@@ -7,7 +7,7 @@ use gpui::prelude::*;
 use gpui::{Bounds, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight, MouseButton, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage, div, img, px, rems};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::InputState;
-use gpui_component::{Icon, IconName};
+use gpui_component::{Icon, IconName, Selectable};
 
 use crate::{
     BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TAB_UNDERLINE_HEIGHT, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM, TITLE_MD,
@@ -44,9 +44,15 @@ pub(crate) fn navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement,
         )
 }
 
-/// A rail destination: a square tile with a name in its original case.
+/// A rail destination: the current tile takes a solid accent on every platform.
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, selected, theme).w_full().h(gpui::rems(crate::NAV_RAIL_SIZE_REM)).flex_none().px(px(SPACE_XS)).text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
+    navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, false, theme)
+        .w_full()
+        .h(gpui::rems(crate::NAV_RAIL_SIZE_REM))
+        .flex_none()
+        .px(px(SPACE_XS))
+        .text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
+        .when(selected, |button| button.selected(true).bg(theme.accent).text_color(theme.accent_text).font_weight(FontWeight::SEMIBOLD).hover(move |style| style.bg(theme.accent_hover)))
 }
 
 /// A full-width bar along the bottom of the window, ruled off from the page
@@ -69,20 +75,21 @@ pub(crate) fn bottom_navigation_tile(id: impl Into<ElementId>, glyph: impl IntoE
     navigation_tile(id, glyph, label, selected, theme).h_full().flex_1().text_size(gpui::rems(TEXT_XS))
 }
 
-/// A modal list sized from its fixed-height header and rows.
-/// Sized to its contents up to a cap, then scrolls.
+/// A modal list sized from its fixed-height header and rows, capped only by
+/// the viewport space inside the modal overlay. The caller supplies a
+/// scrollable body beneath the fixed header.
 ///
 /// The height is stated rather than left to the contents because the list
 /// scrolls, and a scroll container needs a definite height. It is worked out at
 /// the window's `rem_size`: the header and rows are rems, the gaps and padding
 /// are pixels, and a height reckoned at a fixed 16px rem cut the rows off at
 /// any larger UI font.
-pub fn navigation_modal_list(item_count: usize, rem_size: Pixels, theme: BrowserTheme) -> Scrollable<Div> {
+pub fn navigation_modal_list(item_count: usize, rem_size: Pixels, theme: BrowserTheme) -> Div {
     let rem = f32::from(rem_size);
     let rows = (item_count + 1) as f32 * navigation_modal_row_height_rem() * rem;
     let gaps = item_count as f32 * SPACE_XS + SPACE_MD * 2.0;
-    let height = (rows + gaps).min(crate::NAVIGATION_MODAL_MAX_HEIGHT_REM * rem);
-    crate::modal_surface(theme).w(gpui::rems(crate::NAVIGATION_MODAL_WIDTH_REM)).max_w_full().h(px(height)).max_h_full().overflow_y_scrollbar()
+    let height = rows + gaps + 2.0; // Include the surface's top and bottom borders.
+    crate::modal_surface(theme).w(gpui::rems(crate::NAVIGATION_MODAL_WIDTH_REM)).max_w_full().h(px(height)).max_h_full().flex().flex_col()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,19 +212,18 @@ pub fn library_switcher_group(theme: BrowserTheme) -> Div {
     div().relative().w_full().h(gpui::rems(crate::NAV_RAIL_SIZE_REM)).flex_none().flex().items_center().gap(px(SPACE_SM))
 }
 
-/// The bar along the top of a page — the library's pages, the phone reader,
-/// the phone's audiobook player — one height everywhere. The page colour is
-/// what lets it lie over content that scrolls or pages under it. In the library
+/// The default bar along the top of a page. The page colour is what lets it
+/// lie over content that scrolls or pages under it. In the library
 /// it carries no underline: the breadcrumb and the actions already mark the
 /// boundary. See [`crate::nav_rail_destinations`].
 pub fn topbar(theme: BrowserTheme) -> Div {
     div().w_full().min_w_0().h(gpui::rems(topbar_height_rem())).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).bg(theme.page_bg)
 }
 
-/// A topbar ruled off from the book under it, with its controls at the window's
-/// edges: the phone reader's.
+/// The reader's single-row topbar, sized to its controls without extra vertical
+/// inset and ruled off from the book under it.
 pub fn ruled_topbar(theme: BrowserTheme) -> Div {
-    topbar(theme).px(px(SPACE_XS)).border_b_1().border_color(theme.rule)
+    topbar(theme).h_auto().min_h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).border_b_1().border_color(theme.rule)
 }
 
 pub fn browser_topbar_left() -> Div {
@@ -650,16 +656,18 @@ pub fn browser_settings_path_button(id: impl Into<ElementId>, path: impl Into<Sh
     crate::outlined_text_button(id, path).h(gpui::rems(settings_control_size_rem())).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border).text_color(theme.text).text_size(gpui::rems(TEXT_XS))
 }
 
-/// Abbreviate only a complete home-directory prefix; keep the actual path for
-/// opening the folder and for the tooltip.
+/// Show normal Windows paths and abbreviate Unix home-directory prefixes;
+/// keep the actual path for opening the folder and for the tooltip.
 pub fn library_path_label(path: &Path) -> String {
-    let (variable, alias) = if cfg!(target_os = "windows") { ("USERPROFILE", "\\") } else { ("HOME", "~") };
-    if let Some(home) = std::env::var_os(variable).filter(|home| !home.is_empty()) {
+    #[cfg(target_os = "windows")]
+    let path = dunce::simplified(path);
+    #[cfg(not(target_os = "windows"))]
+    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
         let home = std::path::PathBuf::from(home);
         if home.is_absolute()
             && let Ok(relative) = path.strip_prefix(&home)
         {
-            return if relative.as_os_str().is_empty() { alias.to_owned() } else { Path::new(alias).join(relative).display().to_string() };
+            return if relative.as_os_str().is_empty() { "~".to_owned() } else { Path::new("~").join(relative).display().to_string() };
         }
     }
     path.display().to_string()

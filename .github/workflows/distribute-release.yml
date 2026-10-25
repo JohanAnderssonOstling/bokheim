@@ -95,12 +95,14 @@ jobs:
                   assert info['application'] == version, 'Package version differs from release tag'
                   names = [*artifacts.FILES[platform], artifacts.receipt_name(platform)]
               elif platform == 'kobo':
-                  packages = ['Bokheim-Kobo-Installer-Windows-x86_64.exe', 'Bokheim-Kobo-Installer-Linux-x86_64.AppImage']
+                  packages = ['Bokheim-Kobo-Installer-Windows-x86_64.exe', 'Bokheim-Kobo-Installer-Linux-x86_64.AppImage',
+                              'Bokheim-Kobo-armv7.tar.gz', 'Bokheim-Kobo-Libra2-armv7.tar.gz']
                   names = []
                   for package in packages:
                       expected = (directory / (package + '.sha256')).read_text().split()
                       assert expected == [artifacts.fingerprint(directory / package)['sha256'], package], 'Installer checksum differs'
                       names.extend([package, package + '.sha256'])
+                  assert artifacts.fingerprint(directory / 'Bokheim-Kobo-armv7.tar.gz') == artifacts.fingerprint(directory / 'Bokheim-Kobo-Libra2-armv7.tar.gz'), 'Legacy Kobo alias differs from the universal package'
               else:
                   metadata = json.loads((directory / 'build-macos.json').read_text())
                   assert metadata['source_commit'] == sha and metadata['application'] == version

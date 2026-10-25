@@ -44,7 +44,7 @@ impl crate::import_workflow::Batch for DirectBatch<'_> {
         if (self.cancelled)() {
             return Err(BackendError::message("directory import cancelled"));
         }
-        let file = self.files[index].take().expect("import item processed once");
+        let file = self.files.get_mut(index).and_then(Option::take).ok_or_else(|| BackendError::message("import item is unavailable or already processed"))?;
         let result = async {
             let (parent_id, name) = self.parents.resolve(&file.path)?;
             // A book already at this name was imported before: continuing an
@@ -79,7 +79,7 @@ impl LibraryImport {
         };
         // Let queued import status reach subscribers before doing SQLite work;
         // large directory trees must not monopolize the executor.
-        sleep(Duration::ZERO).await;
+        sleep(Duration::ZERO).await.map_err(BackendError::operation)?;
         let root_id = match name {
             Some(name) => create(parent_id, &name)?,
             None => *parent_id,
@@ -93,7 +93,7 @@ impl LibraryImport {
         let mut slice_started = web_time::Instant::now();
         for path in directories {
             if slice_started.elapsed() >= Duration::from_millis(8) {
-                sleep(Duration::ZERO).await;
+                sleep(Duration::ZERO).await.map_err(BackendError::operation)?;
                 slice_started = web_time::Instant::now();
             }
             let Some((name, parent_path)) = path.split_last() else { continue };

@@ -23,7 +23,7 @@ use crate::books::audiobook::navigation_from_chapters;
 include_sql!("src/import/sql/import_commit.sql");
 use book_model::{BookRecord, BookTocDocument};
 use library_replica::{BookAddition, BookFacts, LibraryStateEntry};
-use sync_common::{ContentHash, DirId, StateKey};
+use sync_common::{BookId, DirId, StateKey};
 
 /// Snapshot in for one import commit. All filesystem truth (book
 /// outcome, thumbnail need, restore paths) is resolved by the caller.
@@ -31,7 +31,7 @@ pub struct ImportCommit {
     pub parent_id: DirId,
     pub file_name: String,
     pub format: book_model::BookFormat,
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub size_bytes: u64,
     pub inspection_version: i64,
     pub inspection: Option<book_inspection::InspectedBook>,
@@ -49,7 +49,15 @@ pub(crate) struct PreparedInspection {
     pdf: Option<pdf_view_common::PdfReaderMetadata>,
 }
 
-pub(crate) fn prepare_inspection(inspection: &book_inspection::InspectedBook, content_hash: &ContentHash, format: book_model::BookFormat) -> Result<PreparedInspection, DatabaseError> {
+pub(crate) fn provider_addition(prepared: PreparedInspection, format: book_model::BookFormat, added_at: i64) -> Result<BookAddition, DatabaseError> {
+    Ok(BookAddition {
+        facts: BookFacts { added_at: u64::try_from(added_at).map_err(DatabaseError::operation)?, format },
+        record: prepared.metadata, navigation: prepared.navigation, recording: prepared.recording, pdf: prepared.pdf,
+        enrichment: Some(library_replica::EnrichmentResult::NoMatch),
+    })
+}
+
+pub(crate) fn prepare_inspection(inspection: &book_inspection::InspectedBook, content_hash: &BookId, format: book_model::BookFormat) -> Result<PreparedInspection, DatabaseError> {
     let mut metadata = inspection.metadata.clone();
     metadata.description = normalized_description(&metadata.description);
     // Empty navigation still records that inspection found no entries.
@@ -58,7 +66,7 @@ pub(crate) fn prepare_inspection(inspection: &book_inspection::InspectedBook, co
         Some(BookTocDocument { entries: navigation_from_chapters(&audio.chapters), duration_ms: Some(audio.duration_ms), tracks: (!audio.tracks.is_empty()).then(|| audio.tracks.clone()) })
     } else {
         match format {
-            book_model::BookFormat::Epub | book_model::BookFormat::Mobi | book_model::BookFormat::Pdf => Some(BookTocDocument::entries(inspection.toc.clone())),
+            book_model::BookFormat::Epub | book_model::BookFormat::Mobi | book_model::BookFormat::Pdf | book_model::BookFormat::Fb2 | book_model::BookFormat::Cbz => Some(BookTocDocument::entries(inspection.toc.clone())),
             book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder => None,
         }
     };
@@ -76,7 +84,7 @@ pub(crate) fn prepare_inspection(inspection: &book_inspection::InspectedBook, co
 impl Database {
     /// Whether a book already has an inspection projection at this exact
     /// format and inspection version, so the caller can skip re-inspecting it.
-    pub fn has_import_inspection(&self, hash: &ContentHash, format: book_model::BookFormat, inspection_version: i64) -> Result<bool, DatabaseError> {
+    pub fn has_import_inspection(&self, hash: &BookId, format: book_model::BookFormat, inspection_version: i64) -> Result<bool, DatabaseError> {
         let mut inspected = false;
         self.connection.has_import_inspection_select(hash, format as i64, inspection_version, |row| {
             inspected = row.get(0)?;
@@ -145,7 +153,7 @@ impl Database {
     /// Placement rows for one book with their remembered materialized paths.
     /// The orchestrator filters these against the filesystem (without holding
     /// the writer) and hands the restore set back to the commit.
-    pub fn import_restore_candidates(&self, hash: &ContentHash) -> Result<Vec<(library_model::RelativeBookPath, Option<String>)>, DatabaseError> {
+    pub fn import_restore_candidates(&self, hash: &BookId) -> Result<Vec<(library_model::RelativeBookPath, Option<String>)>, DatabaseError> {
         let mut rows = Vec::new();
         self.connection
             .restore_candidates_select(hash, |row| {

@@ -142,9 +142,9 @@ impl OwnedEndpoint {
 
     fn new(endpoint: WorkerEndpoint, message: impl FnMut(web_sys::MessageEvent) + 'static, error: impl FnMut(web_sys::Event) + 'static, malformed: impl FnMut(web_sys::MessageEvent) + 'static) -> Self {
         use wasm_bindgen::{closure::Closure, JsCast};
-        let message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(message);
-        let error = Closure::<dyn FnMut(web_sys::Event)>::new(error);
-        let malformed = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(malformed);
+        let message = Closure::<dyn FnMut(web_sys::MessageEvent)>::own_aborting(message);
+        let error = Closure::<dyn FnMut(web_sys::Event)>::own_aborting(error);
+        let malformed = Closure::<dyn FnMut(web_sys::MessageEvent)>::own_aborting(malformed);
         endpoint.set_onmessage(Some(message.as_ref().unchecked_ref()));
         endpoint.set_onerror(Some(error.as_ref().unchecked_ref()));
         endpoint.set_onmessageerror(Some(malformed.as_ref().unchecked_ref()));

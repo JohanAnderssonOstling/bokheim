@@ -1,16 +1,16 @@
 # book-content
 
-Client-side EPUB and MOBI parsing, declared metadata, navigation, cover resources,
+Client-side EPUB, MOBI and FB2 parsing, declared metadata, navigation, cover resources,
 and reading preparation. The crate has no HTML-engine dependency or feature gates.
 
 `Book::open(format, reader_factory)` opens an asynchronous source supplied by
 book-access. `Book::open_reader(format, reader)` is the synchronous entry point
-for scanning, import, thumbnails, and tools. Synchronous opening reads only
+for scanning, import, thumbnails, and tools. For EPUB and MOBI, synchronous opening reads only
 container headers; asynchronous opening reads the ZIP directory and package or
 the MOBI record directory and header record without buffering the whole source.
 `prepare_reading()` consumes the container and prepares an immutable `ReadingBook`.
 Declared metadata extraction runs only when requested by scanning/import.
-`metadata()` returns one owned `DeclaredMetadata` structure for both formats.
+`metadata()` returns one owned `DeclaredMetadata` structure for text formats.
 The parsers retain declared fields, roles, refinements, and textual source
 properties; book-inspection applies one library metadata projection. Redundant
 singular publisher/language/date fields are replaced by their plural lists.
@@ -60,6 +60,18 @@ can refresh old cached results.
 The HTML-engine adapter lives in apps/reader/crates/html/src/book.rs and is
 shared by the reader and its command-line tools. Rendering, image scheduling,
 decoding, and engine image caching stay outside book-content.
+
+FB2 accepts plain XML and ZIP containers (`.fb2`, `.fbz`, `.fb2.zip`). Its bounded
+XML parser handles declared encodings, maps sections and notes to stable HTML
+documents and anchors, and decodes embedded base64 images on demand. The XML
+input is limited to 96 MiB; prepared text and individual images retain the common
+limits above. Source-print ISBNs remain distinct from ebook identifiers.
+
+`comic::ComicBook` inspects CBZ directories and optional ComicInfo metadata without
+decoding page images. Natural filename ordering defines page indices, including
+ComicInfo cover and bookmark references. `into_reader()` retains independent
+archive cursors for bounded asynchronous page reads. CBZ image decoding, cache
+management, zoom, spreads and reader controls live in `apps/reader/src/comic/`.
 
 Existing checks: `cargo test --release -p book-content --lib`.
 

@@ -2,4 +2,4 @@
 set -eu
 
 APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-exec "$APPDIR/usr/bin/bokheim" "$@"
+exec "$APPDIR/usr/libexec/bokheim-launch" "$APPDIR" bokheim "$@"

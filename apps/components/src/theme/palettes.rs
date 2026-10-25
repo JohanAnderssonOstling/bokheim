@@ -1,6 +1,6 @@
 //! Application palettes: each theme in a light and a dark appearance. Warm
-//! dark is black and gold; Cool dark is blue-black with a steel-blue accent,
-//! the navy of Cool light lifted until it reads on a dark surface.
+//! dark is black and gold; Cool uses neutral greys with a muted slate accent,
+//! lifted in dark appearance until it reads on a charcoal surface.
 
 use app_preferences::{ApplicationTheme, ResolvedAppearance};
 
@@ -8,8 +8,8 @@ use super::ApplicationPalette;
 
 const DARK_SURFACE: u32 = 0x11100d;
 const DARK_GOLD: u32 = 0xd3b271;
-const COOL_DARK_SURFACE: u32 = 0x0f1216;
-const COOL_DARK_BLUE: u32 = 0x8fb0dc;
+const COOL_DARK_SURFACE: u32 = 0x121212;
+const COOL_DARK_SLATE: u32 = 0xa7b3c2;
 const LIGHT_DANGER_TEXT: u32 = 0xa13029;
 const LIGHT_DANGER_BG: u32 = 0xfde6e3;
 const DARK_DANGER_TEXT: u32 = 0xdf8a83;
@@ -54,20 +54,20 @@ pub const fn palette(theme: ApplicationTheme, appearance: ResolvedAppearance) ->
             usage_segments: USAGE_LIGHT,
         },
         (ApplicationTheme::Cool, ResolvedAppearance::Light) => ApplicationPalette {
-            surface_bg: 0xeff3f9,
+            surface_bg: 0xfafafa,
             raised_bg: 0xffffff,
             ink_text: 0x262627,
             subtle_text: 0x65686a,
-            accent: 0x224a7f,
+            accent: 0x42566d,
             text_accent: 0x8a6a2b,
-            accent_hover: 0x1b3f6f,
-            accent_active: 0x14355f,
+            accent_hover: 0x384b60,
+            accent_active: 0x2f4053,
             accent_text: 0xfdfdfe,
-            border: 0x798189,
-            rule: 0xb9bec4,
-            hover_overlay: (0x224a7f << 8) | 0x14,
-            active_highlight: 0xdbe4f1,
-            active_highlight_hover: 0xcad8eb,
+            border: 0x7d8288,
+            rule: 0xbcbfc3,
+            hover_overlay: (0x42566d << 8) | 0x14,
+            active_highlight: 0xe1e5e9,
+            active_highlight_hover: 0xd4dbe2,
             danger_text: LIGHT_DANGER_TEXT,
             danger_bg: LIGHT_DANGER_BG,
             warning_text: 0x895c00,
@@ -76,19 +76,19 @@ pub const fn palette(theme: ApplicationTheme, appearance: ResolvedAppearance) ->
         },
         (ApplicationTheme::Cool, ResolvedAppearance::Dark) => ApplicationPalette {
             surface_bg: COOL_DARK_SURFACE,
-            raised_bg: 0x20252c,
-            ink_text: 0xe3e8ef,
-            subtle_text: 0x929aa5,
-            accent: COOL_DARK_BLUE,
-            text_accent: COOL_DARK_BLUE,
-            accent_hover: over(COOL_DARK_BLUE, 0xffffff, 38),
-            accent_active: over(COOL_DARK_BLUE, 0xffffff, 72),
+            raised_bg: 0x232527,
+            ink_text: 0xe7e8ea,
+            subtle_text: 0x999da2,
+            accent: COOL_DARK_SLATE,
+            text_accent: COOL_DARK_SLATE,
+            accent_hover: over(COOL_DARK_SLATE, 0xffffff, 38),
+            accent_active: over(COOL_DARK_SLATE, 0xffffff, 72),
             accent_text: COOL_DARK_SURFACE,
-            border: over(COOL_DARK_SURFACE, COOL_DARK_BLUE, 136),
-            rule: over(COOL_DARK_SURFACE, COOL_DARK_BLUE, 80),
-            hover_overlay: (COOL_DARK_BLUE << 8) | 0x14,
-            active_highlight: over(COOL_DARK_SURFACE, COOL_DARK_BLUE, 56),
-            active_highlight_hover: over(COOL_DARK_SURFACE, COOL_DARK_BLUE, 72),
+            border: over(COOL_DARK_SURFACE, COOL_DARK_SLATE, 136),
+            rule: over(COOL_DARK_SURFACE, COOL_DARK_SLATE, 80),
+            hover_overlay: (COOL_DARK_SLATE << 8) | 0x14,
+            active_highlight: over(COOL_DARK_SURFACE, COOL_DARK_SLATE, 56),
+            active_highlight_hover: over(COOL_DARK_SURFACE, COOL_DARK_SLATE, 72),
             danger_text: DARK_DANGER_TEXT,
             danger_bg: DARK_DANGER_BG,
             warning_text: 0xd4a444,

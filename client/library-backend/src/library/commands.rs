@@ -6,11 +6,12 @@
 pub(crate) use crate::ThumbnailResolution;
 use crate::executor::BackendOutput;
 use crate::library::RemoteFile;
-use crate::{BackendError, ContentHash, DirId};
+use crate::{BackendError, BookId, DirId};
 pub(crate) use client_runtime::reply::Reply;
-use library_model::{BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
+use library_model::{BrowseLocation, BrowsePageRequest, LibraryBrowseQuery, LibraryUpdate};
 
 pub(crate) use super::LibrarySession;
+use super::events::LibraryEvent;
 use super::handle::LibraryActor;
 pub(crate) use super::pending::OperationKind;
 pub(crate) use futures_util::future::LocalBoxFuture;
@@ -57,7 +58,7 @@ pub enum ReadyCommand {
     },
     #[cfg(not(target_arch = "wasm32"))]
     BookTorrents {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     #[cfg(not(target_arch = "wasm32"))]
     KeepTorrentSeeding {
@@ -70,7 +71,7 @@ pub enum ReadyCommand {
     },
     Scanning,
     DownloadState {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     SyncStatus {
         signed_in: bool,
@@ -80,13 +81,13 @@ pub enum ReadyCommand {
     LibraryLanguageCounts,
     /// The browser streams books it does not hold; there these are refused.
     DownloadBook {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     DownloadBrowse {
         query: LibraryBrowseQuery,
     },
     RemoveLocalBookCopy {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     EvictFolderDownloads {
         directory_id: DirId,
@@ -94,14 +95,14 @@ pub enum ReadyCommand {
     FolderDestinations,
     Trash,
     RestoreBook {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     RestoreDirectory {
         directory_id: DirId,
         parent_id: Option<DirId>,
     },
     PurgeBook {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     PurgeDirectory {
         directory_id: DirId,
@@ -137,25 +138,25 @@ pub enum ReadyCommand {
         parent_id: DirId,
     },
     RestoreBookPlacement {
-        content_hash: ContentHash,
+        content_hash: BookId,
         directory_id: DirId,
     },
     CopyBookToDirectory {
-        content_hash: ContentHash,
+        content_hash: BookId,
         source_id: Option<DirId>,
         destination_id: DirId,
     },
     MoveBookToDirectory {
-        content_hash: ContentHash,
+        content_hash: BookId,
         source_id: DirId,
         destination_id: DirId,
     },
     RemoveBookFromDirectory {
-        content_hash: ContentHash,
+        content_hash: BookId,
         source_id: DirId,
     },
     MoveBookToTrash {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     MoveDirectoryToTrash {
         directory_id: DirId,
@@ -189,28 +190,32 @@ pub enum ReadyCommand {
         limit: usize,
     },
     BookDetail {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     ExternalCatalogDetail {
         entry: library_model::CardKey,
     },
     BookFormat {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     ReadingPosition {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     PdfReadingPosition {
-        content_hash: ContentHash,
+        content_hash: BookId,
+    },
+    ResetChapterReadStatus {
+        content_hash: BookId,
+        target: Option<String>,
     },
     UpdateReadingPosition {
-        content_hash: ContentHash,
+        content_hash: BookId,
         position: String,
         progress: Option<f32>,
         entry: Option<String>,
     },
     Annotations {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     UpsertAnnotation {
         annotation: book_model::Annotation,
@@ -247,7 +252,7 @@ pub enum PendingCommand {
     /// Downloads a public-domain catalog book and imports it.
     AddCatalogBook {
         parent_id: DirId,
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     /// Downloads an external catalog audiobook from its source and imports it.
     AddExternalCatalogAudiobook {
@@ -270,7 +275,7 @@ pub enum PendingCommand {
     // Renewal only authorizes the original remote book. It must not reopen
     // metadata or change source type if the user downloaded a local copy.
     RenewRemoteAudio {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     ReadFileRange {
         source: RemoteFile,
@@ -282,7 +287,7 @@ pub enum PendingCommand {
         ranges: Vec<(u64, usize)>,
     },
     Thumbnail {
-        content_hash: ContentHash,
+        content_hash: BookId,
         resolution: ThumbnailResolution,
     },
     ExternalCatalogCover {
@@ -308,11 +313,11 @@ pub enum PendingCommand {
         token: String,
     },
     AudiobookPlaybackMetadata {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     #[cfg(target_arch = "wasm32")]
     OpenRemoteAudio {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
 }
 
@@ -409,6 +414,13 @@ fn execute_ready(actor: &mut LibraryActor, command: ReadyCommand) -> Result<Repl
         ReadyCommand::BookFormat { content_hash } => Reply::new(library.db.book_format(&content_hash).map_err(BackendError::operation)?),
         ReadyCommand::ReadingPosition { content_hash } => Reply::new(library.db.reading_position(&content_hash).map_err(BackendError::operation)?),
         ReadyCommand::PdfReadingPosition { content_hash } => Reply::new(library.db.pdf_reading_position(&content_hash).map_err(BackendError::operation)?),
+        ReadyCommand::ResetChapterReadStatus { content_hash, target } => {
+            if library.db.reset_chapter_read_status_at(&content_hash, target.as_deref()).map_err(BackendError::operation)? {
+                actor.coordination.reading_position_changed(content_hash, &library.events);
+                library.emit(LibraryEvent::ContentsChanged);
+            }
+            Reply::new(library.db.chapter_read_status(&content_hash).map_err(BackendError::operation)?)
+        }
         // `entry` is the navigation entry the reader resolved the position to. It
         // travels with the position because that is when it changes, and it is
         // stored locally rather than synchronized: any device can recompute it
@@ -416,6 +428,8 @@ fn execute_ready(actor: &mut LibraryActor, command: ReadyCommand) -> Result<Repl
         ReadyCommand::UpdateReadingPosition { content_hash, position, progress, entry } => {
             if library.db.update_reading_position(&content_hash, &position, progress, entry.as_deref()).map_err(BackendError::operation)? {
                 actor.coordination.reading_position_changed(content_hash, &library.events);
+                // Shelf membership, recency and progress change locally, before sync.
+                library.events.publish_update(LibraryUpdate::Contents);
             }
             Reply::new(())
         }

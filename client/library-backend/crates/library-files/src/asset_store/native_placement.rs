@@ -1,10 +1,15 @@
 //! Concrete native placement operations; inputs are selected by the caller.
 
+use client_platform_native::filesystem::parent_directory;
 use super::{AssetStore, AssetStoreError, imp};
 use library_model::RelativeBookPath;
 use std::fs::File;
 use std::path::Path;
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
+
+fn folder_unavailable() -> AssetStoreError {
+    AssetStoreError::operation(client_runtime::BackendError::classified(client_runtime::Failure::LibraryFolderUnavailable, "placement folder is unavailable"))
+}
 
 pub struct PreparedPlacement(imp::PreparedPlacement);
 
@@ -40,15 +45,15 @@ impl AssetStore {
         imp::root_available(&self.0)
     }
 
-    pub fn placement_conflicts(&self, hash: &ContentHash, relative: &RelativeBookPath) -> Result<bool, AssetStoreError> {
+    pub fn placement_conflicts(&self, hash: &BookId, relative: &RelativeBookPath) -> Result<bool, AssetStoreError> {
         imp::placement_conflicts(&self.0, hash, relative)
     }
 
-    pub fn prepare_removal(&self, hash: &ContentHash, relative: &RelativeBookPath) -> Result<PreparedPlacement, AssetStoreError> {
+    pub fn prepare_removal(&self, hash: &BookId, relative: &RelativeBookPath) -> Result<PreparedPlacement, AssetStoreError> {
         imp::prepare_removal(&self.0, hash, relative).map(PreparedPlacement)
     }
 
-    pub fn prepare_placement(&self, hash: &ContentHash, relative: &RelativeBookPath, source_paths: &[RelativeBookPath], movable_sources: &[RelativeBookPath]) -> Result<Option<PreparedPlacement>, AssetStoreError> {
+    pub fn prepare_placement(&self, hash: &BookId, relative: &RelativeBookPath, source_paths: &[RelativeBookPath], movable_sources: &[RelativeBookPath]) -> Result<Option<PreparedPlacement>, AssetStoreError> {
         use super::native::{VerifiedPath, content_matches, placement_path};
         let handle = &self.0;
         use std::io::Write as _;
@@ -60,22 +65,22 @@ impl AssetStore {
         // Only a source with a queued removal job for this path is safe to move.
         if let Some((source_relative, source)) = &found {
             if movable_sources.iter().any(|movable| movable == *source_relative) {
-                if !destination.parent().unwrap().is_dir() {
-                    return Err(AssetStoreError::operation("placement folder is unavailable"));
+                if !parent_directory(&destination)?.is_dir() {
+                    return Err(folder_unavailable());
                 }
                 return Ok(Some(PreparedPlacement(imp::PreparedPlacement::Renamed { source: source.clone(), destination })));
             }
         }
         let Some((_, source)) = found else { return Ok(None) };
-        if !destination.parent().unwrap().is_dir() {
-            return Err(AssetStoreError::operation("placement folder is unavailable"));
+        if !parent_directory(&destination)?.is_dir() {
+            return Err(folder_unavailable());
         }
         if source.is_dir() {
-            let output = tempfile::Builder::new().prefix(".bokheim-copy-").tempdir_in(destination.parent().unwrap())?;
+            let output = tempfile::Builder::new().prefix(".bokheim-copy-").tempdir_in(parent_directory(&destination)?)?;
             let copy_member = |path: &Path| -> Result<(), AssetStoreError> {
                 let local = path.strip_prefix(&source).map_err(AssetStoreError::operation)?;
                 let target = output.path().join(local);
-                std::fs::create_dir_all(target.parent().unwrap())?;
+                std::fs::create_dir_all(parent_directory(&target)?)?;
                 std::fs::copy(path, target)?;
                 Ok(())
             };
@@ -91,7 +96,7 @@ impl AssetStore {
             }
             return Ok(Some(PreparedPlacement(imp::PreparedPlacement::CopiedFolder { output, destination })));
         }
-        let mut output = tempfile::Builder::new().prefix(".bokheim-copy-").tempfile_in(destination.parent().unwrap())?;
+        let mut output = tempfile::Builder::new().prefix(".bokheim-copy-").tempfile_in(parent_directory(&destination)?)?;
         let mut input = File::open(source)?;
         std::io::copy(&mut input, &mut output)?;
         output.flush()?;

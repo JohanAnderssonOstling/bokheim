@@ -1,27 +1,31 @@
 use super::TransfersSql;
 use crate::*;
-use library_model::BlobKind;
+use library_model::{BlobKind, TransferOrigin};
 use std::collections::HashSet;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 impl Database {
     /// Records that the server already holds these bytes.
-    pub fn record_remote_asset(&self, kind: BlobKind, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn record_remote_asset(&self, kind: BlobKind, hash: &BookId) -> Result<(), DatabaseError> {
         self.connection.record_remote_asset(kind.storage(), hash)?;
         Ok(())
     }
 
     /// Forgets server-side presence, e.g. after a local edit.
-    pub fn forget_remote_asset(&self, kind: BlobKind, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn forget_remote_asset(&self, kind: BlobKind, hash: &BookId) -> Result<(), DatabaseError> {
         self.connection.forget_remote_asset(kind.storage(), hash)?;
         Ok(())
     }
 
     /// Hashes the server is known to hold for one asset kind.
-    pub fn remote_asset_hashes(&self, kind: BlobKind) -> Result<HashSet<ContentHash>, DatabaseError> {
+    pub fn remote_asset_hashes(&self, kind: BlobKind) -> Result<HashSet<BookId>, DatabaseError> {
+        if self.storage_policy()?.external().is_some() {
+            let mut query = self.connection.prepare("SELECT book_id FROM provider_book WHERE available AND (?1='book' OR thumbnails IS NOT NULL)")?;
+            return query.query_map([kind.storage()], |row| row.get(0))?.collect::<Result<HashSet<_>, _>>().map_err(DatabaseError::from);
+        }
         let mut hashes = HashSet::new();
         self.connection.remote_asset_hashes(kind.storage(), |row| {
-            hashes.insert(row.get::<_, ContentHash>(0)?);
+            hashes.insert(row.get::<_, BookId>(0)?);
             Ok(())
         })?;
         Ok(hashes)
@@ -29,13 +33,23 @@ impl Database {
 
     /// Requested book downloads, oldest first.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn book_download_requests(&self, after_at: i64, after_hash: Option<&ContentHash>, limit: i64) -> Result<Vec<(ContentHash, i64)>, DatabaseError> {
+    pub fn book_download_requests(&self, after_at: i64, after_hash: Option<&BookId>, limit: i64) -> Result<Vec<(BookId, i64)>, DatabaseError> {
         let mut rows = Vec::new();
         self.connection.book_download_requests(after_at, after_hash, limit, |row| {
-            rows.push((row.get::<_, ContentHash>(0)?, row.get(1)?));
+            rows.push((row.get::<_, BookId>(0)?, row.get(1)?));
             Ok(())
         })?;
         Ok(rows)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn book_download_origin(&self, hash: &BookId) -> Result<Option<TransferOrigin>, DatabaseError> {
+        let mut origin = None;
+        self.connection.book_download_origin(hash, |row| {
+            origin = TransferOrigin::parse_storage(&row.get::<_, String>(0)?);
+            Ok(())
+        })?;
+        Ok(origin)
     }
 }
 
@@ -47,8 +61,8 @@ mod tests {
     fn download_cursor_pages_raw_hashes_at_equal_timestamps() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let first = ContentHash::from_bytes([0; 32]);
-        let second = ContentHash::from_bytes([0xff; 32]);
+        let first = BookId::from_bytes([0; 32]);
+        let second = BookId::from_bytes([0xff; 32]);
         for hash in [second, first] {
             db.connection.fixtures_insert_book_7(&hash).unwrap();
             db.connection.fixtures_insert_book_transfer(&hash).unwrap();

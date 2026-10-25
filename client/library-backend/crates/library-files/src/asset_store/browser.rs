@@ -6,7 +6,7 @@ pub(crate) use book_access::BoxedBookReader;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-pub(crate) use sync_common::ContentHash;
+pub(crate) use sync_common::BookId;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Handle {
@@ -14,7 +14,7 @@ pub(crate) struct Handle {
     pub(crate) hash_service: Arc<dyn HashService>,
 }
 
-pub(crate) async fn open_verified_reader(handle: &Handle, hash: &ContentHash) -> Result<Option<client_platform_web::web_storage::FileReader>, AssetStoreError> {
+pub(crate) async fn open_verified_reader(handle: &Handle, hash: &BookId) -> Result<Option<client_platform_web::web_storage::FileReader>, AssetStoreError> {
     client_platform_web::web_storage::open_reader(&name(handle, format!("book/{hash}"))).await.map_err(AssetStoreError::operation)
 }
 
@@ -66,12 +66,12 @@ pub(crate) fn name(handle: &Handle, asset_name: String) -> String {
 
 pub(crate) struct StagedBook {
     pub(crate) writer: client_platform_web::web_storage::FileWriter,
-    pub(crate) content_hash: ContentHash,
+    pub(crate) content_hash: BookId,
     pub(crate) size_bytes: u64,
     pub(crate) destination: String,
 }
 
-pub(crate) fn finish_staged_write(handle: &Handle, writer: client_platform_web::web_storage::FileWriter, content_hash: ContentHash) -> Result<StagedBook, AssetStoreError> {
+pub(crate) fn finish_staged_write(handle: &Handle, writer: client_platform_web::web_storage::FileWriter, content_hash: BookId) -> Result<StagedBook, AssetStoreError> {
     let size_bytes = std::io::Seek::seek(&mut writer.open_reader(), std::io::SeekFrom::End(0))?;
     let destination = name(handle, format!("book/{content_hash}"));
     Ok(StagedBook { writer, content_hash, size_bytes, destination })

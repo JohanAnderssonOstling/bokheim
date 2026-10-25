@@ -13,12 +13,12 @@ use crate::shared_sql::SharedSql;
 use crate::{Database, DatabaseError, NativeBookSnapshot};
 use library_model::{BlobKind, BookUploadIntent, RelativeBookPath};
 use std::collections::HashMap;
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 
 /// One live placement's transfer inputs, keyed by its stored path.
 #[derive(Clone, Debug)]
 pub struct PlacementTransferEntry {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub rel_path: RelativeBookPath,
     pub download_directory: Option<DirId>,
     pub placement_current: bool,
@@ -28,7 +28,7 @@ pub struct PlacementTransferEntry {
 /// Point-in-time inputs for one transfer drain.
 #[derive(Clone, Debug, Default)]
 pub struct TransferSnapshot {
-    pub assets: HashMap<ContentHash, AssetTransferState>,
+    pub assets: HashMap<BookId, AssetTransferState>,
     pub placements: Vec<PlacementTransferEntry>,
 }
 
@@ -40,16 +40,16 @@ pub struct AssetTransferState {
 }
 
 struct DatabaseTransferSnapshot {
-    assets: HashMap<ContentHash, AssetTransferState>,
-    placement_paths: HashMap<ContentHash, Vec<RelativeBookPath>>,
+    assets: HashMap<BookId, AssetTransferState>,
+    placement_paths: HashMap<BookId, Vec<RelativeBookPath>>,
 }
 
 impl TransferSnapshot {
-    pub fn asset_for(&self, hash: &ContentHash) -> Option<&AssetTransferState> {
+    pub fn asset_for(&self, hash: &BookId) -> Option<&AssetTransferState> {
         self.assets.get(hash)
     }
 
-    pub fn placement_for(&self, hash: &ContentHash, rel_path: &RelativeBookPath) -> Option<&PlacementTransferEntry> {
+    pub fn placement_for(&self, hash: &BookId, rel_path: &RelativeBookPath) -> Option<&PlacementTransferEntry> {
         self.placements.iter().find(|entry| entry.content_hash == *hash && entry.rel_path == *rel_path)
     }
 }
@@ -57,16 +57,16 @@ impl TransferSnapshot {
 impl Database {
     /// Reads every transfer input for the given hashes: upload intents and
     /// snapshots, book paths, and per-placement download/book state.
-    pub fn transfer_snapshot(&self, hashes: &[ContentHash]) -> Result<TransferSnapshot, DatabaseError> {
+    pub fn transfer_snapshot(&self, hashes: &[BookId]) -> Result<TransferSnapshot, DatabaseError> {
         let database = {
             let transaction = self.connection.unchecked_transaction()?;
-            let requested = serde_json::to_string(&hashes.iter().map(ContentHash::to_hex).collect::<Vec<_>>()).map_err(DatabaseError::operation)?;
-            let mut assets: HashMap<ContentHash, AssetTransferState> = hashes.iter().map(|hash| (*hash, AssetTransferState { upload: BookUploadSnapshot { local_versions: Vec::new(), intent: None }, upload_paths: Vec::new() })).collect();
+            let requested = serde_json::to_string(&hashes.iter().map(BookId::to_hex).collect::<Vec<_>>()).map_err(DatabaseError::operation)?;
+            let mut assets: HashMap<BookId, AssetTransferState> = hashes.iter().map(|hash| (*hash, AssetTransferState { upload: BookUploadSnapshot { local_versions: Vec::new(), intent: None }, upload_paths: Vec::new() })).collect();
 
             // Each live placement, with the local fingerprint an upload records.
             let mut placements = Vec::new();
             transaction.transfer_snapshot_versions(&requested, |row| {
-                let hash = row.get::<_, ContentHash>(0)?;
+                let hash = row.get::<_, BookId>(0)?;
                 let dir_id: String = row.get(1)?;
                 let file_name: String = row.get(2)?;
                 if let Some(asset) = assets.get_mut(&hash) {
@@ -76,7 +76,7 @@ impl Database {
                 Ok(())
             })?;
             transaction.transfer_snapshot_intents(&requested, |row| {
-                let hash = row.get::<_, ContentHash>(0)?;
+                let hash = row.get::<_, BookId>(0)?;
                 if let Some(asset) = assets.get_mut(&hash) {
                     asset.upload.intent = Some(BookUploadIntent { content_hash: hash, id: row.get(1)?, size_bytes: row.get::<_, i64>(2)? as u64 });
                 }
@@ -85,7 +85,7 @@ impl Database {
             // Materialized paths first, then the live placements read below.
             let mut projected = Vec::new();
             transaction.transfer_snapshot_projection_paths(&requested, |row| {
-                projected.push((row.get::<_, ContentHash>(0)?, row.get::<_, String>(1)?));
+                projected.push((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?));
                 Ok(())
             })?;
             for (hash, path) in projected {
@@ -94,7 +94,7 @@ impl Database {
                 }
             }
             let mut folders = crate::placements::FolderPaths::new(&transaction);
-            let mut placement_paths: HashMap<ContentHash, Vec<RelativeBookPath>> = HashMap::new();
+            let mut placement_paths: HashMap<BookId, Vec<RelativeBookPath>> = HashMap::new();
             for (hash, dir_id, file_name) in placements {
                 let Some(path) = folders.placement(&dir_id, &file_name)? else { continue };
                 if let Some(asset) = assets.get_mut(&hash) {
@@ -155,18 +155,18 @@ impl Database {
 
     /// Records an uploaded book. Returns false when its local files changed
     /// since `local_versions` was read; the upload then stays queued.
-    pub fn complete_book_upload(&self, hash: &ContentHash, local_versions: &[(String, String, String)], intent: Option<&BookUploadIntent>) -> Result<bool, DatabaseError> {
+    pub fn complete_book_upload(&self, hash: &BookId, local_versions: &[(String, String, String)], intent: Option<&BookUploadIntent>) -> Result<bool, DatabaseError> {
         self.write(|transaction| Self::complete_book_upload_in_transaction(transaction, hash, local_versions, intent))
     }
 
     /// Ends a download request without its bytes.
-    pub fn complete_download(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn complete_download(&self, hash: &BookId) -> Result<(), DatabaseError> {
         self.connection.shared_transfer_complete_download(hash)?;
         Ok(())
     }
 
     /// The server has no copy to download: forget it and end the request.
-    pub fn cancel_download(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn cancel_download(&self, hash: &BookId) -> Result<(), DatabaseError> {
         self.write(|transaction| {
             transaction.forget_remote_asset(BlobKind::Book.storage(), hash)?;
             transaction.shared_transfer_complete_download(hash)?;
@@ -176,12 +176,12 @@ impl Database {
 
     /// Downloaded bytes are stored here.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn complete_local_book_request(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn complete_local_book_request(&self, hash: &BookId) -> Result<(), DatabaseError> {
         self.write(|transaction| Self::complete_local_book_request_on(transaction, hash))
     }
 
     /// Covers the server holds.
-    pub fn record_server_covers(&self, hashes: &[ContentHash]) -> Result<(), DatabaseError> {
+    pub fn record_server_covers(&self, hashes: &[BookId]) -> Result<(), DatabaseError> {
         self.write(|transaction| {
             for hash in hashes {
                 transaction.record_remote_asset(BlobKind::Thumbnail.storage(), hash)?;
@@ -191,7 +191,7 @@ impl Database {
     }
 
     /// One validated cover presence response, written atomically.
-    pub fn record_cover_presence(&self, requested: &[ContentHash], present: &[ContentHash]) -> Result<(), DatabaseError> {
+    pub fn record_cover_presence(&self, requested: &[BookId], present: &[BookId]) -> Result<(), DatabaseError> {
         self.write(|transaction| {
             for hash in requested {
                 if present.contains(hash) {
@@ -206,7 +206,7 @@ impl Database {
 
     /// One cover download batch: covers now ready here, the ones among them
     /// that came from the server, and covers the server does not have.
-    pub fn complete_cover_downloads(&self, ready: &[ContentHash], received: &[ContentHash], missing: &[ContentHash]) -> Result<(), DatabaseError> {
+    pub fn complete_cover_downloads(&self, ready: &[BookId], received: &[BookId], missing: &[BookId]) -> Result<(), DatabaseError> {
         self.write(|transaction| {
             for hash in received {
                 transaction.record_remote_asset(BlobKind::Thumbnail.storage(), hash)?;

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 client-platform-runtime = { path = "../../../platforms/runtime" }
+client-runtime = { path = "../../../client-runtime", features = ["http"] }
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 content-address = { path = "../../../../shared/content-address" }
 cpu-host = { path = "../cpu-host" }

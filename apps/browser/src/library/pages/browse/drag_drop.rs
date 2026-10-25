@@ -239,7 +239,7 @@ mod tests {
     fn cross_library_drag_from_all_books_requires_a_different_library() {
         let library_id = Uuid::from_u128(1);
         let other = Uuid::from_u128(2);
-        let drag = LibraryDrag { library_id, targets: FolderTargets { books: vec![sync_common::ContentHash::from_bytes([1; 32])], ..Default::default() } };
+        let drag = LibraryDrag { library_id, targets: FolderTargets { books: vec![sync_common::BookId::from_bytes([1; 32])], ..Default::default() } };
         assert!(!drag.accepts(library_id, sync_common::ROOT_DIR_ID));
         assert_eq!(drag.accepts(other, sync_common::ROOT_DIR_ID), cfg!(not(target_arch = "wasm32")));
     }
@@ -260,7 +260,7 @@ mod tests {
         let other_library_id = Uuid::from_u128(2);
         let source = Uuid::from_u128(3);
         let destination = Uuid::from_u128(4);
-        let drag = LibraryDrag { library_id, targets: FolderTargets { source: Some(source), books: vec![sync_common::ContentHash::from_bytes([1; 32])], ..Default::default() } };
+        let drag = LibraryDrag { library_id, targets: FolderTargets { source: Some(source), books: vec![sync_common::BookId::from_bytes([1; 32])], ..Default::default() } };
         assert!(drag.accepts(library_id, destination));
         assert_eq!(drag.accepts(other_library_id, destination), cfg!(not(target_arch = "wasm32")));
         assert_eq!(drag.accepts(other_library_id, source), cfg!(not(target_arch = "wasm32")));

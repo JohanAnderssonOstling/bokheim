@@ -1,5 +1,5 @@
 use library_database::{Database, ImportCommit};
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 
 fn database() -> Database {
     let db = Database::open(":memory:").unwrap();
@@ -8,7 +8,7 @@ fn database() -> Database {
 }
 
 fn import() -> ImportCommit {
-    let hash = ContentHash::new(&"9".repeat(64));
+    let hash = BookId::new(&"9".repeat(64));
     ImportCommit {
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
@@ -33,7 +33,7 @@ fn import() -> ImportCommit {
 
 /// A library holding one downloaded book, through the same calls production
 /// uses to request and complete a download.
-fn downloaded_book() -> (Database, ContentHash) {
+fn downloaded_book() -> (Database, BookId) {
     let db = database();
     let commit = import();
     let hash = commit.content_hash;

@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use app_preferences::{DEFAULT_COLUMN_GAP_PX, DEFAULT_READER_MARGIN_PX, ReaderFontFamily, ReaderPreferencePatch, ReaderTextAlignment};
 
+pub use app_preferences::PdfReadingDirection;
 /// The shared, synchronized description of how a PDF's layout is decided. The
 /// reader carries `pdf_page_count` and `pdf_zoom` alongside it, so each mode
 /// keeps the value it holds fixed.
@@ -45,6 +46,13 @@ pub enum NarrationVoice {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReaderPreferences {
+    /// Reading guides are a local display preference and do not create book annotations.
+    #[serde(default)]
+    pub reading_ruler: html_view_gpui::ReadingRulerStyle,
+    #[serde(default = "default_reading_ruler_style")]
+    pub reading_ruler_last_style: html_view_gpui::ReadingRulerStyle,
+    #[serde(default = "default_reading_ruler_lines")]
+    pub reading_ruler_lines: usize,
     pub font_size: f32,
     pub column_width: f64,
     #[serde(default = "default_min_line_width_ch")]
@@ -63,6 +71,9 @@ pub struct ReaderPreferences {
     pub sidebar_open: bool,
     #[serde(default)]
     pub font_family: ReaderFontFamily,
+    /// Installed font names belong to this device and are not synchronized.
+    #[serde(default)]
+    pub system_font_family: Option<String>,
     #[serde(default)]
     pub text_alignment: ReaderTextAlignment,
     #[serde(default = "default_line_height")]
@@ -81,6 +92,8 @@ pub struct ReaderPreferences {
     pub pdf_page_count: u8,
     #[serde(default = "default_pdf_trim_margins")]
     pub pdf_trim_margins: bool,
+    #[serde(default)]
+    pub pdf_reading_direction: PdfReadingDirection,
     /// Which end of the PDF layout the reader holds fixed. `pdf_page_count`
     /// carries the page count for [`PdfZoomModePreference::FitWidth`], and
     /// `pdf_zoom` the zoom for [`PdfZoomModePreference::Fixed`].
@@ -105,6 +118,9 @@ pub struct ReaderPreferences {
 impl Default for ReaderPreferences {
     fn default() -> Self {
         Self {
+            reading_ruler: html_view_gpui::ReadingRulerStyle::Off,
+            reading_ruler_last_style: default_reading_ruler_style(),
+            reading_ruler_lines: default_reading_ruler_lines(),
             font_size: 20.0,
             column_width: 600.0,
             min_line_width_ch: default_min_line_width_ch(),
@@ -115,6 +131,7 @@ impl Default for ReaderPreferences {
             chrome_hidden: false,
             sidebar_open: default_sidebar_open(),
             font_family: ReaderFontFamily::default(),
+            system_font_family: None,
             text_alignment: ReaderTextAlignment::default(),
             line_height: default_line_height(),
             horizontal_margin_px: default_reader_margin(),
@@ -123,6 +140,7 @@ impl Default for ReaderPreferences {
             max_column_count: default_max_column_count(),
             pdf_page_count: default_pdf_page_count(),
             pdf_trim_margins: default_pdf_trim_margins(),
+            pdf_reading_direction: PdfReadingDirection::default(),
             pdf_zoom_mode: PdfZoomModePreference::default(),
             pdf_zoom: default_pdf_zoom(),
             audiobook_speed: default_audiobook_speed(),
@@ -130,6 +148,14 @@ impl Default for ReaderPreferences {
             narration_voice: NarrationVoice::default(),
         }
     }
+}
+
+fn default_reading_ruler_lines() -> usize {
+    1
+}
+
+fn default_reading_ruler_style() -> html_view_gpui::ReadingRulerStyle {
+    html_view_gpui::ReadingRulerStyle::Band
 }
 
 fn default_reader_margin() -> f32 {
@@ -196,6 +222,7 @@ impl ReaderPreferences {
         self.pdf_page_count = saved.pdf_page_count();
         self.pdf_zoom = saved.pdf_zoom();
         self.pdf_trim_margins = saved.pdf_trim_margins();
+        self.pdf_reading_direction = saved.pdf_reading_direction();
         self.audiobook_speed = saved.audiobook_speed();
     }
 
@@ -250,6 +277,9 @@ impl ReaderPreferences {
         if self.pdf_trim_margins != next.pdf_trim_margins {
             patches.push(ReaderPreferencePatch::PdfTrimMargins(next.pdf_trim_margins));
         }
+        if self.pdf_reading_direction != next.pdf_reading_direction {
+            patches.push(ReaderPreferencePatch::PdfReadingDirection(next.pdf_reading_direction));
+        }
         if self.audiobook_speed != next.audiobook_speed {
             patches.push(ReaderPreferencePatch::AudiobookSpeed(next.audiobook_speed));
         }
@@ -262,6 +292,7 @@ impl ReaderPreferences {
             ReaderFontFamily::Serif => Some("NV Garamond, serif".to_owned()),
             ReaderFontFamily::SansSerif => Some("Raleway, sans-serif".to_owned()),
         };
+        let family = self.system_font_family.as_ref().map(|family| format!("\"{}\", NV Garamond, serif", family.replace('\\', "\\\\").replace('"', "\\\""))).or(family);
         let alignment = match self.text_alignment {
             ReaderTextAlignment::Publisher => None,
             ReaderTextAlignment::Start => Some(html::pipeline::TextAlign::Left),
@@ -379,6 +410,47 @@ impl ReaderSettings {
 mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    #[test]
+    fn pdf_direction_survives_ui_reload_and_backend_updates() {
+        let previous = ReaderPreferences::default();
+        let next = ReaderPreferences { pdf_reading_direction: PdfReadingDirection::RightToLeft, ..previous.clone() };
+        let patches = previous.synchronized_patches(&next);
+        assert_eq!(patches, vec![ReaderPreferencePatch::PdfReadingDirection(PdfReadingDirection::RightToLeft)]);
+        let mut saved = app_preferences::ReaderPreferences::default();
+        for patch in patches {
+            patch.apply(&mut saved).unwrap();
+        }
+        let mut restored = ReaderPreferences::default();
+        restored.apply_synchronized(&saved);
+        assert_eq!(restored.pdf_reading_direction, PdfReadingDirection::RightToLeft);
+        let mut legacy = serde_json::to_value(&next).unwrap();
+        assert_eq!(serde_json::from_value::<ReaderPreferences>(legacy.clone()).unwrap().pdf_reading_direction, PdfReadingDirection::RightToLeft);
+        legacy.as_object_mut().unwrap().remove("pdf_reading_direction");
+        assert_eq!(serde_json::from_value::<ReaderPreferences>(legacy).unwrap().pdf_reading_direction, PdfReadingDirection::Document);
+        assert_eq!(next.synchronized_patches(&previous), vec![ReaderPreferencePatch::PdfReadingDirection(PdfReadingDirection::Document)]);
+    }
+
+    #[test]
+    fn system_font_is_local_and_survives_reload_and_synchronized_updates() {
+        let mut preferences = ReaderPreferences::default();
+        preferences.system_font_family = Some("Noto Serif".into());
+        assert!(ReaderPreferences::default().synchronized_patches(&preferences).is_empty());
+        let saved = serde_json::to_value(&preferences).unwrap();
+        let mut restored: ReaderPreferences = serde_json::from_value(saved.clone()).unwrap();
+        restored.apply_synchronized(&app_preferences::ReaderPreferences::default());
+        assert_eq!(restored.system_font_family.as_deref(), Some("Noto Serif"));
+        assert_eq!(restored.style_overrides(None, 0).font_family.as_deref(), Some("\"Noto Serif\", NV Garamond, serif"));
+        let mut legacy = saved;
+        legacy.as_object_mut().unwrap().remove("system_font_family");
+        assert_eq!(serde_json::from_value::<ReaderPreferences>(legacy).unwrap().system_font_family, None);
+    }
+
+    #[test]
+    fn system_font_names_are_quoted_without_changing_their_identity() {
+        let preferences = ReaderPreferences { system_font_family: Some("A, B's \"Serif\" \\ Font".into()), ..Default::default() };
+        assert_eq!(preferences.style_overrides(None, 0).font_family.as_deref(), Some(r#""A, B's \"Serif\" \\ Font", NV Garamond, serif"#));
+    }
 
     #[gpui::test]
     fn persistence_receives_only_the_fields_changed_by_each_update(cx: &mut TestAppContext) {

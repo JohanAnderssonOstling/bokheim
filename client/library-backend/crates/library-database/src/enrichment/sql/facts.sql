@@ -1,11 +1,11 @@
 -- File facts sent to the metadata server, and its answers.
 
 -- name: facts_metadata_body?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT body FROM local_book_draft WHERE content_hash=:content_hash;
 
 -- name: facts_filenames?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT DISTINCT file_name FROM book_dir
 WHERE book_row_id = (SELECT row_id FROM book WHERE content_hash = :content_hash) AND deleted_at IS NULL
 ORDER BY file_name LIMIT 8;
@@ -20,7 +20,7 @@ WHERE b.deleted_at IS NULL
 ORDER BY b.content_hash;
 
 -- name: facts_record_failure!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: retry_at: i64
 UPDATE local_book_draft SET retry_at=:retry_at WHERE content_hash=:content_hash;
 
@@ -38,6 +38,6 @@ WHERE t.cover_checked=0 AND t.cover_state='no_cover' AND b.deleted_at IS NULL
 ORDER BY b.content_hash;
 
 -- name: facts_mark_cover_checked!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT INTO book_transfer(content_hash,cover_checked) SELECT content_hash,1 FROM book WHERE content_hash=:content_hash
 ON CONFLICT(content_hash) DO UPDATE SET cover_checked=1;

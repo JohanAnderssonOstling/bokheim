@@ -60,7 +60,7 @@ pub fn account_identity(initial: impl Into<SharedString>, email: impl Into<Share
                 .child(initial.into()),
         )
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(email.into()))
-        .child(div().flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).children(actions))
+        .child(div().flex_none().max_w_full().flex().flex_row().flex_wrap().items_center().gap(px(SPACE_MD)).children(actions))
 }
 
 /// The quota as one line: what is used against the quota, and what is left

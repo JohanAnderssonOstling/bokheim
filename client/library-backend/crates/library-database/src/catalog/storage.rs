@@ -3,7 +3,7 @@ use super::popularity::{read_popularity, read_popularity_for};
 use super::{CatalogBook, FORMAT_VERSION, read_sources, read_sources_for, release};
 use crate::{DatabaseError, attach_taxonomy, taxonomy_update};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AuthorId, BookDetails, BookFormat, BookMetadata, BookRecord, BookSubject, Contributor, Identifier, LanguageTag, Scheme, Scope, normalize_search_text};
-use content_address::ContentHash;
+use content_address::BookId;
 use library_model::CardKey;
 use rusqlite::{
     Connection, Error as SqlError, OptionalExtension, Row,
@@ -23,7 +23,7 @@ struct ActiveCatalog {
     generation: u64,
 }
 static ACTIVE: OnceLock<Mutex<ActiveCatalog>> = OnceLock::new();
-const PROJECTION_VERSION: i64 = 15;
+const PROJECTION_VERSION: i64 = 16;
 const SCHEMA: &str = include_str!("schema.sql");
 const COMPACT_SCHEMA: &str = include_str!("compact.sql");
 // An inactive catalog exposes empty browse tables without allocating source records.
@@ -195,7 +195,7 @@ fn previous_ids(db: &Connection) -> Result<StableIds, DatabaseError> {
     }
     let mut ids = StableIds::default();
     let mut rows = db.prepare("SELECT key,row_id FROM catalog_browse_book")?;
-    for row in rows.query_map([], |row| Ok((CardKey(*row.get::<_, ContentHash>(0)?.as_bytes()), row.get::<_, i64>(1)?)))? {
+    for row in rows.query_map([], |row| Ok((CardKey::from(row.get::<_, BookId>(0)?), row.get::<_, i64>(1)?)))? {
         let (key, id) = row?;
         ids.books.insert(key, id);
     }
@@ -378,7 +378,7 @@ fn published_concepts(db: &Connection, taxonomy_revision: &str) -> Result<Option
     }
     let mut concepts = HashMap::<CardKey, Vec<i64>>::new();
     let mut statement = db.prepare("SELECT b.key,c.concept_id FROM book_concept c JOIN book b ON b.row_id=c.book_row_id ORDER BY b.row_id,c.concept_id")?;
-    for row in statement.query_map([], |row| Ok((CardKey(*row.get::<_, ContentHash>(0)?.as_bytes()), row.get(1)?)))? {
+    for row in statement.query_map([], |row| Ok((CardKey::from(row.get::<_, BookId>(0)?), row.get(1)?)))? {
         let (key, concept) = row?;
         concepts.entry(key).or_default().push(concept);
     }
@@ -413,16 +413,18 @@ fn build_projection_in(db: &Connection, taxonomy_revision: &str, ids: StableIds)
     let mut sources = read_sources(db)?;
     let mut popularity = read_popularity(db)?;
     let mut concepts = published_concepts(db, taxonomy_revision)?;
-    let keys = db.prepare("SELECT identity FROM catalog_source ORDER BY identity")?.query_map([], |row| row.get::<_, ContentHash>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let keys = db.prepare("SELECT identity FROM catalog_source ORDER BY identity")?.query_map([], |row| row.get::<_, BookId>(0))?.collect::<Result<Vec<_>, _>>()?;
     for table in ["catalog_browse_author_book", "catalog_browse_author", "catalog_browse_language", "catalog_browse_concept", "catalog_browse_book", "catalog_browse_search", "catalog_browse_author_search", "catalog_browse_revision"] {
         if let Some(kind) = db.query_row("SELECT type FROM sqlite_schema WHERE name=?1", [table], |row| row.get::<_, String>(0)).optional()? {
             db.execute_batch(&format!("DROP {} {table}", kind.to_uppercase()))?;
         }
     }
+    // Format-8 snapshots published before audio durations remain readable.
+    db.execute_batch("CREATE TABLE IF NOT EXISTS book_audiobook_duration(book_row_id INTEGER PRIMARY KEY REFERENCES book(row_id),duration_ms INTEGER NOT NULL CHECK(duration_ms>0)) STRICT;")?;
     db.execute_batch(COMPACT_SCHEMA)?;
     let mut next_id = ids.books.values().copied().max().map_or(0, |id| id + 1);
     for identity in keys {
-        let key = CardKey(*identity.as_bytes());
+        let key = CardKey::from(identity);
         let index = ids.books.get(&key).copied().unwrap_or_else(|| {
             let id = next_id;
             next_id += 1;
@@ -461,6 +463,7 @@ fn build_projection_in(db: &Connection, taxonomy_revision: &str, ids: StableIds)
             external_url,
             download_url,
             file_format: format,
+            audiobook_duration_ms: None,
             sources: sources.remove(&text_key).unwrap_or_default(),
             title,
             subtitle,
@@ -524,9 +527,12 @@ pub fn entry(key: CardKey) -> Result<Option<CatalogBook>, DatabaseError> {
 
 pub(super) fn load_entry(db: &Connection, key: CardKey) -> Result<Option<CatalogBook>, DatabaseError> {
     let found = db
-        .query_row("SELECT external,format,search_title,search_author FROM catalog_browse_book WHERE key=?1", [&key.0[..]], |row| Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))
+        .query_row("SELECT external,format,search_title,search_author,duration_ms FROM catalog_browse_book WHERE key=?1", [&key.0[..]], |row| {
+            let duration = row.get::<_, Option<i64>>(4)?.map(u64::try_from).transpose().map_err(|error| SqlError::FromSqlConversionFailure(4, Type::Integer, Box::new(error)))?;
+            Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, duration))
+        })
         .optional()?;
-    let Some((external, format, search_title, search_author)) = found else { return Ok(None) };
+    let Some((external, format, search_title, search_author, audiobook_duration_ms)) = found else { return Ok(None) };
     let view = if external { "catalog_external" } else { "catalog_hosted" };
     let (title, subtitle, description, year) = db.query_row(&format!("SELECT title,subtitle,description,year FROM {view} WHERE identity=?1"), [&key.0[..]], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i32>>(3)?))
@@ -545,11 +551,12 @@ pub(super) fn load_entry(db: &Connection, key: CardKey) -> Result<Option<Catalog
     let popularity = read_popularity_for(db, Some(&identity))?.remove(&identity);
     let languages = record.book.languages.iter().map(|language| crate::browse::options::base_language(language.as_str())).filter(|language| !language.is_empty()).collect();
     Ok(Some(CatalogBook {
-        hash: (!external).then(|| ContentHash::from_bytes(key.0)),
+        hash: (!external).then(|| BookId::from_bytes(key.0)),
         key,
         external_url,
         download_url,
         file_format: BookFormat::from_code(format).ok_or_else(|| DatabaseError::message("catalog entry has an unsupported file format"))?,
+        audiobook_duration_ms,
         sources: sources.remove(&identity).unwrap_or_default(),
         title,
         subtitle,
@@ -574,7 +581,7 @@ fn audiobook_candidates_in(db: &Connection, title: &str) -> Result<Vec<CatalogBo
         .prepare(
             "SELECT book.key FROM catalog_browse_book book JOIN catalog_external source ON source.identity=book.key WHERE book.external=1 AND book.format=?1 AND catalog_title_key(source.title)=catalog_title_key(?2) ORDER BY book.row_id",
         )?
-        .query_map(params![BookFormat::Mp3Folder as i64, title], |row| row.get::<_, ContentHash>(0))?
+        .query_map(params![BookFormat::Mp3Folder as i64, title], |row| row.get::<_, BookId>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    keys.into_iter().map(|key| load_entry(db, CardKey(*key.as_bytes()))?.ok_or_else(|| DatabaseError::message("catalog entry is missing"))).collect()
+    keys.into_iter().map(|key| load_entry(db, CardKey::from(key))?.ok_or_else(|| DatabaseError::message("catalog entry is missing"))).collect()
 }

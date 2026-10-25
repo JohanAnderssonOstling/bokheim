@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{watch, Mutex, MutexGuard, Notify};
 
@@ -41,7 +41,7 @@ pub(crate) struct TorrentRequest {
 
 impl Drop for TorrentRequest {
     fn drop(&mut self) {
-        self.requests.lock().expect("torrent requests poisoned").remove(&self.id);
+        self.requests.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.id);
     }
 }
 
@@ -95,23 +95,22 @@ impl TorrentService {
     }
 
     pub(crate) async fn add(&self, db: &Database, root: &Path, input: TorrentInput) -> Result<String, BackendError> {
-        transfers::retry(|| self.add_allowed(db, root, input.clone(), None)).await
+        self.add_allowed(db, root, input, None).await
     }
 
     pub(crate) fn begin_request(&self, request: &str) -> TorrentRequest {
-        let receiver = self.requests.lock().expect("torrent requests poisoned").entry(request.to_owned()).or_insert_with(|| (watch::channel(false).0, None)).0.subscribe();
+        let receiver = self.requests.lock().unwrap_or_else(PoisonError::into_inner).entry(request.to_owned()).or_insert_with(|| (watch::channel(false).0, None)).0.subscribe();
         TorrentRequest { id: request.to_owned(), cancelled: receiver, requests: self.requests.clone() }
     }
 
     pub(crate) fn prepare_request(&self, request: String) {
-        self.requests.lock().expect("torrent requests poisoned").entry(request).or_insert_with(|| (watch::channel(false).0, None));
+        self.requests.lock().unwrap_or_else(PoisonError::into_inner).entry(request).or_insert_with(|| (watch::channel(false).0, None));
     }
 
     pub(crate) fn cancel_request(&self, request: &str) -> Option<String> {
-        let requests = self.requests.lock().expect("torrent requests poisoned");
-        let (sender, hash) = requests.get(request)?;
+        let (sender, hash) = self.requests.lock().unwrap_or_else(PoisonError::into_inner).get(request)?.clone();
         sender.send_replace(true);
-        hash.clone()
+        hash
     }
 
     async fn add_request(&self, db: &Database, root: &Path, input: TorrentInput, mut request: TorrentRequest) -> Result<String, BackendError> {
@@ -119,7 +118,7 @@ impl TorrentService {
         tokio::select! {
             biased;
             _ = request.cancelled.wait_for(|cancelled| *cancelled) => Err(failure("Download cancelled")),
-            result = transfers::retry(|| self.add_allowed(db, root, input.clone(), Some(&id))) => result,
+            result = self.add_allowed(db, root, input, Some(&id)) => result,
         }
     }
 
@@ -129,7 +128,7 @@ impl TorrentService {
         self.active_adds.fetch_add(1, Ordering::AcqRel);
         let _adding = AddingTorrent(self);
         if !root.is_dir() {
-            return Err(failure("this library's folder is unavailable"));
+            return Err(BackendError::classified(client_runtime::Failure::LibraryFolderUnavailable, "this library's folder is unavailable"));
         }
         let (torrent, source) = match input {
             TorrentInput::Magnet(magnet) => {
@@ -167,7 +166,7 @@ impl TorrentService {
         let record = TorrentRecord { info_hash: hash.clone(), metadata: list.torrent_bytes.to_vec(), source, staging_path: stage, output_path: name, imported: false, publishing: false, keep_seeding: true, folder_id: None, error: None };
         db.save_torrent(&record, &files)?;
         if let Some(request) = request {
-            if let Some((_, saved_hash)) = self.requests.lock().expect("torrent requests poisoned").get_mut(request) {
+            if let Some((_, saved_hash)) = self.requests.lock().unwrap_or_else(PoisonError::into_inner).get_mut(request) {
                 *saved_hash = Some(hash.clone());
             }
         }
@@ -280,13 +279,15 @@ impl TorrentService {
     }
 
     async fn pass_with_policy(&self, library: &LibrarySession, policy: &TransferPolicy) -> Result<(), BackendError> {
-        if !policy.allowed() {
+        let records = library.db.torrents()?;
+        // Pending torrents are explicit downloads, retained across restarts.
+        // Only completed torrents' automatic seeding follows network cost.
+        if !policy.allowed() && records.iter().all(|record| record.imported) && self.active_adds.load(Ordering::Acquire) == 0 {
             if let Some(engine) = self.engine.lock().await.take() {
                 engine.stop().await;
             }
             return Ok(());
         }
-        let records = library.db.torrents()?;
         if records.is_empty() && self.engine.try_lock().is_ok_and(|slot| slot.is_none()) {
             return Ok(());
         }
@@ -323,19 +324,18 @@ impl TorrentService {
                 continue;
             }
             let id = torrent_id(&record.info_hash)?;
-            if record.imported && !record.keep_seeding {
+            if record.imported && (!record.keep_seeding || !policy.allowed()) {
                 if engine.get(id).is_some() {
                     engine.delete(torrent_id(&record.info_hash)?, false).await.map_err(failure)?;
                 }
                 continue;
             }
-            if engine.get(id).is_none() {
+            let Some(handle) = engine.get(id) else {
                 if let Err(error) = Self::resume(&engine, &library.db, &root, &record, Vec::new()).await {
                     library.db.set_torrent_error(&record.info_hash, Some(&error.to_string()))?;
                 }
                 continue;
-            }
-            let handle = engine.get(torrent_id(&record.info_hash)?).expect("checked above");
+            };
             let stats = handle.stats();
             if let Some(error) = &stats.error {
                 library.db.set_torrent_error(&record.info_hash, Some(error))?;
@@ -379,24 +379,26 @@ impl TorrentService {
             tokio::select! {
                 _ = self.wake.notified() => {},
                 _ = changes.changed() => {},
-                _ = async {
+                elapsed = async {
                     match next {
                         Some(delay) => crate::executor::sleep(delay).await,
                         None => std::future::pending().await,
                     }
-                } => {},
+                } => {
+                    if let Err(error) = elapsed {
+                        log::warn!("torrent transfer retries stopped: {error}");
+                        return;
+                    }
+                },
             }
         }
     }
 
     fn next_check(&self, library: &LibrarySession, policy: &TransferPolicy) -> Result<Option<Duration>, BackendError> {
-        if !policy.allowed() {
-            return Ok(None);
-        }
         let records = library.db.torrents()?;
         Ok(if records.iter().any(|record| !record.imported) {
             Some(Duration::from_secs(2))
-        } else if records.iter().any(|record| record.keep_seeding) {
+        } else if policy.allowed() && records.iter().any(|record| record.keep_seeding) {
             // Peer traffic belongs to librqbit. Reconcile stable seeds less
             // often; user actions, moves and scans wake us immediately.
             Some(Duration::from_secs(30))

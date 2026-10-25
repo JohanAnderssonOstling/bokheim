@@ -20,6 +20,8 @@ mod pending;
 mod reading;
 mod resources;
 #[cfg(not(target_arch = "wasm32"))]
+mod cloud;
+#[cfg(not(target_arch = "wasm32"))]
 mod torrents;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod transfer;

@@ -124,6 +124,12 @@ where
         self.handle = Some(handle);
         self
     }
+
+    /// Keep scrolling and the surface's stable identity without drawing a bar.
+    pub fn hide_scrollbar(mut self) -> Self {
+        self.show_scrollbar = false;
+        self
+    }
 }
 
 impl<E> Styled for Scrollable<E>
@@ -182,7 +188,10 @@ where
             })
             .child(content);
 
-        let scrollbar = self.show_scrollbar.then(|| Scrollbar::new(&scroll_handle).id((self.id.clone(), "scrollbar")).axis(self.axis));
+        // Scrollbar is absolute but supplies no inset of its own. Anchor its
+        // layer to the viewport so its static position cannot follow the
+        // preceding scroll area and extend below a popup.
+        let scrollbar = self.show_scrollbar.then(|| div().absolute().inset_0().child(Scrollbar::new(&scroll_handle).id((self.id.clone(), "scrollbar")).axis(self.axis)));
         div().id(self.id).size_full().relative().refine_style(&root_style).on_key_down(page_with_arrow_keys(scroll_handle.clone())).child(scroll_area).children(scrollbar)
     }
 }

@@ -1,5 +1,6 @@
 //! The EPUB reader surface.
 
+mod font_picker;
 pub(crate) mod marks;
 pub(crate) mod progress;
 pub(crate) mod render;
@@ -118,6 +119,7 @@ pub(crate) struct ReaderView {
     /// turns no page.
     touch_swipe_from_edge: bool,
     search_input: Entity<InputState>,
+    font_picker: Entity<font_picker::FontPicker>,
     search: SearchState,
     book: Arc<crate::book::NativeBook>,
     reading_position: Option<ReadingPosition>,
@@ -135,6 +137,7 @@ pub(crate) struct ReaderView {
     selection: Option<Selection>,
     touch_selection: render::touch_selection::TouchSelectionState,
     annotation_note_input: Entity<InputState>,
+    annotation_filter_input: Entity<InputState>,
     annotation_popup_anchor: Option<Point<Pixels>>,
     footnote: Option<(html_view_core::FootnotePreview, html_view_gpui::PreparedNote)>,
     image_preview: Option<(String, Arc<gpui::Image>)>,
@@ -148,4 +151,5 @@ pub(crate) struct ReaderView {
     reading_positions: ReadingPositionWriter,
     close_reader: crate::CloseReader,
     _search_subscription: Subscription,
+    _annotation_filter_subscription: Subscription,
 }

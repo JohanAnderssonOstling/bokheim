@@ -17,8 +17,8 @@ use super::listing::{BrowseItem, BrowseItems, BrowseKind, book_id, chip_id, is_a
 use super::page::BrowseSplitSide;
 use super::section_card::SectionCard;
 use crate::library::widgets::{
-    BookCardInteraction, BookCardPresentation, BookCardView, PaginatorChild, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorState, PaginatorWidthPolicy, book_card_policy, browse_section_card_policy,
-    browse_shelf_card_policy,
+    BookCardInteraction, BookCardPresentation, BookCardView, PaginatorChild, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorState, PaginatorWidthPolicy, book_card_policy, browse_folder_card_policy,
+    browse_section_card_policy, browse_shelf_card_policy,
 };
 
 /// A child opens, splits, shows its resolved menu, and carries folder placements.
@@ -167,6 +167,7 @@ pub(super) fn paginator_groups(
     page: Option<&BrowsePageState>,
     book_indices: &BTreeMap<usize, Entity<BookCardView>>,
     heading_rows: &BTreeMap<usize, BrowseRow>,
+    mobile: bool,
     cx: &mut App,
 ) -> Vec<PaginatorGroup> {
     let cover_text = crate::stores::current_cover_text(cx);
@@ -256,7 +257,14 @@ pub(super) fn paginator_groups(
         groups.push(PaginatorGroup::new(policy, chip_children));
     }
     if !card_children.is_empty() {
-        groups.push(PaginatorGroup::new(if shelves { browse_shelf_card_policy(cover_text) } else { browse_section_card_policy(cover_text) }, card_children));
+        let policy = if shelves {
+            browse_shelf_card_policy(cover_text)
+        } else if kind == BrowseKind::Folder {
+            browse_folder_card_policy(cover_text, mobile)
+        } else {
+            browse_section_card_policy(cover_text, mobile)
+        };
+        groups.push(PaginatorGroup::new(policy, card_children));
     }
     if !book_children.is_empty() {
         groups.push(PaginatorGroup::new(book_card_policy(cover_text), book_children));

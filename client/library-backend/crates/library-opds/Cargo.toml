@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 client-platform-runtime = { path = "../../../platforms/runtime" }
+client-runtime = { path = "../../../client-runtime", features = ["http"] }
 blake3 = { workspace = true }
 image = { version = "0.25", default-features = false }
 thumbnail = { path = "../thumbnail" }

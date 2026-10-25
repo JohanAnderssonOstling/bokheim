@@ -7,17 +7,17 @@ use library_files::AssetStore;
 use library_model::{BlobKind, PublishedStagedBook};
 use library_placement::evict_local_book;
 use std::fs;
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 use tempfile::TempDir;
 
 const BOOK_BYTES: &[u8] = b"the only local copy of an unfinished upload";
 
-fn local_book() -> (TempDir, AssetStore, Database, ContentHash) {
+fn local_book() -> (TempDir, AssetStore, Database, BookId) {
     let root = TempDir::new().unwrap();
     let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
     let database = Database::open(":memory:").unwrap();
     database.initialize_library().unwrap();
-    let hash = ContentHash::from_bytes(*blake3::hash(BOOK_BYTES).as_bytes());
+    let hash = BookId::from_bytes(*blake3::hash(BOOK_BYTES).as_bytes());
     let record = BookRecord { metadata: BookDetails { title: "Book".into(), ..Default::default() }, description: String::new() };
     fs::write(root.path().join("book.epub"), BOOK_BYTES).unwrap();
     database

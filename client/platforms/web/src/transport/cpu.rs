@@ -60,12 +60,12 @@ impl Service {
     }
 
     fn start(self: &Rc<Self>) -> Result<(), JsValue> {
-        let worker = (self.create_worker)()?;
         let generation = {
             let mut state = self.state.borrow_mut();
-            state.next_generation = state.next_generation.checked_add(1).expect("CPU worker generations exhausted");
+            state.next_generation = state.next_generation.checked_add(1).ok_or_else(|| JsValue::from_str("CPU worker generations exhausted"))?;
             state.next_generation
         };
+        let worker = (self.create_worker)()?;
         let service = Rc::downgrade(self);
         let message = move |data: JsValue| {
             let Some(service) = service.upgrade() else {
@@ -89,12 +89,11 @@ impl Service {
         let (cancel, cancelled) = oneshot::channel();
         self.state.borrow_mut().worker = Some(Connection::new(endpoint, generation, cancel));
         wasm_bindgen_futures::spawn_local(async move {
-            if client_platform_runtime::pending::until_cancelled(client_platform_runtime::executor::sleep(startup_timeout), cancelled).await.is_none() {
-                return;
-            }
+            let Some(elapsed) = client_platform_runtime::pending::until_cancelled(client_platform_runtime::executor::sleep(startup_timeout), cancelled).await else { return };
             if let Some(service) = service.upgrade() {
                 if service.state.borrow().worker.as_ref().is_some_and(|worker| worker.waiting(generation)) {
-                    service.fail("CPU worker startup timed out".into());
+                    let message = elapsed.err().map(|error| error.to_string()).unwrap_or_else(|| "CPU worker startup timed out".into());
+                    service.fail(message.into());
                 }
             }
         });
@@ -140,8 +139,12 @@ impl Service {
     fn pump(&self) {
         let work = {
             let mut state = self.state.borrow_mut();
-            let next = state.policy.next().map(|(id, job)| (id, std::mem::take(&mut job.bytes), std::mem::take(&mut job.source)));
-            next.map(|(id, bytes, source)| (id, bytes, source, state.worker.as_ref().expect("ready worker").endpoint.endpoint().clone()))
+            let Some(worker) = state.worker.as_ref().map(|worker| worker.endpoint.endpoint().clone()) else {
+                drop(state);
+                self.fail("CPU worker is unavailable".into());
+                return;
+            };
+            state.policy.next().map(|(id, job)| (id, std::mem::take(&mut job.bytes), std::mem::take(&mut job.source), worker))
         };
         if let Some((id, bytes, mut source, worker)) = work {
             let (message, transfer) = CpuRequest { id, bytes, source: source.value() }.encode();

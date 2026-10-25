@@ -102,14 +102,14 @@ impl BrowserDownloads {
             }
             return;
         }
-        let message = if phase == BrowserDownloadPhase::Failed { Some(crate::book_transfer_error_message(message.as_deref().unwrap_or("")).to_owned()) } else { message };
+        let message = if let BrowserDownloadPhase::Failed(failure) = phase { Some(crate::book_transfer_error_message(failure).to_owned()) } else { message };
         let text = message.as_ref().map_or_else(|| name.clone(), |message| format!("{name}: {message}"));
         let mut notification = match phase {
             BrowserDownloadPhase::Completed => {
                 self.entries.remove(&download);
                 Notification::success(text).title("Download complete")
             }
-            BrowserDownloadPhase::Failed => {
+            BrowserDownloadPhase::Failed(_) => {
                 self.entries.remove(&download);
                 Notification::error(text).title("Download failed").autohide(false)
             }
@@ -143,7 +143,7 @@ impl BrowserDownloads {
                 }
             }
         };
-        if !matches!(phase, BrowserDownloadPhase::Completed | BrowserDownloadPhase::Failed) {
+        if !matches!(phase, BrowserDownloadPhase::Completed | BrowserDownloadPhase::Failed(_)) {
             if let Some(cancel) = self.cancel.clone() {
                 let id = download.clone();
                 notification = notification.on_close_button_click(move |_, cx| cancel(&id, cx));

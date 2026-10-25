@@ -44,5 +44,5 @@ fn registry_backup_does_not_require_a_library_directory() {
     rusqlite::Connection::open(&registry).unwrap().execute_batch("CREATE TABLE setting(v)").unwrap();
     let config = DiscoveryConfig { endpoint: "https://updates.example.org/v1/stable".into(), channel: "stable".into(), trusted_keys: [("test".into(), [1; 32])].into() };
     let host = Host::open(temp.path(), "1.0.0", config, None, std::env::current_exe().unwrap()).unwrap();
-    assert_eq!(host.databases().unwrap(), vec![registry]);
+    assert_eq!(databases::paths(&host.data).unwrap(), vec![registry]);
 }

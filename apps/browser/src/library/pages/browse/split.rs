@@ -23,6 +23,15 @@ struct BrowsePane {
 }
 
 impl BrowseSplitPlane {
+    /// Return to one fresh root page, clearing details, searches and split panes.
+    pub(crate) fn open_root(&mut self, cx: &mut Context<Self>) {
+        self.panes.clear();
+        self.add_page_at(0, Vec::new(), cx);
+        self.focus = self.panes[0].page.read(cx).focus_handle(cx);
+        self.restore_focus = true;
+        cx.notify();
+    }
+
     pub(crate) fn open_folder(&mut self, directory_id: sync_common::DirId, title: String, cx: &mut Context<Self>) {
         let path = if directory_id == sync_common::ROOT_DIR_ID { Vec::new() } else { vec![BrowseCrumb { location: library_model::BrowseLocation::Folder(directory_id), label: title }] };
         self.panes[0].page.update(cx, |page, cx| page.open_path(path, cx));
@@ -147,12 +156,13 @@ impl Render for BrowseSplitPlane {
             self.focus.focus(window, cx);
         }
         if !crate::split_panes_available(window) {
+            let Some(first) = self.panes.first() else { return div().into_any_element() };
             let hidden_pane_has_focus = self.panes.iter().skip(1).any(|pane| pane.page.read(cx).focus_handle(cx).contains_focused(window, cx));
-            self.focus = self.panes[0].page.read(cx).focus_handle(cx);
+            self.focus = first.page.read(cx).focus_handle(cx);
             if hidden_pane_has_focus {
                 self.focus.focus(window, cx);
             }
-            return self.panes.first().expect("browse split plane always has a page").page.clone().into_any_element();
+            return first.page.clone().into_any_element();
         }
         let theme = components::browser_theme(cx);
         div()

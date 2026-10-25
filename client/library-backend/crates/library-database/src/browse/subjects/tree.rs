@@ -112,24 +112,24 @@ impl Database {
                     let (parent, label) = self.connection.taxonomy_route_parent(&current, |row| Ok((row.get(0)?, row.get(1)?)))?;
                     nodes.insert(current, SubjectNode { parent, label, ..Default::default() });
                 }
-                let node = nodes.get_mut(&current).expect("loaded route");
+                let node = subject_node_mut(&mut nodes, current)?;
                 node.members.insert(book);
                 if current == assigned_route {
                     node.direct.insert(book);
                 }
                 current = node.parent;
             }
-            nodes.get_mut(&0).expect("subject root").members.insert(book);
+            subject_node_mut(&mut nodes, 0)?.members.insert(book);
         }
         let edges = nodes.iter().filter(|(route, _)| **route != 0).map(|(&route, node)| (route, node.parent)).collect::<Vec<_>>();
         for (route, parent) in edges {
-            nodes.get_mut(&parent).expect("loaded ancestor").children.insert(route);
+            subject_node_mut(&mut nodes, parent)?.children.insert(route);
         }
-        let branches = nodes[&0].children.clone();
+        let branches = subject_node(&nodes, 0)?.children.clone();
         for branch in branches {
-            if !compact_node(branch, &mut nodes) {
-                let members = nodes[&branch].members.clone();
-                let root = nodes.get_mut(&0).expect("subject root");
+            if !compact_node(branch, &mut nodes)? {
+                let members = subject_node(&nodes, branch)?.members.clone();
+                let root = subject_node_mut(&mut nodes, 0)?;
                 root.direct.extend(members);
                 root.children.remove(&branch);
             }
@@ -141,34 +141,42 @@ impl Database {
     }
 }
 
+fn subject_node(nodes: &BTreeMap<i64, SubjectNode>, route: i64) -> Result<&SubjectNode, DatabaseError> {
+    nodes.get(&route).ok_or_else(|| DatabaseError::message(format!("subject tree is missing route {route}")))
+}
+
+fn subject_node_mut(nodes: &mut BTreeMap<i64, SubjectNode>, route: i64) -> Result<&mut SubjectNode, DatabaseError> {
+    nodes.get_mut(&route).ok_or_else(|| DatabaseError::message(format!("subject tree is missing route {route}")))
+}
+
 /// Collapse small leaves, then absorb a sole child of an empty wrapper while
 /// keeping the wrapper's label. Membership is independent of page filters.
-pub(in crate::browse) fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> bool {
-    let children = nodes[&route].children.clone();
+pub(in crate::browse) fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> Result<bool, DatabaseError> {
+    let children = subject_node(nodes, route)?.children.clone();
     for child in children {
-        if !compact_node(child, nodes) {
-            let members = nodes[&child].members.clone();
-            let node = nodes.get_mut(&route).expect("subject route");
+        if !compact_node(child, nodes)? {
+            let members = subject_node(nodes, child)?.members.clone();
+            let node = subject_node_mut(nodes, route)?;
             node.direct.extend(members);
             node.children.remove(&child);
         }
     }
-    let node = &nodes[&route];
+    let node = subject_node(nodes, route)?;
     if node.children.is_empty() && node.members.len() <= 2 {
-        return false;
+        return Ok(false);
     }
     if node.direct.is_empty() && node.children.len() == 1 {
-        let child = *node.children.first().expect("sole child");
-        let direct = nodes[&child].direct.clone();
-        let grandchildren = nodes[&child].children.clone();
+        let child = *node.children.first().ok_or_else(|| DatabaseError::message("subject wrapper has no child"))?;
+        let direct = subject_node(nodes, child)?.direct.clone();
+        let grandchildren = subject_node(nodes, child)?.children.clone();
         for grandchild in &grandchildren {
-            nodes.get_mut(grandchild).expect("subject grandchild").parent = route;
+            subject_node_mut(nodes, *grandchild)?.parent = route;
         }
-        let node = nodes.get_mut(&route).expect("subject route");
+        let node = subject_node_mut(nodes, route)?;
         node.direct = direct;
         node.children = grandchildren;
     }
-    true
+    Ok(true)
 }
 
 pub(in crate::browse) fn subtree_routes(nodes: &BTreeMap<i64, SubjectNode>, root: i64) -> BTreeSet<i64> {
@@ -188,6 +196,13 @@ pub(in crate::browse) fn subtree_routes(nodes: &BTreeMap<i64, SubjectNode>, root
 mod tests {
     use super::*;
     use crate::transactions::WriteOutcome;
+
+    #[test]
+    fn compaction_reports_missing_children_instead_of_panicking() {
+        let mut nodes = BTreeMap::from([(1, SubjectNode { children: BTreeSet::from([2]), ..Default::default() })]);
+        assert!(compact_node(1, &mut nodes).is_err());
+        assert!(compact_node(99, &mut nodes).is_err());
+    }
 
     #[test]
     fn leaf_assignments_count_upwards_once_without_combining_separate_branches() {

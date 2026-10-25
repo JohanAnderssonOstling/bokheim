@@ -2,7 +2,7 @@
 
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::{Database, DatabaseError};
-use content_address::ContentHash;
+use content_address::BookId;
 pub(crate) use include_sqlite_sql::include_sql;
 pub(crate) use library_model::BookTocEntry;
 
@@ -19,7 +19,7 @@ pub(crate) use book_model::{AudiobookChapter, BookFormat};
 /// content hash. Reuse complete facts without claiming this device inspected
 /// the audio. Missing or inconsistent metadata must still go through inspection.
 #[cfg(feature = "scanner")]
-pub(crate) fn reusable_playback_format(hash: ContentHash, format: Option<BookFormat>, duration_ms: Option<i64>, toc_json: Option<&str>, tracks_json: Option<&str>) -> Option<BookFormat> {
+pub(crate) fn reusable_playback_format(hash: BookId, format: Option<BookFormat>, duration_ms: Option<i64>, toc_json: Option<&str>, tracks_json: Option<&str>) -> Option<BookFormat> {
     use book_model::{AudiobookTrack, audiobook_toc_position, tracks_match_archive};
     use std::collections::HashSet;
 
@@ -76,7 +76,7 @@ pub(crate) fn navigation_from_chapters(chapters: &[AudiobookChapter]) -> Vec<Boo
 
 impl Database {
     /// Naming hints only: logical track names and content identity stay intact.
-    pub fn audiobook_download_track_titles(&self, hash: &ContentHash) -> Result<Vec<(String, String)>, DatabaseError> {
+    pub fn audiobook_download_track_titles(&self, hash: &BookId) -> Result<Vec<(String, String)>, DatabaseError> {
         if self.book_format(hash)? != Some(BookFormat::Mp3Folder) {
             return Ok(Vec::new());
         }
@@ -104,7 +104,7 @@ impl Database {
     /// Everything a player needs to open the book without inspecting its
     /// file, except the cover, which lives in asset storage. `None` until the
     /// file's chapters and duration have been cached.
-    pub fn audiobook_playback_metadata(&self, hash: &sync_common::ContentHash) -> Result<Option<library_model::PlaybackMetadata>, DatabaseError> {
+    pub fn audiobook_playback_metadata(&self, hash: &sync_common::BookId) -> Result<Option<library_model::PlaybackMetadata>, DatabaseError> {
         let mut cached_row = None;
         self.connection.audiobook_cached_metadata(hash, |row| {
             cached_row = Some((row.get::<_, i64>(0)?, row.get::<_, String>(1)?));
@@ -137,7 +137,7 @@ impl Database {
         }))
     }
 
-    pub fn audiobook_tracks(&self, hash: &sync_common::ContentHash) -> Result<Vec<book_model::AudiobookTrack>, DatabaseError> {
+    pub fn audiobook_tracks(&self, hash: &sync_common::BookId) -> Result<Vec<book_model::AudiobookTrack>, DatabaseError> {
         let mut tracks = None;
         self.connection.audiobook_track_index_select(hash, |row| {
             tracks = Some(serde_json::from_str::<Vec<book_model::AudiobookTrack>>(&row.get::<_, String>(0)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn playback_reuse_requires_complete_metadata_for_the_same_archive() {
-        let hash = ContentHash::new(&"a".repeat(64));
+        let hash = BookId::new(&"a".repeat(64));
         let toc = serde_json::to_string(&vec![BookTocEntry { title: "Chapter".into(), target: audiobook_toc_target(0), children: vec![] }]).unwrap();
         let track = AudiobookTrack { name: "01.mp3".into(), start_ms: 0, end_ms: 1000, offset: 0, length: 100, archive_hash: Some(hash) };
         let tracks = serde_json::to_string(&vec![track.clone()]).unwrap();
@@ -173,7 +173,7 @@ mod tests {
             assert_eq!(reuse(BookFormat::Mp3Folder, Some(1000), Some(toc.as_str()), incomplete_tracks), None);
         }
         let mut wrong_archive = track.clone();
-        wrong_archive.archive_hash = Some(ContentHash::new(&"b".repeat(64)));
+        wrong_archive.archive_hash = Some(BookId::new(&"b".repeat(64)));
         let wrong_archive = serde_json::to_string(&vec![wrong_archive]).unwrap();
         assert_eq!(reuse(BookFormat::Mp3Folder, Some(1000), Some(toc.as_str()), Some(wrong_archive.as_str())), None);
         assert_eq!(reuse(BookFormat::Mp3Folder, Some(2000), Some(toc.as_str()), Some(tracks.as_str())), None);

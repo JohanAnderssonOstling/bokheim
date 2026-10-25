@@ -22,7 +22,7 @@ fn bridge() -> Result<Rc<Bridge>, JsValue> {
         }
         let bridge = Rc::new(Bridge { scope: js_sys::global().unchecked_into(), pending: Default::default() });
         let weak = Rc::downgrade(&bridge);
-        let listener = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let listener = Closure::<dyn FnMut(MessageEvent)>::own_aborting(move |event: MessageEvent| {
             let data = event.data();
             if field(&data, "transport").as_string().as_deref() != Some("sync_failed") {
                 return;
@@ -60,7 +60,7 @@ impl Drop for Request {
 }
 pub fn sync_request(key: String, bytes: Vec<u8>, run: impl AsyncFnMut(Vec<u8>) -> Result<Vec<u8>, String> + 'static) -> Result<BytesFuture, JsValue> {
     let bridge = bridge()?;
-    let id = bridge.pending.next_id();
+    let id = bridge.pending.next_id().map_err(|error| JsValue::from_str(&error))?;
     let channel = MessageChannel::new()?;
     // Completion and commands use separate channels so completion can cancel an
     // active operation without waiting for it or running any queued commands.
@@ -143,7 +143,7 @@ impl Drop for BackgroundHost {
 impl BackgroundHost {
     pub fn new(retry: f64, debounce: f64) -> Result<Self, JsValue> {
         let bridge = bridge()?;
-        let id = bridge.pending.next_id();
+        let id = bridge.pending.next_id().map_err(|error| JsValue::from_str(&error))?;
         let channel = MessageChannel::new()?;
         let (send, commands) = async_channel::bounded(1);
         let state = Rc::new_cyclic(|weak: &Weak<Background>| {

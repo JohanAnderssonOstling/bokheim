@@ -153,6 +153,9 @@ export function openAuthentication(themeJson, minimum, submit) {
             pin.inputMode = 'numeric';
             pin.pattern = '[0-9]{6}';
             pin.maxLength = 6;
+            // The PIN proves the mailbox; the registration password proves
+            // the registrant, so the server asks for both.
+            field('password', 'Password you chose', 'password', 'current-password');
         }
         if (flow === 'reset') {
             field('token', 'Reset code from your email', 'text', 'off');
@@ -191,12 +194,22 @@ export function openAuthentication(themeJson, minimum, submit) {
         if (action === 'resend' ? !emailField.reportValidity() : !form.reportValidity()) return;
         // Read DOM values on submit: autofill need not dispatch typing events.
         const email = emailField.value.trim();
-        const secret = (form.elements.namedItem(action === 'verify' ? 'pin' : 'password')?.value ?? '');
-        const token = form.elements.namedItem('token')?.value.trim() ?? '';
-        if ((action === 'register' || action === 'reset') && Array.from(secret).length < minimum) {
+        const value = name => form.elements.namedItem(name)?.value ?? '';
+        const password = value('password');
+        if ((action === 'register' || action === 'reset') && Array.from(password).length < minimum) {
             error.textContent = `Use a password with at least ${minimum} characters.`;
             return;
         }
+        // Each action sends exactly its own fields; Rust parses this into an enum.
+        const requests = {
+            login: () => ({email, password}),
+            register: () => ({email, password}),
+            verify: () => ({email, pin: value('pin').trim(), password}),
+            resend: () => ({email}),
+            'request-reset': () => ({email}),
+            reset: () => ({token: value('token').trim(), password}),
+        };
+        const request = JSON.stringify({action, ...requests[action]()});
         busy = true;
         error.textContent = '';
         status.textContent = 'Please wait…';
@@ -205,7 +218,7 @@ export function openAuthentication(themeJson, minimum, submit) {
         for (const input of form.querySelectorAll('input')) input.readOnly = true;
         for (const item of dialog.querySelectorAll('button')) item.disabled = true;
         try {
-            await submit(action, email, secret, token);
+            await submit(request);
             if (closed) return;
             if (action === 'login' || action === 'verify') { destroy(); return; }
             if (action === 'register') render('verify', email, 'Check your email for a six-digit verification PIN.');

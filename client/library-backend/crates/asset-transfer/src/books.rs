@@ -4,23 +4,23 @@ pub(crate) use crate::policy::upload_timeout;
 pub(crate) use crate::TransferError;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use futures_util::StreamExt;
+use library_database::Database;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use library_database::NativeBookCompletion;
 pub(crate) use library_files::AssetStore;
-use library_database::Database;
-use library_runtime::account::SharedSyncCredentials;
-use library_runtime::events::LibraryEventRouter;
-#[cfg(not(target_arch = "wasm32"))]
-use library_runtime::events::LibraryEvent;
-use std::sync::{Arc, atomic::AtomicBool};
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::Ordering;
-use sync_common::LibraryId;
-use sync_transport::SyncCredentials;
+pub(crate) use library_model::BookUploadIntent;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use library_model::{BookPlacement, DownloadProgress, DownloadState};
-pub(crate) use library_model::BookUploadIntent;
-pub(crate) use sync_common::ContentHash;
+use library_runtime::account::SharedSyncCredentials;
+#[cfg(not(target_arch = "wasm32"))]
+use library_runtime::events::LibraryEvent;
+use library_runtime::events::LibraryEventRouter;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::Ordering;
+use std::sync::{atomic::AtomicBool, Arc};
+pub(crate) use sync_common::BookId;
+use sync_common::LibraryId;
+use sync_transport::SyncCredentials;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web_upload;
@@ -38,10 +38,11 @@ pub struct BookTransfers {
 }
 impl BookTransfers {
     pub(crate) fn credentials(&self) -> Result<SyncCredentials, TransferError> {
+        if self.database.storage_policy()?.external().is_some() { return Err(TransferError::rejected("external library books belong to the selected storage provider")); }
         self.credentials.credentials().ok_or(TransferError::AuthenticationRequired)
     }
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn send_download_status(&self, hash: ContentHash, state: DownloadState) {
+    pub(crate) fn send_download_status(&self, hash: BookId, state: DownloadState) {
         report_download_status(&self.availability_changed, self.events.as_ref(), hash, state);
     }
 
@@ -73,21 +74,16 @@ impl BookTransfers {
         {
             transfer_deadline(
                 upload_timeout(intent.size_bytes),
-                crate::upload_book_stream(
-                    &self.http_client,
-                    credentials.server_url(),
-                    credentials.access_token(),
-                    &self.library_id,
-                    content_hash,
-                    intent.size_bytes,
-                    reqwest::Body::wrap_stream(book.into_upload_stream()),
-                ),
+                crate::upload_book_stream(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, content_hash, intent.size_bytes, reqwest::Body::wrap_stream(book.into_upload_stream())),
             )
             .await?
             .map_err(TransferError::from)?;
         }
         #[cfg(target_arch = "wasm32")]
-        transfer_deadline(upload_timeout(book.length), web_upload::upload(&book, &sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, content_hash), credentials.access_token())).await??;
+        {
+            let endpoint = sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, content_hash).map_err(crate::AssetResponseError::Url)?;
+            transfer_deadline(upload_timeout(book.length), web_upload::upload(&book, &endpoint, credentials.access_token())).await??;
+        }
         // A placement that changed mid-upload is not recorded; the job
         // retries with the current version.
         if !self.database.complete_book_upload(content_hash, &asset.upload.local_versions, Some(intent))? {
@@ -99,7 +95,7 @@ impl BookTransfers {
     /// Native only: the browser streams books it does not hold instead of
     /// downloading them.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn download_blob(&self, snapshot: &library_database::TransferSnapshot, content_hash: &ContentHash, placement: &BookPlacement) -> Result<(), TransferError> {
+    pub async fn download_blob(&self, snapshot: &library_database::TransferSnapshot, content_hash: &BookId, placement: &BookPlacement) -> Result<(), TransferError> {
         // No live placement expects this download: the placement went stale
         // (or never named this hash), so there is nothing to publish. This
         // mirrors the currency skip below; the queue job still completes.
@@ -111,7 +107,8 @@ impl BookTransfers {
         };
         let credentials = self.credentials()?;
         self.send_download_status(*content_hash, DownloadState::Downloading(DownloadProgress::ZERO));
-        let response = self.http_client.get(sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, content_hash)).bearer_auth(credentials.access_token()).send().await.map_err(crate::AssetResponseError::Retryable)?;
+        let endpoint = sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, content_hash).map_err(crate::AssetResponseError::Url)?;
+        let response = self.http_client.get(endpoint).bearer_auth(credentials.access_token()).send().await.map_err(crate::AssetResponseError::Retryable)?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             self.database.cancel_download(content_hash)?;
             return Ok(());
@@ -146,13 +143,9 @@ impl BookTransfers {
                 return Err(TransferError::rejected(error.to_string()));
             }
         };
-        let destination = match destination.finish_book().await {
-            Ok(destination) => destination,
-            Err(error) => {
-                self.database.cancel_download(content_hash)?;
-                return Err(TransferError::rejected(error.to_string()));
-            }
-        };
+        // A local flush/sync failure says nothing about the server's copy.
+        // Background work retries it; explicit requests are reported by the executor.
+        let destination = destination.finish_book().await?;
         let published = destination.publish_snapshot_with_track_titles(&self.assets, &book.relative_path, &book.occupied_names, book.format == book_model::BookFormat::Mp3Folder, &book.audiobook_track_titles)?;
         // The write revalidates the placement and name conflicts before applying the result.
         let completion = NativeBookCompletion { snapshot: book, publication: published, size_bytes: completed_bytes };
@@ -163,7 +156,7 @@ impl BookTransfers {
 
 /// Shares completion tracking and progress delivery with the asset executor.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn report_download_status(availability_changed: &AtomicBool, events: Option<&LibraryEventRouter>, content_hash: ContentHash, state: DownloadState) {
+pub(crate) fn report_download_status(availability_changed: &AtomicBool, events: Option<&LibraryEventRouter>, content_hash: BookId, state: DownloadState) {
     if matches!(state, DownloadState::Downloaded | DownloadState::NotDownloaded) {
         availability_changed.store(true, Ordering::Release);
     }

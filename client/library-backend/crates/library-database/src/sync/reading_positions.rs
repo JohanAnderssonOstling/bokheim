@@ -3,13 +3,13 @@
 use crate::sync::SyncOutboxSql;
 use crate::{Database, DatabaseError};
 use std::collections::HashSet;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 impl Database {
-    pub fn sync_queued_reading_positions(&self) -> Result<HashSet<ContentHash>, DatabaseError> {
+    pub fn sync_queued_reading_positions(&self) -> Result<HashSet<BookId>, DatabaseError> {
         let mut queued = HashSet::new();
         self.connection.outbox_reading_positions(|row| {
-            queued.insert(row.get::<_, ContentHash>(0)?);
+            queued.insert(row.get::<_, BookId>(0)?);
             Ok(())
         })?;
         Ok(queued)
@@ -23,8 +23,8 @@ mod tests {
     use library_replica::LibraryStateEntry;
     use sync_common::ROOT_DIR_ID;
 
-    fn hash() -> ContentHash {
-        ContentHash::from_bytes([7; 32])
+    fn hash() -> BookId {
+        BookId::from_bytes([7; 32])
     }
 
     fn database(path: impl AsRef<std::path::Path>) -> Database {
@@ -64,7 +64,7 @@ mod tests {
         for index in 0u64..300 {
             let mut bytes = [0; 32];
             bytes[..8].copy_from_slice(&index.to_le_bytes());
-            let book = ContentHash::from_bytes(bytes);
+            let book = BookId::from_bytes(bytes);
             db.connection.fixtures_insert_book_7(&book).unwrap();
             db.update_reading_position(&book, "epubcfi(/6/2)", Some(10.0), None).unwrap();
             waiting.insert(book);

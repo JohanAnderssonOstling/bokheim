@@ -33,6 +33,8 @@ const EPUB_FALLBACK_MAX_ASPECT_RATIO: f64 = 0.90;
 pub type ThumbnailResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 mod card;
+#[cfg(all(test, feature = "book-extractors"))]
+mod format_tests;
 pub use card::{card_thumbnail_geometry, card_thumbnail_suffix, encode_card_thumbnail_at_width, CardThumbnailGeometry, CARD_MAX_HORIZONTAL_CROP, CARD_MAX_VERTICAL_STRETCH, CARD_TARGET_HEIGHT_RATIO, CARD_THUMBNAIL_VERSION};
 
 /// An unmodified high-density master plus adjusted 300px and 600px cards.
@@ -198,7 +200,7 @@ fn decode_cover_resource(book: &mut Book, uri: &str) -> ThumbnailResult<RgbImage
 }
 
 /// Container parsing and record bounds belong to book-content. Thumbnail
-/// selection owns geometry checks and image decoding for both formats.
+/// selection owns geometry checks and image decoding for text formats.
 #[cfg(feature = "book-extractors")]
 fn book_cover(mut book: Book, format: BookFormat) -> ThumbnailResult<Option<RgbImage>> {
     let preferred = book.preferred_cover_resources()?;
@@ -207,8 +209,8 @@ fn book_cover(mut book: Book, format: BookFormat) -> ThumbnailResult<Option<RgbI
             // Explicit artwork can be square, landscape or unusually tall.
             // Keep shape heuristics for undeclared reading-order fallbacks.
             // A tiny MOBI thumbnail still yields to its full cover record.
-            Ok(image) if format == BookFormat::Epub || (image.width() >= EPUB_FALLBACK_MIN_WIDTH && image.height() >= EPUB_FALLBACK_MIN_HEIGHT) => return Ok(Some(image)),
-            Err(error) if format == BookFormat::Epub || is_read_failure(&*error) => return Err(error),
+            Ok(image) if matches!(format, BookFormat::Epub | BookFormat::Fb2) || (image.width() >= EPUB_FALLBACK_MIN_WIDTH && image.height() >= EPUB_FALLBACK_MIN_HEIGHT) => return Ok(Some(image)),
+            Err(error) if matches!(format, BookFormat::Epub | BookFormat::Fb2) || is_read_failure(&*error) => return Err(error),
             _ => {}
         }
     }
@@ -343,9 +345,14 @@ fn is_read_failure(error: &(dyn std::error::Error + Send + Sync + 'static)) -> b
 #[cfg(feature = "book-extractors")]
 fn cover_versions<R: Read + Seek + Send + Sync + 'static>(extension: &str, mut reader: R, render: impl FnOnce(R) -> ThumbnailResult<RgbImage>) -> ThumbnailResult<Option<ThumbnailVersions>> {
     let cover = match extension {
-        "epub" | "mobi" | "azw" | "azw3" => {
-            let format = if extension == "epub" { BookFormat::Epub } else { BookFormat::Mobi };
+        "epub" | "mobi" | "azw" | "azw3" | "fb2" | "fbz" | "fb2.zip" => {
+            let format = match extension { "epub" => BookFormat::Epub, "fb2" | "fbz" | "fb2.zip" => BookFormat::Fb2, _ => BookFormat::Mobi };
             book_cover(Book::open_reader(format, reader)?, format)?
+        }
+        "cbz" => {
+            let mut book = book_content::comic::ComicBook::open_reader(reader)?;
+            let bytes = book.read_page(book.cover_page)?;
+            Some(decode_cover_image(&bytes, image::guess_format(&bytes)?)?)
         }
         "m4b" => {
             let tag = mp4ameta::Tag::read_from(&mut reader)?;

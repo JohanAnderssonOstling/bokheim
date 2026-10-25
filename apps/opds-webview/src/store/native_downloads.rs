@@ -3,7 +3,7 @@ use super::Action;
 use gtk::glib::prelude::*;
 use std::{cell::Cell, path::PathBuf, rc::Rc, sync::mpsc::Sender};
 use url::Url;
-use webkit2gtk::{Download, DownloadExt, URIResponseExt, WebContextExt, WebViewExt, URIRequestExt};
+use webkit2gtk::{Download, DownloadExt, URIResponseExt, WebContextExt, WebViewExt};
 use wry::{WebView, WebViewExtUnix};
 
 pub(super) fn observe(page: &WebView, sender: Sender<Action>) {
@@ -12,22 +12,6 @@ pub(super) fn observe(page: &WebView, sender: Sender<Action>) {
     let page = native.downgrade();
     context.connect_download_started(move |_, download| {
         if page.upgrade().is_none_or(|page| download.web_view().as_ref() != Some(&page)) { return; }
-        let watched = download.clone();
-        let deferred = sender.clone();
-        let finished = Rc::new(Cell::new(false));
-        download.connect_finished({ let finished = finished.clone(); move |_| finished.set(true) });
-        download.connect_failed({ let finished = finished.clone(); move |_, _| finished.set(true) });
-        gtk::glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            if finished.get() { return gtk::glib::ControlFlow::Break; }
-            if !client_platform_runtime::transfers::allowed() {
-                if let Some(url) = watched.request().and_then(|request| request.uri()) {
-                    let _ = deferred.send(Action::DownloadDeferred(url.to_string()));
-                }
-                watched.cancel();
-                return gtk::glib::ControlFlow::Break;
-            }
-            if watched.estimated_progress() >= 1.0 { gtk::glib::ControlFlow::Break } else { gtk::glib::ControlFlow::Continue }
-        });
         let previous = Rc::new(Cell::new(None));
         download.connect_created_destination({
             let previous = previous.clone();

@@ -14,11 +14,12 @@ crate-type = ["rlib"]
 kobo = ["client-platform-kobo/device"]
 
 [dependencies]
-client-runtime = { path = "../client-runtime" }
+client-runtime = { path = "../client-runtime", features = ["http"] }
 cpu-host = { path = "../library-backend/crates/cpu-host" }
 thumbnail = { path = "../library-backend/crates/thumbnail" }
 client-platform-desktop = { path = "crates/platform-desktop" }
 library-runtime = { path = "../library-backend/crates/library-runtime" }
+cloud-storage = { path = "../library-backend/crates/cloud-storage" }
 client-platform-runtime = { path = "../platforms/runtime" }
 account-contract = { path = "../../shared/account-contract" }
 library-registry = { path = "crates/library-registry" }

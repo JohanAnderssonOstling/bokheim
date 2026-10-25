@@ -47,6 +47,70 @@ notification. Failed reader restoration clears the saved book so the next launch
 does not repeat the failure. Native Back cancels both the opening overlay and the
 reader's loading screen; the loading screen also keeps an on-screen Back button.
 
+## Google Play build
+
+The `play` build type produces an optimized ARM64 Google Play bundle while
+`assembleRelease` continues to produce the direct-distribution APK:
+
+```sh
+gradle bundlePlay -Prust.ndkHome=/path/to/android/ndk
+```
+
+The bundle is `build/outputs/bundle/play/BokheimGpui-play.aab`. It uses the
+release/upload key configured through `BOKHEIM_ANDROID_*` above. The bundle
+task rejects `-Pbokheim.localSigning=true`. The project configures a 2 GiB Gradle
+heap for finalizing the bundled native runtimes and offline voice. If user-level
+Gradle properties override `org.gradle.jvmargs`, retain at least `-Xmx2g` for
+bundle builds. Before enrolling in Play App Signing,
+choose the app signing certificate deliberately: installations can update
+between Play and direct APKs only with compatible signing identities and an
+increasing version code. The upload key and the app signing key are separate
+roles when Play manages signing. No upload or store publication runs as part of
+this build.
+
+The compiled Java `BuildConfig.PLAY_STORE` flag is read by Rust at startup;
+intent extras and installer identity cannot change distribution policy. Play
+never starts the direct-update coordinator, checks its feed, stages APKs or
+shows its Settings controls. The native-to-Java updater entry point also
+rejects all commands. The Play manifest removes the APK installation permission,
+the private updater services/activity and its staging FileProvider.
+
+Play also removes `MANAGE_EXTERNAL_STORAGE`, its launch prompt and the Manage
+file access setting. New libraries, imports, downloads and synchronized libraries
+use `files/libraries` in app-owned storage, even if an earlier direct installation
+saved a shared-storage default. Registered libraries are never moved or deleted.
+Existing shared folders need to be selected again with the system picker to
+import copies; switching distributions does not grant raw filesystem access.
+
+The system file picker opens individual books, and the folder picker imports
+supported books into a managed library while preserving subfolders. The review
+explains that originals stay in the selected folder. Play always uses the
+provider-backed import path, including when an old all-files grant exists.
+Completed imports are ordinary app-owned files and do not depend on the source
+provider or a persistent URI grant when reopened. These local copies are removed
+if the app is uninstalled; synchronization or separately retained originals are
+needed to recover them.
+
+Run both distributions' Android tests with:
+
+```sh
+gradle testPlayUnitTest testReleaseUnitTest
+```
+
+For a local device trial of Play storage/update behavior without a release key:
+
+```sh
+gradle assemblePlay -Pbokheim.localSigning=true
+adb install -r build/outputs/apk/play/BokheimGpui-play.apk
+```
+
+Use a dedicated test profile/device if an existing installation has a different
+signer; never uninstall an existing library just to bypass a signing mismatch.
+Check file and folder imports (including a cloud document provider), cancellation,
+downloads, reading after restart, and screen-locked audio. Local APK trials do
+not test Play-delivered split APKs; validate the bundle through an internal Play
+track before expanding the beta.
+
 ## Launcher icon
 
 Both launcher icon shapes use the Bokheim adaptive icon, with the shared Android
@@ -72,12 +136,14 @@ the selected library. All payload files download with the standard networking
 settings. Completed content is moved into the library and found by the normal
 scanner; the same files are then used for seeding.
 
-Settings → Transfers controls metered connections for all file transfers,
-including downloads, uploads, torrents, and updates. Allowing metered transfers
-is off by default. Android's connectivity service supplies the connection cost;
-waiting work resumes automatically when allowed. Browser HTTP requests restart
-after an interruption, while torrents reuse their downloaded pieces. Automatic
-suspension preserves the user's seeding preference.
+Settings → Transfers controls automatic transfers on metered connections and is
+off by default. Android's connectivity service supplies the connection cost.
+Automatic uploads, cover/catalog updates and completed torrents' seeding wait
+and resume when allowed. Opening and reading books, explicit downloads from the
+library, catalog, OPDS or browser, and approved app updates always proceed on
+metered connections. Pending user-requested downloads retain this exemption
+across retries and restarts. Automatic suspension preserves the user's seeding
+preference.
 
 Torrent metadata, resume information, and book-to-torrent associations are kept
 in the device's library database. Closing the browser leaves transfers running

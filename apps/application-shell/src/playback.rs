@@ -142,7 +142,8 @@ struct OpenOrder {
 }
 impl OpenOrder {
     fn reserve(&mut self) -> u64 {
-        self.next = self.next.checked_add(1).expect("playback request sequence exhausted");
+        // Exhaustion rejects subsequent opens through the existing order check.
+        self.next = self.next.saturating_add(1);
         self.next
     }
     fn accept(&mut self, request: u64) -> bool {
@@ -251,8 +252,9 @@ impl PlaybackController {
                         write_error = None;
                     }
                     Ok(false) => {
-                        write_error = Some("Audiobook restore record changed outside this playback controller".to_owned());
-                        log::warn!("{}", write_error.as_ref().unwrap());
+                        let error = "Audiobook restore record changed outside this playback controller".to_owned();
+                        log::warn!("{error}");
+                        write_error = Some(error);
                     }
                     Err(error) => {
                         log::warn!("could not save active audiobook: {error}");
@@ -315,7 +317,7 @@ impl PlaybackController {
         self.user_changed = true;
         self.opens.cancel_pending();
         self.opening = None;
-        self.generation = self.generation.checked_add(1).expect("playback generation exhausted");
+        self.generation = self.generation.wrapping_add(1);
         // No intermediate observation may overwrite the final service snapshot
         // while shutdown is waiting for the position producer to finish.
         self.observation = None;
@@ -365,7 +367,7 @@ impl PlaybackController {
         if !self.opens.accept(request) {
             return false;
         }
-        self.generation = self.generation.checked_add(1).expect("playback generation exhausted");
+        self.generation = self.generation.wrapping_add(1);
         self.user_changed = true;
         self.opening = None;
         active.session.update(cx, |session, cx| {
@@ -491,13 +493,16 @@ impl PlaybackController {
     }
 
     fn finish_active_removal(&mut self, positions: LibraryRemovalPreparation, cx: &mut Context<Self>) -> LibraryRemovalPreparation {
-        let library = *self.current.as_ref().expect("active removal requires a session").record.locator.library_id();
+        let Some(active) = &self.current else {
+            return Box::pin(async { Err("Playback session ended while preparing library removal; try again".into()) });
+        };
+        let library = *active.record.locator.library_id();
         let positions = self.track_position_flush(library, positions, cx);
         self.opens.cancel_pending();
         self.opening = None;
         self.user_changed = true;
         self.observation = None;
-        self.generation = self.generation.checked_add(1).expect("playback generation exhausted");
+        self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         // Retain the stopped session until both saves succeed. In particular,
         // never queue a tombstone before the final position producer has flushed.
@@ -528,7 +533,7 @@ impl PlaybackController {
                 this.update(cx, |controller, cx| {
                     controller.check_removal_generation(generation)?;
                     controller.current = None;
-                    controller.generation = controller.generation.checked_add(1).expect("playback generation exhausted");
+                    controller.generation = controller.generation.wrapping_add(1);
                     cx.notify();
                     Ok::<_, String>(())
                 })
@@ -581,7 +586,7 @@ impl PlaybackController {
 
     fn stop_current(&mut self, cx: &mut Context<Self>) {
         self.opening = None;
-        self.generation = self.generation.checked_add(1).expect("playback generation exhausted");
+        self.generation = self.generation.wrapping_add(1);
         self.user_changed = true;
         self.save_current(true, cx);
         if let Some(active) = self.current.take() {
@@ -595,5 +600,21 @@ impl PlaybackController {
         self.observation = None;
         let _ = self.saves.try_send(Save::Replace(None));
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::OpenOrder;
+
+    #[test]
+    fn exhausting_request_ids_never_reaccepts_an_old_open() {
+        let mut order = OpenOrder { next: u64::MAX - 1, ..OpenOrder::default() };
+        let last = order.reserve();
+        assert_eq!(last, u64::MAX);
+        assert!(order.accept(last));
+        let exhausted = order.reserve();
+        assert!(!order.accept(exhausted));
+        assert!(!order.accept(1));
     }
 }

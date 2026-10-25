@@ -67,12 +67,15 @@ pub(crate) struct ArchiveReader {
     source: Source,
 }
 impl ArchiveReader {
-    pub(crate) async fn open(mut source: Source) -> io::Result<Self> {
+    pub(crate) async fn open(source: Source) -> io::Result<Self> {
+        Self::open_with_limit(source, MAX_BINARY_RESOURCE_BYTES.max(MAX_PACKAGE_DOCUMENT_BYTES)).await
+    }
+    pub(crate) async fn open_with_limit(mut source: Source, limit: u64) -> io::Result<Self> {
         let options = ZipOptions {
             max_cd_num_files: MAX_ARCHIVE_ENTRIES as u64,
             max_cd_num_files_load: MAX_ARCHIVE_ENTRIES as u64,
-            max_uncompressed_size_per_file: MAX_BINARY_RESOURCE_BYTES.max(MAX_PACKAGE_DOCUMENT_BYTES),
-            max_compressed_size_per_file: MAX_BINARY_RESOURCE_BYTES,
+            max_uncompressed_size_per_file: limit,
+            max_compressed_size_per_file: limit,
             ..ZipOptions::untrusted()
         };
         let reader = ZipArchiveReader::open_with_options(&mut source.reader, options).await.map_err(io::Error::other)?;

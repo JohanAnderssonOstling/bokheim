@@ -41,7 +41,7 @@ impl BrowseOptions {
 pub(crate) fn file_type_query_value(filter: LibraryFileTypeFilter) -> i32 {
     match filter {
         LibraryFileTypeFilter::All => 0,
-        LibraryFileTypeFilter::Book => BookFormat::Epub as i32 | BookFormat::Mobi as i32,
+        LibraryFileTypeFilter::Book => BookFormat::Epub as i32 | BookFormat::Mobi as i32 | BookFormat::Fb2 as i32 | BookFormat::Cbz as i32,
         LibraryFileTypeFilter::Pdf => BookFormat::Pdf as i32,
         LibraryFileTypeFilter::Audiobook => BookFormat::M4b as i32 | BookFormat::Mp3Folder as i32,
     }

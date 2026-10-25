@@ -3,11 +3,11 @@ pub(crate) use crate::DatabaseError;
 use crate::SqlParam;
 use crate::query_methods::query_rows;
 pub(crate) use crate::shared_sql::SharedSql;
-use content_address::ContentHash;
+use content_address::BookId;
 
 /// Remove the disposable book row while keeping sync intent and retryable file
 /// cleanup independent of its lifetime. Caller uses remote origin.
-pub(crate) fn remove_book(tx: &rusqlite::Transaction<'_>, hash: &ContentHash) -> Result<(), DatabaseError> {
+pub(crate) fn remove_book(tx: &rusqlite::Transaction<'_>, hash: &BookId) -> Result<(), DatabaseError> {
     // Capture materialized and logical paths before cascading placements away.
     tx.purge_queue_observed_files(&hash)?;
     let placements = query_rows(|callback| tx.purge_book_placements(&hash, callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
@@ -40,23 +40,23 @@ mod tests {
         db.initialize_library().unwrap();
         // This fixture owns derived rows directly; do not enqueue canonical edits.
 
-        for hash in [ContentHash::new(&"a".repeat(64)), ContentHash::new(&"b".repeat(64))] {
+        for hash in [BookId::new(&"a".repeat(64)), BookId::new(&"b".repeat(64))] {
             db.connection.fixtures_insert_book(&hash).unwrap();
             let id = db.connection.last_insert_rowid();
             db.connection.fixtures_insert_book_language(&id).unwrap();
             db.connection.fixtures_insert_book_subject(&id).unwrap();
         }
-        let first: i64 = db.connection.fixtures_read_book_row_id(&(ContentHash::new(&"a".repeat(64))), |r| r.get(0)).unwrap();
+        let first: i64 = db.connection.fixtures_read_book_row_id(&(BookId::new(&"a".repeat(64))), |r| r.get(0)).unwrap();
         db.connection.fixtures_create_book_subject().unwrap();
         let failed = db.with_write_transaction(|tx| {
-            remove_book(tx, &ContentHash::new(&"a".repeat(64)))?;
+            remove_book(tx, &BookId::new(&"a".repeat(64)))?;
             Ok(WriteOutcome::Commit(()))
         });
         assert!(failed.is_err());
         assert_eq!(db.connection.fixtures_read_book_language(|r| r.get::<_, i64>(0)).unwrap(), 2);
         db.connection.fixtures_drop_TRIGGER().unwrap();
         db.with_write_transaction(|tx| {
-            remove_book(tx, &ContentHash::new(&"a".repeat(64)))?;
+            remove_book(tx, &BookId::new(&"a".repeat(64)))?;
             Ok(WriteOutcome::Commit(()))
         })
         .unwrap();
@@ -70,7 +70,7 @@ mod tests {
     fn purge_clears_pending_annotation_and_rollback_preserves_its_publication() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let hash = sync_common::ContentHash::new(&"c".repeat(64));
+        let hash = sync_common::BookId::new(&"c".repeat(64));
         add(&db, &hash);
         let tx = db.connection.unchecked_transaction().unwrap();
         crate::sync::apply::registers::record_local(
@@ -124,7 +124,7 @@ mod tests {
         assert!(db.sync_publishable_mutations().unwrap().iter().any(|m| matches!(m.state.value, library_replica::LibraryStateEntry::Annotation { .. })), "old acknowledgements cannot erase readded work");
     }
 
-    fn add(db: &Database, hash: &ContentHash) {
+    fn add(db: &Database, hash: &BookId) {
         let tx = db.connection.unchecked_transaction().unwrap();
         tx.fixtures_insert_book_2(&hash).unwrap();
         crate::sync::apply::registers::record_local(&tx, library_replica::LibraryStateEntry::BookLifecycle { content_hash: *hash, value: library_replica::BookLifecycleState::Present }).unwrap();

@@ -6,6 +6,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Div, ElementId, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, div, img, px};
 use gpui_component::IconName;
 use gpui_component::button::Button;
+use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::PopupMenu;
 use gpui_component::popover::Popover;
 
@@ -119,12 +120,12 @@ pub fn reader_annotation_color_bar(color: u32) -> Div {
     div().absolute().left(px(6.0)).top(px(12.0)).bottom(px(12.0)).w(px(3.0)).bg(reader_annotation_color(color))
 }
 
-pub fn reader_state_quote(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().whitespace_normal().line_clamp(2).text_ellipsis().text_size(gpui::rems(TEXT_SM)).line_height(gpui::relative(1.35)).text_color(theme.text_muted).italic().child(text.into())
+pub fn reader_state_quote(text: impl IntoElement, theme: BrowserTheme) -> Div {
+    div().w_full().min_w_0().whitespace_normal().line_clamp(2).text_ellipsis().text_size(gpui::rems(TEXT_SM)).line_height(gpui::relative(1.35)).text_color(theme.text_muted).italic().child(text)
 }
 
-pub fn reader_state_note(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(text.into())
+pub fn reader_state_note(text: impl IntoElement, theme: BrowserTheme) -> Div {
+    div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(text)
 }
 
 /// Smallest note field, in the absence of a note. Below two rows the box reads
@@ -136,7 +137,7 @@ pub const READER_NOTE_MIN_ROWS: usize = 2;
 pub const READER_NOTE_MAX_ROWS: usize = 40;
 
 /// Compact non-modal annotation editor. Its caller supplies absolute placement
-/// relative to the document viewport and appends the action rows.
+/// relative to the document viewport and provides the action rows.
 ///
 /// No quote: the panel is placed clear of the passage it belongs to, so the
 /// passage is on screen, highlighted, a few millimetres away. Repeating it here
@@ -146,7 +147,9 @@ pub const READER_NOTE_MAX_ROWS: usize = 40;
 /// The note takes its height from its content. Only when the panel reaches the
 /// height its anchor allows does anything scroll, and then it is the panel, so
 /// a note is never a small scrolling box inside a panel with room to spare.
-pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> Stateful<Div> {
+pub fn reader_annotation_editor(note: impl IntoElement, controls: impl IntoElement, scroll: &ScrollHandle, theme: BrowserTheme) -> Stateful<Div> {
+    use gpui_component::scroll::ScrollableElement as _;
+
     // The panel is `modal_surface` plus editor geometry: an absolute `min_0`
     // pair and `relative` come along, neither of which moves an
     // absolutely-placed, content-sized panel.
@@ -158,21 +161,31 @@ pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> 
         // one is placed against a point in the page: it should be as tall as
         // the note in it, up to the room its anchor leaves.
         .h_auto()
-        // Keep the content in this surface's own layout. A Scrollable wrapper's
-        // full-height viewport collapses when this floating panel is auto-sized.
-        .overflow_y_scroll()
         .occlude()
-        .p(px(SPACE_MD))
         .flex()
         .flex_col()
-        .gap(px(SPACE_SM))
         .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(theme.rule)
         .bg(theme.page_bg)
         .shadow(crate::overlay_shadow(theme))
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-        .child(div().w_full().flex_none().debug_selector(|| "reader-annotation-note-row".into()).p(px(SPACE_XS)).rounded(px(RADIUS_SM)).border_1().border_color(theme.rule).bg(theme.page_bg).child(note))
+        // The scroll surface has neither padding nor a border, so its
+        // scrollbar overlay matches the viewport exactly. Padding belongs to
+        // the content; adding it to the overlay's bounds creates false overflow.
+        .child(
+            div().id("reader-annotation-scroll-area").w_full().min_h_0().flex_shrink(1.0).overflow_y_scroll().track_scroll(scroll).vertical_scrollbar(scroll).flex().flex_col().child(
+                div()
+                    .w_full()
+                    .flex_none()
+                    .p(px(SPACE_MD))
+                    .flex()
+                    .flex_col()
+                    .gap(px(SPACE_SM))
+                    .child(div().w_full().flex_none().debug_selector(|| "reader-annotation-note-row".into()).p(px(SPACE_XS)).rounded(px(RADIUS_SM)).border_1().border_color(theme.rule).bg(theme.page_bg).child(note))
+                    .child(controls),
+            ),
+        )
 }
 
 /// Editor controls run at `settings_control_size_rem()`, the shared settings
@@ -302,6 +315,12 @@ pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
     div().w_full().min_h(gpui::rems(2.375)).flex().items_center().gap(px(SPACE_SM)).child(div().w(gpui::rems(7.0)).max_w(px(112.0)).flex_none().whitespace_nowrap().text_size(gpui::rems(TEXT_SM)).child(label.into())).child(div().flex_1())
 }
 
+/// A full-width checkbox row with its label on the left and check on the right.
+pub fn reader_setting_checkbox(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool, theme: BrowserTheme) -> Checkbox {
+    let label: SharedString = label.into();
+    Checkbox::new(id).label(label).checked(checked).w_full().min_h(gpui::rems(2.375)).flex_row_reverse().items_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text)
+}
+
 /// A button-group row: a small-caps label above a full-width choice group,
 /// rather than the stepper row's side-by-side label-and-value layout.
 pub fn reader_setting_row_smallcaps(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
@@ -353,12 +372,12 @@ impl ReaderDestination {
     }
 
     /// Keep keyboard hints consistent across the rail and mobile controls.
-    pub fn tooltip(self, label: impl Into<SharedString>) -> SharedString {
+    pub fn tooltip(self, label: impl Into<SharedString>, cx: &gpui::App) -> SharedString {
         let label = label.into();
         let shortcut = match self {
             Self::Library => "backspace",
-            Self::Contents => "secondary-t",
-            Self::Search => "secondary-f",
+            Self::Contents => return crate::configured_shortcut_tooltip(label, "reader.contents", cx),
+            Self::Search => return crate::configured_shortcut_tooltip(label, "reader.search", cx),
             Self::Notes | Self::Settings | Self::Tts => return label,
         };
         crate::shortcut_tooltip(label, shortcut)
@@ -387,15 +406,20 @@ pub fn reader_sheet_grab(theme: BrowserTheme) -> Div {
     div().flex_none().w_full().pt(px(SPACE_SM)).pb(px(SPACE_XS)).flex().justify_center().child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(theme.rule))
 }
 
+/// Book and current chapter on one line, joined as "Title: Chapter".
 pub fn reader_top_bar_title(title: impl Into<SharedString>, chapter: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).child(title.into()))
-        .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(0.75)).text_color(theme.text_muted).child(chapter.into()))
+    let title = title.into();
+    let chapter = chapter.into();
+    let title = title.trim();
+    let chapter = chapter.trim();
+    let heading = if title.is_empty() {
+        chapter.to_owned()
+    } else if chapter.is_empty() || chapter == title {
+        title.to_owned()
+    } else {
+        format!("{title}: {chapter}")
+    };
+    div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(heading)
 }
 
 /// On a phone the only place reading progress is shown.
@@ -406,13 +430,13 @@ pub fn reader_top_bar_progress(label: impl Into<SharedString>, theme: BrowserThe
 /// A phone bar action below the page: the library's bottom bar item over the
 /// destination's glyph. Reading aloud marks its glyph with the rail's activity
 /// dot, and tints it while it plays.
-pub fn reader_bottom_bar_item(id: impl Into<ElementId>, destination: ReaderDestination, mark: ReaderRailMark, theme: BrowserTheme) -> gpui_component::button::Button {
+pub fn reader_bottom_bar_item(id: impl Into<ElementId>, destination: ReaderDestination, mark: ReaderRailMark, theme: BrowserTheme, cx: &gpui::App) -> gpui_component::button::Button {
     let glyph = div()
         .relative()
         .when(mark == ReaderRailMark::Active, |glyph| glyph.text_color(theme.accent))
         .child(destination.glyph(crate::NAV_RAIL_ICON_SIZE_REM, theme))
         .children(reader_activity_dot(mark, theme).map(|dot| dot.top(px(-2.0)).right(px(-6.0))));
-    crate::browser::bottom_navigation_tile(id, glyph, destination.label(), mark == ReaderRailMark::Selected, theme).tooltip(destination.tooltip(destination.label()))
+    crate::browser::bottom_navigation_tile(id, glyph, destination.label(), mark == ReaderRailMark::Selected, theme).tooltip(destination.tooltip(destination.label(), cx))
 }
 
 /// Width of the reader sidebar's icon rail. The rail belongs to the sidebar:
@@ -447,8 +471,8 @@ pub enum ReaderRailMark {
 }
 
 /// One rail destination: an icon, named by its tooltip.
-pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination, label: impl Into<SharedString>, mark: ReaderRailMark, theme: BrowserTheme) -> Stateful<Div> {
-    let label = destination.tooltip(label);
+pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination, label: impl Into<SharedString>, mark: ReaderRailMark, theme: BrowserTheme, cx: &gpui::App) -> Stateful<Div> {
+    let label = destination.tooltip(label, cx);
     let ink = match mark {
         ReaderRailMark::Selected => theme.text,
         ReaderRailMark::Active => theme.accent,

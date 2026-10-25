@@ -8,6 +8,10 @@ use std::os::unix::fs::MetadataExt;
 use std::{io, path::Path, time::UNIX_EPOCH};
 
 pub fn file_fingerprint(path: impl AsRef<Path>) -> io::Result<u64> {
+    crate::filesystem::retry_transient(|| fingerprint_once(path.as_ref()))
+}
+
+fn fingerprint_once(path: &Path) -> io::Result<u64> {
     #[cfg(windows)]
     let file = File::open(path)?;
     #[cfg(windows)]
@@ -29,14 +33,15 @@ pub fn file_fingerprint(path: impl AsRef<Path>) -> io::Result<u64> {
     }
     #[cfg(windows)]
     hash_windows_revision(&file, &mut hasher)?;
-    Ok(u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().expect("BLAKE3 digest contains eight bytes")))
+    let [a, b, c, d, e, f, g, h, ..] = *hasher.finalize().as_bytes();
+    Ok(u64::from_le_bytes([a, b, c, d, e, f, g, h]))
 }
 
 #[cfg(windows)]
 fn hash_windows_revision(file: &File, hasher: &mut blake3::Hasher) -> io::Result<()> {
-    use std::mem::{size_of, MaybeUninit};
+    use std::mem::{MaybeUninit, size_of};
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO};
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx};
 
     let mut basic = MaybeUninit::<FILE_BASIC_INFO>::uninit();
     // SAFETY: the live file owns the handle; the writable buffer has the size

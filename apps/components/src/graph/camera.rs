@@ -14,8 +14,9 @@ const MARGIN: f32 = 14.0;
 /// On compact screens the selection sits back from the centre, opposite the
 /// direction its column opens, and its children stay on screen where they fit.
 pub fn framing_camera(layout: &GraphLayout, area: Bounds<Pixels>, compact: bool, user_zoom: f32) -> CanvasCamera {
-    let selection = *layout.path.last().expect("the path always holds the root");
-    let s = layout.node(selection).expect("the selection is always placed");
+    let Some((&selection, s)) = layout.path.last().and_then(|selection| layout.node(*selection).map(|node| (selection, node))) else {
+        return CanvasCamera { pan: area.center(), zoom: user_zoom };
+    };
     let fan = layout.nodes.iter().filter(|node| node.node == selection || node.parent == Some(selection));
     let (x0, y0, x1, y1) = fan.fold((f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY), |(x0, y0, x1, y1), node| {
         let h = node.bounds;
@@ -32,12 +33,8 @@ pub fn framing_camera(layout: &GraphLayout, area: Bounds<Pixels>, compact: bool,
     }
 
     let (sx, sy) = (s.center.x, s.center.y);
-    let fits = [
-        (x1 > sx).then(|| (left + width - MARGIN - ax) / (x1 - sx)),
-        (x0 < sx).then(|| (ax - left - MARGIN) / (sx - x0)),
-        (y1 > sy).then(|| (top + height - MARGIN - ay) / (y1 - sy)),
-        (y0 < sy).then(|| (ay - top - MARGIN) / (sy - y0)),
-    ];
+    let fits =
+        [(x1 > sx).then(|| (left + width - MARGIN - ax) / (x1 - sx)), (x0 < sx).then(|| (ax - left - MARGIN) / (sx - x0)), (y1 > sy).then(|| (top + height - MARGIN - ay) / (y1 - sy)), (y0 < sy).then(|| (ay - top - MARGIN) / (sy - y0))];
     let (min_fit, max_fit) = if compact { (0.85, 1.1) } else { (0.45, 1.0) };
     let fit = fits.into_iter().flatten().fold(max_fit, f32::min).max(min_fit);
     let zoom = fit * user_zoom;

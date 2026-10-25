@@ -148,9 +148,9 @@ pub fn project_subject_concepts(codes: &[ProjectedSubjectCode]) -> Vec<(usize, i
         .iter()
         .enumerate()
         .flat_map(|(index, code)| {
-            unified_subject_paths(code.system_id(), code.code())
+            runtime::resolved_subject_concepts(code.system_id(), code.code())
                 .into_iter()
-                .map(move |path| (index, unified_concept_id(&path).expect("projected subject exists in the taxonomy")))
+                .map(move |id| (index, id))
                 .filter(|(_, id)| !code.excluded_concept_ids.contains(id))
         })
         .collect::<Vec<_>>();

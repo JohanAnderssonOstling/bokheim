@@ -291,7 +291,7 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
     let mut current_subject_source: Option<String> = None;
     let mut current_subject_authority: Option<String> = None;
     let mut current_date_event: Option<String> = None;
-    let mut current_role: Option<CreatorRole> = None;
+    let mut current_role = CreatorRole::author();
     let mut current_file_as: Option<String> = None;
     let mut parsed_identifiers = Vec::<(Option<String>, MetadataIdentifier)>::new();
     let mut identifier_type_refinements = Vec::<(String, MetadataIdentifierType)>::new();
@@ -326,12 +326,12 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
                 } else if name.as_ref().ends_with(b"creator") {
                     current = Some(MetaField::Creator);
                     // Extract role attribute (opf:role), default to Author if not present
-                    current_role = Some(read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::author));
+                    current_role = read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::author);
                     current_value_id = read_xml_attr(e.attributes(), b"id");
                     // Extract file-as attribute (opf:file-as)
                     current_file_as = read_xml_attr(e.attributes(), b"file-as");
                 } else if name.as_ref().ends_with(b"contributor") {
-                    current_role = Some(read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::contributor));
+                    current_role = read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::contributor);
                     current_value_id = read_xml_attr(e.attributes(), b"id");
                     current = Some(MetaField::Contributor);
                     current_file_as = read_xml_attr(e.attributes(), b"file-as");
@@ -414,7 +414,7 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
                     current_identifier_id = None;
                     current_identifier_type_target = None;
                     current_identifier_type_scheme = None;
-                    current_role = None;
+                    current_role = CreatorRole::author();
                     current_file_as = None;
                     current_property = None;
                     current_value_id = None;
@@ -453,12 +453,10 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
                             }
                         }
                         MetaField::Creator => {
-                            // unwrap is safe here because we always set current_role for creators
-                            metadata.creators.push(MetadataCredit { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone().unwrap() });
+                            metadata.creators.push(MetadataCredit { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone() });
                         }
                         MetaField::Contributor => {
-                            // unwrap is safe here because we only set current=Contributor if role exists
-                            metadata.contributors.push(MetadataCredit { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone().unwrap() });
+                            metadata.contributors.push(MetadataCredit { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone() });
                         }
                         MetaField::Description if metadata.description.is_empty() => {
                             metadata.description = text;
@@ -903,8 +901,7 @@ mod mislabeled_isbn_tests {
 impl EpubPackage {
     fn parse_nav_toc(nav_xml: &str) -> Option<Vec<TocEntry>> {
         let html = scraper::Html::parse_document(nav_xml);
-        let nav = scraper::Selector::parse("nav").unwrap();
-        let toc = html.select(&nav).find(|element| element.value().attr("epub:type").or_else(|| element.value().attr("type")).is_some_and(|kind| kind.split_whitespace().any(|kind| kind == "toc")))?;
+        let toc = html.root_element().descendants().filter_map(scraper::ElementRef::wrap).filter(|element| element.value().name() == "nav").find(|element| element.value().attr("epub:type").or_else(|| element.value().attr("type")).is_some_and(|kind| kind.split_whitespace().any(|kind| kind == "toc")))?;
         let entries = crate::toc::html_entries(toc, |element| element.value().attr("href").map(str::to_owned));
         (!entries.is_empty()).then_some(entries)
     }

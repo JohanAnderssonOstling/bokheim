@@ -2,14 +2,13 @@
 
 use crate::shell::annotation_editor::AnnotationEditorTarget;
 
-use crate::invalidation::notify;
-use gpui::{Context, Window};
+use gpui::{App, Context, Keystroke, Window};
+use ui_components as components;
 
-use crate::invalidation::Component;
 use crate::shell::input::CommandTarget;
 use crate::shell::state_panel::SidebarTab;
 use crate::shell::toolbar::SidebarTarget;
-use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, NextSidebarTab, PreviousLine, PreviousPage, PreviousSidebarTab, ReturnToLibrary, ToggleSearch, ToggleSidebar, ToggleToc};
+use crate::{DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ToggleSearch, ToggleToc};
 
 use super::{PdfReaderView, ZOOM_STEP};
 
@@ -45,41 +44,6 @@ impl CommandTarget<NextLine> for PdfReaderView {
     }
 }
 
-impl CommandTarget<NextSidebarTab> for PdfReaderView {
-    fn execute(&mut self, _: &NextSidebarTab, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = self.chrome.cycled_sidebar_tab(self.sidebar.is_visible(), self.sidebar_tab(), self.contents_available(), 1, window);
-        self.chrome.show(cx);
-        self.keyboard_visibility().set(!ui_components::uses_mobile_reader_controls(window));
-        self.select_sidebar_tab(tab, window, cx);
-    }
-}
-
-impl CommandTarget<PreviousSidebarTab> for PdfReaderView {
-    fn execute(&mut self, _: &PreviousSidebarTab, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = self.chrome.cycled_sidebar_tab(self.sidebar.is_visible(), self.sidebar_tab(), self.contents_available(), -1, window);
-        self.chrome.show(cx);
-        self.keyboard_visibility().set(!ui_components::uses_mobile_reader_controls(window));
-        self.select_sidebar_tab(tab, window, cx);
-    }
-}
-
-impl CommandTarget<ToggleSidebar> for PdfReaderView {
-    fn execute(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
-        let chrome_visible = self.chrome.is_visible();
-        let visible = chrome_visible && (!crate::shell::chrome::sidebar_overlays_document(window) || self.sidebar.is_visible());
-        if visible {
-            self.sidebar.close(cx);
-            self.chrome.hide(cx);
-            self.focus_document(window, cx);
-        } else {
-            self.sidebar.reopen(cx);
-            self.chrome.show(cx);
-            self.focus_sidebar_body(window, cx);
-        }
-        notify(cx, Component::PdfShell, "sidebar_toggled");
-    }
-}
-
 impl CommandTarget<ToggleToc> for PdfReaderView {
     fn execute(&mut self, _: &ToggleToc, window: &mut Window, cx: &mut Context<Self>) {
         self.select_sidebar_tab(SidebarTab::Contents, window, cx);
@@ -98,13 +62,36 @@ impl CommandTarget<ToggleSearch> for PdfReaderView {
     }
 }
 
-impl CommandTarget<CloseSearch> for PdfReaderView {
-    fn execute(&mut self, _: &CloseSearch, window: &mut Window, cx: &mut Context<Self>) {
-        self.hide_sidebar(window, cx);
-    }
-}
-
 impl PdfReaderView {
+    pub(super) fn turn_horizontal(&mut self, towards_right: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.chrome.hide_for_motion(window, cx);
+        self.pdf.update(cx, |pdf, cx| pdf.horizontal_page(towards_right, cx));
+    }
+
+    pub(super) fn install_directional_page_keys(window: &mut Window, cx: &mut Context<Self>) {
+        let target = cx.entity().downgrade();
+        let window_handle = window.window_handle();
+        window.use_keyed_state(("pdf-directional-page-keys", cx.entity_id()), cx, move |_, cx| {
+            cx.intercept_keystrokes(move |event, window, cx| {
+                if window.window_handle() != window_handle || !event.context_stack.iter().any(|context| context.contains("PdfReaderDocument")) {
+                    return;
+                }
+                let Some(towards_right) = horizontal_page_key(&event.keystroke, cx) else { return };
+                let Some(target) = target.upgrade() else { return };
+                let handled = target.update(cx, |reader, cx| {
+                    if !reader.pdf.read(cx).right_to_left() {
+                        return false;
+                    }
+                    reader.turn_horizontal(towards_right, window, cx);
+                    true
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+            })
+        });
+    }
+
     pub(crate) fn native_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.context_sheet.take().is_some() {
             cx.notify();
@@ -116,6 +103,16 @@ impl PdfReaderView {
             self.close_reader(window, cx);
         }
     }
+}
+
+/// Only physical arrows assigned to page navigation change with direction.
+/// Page Up/Down, Space and custom next/previous commands keep document order.
+fn horizontal_page_key(key: &Keystroke, cx: &App) -> Option<bool> {
+    let modifiers = key.modifiers;
+    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.shift || !matches!(key.key.as_str(), "left" | "right") {
+        return None;
+    }
+    (components::matches_shortcut("reader.previous_page", key, cx) || components::matches_shortcut("reader.next_page", key, cx)).then_some(key.key == "right")
 }
 
 impl CommandTarget<IncreaseScale> for PdfReaderView {
@@ -130,10 +127,23 @@ impl CommandTarget<DecreaseScale> for PdfReaderView {
     }
 }
 
-/// Leaving the book is one behaviour with two entry points: this and the
-/// toolbar's library button both go through `close_reader`.
-impl CommandTarget<ReturnToLibrary> for PdfReaderView {
-    fn execute(&mut self, _: &ReturnToLibrary, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_reader(window, cx);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn directional_keys_respect_shortcut_overrides_and_leave_semantic_commands_alone(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::shell::input::bind_document_keys(cx, "PdfReaderDocument");
+            assert_eq!(horizontal_page_key(&Keystroke::parse("left").unwrap(), cx), Some(false));
+            assert_eq!(horizontal_page_key(&Keystroke::parse("right").unwrap(), cx), Some(true));
+            for key in ["pagedown", "pageup", "space", "ctrl-left", "shift-right"] {
+                assert_eq!(horizontal_page_key(&Keystroke::parse(key).unwrap(), cx), None);
+            }
+            components::apply_keyboard_shortcuts(&app_preferences::KeyboardShortcuts::from([("reader.previous_page".into(), vec!["p".into()]), ("reader.next_page".into(), vec!["n".into()])]), cx);
+            assert_eq!(horizontal_page_key(&Keystroke::parse("left").unwrap(), cx), None);
+            assert_eq!(horizontal_page_key(&Keystroke::parse("right").unwrap(), cx), None);
+        });
     }
 }

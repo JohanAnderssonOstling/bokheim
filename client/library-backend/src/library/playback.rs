@@ -4,13 +4,13 @@
 //! objects.
 
 use serde::{Deserialize, Serialize};
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirectPlayback {
     pub url: String,
     pub expires_in_seconds: u32,
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub length: u64,
 }
 

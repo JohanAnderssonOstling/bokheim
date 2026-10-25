@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use sync_common::{ContentHash, LibraryId, api::assets::PlaybackGrant};
+use sync_common::{BookId, LibraryId, api::assets::PlaybackGrant};
 
 const LIFETIME: Duration = Duration::from_secs(15 * 60);
 const MAX_GRANTS: usize = 4096;
@@ -27,7 +27,7 @@ struct Grant {
     user: String,
     credential: Arc<str>,
     library: LibraryId,
-    hash: ContentHash,
+    hash: BookId,
     length: u64,
     expires: Instant,
 }
@@ -54,7 +54,7 @@ impl Grants {
     }
 }
 
-pub(crate) async fn issue(State(state): State<AppState>, user: AuthUser, Path((library, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap) -> Result<Response, StatusCode> {
+pub(crate) async fn issue(State(state): State<AppState>, user: AuthUser, Path((library, hash)): Path<(LibraryId, BookId)>, headers: HeaderMap) -> Result<Response, StatusCode> {
     // Storage rechecks account/library ownership before issuing or serving.
     let asset = state.assets.open_from(&user.user_id, &library, AssetKind::Book, &hash, 0).await.map_err(asset_error)?.ok_or(StatusCode::NOT_FOUND)?;
     let now = Instant::now();

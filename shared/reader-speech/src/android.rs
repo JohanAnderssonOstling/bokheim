@@ -1,6 +1,6 @@
 //! Android notification controls act on the speech worker directly, then notify
 //! the reader so its dock and highlighting follow the same playback state.
-use crate::{Command, Shared, SpeechControl, SpeechEvent, SpeechEvents};
+use crate::{Command, Shared, SpeechControl, SpeechEvent, SpeechEvents, recover_lock};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{
@@ -38,8 +38,8 @@ impl Session {
             return None;
         }
         let shared = self.shared.upgrade()?;
-        let preparing = shared.player.lock().unwrap().as_ref().is_none_or(|player| player.empty());
-        Some(NotificationState { title: self.title.lock().unwrap().clone(), paused: shared.paused.load(Ordering::Acquire), preparing, rate: shared.rate.load(Ordering::Acquire) })
+        let preparing = shared.lock(&shared.player).as_ref().is_none_or(|player| player.empty());
+        Some(NotificationState { title: recover_lock(&self.title).clone(), paused: shared.paused.load(Ordering::Acquire), preparing, rate: shared.rate.load(Ordering::Acquire) })
     }
 }
 
@@ -48,7 +48,7 @@ fn sessions() -> &'static Mutex<HashMap<u64, Arc<Session>>> {
 }
 
 fn session(id: u64) -> Option<Arc<Session>> {
-    sessions().lock().unwrap().get(&id).cloned()
+    recover_lock(sessions()).get(&id).cloned()
 }
 
 pub fn initialize(dispatch: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) {
@@ -57,13 +57,13 @@ pub fn initialize(dispatch: impl Fn(&str) -> Result<(), String> + Send + Sync + 
 
 pub(crate) fn register(shared: &Arc<Shared>, commands: mpsc::Sender<Command>, events: SpeechEvents, owner: u64) -> u64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    sessions().lock().unwrap().insert(id, Arc::new(Session { shared: Arc::downgrade(shared), commands, events, owner, title: Mutex::new("Read aloud".into()), active: AtomicBool::new(false), last_state: Mutex::new(None) }));
+    recover_lock(sessions()).insert(id, Arc::new(Session { shared: Arc::downgrade(shared), commands, events, owner, title: Mutex::new("Read aloud".into()), active: AtomicBool::new(false), last_state: Mutex::new(None) }));
     id
 }
 
 pub(crate) fn set_title(id: u64, title: &str) {
     if let Some(session) = session(id) {
-        *session.title.lock().unwrap() = title.into();
+        *recover_lock(&session.title) = title.into();
         changed(id);
     }
 }
@@ -74,7 +74,7 @@ pub(crate) fn start(id: u64) -> Result<(), String> {
         changed(id);
         return Ok(());
     }
-    *session.last_state.lock().unwrap() = None;
+    *recover_lock(&session.last_state) = None;
     let result = match BRIDGE.get() {
         Some(dispatch) => dispatch(&json!({"command":"start", "id":id}).to_string()),
         None => Err("Android speech service is unavailable".into()),
@@ -95,7 +95,7 @@ pub(crate) fn stop(id: u64) {
 }
 
 pub(crate) fn remove(id: u64) {
-    sessions().lock().unwrap().remove(&id);
+    recover_lock(sessions()).remove(&id);
 }
 
 pub fn failed(id: u64, generation: u64, message: String) {
@@ -122,7 +122,7 @@ fn changed(id: u64) {
 }
 
 pub(crate) fn changed_for(shared: &Shared) {
-    let id = sessions().lock().unwrap().iter().find(|(_, session)| session.active.load(Ordering::Acquire) && std::ptr::eq(session.shared.as_ptr(), shared)).map(|(&id, _)| id);
+    let id = recover_lock(sessions()).iter().find(|(_, session)| session.active.load(Ordering::Acquire) && std::ptr::eq(session.shared.as_ptr(), shared)).map(|(&id, _)| id);
     if let Some(id) = id {
         changed(id);
     }
@@ -131,14 +131,14 @@ pub(crate) fn changed_for(shared: &Shared) {
 fn changed_with(id: u64, dispatch: &Bridge) {
     let Some(session) = session(id) else { return };
     let Some(state) = session.state() else { return };
-    let mut last = session.last_state.lock().unwrap();
+    let mut last = recover_lock(&session.last_state);
     if last.as_ref() == Some(&state) {
         return;
     }
     *last = Some(state);
     drop(last);
     if dispatch(&json!({"command":"update", "id":id}).to_string()).is_err() {
-        *session.last_state.lock().unwrap() = None;
+        *recover_lock(&session.last_state) = None;
     }
 }
 
@@ -150,7 +150,7 @@ pub fn control(id: u64, action: &str) -> bool {
         return false;
     }
     let Some(shared) = session.shared.upgrade() else { return false };
-    let owner = shared.owner.lock().unwrap();
+    let owner = shared.lock(&shared.owner);
     if *owner != session.owner {
         return false;
     }
@@ -158,7 +158,7 @@ pub fn control(id: u64, action: &str) -> bool {
     let command = match action {
         "pause" => {
             shared.paused.store(true, Ordering::Release);
-            if let Some(player) = shared.player.lock().unwrap().as_ref() {
+            if let Some(player) = shared.lock(&shared.player).as_ref() {
                 player.pause();
             }
             shared.update_output(&session.commands);
@@ -167,7 +167,7 @@ pub fn control(id: u64, action: &str) -> bool {
         "resume" => {
             shared.paused.store(false, Ordering::Release);
             let _ = session.commands.send(Command::Wake);
-            if let Some(player) = shared.player.lock().unwrap().as_ref() {
+            if let Some(player) = shared.lock(&shared.player).as_ref() {
                 player.play();
             }
             shared.update_output(&session.commands);
@@ -177,7 +177,7 @@ pub fn control(id: u64, action: &str) -> bool {
             shared.paused.store(true, Ordering::Release);
             let stopped = shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
             shared.count.store(0, Ordering::Release);
-            if let Some(player) = shared.player.lock().unwrap().as_ref() {
+            if let Some(player) = shared.lock(&shared.player).as_ref() {
                 player.stop();
                 player.pause();
             }
@@ -195,7 +195,7 @@ pub fn control(id: u64, action: &str) -> bool {
             let Some(index) = index else { return true };
             let next_generation = shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
             shared.cursor.store(index, Ordering::Release);
-            if let Some(player) = shared.player.lock().unwrap().as_ref() {
+            if let Some(player) = shared.lock(&shared.player).as_ref() {
                 player.stop();
                 player.pause();
             }

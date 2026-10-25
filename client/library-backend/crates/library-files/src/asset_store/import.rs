@@ -1,6 +1,10 @@
 //! Import storage lifecycle. The caller retains the content lease and metadata commit.
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_native::filesystem::parent_directory;
 use super::{AssetStore, AssetStoreError, CopiedBook};
 use library_model::RelativeBookPath;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::PoisonError;
 
 #[derive(Default)]
 pub struct ImportOptions {
@@ -20,12 +24,12 @@ impl AssetStore {
                 return client_platform_runtime::executor::run_blocking(move || {
                     use crate::asset_store::native::{DIRECT_IMPORTS, DirectBook, placement_path, write_import_bytes};
                     let requested = relative.file_name();
-                    let directory = placement_path(&store.0, &relative).parent().expect("a book path has a folder").canonicalize()?;
+                    let directory = parent_directory(&placement_path(&store.0, &relative))?.canonicalize()?;
                     occupied.extend(std::fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
                     for name in library_replica::file_name_candidates(requested, occupied.iter().map(String::as_str)) {
                         let path = directory.join(&name);
                         let imports = DIRECT_IMPORTS.get_or_init(Default::default);
-                        if !imports.lock().unwrap().insert(path.clone()) {
+                        if !imports.lock().unwrap_or_else(PoisonError::into_inner).insert(path.clone()) {
                             continue;
                         }
                         let direct = DirectBook { path: path.clone() };

@@ -43,7 +43,7 @@ impl From<Receiver<LibraryUpdate>> for LibraryUpdates {
 }
 
 #[cfg(target_arch = "wasm32")]
-use crate::ContentHash;
+use crate::BookId;
 use client_runtime::reply::Reply;
 use client_runtime::wire::{encode_reply, WorkerPayload};
 
@@ -52,7 +52,7 @@ pub enum LibrarySubscription {
     Updates,
     #[cfg(target_arch = "wasm32")]
     Book {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
 }
 impl LibrarySubscription {}

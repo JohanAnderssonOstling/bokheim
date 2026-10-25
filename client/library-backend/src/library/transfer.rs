@@ -4,14 +4,14 @@ use super::remote_access::read_remote_file;
 use book_access::{BoxedBookReader, FetchFuture, RemoteFileError};
 use client_runtime::BackendError;
 use library_database::transfer::BookTransferState;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 pub struct TransferResource {
     pub reader: BoxedBookReader,
     pub state: BookTransferState,
 }
 impl LibrarySession {
-    pub(crate) async fn export_transfer_book(&self, hash: ContentHash) -> Result<TransferResource, BackendError> {
+    pub(crate) async fn export_transfer_book(&self, hash: BookId) -> Result<TransferResource, BackendError> {
         library_placement::run_file_jobs_for(&self.assets, &self.db, &hash).await.map_err(BackendError::operation)?;
         let state = self.db.book_transfer_state(hash)?;
         let paths = self.db.book_paths(&hash)?;

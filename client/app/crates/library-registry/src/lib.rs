@@ -9,6 +9,7 @@ use std::error::Error;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::ErrorKind;
 use sync_common::LibraryId;
+use sync_common::storage::LibraryStorage;
 
 const DATABASE_FILENAME: &str = "app-state-v1.sqlite3";
 
@@ -105,23 +106,55 @@ impl LocalRegistry {
         row.map(|(name, path)| LibraryEntry::new(*id, &name, path)).transpose()
     }
 
-    // Keep the original device key so an earlier creation choice is preserved.
-    // The choice now affects asset uploads only, never metadata sync.
+    /// Read the explicit selection, retaining the original choice for existing
+    /// installations that predate provider-backed libraries.
+    pub fn storage(&mut self, id: &LibraryId) -> RegistryResult<LibraryStorage> {
+        if let Some(bytes) = self.read_value(&format!("library-storage:{id}"))? {
+            return Ok(serde_json::from_slice(&bytes)?);
+        }
+        Ok(if self.read_value(&format!("library_sync_disabled:{id}"))?.as_deref() == Some(b"1") { LibraryStorage::Local } else { LibraryStorage::Bokheim })
+    }
+
     pub fn asset_storage_enabled(&mut self, id: &LibraryId) -> RegistryResult<bool> {
-        Ok(self.read_value(&format!("library_sync_disabled:{id}"))?.as_deref() != Some(b"1"))
+        Ok(self.storage(id)?.uses_bokheim_assets())
+    }
+
+    pub fn cache_remote_storage(&mut self, id: &LibraryId, storage: LibraryStorage) -> RegistryResult<()> {
+        if self.entry(id)?.is_none() { return Err("library not found".into()); }
+        let current = self.storage(id)?;
+        if current.external().is_some() && current != storage {
+            return Err("remote storage selection conflicts with this external library".into());
+        }
+        // Offline changes to Bokheim storage remain queued until acknowledged.
+        if storage.external().is_none() && self.read_value(&format!("pending-cloud-storage:{id}"))?.is_some() { return Ok(()); }
+        let tx = self.connection.transaction()?;
+        write_storage_policy(&tx, id, &storage)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn storage_for_bokheim_change(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<LibraryStorage> {
+        if self.entry(id)?.is_none() { return Err("library not found".into()); }
+        match self.storage(id)? {
+            LibraryStorage::External(root) if !enabled => Ok(LibraryStorage::External(root)),
+            LibraryStorage::External(_) => Err("external libraries cannot use Bokheim file storage".into()),
+            _ => Ok(if enabled { LibraryStorage::Bokheim } else { LibraryStorage::Local }),
+        }
     }
 
     pub fn set_asset_storage_enabled(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
-        if self.entry(id)?.is_none() {
-            return Err("library not found".into());
-        }
-        self.write_value(&format!("library_sync_disabled:{id}"), if enabled { b"0" } else { b"1" })
+        let storage = self.storage_for_bokheim_change(id, enabled)?;
+        let tx = self.connection.transaction()?;
+        write_storage_policy(&tx, id, &storage)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn cache_cloud_storage_with_reset(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
+        let storage = self.storage_for_bokheim_change(id, enabled)?;
         let connection = &mut self.connection;
         let tx = connection.transaction()?;
-        tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library_sync_disabled:{id}"), if enabled { b"0".as_slice() } else { b"1".as_slice() }])?;
+        write_storage_policy(&tx, id, &storage)?;
         tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("cloud-storage-reset:{id}"), uuid::Uuid::new_v4().as_bytes().as_slice()])?;
         tx.commit()?;
         Ok(())
@@ -134,13 +167,11 @@ impl LocalRegistry {
 
     /// Save the local cache and an idempotent account write together.
     pub fn queue_cloud_storage(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
-        if self.entry(id)?.is_none() {
-            return Err("library not found".into());
-        }
+        let storage = self.storage_for_bokheim_change(id, enabled)?;
         let pending = format!("{}:{}", uuid::Uuid::new_v4(), u8::from(enabled));
         let connection = &mut self.connection;
         let tx = connection.transaction()?;
-        tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library_sync_disabled:{id}"), if enabled { b"0".as_slice() } else { b"1".as_slice() }])?;
+        write_storage_policy(&tx, id, &storage)?;
         tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("pending-cloud-storage:{id}"), pending.as_bytes()])?;
         tx.commit()?;
         Ok(())
@@ -152,6 +183,15 @@ impl LocalRegistry {
 
     /// Persist the policy before the new library becomes visible to background work.
     pub fn create_with_asset_storage(&mut self, name: &str, locator: Option<String>, asset_storage_enabled: bool) -> RegistryResult<LibraryEntry> {
+        self.create_with_storage(name, locator, if asset_storage_enabled { LibraryStorage::Bokheim } else { LibraryStorage::Local })
+    }
+
+    pub fn create_with_storage(&mut self, name: &str, locator: Option<String>, storage: LibraryStorage) -> RegistryResult<LibraryEntry> {
+        if let Some(root) = storage.external() {
+            for entry in self.entries()? {
+                if self.storage(entry.library_id())?.external() == Some(root) { return Err("this cloud folder is already registered as a library".into()); }
+            }
+        }
         let generated_id = LibraryId::new_v4();
         let requested_name = if name.trim().is_empty() { "Library" } else { name };
         let requested_locator = match locator {
@@ -170,9 +210,13 @@ impl LocalRegistry {
         if self.is_detached(entry.library_id())? {
             return Err("library is pending deletion".into());
         }
+        if self.entry(entry.library_id())?.is_some() && self.storage(entry.library_id())?.external().is_some() {
+            return Err("external library is already registered; its storage cannot be replaced by opening its download folder".into());
+        }
+        let asset_storage_enabled = storage.uses_bokheim_assets();
         let connection = &mut self.connection;
         let tx = connection.transaction()?;
-        tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library_sync_disabled:{}", entry.library_id), if asset_storage_enabled { b"0".as_slice() } else { b"1".as_slice() }])?;
+        write_storage_policy(&tx, entry.library_id(), &storage)?;
         tx.execute(include_str!("sql/create_library.sql"), params![entry.library_id.to_string(), entry.library_name, entry.storage_locator])?;
         if !asset_storage_enabled {
             let pending = format!("{}:0", uuid::Uuid::new_v4());
@@ -319,6 +363,12 @@ impl LocalRegistry {
         self.connection.execute("DELETE FROM app_value WHERE key=?1", [key])?;
         Ok(())
     }
+}
+
+fn write_storage_policy(tx: &rusqlite::Transaction<'_>, id: &LibraryId, storage: &LibraryStorage) -> RegistryResult<()> {
+    tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library-storage:{id}"), serde_json::to_vec(storage)?])?;
+    tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library_sync_disabled:{id}"), if storage.uses_bokheim_assets() { b"0".as_slice() } else { b"1".as_slice() }])?;
+    Ok(())
 }
 
 fn validate_name(value: &str) -> RegistryResult<String> {
@@ -584,6 +634,54 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_storage_persists_and_rejects_bokheim_enablement() {
+        use sync_common::storage::{CloudLibraryRoot, CloudProvider, ProviderId, ProviderScope};
+        let temp = tempfile::tempdir().unwrap();
+        let app_data = temp.path().join("app").to_string_lossy().into_owned();
+        let downloads = temp.path().join("downloads").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&app_data).unwrap();
+        let storage = LibraryStorage::External(CloudLibraryRoot {
+            scope: ProviderScope {
+                provider: CloudProvider::GoogleDrive,
+                account_id: ProviderId::new("account").unwrap(),
+                container_id: ProviderId::new("my_drive").unwrap(),
+            },
+            folder_id: ProviderId::new("folder").unwrap(),
+        });
+        let mut registry = LocalRegistry::open_with_library_root(app_data.clone(), downloads.clone()).unwrap();
+        let entry = registry.create_with_storage("Audio", None, storage.clone()).unwrap();
+        let id = *entry.library_id();
+        assert!(!registry.asset_storage_enabled(&id).unwrap());
+        assert!(registry.set_asset_storage_enabled(&id, true).is_err());
+        assert!(registry.queue_cloud_storage(&id, true).is_err());
+        assert!(registry.cache_cloud_storage_with_reset(&id, true).is_err());
+        registry.cache_cloud_storage_with_reset(&id, false).unwrap();
+        registry.queue_cloud_storage(&id, false).unwrap();
+        assert_eq!(registry.storage(&id).unwrap(), storage);
+        assert!(registry.read_value(&format!("pending-cloud-storage:{id}")).unwrap().unwrap().ends_with(b":0"));
+        drop(registry);
+        let mut reopened = LocalRegistry::open_with_library_root(app_data, downloads).unwrap();
+        assert_eq!(reopened.storage(&id).unwrap(), storage);
+        assert!(reopened.create_with_asset_storage("Audio", Some(entry.storage_locator().to_owned()), true).is_err());
+    }
+
+    #[test]
+    fn legacy_storage_choice_migrates_when_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_string_lossy().into_owned();
+        let mut registry = LocalRegistry::open_with_library_root(root.clone(), root).unwrap();
+        let entry = registry.create("Books", None).unwrap();
+        let id = *entry.library_id();
+        registry.remove_value(&format!("library-storage:{id}")).unwrap();
+        registry.write_value(&format!("library_sync_disabled:{id}"), b"1").unwrap();
+        assert_eq!(registry.storage(&id).unwrap(), LibraryStorage::Local);
+        registry.set_asset_storage_enabled(&id, true).unwrap();
+        assert_eq!(registry.storage(&id).unwrap(), LibraryStorage::Bokheim);
+        registry.cache_cloud_storage_with_reset(&id, false).unwrap();
+        assert_eq!(registry.storage(&id).unwrap(), LibraryStorage::Local);
+    }
 
     #[test]
     fn local_removal_detaches_before_physical_cleanup_and_preserves_retry_record() {

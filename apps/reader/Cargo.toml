@@ -34,10 +34,15 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "js"] }
 web-time = "1"
+unicode-normalization.workspace = true
 pdf-reader-core = { path = "../../shared/pdf-reader-core" }
 pdf-view-gpui = { path = "crates/pdf/pdf-view" }
+fixed-page = { path = "../../shared/fixed-page", features = ["gpui"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp", "tiff"] }
+gpui-image-eviction = { path = "../../shared/gpui-image-eviction" }
 
 [dev-dependencies]
+base64 = "0.22"
 book-access = { path = "../../client/library-backend/crates/book-access" }
 gpui = { workspace = true, features = ["test-support"] }
 gpui_platform.workspace = true

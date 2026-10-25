@@ -15,18 +15,18 @@ fn detail(error: JsValue) -> String {
 
 pub fn install() -> Result<(), JsValue> {
     let scope = super::worker_scope();
-    let error = Closure::<dyn FnMut(ErrorEvent)>::new(|event: ErrorEvent| {
+    let error = Closure::<dyn FnMut(ErrorEvent)>::own_aborting(|event: ErrorEvent| {
         let error = if event.error().is_null() || event.error().is_undefined() { event.message() } else { detail(event.error()) };
         super::post_control("backend_failed", Some(&format!("Database worker failed: {error}")));
     })
     .into_js_value();
     scope.add_event_listener_with_callback("error", error.unchecked_ref())?;
-    let rejection = Closure::<dyn FnMut(PromiseRejectionEvent)>::new(|event: PromiseRejectionEvent| {
+    let rejection = Closure::<dyn FnMut(PromiseRejectionEvent)>::own_aborting(|event: PromiseRejectionEvent| {
         super::post_control("backend_failed", Some(&format!("Database worker failed: {}", detail(event.reason()))));
     })
     .into_js_value();
     scope.add_event_listener_with_callback("unhandledrejection", rejection.unchecked_ref())?;
-    let message = Closure::<dyn FnMut(MessageEvent)>::new(|event: MessageEvent| {
+    let message = Closure::<dyn FnMut(MessageEvent)>::own_aborting(|event: MessageEvent| {
         let data = event.data();
         let transport = js_sys::Reflect::get(&data, &"transport".into()).ok().and_then(|value| value.as_string());
         if transport.as_deref() == Some("connect") {

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use metadata_contract::books::{BookEnrichment, BookEnrichmentRequest, BookEnrichmentStatus, BookFacts, MAX_BOOKS_PER_REQUEST};
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 use crate::{EnrichmentResult, LibraryEnrichment};
 
@@ -18,7 +18,7 @@ fn failed(key: String, detail: String) -> BookEnrichment {
 impl LibraryEnrichment {
     /// Sends the facts of every unanswered book in `scope`, stores the
     /// answers, then fills missing covers. Returns how many books changed.
-    pub(crate) async fn enrich_books(&self, scope: &HashSet<ContentHash>) -> EnrichmentResult<usize> {
+    pub(crate) async fn enrich_books(&self, scope: &HashSet<BookId>) -> EnrichmentResult<usize> {
         let members = scope.iter().copied().collect::<Vec<_>>();
         let candidates = self.database.enrichment_candidates(&members, now())?;
         let mut changed = 0;

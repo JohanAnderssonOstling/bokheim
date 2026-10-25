@@ -1,7 +1,7 @@
 #![cfg(target_family = "wasm")]
 
 use app::{
-    AppDataLocation, AppStartupState, host::AppWorkerClientMessage, host::AppWorkerStartupMessage, host::BackendWorkerHost, host::WorkerDispatchResult, host::WorkerSubscription, host::decode_worker_message, host::encode_worker_message,
+    AppDataLocation, AppStartupState, BackendError, host::AppWorkerClientMessage, host::AppWorkerStartupMessage, host::BackendWorkerHost, host::WorkerDispatchResult, host::WorkerSubscription, host::decode_worker_message, host::encode_worker_message,
 };
 use futures_channel::oneshot;
 use futures_util::future::{Either, select};
@@ -84,13 +84,14 @@ pub fn connect(port: MessagePort) {
 
     let _ = install_request_handler(port.clone());
     port.start();
-    let startup = BACKEND.with(|slot| match slot.get().expect("initializing connections are queued") {
-        Ok(backend) => backend.startup_state().map(|startup| AppWorkerStartupMessage::Ready { startup }).unwrap_or_else(|error| AppWorkerStartupMessage::Failed { error }),
-        Err(error) => AppWorkerStartupMessage::Failed { error: error.clone() },
+    let startup = BACKEND.with(|slot| match slot.get() {
+        Some(Ok(backend)) => backend.startup_state().map(|startup| AppWorkerStartupMessage::Ready { startup }).unwrap_or_else(|error| AppWorkerStartupMessage::Failed { error }),
+        Some(Err(error)) => AppWorkerStartupMessage::Failed { error: error.clone() },
+        None => AppWorkerStartupMessage::Failed { error: BackendError::message("The backend is still initializing") },
     });
     let failed = matches!(startup, AppWorkerStartupMessage::Failed { .. });
-    post_message(&port, &startup);
-    if failed {
+    let posted = post_message(&port, &startup);
+    if failed || !posted {
         port.close();
     }
 }
@@ -103,7 +104,7 @@ fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
     let registration_port = port.clone();
     let handler_port = port.clone();
     let response_port = port;
-    let on_message = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+    let on_message = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::own_aborting(move |event: web_sys::MessageEvent| {
         if event.data().as_string().as_deref() == Some("disconnect") {
             alive.set(false);
             if let Some(disconnect) = disconnect.take() {
@@ -179,7 +180,10 @@ fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
                 return;
             }
             web_sys::console::info_1(&JsValue::from_str(&format!("backend phase=response_post id={id} ok={}", result.is_ok())));
-            post_message(&port, &AppWorkerStartupMessage::Response { id, result });
+            if !post_message(&port, &AppWorkerStartupMessage::Response { id, result }) {
+                cancellations.borrow_mut().remove(&id);
+                return;
+            }
             if let Some(events) = subscription {
                 let cancelled = playback_cancel.unwrap_or_else(|| {
                     let (cancel, cancelled) = oneshot::channel();
@@ -213,9 +217,26 @@ async fn forward_subscription(mut events: WorkerSubscription, id: u64, port: Mes
 }
 
 fn post_message(port: &MessagePort, message: &AppWorkerStartupMessage) -> bool {
-    let bytes = encode_worker_message(message).expect("backend worker message must serialize");
+    let (bytes, complete) = match encode_worker_message(message) {
+        Ok(bytes) => (bytes, true),
+        Err(error) => {
+            web_sys::console::error_1(&JsValue::from_str(&format!("Could not encode a backend worker message: {error}")));
+            // Return a small error over the same protocol so callers do not
+            // wait indefinitely for a response that could not be serialized.
+            let error = BackendError::message("The backend could not encode its response");
+            let failed = match message {
+                AppWorkerStartupMessage::Response { id, .. } => AppWorkerStartupMessage::Response { id: *id, result: Err(error) },
+                _ => AppWorkerStartupMessage::Failed { error },
+            };
+            let Ok(bytes) = encode_worker_message(&failed) else {
+                port.close();
+                return false;
+            };
+            (bytes, false)
+        }
+    };
     let message = js_sys::Uint8Array::from(bytes.as_slice());
     let transferable = js_sys::Array::new();
     transferable.push(&message.buffer());
-    port.post_message_with_transferable(message.as_ref(), transferable.as_ref()).is_ok()
+    port.post_message_with_transferable(message.as_ref(), transferable.as_ref()).is_ok() && complete
 }

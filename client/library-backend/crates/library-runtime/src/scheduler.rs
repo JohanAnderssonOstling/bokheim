@@ -1,10 +1,10 @@
 //! Wake scheduling for one library's durable workers.
 
 use std::time::Duration;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 pub enum SyncRequest {
-    Wake(Vec<ContentHash>),
+    Wake(Vec<BookId>),
     WakeAfter(Duration),
     RefreshRemote,
     Stop,
@@ -16,7 +16,7 @@ pub enum SyncRequest {
 /// targeted pass never replaces the bounded drain.
 pub struct CycleInput {
     pub remote: bool,
-    pub hashes: Vec<ContentHash>,
+    pub hashes: Vec<BookId>,
 }
 
 #[derive(Clone)]
@@ -36,7 +36,7 @@ impl SyncScheduler {
     pub fn wake_after(&self, delay: Duration) {
         let _ = self.0.try_send(SyncRequest::WakeAfter(delay));
     }
-    pub fn wake_hashes(&self, hashes: Vec<ContentHash>) {
+    pub fn wake_hashes(&self, hashes: Vec<BookId>) {
         let _ = self.0.try_send(SyncRequest::Wake(hashes));
     }
     pub fn stop(&self) {
@@ -51,7 +51,7 @@ where
     let started = web_time::Instant::now();
     let now = || started.elapsed().as_secs_f64() * 1000.0;
     let mut timing = BackgroundTiming::new(now(), retry.as_secs_f64() * 1000.0, debounce.as_secs_f64() * 1000.0);
-    let mut pending: Vec<ContentHash> = Vec::new();
+    let mut pending: Vec<BookId> = Vec::new();
     loop {
         while let Ok(request) = requests.try_recv() {
             if matches!(request, SyncRequest::Stop) {
@@ -81,7 +81,7 @@ where
     }
 }
 
-fn apply(timing: &mut BackgroundTiming, now: f64, request: SyncRequest, pending: &mut Vec<ContentHash>) {
+fn apply(timing: &mut BackgroundTiming, now: f64, request: SyncRequest, pending: &mut Vec<BookId>) {
     match request {
         SyncRequest::Wake(hashes) => {
             timing.wake(now);

@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use crate::ContentHash;
+use crate::BookId;
 use std::rc::Rc;
 
 /// Mutable coordination state for one open library, independent of app policy
@@ -11,15 +11,15 @@ use std::rc::Rc;
 pub struct LibraryRuntime {
     local_work_running: Cell<bool>,
     thumbnail_work_running: Cell<bool>,
-    catalog_cover_refreshes: RefCell<HashSet<ContentHash>>,
+    catalog_cover_refreshes: RefCell<HashSet<BookId>>,
 }
 
 impl LibraryRuntime {
-    pub(crate) fn claim_catalog_cover_refresh(&self, hash: ContentHash) -> bool {
+    pub(crate) fn claim_catalog_cover_refresh(&self, hash: BookId) -> bool {
         self.catalog_cover_refreshes.borrow_mut().insert(hash)
     }
 
-    pub(crate) fn retry_catalog_cover_refresh(&self, hash: &ContentHash) {
+    pub(crate) fn retry_catalog_cover_refresh(&self, hash: &BookId) {
         self.catalog_cover_refreshes.borrow_mut().remove(hash);
     }
 
@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn catalog_cover_refresh_is_per_library_and_failed_attempts_can_retry() {
         let runtime = LibraryRuntime::default();
-        let hash = ContentHash::new(&"a".repeat(64));
+        let hash = BookId::new(&"a".repeat(64));
         assert!(runtime.claim_catalog_cover_refresh(hash));
         assert!(!runtime.claim_catalog_cover_refresh(hash));
         runtime.retry_catalog_cover_refresh(&hash);

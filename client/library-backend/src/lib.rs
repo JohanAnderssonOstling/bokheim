@@ -28,7 +28,7 @@ pub use library_import::{ImportFailure, ImportFailureKind};
 
 pub use library::subscriptions::LibraryUpdates;
 pub use library_model::{LibraryBrowseQuery, LibraryUpdate};
-pub use sync_common::{ContentHash, DirId, LibraryId, ROOT_DIR_ID};
+pub use sync_common::{BookId, DirId, LibraryId, ROOT_DIR_ID};
 mod thumbnail_resolution;
 pub use library_catalog::evict_cover_caches as evict_catalog_cover_caches;
 pub use thumbnail_resolution::ThumbnailResolution;

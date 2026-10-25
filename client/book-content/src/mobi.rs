@@ -90,13 +90,13 @@ impl MobiContainer {
         source.reader.seek(SeekFrom::Start(0)).await?;
         let mut prefix = vec![0; PDB_HEADER_BYTES];
         source.reader.read_exact(&mut prefix).await?;
-        let count = u16::from_be_bytes(prefix[76..78].try_into().unwrap()) as usize;
+        let count = u16::from_be_bytes([prefix[76], prefix[77]]) as usize;
         if count == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "MOBI contains no records"));
         }
         prefix.resize(PDB_HEADER_BYTES + count * 8 + 2, 0);
         source.reader.read_exact(&mut prefix[PDB_HEADER_BYTES..]).await?;
-        let header_end = if count > 1 { u32::from_be_bytes(prefix[86..90].try_into().unwrap()) as u64 } else { length };
+        let header_end = if count > 1 { u32::from_be_bytes([prefix[86], prefix[87], prefix[88], prefix[89]]) as u64 } else { length };
         if header_end < prefix.len() as u64 || header_end > length || header_end > MAX_HEADER_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid MOBI header bounds"));
         }
@@ -352,8 +352,8 @@ fn mobi_extra_record_data_flags(metadata: &MobiMetadata, source_bytes: &[u8]) ->
         return Ok(0);
     }
     let offset = usize::try_from(record_zero.offset).ok().and_then(|offset| offset.checked_add(PALMDOC_HEADER_LEN + EXTRA_DATA_FLAGS_OFFSET)).ok_or_else(|| "MOBI extra-data flags offset overflows".to_owned())?;
-    let bytes = source_bytes.get(offset..offset + 4).ok_or_else(|| "MOBI extra-data flags are truncated".to_owned())?;
-    Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
+    let bytes = source_bytes.get(offset..).and_then(|bytes| bytes.first_chunk::<4>()).ok_or_else(|| "MOBI extra-data flags are truncated".to_owned())?;
+    Ok(u32::from_be_bytes(*bytes))
 }
 
 fn trim_mobi_trailing_data(mut data: &[u8], flags: u32) -> Result<&[u8], String> {

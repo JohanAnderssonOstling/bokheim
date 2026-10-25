@@ -2,9 +2,9 @@
 use flate2::read::GzDecoder;
 #[cfg(target_arch = "wasm32")]
 use rusqlite::backup::StepResult;
-use rusqlite::{backup::Backup, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, backup::Backup};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -14,6 +14,26 @@ const IMAGE_SIZE: usize = include!(concat!(env!("OUT_DIR"), "/bisac-reference-si
 #[cfg(not(target_arch = "wasm32"))]
 const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bisac-reference.sqlite3.gz"));
 static REFERENCE: OnceLock<Mutex<Option<Connection>>> = OnceLock::new();
+
+fn reference() -> MutexGuard<'static, Option<Connection>> {
+    let mutex = REFERENCE.get_or_init(|| Mutex::new(None));
+    mutex.lock().unwrap_or_else(|error| {
+        // Native callers can reopen from the verified bundle. Browser workers
+        // retain their initialized, read-only connection: only the host owns
+        // the bundle needed to install a new one there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut reference = error.into_inner();
+        #[cfg(target_arch = "wasm32")]
+        let reference = error.into_inner();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *reference = None;
+        }
+        mutex.clear_poison();
+        eprintln!("Recovering the BISAC reference after an interrupted query");
+        reference
+    })
+}
 
 fn database_path() -> PathBuf {
     #[cfg(not(target_arch = "wasm32"))]
@@ -127,7 +147,7 @@ mod tests {
 }
 
 pub fn open_bisac_reference() -> Result<bool, String> {
-    let mut reference = REFERENCE.get_or_init(|| Mutex::new(None)).lock().map_err(|e| e.to_string())?;
+    let mut reference = reference();
     if reference.is_some() {
         return Ok(true);
     }
@@ -142,7 +162,7 @@ pub fn open_bisac_reference() -> Result<bool, String> {
 
 pub fn install_bisac_reference(image: &[u8]) -> Result<(), String> {
     image_is_compressed(image)?;
-    let mut reference = REFERENCE.get_or_init(|| Mutex::new(None)).lock().map_err(|e| e.to_string())?;
+    let mut reference = reference();
     if reference.is_some() {
         return Ok(());
     }
@@ -153,18 +173,26 @@ pub fn install_bisac_reference(image: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn with_reference<T>(read: impl FnOnce(&Connection) -> T) -> T {
-    let reference = REFERENCE.get_or_init(|| Mutex::new(None)).lock().expect("BISAC reference lock must not be poisoned");
+#[cfg(not(target_arch = "wasm32"))]
+fn native_reference() -> Result<Connection, String> {
+    let mut db = open_file().map_err(|error| error.to_string())?;
+    if !matches_revision(&db).map_err(|error| error.to_string())? {
+        copy_image(IMAGE, &mut db)?;
+    }
+    db.execute_batch("PRAGMA query_only=ON;").map_err(|error| error.to_string())?;
+    Ok(db)
+}
+
+pub(super) fn with_reference<T>(read: impl FnOnce(Option<&Connection>) -> T) -> T {
+    let reference = reference();
     #[cfg(not(target_arch = "wasm32"))]
     let mut reference = reference;
     #[cfg(not(target_arch = "wasm32"))]
     if reference.is_none() {
-        let mut db = open_file().expect("BISAC reference file must open");
-        if !matches_revision(&db).expect("BISAC reference revision must be readable") {
-            copy_image(IMAGE, &mut db).expect("bundled BISAC reference must be installable");
+        match native_reference() {
+            Ok(db) => *reference = Some(db),
+            Err(error) => eprintln!("BISAC storage is unavailable; using compiled reference nodes: {error}"),
         }
-        db.execute_batch("PRAGMA query_only=ON;").expect("BISAC reference must become read-only");
-        *reference = Some(db);
     }
-    read(reference.as_ref().expect("browser host must initialize the BISAC reference"))
+    read(reference.as_ref())
 }

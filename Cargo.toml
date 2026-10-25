@@ -4,14 +4,17 @@ members = [
     "client/app",
     "client/client-runtime",
     "client/library-backend",
+    "client/library-backend/crates/cloud-storage",
     "client/library-backend/crates/library-database",
     "client/library-backend/crates/library-replica",
     "client/app/crates/library-registry",
     "client/library-backend/crates/thumbnail",
     "client/preferences",
     "client/library-model",
+    "client/operation-failure",
     "shared/content-address",
     "shared/pdf-view-common",
+    "shared/fixed-page",
     "shared/pdf-reader-core",
     "shared/gpui-image-eviction",
     "shared/html-gpui",
@@ -31,8 +34,12 @@ members = [
     "shared/protobuf-wire",
     "shared/metadata-contract",
     "shared/update-protocol",
+    "shared/update-files",
+    "shared/kobo-package",
+    "shared/kobo-profile",
     "client/update-client",
     "client/update-host",
+    "client/kobo-update",
     "shared/sync-common",
     "apps/desktop-gpui",
     "apps/opds-webview",
@@ -52,7 +59,7 @@ exclude = ["servers/sync", "vendor/segment-parser"]
 inherits = "release"
 lto = true
 opt-level = "s"
-panic = "abort"
+panic = "unwind"
 strip = true
 
 [workspace.dependencies]
@@ -82,6 +89,9 @@ encoding_rs = "0.8"
 reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "system-proxy"] }
 
 [patch.crates-io]
+# Callback boundaries retain abort behavior while Rust operations can unwind.
+wgpu = { path = "vendor/wgpu" }
+indexed_db_futures = { path = "vendor/indexed_db_futures" }
 mobi = { path = "vendor/mobi" }
 async_zip = { path = "vendor/async_zip" }
 zip = { path = "vendor/zip" }
@@ -93,6 +103,9 @@ sherpa-onnx-sys = { path = "vendor/sherpa-onnx-sys" }
 gpui = { path = "../GPUI-Fork/crates/gpui", version = "=0.2.2" }
 gpui_macros = { path = "../GPUI-Fork/crates/gpui_macros" }
 gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform" }
+
+[patch."https://github.com/zed-industries/wasm_thread"]
+wasm_thread = { path = "vendor/wasm_thread" }
 
 # Keep vendored components on the same GPUI source as the application.
 [patch."https://github.com/JohanAnderssonOstling/GPUI-Fork"]

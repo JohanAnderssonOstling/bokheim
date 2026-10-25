@@ -1,6 +1,6 @@
 //! Shared physical placement, upload intent, and validated library-relative paths.
 
-use content_address::ContentHash;
+use content_address::BookId;
 use std::error::Error;
 use std::fmt;
 
@@ -53,11 +53,11 @@ impl fmt::Display for RelativeBookPath {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BookPlacement {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub rel_path: RelativeBookPath,
 }
 impl BookPlacement {
-    pub const fn new(content_hash: ContentHash, rel_path: RelativeBookPath) -> Self {
+    pub const fn new(content_hash: BookId, rel_path: RelativeBookPath) -> Self {
         Self { content_hash, rel_path }
     }
 }
@@ -65,7 +65,7 @@ impl BookPlacement {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BookUploadIntent {
     pub id: i64,
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub size_bytes: u64,
 }
 

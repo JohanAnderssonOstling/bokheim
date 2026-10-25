@@ -2,6 +2,8 @@
 
 use crate::executor::BackendExecutor;
 use client_platform_runtime::startup_profile::StartupProfile;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::pending::OnDrop;
 use crate::library::ResolvedBook;
 use crate::{DirectoryImport, ImportFailure, LibrarySyncState, LibrarySyncStatus};
 use std::cell::Cell;
@@ -14,7 +16,7 @@ pub(crate) use crate::asset_store::AssetStore;
 pub(crate) use crate::library::commands::LibraryCommand;
 pub(crate) use crate::library::discovery::LibraryScanner;
 pub(crate) use crate::library::events::{LibraryEvent, LibraryEventRouter, LibraryEventState};
-pub(crate) use crate::{ContentHash, DirId, DownloadState, LibraryId};
+pub(crate) use crate::{BookId, DirId, DownloadState, LibraryId};
 pub(crate) use library_database::Database;
 
 pub(crate) use super::commands::PreparedRequest;
@@ -43,6 +45,7 @@ pub struct LibrarySession {
     pub(crate) requests: Option<super::workers::WorkerRequests>,
     pub(crate) runtime: Rc<crate::library::session::LibraryRuntime>,
     pub(crate) account: crate::integration::LibraryAccount,
+    pub(crate) cloud: cloud_storage::connections::CloudConnections,
     /// Kept only for library-owned accounting. The app registry never opens a
     /// library path merely to calculate a settings total.
     // Its Drop implementation stops and joins the scanner threads.
@@ -310,7 +313,7 @@ pub enum LibraryActorCommand {
     },
     #[cfg(target_arch = "wasm32")]
     SubscribeBook {
-        content_hash: ContentHash,
+        content_hash: BookId,
         reply: async_channel::Sender<Result<(client_runtime::reply::Reply, u64), BackendError>>,
     },
     #[cfg(target_arch = "wasm32")]
@@ -322,18 +325,18 @@ pub enum LibraryActorCommand {
     /// produce are not `Send`, so these never cross the browser actor channel.
     #[cfg(not(target_arch = "wasm32"))]
     ResolveBook {
-        content_hash: ContentHash,
+        content_hash: BookId,
         reply: async_channel::Sender<Result<ResolvedBook, BackendError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
     ResolveAudiobookTrack {
-        content_hash: ContentHash,
+        content_hash: BookId,
         index: usize,
         reply: async_channel::Sender<Result<ResolvedBook, BackendError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
     ExportTransferBook {
-        content_hash: ContentHash,
+        content_hash: BookId,
         reply: async_channel::Sender<Result<super::transfer::TransferResource, BackendError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
@@ -385,16 +388,18 @@ impl LibraryHandle {
         let library_executor = crate::executor::LibraryExecutor::new().map_err(BackendError::operation)?;
         profile.mark("thread_spawn");
         let executor_for_actor = library_executor.clone();
-        let handle = library_executor.run_blocking(move || -> Result<LibraryHandle, BackendError> {
-            profile.mark("thread_ready");
-            let session = LibrarySession::open(spec)?;
-            profile.mark("session_open");
-            session.events.sync.request_remote_refresh();
-            session.events.assets.wake();
-            let handle = session.spawn_actor(executor_for_actor);
-            profile.mark("actor_schedule");
-            Ok(handle)
-        })?;
+        let handle = library_executor
+            .run_blocking(move || -> Result<LibraryHandle, BackendError> {
+                profile.mark("thread_ready");
+                let session = LibrarySession::open(spec)?;
+                profile.mark("session_open");
+                session.events.sync.request_remote_refresh();
+                session.events.assets.wake();
+                let handle = session.spawn_actor(executor_for_actor);
+                profile.mark("actor_schedule");
+                Ok(handle)
+            })
+            .map_err(BackendError::operation)??;
         Ok(handle)
     }
     #[cfg(target_arch = "wasm32")]
@@ -449,7 +454,7 @@ impl LibraryHandle {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub async fn subscribe_book(&self, content_hash: ContentHash) -> Result<(client_runtime::reply::Reply, BookSubscription), BackendError> {
+    pub async fn subscribe_book(&self, content_hash: BookId) -> Result<(client_runtime::reply::Reply, BookSubscription), BackendError> {
         let (reply, result) = async_channel::bounded(1);
         self.commands.send(LibraryActorCommand::SubscribeBook { content_hash, reply }).await.map_err(|_| "library actor is no longer running".to_owned())?;
         let (initial, id) = result.recv().await.map_err(|_| "library actor stopped before replying".to_owned())??;
@@ -457,21 +462,21 @@ impl LibraryHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn resolve_book(&self, content_hash: ContentHash) -> Result<ResolvedBook, BackendError> {
+    pub async fn resolve_book(&self, content_hash: BookId) -> Result<ResolvedBook, BackendError> {
         let (reply, result) = async_channel::bounded(1);
         self.commands.send(LibraryActorCommand::ResolveBook { content_hash, reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
         result.recv().await.map_err(|_| BackendError::message("library actor stopped before replying"))?
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn resolve_audiobook_track(&self, content_hash: ContentHash, index: usize) -> Result<ResolvedBook, BackendError> {
+    pub async fn resolve_audiobook_track(&self, content_hash: BookId, index: usize) -> Result<ResolvedBook, BackendError> {
         let (reply, result) = async_channel::bounded(1);
         self.commands.send(LibraryActorCommand::ResolveAudiobookTrack { content_hash, index, reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
         result.recv().await.map_err(|_| BackendError::message("library actor stopped before replying"))?
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn export_transfer_book(&self, content_hash: ContentHash) -> Result<super::transfer::TransferResource, BackendError> {
+    pub(crate) async fn export_transfer_book(&self, content_hash: BookId) -> Result<super::transfer::TransferResource, BackendError> {
         let (reply, result) = async_channel::bounded(1);
         self.commands.send(LibraryActorCommand::ExportTransferBook { content_hash, reply }).await.map_err(|_| BackendError::message("source library is no longer running"))?;
         result.recv().await.map_err(|_| BackendError::message("source library stopped before replying"))?
@@ -511,6 +516,8 @@ impl LibrarySession {
         };
         Ok(LibrarySyncStatus {
             asset_storage_enabled: self.sync.clone().asset_storage_enabled(),
+            storage: self.db.storage_policy()?,
+            pending_provider_uploads: self.db.pending_provider_upload_count()?,
             library_id: self.id,
             state,
             has_unsynced_changes: sync_details.has_unsynced_changes,
@@ -583,26 +590,31 @@ impl LibrarySession {
     }
 
     /// Walks the library folder and applies what it finds, walking again while
-    /// the database changed underneath. The scanning flag clears once applied.
+    /// the database changed underneath. Errors and cancellation release the
+    /// scanning flag too, so file replay can continue between scan attempts.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn scan_folder(&self) -> Result<(), BackendError> {
+        if self.db.storage_policy()?.external().is_some() { return Ok(()); }
         if !self.assets.local_access_enabled() || !self._scanner.enabled() {
             self.filesystem_scanning.set(false);
             return Ok(());
         }
         self.filesystem_scanning.set(true);
+        let scanning = OnDrop::new(|| {
+            self.filesystem_scanning.set(false);
+            self.emit(LibraryEvent::ScanComplete { busy: self.scanner_running() });
+        });
         loop {
             let snapshot = self.db.scan_snapshot()?;
             self.emit(LibraryEvent::ScanStarted);
             match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(self.scan_once(snapshot))).await.unwrap_or_else(|_| Err(BackendError::message("library scan panicked")))? {
                 library_database::ScanApplyResult::Applied => break,
                 // Coalesce changes while the actor keeps serving requests.
-                library_database::ScanApplyResult::Stale => crate::executor::sleep(std::time::Duration::from_millis(250)).await,
+                library_database::ScanApplyResult::Stale => crate::executor::sleep(std::time::Duration::from_millis(250)).await.map_err(BackendError::operation)?,
             }
         }
-        self.filesystem_scanning.set(false);
         self.emit(LibraryEvent::ContentsChanged);
-        self.emit(LibraryEvent::ScanComplete { busy: self.scanner_running() });
+        drop(scanning);
         self.db.bind_torrent_books()?;
         // A completed scan can leave lifecycle and metadata mutations
         // that need a sync pass before dependent asset work is ready.
@@ -648,7 +660,7 @@ impl LibrarySession {
         Ok(result)
     }
 
-    pub(crate) fn download_state(&self, coordination: &LibraryEventState, content_hash: ContentHash) -> Result<DownloadState, BackendError> {
+    pub(crate) fn download_state(&self, coordination: &LibraryEventState, content_hash: BookId) -> Result<DownloadState, BackendError> {
         let durable = self.persistent_download_state(content_hash)?;
         Ok(match (&durable, coordination.download_state(&content_hash).cloned()) {
             (DownloadState::Queued, Some(state @ DownloadState::Downloading(_))) => state,
@@ -657,7 +669,7 @@ impl LibrarySession {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn queue_download(&self, coordination: &mut LibraryEventState, content_hash: ContentHash) -> Result<DownloadState, BackendError> {
+    pub(crate) fn queue_download(&self, coordination: &mut LibraryEventState, content_hash: BookId) -> Result<DownloadState, BackendError> {
         let state = self.download_state(coordination, content_hash)?;
         if matches!(state, DownloadState::Downloaded | DownloadState::Downloading(_)) {
             return Ok(state);
@@ -674,7 +686,7 @@ impl LibrarySession {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn request_downloads(&self, hashes: &[ContentHash]) -> Result<(), BackendError> {
+    pub(crate) fn request_downloads(&self, hashes: &[BookId]) -> Result<(), BackendError> {
         if hashes.is_empty() {
             return Ok(());
         }

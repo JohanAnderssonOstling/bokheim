@@ -2,7 +2,7 @@
 //! playback source and forwards service position events to library persistence,
 //! independently of the GPUI activity's rendering/lifetime.
 
-use crate::{AudiobookBook, PlaybackPosition, ReadSeek, playback_progress, position_save_required};
+use crate::{AudiobookBook, PlaybackPosition, ReadSeek, lock_state, playback_progress, position_save_required};
 #[cfg(not(target_arch = "wasm32"))]
 use library_backend::library::AudioStreamControl;
 use serde_json::{Value, json};
@@ -80,10 +80,10 @@ struct Session {
 pub(crate) struct PositionSnapshot(Arc<Mutex<Status>>);
 impl PositionSnapshot {
     pub fn last_position(&self) -> Duration {
-        self.0.lock().unwrap().position
+        lock_state(&self.0).position
     }
     pub fn confirmed_position(&self) -> Option<Duration> {
-        let status = self.0.lock().unwrap();
+        let status = lock_state(&self.0);
         status.confirmed.then_some(status.position)
     }
 }
@@ -92,8 +92,8 @@ pub fn read_source(id: u64, offset: u64, length: usize) -> Result<Vec<u8>, Strin
     if length > 256 * 1024 {
         return Err("audio read is too large".into());
     }
-    let session = sessions().lock().unwrap().get(&id).cloned().ok_or("audio session ended")?;
-    let mut guard = session.reader.lock().unwrap();
+    let session = lock_state(sessions()).get(&id).cloned().ok_or("audio session ended")?;
+    let mut guard = session.reader.lock().map_err(|_| "audio source reader failed; reopen the audiobook".to_owned())?;
     let generation = session.read_generation.load(Ordering::Acquire);
     if let Some(control) = &session.control {
         if !control.begin_seek(generation) {
@@ -113,7 +113,7 @@ pub fn read_source(id: u64, offset: u64, length: usize) -> Result<Vec<u8>, Strin
 /// Media3 reports seek discontinuities from both application and media controls.
 /// Invalidate the blocked range; the next loader read acknowledges the generation.
 pub fn interrupt_source(id: u64) {
-    let session = sessions().lock().unwrap().get(&id).cloned();
+    let session = lock_state(sessions()).get(&id).cloned();
     if let Some(session) = session {
         if let Some(control) = &session.control {
             let generation = session.read_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -143,7 +143,11 @@ impl AudioEngine {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let global_offset = track.map(|track| Duration::from_millis(track.start_ms)).unwrap_or_default();
         let duration = track.map(|track| Duration::from_millis(track.end_ms - track.start_ms)).unwrap_or(book.duration);
-        let chapter_ends = book.chapters.iter().filter_map(|chapter| (chapter.end() > global_offset && chapter.start() < global_offset + duration).then_some(chapter.end().saturating_sub(global_offset).min(duration).as_millis() as u64)).collect::<Vec<_>>();
+        let chapter_ends = book
+            .chapters
+            .iter()
+            .filter_map(|chapter| (chapter.end() > global_offset && chapter.start() < global_offset + duration).then_some(chapter.end().saturating_sub(global_offset).min(duration).as_millis() as u64))
+            .collect::<Vec<_>>();
         let load = json!({"command":"load", "id":id, "path":path, "length":length, "title":book.title, "author":book.author, "position":initial.min(duration).as_millis() as u64, "chapterEnds":chapter_ends});
         let session = Arc::new(Session {
             read_generation: AtomicU64::new(0),
@@ -165,15 +169,15 @@ impl AudioEngine {
             control.set_paused(false);
         }
         self.started.store(true, Ordering::Release);
-        sessions().lock().unwrap().insert(self.id, self.session.clone());
+        lock_state(sessions()).insert(self.id, self.session.clone());
         if let Err(error) = dispatch(self.load.clone()) {
-            self.session.status.lock().unwrap().error = Some(error);
-            sessions().lock().unwrap().remove(&self.id);
+            lock_state(&self.session.status).error = Some(error);
+            lock_state(sessions()).remove(&self.id);
             self.session.release.0.close();
         }
     }
     pub fn position(&self) -> Duration {
-        self.session.status.lock().unwrap().position
+        lock_state(&self.session.status).position
     }
     pub fn position_snapshot(&self) -> PositionSnapshot {
         PositionSnapshot(self.session.status.clone())
@@ -182,17 +186,17 @@ impl AudioEngine {
         self.position_snapshot().confirmed_position()
     }
     pub fn rate(&self) -> f64 {
-        self.session.status.lock().unwrap().rate.unwrap_or_else(|| self.load["speed"].as_f64().unwrap_or(1.0))
+        lock_state(&self.session.status).rate.unwrap_or_else(|| self.load["speed"].as_f64().unwrap_or(1.0))
     }
     pub fn is_playing(&self) -> bool {
-        self.session.status.lock().unwrap().playing
+        lock_state(&self.session.status).playing
     }
     pub fn finished(&self) -> bool {
-        let status = self.session.status.lock().unwrap();
+        let status = lock_state(&self.session.status);
         status.confirmed && status.ended && !status.playing && !status.buffering
     }
     pub fn is_buffering(&self) -> bool {
-        self.session.status.lock().unwrap().buffering
+        lock_state(&self.session.status).buffering
     }
     pub fn toggle(&self) -> Result<(), String> {
         dispatch(json!({"command":"toggle", "id":self.id}))
@@ -206,7 +210,7 @@ impl AudioEngine {
     }
     pub fn seek_to(&self, position: Duration) -> Result<(), String> {
         let sequence = {
-            let mut s = self.session.status.lock().unwrap();
+            let mut s = lock_state(&self.session.status);
             s.sequence += 1;
             s.confirmed = false;
             s.sequence
@@ -225,7 +229,7 @@ impl AudioEngine {
     }
     pub fn set_sleep(&self, remaining: Option<Duration>, chapter_end: Option<Duration>) -> Result<(), String> {
         {
-            let mut status = self.session.status.lock().unwrap();
+            let mut status = lock_state(&self.session.status);
             status.sleep_finished = false;
             status.sleep_reset = None;
         }
@@ -234,13 +238,13 @@ impl AudioEngine {
             "chapterEnd":chapter_end.map(|time| time.saturating_sub(self.session.global_offset).as_millis() as u64)}))
     }
     pub fn take_sleep_reset(&self) -> Option<(Option<web_time::Instant>, Option<Duration>)> {
-        self.session.status.lock().unwrap().sleep_reset.take().map(|(deadline, chapter_end)| (deadline, chapter_end.map(|end| self.session.global_offset.saturating_add(end))))
+        lock_state(&self.session.status).sleep_reset.take().map(|(deadline, chapter_end)| (deadline, chapter_end.map(|end| self.session.global_offset.saturating_add(end))))
     }
     pub fn take_sleep_finished(&self) -> bool {
-        std::mem::take(&mut self.session.status.lock().unwrap().sleep_finished)
+        std::mem::take(&mut lock_state(&self.session.status).sleep_finished)
     }
     pub fn take_error(&self) -> Option<String> {
-        self.session.status.lock().unwrap().error.take()
+        lock_state(&self.session.status).error.take()
     }
     pub fn stop(&self) {
         // Release can wait for the Media3 loader; unblock its native read first.
@@ -252,7 +256,7 @@ impl AudioEngine {
         }
         if let Err(error) = dispatch(json!({"command":"stop", "id":self.id})) {
             log::warn!("Could not stop Android audio: {error}");
-            *self.session.stop_error.lock().unwrap() = Some(error);
+            *lock_state(&self.session.stop_error) = Some(error);
             self.session.release.0.close();
         }
     }
@@ -283,7 +287,7 @@ impl AudioEngine {
                 Poll::Pending
             })
             .await?;
-            session.stop_error.lock().unwrap().clone().map_or(Ok(()), Err)
+            lock_state(&session.stop_error).clone().map_or(Ok(()), Err)
         })
     }
 }
@@ -292,9 +296,9 @@ impl AudioEngine {
 pub fn playback_state(event: &str) {
     let Ok(event) = serde_json::from_str::<Value>(event) else { return };
     let Some(id) = event["id"].as_u64() else { return };
-    let session = sessions().lock().unwrap().get(&id).cloned();
+    let session = lock_state(sessions()).get(&id).cloned();
     let Some(session) = session else { return };
-    let mut status = session.status.lock().unwrap();
+    let mut status = lock_state(&session.status);
     if let Some(reset) = event["sleepReset"].as_object() {
         status.sleep_reset = Some((reset.get("remaining").and_then(Value::as_u64).map(|millis| web_time::Instant::now() + Duration::from_millis(millis)), reset.get("chapterEnd").and_then(Value::as_u64).map(Duration::from_millis)));
     }
@@ -320,7 +324,7 @@ pub fn playback_state(event: &str) {
         status.rate = event["speed"].as_f64().filter(|rate| rate.is_finite() && *rate > 0.0);
         if status.confirmed && position_save_required(status.last_saved, status.position, force) {
             let position = session.global_offset.saturating_add(status.position);
-            let _ = session.updates.try_send((position, playback_progress(position, session.global_duration)));
+            let _ = session.updates.try_send(PlaybackPosition::new(position, playback_progress(position, session.global_duration)));
             status.last_saved = Some(status.position);
         }
     }
@@ -331,7 +335,7 @@ pub fn playback_state(event: &str) {
         status.playing = false;
         status.buffering = false;
         session.release.0.close();
-        sessions().lock().unwrap().remove(&id);
+        lock_state(sessions()).remove(&id);
     }
 }
 
@@ -361,6 +365,16 @@ mod tests {
         playback_state(&json!({"id":id,"sequence":sequence,"position":position,"playing":playing,"ready":ready,"released":released}).to_string());
     }
 
+    #[test]
+    fn a_poisoned_source_reader_returns_an_error_without_reusing_the_stream() {
+        let (id, session, _) = session();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = session.reader.lock().unwrap();
+            panic!("source reader failed");
+        }));
+        assert_eq!(read_source(id, 0, 2), Err("audio source reader failed; reopen the audiobook".into()));
+        sessions().lock().unwrap().remove(&id);
+    }
 
     #[test]
     fn seek_during_read_cannot_deliver_old_generation_bytes() {
@@ -390,7 +404,6 @@ mod tests {
         event(id, 0, 0, false, false, true);
     }
 
-
     #[test]
     fn release_during_pending_seek_retains_last_accepted_position() {
         let (id, session, _) = session();
@@ -409,7 +422,6 @@ mod tests {
         assert_eq!(snapshot.last_position(), Duration::from_secs(40));
         assert_eq!(snapshot.confirmed_position(), None);
     }
-
 
     #[test]
     fn missing_service_acknowledgement_fails_instead_of_allowing_removal() {

@@ -1,5 +1,7 @@
 //! Shared presentation primitives for the GPUI desktop interface.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod account;
 pub mod assets;
 pub mod audiobook;
@@ -15,6 +17,8 @@ mod fonts;
 pub mod graph;
 pub mod infinite_canvas;
 pub mod keyboard;
+pub mod keyboard_settings;
+mod keyboard_shortcut_editor;
 pub mod layout;
 pub mod library;
 mod menu_items;
@@ -41,11 +45,14 @@ pub use browser_start::*;
 pub use buttons::*;
 pub use contents::*;
 pub use detail::*;
-pub use errors::{authentication_error, is_http_status, user_facing_error, wifi_error_message};
-pub use fonts::{InterfaceFontFace, interface_font_faces, register_fonts};
+pub use errors::{authentication_error, user_facing_error, wifi_error_message, AccountAction};
+pub use operation_failure::{Classified, Failure, WifiFailure};
+pub use fonts::{InterfaceFontFace, SystemFontFamilies, interface_font_faces, register_fonts};
 pub use graph::*;
 pub use infinite_canvas::*;
 pub use keyboard::*;
+pub use keyboard_settings::*;
+pub use keyboard_shortcut_editor::*;
 pub use layout::*;
 pub use library::*;
 pub use menu_items::*;
@@ -61,3 +68,5 @@ pub use theme::*;
 pub use theme_picker::*;
 pub use tokens::*;
 pub use trash::*;
+#[cfg(feature = "kobo")]
+pub mod kobo;

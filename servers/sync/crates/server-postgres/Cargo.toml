@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 tracing = "0.1"
+serde_json = "1"
 server-asset-store = { path = "../server-asset-store" }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres", "macros", "uuid", "migrate"] }
 sync-common = { path = "../../../../shared/sync-common" }

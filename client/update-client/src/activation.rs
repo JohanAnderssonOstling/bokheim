@@ -1,12 +1,12 @@
 //! Native startup transaction. The host holds application ownership and UpdateLock.
 //! Durable backups precede mutations; recovery is repeatable after any interruption.
 
-use crate::native_files::{remove, replace, sync_file};
+use crate::native_files::{remove, sync_file};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -41,11 +41,7 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     atomic_bytes(path, &bytes)
 }
 fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let part = path.with_extension("writing");
-    let mut f = File::create(&part).map_err(|e| e.to_string())?;
-    f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
-    drop(f);
-    replace(&part, path)
+    update_files::write_atomic(path, &path.with_extension("writing"), bytes, None, |_| {}).map(|_| ()).map_err(|e| e.to_string())
 }
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_reader(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
@@ -74,10 +70,7 @@ pub fn copy_database(source: &Path, destination: &Path) -> Result<(), String> {
 }
 
 pub fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
-    let part = destination.with_extension("update-writing");
-    fs::copy(source, &part).map_err(|e| e.to_string())?;
-    sync_file(&part)?;
-    replace(&part, destination)
+    update_files::copy_atomic(source, destination, &destination.with_extension("update-writing")).map_err(|e| e.to_string())
 }
 
 fn identical(left: &Path, right: &Path) -> Result<bool, String> {

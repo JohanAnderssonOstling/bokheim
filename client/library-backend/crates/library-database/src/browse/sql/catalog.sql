@@ -23,7 +23,7 @@ SELECT book.row_id,book.key,CASE WHEN book.external=0 THEN book.key END,
        COALESCE((SELECT group_concat(name,', ') FROM (
            SELECT author.name FROM catalog_browse_author_book credit JOIN catalog_browse_author author USING(author_id)
            WHERE credit.book_row_id=book.row_id ORDER BY author.name,author.author_id)),''),book.format,
-       book.external=1 AND book.format=16 AND source.download_url IS NOT NULL
+       book.external=1 AND book.format=16 AND source.download_url IS NOT NULL,book.duration_ms
 FROM json_each(:book_ids) selected
 JOIN catalog_browse_book book ON book.row_id=selected.value
 JOIN book source ON source.row_id=book.source_row_id

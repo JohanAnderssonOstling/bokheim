@@ -49,7 +49,6 @@ fn device_error(error: io::Error) -> io::Error {
 mod tests {
     use super::*;
 
-
     #[test]
     fn changes_brightness_repeatedly_including_off_and_rejects_out_of_range() {
         let file = tempfile::NamedTempFile::new().unwrap();

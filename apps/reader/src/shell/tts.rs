@@ -1,8 +1,9 @@
-//! Shared desktop narration state and sidebar controls.
+//! Shared narration state and playback controls.
 use crate::settings::{NarrationPauses, NarrationVoice};
-use audiobook_player::{SleepChoice, SleepPlan, format_playback_rate, sleep_menu, speed_menu};
+use audiobook_player::{PlaybackMenu, SleepChoice, SleepPlan, format_playback_rate, sleep_menu, speed_menu};
+use components::playback_secondary_button;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, SharedString, Task, div, rems};
+use gpui::{AnyElement, App, Context, SharedString, Task, div};
 use gpui_component::menu::DropdownMenu;
 use gpui_component::{Disableable, Icon, IconName};
 use reader_speech::{DesktopSpeech, Pauses, SpeechControl, SpeechEvent, SpeechPassage, Voice, supports_languages};
@@ -69,10 +70,11 @@ impl Narration {
         self
     }
     /// An active narration session reserves hardware volume keys for Android's
-    /// media volume, including while paused or preparing the next passage.
+    /// media volume, including while paused or preparing the next passage,
+    /// unless the reader explicitly uses them to advance a reading ruler.
     #[cfg(target_os = "android")]
-    pub fn sync_volume_buttons(&mut self, cx: &App) {
-        let capture = !self.playing;
+    pub fn sync_volume_buttons(&mut self, ruler_active: bool, cx: &App) {
+        let capture = ruler_active || !self.playing;
         if self.volume_button_capture != Some(capture) {
             self.volume_button_capture = Some(capture);
             cx.set_volume_button_capture(capture);
@@ -104,7 +106,9 @@ impl Narration {
         } else {
             None
         };
-        let service = self.service.as_ref().expect("speech service");
+        let Some(service) = self.service.as_ref() else {
+            return Err("Speech service is unavailable. Try starting read aloud again.".into());
+        };
         service.set_title(&self.media_title);
         service.set_rate(self.rate() as f32);
         service.set_pauses(speech_pauses(self.pauses));
@@ -387,9 +391,9 @@ fn choose_sleep<C: TtsReader>(reader: &mut C, choice: SleepChoice, cx: &mut Cont
 }
 
 /// The narration dock under the page, laid out like the audiobook dock but
-/// with transport controls in the centre and tools alongside them. On desktop
-/// the tools sit together on the right; in a compact dock speed, pauses and the
-/// voice selector (where available) move left to keep play in the true centre.
+/// with transport controls in the centre and tools alongside them on desktop.
+/// Compact docks distribute every control with equal inner and outer spacing.
+/// Every compact option opens a window-owned bottom sheet.
 pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: components::BrowserTheme, cx: &mut Context<C>) -> AnyElement {
     let playing = state.playing && !state.paused;
     let eligible = state.unavailable_reason.is_none();
@@ -406,94 +410,116 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
 
     let rate = state.rate();
     let entity = cx.entity().downgrade();
-    let speed = components::player_dock_text_button("tts-speed", format_playback_rate(rate), theme).tooltip("Reading speed").dropdown_menu_with_anchor(
-        if compact { gpui::Anchor::BottomLeft } else { gpui::Anchor::BottomRight },
-        move |menu, _, _| {
-            let entity = entity.clone();
-            speed_menu(rate).dropdown(menu, move |rate, cx: &mut App| {
-                let _ = entity.update(cx, |reader, cx| {
-                    reader.narration_mut().set_rate(rate);
-                    crate::settings::ReaderSettings::update(cx, |preferences| preferences.audiobook_speed = rate);
-                    cx.notify();
-                });
-            })
-        },
-    );
+    let set_rate = move |rate, cx: &mut App| {
+        let _ = entity.update(cx, |reader, cx| {
+            reader.narration_mut().set_rate(rate);
+            crate::settings::ReaderSettings::update(cx, |preferences| preferences.audiobook_speed = rate);
+            cx.notify();
+        });
+    };
+    let speed = components::player_dock_text_button("tts-speed", format_playback_rate(rate), theme).tooltip("Reading speed");
+    let speed = if compact {
+        speed.on_click(move |_, window, cx| speed_menu(rate).title("Reading speed").open_sheet(window, cx, set_rate.clone())).into_any_element()
+    } else {
+        speed.dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| speed_menu(rate).dropdown(menu, set_rate.clone())).into_any_element()
+    };
+
     #[cfg(not(target_os = "android"))]
     let voice = {
         let current_voice = state.voice;
         let voice_label = VOICE_CHOICES.into_iter().find(|(voice, ..)| *voice == current_voice).map_or("Alba", |(_, label, ..)| label);
         let entity = cx.entity().downgrade();
-        let voice = components::player_dock_text_button("tts-voice", voice_label, theme);
-        // Leave room for the speed/pause row inside the fixed-height phone dock.
-        let voice = if compact { voice.h(rems(components::PLAYER_DOCK_HEIGHT_REM - components::topbar_action_height_rem())) } else { voice };
-        let voice = voice.tooltip("Narration voice").dropdown_menu_with_anchor(if compact { gpui::Anchor::BottomLeft } else { gpui::Anchor::BottomRight }, move |mut menu, _, _| {
-            for (choice, _, label, _) in VOICE_CHOICES {
-                let entity = entity.clone();
-                menu = menu.item(
-                    components::menu_item(label, move |_, _, cx| {
-                        let _ = entity.update(cx, |reader, cx| {
-                            reader.narration_mut().set_voice(choice);
-                            crate::settings::ReaderSettings::update(cx, |preferences| preferences.narration_voice = choice);
-                            cx.notify();
-                        });
-                    })
-                    .checked(choice == current_voice),
-                );
-            }
-            menu
-        });
-        voice
+        let set_voice = move |choice, cx: &mut App| {
+            let _ = entity.update(cx, |reader, cx| {
+                reader.narration_mut().set_voice(choice);
+                crate::settings::ReaderSettings::update(cx, |preferences| preferences.narration_voice = choice);
+                cx.notify();
+            });
+        };
+        let voice = components::player_dock_text_button("tts-voice", voice_label, theme).tooltip("Narration voice");
+        if compact {
+            voice
+                .on_click(move |_, window, cx| {
+                    let choices = VOICE_CHOICES.into_iter().map(|(choice, _, label, _)| (choice, label.into(), choice == current_voice));
+                    PlaybackMenu::new("tts-voice", "Narration voice", choices).open_sheet(window, cx, set_voice.clone());
+                })
+                .into_any_element()
+        } else {
+            voice
+                .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |mut menu, _, _| {
+                    for (choice, _, label, _) in VOICE_CHOICES {
+                        let set_voice = set_voice.clone();
+                        menu = menu.item(components::menu_item(label, move |_, _, cx| set_voice(choice, cx)).checked(choice == current_voice));
+                    }
+                    menu
+                })
+                .into_any_element()
+        }
     };
+
     let current_pauses = state.pauses;
     let entity = cx.entity().downgrade();
-    let pauses = components::outlined_icon_button("tts-pauses", "Pauses between sentences and paragraphs", Icon::empty().path("icons/hourglass.svg"), theme).dropdown_menu_with_anchor(
-        if compact { gpui::Anchor::BottomLeft } else { gpui::Anchor::BottomRight },
-        move |mut menu, _, _| {
-            for (choice, label, _) in PAUSE_CHOICES {
-                let entity = entity.clone();
-                menu = menu.item(
-                    components::menu_item(label, move |_, _, cx| {
-                        let _ = entity.update(cx, |reader, cx| {
-                            reader.narration_mut().set_pauses(choice);
-                            crate::settings::ReaderSettings::update(cx, |preferences| preferences.narration_pauses = choice);
-                            cx.notify();
-                        });
-                    })
-                    .checked(choice == current_pauses),
-                );
-            }
-            menu
-        },
-    );
+    let set_pauses = move |choice, cx: &mut App| {
+        let _ = entity.update(cx, |reader, cx| {
+            reader.narration_mut().set_pauses(choice);
+            crate::settings::ReaderSettings::update(cx, |preferences| preferences.narration_pauses = choice);
+            cx.notify();
+        });
+    };
+    let pauses = playback_secondary_button(components::outlined_icon_button("tts-pauses", "Pauses between sentences and paragraphs", Icon::empty().path("icons/hourglass.svg"), theme));
+    let pauses = if compact {
+        pauses
+            .on_click(move |_, window, cx| {
+                let choices = PAUSE_CHOICES.into_iter().map(|(choice, label, _)| (choice, label.into(), choice == current_pauses));
+                PlaybackMenu::new("tts-pauses", "Pauses", choices).open_sheet(window, cx, set_pauses.clone());
+            })
+            .into_any_element()
+    } else {
+        pauses
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |mut menu, _, _| {
+                for (choice, label, _) in PAUSE_CHOICES {
+                    let set_pauses = set_pauses.clone();
+                    menu = menu.item(components::menu_item(label, move |_, _, cx| set_pauses(choice, cx)).checked(choice == current_pauses));
+                }
+                menu
+            })
+            .into_any_element()
+    };
+
     let sleep_label = state.sleep_label();
     let sleep = match sleep_label.clone() {
         Some(label) => components::player_dock_text_button("tts-sleep", label, theme).tooltip("Sleep timer"),
         None => components::outlined_icon_button("tts-sleep", "Sleep timer", Icon::empty().path("icons/alarm.svg"), theme),
     };
     let entity = cx.entity().downgrade();
-    let sleep = components::selectable_button(sleep, sleep_label.is_some(), theme).dropdown_menu_with_anchor(if compact { gpui::Anchor::BottomRight } else { gpui::Anchor::BottomLeft }, move |menu, _, _| {
-        let entity = entity.clone();
-        sleep_menu(sleep_label.as_deref()).dropdown(menu, move |choice, cx: &mut App| {
-            let _ = entity.update(cx, |reader, cx| choose_sleep(reader, choice, cx));
-        })
-    });
-    let close = components::outlined_icon_button("tts-close", "Close player", IconName::Close, theme).on_click(cx.listener(|reader, _, _, cx| reader.close_tts_dock(cx)));
-
-    let (leading, trailing) = if compact {
-        let leading = div().pl(rems(components::SPACE_SM / 16.0)).flex().flex_col().items_start();
-        #[cfg(not(target_os = "android"))]
-        let leading = leading.child(voice);
-        (leading.child(div().flex().child(speed).child(pauses)).into_any_element(), components::player_dock_tools().child(sleep).child(close))
-    } else {
-        let trailing = components::player_dock_tools();
-        #[cfg(not(target_os = "android"))]
-        let trailing = trailing.child(voice);
-        (div().into_any_element(), trailing.child(sleep).child(speed).child(pauses).child(close))
+    let set_sleep = move |choice, cx: &mut App| {
+        let _ = entity.update(cx, |reader, cx| choose_sleep(reader, choice, cx));
     };
+    let sleep = playback_secondary_button(components::selectable_button(sleep, sleep_label.is_some(), theme));
+    let sleep = if compact {
+        sleep.on_click(move |_, window, cx| sleep_menu(sleep_label.as_deref()).open_sheet(window, cx, set_sleep.clone())).into_any_element()
+    } else {
+        sleep.dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _, _| sleep_menu(sleep_label.as_deref()).dropdown(menu, set_sleep.clone())).into_any_element()
+    };
+    let close = playback_secondary_button(components::outlined_icon_button("tts-close", "Close player", IconName::Close, theme)).on_click(cx.listener(|reader, _, _, cx| reader.close_tts_dock(cx)));
+
+    if compact {
+        let mut controls = Vec::new();
+        #[cfg(not(target_os = "android"))]
+        controls.push(voice);
+        controls.extend([speed, pauses]);
+        controls.extend(transport.into_iter().map(|button| button.into_any_element()));
+        controls.extend([sleep, close.into_any_element()]);
+        return components::player_dock_evenly(controls, theme).id("tts-dock").on_scroll_wheel(|_, _, cx| cx.stop_propagation()).into_any_element();
+    }
+
+    let trailing = components::player_dock_tools();
+    #[cfg(not(target_os = "android"))]
+    let trailing = trailing.child(voice);
+    let trailing = trailing.child(sleep).child(speed).child(pauses).child(close);
 
     let transport = components::player_dock_transport(None, transport, theme);
-    components::player_dock(leading, transport, trailing, theme).id("tts-dock").on_scroll_wheel(|_, _, cx| cx.stop_propagation()).into_any_element()
+    components::player_dock(div(), transport, trailing, theme).id("tts-dock").on_scroll_wheel(|_, _, cx| cx.stop_propagation()).into_any_element()
 }
 
 #[cfg(test)]

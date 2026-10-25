@@ -349,7 +349,8 @@ impl LocalDocumentSession {
             return Err(PdfError::new("the PDF has no pages"));
         }
         let outline = document_outline(&document);
-        Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline, skippable_pages: Vec::new() }, analysis: RefCell::new(PageAnalysisCache::default()), page_source: None })
+        let right_to_left = document.catalog().is_right_to_left();
+        Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline, skippable_pages: Vec::new(), right_to_left }, analysis: RefCell::new(PageAnalysisCache::default()), page_source: None })
     }
 
     pub fn info(&self) -> &PdfDocumentInfo {
@@ -527,6 +528,7 @@ pub struct PdfDocumentInfo {
     pages: Vec<PdfPageInfo>,
     outline: Vec<BookTocEntry>,
     skippable_pages: Vec<usize>,
+    right_to_left: bool,
 }
 
 impl PdfDocumentInfo {
@@ -556,6 +558,11 @@ impl PdfDocumentInfo {
 
     pub fn skippable_pages(&self) -> &[usize] {
         &self.skippable_pages
+    }
+
+    /// The document's `/ViewerPreferences /Direction`, defaulting to L2R.
+    pub fn right_to_left(&self) -> bool {
+        self.right_to_left
     }
 }
 
@@ -1193,6 +1200,24 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn viewer_direction_is_read_from_the_pdf_with_and_without_cached_geometry() -> PdfResult<()> {
+        let fixture = String::from_utf8(include_bytes!("../tests/fixtures/rtl-viewer-preferences.pdf").to_vec()).unwrap();
+        for (name, expected) in [("/R2L", true), ("/L2R", false), ("/Foo", false), ("(R) ", false)] {
+            // Equal-length substitutions preserve the real fixture's xref offsets.
+            let bytes = fixture.replace("/R2L", name).into_bytes();
+            let session = PdfDocumentSession::from_bytes("direction", bytes.clone())?;
+            assert_eq!(session.info().right_to_left(), expected, "{name}");
+            let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes))?;
+            let hash = metadata.content_hash.clone();
+            let cached = PdfDocumentSession::from_reader_with_metadata("cached-direction", reader, &hash, Some(metadata))?;
+            assert_eq!(cached.info().right_to_left(), expected, "cached {name}");
+        }
+        let missing = fixture.replace("/Direction", "/Unknown__").into_bytes();
+        assert!(!PdfDocumentSession::from_bytes("no-direction", missing)?.info().right_to_left());
+        Ok(())
+    }
 
     #[test]
     fn paper_tint_matches_white_pixels_and_preserves_black_and_alpha() {

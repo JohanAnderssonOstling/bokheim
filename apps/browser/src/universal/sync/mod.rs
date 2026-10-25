@@ -5,13 +5,15 @@
 //! library list is reported upward so the root can update the shared
 //! [`Libraries`] rather than this page reaching into the navigation UI tree.
 
-use ui_components::user_facing_error;
 use std::collections::HashSet;
+use ui_components::user_facing_error;
 mod account;
+mod deletion;
 #[cfg(target_os = "android")]
 mod android_authentication;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod authentication;
+mod authentication_request;
 mod view;
 #[cfg(target_arch = "wasm32")]
 mod web_authentication;
@@ -31,6 +33,7 @@ use gpui_component::{Sizable, Size};
 use library_backend::{LibrarySyncState, LibrarySyncStatus};
 use ui_components as components;
 
+pub use self::authentication_request::AuthenticationRequest;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use crate::model::AccountFlow;
 use crate::navigation::Libraries;
@@ -84,14 +87,15 @@ impl SyncState {
 pub enum SyncEvent {
     AccountRefreshDue,
     AccountRefreshRequested,
-    AccountSnapshot { generation: u64, result: Result<app::AccountSnapshot, String> },
+    AccountSnapshot { generation: u64, result: Result<app::AccountSnapshot, app::BackendError> },
     LocalStorageUsageRequested,
-    LocalStorageUsage { generation: u64, result: Result<Vec<app::LocalLibraryStorageUsage>, String> },
+    LocalStorageUsage { generation: u64, result: Result<Vec<app::LocalLibraryStorageUsage>, app::BackendError> },
     LogoutRequested,
-    AccountOperation { generation: u64, result: Result<app::AccountSnapshot, String>, success: &'static str, reveal_password_reset_on_error: bool },
+    DeleteAccountRequested { email: String, password: String },
+    AccountOperation { generation: u64, result: Result<app::AccountSnapshot, app::BackendError>, success: &'static str, reveal_password_reset_on_error: bool },
     AssetStorageRequested { library_id: sync_common::LibraryId, enabled: bool },
-    AssetStorageChanged { library_id: sync_common::LibraryId, enabled: bool, result: Result<(), String> },
-    Authenticate { action: String, email: String, secret: String, token: String, reply: async_channel::Sender<Result<(), String>> },
+    AssetStorageChanged { library_id: sync_common::LibraryId, enabled: bool, result: Result<(), app::BackendError> },
+    Authenticate { request: AuthenticationRequest, reply: async_channel::Sender<Result<(), &'static str>> },
     WebAuthenticated,
 }
 
@@ -100,6 +104,7 @@ enum AccountActivity {
     Idle,
     Refreshing,
     AccountRequest,
+    DeletingAccount,
 }
 
 pub(crate) struct SyncPage {
@@ -110,6 +115,7 @@ pub(crate) struct SyncPage {
     state: Entity<SyncState>,
     active_library: Entity<Libraries>,
     identity: Entity<view::AccountIdentityView>,
+    deletion: Option<deletion::DeleteAccountForm>,
     asset_storage_pending: HashSet<sync_common::LibraryId>,
     /// Where a new library is created. It belongs to the library list rather
     /// than to a storage group of its own: it is the setting that decides where
@@ -183,6 +189,9 @@ impl SyncPage {
         });
         let state_subscription = cx.observe(&state, |page, state, cx| {
             let account_status = state.read(cx).account_status.clone();
+            if page.deletion.as_ref().is_some_and(|form| account_status.email() != Some(form.email.as_str())) {
+                page.deletion = None;
+            }
             page.identity.update(cx, |identity, cx| identity.set_account_status(account_status, cx));
             cx.notify();
         });
@@ -190,10 +199,18 @@ impl SyncPage {
             #[cfg(not(target_arch = "wasm32"))]
             services,
             #[cfg(target_arch = "wasm32")]
-            events: services.sync_events.clone().expect("web sync event inbox"),
+            events: services.sync_events.clone().unwrap_or_else(|| {
+                log::error!("Web sync event inbox is unavailable");
+                // A closed sender lets the existing command error path report
+                // unavailable sync without queuing requests that cannot finish.
+                let (sender, receiver) = async_channel::unbounded();
+                drop(receiver);
+                sender
+            }),
             state,
             active_library,
             identity,
+            deletion: None,
             asset_storage_pending: HashSet::new(),
             #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
             default_library_location: None,
@@ -278,12 +295,7 @@ impl SyncPage {
                 cx.notify();
             }
             SyncEvent::WebAuthenticated => self.schedule_refresh(cx),
-            SyncEvent::AccountRefreshRequested
-            | SyncEvent::LocalStorageUsageRequested
-            | SyncEvent::LocalStorageUsage { .. }
-            | SyncEvent::LogoutRequested
-            | SyncEvent::AssetStorageRequested { .. }
-            | SyncEvent::Authenticate { .. } => {
+            SyncEvent::AccountRefreshRequested | SyncEvent::LocalStorageUsageRequested | SyncEvent::LocalStorageUsage { .. } | SyncEvent::LogoutRequested | SyncEvent::DeleteAccountRequested { .. } | SyncEvent::AssetStorageRequested { .. } | SyncEvent::Authenticate { .. } => {
                 unreachable!("sync commands are handled by ApplicationRoot")
             }
         }

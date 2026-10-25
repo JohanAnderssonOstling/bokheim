@@ -11,23 +11,28 @@ target_dir="${CARGO_TARGET_DIR:-$workspace_dir/target}"
 if [[ "$target_dir" != /* ]]; then target_dir="$workspace_dir/$target_dir"; fi
 local_bindgen="$workspace_dir/target/wasm-bindgen-cli/bin/wasm-bindgen"
 bundle_dir="${output_dir}/pkg/.building"
+# Rebuild std for every module: Rust's distributed wasm std uses panic=abort.
+# Use standardized exception instructions in both isolated and shared memory.
+web_rustflags='--cfg getrandom_backend="wasm_js" -C panic=unwind -C target-feature=+exception-handling -C llvm-args=-wasm-use-legacy-eh=false'
 
 (
     cd "$workspace_dir"
-    RUSTC_BOOTSTRAP=1 cargo build \
+    RUSTC_BOOTSTRAP=1 RUSTFLAGS="$web_rustflags" cargo build \
+        -Z build-std=std,panic_unwind \
         --manifest-path "$workspace_dir/Cargo.toml" \
         -p web-backend-worker \
         --target wasm32-unknown-unknown \
         --profile web-release
-    RUSTC_BOOTSTRAP=1 cargo build \
+    RUSTC_BOOTSTRAP=1 RUSTFLAGS="$web_rustflags" cargo build \
+        -Z build-std=std,panic_unwind \
         --manifest-path "$workspace_dir/Cargo.toml" \
         -p web-backend-worker --example cpu_worker --example sync_coordinator \
         --target wasm32-unknown-unknown --profile web-release
     # The UI's parser pool shares Rust-owned file handles and prepared documents.
     # Build Rust and C dependencies with atomics; backend workers stay isolated.
     CFLAGS_wasm32_unknown_unknown="${CFLAGS_wasm32_unknown_unknown:-} -matomics -mbulk-memory" \
-    RUSTC_BOOTSTRAP=1 RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base' cargo rustc \
-        -Z build-std=std,panic_abort \
+    RUSTC_BOOTSTRAP=1 RUSTFLAGS="$web_rustflags -C target-feature=+atomics,+bulk-memory,+mutable-globals,+exception-handling -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base" cargo rustc \
+        -Z build-std=std,panic_unwind \
         --manifest-path "$workspace_dir/Cargo.toml" -p web-gpui \
         --target wasm32-unknown-unknown --profile web-release -- -C link-arg=--export=__heap_base
 )

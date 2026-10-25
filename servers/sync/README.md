@@ -72,7 +72,11 @@ authenticated ChaCha20-Poly1305 encryption bound to the row ID, recipient, and
 message kind. Successful delivery deletes the outbox row.
 
 Registration reserves the canonical email and username for 24 hours and stores
-only an Argon2 password hash plus a keyed hash of a six-digit verification PIN. PIN redemption
+only an Argon2 password hash plus a keyed hash of a six-digit verification PIN.
+Registering an address that is still pending replaces its password hash, so the
+latest registrant's password wins. Verification requires that password together
+with the PIN: the PIN proves control of the mailbox, the password proves the
+verifier chose the account's password. PIN redemption
 is scoped to the normalized email address and persistently limited to five attempts per
 address per hour, in addition to the network limit. Verification
 is single-use and creates a one-hour access token plus a 90-day rotating refresh
@@ -85,6 +89,30 @@ Requests for existing accounts and unknown password-reset emails deliberately
 return the same `202 Accepted` response. Disposable-domain policy rejection and
 malformed email/password inputs return `400` because they reveal no account
 existence.
+
+## Public account deletion
+
+`https://bokheim.se/delete-account/` posts JSON to
+`POST /api/auth/delete-account` with `email`, `password`, and
+`confirmation: "DELETE"`. This standalone website endpoint requires the current
+password; cookies and existing bearer sessions do not authorize deletion. It
+allows five attempts per email and twenty per client address per five minutes.
+
+The application's Settings → Account → Delete account action calls the same
+endpoint with the current account email, password and explicit confirmation.
+It clears persisted credentials only after the server confirms deletion, and
+preserves device-local libraries.
+
+Deletion removes the actual `users` row in a transaction. Foreign-key cascades
+remove libraries, synced metadata and reading state, OPDS settings, sessions,
+password-reset tokens, storage quota, upload reservations, and blob ownership
+and access records. Pending registrations and queued account emails for that
+email address are also removed. The identity cache is invalidated after commit
+so cached access tokens stop working immediately. Physical book and cover
+files retain the existing asset-store behavior; account deletion does not erase
+files already downloaded to devices or perform physical asset garbage collection.
+
+Deploy the sync server before publishing the static page in `bokheim-site`.
 
 ## Configured test account
 
@@ -122,11 +150,13 @@ Thumbnails are physically and financially scoped to the account and are charged
 once per unique thumbnail hash. Metadata does not consume storage quota. New
 accounts receive a 5 GiB quota lazily.
 
-Global deduplication is not an authorization capability. A stored book can be
-claimed or downloaded only when the authenticated account already owns it or
-has a synchronized lifecycle reference to its hash. An unreferenced manifest
-entry is reported as requiring upload whether or not another account has stored
-the same hash; the upload path verifies the complete BLAKE3-matching body.
+Global deduplication is not an authorization capability. A book is charged to
+an account only by that account uploading its complete BLAKE3-matching body, and
+only a charged book can be downloaded. Synchronized lifecycle references are
+client-declared and grant no access. A manifest entry the account has not
+uploaded is reported as requiring upload whether or not another account has
+stored the same hash; the store then keeps its single existing copy. An account
+that drops its last reference to a book and later adds it back uploads it again.
 
 Uploads require an exact `Content-Length`. The server reserves that many bytes
 before storage, validates the completed asset, then atomically converts the

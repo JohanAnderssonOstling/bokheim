@@ -6,11 +6,12 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use app::AppClient;
-use gpui::{App, AppContext, Context, Entity, SharedString, Task, Window};
+use app::{AppClient, LibraryFolderError, LibraryFolderStep};
+use gpui::{App, AppContext, Context, Entity, Task, Window};
 use sync_common::LibraryId;
 use ui_components::user_facing_error;
 
+use super::library_errors::folder_add_message;
 use super::{LibrarySession, LibrarySummary};
 use crate::library::OpenBook;
 
@@ -123,7 +124,7 @@ impl Libraries {
         .detach();
     }
 
-    pub(crate) fn save_library_name(&self, library_id: Option<LibraryId>, name: String, asset_storage_enabled: bool) -> impl std::future::Future<Output = Result<Option<LibraryId>, String>> + use<> {
+    pub(crate) fn save_library_name(&self, library_id: Option<LibraryId>, name: String, asset_storage_enabled: bool) -> impl std::future::Future<Output = Result<Option<LibraryId>, app::BackendError>> + use<> {
         let backend = self.backend.clone();
         async move {
             if let Some(id) = library_id {
@@ -177,7 +178,7 @@ impl Libraries {
                         selected_local = ids.last().copied();
                         errors.extend(failures);
                     }
-                    Err(error) => errors.push(error),
+                    Err(error) => errors.push(LibraryFolderError { folder_name: None, step: LibraryFolderStep::OpenLibrary, error }),
                 }
             }
             for directory in directories.into_iter().filter(|directory| directory.local_path.is_none()) {
@@ -187,7 +188,7 @@ impl Libraries {
                     Ok(entry) => {
                         created.push((*entry.library_id(), entry.library_name().to_owned(), directory));
                     }
-                    Err(error) => errors.push(format!("{name}: {error}")),
+                    Err(error) => errors.push(LibraryFolderError { folder_name: Some(name), step: LibraryFolderStep::OpenLibrary, error }),
                 }
             }
             let selected = created.last().map(|(library_id, _, _)| *library_id).or(selected_local);
@@ -206,7 +207,7 @@ impl Libraries {
                 }
                 cx.notify();
                 if !errors.is_empty() {
-                    notify_warning("library-add-warning", format!("Some folders could not be added. {}", user_facing_error(&errors.join("; "), "Check that the folders are available and try adding them again.")), window, cx);
+                    notify_warning("library-add-warning", folder_add_message(&errors), window, cx);
                 }
                 if let Some(library_id) = selected {
                     sessions.select_library(library_id, cx);
@@ -239,7 +240,7 @@ impl Libraries {
         .detach();
     }
 
-    fn apply_library_list_result(&mut self, epoch: u64, result: Result<Vec<LibrarySummary>, String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_library_list_result(&mut self, epoch: u64, result: Result<Vec<LibrarySummary>, app::BackendError>, window: &mut Window, cx: &mut Context<Self>) {
         if self.selection_epoch.get() != epoch {
             return;
         }
@@ -278,8 +279,7 @@ impl Libraries {
         cx.notify();
     }
 
-    fn notify_error(&self, error: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
-        let error = error.into();
+    fn notify_error(&self, error: app::BackendError, window: &mut Window, cx: &mut App) {
         crate::services::notify_error("library-operation-error", user_facing_error(&error, "Could not finish the library action. Please try again."), window, cx);
     }
 }

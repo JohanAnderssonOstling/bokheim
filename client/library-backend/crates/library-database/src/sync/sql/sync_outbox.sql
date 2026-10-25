@@ -8,10 +8,18 @@
 SELECT COALESCE(MAX(replica_seq), 0) FROM sync_outbox;
 
 -- name: sync_pending_uploads?
-SELECT content_hash FROM book_transfer WHERE upload_id IS NOT NULL;
+SELECT content_hash FROM book_transfer WHERE upload_id IS NOT NULL
+UNION
+SELECT b.content_hash FROM book b
+LEFT JOIN provider_book p ON p.book_id=b.content_hash
+WHERE p.book_id IS NULL AND EXISTS (
+    SELECT 1 FROM library_storage WHERE singleton=1 AND json_type(configuration,'$.external') IS NOT NULL
+);
 
 -- name: sync_cloud_storage_enabled ->
-SELECT cloud_storage_enabled FROM sync_metadata WHERE singleton = 1;
+SELECT CASE WHEN s.configuration IS NOT NULL THEN s.configuration != '"local"' ELSE m.cloud_storage_enabled END
+FROM sync_metadata m LEFT JOIN library_storage s ON s.singleton=m.singleton
+WHERE m.singleton=1;
 
 -- name: sync_acknowledge_mutations!
 -- param: ids: &str

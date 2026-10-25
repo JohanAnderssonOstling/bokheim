@@ -13,7 +13,7 @@ use client_platform_runtime::startup_profile::StartupProfile;
 use std::cell::RefCell;
 use std::error::Error;
 use std::sync::Arc;
-use sync_common::ContentHash;
+use sync_common::BookId;
 #[macro_use]
 mod query_methods;
 pub(crate) mod contributors;
@@ -24,7 +24,7 @@ pub mod torrents;
 mod transactions;
 pub mod transfer;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 41;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 42;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -190,6 +190,7 @@ impl Database {
                 projection::backfill_popularity(&transaction)?;
             }
             if version < 41 { browse::revision::install(&transaction)?; }
+            transaction.execute_batch(include_str!("provider/schema.sql"))?;
             transaction.execute_batch(include_str!("torrents.sql"))?;
             profile.mark("schema_and_migrations");
             // Rewriting the same version dirties the header and forces a write commit on every open.
@@ -229,6 +230,7 @@ impl Database {
         transaction.schema_placements_tables()?;
         transaction.schema_placements_views()?;
         transaction.schema_assets_tables()?;
+        transaction.execute_batch(include_str!("provider/schema.sql"))?;
         transaction.schema_assets_views()?;
         transaction.schema_annotations_tables()?;
         // Initial singleton rows and the root directory belong to a new library.
@@ -284,13 +286,24 @@ impl Database {
     }
 
     pub fn set_asset_storage_policy(&self, enabled: bool, reset_cloud_presence: bool) -> Result<(), DatabaseError> {
-        let enabled = if enabled { "1" } else { "0" };
+        use sync_common::storage::LibraryStorage;
+        let storage = match self.storage_policy()? {
+            LibraryStorage::External(root) if !enabled => LibraryStorage::External(root),
+            LibraryStorage::External(_) => return Err(DatabaseError::message("external libraries cannot use Bokheim file storage")),
+            _ => if enabled { LibraryStorage::Bokheim } else { LibraryStorage::Local },
+        };
+        self.set_storage_policy(&storage, reset_cloud_presence)
+    }
+
+    pub fn set_storage_policy(&self, storage: &sync_common::storage::LibraryStorage, reset_cloud_presence: bool) -> Result<(), DatabaseError> {
+        let enabled = if storage.uses_bokheim_assets() { "1" } else { "0" };
+        let json = serde_json::to_string(storage).map_err(DatabaseError::operation)?;
         self.write(|transaction| {
             if reset_cloud_presence {
                 transaction.owner_reset_remote_books()?;
                 let mut candidates = Vec::new();
                 transaction.owner_cloud_storage_candidates(|row| {
-                    candidates.push((row.get::<_, ContentHash>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?));
+                    candidates.push((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?));
                     Ok(())
                 })?;
                 let mut folders = placements::FolderPaths::new(transaction);
@@ -304,11 +317,12 @@ impl Database {
                 transaction.owner_refresh_book_uploads()?;
             }
             transaction.owner_cloud_storage_policy(enabled)?;
+            transaction.execute("INSERT INTO library_storage(singleton,configuration) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET configuration=excluded.configuration", [&json])?;
             Ok(())
         })
     }
 
-    pub fn book_format(&self, hash: &sync_common::ContentHash) -> Result<Option<book_model::BookFormat>, DatabaseError> {
+    pub fn book_format(&self, hash: &sync_common::BookId) -> Result<Option<book_model::BookFormat>, DatabaseError> {
         let mut format = None;
         self.connection.shared_book_format(hash, |row| {
             format = Some(row.get::<_, Option<i64>>(0)?);
@@ -347,6 +361,7 @@ mod import;
 pub mod native;
 pub(crate) mod placements;
 mod projection;
+pub mod provider;
 pub(crate) mod sync;
 pub mod sync_status;
 

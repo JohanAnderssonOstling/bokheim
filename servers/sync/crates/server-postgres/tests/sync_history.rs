@@ -50,7 +50,7 @@ async fn restored_history_rejects_old_cursors_even_after_passing_their_revision(
     sqlx::query("INSERT INTO users(id) VALUES($1)").bind(user).execute(database.pool()).await.unwrap();
     let library = LibraryId::new_v4();
     let replica = ReplicaId::new_v4();
-    repository.create_library(user, &LibraryNameRequest { library_id: library, library_name: "History".into() }).await.unwrap();
+    repository.create_library(user, &LibraryNameRequest { library_id: library, library_name: "History".into(), storage: Default::default() }).await.unwrap();
     let empty = repository.exchange(user, &SyncExchangeRequest { library_id: library, replica_id: replica, mutations: Vec::new(), cursor: SyncCursor::default() }).await.unwrap();
     assert!(empty.pull.next_cursor.generation.is_some(), "even an empty library binds its checkpoint to the history");
     assert!(empty.pull.next_cursor.lifecycle_revision.is_none());
@@ -123,8 +123,8 @@ async fn generation_survives_startup_and_upgrades_and_migrates_existing_state() 
     upgrade_existing(&database).await.unwrap();
     assert_eq!(read().await, replacement);
 
-    // Version 10 has every current domain table except the history singleton.
-    sqlx::raw_sql("DROP TABLE sync_history; ALTER TABLE bokheim_schema_version DROP CONSTRAINT bokheim_schema_version_version_check; UPDATE bokheim_schema_version SET version=10; ALTER TABLE bokheim_schema_version ADD CONSTRAINT bokheim_schema_version_version_check CHECK(version=10);").execute(database.pool()).await.unwrap();
+    // Version 10 predates both the history singleton and storage providers.
+    sqlx::raw_sql("DROP TABLE sync_history; ALTER TABLE libraries DROP COLUMN storage_configuration; ALTER TABLE bokheim_schema_version DROP CONSTRAINT bokheim_schema_version_version_check; UPDATE bokheim_schema_version SET version=10; ALTER TABLE bokheim_schema_version ADD CONSTRAINT bokheim_schema_version_version_check CHECK(version=10);").execute(database.pool()).await.unwrap();
     sqlx::query("INSERT INTO users(id) VALUES('migration-user')").execute(database.pool()).await.unwrap();
     upgrade_existing(&database).await.unwrap();
     let migrated = read().await;

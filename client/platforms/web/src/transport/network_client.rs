@@ -103,14 +103,14 @@ impl Pending {
     }
     fn stream(self: &Rc<Self>) -> Result<JsValue, JsValue> {
         let weak = Rc::downgrade(self);
-        let start = Closure::<dyn FnMut(ReadableStreamDefaultController)>::new(move |controller| {
+        let start = Closure::<dyn FnMut(ReadableStreamDefaultController)>::own_aborting(move |controller| {
             if let Some(state) = weak.upgrade() {
                 *state.controller.borrow_mut() = Some(controller);
             }
         })
         .into_js_value();
         let weak = Rc::downgrade(self);
-        let pull = Closure::<dyn FnMut() -> Promise>::new(move || {
+        let pull = Closure::<dyn FnMut() -> Promise>::own_aborting(move || {
             let Some(state) = weak.upgrade() else {
                 return Promise::resolve(&JsValue::UNDEFINED);
             };
@@ -126,7 +126,7 @@ impl Pending {
         })
         .into_js_value();
         let weak = Rc::downgrade(self);
-        let cancel = Closure::<dyn FnMut()>::new(move || {
+        let cancel = Closure::<dyn FnMut()>::own_aborting(move || {
             if let Some(state) = weak.upgrade() {
                 let _ = state.send("cancel");
                 state.close();
@@ -160,7 +160,7 @@ async fn fetch(input: JsValue, init: JsValue) -> Result<JsValue, JsValue> {
     check_abort(&signal)?;
     let channel = MessageChannel::new()?;
     let (reply, waiting) = oneshot::channel();
-    let id = ACTIVE.with(|active| active.next_id());
+    let id = ACTIVE.with(|active| active.next_id()).map_err(|error| JsValue::from_str(&error))?;
     let state = Rc::new_cyclic(|weak: &std::rc::Weak<Pending>| {
         let receive = weak.clone();
         let error = weak.clone();
@@ -168,7 +168,7 @@ async fn fetch(input: JsValue, init: JsValue) -> Result<JsValue, JsValue> {
         Pending {
             id,
             signal,
-            abort: Closure::<dyn FnMut()>::new(move || {
+            abort: Closure::<dyn FnMut()>::own_aborting(move || {
                 if let Some(state) = abort.upgrade() {
                     state.fail(state.signal.reason());
                 }
@@ -229,7 +229,7 @@ pub fn install() -> Result<(), JsValue> {
         return Ok(());
     }
     let native = Reflect::get(&js_sys::global(), &"fetch".into())?.dyn_into::<Function>()?;
-    let fetch = Closure::<dyn FnMut(JsValue, JsValue) -> Promise>::new(|input, init| future_to_promise(fetch(input, init)));
+    let fetch = Closure::<dyn FnMut(JsValue, JsValue) -> Promise>::own_aborting(|input, init| future_to_promise(fetch(input, init)));
     if !Reflect::set(&js_sys::global(), &"fetch".into(), fetch.as_ref())? {
         return Err(js_sys::Error::new("Could not install backend fetch bridge").into());
     }

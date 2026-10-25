@@ -7,6 +7,7 @@ use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, CursorStyle, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Size, Style, Window, fill, px, relative, size,
 };
+use html::layout::LaidOutDocument;
 use html::render::{FragmentImagePolicy, FragmentRenderOptions, FragmentRenderer};
 
 use crate::fragment_selection::FragmentSelection;
@@ -57,7 +58,7 @@ impl HtmlFragmentElement {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct FragmentKey {
     source: SharedString,
     width: f32,
@@ -72,20 +73,20 @@ struct FragmentState {
     commands: Arc<Vec<PaintCommand>>,
     height: f32,
     selection: Option<FragmentSelection>,
+    selection_key: Option<FragmentKey>,
+    document: Option<LaidOutDocument>,
 }
 
 impl FragmentState {
     fn new(window: &Window) -> Self {
-        Self { renderer: FragmentRenderer::new(), shaper: GpuiTextCache::new(window.text_system().clone()), key: None, commands: Arc::default(), height: 0.0, selection: None }
+        Self { renderer: FragmentRenderer::new(), shaper: GpuiTextCache::new(window.text_system().clone()), key: None, commands: Arc::default(), height: 0.0, selection: None, selection_key: None, document: None }
     }
 
     fn layout(&mut self, key: FragmentKey) -> Result<Size<Pixels>, String> {
+        let width = key.width;
         if self.key.as_ref() != Some(&key) {
             let options = FragmentRenderOptions::new(f64::from(key.width), None).map_err(|error| error.to_string())?.with_user_styles(key.styles.clone()).with_image_policy(FragmentImagePolicy::Omit);
             let rendered = self.renderer.render(&key.source, &options, &mut self.shaper).map_err(|error| error.to_string())?;
-            if let Some(selection) = &mut self.selection {
-                selection.install(rendered.document(), &self.shaper);
-            }
             let commands = Arc::try_unwrap(std::mem::take(&mut self.commands)).unwrap_or_default();
             let mut painter = GpuiCommandPainter::commands_only(self.shaper.store(), self.shaper.run_store(), commands);
             if let Some(color) = key.text_color {
@@ -94,9 +95,21 @@ impl FragmentState {
             rendered.scene().paint(&mut painter);
             self.commands = Arc::new(painter.into_commands());
             self.height = rendered.scene().content_height() as f32;
+            self.document = Some(rendered.into_parts().0);
             self.key = Some(key);
         }
-        Ok(size(px(self.key.as_ref().unwrap().width), px(self.height)))
+        Ok(size(px(width), px(self.height)))
+    }
+
+    fn prepare_selection(&mut self) {
+        // Flex layout can measure several widths before returning to the same
+        // final width. Those probes must not clear an ongoing selection.
+        if self.selection_key != self.key {
+            if let (Some(selection), Some(document)) = (&mut self.selection, &self.document) {
+                selection.install(document, &self.shaper);
+                self.selection_key = self.key.clone();
+            }
+        }
     }
 }
 
@@ -146,6 +159,8 @@ impl Element for HtmlFragmentElement {
                 state.layout(key).unwrap_or_else(|error| {
                     state.commands = Arc::default();
                     state.key = None;
+                    state.document = None;
+                    state.selection_key = None;
                     if let Some(selection) = &mut state.selection {
                         selection.clear();
                         selection.text.clear();
@@ -160,9 +175,20 @@ impl Element for HtmlFragmentElement {
     }
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
+        self.state.as_ref()?.update(cx, |state, _| {
+            if let Some(mut key) = state.key.clone() {
+                key.width = f32::from(bounds.size.width).max(1.0);
+                if let Err(error) = state.layout(key) {
+                    eprintln!("HTML fragment layout failed: {error}");
+                }
+            }
+            if self.selection_color.is_some() {
+                state.prepare_selection();
+            }
+        });
         if self.selection_color.is_some() {
-            let state = self.state.as_ref().unwrap().read(cx);
-            window.set_focus_handle(&state.selection.as_ref().unwrap().focus, cx);
+            let state = self.state.as_ref()?.read(cx);
+            window.set_focus_handle(&state.selection.as_ref()?.focus, cx);
             Some(window.insert_hitbox(bounds, HitboxBehavior::Normal))
         } else {
             None
@@ -170,16 +196,17 @@ impl Element for HtmlFragmentElement {
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, hitbox: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
+        let Some(state) = self.state.clone() else { return };
         let (commands, glyphs) = {
-            let state = self.state.as_ref().unwrap().read(cx);
+            let state = state.read(cx);
             (state.commands.clone(), state.shaper.store())
         };
         window.with_content_mask(Some(ContentMask { bounds }), |window| paint_commands(&commands, &glyphs, bounds, window, cx));
         let Some(hitbox) = hitbox else { return };
-        let color = self.selection_color.unwrap();
-        let state = self.state.as_ref().unwrap().clone();
+        let Some(color) = self.selection_color else { return };
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            let selection = state.read(cx).selection.as_ref().unwrap();
+            let state = state.read(cx);
+            let Some(selection) = state.selection.as_ref() else { return };
             for run in &selection.runs {
                 if run.range.start < selection.range.end && run.range.end > selection.range.start {
                     window.paint_quad(fill(Bounds::new(bounds.origin + run.bounds.origin, run.bounds.size), color));
@@ -196,7 +223,7 @@ impl Element for HtmlFragmentElement {
             }
             if phase.capture() && !hit.is_hovered(window) {
                 target.update(cx, |state, cx| {
-                    let selection = state.selection.as_mut().unwrap();
+                    let Some(selection) = state.selection.as_mut() else { return };
                     if !selection.range.is_empty() || selection.dragging {
                         selection.clear();
                         cx.notify();
@@ -204,7 +231,7 @@ impl Element for HtmlFragmentElement {
                 });
             } else if phase.bubble() && hit.is_hovered(window) {
                 target.update(cx, |state, cx| {
-                    let selection = state.selection.as_mut().unwrap();
+                    let Some(selection) = state.selection.as_mut() else { return };
                     selection.begin(event.position - bounds.origin, event.click_count);
                     selection.focus.focus(window, cx);
                     window.prevent_default();
@@ -219,7 +246,7 @@ impl Element for HtmlFragmentElement {
                 return;
             }
             target.update(cx, |state, cx| {
-                let selection = state.selection.as_mut().unwrap();
+                let Some(selection) = state.selection.as_mut() else { return };
                 if selection.dragging {
                     if event.pressed_button == Some(MouseButton::Left) {
                         selection.extend(event.position - bounds.origin);
@@ -237,7 +264,7 @@ impl Element for HtmlFragmentElement {
                 return;
             }
             target.update(cx, |state, cx| {
-                let selection = state.selection.as_mut().unwrap();
+                let Some(selection) = state.selection.as_mut() else { return };
                 if selection.dragging {
                     selection.extend(event.position - bounds.origin);
                     selection.dragging = false;
@@ -247,11 +274,11 @@ impl Element for HtmlFragmentElement {
             });
         });
         window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
-            if !phase.bubble() || !state.read(cx).selection.as_ref().unwrap().focus.is_focused(window) {
+            if !phase.bubble() || !state.read(cx).selection.as_ref().is_some_and(|selection| selection.focus.is_focused(window)) {
                 return;
             }
             state.update(cx, |state, cx| {
-                let selection = state.selection.as_mut().unwrap();
+                let Some(selection) = state.selection.as_mut() else { return };
                 let modifiers = event.keystroke.modifiers;
                 let shortcut = if cfg!(target_os = "macos") { modifiers.platform } else { modifiers.control };
                 match event.keystroke.key.as_str() {
@@ -333,6 +360,7 @@ mod tests {
                 state.selection = Some(FragmentSelection::new(cx.focus_handle()));
                 let source = "<p>First &amp; <em>café</em> Åsa</p><p>Second paragraph</p>";
                 state.layout(key(source.into(), 300.)).unwrap();
+                state.prepare_selection();
                 let selection = state.selection.as_mut().unwrap();
                 assert_eq!(selection.text, "First & café Åsa\n\nSecond paragraph");
                 let run = selection.runs.iter().find(|run| selection.text[run.range.clone()].contains('é')).unwrap();
@@ -340,10 +368,12 @@ mod tests {
                 assert!(selection.begin(position, 2));
                 assert_eq!(selection.selected_text(), "café");
                 state.layout(key(source.into(), 110.)).unwrap();
+                state.prepare_selection();
                 let selection = state.selection.as_ref().unwrap();
                 assert!(selection.range.is_empty());
                 assert_eq!(selection.text, "First & café Åsa\n\nSecond paragraph");
                 state.layout(key("<p>Replacement</p>".into(), 110.)).unwrap();
+                state.prepare_selection();
                 assert_eq!(state.selection.as_ref().unwrap().text, "Replacement");
             })
             .unwrap();

@@ -2,7 +2,7 @@
 
 use crate::SqlParam;
 pub(crate) use crate::shared_sql::SharedSql;
-use content_address::ContentHash;
+use content_address::BookId;
 use std::io::{Error, ErrorKind};
 use sync_common::{LibraryRevision, StateKey, SyncCursor, SyncGeneration};
 pub(crate) mod apply;

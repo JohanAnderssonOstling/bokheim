@@ -58,13 +58,13 @@ fn inspect_pdf_pages_mode<R: Read + Seek + Send + 'static>(source_name: &Path, m
                         let location: &str = &format!("pdf:page:{page}:back-cover");
                         let text: &str = &text;
 
-                        inspect_section(book, location, text)
+                        try_inspect_section(book, location, text)
                     }
                 } else {
-                    crate::evidence::inspect_section(&inspected.metadata, &format!("pdf:page:{page}"), &text)
+                    crate::evidence::try_inspect_section(&inspected.metadata, &format!("pdf:page:{page}"), &text)
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<std::io::Result<Vec<_>>>()?;
         crate::evidence::apply_evidence(&mut inspected.metadata, &evidence, "pdf");
         inspected.metadata.book.identifiers.extend(original_ids);
         Ok(inspected)

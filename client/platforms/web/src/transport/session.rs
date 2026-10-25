@@ -6,7 +6,8 @@ use web_sys::{MessageEvent, MessagePort, SharedWorker};
 pub enum SessionMessage {
     Bytes(Vec<u8>),
     Reconnecting,
-    Failed(String),
+    /// `storage_busy` when another tab holds the library's browser storage.
+    Failed { error: String, storage_busy: bool },
 }
 
 #[derive(Clone)]
@@ -57,16 +58,19 @@ pub struct Session {
 }
 impl Session {
     pub fn new(sender: SessionSender, mut message: impl FnMut(SessionMessage) + 'static, mut error: impl FnMut(String) + 'static) -> Self {
-        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::own_aborting(move |event: MessageEvent| {
             let data = event.data();
             let kind = super::field(&data, "kind").as_string();
             match kind.as_deref() {
                 Some("reconnecting") => message(SessionMessage::Reconnecting),
-                Some("failed") => message(SessionMessage::Failed(super::field(&data, "error").as_string().unwrap_or_else(|| "Worker connection failed".into()))),
+                Some("failed") => message(SessionMessage::Failed {
+                    error: super::field(&data, "error").as_string().unwrap_or_else(|| "Worker connection failed".into()),
+                    storage_busy: super::field(&data, "storageBusy").as_bool() == Some(true),
+                }),
                 _ => message(SessionMessage::Bytes(js_sys::Uint8Array::new(&data).to_vec())),
             }
         });
-        let on_error = Closure::<dyn FnMut(JsValue)>::new(move |event| {
+        let on_error = Closure::<dyn FnMut(JsValue)>::own_aborting(move |event| {
             error(super::field(&event, "message").as_string().filter(|value| !value.is_empty()).unwrap_or_else(|| "shared backend worker stopped or sent an unreadable message".into()));
         });
         sender.0.worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));

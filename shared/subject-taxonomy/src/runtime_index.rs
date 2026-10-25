@@ -3,6 +3,7 @@ use crate::compact_whitespace;
 use crate::lcc::{lcc_endpoint, lcc_match_keys, parse_lcc_call};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 pub mod route_index;
@@ -206,12 +207,11 @@ pub fn build_runtime(concepts: Vec<UnifiedConceptDefinition>) -> Result<UnifiedT
     validate(&concepts)?;
     let mut fingerprint = String::new();
     for concept in &concepts {
-        use std::fmt::Write as _;
-        write!(&mut fingerprint, "{}\u{1f}{}\u{1f}{}", concept.concept_id, concept.preferred_label, concept.parent_ids.iter().map(i64::to_string).collect::<Vec<_>>().join("|")).unwrap();
+        write!(&mut fingerprint, "{}\u{1f}{}\u{1f}{}", concept.concept_id, concept.preferred_label, concept.parent_ids.iter().map(i64::to_string).collect::<Vec<_>>().join("|")).map_err(|error| error.to_string())?;
         for (system, selectors) in &concept.source_selectors {
-            write!(&mut fingerprint, "\u{1f}{system}={}", selectors.join("|")).unwrap();
+            write!(&mut fingerprint, "\u{1f}{system}={}", selectors.join("|")).map_err(|error| error.to_string())?;
         }
-        writeln!(&mut fingerprint).unwrap();
+        writeln!(&mut fingerprint).map_err(|error| error.to_string())?;
     }
     let routes = Arc::new(RouteIndex::compile(build_routes(&concepts)?));
     let selectors = Arc::new(build_selectors(&concepts)?);
@@ -254,8 +254,8 @@ pub fn validate(concepts: &[UnifiedConceptDefinition]) -> Result<(), String> {
             if !ids.contains(parent) {
                 return Err(format!("unified concept {} references missing parent {parent}", concept.concept_id));
             }
-            let label = labels_by_id.get(&concept.concept_id).expect("concept label exists");
-            let parent_label = labels_by_id.get(parent).expect("parent label exists");
+            let label = labels_by_id.get(&concept.concept_id).ok_or_else(|| format!("unified concept {} has no label", concept.concept_id))?;
+            let parent_label = labels_by_id.get(parent).ok_or_else(|| format!("unified concept {} references unlabeled parent {parent}", concept.concept_id))?;
             if label == parent_label {
                 return Err(format!("unified concept {} duplicates the preferred label of direct parent {parent}", concept.concept_id));
             }
@@ -265,7 +265,7 @@ pub fn validate(concepts: &[UnifiedConceptDefinition]) -> Result<(), String> {
                 }
             }
         }
-        let label = labels_by_id.get(&concept.concept_id).expect("concept label exists");
+        let label = labels_by_id.get(&concept.concept_id).ok_or_else(|| format!("unified concept {} has no label", concept.concept_id))?;
         for (system, selectors) in &concept.source_selectors {
             for selector in selectors {
                 // Range overlaps, including equal bounds, are resolved by

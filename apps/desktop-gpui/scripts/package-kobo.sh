@@ -4,27 +4,23 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 GPUI_FORK=$(CDPATH= cd -- "$REPO_ROOT/../GPUI-Fork" && pwd)
-KOBO_BUILD="$GPUI_FORK/target/gpui-kobo"
-GPUI_PACKAGE="$KOBO_BUILD/package/.adds/gpui-kobo"
 OUTPUT="$REPO_ROOT/target/desktop-gpui-kobo"
-FBINK_RELEASE="$OUTPUT/fbink-build/FBInk-v1.25.0/Release"
+FBINK_SOURCE="$REPO_ROOT/target/kobo-toolchain-cache/fbink-source"
+FBINK_RELEASE="$FBINK_SOURCE/Release"
 BUILD_TARGET=${CARGO_TARGET_DIR:-"$REPO_ROOT/target"}
 case "$BUILD_TARGET" in /*) ;; *) BUILD_TARGET="$REPO_ROOT/$BUILD_TARGET" ;; esac
 
-# The attached Kobo Libra 2 (N418) uses an NXP i.MX 6SLL: one Cortex-A9
-# core with the NEON media engine. Keep the tuning at the Kobo packaging
-# boundary so desktop builds and binaries for older Kobo models remain
-# unaffected. KOBO_CPU_PROFILE=generic provides an A/B and compatibility
-# build without device-specific instructions.
-KOBO_CPU_PROFILE=${KOBO_CPU_PROFILE:-libra2}
+# The default package uses the common ARMv7 hard-float baseline. Libra 2
+# tuning remains available for local comparisons, without declaring other models.
+KOBO_CPU_PROFILE=${KOBO_CPU_PROFILE:-generic}
 case "$KOBO_CPU_PROFILE" in
     libra2)
         KOBO_RUSTFLAGS='-C target-cpu=cortex-a9 -C target-feature=+neon'
         KOBO_CFLAGS='-O3 -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard'
         ;;
     generic)
-        KOBO_RUSTFLAGS=''
-        KOBO_CFLAGS='-O3'
+        KOBO_RUSTFLAGS='-C target-cpu=cortex-a8 -C target-feature=+neon'
+        KOBO_CFLAGS='-O3 -march=armv7-a -mfpu=neon -mfloat-abi=hard'
         ;;
     *)
         printf 'Unsupported KOBO_CPU_PROFILE: %s\n' "$KOBO_CPU_PROFILE" >&2
@@ -32,9 +28,6 @@ case "$KOBO_CPU_PROFILE" in
         ;;
 esac
 
-if [ ! -x "$GPUI_PACKAGE/fbink" ]; then
-    "$GPUI_FORK/crates/gpui_kobo/scripts/package-kobo.sh" >/dev/null
-fi
 CROSS=$(KOBO_CFLAGS="$KOBO_CFLAGS" sh "$SCRIPT_DIR/prepare-kobo-toolchain.sh")
 SYSROOT=$("$CROSS-gcc" -print-sysroot)
 python3 "$REPO_ROOT/shared/pdfium/prepare.py" --target armv7-unknown-linux-gnueabihf >&2
@@ -43,12 +36,10 @@ python3 "$REPO_ROOT/shared/pdfium/prepare.py" --target armv7-unknown-linux-gnuea
 # loader and libraries only for this executable; Nickel keeps its own runtime.
 KOBO_RUSTFLAGS="$KOBO_RUSTFLAGS -C link-arg=-Wl,--dynamic-linker=/mnt/onboard/.adds/bokheim/runtime/ld-linux-armhf.so.3 -C link-arg=-Wl,-rpath,\$ORIGIN/runtime"
 
-# This build only runs on developer machines now that the release package is
-# published from one, so the job count is no longer pinned to a small CI
-# runner. It stays well below the core count: `codegen-units=1` makes each
-# rustc a single large process, and the release profile exhausts memory before
-# it exhausts cores.
-CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-6}
+# Keep the cross-build within a desktop machine's memory budget. Large UI
+# crates also use smaller code-generation units below. Maintainers with more
+# available memory can raise CARGO_BUILD_JOBS explicitly.
+CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1}
 
 cd "$REPO_ROOT"
 FBINK_LIB_DIR="$FBINK_RELEASE" \
@@ -63,6 +54,11 @@ CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
 CARGO_PROFILE_RELEASE_DEBUG=0 \
 cargo build --release --target-dir "$BUILD_TARGET" --target armv7-unknown-linux-gnueabihf \
+    --config 'profile.release.package.gpui-component.codegen-units=16' \
+    --config 'profile.release.package.browser-ui.codegen-units=16' \
+    --config 'profile.release.package.reader-ui.codegen-units=16' \
+    --config 'profile.release.package.application-shell.codegen-units=16' \
+    --config 'profile.release.package.desktop-gpui.codegen-units=16' \
     -p desktop-gpui --no-default-features --features kobo --bin desktop-gpui-kobo
 
 mkdir -p "$OUTPUT"
@@ -91,14 +87,22 @@ for library in ld-linux-armhf.so.3 libc.so.6 libm.so.6 libgcc_s.so.1 \
     cp -L "$SYSROOT/lib/$library" "$APP/runtime/$library"
 done
 cp "$REPO_ROOT/shared/pdfium/kobo-runtime/"*.txt "$APP/runtime/"
-cp "$GPUI_PACKAGE/fbink" "$APP/fbink"
-cp "$GPUI_PACKAGE/LICENSE-APACHE" "$APP/LICENSE-APACHE"
-cp "$GPUI_PACKAGE/LICENSE-FBINK-GPLv3" "$APP/LICENSE-FBINK-GPLv3"
-cp "$GPUI_PACKAGE/LICENSE-LILEX-OFL.txt" "$APP/LICENSE-LILEX-OFL.txt"
+cp "$FBINK_RELEASE/fbink" "$APP/fbink"
+cp "$GPUI_FORK/LICENSE-APACHE" "$APP/LICENSE-APACHE"
+cp "$FBINK_SOURCE/LICENSE" "$APP/LICENSE-FBINK-GPLv3"
+cp "$GPUI_FORK/assets/fonts/lilex/OFL.txt" "$APP/LICENSE-LILEX-OFL.txt"
 cp "$REPO_ROOT/apps/ui/design-tokens/assets/fonts/terminus/TerminusTTF-OFL.txt" "$APP/LICENSE-TERMINUS-OFL.txt"
 cp "$REPO_ROOT/vendor/wpa-ctrl/LICENSE" "$APP/LICENSE-WPA-CTRL-BSL-1.0"
-cp "$GPUI_PACKAGE/third-party-source/FBInk-v1.25.0.tar.xz" "$APP/third-party-source/"
+python3 - "$REPO_ROOT" "$APP/third-party-source" <<'PY_SOURCES'
+import json, shutil, sys
+from pathlib import Path
+root, output = map(Path, sys.argv[1:])
+for name, spec in json.loads((root / 'apps/desktop-gpui/kobo/sources.json').read_text()).items():
+    if name != 'toolchain':
+        shutil.copyfile(root / 'target/kobo-toolchain-cache' / spec['archive'], output / spec['archive'])
+PY_SOURCES
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/run.sh" "$APP/run.sh"
+cp "$REPO_ROOT/apps/desktop-gpui/kobo/update-recovery.sh" "$APP/update-recovery.sh"
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/wifi-power.sh" "$APP/wifi-power.sh"
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/run-monitored.sh" "$APP/run-monitored.sh"
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/monitor-nickel.sh" "$APP/monitor-nickel.sh"
@@ -107,10 +111,16 @@ cp "$REPO_ROOT/apps/desktop-gpui/kobo/nickelmenu" "$STAGE/.adds/nm/desktop-gpui-
 mkdir -p "$APP/nickelmenu-icons"
 cp "$REPO_ROOT/apps/ui/design-tokens/assets/icon/bokheim-kobo.png" "$APP/nickelmenu-icons/bokheim.png"
 cp "$REPO_ROOT/apps/ui/design-tokens/assets/icon/bokheim-kobo-active.png" "$APP/nickelmenu-icons/bokheim-active.png"
-chmod +x "$APP/desktop-gpui-kobo" "$APP/fbink" "$APP/run.sh" "$APP/run-monitored.sh" "$APP/monitor-nickel.sh" "$APP/probe-kobo-audio.sh"
+chmod +x "$APP/desktop-gpui-kobo" "$APP/fbink" "$APP/run.sh" "$APP/run-monitored.sh" "$APP/monitor-nickel.sh" "$APP/probe-kobo-audio.sh" "$APP/update-recovery.sh"
 chmod +x "$APP/command-shims/bluetoothctl" "$APP/command-timeout.sh"
-printf 'Bokheim shared GPUI UI for Kobo\nBuilt: %s\nTarget: armv7-unknown-linux-gnueabihf\nPDFium: 7961 (ARM glibc)\nRuntime: Bootlin glibc stable-2024.05-1\nCPU profile: %s\nRust flags: %s\nC flags: %s\nLTO: thin\nCodegen units: 1\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$KOBO_CPU_PROFILE" "$KOBO_RUSTFLAGS" "$KOBO_CFLAGS" >"$APP/BUILD-INFO.txt"
+KOBO_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_ROOT/apps/desktop-gpui/Cargo.toml" | head -n 1)
+printf 'Bokheim shared GPUI UI for Kobo\nVersion: %s\nBuilt: %s\nTarget: armv7-unknown-linux-gnueabihf\nPDFium: 7961 (ARM glibc)\nRuntime: glibc 2.23 (Linux 2.6.32 baseline)\nCPU profile: %s\nRust flags: %s\nC flags: %s\nLTO: thin\nCodegen units: 1\n' \
+    "$KOBO_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$KOBO_CPU_PROFILE" "$KOBO_RUSTFLAGS" "$KOBO_CFLAGS" >"$APP/BUILD-INFO.txt"
+if [ "$KOBO_CPU_PROFILE" = generic ]; then
+    printf 'Supported model IDs: %s\n' "$(cargo run --quiet -p kobo-profile --example devices -- --ids)" >>"$APP/BUILD-INFO.txt"
+fi
+printf 'FBInk source: %s\n' 886f25f13368859ad8a899b88d04c26e19cda32e >>"$APP/BUILD-INFO.txt"
+printf 'UI crate codegen units: 16 (bounded build memory)\n' >>"$APP/BUILD-INFO.txt"
 python3 - "${BOKHEIM_BUILD_TAXONOMY_SQLITE:-$REPO_ROOT/shared/subject-projection/data/unified-taxonomy-v2.sqlite3}" >>"$APP/BUILD-INFO.txt" <<'PY'
 import hashlib, sys
 with open(sys.argv[1], 'rb') as source:

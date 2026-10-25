@@ -1,9 +1,11 @@
 //! Network-free bibliographic evidence rules shared by device and authority ingestion.
 //! A content_hash is necessary, but never sufficient, to identify the current book.
 
+use crate::cached_regex;
 pub(crate) use book_model::{BookRecord, BookSubject, Identifier, Scheme, Scope};
 pub(crate) use regex::Regex;
 use std::collections::BTreeSet;
+use std::io;
 pub(crate) use std::sync::OnceLock;
 
 pub const INSPECTION_VERSION: u32 = 11;
@@ -47,39 +49,41 @@ pub(crate) fn complete_isbn(value: &str) -> Option<String> {
 
 pub(crate) const ISBN_SEARCH_CHARS: usize = 128;
 
-pub(crate) fn isbn_marker_pattern() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\b(?:e-?)?I\s{0,4}S\s{0,4}B\s{0,4}N(?:[\t ]*[-:]?[\t ]*1[03]\b)?\b").unwrap())
+pub(crate) fn isbn_marker_pattern() -> io::Result<&'static Regex> {
+    static RE: OnceLock<Result<Regex, String>> = OnceLock::new();
+    cached_regex(&RE, r"(?i)\b(?:e-?)?I\s{0,4}S\s{0,4}B\s{0,4}N(?:[\t ]*[-:]?[\t ]*1[03]\b)?\b")
 }
 
 /// An ISBN-shaped digit run, with an optional short parenthetical after it
 /// such as "(hardcover)".
-fn isbn_candidate_pattern() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\b(?P<isbn>(?:[0-9X](?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)){9,}[0-9X])\b[\t \x{00a0}]*(?:\((?P<after>[^)\n]{1,40})\))?").unwrap())
+fn isbn_candidate_pattern() -> io::Result<&'static Regex> {
+    static RE: OnceLock<Result<Regex, String>> = OnceLock::new();
+    cached_regex(&RE, r"(?i)\b(?P<isbn>(?:[0-9X](?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)){9,}[0-9X])\b[\t \x{00a0}]*(?:\((?P<after>[^)\n]{1,40})\))?")
 }
 
 /// Inspect a bounded bibliographic page independently of embedded identity fields.
-pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> SectionEvidence {
+pub fn inspect_section(book: &BookRecord, location: &str, text: &str) -> SectionEvidence {
+    try_inspect_section(book, location, text).unwrap_or_else(|error| SectionEvidence { location: location.chars().take(512).collect(), reason: format!("section inspection failed: {error}"), ..Default::default() })
+}
+
+pub fn try_inspect_section(_book: &BookRecord, location: &str, text: &str) -> io::Result<SectionEvidence> {
     let mut out = SectionEvidence { location: location.chars().take(512).collect(), ..Default::default() };
     if text.len() > MAX_SECTION_BYTES {
         out.reason = "section exceeds inspection limit".into();
-        return out;
+        return Ok(out);
     }
     // Extract candidates independently of headings or copyright/CIP wording.
     // Edition scope keeps a discovered ISBN separate from the book's identity.
     out.accepted = true;
     out.reason = "local identifier candidates".into();
-    for marker in isbn_marker_pattern().find_iter(text).take(16) {
+    for marker in isbn_marker_pattern()?.find_iter(text).take(16) {
         let tail = &text[marker.end()..];
         let limit = tail.char_indices().nth(ISBN_SEARCH_CHARS).map_or(tail.len(), |(i, _)| i);
-        let end = isbn_marker_pattern().find(tail).map_or(limit, |next| next.start().min(limit));
+        let end = isbn_marker_pattern()?.find(tail).map_or(limit, |next| next.start().min(limit));
         let window = &tail[..end];
-        let mut matched = isbn_candidate_pattern()
-        .captures_iter(window)
-        .find_map(|c| {
+        let mut matched = isbn_candidate_pattern()?.captures_iter(window).find_map(|c| {
             // Do not accept a number cut short by the bounded search window.
-            if c.name("isbn").unwrap().end() == end && tail[end..].chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            if c.name("isbn")?.end() == end && tail[end..].chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
                 return None;
             }
             complete_isbn(&c["isbn"]).map(|isbn| (c, isbn))
@@ -87,8 +91,8 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         // PDF visual-line extraction can put each numeric group on its own line.
         // Try a whole whitespace-separated run only after the ordinary pass fails;
         // never guess digits or accept a prefix of a longer numeric run.
-        static MULTILINE: OnceLock<Regex> = OnceLock::new();
-        let multiline = MULTILINE.get_or_init(|| Regex::new(r"(?i)\b(?P<isbn>[0-9](?:[\s\-–‐‑]*[0-9X]){9,})\b(?:[\t ]*\((?P<after>[^)\n]{1,40})\))?").unwrap());
+        static MULTILINE: OnceLock<Result<Regex, String>> = OnceLock::new();
+        let multiline = cached_regex(&MULTILINE, r"(?i)\b(?P<isbn>[0-9](?:[\s\-–‐‑]*[0-9X]){9,})\b(?:[\t ]*\((?P<after>[^)\n]{1,40})\))?")?;
         if matched.is_none() {
             matched = multiline.captures_iter(window).find_map(|c| {
                 if c.name("isbn")?.end() == end && tail[end..].chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
@@ -100,7 +104,7 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         let Some((c, isbn)) = matched else { continue };
         // Labels can appear anywhere between the marker and number, or in
         // parentheses immediately after it. They retain edition scope.
-        let label = format!("{} {}", &window[..c.name("isbn").unwrap().start()], c.name("after").map_or("", |m| m.as_str())).to_lowercase();
+        let label = format!("{} {}", &window[..c.name("isbn").ok_or_else(|| io::Error::other("ISBN pattern has no ISBN capture"))?.start()], c.name("after").map_or("", |m| m.as_str())).to_lowercase();
         let scope = if marker.as_str().to_ascii_lowercase().starts_with('e') || ["ebook", "e-book", "epub", "electronic", "pdf"].iter().any(|s| label.contains(s)) {
             IsbnScope::ElectronicEdition
         } else if ["hardcover", "paperback", "pbk", "cloth", "paper", "print"].iter().any(|s| label.contains(s)) {
@@ -123,8 +127,8 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
     // Search the entire accepted block without requiring an ISBN label. Match
     // maximal number runs so a valid content_hash substring in a longer number is
     // not accepted. Keep the labelled pass above for richer edition scope.
-    static NUMBER_RUN: OnceLock<Regex> = OnceLock::new();
-    let numbers = NUMBER_RUN.get_or_init(|| Regex::new(r"(?i)\b[0-9](?:(?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)[0-9X]){9,}\b").unwrap());
+    static NUMBER_RUN: OnceLock<Result<Regex, String>> = OnceLock::new();
+    let numbers = cached_regex(&NUMBER_RUN, r"(?i)\b[0-9](?:(?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)[0-9X]){9,}\b")?;
     for number in numbers.find_iter(text) {
         if out.isbns.len() >= 16 {
             break;
@@ -168,15 +172,15 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         }
     }
     {
-        static LCC: OnceLock<Regex> = OnceLock::new();
+        static LCC: OnceLock<Result<Regex, String>> = OnceLock::new();
         // Full CIP call numbers commonly include a Cutter. Some pages
         // concatenate a four-digit date directly onto the class
         // (HB37172008 .B55 2013); split that date back out before matching.
-        let pattern = LCC.get_or_init(|| Regex::new(r"\b(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?P<class_year>(?:19|20)[0-9]{2})?\s*(?P<cutter>\.[A-Z][0-9]+(?:[A-Z][0-9]+)?)(?:\s+(?P<item_year>(?:19|20)[0-9]{2}))?\b").unwrap());
+        let pattern = cached_regex(&LCC, r"\b(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?P<class_year>(?:19|20)[0-9]{2})?\s*(?P<cutter>\.[A-Z][0-9]+(?:[A-Z][0-9]+)?)(?:\s+(?P<item_year>(?:19|20)[0-9]{2}))?\b")?;
         for captures in pattern.captures_iter(text).take(16) {
-            let class = captures.name("class").unwrap().as_str();
+            let class = captures.name("class").ok_or_else(|| io::Error::other("LCC pattern has no class capture"))?.as_str();
             let class_year = captures.name("class_year").map_or(String::new(), |year| format!(" {}", year.as_str()));
-            let cutter = captures.name("cutter").unwrap().as_str();
+            let cutter = captures.name("cutter").ok_or_else(|| io::Error::other("LCC pattern has no cutter capture"))?.as_str();
             let item_year = captures.name("item_year").map_or(String::new(), |year| format!(" {}", year.as_str()));
             let code = format!("{class}{class_year} {cutter}{item_year}");
             // Publisher control numbers (e.g. QBI04-200396) are not LCC codes.
@@ -193,24 +197,23 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         // clearly identified CIP block, but only if no complete call number
         // was found in that block. This avoids treating code-like fragments
         // embedded in prose or publisher addresses as classifications.
-        static LABELED_LCC: OnceLock<Regex> = OnceLock::new();
-        let labeled =
-            LABELED_LCC.get_or_init(|| Regex::new(r"(?im)^[\t ]*(?:classification[\t ]*:[\t ]*)?LCC[\t ]*:?[\t ]*(?:\r?\n[\t ]*)?(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?:[\t ]+(?P<year>(?:19|20)[0-9]{2}))?[\t ]*$").unwrap());
+        static LABELED_LCC: OnceLock<Result<Regex, String>> = OnceLock::new();
+        let labeled = cached_regex(&LABELED_LCC, r"(?im)^[\t ]*(?:classification[\t ]*:[\t ]*)?LCC[\t ]*:?[\t ]*(?:\r?\n[\t ]*)?(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?:[\t ]+(?P<year>(?:19|20)[0-9]{2}))?[\t ]*$")?;
         for captures in labeled.captures_iter(text).take(16) {
-            let class = captures.name("class").unwrap().as_str().to_ascii_uppercase();
+            let class = captures.name("class").ok_or_else(|| io::Error::other("LCC pattern has no class capture"))?.as_str().to_ascii_uppercase();
             let year = captures.name("year").map_or(String::new(), |year| format!(" {}", year.as_str()));
             let code = format!("{class}{year}");
             if !out.lcc.contains(&code) {
                 out.lcc.push(code);
             }
         }
-        static CIP_HEADING: OnceLock<Regex> = OnceLock::new();
-        let cip_heading = CIP_HEADING.get_or_init(|| Regex::new(r"(?i)\b(?:library of congress cataloging|cataloging[- ]in[- ]publication)\b").unwrap());
+        static CIP_HEADING: OnceLock<Result<Regex, String>> = OnceLock::new();
+        let cip_heading = cached_regex(&CIP_HEADING, r"(?i)\b(?:library of congress cataloging|cataloging[- ]in[- ]publication)\b")?;
         if out.lcc.is_empty() && cip_heading.is_match(text) {
-            static STANDALONE_LCC: OnceLock<Regex> = OnceLock::new();
-            let standalone = STANDALONE_LCC.get_or_init(|| Regex::new(r"(?m)^[\t ]*(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?:[\t ]+(?P<year>(?:19|20)[0-9]{2}))?[\t ]*$").unwrap());
+            static STANDALONE_LCC: OnceLock<Result<Regex, String>> = OnceLock::new();
+            let standalone = cached_regex(&STANDALONE_LCC, r"(?m)^[\t ]*(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?:[\t ]+(?P<year>(?:19|20)[0-9]{2}))?[\t ]*$")?;
             if let Some(captures) = standalone.captures(text) {
-                let class = captures.name("class").unwrap().as_str().to_ascii_uppercase();
+                let class = captures.name("class").ok_or_else(|| io::Error::other("LCC pattern has no class capture"))?.as_str().to_ascii_uppercase();
                 let year = captures.name("year").map_or(String::new(), |year| format!(" {}", year.as_str()));
                 out.lcc.push(format!("{class}{year}"));
             }
@@ -220,7 +223,7 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         out.accepted = false;
         out.reason = "no usable bibliographic identifiers or classification".into();
     }
-    out
+    Ok(out)
 }
 
 /// Resolution is separate from extraction: retain rejected candidates for auditing,

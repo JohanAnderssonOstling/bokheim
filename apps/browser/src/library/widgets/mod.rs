@@ -11,8 +11,8 @@ pub(crate) use book_card::{BookCardEvent, BookCardEvents, BookPlacement, LoadedC
 pub(crate) use book_card::{BookCardInteraction, BookCardPresentation, BookCardView};
 pub(crate) use book_card::{CoversEvicted, cover_generation, evict_covers};
 pub(crate) use paginator::{
-    CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorGroup, PaginatorGroupPolicy, PaginatorPosition, PaginatorSizing, PaginatorState, PaginatorWidthPolicy, book_card_policy, browse_section_card_policy,
-    browse_section_item_policy, browse_section_subject_rows, browse_shelf_card_policy, graph_cover_policy,
+    CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorGroup, PaginatorGroupPolicy, PaginatorPosition, PaginatorSizing, PaginatorState, PaginatorWidthPolicy, book_card_policy, browse_folder_card_policy,
+    browse_folder_item_policy, browse_section_card_policy, browse_section_item_policy, browse_section_subject_rows, browse_shelf_card_policy, graph_cover_policy,
 };
 
 pub(crate) use page_controls::activate_paginator;

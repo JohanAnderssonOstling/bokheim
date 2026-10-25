@@ -8,7 +8,7 @@ UPDATE dir SET deleted_at=NULL WHERE id=:dir_id;
 
 -- name: apply_remote_book_dir_added!
 -- param: dir_id: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: file_name: &str
 INSERT INTO book_dir (dir_id, book_row_id, file_name, local_hash, is_downloaded, deleted_at)
 VALUES (
@@ -27,7 +27,7 @@ ON CONFLICT(dir_id, book_row_id) DO UPDATE SET
 
 -- name: apply_remote_book_dir_removed!
 -- param: dir_id: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: origin_folder_id: Option<&str>
 INSERT INTO book_dir (dir_id, book_row_id, file_name, local_hash, is_downloaded, deleted_at, trash_origin_dir_id)
 VALUES (
@@ -61,7 +61,7 @@ UPDATE dir SET deleted_at=1 WHERE id != '00000000-0000-0000-0000-000000000000';
 INSERT OR IGNORE INTO book_language(book_row_id,language) VALUES(:book_row_id,:language);
 
 -- name: meta_update_book_metadata_state_preserving_ids_update_2!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: title: &str
 -- param: subtitle: Option<&str>
 -- param: search_title: &str
@@ -69,7 +69,7 @@ UPDATE book SET title=:title,subtitle=:subtitle,search_title=:search_title
         WHERE content_hash=:content_hash AND (title IS NOT :title OR subtitle IS NOT :subtitle OR search_title IS NOT :search_title);
 
 -- name: pdf_reader_metadata_upsert!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: metadata: &[u8]
 INSERT INTO pdf_reader_metadata VALUES(:content_hash,:metadata) ON CONFLICT(content_hash) DO UPDATE SET metadata=excluded.metadata WHERE metadata IS NOT excluded.metadata;
 
@@ -80,7 +80,7 @@ INSERT INTO pdf_reader_metadata VALUES(:content_hash,:metadata) ON CONFLICT(cont
 UPDATE dir SET parent_id=:parent_id, name=:name WHERE id=:dir_id;
 
 -- name: queue_book_work_insert!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT OR REPLACE INTO local_book_work(content_hash) VALUES(:content_hash);
 
 -- name: read_sync_state_version_select?

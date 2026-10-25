@@ -7,7 +7,13 @@ pub fn candidate_entry() -> bool {
     let mut args = std::env::args_os().skip(1);
     let action = args.next();
     if action.as_deref() == Some(OsStr::new("--bokheim-update-info")) {
-        println!("{}", crate::update_metadata::json().expect("invalid bundled update metadata"));
+        match crate::update_metadata::json() {
+            Ok(metadata) => println!("{metadata}"),
+            Err(error) => {
+                eprintln!("invalid bundled update metadata: {error}");
+                std::process::exit(1);
+            }
+        }
         return true;
     }
     if action.as_deref() != Some(OsStr::new("--bokheim-prepare-update")) {

@@ -3,9 +3,10 @@
 //! This module deliberately exposes bytes, paths, and directory entries only.
 //! It does not classify books or persist scan decisions.
 
+use client_platform_native::filesystem::retry_transient;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Error, ErrorKind};
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 pub struct DirectoryWalk {
@@ -77,13 +78,13 @@ pub fn walk(root: impl AsRef<Path>) -> DirectoryWalk {
 }
 
 pub fn read_to_string(path: impl AsRef<Path>) -> std::io::Result<String> {
-    std::fs::read_to_string(path)
+    retry_transient(|| fs::read_to_string(path.as_ref()))
 }
 pub fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 pub fn open(path: impl AsRef<Path>) -> std::io::Result<File> {
-    File::open(path)
+    retry_transient(|| File::open(path.as_ref()))
 }
 
 pub fn fingerprint(path: impl AsRef<Path>) -> std::io::Result<u64> {
@@ -115,7 +116,8 @@ pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track])
         hasher.update(cover.name.as_bytes());
         hasher.update(&fingerprint(&cover.path)?.to_le_bytes());
     }
-    Ok(u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap()))
+    let [a, b, c, d, e, f, g, h, ..] = *hasher.finalize().as_bytes();
+    Ok(u64::from_le_bytes([a, b, c, d, e, f, g, h]))
 }
 
 /// Places a file or complete folder before any book inspection begins.
@@ -142,12 +144,9 @@ pub fn place_into_directory_with_intent(source: &Path, directory: &Path, occupie
     let name = source.file_name().and_then(OsStr::to_str).ok_or_else(|| Error::other("invalid file name"))?;
     let mut names = occupied.to_vec();
     names.extend(fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
-    let candidates: Box<dyn Iterator<Item = String> + '_> = if metadata.is_dir() {
-        Box::new(library_replica::folder_name_candidates(name, names.iter().map(String::as_str)))
-    } else {
-        Box::new(library_replica::file_name_candidates(name, names.iter().map(String::as_str)))
-    };
-    let mut staging = None;
+    let candidates: Box<dyn Iterator<Item = String> + '_> =
+        if metadata.is_dir() { Box::new(library_replica::folder_name_candidates(name, names.iter().map(String::as_str))) } else { Box::new(library_replica::file_name_candidates(name, names.iter().map(String::as_str))) };
+    let mut staging: Option<tempfile::TempDir> = None;
     for name in candidates {
         let destination = directory.join(name);
         if destination.symlink_metadata().is_ok() {
@@ -164,18 +163,25 @@ pub fn place_into_directory_with_intent(source: &Path, directory: &Path, occupie
         }
         // A complete file or folder is copied under a hidden directory on the
         // destination filesystem. The scanner skips it, including after a crash.
-        if staging.is_none() {
-            let temporary = tempfile::Builder::new().prefix(".bokheim-copy-").tempdir_in(&directory)?;
-            copy_entry(&source, &temporary.path().join("contents"))?;
-            staging = Some(temporary);
-        }
-        let staged = staging.as_ref().unwrap().path().join("contents");
+        let temporary = match &mut staging {
+            Some(temporary) => temporary,
+            vacant @ None => {
+                let temporary = tempfile::Builder::new().prefix(".bokheim-copy-").tempdir_in(&directory)?;
+                copy_entry(&source, &temporary.path().join("contents"))?;
+                vacant.insert(temporary)
+            }
+        };
+        let staged = temporary.path().join("contents");
         match rename_entry(&staged, &destination) {
             Ok(()) => {
                 // Cross-filesystem moves delete the original only after the
                 // completed copy has been renamed into its final location.
                 if moving {
-                    if metadata.is_dir() { fs::remove_dir_all(&source)?; } else { fs::remove_file(&source)?; }
+                    if metadata.is_dir() {
+                        fs::remove_dir_all(&source)?;
+                    } else {
+                        fs::remove_file(&source)?;
+                    }
                 }
                 return Ok(destination);
             }

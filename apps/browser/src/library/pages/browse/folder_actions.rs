@@ -8,7 +8,7 @@
 use ui_components::user_facing_error;
 
 use library_backend::DownloadState;
-use library_backend::LibraryClient;
+use library_backend::{BackendError, LibraryClient};
 
 use crate::services::notify_error;
 
@@ -18,7 +18,7 @@ use gpui_component::button::ButtonVariants;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu};
 use gpui_component::{Disableable, IconName};
-use sync_common::{ContentHash, DirId, ROOT_DIR_ID};
+use sync_common::{BookId, DirId, ROOT_DIR_ID};
 use ui_components as components;
 
 use super::folder_picker::{FolderPicker, FolderPickerEvent};
@@ -86,7 +86,7 @@ enum TargetOperation {
 }
 
 impl TargetOperation {
-    async fn apply(self, library: &LibraryClient, targets: FolderTargets, entry: &mut UndoEntry) -> Result<(), String> {
+    async fn apply(self, library: &LibraryClient, targets: FolderTargets, entry: &mut UndoEntry) -> Result<(), BackendError> {
         let source = targets.source;
         entry
             .record(targets.folders, |folder| {
@@ -131,7 +131,7 @@ impl TargetOperation {
 pub(crate) struct FolderTargets {
     pub(crate) folders: Vec<DirId>,
     pub(crate) folder_parents: std::collections::HashMap<DirId, DirId>,
-    pub(crate) books: Vec<ContentHash>,
+    pub(crate) books: Vec<BookId>,
     /// The holder of listed books and fallback parent for ordinary folder chips.
     /// Promoted chips record their actual parents separately. Flat book copies
     /// resolve each source in the backend instead.
@@ -527,7 +527,7 @@ impl FolderActions {
         self.run_targets(targets, TargetOperation::Remove, label, move |result, window, cx| Self::finish_removal(result, report, "folder-remove", "remove everything selected from the folder", window, cx), cx);
     }
 
-    fn finish_removal(result: Result<(), String>, label: String, id: &'static str, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_removal(result: Result<(), BackendError>, label: String, id: &'static str, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         match result {
             Ok(()) => crate::services::notify_undoable(id, label, window, cx),
             Err(error) => notify_error(id, format!("Could not {action}. {}", user_facing_error(&error, "Please try again.")), window, cx),
@@ -535,7 +535,7 @@ impl FolderActions {
     }
 
     /// Commit undo before reporting completion, including any successful prefix.
-    fn run_targets(&mut self, targets: FolderTargets, operation: TargetOperation, label: String, finished: impl FnOnce(Result<(), String>, &mut Window, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+    fn run_targets(&mut self, targets: FolderTargets, operation: TargetOperation, label: String, finished: impl FnOnce(Result<(), BackendError>, &mut Window, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
         let library = self.ui.backend().clone();
         let session = self.ui.session();
         cx.spawn(async move |actions, cx| {

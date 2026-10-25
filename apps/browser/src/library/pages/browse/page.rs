@@ -15,7 +15,7 @@ use gpui_component::IconName;
 use gpui_component::breadcrumb::BreadcrumbItem;
 use gpui_component::menu::PopupMenu;
 use library_model::BrowseLocation;
-use sync_common::{ContentHash, DirId, ROOT_DIR_ID};
+use sync_common::{BookId, DirId, ROOT_DIR_ID};
 use ui_components as components;
 
 use super::cards::{CardEvent, CardEvents, CardView};
@@ -85,7 +85,7 @@ pub(crate) struct BrowsePage {
     split_close_enabled: bool,
     /// Keep the requested trail while its asynchronous listing is still loading.
     session_path: Vec<BrowseCrumb>,
-    restoring_detail: Option<ContentHash>,
+    restoring_detail: Option<BookId>,
     restore_task: Option<Task<()>>,
     profile_render_pending: Option<Stage>,
 }

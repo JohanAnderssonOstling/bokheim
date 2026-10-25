@@ -59,8 +59,9 @@ impl LayoutCache {
         if self.entries.front().is_some_and(|layout| !Rc::ptr_eq(&layout.key.data, &key.data) || !Rc::ptr_eq(&layout.key.widths, &key.widths)) {
             self.entries.clear();
         }
-        if let Some(index) = self.entries.iter().position(|layout| layout.key.matches(&key)) {
-            let entry = self.entries.remove(index).unwrap();
+        if let Some(index) = self.entries.iter().position(|layout| layout.key.matches(&key))
+            && let Some(entry) = self.entries.remove(index)
+        {
             self.entries.push_front(entry.clone());
             return entry;
         }

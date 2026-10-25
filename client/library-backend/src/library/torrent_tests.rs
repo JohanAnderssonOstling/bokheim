@@ -3,7 +3,7 @@ use crate::library::handle::concurrency_tests::fixture;
 use librqbit::{CreateTorrentOptions, SessionOptions};
 use std::fs;
 use std::sync::atomic::{AtomicU16, Ordering};
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -72,9 +72,12 @@ async fn exercise(magnet: bool) {
         TorrentInput::File(bytes.to_vec().into())
     };
     assert_eq!(library.add_torrent(input).await.unwrap(), hash);
+    let policy = TransferPolicy::default();
+    policy.set_network_cost(transfers::NetworkCost::Metered);
+    assert!(library.torrents.next_check(library, &policy).unwrap().is_some(), "explicit torrents keep progressing on metered connections");
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            library.torrents.pass(library).await.unwrap();
+            library.torrents.pass_with_policy(library, &policy).await.unwrap();
             if library.db.torrents().unwrap()[0].imported {
                 break;
             }
@@ -89,7 +92,7 @@ async fn exercise(magnet: bool) {
     assert_eq!(fs::read(root.path().join("Books/Nested/Other.epub")).unwrap(), OTHER);
     assert_eq!(fs::read(root.path().join("Books/notes.txt")).unwrap(), b"retain every file");
     assert!(!root.path().join(&original.staging_path).exists(), "payload is moved, never copied");
-    for book in [ContentHash::from(blake3::hash(EPUB)), ContentHash::from(blake3::hash(OTHER))] {
+    for book in [BookId::from(blake3::hash(EPUB)), BookId::from(blake3::hash(OTHER))] {
         let links = library.db.book_torrents(&book).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].info_hash, hash);
@@ -103,7 +106,7 @@ async fn exercise(magnet: bool) {
     library.torrents.pass(library).await.unwrap();
     let record = library.db.torrents().unwrap().remove(0);
     assert_eq!(library.db.torrent_output_path(&record).unwrap().as_deref(), Some("/Shelf/Moved books"));
-    assert_eq!(library.db.book_torrents(&ContentHash::from(blake3::hash(EPUB))).unwrap()[0].info_hash, hash);
+    assert_eq!(library.db.book_torrents(&BookId::from(blake3::hash(EPUB))).unwrap()[0].info_hash, hash);
     let engine = library.torrents.engine.lock().await.as_ref().unwrap().clone();
     let handle = engine.get(torrent_id(&hash).unwrap()).unwrap();
     assert!(handle.stats().finished, "moved bytes are verified before seeding");
@@ -129,7 +132,7 @@ async fn exercise(magnet: bool) {
     *library.torrents.engine.lock().await = Some(local_engine(root.path()).await);
     library.torrents.pass(library).await.unwrap();
     assert!(library.torrents.engine.lock().await.as_ref().unwrap().get(torrent_id(&hash).unwrap()).unwrap().stats().finished);
-    assert_eq!(library.db.book_torrents(&ContentHash::from(blake3::hash(EPUB))).unwrap()[0].info_hash, hash);
+    assert_eq!(library.db.book_torrents(&BookId::from(blake3::hash(EPUB))).unwrap()[0].info_hash, hash);
     library.db.keep_torrent_seeding(&hash, false).unwrap();
     library.torrents.pass(library).await.unwrap();
     assert!(library.torrents.engine.lock().await.is_none(), "no peer or discovery work remains without active torrents");
@@ -157,7 +160,7 @@ async fn exercise(magnet: bool) {
     library.db.forget_torrent(&hash).unwrap();
     library.torrents.pass(library).await.unwrap();
     assert!(library.torrents.engine.lock().await.is_none(), "no peer or discovery work remains without active torrents");
-    assert!(library.db.book_torrents(&ContentHash::from(blake3::hash(EPUB))).unwrap().is_empty());
+    assert!(library.db.book_torrents(&BookId::from(blake3::hash(EPUB))).unwrap().is_empty());
     assert_eq!(fs::read(root.path().join("Shelf/Moved books/Novel.epub")).unwrap(), EPUB);
     tracker_task.abort();
 }
@@ -285,7 +288,7 @@ async fn interrupted_publication_recovers_destination_without_recreating_staging
     assert!(library.torrents.engine.lock().await.is_none(), "tracker, discovery and peer traffic stop together");
     let waiting = library.db.torrents().unwrap().remove(0);
     assert!(waiting.imported && waiting.keep_seeding, "automatic suspension does not change the user's preference");
-    let book = ContentHash::from(blake3::hash(EPUB));
+    let book = BookId::from(blake3::hash(EPUB));
     assert_eq!(library.db.book_torrents(&book).unwrap()[0].info_hash, hash);
     assert_eq!(fs::read(payload.join("Novel.epub")).unwrap(), EPUB);
 

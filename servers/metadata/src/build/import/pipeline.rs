@@ -1,8 +1,8 @@
-use crate::{
-    error, mpsc, params, thread, BufRead, BufReader, Connection, DeserializeOwned, File, IndexedParallelIterator, IntoParallelIterator, MetadataError, MultiGzDecoder, ParallelIterator, Path, OPEN_LIBRARY_CHECKPOINT_RECORDS,
-    PIPELINE_BUFFERED_BATCHES, PIPELINE_PARSE_RECORDS,
-};
 use super::core::{checkpoint_records, completed_phase};
+use crate::{
+    BufRead, BufReader, Connection, DeserializeOwned, File, IndexedParallelIterator, IntoParallelIterator, MetadataError, MultiGzDecoder, OPEN_LIBRARY_CHECKPOINT_RECORDS, PIPELINE_BUFFERED_BATCHES, PIPELINE_PARSE_RECORDS, ParallelIterator,
+    Path, error, mpsc, params, thread,
+};
 
 struct RawJsonBatch {
     end_count: usize,
@@ -16,6 +16,11 @@ struct ParsedJsonBatch<T> {
     records: Vec<T>,
 }
 
+pub(crate) struct JsonBatchSizes {
+    pub checkpoint: usize,
+    pub parse: usize,
+}
+
 pub(crate) fn read_open_library_resumable<T: DeserializeOwned + Send>(
     connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, mut import_batch: impl FnMut(&rusqlite::Transaction<'_>, Vec<T>) -> Result<(), MetadataError>,
 ) -> Result<usize, MetadataError> {
@@ -25,14 +30,14 @@ pub(crate) fn read_open_library_resumable<T: DeserializeOwned + Send>(
 fn read_json_resumable<T: DeserializeOwned + Send>(
     connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, batch_size: usize, import_batch: &mut impl FnMut(&rusqlite::Transaction<'_>, Vec<T>) -> Result<(), MetadataError>,
 ) -> Result<usize, MetadataError> {
-    read_json_resumable_mapped(connection, path, limit, phase, batch_size, PIPELINE_PARSE_RECORDS, &Some, import_batch)
+    read_json_resumable_mapped(connection, path, limit, phase, JsonBatchSizes { checkpoint: batch_size, parse: PIPELINE_PARSE_RECORDS }, &Some, import_batch)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn read_json_resumable_mapped<T: DeserializeOwned + Send, U: Send>(
-    connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, batch_size: usize, parse_batch_size: usize, transform: &(impl Fn(T) -> Option<U> + Sync),
+    connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, batch_sizes: JsonBatchSizes, transform: &(impl Fn(T) -> Option<U> + Sync),
     import_batch: &mut impl FnMut(&rusqlite::Transaction<'_>, Vec<U>) -> Result<(), MetadataError>,
 ) -> Result<usize, MetadataError> {
+    let JsonBatchSizes { checkpoint: batch_size, parse: parse_batch_size } = batch_sizes;
     if let Some(records) = completed_phase(connection, phase)? {
         println!("resuming after completed {phase} phase ({records} records)");
         return usize::try_from(records).map_err(error);

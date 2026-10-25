@@ -16,12 +16,16 @@ pub(crate) enum SettingsRow {
     Alignment,
     FontSize,
     LineHeight,
+    ReadingRuler,
+    ReadingRulerStyle,
+    ReadingRulerLines,
     SideMargins,
     VerticalMargins,
     ColumnGap,
     LineLength,
     PdfMargins,
     PdfFit,
+    PdfDirection,
     PdfPages,
     PdfZoom,
 }
@@ -53,9 +57,8 @@ impl SettingsNavigation {
 
     pub(crate) fn fullscreen_group(&self, rows: &[SettingsRow], window: &Window, theme: components::BrowserTheme) -> Option<Div> {
         DESKTOP_FULLSCREEN.then(|| {
-            let label = if window.is_fullscreen() { "Exit full screen" } else { "Enter full screen" };
-            let button = components::reader_choice_button("reader-toggle-fullscreen", label, false, theme).on_click(|_, window, _| window.toggle_fullscreen());
-            let row = components::reader_setting_row_smallcaps("Full screen", theme).child(components::reader_choice_button_group("reader-fullscreen", [button], theme));
+            let checkbox = components::reader_setting_checkbox("reader-toggle-fullscreen", "Full screen", window.is_fullscreen(), theme).on_click(|enabled, window, _| set_fullscreen(*enabled, window));
+            let row = div().w_full().child(checkbox);
             components::reader_settings_group(theme).child(self.row(SettingsRow::Fullscreen, rows, row, theme))
         })
     }

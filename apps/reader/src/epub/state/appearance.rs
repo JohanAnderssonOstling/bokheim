@@ -4,6 +4,7 @@ use crate::invalidation::notify;
 use app_preferences::{FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFontFamily, ReaderTextAlignment};
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
+use html_view_gpui::ReadingRulerStyle;
 
 use crate::epub::ReaderView;
 use crate::invalidation::Component;
@@ -42,6 +43,40 @@ fn fitted_columns_and_width(viewport_width: f64, minimum_gap: f64, desired: u8, 
 }
 
 impl ReaderView {
+    pub(in crate::epub) fn set_reading_ruler(&self, style: ReadingRulerStyle, cx: &mut Context<Self>) {
+        if ReaderSettings::update(cx, |preferences| {
+            if style != ReadingRulerStyle::Off {
+                preferences.reading_ruler_last_style = style;
+            } else if preferences.reading_ruler != ReadingRulerStyle::Off {
+                preferences.reading_ruler_last_style = preferences.reading_ruler;
+            }
+            preferences.reading_ruler = style;
+        }) {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::epub) fn set_reading_ruler_enabled(&self, enabled: bool, cx: &mut Context<Self>) {
+        if (ReaderSettings::preferences(cx).reading_ruler != ReadingRulerStyle::Off) == enabled {
+            return;
+        }
+        let style = if enabled {
+            match ReaderSettings::preferences(cx).reading_ruler_last_style {
+                ReadingRulerStyle::Off => ReadingRulerStyle::Band,
+                style => style,
+            }
+        } else {
+            ReadingRulerStyle::Off
+        };
+        self.set_reading_ruler(style, cx);
+    }
+
+    pub(in crate::epub) fn set_reading_ruler_lines(&self, lines: usize, cx: &mut Context<Self>) {
+        if ReaderSettings::update(cx, |preferences| preferences.reading_ruler_lines = lines.clamp(1, 5)) {
+            cx.notify();
+        }
+    }
+
     pub(in crate::epub) fn active_sidebar_tab(&self, window: &Window) -> Option<SidebarTab> {
         if chrome::sidebar_overlays_document(window) { self.sidebar.effective(true) } else { Some(self.sidebar.effective_or_default(true)) }
     }
@@ -101,7 +136,15 @@ impl ReaderView {
     }
 
     pub(in crate::epub) fn set_reader_font_family(&self, font_family: ReaderFontFamily, cx: &mut Context<Self>) {
-        self.apply_style_override(cx, |preferences| preferences.font_family = font_family);
+        self.apply_style_override(cx, |preferences| {
+            preferences.font_family = font_family;
+            preferences.system_font_family = None;
+        });
+        self.font_picker.update(cx, |_, cx| cx.notify());
+    }
+
+    pub(in crate::epub) fn set_system_font_family(&self, family: String, cx: &mut Context<Self>) {
+        self.apply_style_override(cx, |preferences| preferences.system_font_family = Some(family));
     }
 
     pub(in crate::epub) fn set_reader_text_alignment(&self, text_alignment: ReaderTextAlignment, cx: &mut Context<Self>) {

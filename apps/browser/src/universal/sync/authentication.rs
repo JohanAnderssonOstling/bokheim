@@ -120,6 +120,7 @@ impl SyncPage {
     pub(super) fn start_verify_email(&mut self, cx: &mut Context<Self>) {
         let email = self.authentication.email.read(cx).value().trim().to_owned();
         let pin = self.authentication.verification_pin.read(cx).value().trim().to_owned();
+        let password = self.authentication.registration_password.read(cx).value().to_string();
         let pin_digits = account_contract::EMAIL_VERIFICATION_PIN_DIGITS;
         if email.is_empty() {
             self.error = Some("Enter your email address.".into());
@@ -131,7 +132,12 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        let operation = super::account::verify_email(&self.services.backend, email, pin);
+        if password.is_empty() {
+            self.error = Some("Enter the password you chose for this account.".into());
+            cx.notify();
+            return;
+        }
+        let operation = super::account::verify_email(&self.services.backend, email, pin, password);
         self.start_snapshot_operation("Verifying email…", Some("Email verified"), false, operation, cx);
     }
 

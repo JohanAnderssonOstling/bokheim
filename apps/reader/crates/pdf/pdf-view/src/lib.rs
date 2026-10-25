@@ -1,20 +1,21 @@
 mod session;
 
+use fixed_page::{DISPLAY_CACHE_BUDGET, PageCache, PageImage, PageSwipe, PageZoom};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, Pixels, Point, Render,
-    RenderImage, ScrollDelta, ScrollHandle, Style, Task, TouchPhase, Window, div, fill, point, px, rgba, size,
+    ScrollDelta, ScrollHandle, Style, Task, TouchPhase, Window, div, fill, point, px, rgba, size,
 };
 use gpui_component::ElementExt;
 use gpui_image_eviction::track_image;
-use image::{Frame, RgbaImage};
+use image::RgbaImage;
 use pdf_reader_core::{
     DISPLAY_TILE_HEIGHT, FitWidthAnchor, FitWidthAnchorPager, FitWidthColumn, FitWidthPage, FitWidthPlan, FitWidthViewport, NormalizedRect, PageRenderKey, PdfDocumentInfo, PdfDocumentSession, PdfPageGeometry, PdfPageTextLayout, PdfResult,
     PdfSearchHit, PdfTextSelection, PixelCrop, ReaderInteractionStyle, SelectionGranularity, SelectionOptions,
 };
 use smallvec::SmallVec;
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,7 +23,6 @@ use std::time::Duration;
 use ui_components::{self as components, PageTurn};
 use web_time::Instant;
 
-const DISPLAY_CACHE_BUDGET: usize = 64 * 1024 * 1024;
 // PDF raster cost grows with area. A 64px bucket keeps resize cache reuse
 // without routinely producing far more pixels than the viewport can display.
 const RENDER_WIDTH_BUCKET: f32 = 64.0;
@@ -199,6 +199,8 @@ pub struct PdfView {
     /// A direct jump can reveal a page excluded from ordinary reading flow.
     revealed_page: Option<usize>,
     zoom_mode: PdfZoomMode,
+    right_to_left: bool,
+    direction_override: Option<bool>,
     /// Device pixels per logical pixel, sampled from the window each frame so
     /// pages are rastered at the resolution they are actually painted at.
     device_pixel_ratio: f32,
@@ -236,31 +238,22 @@ pub struct PdfView {
     wheel_debounce: Option<Task<()>>,
     /// How far the finger has travelled on both axes, while a touch swipe is
     /// in progress.
-    touch_swipe: Option<Point<f32>>,
+    touch_swipe: PageSwipe,
     swipe_preview: components::SwipePreview,
     page_turn: Option<PageTurn<PdfFlowSnapshot>>,
     scroll_animation: Option<PdfScrollAnimation>,
-    /// The swipe began in the bottom gesture area, so it is the system's and
-    /// turns no page.
-    touch_swipe_from_edge: bool,
     scroll_handle: ScrollHandle,
     focus: FocusHandle,
 }
 
 struct DisplayPage {
-    image: Arc<RenderImage>,
+    raster: PageImage,
     text_layout: Arc<PdfPageTextLayout>,
     raster_crop: PixelCrop,
     page_crop: NormalizedRect,
-    byte_len: usize,
 }
 
-struct DisplayPageCache {
-    byte_budget: usize,
-    byte_len: usize,
-    pages: HashMap<PageRenderKey, Arc<DisplayPage>>,
-    recency: VecDeque<PageRenderKey>,
-}
+type DisplayPageCache = PageCache<PageRenderKey, DisplayPage>;
 
 #[derive(Clone)]
 struct PageSearchHits {
@@ -294,6 +287,7 @@ struct PdfFlowSnapshot {
     column_height: f32,
     remainder: f32,
     fit_height: bool,
+    right_to_left: bool,
     slots: Vec<PdfFlowSlot>,
 }
 
@@ -341,7 +335,7 @@ impl PdfFlowSnapshot {
             );
             columns.push(div().flex_1().h_full().when(slot_index + 1 < self.slots.len(), |gap| gap.bg(paper_color)).into_any_element());
         }
-        div().w_full().h(px(self.column_height)).flex().flex_row().items_start().flex_shrink_0().transform(gpui::ElementTransform::default().translate(offset)).children(columns)
+        div().w_full().h(px(self.column_height)).flex().flex_row().when(self.right_to_left, |row| row.flex_row_reverse()).items_start().flex_shrink_0().transform(gpui::ElementTransform::default().translate(offset)).children(columns)
     }
 }
 
@@ -423,6 +417,8 @@ impl PdfView {
             navigation_revision: 0,
             revealed_page: None,
             zoom_mode: PdfZoomMode::default(),
+            right_to_left: false,
+            direction_override: None,
             device_pixel_ratio: 1.0,
             available_width: DEFAULT_AVAILABLE_WIDTH,
             available_height: DEFAULT_AVAILABLE_HEIGHT,
@@ -454,11 +450,10 @@ impl PdfView {
             flow_offset: 0.0,
             wheel_delta: 0.0,
             wheel_debounce: None,
-            touch_swipe: None,
+            touch_swipe: PageSwipe::default(),
             swipe_preview: components::SwipePreview::default(),
             page_turn: None,
             scroll_animation: None,
-            touch_swipe_from_edge: false,
             scroll_handle: ScrollHandle::new(),
             focus,
         }
@@ -572,6 +567,48 @@ impl PdfView {
         self.turn_page(false, cx);
     }
 
+    pub fn right_to_left(&self) -> bool {
+        self.right_to_left
+    }
+
+    /// Overrides the document's reading direction.
+    pub fn set_right_to_left(&mut self, right_to_left: bool, cx: &mut Context<Self>) {
+        self.set_direction_override(Some(right_to_left), cx);
+    }
+
+    /// `None` follows the PDF's viewer preference (including after async load).
+    pub fn set_direction_override(&mut self, direction: Option<bool>, cx: &mut Context<Self>) {
+        self.direction_override = direction;
+        self.apply_reading_direction(cx);
+    }
+
+    /// Changes presentation without changing source positions or reading history.
+    fn apply_reading_direction(&mut self, cx: &mut Context<Self>) {
+        let right_to_left = self.direction_override.unwrap_or_else(|| self.info.as_ref().is_some_and(PdfDocumentInfo::right_to_left));
+        if self.right_to_left == right_to_left {
+            return;
+        }
+        self.right_to_left = right_to_left;
+        self.touch_swipe.cancel();
+        self.swipe_preview.clear();
+        self.page_turn = None;
+        self.scroll_animation = None;
+        self.wheel_delta = 0.0;
+        self.wheel_debounce.take();
+        self.tap_start = None;
+        self.selection_anchor = None;
+        self.selection_anchor_source_index = None;
+        self.selection_active = None;
+        self.passage_bounds.set(None);
+        cx.notify();
+    }
+
+    /// `towards_right` describes a physical control, such as the right arrow.
+    /// Next/previous-page commands themselves retain document order.
+    pub fn horizontal_page(&mut self, towards_right: bool, cx: &mut Context<Self>) {
+        self.turn_page(towards_right != self.right_to_left, cx);
+    }
+
     fn turn_page(&mut self, forward: bool, cx: &mut Context<Self>) {
         self.pending_search_scroll = None;
         self.finish_scroll_animation(cx);
@@ -588,8 +625,9 @@ impl PdfView {
         if before != (self.source_position, self.flow_offset) {
             let drag = self.swipe_preview.take_offset();
             let viewport = size(px(self.available_width), px(self.flow_column_height()));
-            self.page_turn =
-                outgoing.and_then(|outgoing| if self.zoom_mode == PdfZoomMode::FitHeight { PageTurn::new(outgoing, forward, drag, viewport, cx) } else { PageTurn::new_on_axis(outgoing, forward, drag, viewport, Axis::Vertical, cx) });
+            let axis = if self.zoom_mode == PdfZoomMode::FitHeight && drag.x.abs() >= drag.y.abs() { Axis::Horizontal } else { Axis::Vertical };
+            let physical_forward = if axis == Axis::Horizontal && self.right_to_left { !forward } else { forward };
+            self.page_turn = outgoing.and_then(|outgoing| PageTurn::new_on_axis(outgoing, physical_forward, drag, viewport, axis, cx));
         } else {
             self.swipe_preview.settle();
         }
@@ -717,7 +755,7 @@ impl PdfView {
         let page_position = self.current_page_position();
         self.wheel_debounce.take();
         self.wheel_delta = 0.0;
-        self.touch_swipe = None;
+        self.touch_swipe.cancel();
         self.zoom_mode = zoom_mode;
         self.rebuild_fit_width_plan();
         self.restore_page_position(page_position);
@@ -1000,6 +1038,7 @@ impl PdfView {
                 match result {
                     Ok(session) => {
                         this.info = Some(session.info().clone());
+                        this.apply_reading_direction(cx);
                         this.session = Some(session);
                         let mut page_index = this.source_position.page_index().min(this.page_count().saturating_sub(1));
                         if let Some(info) = &this.info
@@ -1146,7 +1185,7 @@ impl PdfView {
         // tiles, instead of substituting the same tile index at another size.
         for key in keys {
             if !self.display_cache.contains(*key) {
-                for page in self.display_cache.fallback(*key) {
+                for page in pdf_fallback_pages(&mut self.display_cache, *key) {
                     if !pages.iter().any(|(_, existing)| Arc::ptr_eq(existing, &page)) {
                         pages.push((key.page_index(), page));
                     }
@@ -1224,7 +1263,7 @@ impl PdfView {
                 return false;
             }
         };
-        self.display_cache.insert(key, page);
+        self.display_cache.insert(key, page.clone(), page.raster.byte_len);
         if self.render_generation != generation {
             return false;
         }
@@ -1407,7 +1446,17 @@ impl PdfView {
     }
 
     fn page_drag(&self, travel: Point<f32>) -> Point<f32> {
-        if self.zoom_mode == PdfZoomMode::FitHeight { travel } else { point(0.0, if travel.x.abs() > travel.y.abs() { travel.x } else { travel.y }) }
+        if self.zoom_mode == PdfZoomMode::FitHeight { travel } else { point(0.0, if travel.x.abs() > travel.y.abs() { if self.right_to_left { -travel.x } else { travel.x } } else { travel.y }) }
+    }
+
+    fn flow_scroll_delta(&self, travel: Point<f32>) -> f32 {
+        if travel.y != 0.0 {
+            travel.y
+        } else if self.right_to_left {
+            -travel.x
+        } else {
+            travel.x
+        }
     }
 
     /// Touch swipes turn a complete viewport in every zoom mode. Physical
@@ -1416,7 +1465,7 @@ impl PdfView {
     /// swipe began in the bottom gesture area; it is read when the swipe
     /// starts.
     fn handle_page_scroll(&mut self, travel: Point<f32>, phase: TouchPhase, from_edge: bool, window: &Window, cx: &mut Context<Self>) {
-        if cfg!(target_os = "android") || window.is_page_scroll_swipe() || self.touch_swipe.is_some() {
+        if cfg!(target_os = "android") || window.is_page_scroll_swipe() || self.touch_swipe.is_active() {
             let viewport = size(px(self.available_width), px(self.flow_column_height()));
             let travel = if travel.x.is_finite() && travel.y.is_finite() { travel } else { gpui::point(0.0, 0.0) };
             match phase {
@@ -1424,32 +1473,26 @@ impl PdfView {
                     self.scroll_animation = None;
                     self.page_turn = None;
                     self.wheel_debounce.take();
-                    self.touch_swipe = Some(travel);
-                    self.touch_swipe_from_edge = from_edge;
-                    if !from_edge {
+                    self.touch_swipe.begin(from_edge);
+                    if self.touch_swipe.push(travel.x, travel.y).is_some() {
                         if self.swipe_preview.drag_in_viewport(self.page_drag(travel), viewport) {
                             cx.notify();
                         }
                     }
                     return;
                 }
-                TouchPhase::Moved if self.touch_swipe.is_some() => {
-                    if let Some(swipe) = &mut self.touch_swipe {
-                        *swipe = gpui::point(swipe.x + travel.x, swipe.y + travel.y);
-                        if !self.touch_swipe_from_edge {
-                            let travel = *swipe;
-                            if self.swipe_preview.drag_in_viewport(self.page_drag(travel), viewport) {
-                                cx.notify();
-                            }
+                TouchPhase::Moved if self.touch_swipe.is_active() => {
+                    if let Some((dx, dy)) = self.touch_swipe.push(travel.x, travel.y) {
+                        let travel = point(dx, dy);
+                        if self.swipe_preview.drag_in_viewport(self.page_drag(travel), viewport) {
+                            cx.notify();
                         }
                     }
                     return;
                 }
-                TouchPhase::Ended if self.touch_swipe.is_some() => {
-                    let Some(swipe) = self.touch_swipe.take() else { return };
-                    // A swipe from the bottom edge is the system's.
-                    let from_edge = std::mem::take(&mut self.touch_swipe_from_edge);
-                    match components::swipe_turns_forward(swipe, window).filter(|_| !from_edge) {
+                TouchPhase::Ended if self.touch_swipe.is_active() => {
+                    let forward = self.touch_swipe.finish().and_then(|(dx, dy)| components::swipe_turns_forward_with_direction(point(dx, dy), window, self.right_to_left));
+                    match forward {
                         Some(forward) => {
                             if forward {
                                 self.next_page(cx)
@@ -1465,8 +1508,7 @@ impl PdfView {
                 TouchPhase::Cancelled => {
                     self.swipe_preview.settle();
                     cx.notify();
-                    self.touch_swipe = None;
-                    self.touch_swipe_from_edge = false;
+                    self.touch_swipe.cancel();
                     self.wheel_delta = 0.0;
                     self.wheel_debounce.take();
                     return;
@@ -1475,7 +1517,7 @@ impl PdfView {
             }
         }
         // A wheel or trackpad: whichever axis it moved on.
-        let delta = if travel.y != 0.0 { travel.y } else { travel.x };
+        let delta = self.flow_scroll_delta(travel);
         if !delta.is_finite() || delta == 0.0 {
             return;
         }
@@ -1510,7 +1552,7 @@ impl PdfView {
         if relative_x < 0.0 || relative_y < 0.0 || relative_x >= f32::from(surface.size.width) || relative_y >= f32::from(surface.size.height) {
             return None;
         }
-        let slots = evenly_spaced_page_slots(f32::from(surface.size.width), &self.screen_column_widths());
+        let slots = evenly_spaced_page_slots(f32::from(surface.size.width), &self.screen_column_widths(), self.right_to_left);
         let (slot_index, &(slot_left, column_width)) = slots.iter().enumerate().find(|(_, slot)| relative_x >= slot.0 && relative_x < slot.0 + slot.1)?;
         let streamed_y = relative_y + self.flow_remainder();
         let stream_index = (streamed_y / column_height).floor() as usize;
@@ -1938,7 +1980,7 @@ impl PdfView {
 fn width_fit_zoom(columns: usize, available_width: f32, page_width: f32) -> f32 {
     let columns = columns.max(1) as f32;
     let usable_width = (available_width - FIT_WIDTH_SURFACE_PADDING * 2.0).max(1.0);
-    (usable_width / columns / page_width.max(f32::MIN_POSITIVE)).max(f32::MIN_POSITIVE)
+    PageZoom::FitWidth.scale((page_width, 1.0), (usable_width / columns, 1.0)).max(f32::MIN_POSITIVE)
 }
 
 /// How many columns of `column_width` fit across the viewport.
@@ -1955,7 +1997,7 @@ fn columns_that_fit(column_width: f32, available_width: f32) -> usize {
 /// split downwards, so anything wider would hang off the side with no way to
 /// reach it.
 fn resolve_layout(zoom_mode: PdfZoomMode, available_width: f32, available_height: f32, page_size: (f32, f32)) -> ResolvedLayout {
-    let (page_width, page_height) = page_size;
+    let (page_width, _) = page_size;
     let widest_zoom = width_fit_zoom(MIN_VISIBLE_PAGE_COUNT, available_width, page_width);
     let (columns, zoom) = match zoom_mode {
         PdfZoomMode::FitWidth { columns } => {
@@ -1967,7 +2009,7 @@ fn resolve_layout(zoom_mode: PdfZoomMode, available_width: f32, available_height
             (columns_that_fit(page_width * zoom, available_width), zoom)
         }
         PdfZoomMode::FitHeight => {
-            let zoom = (available_height / page_height.max(f32::MIN_POSITIVE)).clamp(MIN_ZOOM, widest_zoom);
+            let zoom = PageZoom::FitPage.scale(page_size, (available_width, available_height)).clamp(MIN_ZOOM, widest_zoom);
             (columns_that_fit(page_width * zoom, available_width), zoom)
         }
     };
@@ -2028,13 +2070,13 @@ fn whole_page_offset(offset: f32, viewport_height: f32) -> f32 {
     (offset.max(0.0) / height).round() * height
 }
 
-fn evenly_spaced_page_slots(surface_width: f32, widths: &[f32]) -> SmallVec<[(f32, f32); MAX_VISIBLE_PAGE_COUNT]> {
+fn evenly_spaced_page_slots(surface_width: f32, widths: &[f32], right_to_left: bool) -> SmallVec<[(f32, f32); MAX_VISIBLE_PAGE_COUNT]> {
     let gap = ((surface_width - widths.iter().sum::<f32>()) / (widths.len() + 1) as f32).max(0.0);
     let mut left = gap;
     widths
         .iter()
         .map(|&width| {
-            let slot = (left, width);
+            let slot = (if right_to_left { surface_width - left - width } else { left }, width);
             left += width + gap;
             slot
         })
@@ -2080,9 +2122,8 @@ fn cached_character_index(layout: &PdfPageTextLayout, point: (f32, f32), display
 impl DisplayPage {
     fn from_rendered(page: pdf_reader_core::RenderedPdfBgraPage) -> Result<Self, String> {
         let page = page.into_parts();
-        let byte_len = page.pixels.len();
         let image = RgbaImage::from_raw(page.pixel_width, page.pixel_height, page.pixels).ok_or_else(|| "PDF renderer returned an invalid RGBA buffer".to_owned())?;
-        Ok(Self { image: Arc::new(RenderImage::new(SmallVec::from_vec(vec![Frame::new(image)]))), text_layout: page.text_layout, raster_crop: page.raster_crop, page_crop: page.page_crop, byte_len })
+        Ok(Self { raster: PageImage::from_bgra(image), text_layout: page.text_layout, raster_crop: page.raster_crop, page_crop: page.page_crop })
     }
 
     fn map_rect(&self, rect: NormalizedRect) -> Option<NormalizedRect> {
@@ -2102,60 +2143,18 @@ fn uncrop_rect(crop: NormalizedRect, rect: NormalizedRect) -> NormalizedRect {
     NormalizedRect::new(crop.left() + rect.left() * crop.width(), crop.top() + rect.top() * crop.height(), rect.width() * crop.width(), rect.height() * crop.height())
 }
 
-impl DisplayPageCache {
-    fn new(byte_budget: usize) -> Self {
-        Self { byte_budget, byte_len: 0, pages: HashMap::new(), recency: VecDeque::new() }
-    }
-
-    fn get(&mut self, key: PageRenderKey) -> Option<Arc<DisplayPage>> {
-        let page = self.pages.get(&key)?.clone();
-        self.promote(key);
-        Some(page)
-    }
-
-    fn fallback(&mut self, key: PageRenderKey) -> Vec<Arc<DisplayPage>> {
-        let matches = |candidate: &&PageRenderKey| {
-            candidate.page_index() == key.page_index()
-                && candidate.trim_margins() == key.trim_margins()
-                && candidate.paper_color() == key.paper_color()
-                && candidate.ink_color() == key.ink_color()
-                && (candidate.target_width() != key.target_width() || candidate.tile().is_none())
-        };
-        let Some(width) = self.pages.keys().filter(matches).map(PageRenderKey::target_width).min_by_key(|width| width.abs_diff(key.target_width())) else { return Vec::new() };
-        let mut keys = self.pages.keys().filter(matches).filter(|candidate| candidate.target_width() == width).copied().collect::<Vec<_>>();
-        keys.sort_unstable_by_key(PageRenderKey::tile);
-        keys.into_iter().filter_map(|key| self.get(key)).collect()
-    }
-
-    fn contains(&self, key: PageRenderKey) -> bool {
-        self.pages.contains_key(&key)
-    }
-
-    fn insert(&mut self, key: PageRenderKey, page: Arc<DisplayPage>) {
-        if page.byte_len > self.byte_budget {
-            return;
-        }
-        if let Some(previous) = self.pages.remove(&key) {
-            self.byte_len = self.byte_len.saturating_sub(previous.byte_len);
-            self.recency.retain(|candidate| *candidate != key);
-        }
-        while self.byte_len + page.byte_len > self.byte_budget {
-            let Some(oldest) = self.recency.pop_front() else {
-                break;
-            };
-            if let Some(evicted) = self.pages.remove(&oldest) {
-                self.byte_len = self.byte_len.saturating_sub(evicted.byte_len);
-            }
-        }
-        self.byte_len += page.byte_len;
-        self.pages.insert(key, page);
-        self.recency.push_back(key);
-    }
-
-    fn promote(&mut self, key: PageRenderKey) {
-        self.recency.retain(|candidate| *candidate != key);
-        self.recency.push_back(key);
-    }
+fn pdf_fallback_pages(cache: &mut DisplayPageCache, key: PageRenderKey) -> Vec<Arc<DisplayPage>> {
+    let matches = |candidate: &&PageRenderKey| {
+        candidate.page_index() == key.page_index()
+            && candidate.trim_margins() == key.trim_margins()
+            && candidate.paper_color() == key.paper_color()
+            && candidate.ink_color() == key.ink_color()
+            && (candidate.target_width() != key.target_width() || candidate.tile().is_none())
+    };
+    let Some(width) = cache.keys().filter(matches).map(PageRenderKey::target_width).min_by_key(|width| width.abs_diff(key.target_width())) else { return Vec::new() };
+    let mut keys = cache.keys().filter(matches).filter(|candidate| candidate.target_width() == width).copied().collect::<Vec<_>>();
+    keys.sort_unstable_by_key(PageRenderKey::tile);
+    keys.into_iter().filter_map(|key| cache.get(key)).collect()
 }
 
 impl IntoElement for PdfPageElement {
@@ -2241,11 +2240,11 @@ impl Element for PdfPageElement {
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
         for tile in &self.tiles {
-            track_image(&tile.image, cx);
+            track_image(&tile.raster.image, cx);
         }
         window.with_content_mask(Some(ContentMask { bounds: prepaint.column_bounds }), |window| {
             for (tile, bounds) in self.tiles.iter().zip(&prepaint.image_bounds) {
-                let _ = window.paint_image(*bounds, *bounds, Corners::default(), tile.image.clone(), 0, false);
+                let _ = window.paint_image(*bounds, *bounds, Corners::default(), tile.raster.image.clone(), 0, false);
             }
             for (index, hit) in self.search_hits.iter().flat_map(|page| page.hits.iter().enumerate().map(move |(index, hit)| (page.first_index + index, hit))) {
                 let Some(rect) = self.page.map_rect(hit.bounds()).and_then(|rect| self.column.page_rect_to_column(rect)) else { continue };
@@ -2333,7 +2332,7 @@ impl PdfView {
                 PdfFlowSlot { width, streams }
             })
             .collect();
-        PdfFlowSnapshot { column_height: self.flow_column_height(), remainder: self.flow_remainder(), fit_height, slots }
+        PdfFlowSnapshot { column_height: self.flow_column_height(), remainder: self.flow_remainder(), fit_height, right_to_left: self.right_to_left, slots }
     }
 }
 
@@ -2488,11 +2487,11 @@ impl Render for PdfView {
                     ScrollDelta::Lines(delta) => (delta.y * LINE_SCROLL_HEIGHT, delta.x * LINE_SCROLL_HEIGHT),
                     ScrollDelta::Pages(delta) => {
                         let view = wheel_target.read(cx);
-                        let direction = if delta.y != 0.0 { delta.y } else { delta.x };
+                        let direction = view.flow_scroll_delta(delta);
                         (direction * view.flow_column_height(), 0.0)
                     }
                 };
-                let flow_delta = if vertical != 0.0 { vertical } else { horizontal };
+                let flow_delta = wheel_target.read(cx).flow_scroll_delta(point(horizontal, vertical));
                 if window.is_page_scroll_swipe() {
                     let from_edge = components::in_bottom_gesture_edge(event.position, window);
                     wheel_target.update(cx, |view, cx| view.handle_page_scroll(gpui::point(horizontal, vertical), event.touch_phase, from_edge, window, cx));
@@ -2501,8 +2500,7 @@ impl Render for PdfView {
                 }
                 if matches!(event.delta, ScrollDelta::Pages(_)) {
                     wheel_target.update(cx, |view, cx| {
-                        view.touch_swipe = None;
-                        view.touch_swipe_from_edge = false;
+                        view.touch_swipe.cancel();
                         if flow_delta < 0.0 {
                             view.next_page(cx);
                         } else if flow_delta > 0.0 {
@@ -2607,30 +2605,54 @@ mod tests {
         view.update(cx, |view, _| {
             install_test_pages(view);
             let white = PageRenderKey::new(0, 640);
-            view.display_cache.insert(white, view.pages[0].1.clone());
-            assert!(!view.display_cache.fallback(PageRenderKey::new(0, 800)).is_empty());
-            assert!(view.display_cache.fallback(white.with_paper_color([240, 230, 210])).is_empty());
+            view.display_cache.insert(white, view.pages[0].1.clone(), view.pages[0].1.raster.byte_len);
+            assert!(!pdf_fallback_pages(&mut view.display_cache, PageRenderKey::new(0, 800)).is_empty());
+            assert!(pdf_fallback_pages(&mut view.display_cache, white.with_paper_color([240, 230, 210])).is_empty());
             let dark = white.with_paper_color([32; 3]).with_ink_color([230, 235, 240]);
-            view.display_cache.insert(dark, view.pages[0].1.clone());
-            assert!(!view.display_cache.fallback(dark).is_empty());
-            assert!(view.display_cache.fallback(dark.with_ink_color([255; 3])).is_empty());
+            view.display_cache.insert(dark, view.pages[0].1.clone(), view.pages[0].1.raster.byte_len);
+            assert!(!pdf_fallback_pages(&mut view.display_cache, dark).is_empty());
+            assert!(pdf_fallback_pages(&mut view.display_cache, dark.with_ink_color([255; 3])).is_empty());
             let tile = PageRenderKey::new(1, 640).with_tile(0);
-            view.display_cache.insert(tile, view.pages[0].1.clone());
-            view.display_cache.insert(tile.with_tile(1), view.pages[0].1.clone());
-            assert_eq!(view.display_cache.fallback(PageRenderKey::new(1, 800).with_tile(0)).len(), 2, "a new tile index cannot stand in for its old-resolution counterpart");
-            assert!(view.display_cache.fallback(PageRenderKey::new(1, 800).with_tile(0).with_paper_color([240, 230, 210])).is_empty());
+            view.display_cache.insert(tile, view.pages[0].1.clone(), view.pages[0].1.raster.byte_len);
+            view.display_cache.insert(tile.with_tile(1), view.pages[0].1.clone(), view.pages[0].1.raster.byte_len);
+            assert_eq!(pdf_fallback_pages(&mut view.display_cache, PageRenderKey::new(1, 800).with_tile(0)).len(), 2, "a new tile index cannot stand in for its old-resolution counterpart");
+            assert!(pdf_fallback_pages(&mut view.display_cache, PageRenderKey::new(1, 800).with_tile(0).with_paper_color([240, 230, 210])).is_empty());
         });
     }
 
     fn install_test_pages(view: &mut PdfView) {
-        let page = Arc::new(DisplayPage {
-            image: Arc::new(RenderImage::new(SmallVec::from_vec(vec![Frame::new(RgbaImage::new(1, 1))]))),
-            text_layout: Arc::new(PdfPageTextLayout::default()),
-            raster_crop: PixelCrop::full(1, 1),
-            page_crop: NormalizedRect::new(0.0, 0.0, 1.0, 1.0),
-            byte_len: 4,
-        });
+        let page = Arc::new(DisplayPage { raster: PageImage::from_bgra(RgbaImage::new(1, 1)), text_layout: Arc::new(PdfPageTextLayout::default()), raster_crop: PixelCrop::full(1, 1), page_crop: NormalizedRect::new(0.0, 0.0, 1.0, 1.0) });
         view.pages = (0..5).map(|index| (index, page.clone())).collect();
+    }
+
+    #[gpui::test]
+    fn swipes_turn_once_and_leave_system_edge_gestures_and_cancellation_alone(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                install_test_pages(view);
+                // An active swipe also routes through the touch path on desktop.
+                view.touch_swipe.begin(false);
+                view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Started, false, window, cx);
+                view.handle_page_scroll(point(0.0, -160.0), TouchPhase::Moved, false, window, cx);
+                view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Ended, false, window, cx);
+                assert_eq!(view.flow_offset, 800.0);
+                view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Ended, false, window, cx);
+                assert_eq!(view.flow_offset, 800.0, "release cannot turn twice");
+
+                view.touch_swipe.begin(false);
+                view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Started, true, window, cx);
+                view.handle_page_scroll(point(0.0, -160.0), TouchPhase::Moved, false, window, cx);
+                view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Ended, false, window, cx);
+                assert_eq!(view.flow_offset, 800.0);
+
+                view.touch_swipe.begin(false);
+                view.handle_page_scroll(point(0.0, -160.0), TouchPhase::Started, false, window, cx);
+                view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Cancelled, false, window, cx);
+                view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Ended, false, window, cx);
+                assert_eq!(view.flow_offset, 800.0);
+            });
+        });
     }
 
     #[gpui::test]
@@ -2639,7 +2661,7 @@ mod tests {
         visual.update(|window, cx| {
             view.update(cx, |view, cx| {
                 install_test_pages(view);
-                let image = view.pages[0].1.image.clone();
+                let image = view.pages[0].1.raster.image.clone();
                 view.swipe_preview.drag(point(0.0, -120.0), window);
                 view.next_page(cx);
                 assert_eq!(view.flow_offset, 800.0);
@@ -2651,7 +2673,7 @@ mod tests {
                 assert!(!incoming.is_ready());
                 let turn = view.page_turn.as_mut().expect("keyboard, tap and swipe navigation share a transition");
                 let outgoing = turn.outgoing.slots[0].streams[0][0].page.as_ref().unwrap();
-                assert!(Arc::ptr_eq(&outgoing.page.image, &image), "keep the existing raster rather than copying it");
+                assert!(Arc::ptr_eq(&outgoing.page.raster.image, &image), "keep the existing raster rather than copying it");
                 assert!(!Rc::ptr_eq(&outgoing.passage_bounds, &view.passage_bounds), "outgoing paint is passive");
                 let viewport = size(px(view.available_width), px(800.0));
                 let frame = turn.frame(viewport, false, window, cx).unwrap();
@@ -2709,7 +2731,7 @@ mod tests {
     fn page_gaps_and_hit_testing_follow_actual_page_widths(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
         view.update(cx, |view, _| {
-            let slots = evenly_spaced_page_slots(view.available_width, &view.screen_column_widths());
+            let slots = evenly_spaced_page_slots(view.available_width, &view.screen_column_widths(), false);
             let gap = slots[0].0;
             assert!(gap > 0.0);
             assert!((slots[1].0 - (slots[0].0 + slots[0].1) - gap).abs() < 0.001);
@@ -2723,8 +2745,93 @@ mod tests {
                 assert!((target.page_point.1 - 0.5).abs() < 0.001);
             }
             assert!(view.interaction_target(point(surface.origin.x + px(gap * 0.5), surface.origin.y + px(400.0)), surface).is_none());
-            let single_page = evenly_spaced_page_slots(1500.0, &[600.0]);
+            let single_page = evenly_spaced_page_slots(1500.0, &[600.0], false);
             assert_eq!(single_page.as_slice(), &[(450.0, 600.0)]);
+        });
+    }
+
+    #[gpui::test]
+    fn rtl_spreads_mirror_hit_targets_and_keep_source_positions_and_page_numbers(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        view.update(cx, |view, cx| {
+            let source = view.source_position;
+            let position = view.current_page_position();
+            let range = view.visible_page_range();
+            let widths = view.screen_column_widths();
+            assert!(widths.len() >= 2);
+            assert_ne!(widths[0], widths[1], "include mixed page widths");
+            let ltr = evenly_spaced_page_slots(view.available_width, &widths, false);
+            view.set_right_to_left(true, cx);
+            let rtl = evenly_spaced_page_slots(view.available_width, &widths, view.right_to_left());
+            assert!(rtl[0].0 > rtl[1].0);
+            assert!(view.flow_snapshot(false).right_to_left);
+            let surface = Bounds { origin: point(px(30.0), px(40.0)), size: size(px(view.available_width), px(view.available_height)) };
+            for (index, &(left, width)) in rtl.iter().enumerate() {
+                assert!((left - (view.available_width - ltr[index].0 - width)).abs() < 0.001);
+                let target = view.interaction_target(point(surface.origin.x + px(left + width * 0.5), surface.origin.y + px(400.0)), surface).unwrap();
+                assert_eq!(target.page_index, index);
+                assert!((target.page_point.0 - 0.5).abs() < 0.001);
+                assert!((target.page_point.1 - 0.5).abs() < 0.001);
+            }
+            assert_eq!(view.source_position, source);
+            assert_eq!(view.current_page_position(), position);
+            assert_eq!(view.visible_page_range(), range);
+            view.set_right_to_left(false, cx);
+            assert_eq!(view.source_position, source);
+        });
+    }
+
+    #[gpui::test]
+    fn rtl_horizontal_controls_and_swipes_reverse_while_vertical_navigation_advances(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_right_to_left(true, cx);
+                view.horizontal_page(false, cx);
+                assert_eq!(view.flow_offset, 800.0, "left advances in RTL");
+                view.horizontal_page(true, cx);
+                assert_eq!(view.flow_offset, 0.0);
+                view.next_page(cx);
+                assert_eq!(view.flow_offset, 800.0, "semantic next remains forward");
+                view.previous_page(cx);
+                for (travel, expected) in [(point(180.0, 0.0), 800.0), (point(-180.0, 0.0), 0.0), (point(0.0, -180.0), 800.0), (point(0.0, 180.0), 0.0)] {
+                    install_test_pages(view);
+                    view.touch_swipe.begin(false);
+                    view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Started, false, window, cx);
+                    view.handle_page_scroll(travel, TouchPhase::Moved, false, window, cx);
+                    view.handle_page_scroll(point(0.0, 0.0), TouchPhase::Ended, false, window, cx);
+                    assert_eq!(view.flow_offset, expected);
+                    let viewport = size(px(view.available_width), px(view.flow_column_height()));
+                    let frame = view.page_turn.as_mut().unwrap().frame(viewport, false, window, cx).unwrap();
+                    assert_eq!(frame.outgoing, point(px(travel.x), px(travel.y)), "animation follows the finger in either direction");
+                }
+                view.handle_page_scroll(point(180.0, 0.0), TouchPhase::Moved, false, window, cx);
+                view.finish_fit_height_scroll(cx);
+                assert_eq!(view.flow_offset, 800.0, "horizontal wheel follows RTL too");
+                view.handle_page_scroll(point(0.0, -180.0), TouchPhase::Moved, false, window, cx);
+                view.finish_fit_height_scroll(cx);
+                assert_eq!(view.flow_offset, 1600.0, "vertical wheel remains forward");
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn changing_direction_preserves_fit_width_anchor_and_cancels_old_motion(cx: &mut TestAppContext) {
+        let (view, cx) = setup_fit_width(cx);
+        view.update(cx, |view, cx| {
+            view.set_full_page_position(0.3, cx);
+            let source = view.source_position;
+            let plan = view.fit_width_plan.clone();
+            view.touch_swipe.begin(false);
+            view.touch_swipe.push(-100.0, 0.0);
+            view.wheel_delta = -100.0;
+            view.set_right_to_left(true, cx);
+            assert_eq!(view.source_position, source);
+            assert_eq!(view.fit_width_plan, plan);
+            assert!(!view.touch_swipe.is_active());
+            assert_eq!(view.wheel_delta, 0.0);
+            assert_eq!(view.page_drag(point(180.0, 0.0)), point(0.0, -180.0));
+            assert_eq!(view.page_drag(point(0.0, -180.0)), point(0.0, -180.0));
         });
     }
 
@@ -2971,6 +3078,52 @@ mod tests {
 
     #[gpui::test]
     #[cfg(not(target_arch = "wasm32"))]
+    async fn loading_follows_each_pdf_direction_and_preserves_explicit_overrides(cx: &mut TestAppContext) {
+        struct DirectionLoadTest(Entity<PdfView>);
+        impl Render for DirectionLoadTest {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        cx.executor().allow_parking();
+        cx.update(gpui_component::init);
+        let fixture = String::from_utf8(include_bytes!("../../../../../../shared/pdf-reader-core/tests/fixtures/rtl-viewer-preferences.pdf").to_vec()).unwrap();
+        for (name, direction_override, expected) in [("/R2L", None, true), ("/R2L", Some(false), false), ("/L2R", None, false), ("/L2R", Some(true), true)] {
+            let bytes = fixture.replace("/R2L", name).into_bytes();
+            let (holder, visual) = cx.add_window_view(|window, cx| {
+                // Metadata loading is independent of painting a full viewport.
+                DirectionLoadTest(cx.new(|cx| {
+                    let mut view = PdfView::from_bytes("document-direction".into(), bytes, 0, window, cx);
+                    view.set_available_size(64.0, 64.0, cx);
+                    view.set_trim_margins(false, cx);
+                    view.set_direction_override(direction_override, cx);
+                    assert_eq!(view.right_to_left(), direction_override.unwrap_or(false));
+                    view.set_full_page_position(0.3, cx);
+                    view
+                }))
+            });
+            let view = holder.read_with(visual, |holder, _| holder.0.clone());
+            visual
+                .condition(&view, |view, _| {
+                    assert!(view.error.is_none(), "{:?}", view.error);
+                    view.session.is_some()
+                })
+                .await;
+            view.update(visual, |view, cx| {
+                assert_eq!(view.right_to_left(), expected, "{name}, override {direction_override:?}");
+                assert_eq!(view.source_position.page_y(), 0.3);
+                let position = view.source_position;
+                view.set_direction_override(None, cx);
+                assert_eq!(view.right_to_left(), name == "/R2L", "From PDF restores the declaration");
+                assert_eq!(view.source_position, position);
+            });
+            visual.update(|window, _| window.remove_window());
+        }
+    }
+
+    #[gpui::test]
+    #[cfg(not(target_arch = "wasm32"))]
     async fn loading_geometry_tiles_and_restoring_a_position_use_the_same_pdf_anchor(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         cx.update(gpui_component::init);
@@ -2989,7 +3142,7 @@ mod tests {
         view.update(cx, |view, cx| {
             assert_eq!(view.source_position.page_y(), 0.3);
             assert!(view.visible_render_keys().iter().all(|key| key.tile().is_some()));
-            assert!(view.display_cache.byte_len <= DISPLAY_CACHE_BUDGET);
+            assert!(view.display_cache.byte_len() <= DISPLAY_CACHE_BUDGET);
             view.sync_flow_scroll_target(-16.0, cx);
         });
         cx.condition(&view, |view, _| {
@@ -3035,7 +3188,7 @@ mod tests {
             view.trim_margins = false;
             view.page_geometry.insert(PageGeometryKey { page_index: 0, trim_margins: false }, PdfPageGeometry { crop: page.page_crop, break_avoidance: Arc::from([(0.42, 0.46), (0.62, 0.66), (0.72, 0.76)]) });
             view.pages = vec![(0, page.clone())];
-            view.display_cache.insert(key, page);
+            view.display_cache.insert(key, page.clone(), page.raster.byte_len);
             view.rebuild_fit_width_plan();
             view
         });

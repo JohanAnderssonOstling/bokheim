@@ -1,22 +1,22 @@
 //! One database-driven asset pass per library. Cursors advance before execution;
 //! failed work stays durable and cannot hold later pages behind it.
 use super::{error::SyncResult, library_sync::LibrarySync};
-use asset_transfer::{transfer::AssetExecutor, TransferError};
+use asset_transfer::{TransferError, transfer::AssetExecutor};
 use library_model::TransferJobKind;
 use library_runtime::events::LibraryEvent;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 const BOOK_PAGE: i64 = sync_common::api::assets::MAX_BLOB_MANIFEST_ENTRIES as i64;
 const COVER_PAGE: i64 = sync_common::api::assets::MAX_THUMBNAIL_BATCH_ENTRIES as i64;
 const PRESENCE_PAGE: usize = sync_common::api::assets::MAX_THUMBNAIL_PRESENCE_ENTRIES;
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn download_page<F, Fut>(hashes: impl IntoIterator<Item = ContentHash>, download: F) -> Result<bool, TransferError>
+async fn download_page<F, Fut>(hashes: impl IntoIterator<Item = BookId>, download: F) -> Result<bool, TransferError>
 where
-    F: FnMut(ContentHash) -> Fut,
+    F: FnMut(BookId) -> Fut,
     Fut: std::future::Future<Output = Result<(), TransferError>>,
 {
-    use futures_util::{stream, StreamExt};
+    use futures_util::{StreamExt, stream};
     // Poll on the library thread; no connection or transaction crosses threads.
     let mut downloads = stream::iter(hashes.into_iter().map(download)).buffer_unordered(4);
     let mut failed = false;
@@ -33,7 +33,7 @@ impl LibrarySync {
         match result {
             Err(TransferError::AuthenticationRequired) => Err(TransferError::AuthenticationRequired),
             Err(error) => {
-                log::warn!("{kind:?} will retry on the next asset pass: {error}");
+                log::warn!("{kind:?} failed: {error}");
                 *failed = true;
                 Ok(())
             }
@@ -43,7 +43,8 @@ impl LibrarySync {
 
     /// File inspection checks presence before extracting covers. This retains
     /// that ordering while sharing validation and credential renewal with assets.
-    pub async fn record_remote_thumbnail_presence(&self, hashes: Vec<ContentHash>) -> SyncResult<()> {
+    pub async fn record_remote_thumbnail_presence(&self, hashes: Vec<BookId>) -> SyncResult<()> {
+        if self.database.storage_policy()?.external().is_some() { return Ok(()); }
         if !self.is_signed_in() {
             return Ok(());
         }
@@ -55,6 +56,9 @@ impl LibrarySync {
     }
 
     pub async fn run_asset_pass(&self) -> Result<(), TransferError> {
+        // External bytes are handled by the library's provider worker. Even
+        // thumbnail presence discovery must never hit Bokheim asset endpoints.
+        if self.database.storage_policy()?.external().is_some() { return Ok(()); }
         if !self.is_signed_in() {
             return Ok(());
         }
@@ -72,11 +76,7 @@ impl LibrarySync {
             executor.flush_availability_changes();
             result?;
         }
-        if failed {
-            Err(TransferError::retryable("asset pass has pending failures"))
-        } else {
-            Ok(())
-        }
+        if failed { Err(TransferError::retryable("asset pass has pending failures")) } else { Ok(()) }
     }
 
     async fn asset_phase(&self, executor: &AssetExecutor, kind: TransferJobKind, failed: &mut bool) -> Result<(), TransferError> {
@@ -175,7 +175,7 @@ mod tests {
         let peak = Rc::new(Cell::new(0));
         let finished = Rc::new(Cell::new(0));
         let gate = Rc::new(Semaphore::new(0));
-        let download = |_: ContentHash| {
+        let download = |_: BookId| {
             let (active, peak, finished, gate) = (active.clone(), peak.clone(), finished.clone(), gate.clone());
             async move {
                 active.set(active.get() + 1);
@@ -194,7 +194,7 @@ mod tests {
             assert_eq!(active.get(), 4);
             gate.add_permits(12);
         };
-        let (result, ()) = tokio::join!(download_page((0..12).map(|index| ContentHash::from_bytes([index; 32])), download), release);
+        let (result, ()) = tokio::join!(download_page((0..12).map(|index| BookId::from_bytes([index; 32])), download), release);
         assert!(!result.unwrap());
         assert_eq!(peak.get(), 4);
         assert_eq!(finished.get(), 12);
@@ -204,13 +204,13 @@ mod tests {
     #[tokio::test]
     async fn ordinary_download_failures_leave_later_work_running() {
         let completed = Cell::new(0);
-        let failed = download_page((0..10).map(|index| ContentHash::from_bytes([index; 32])), |hash| {
+        let failed = download_page((0..10).map(|index| BookId::from_bytes([index; 32])), |hash| {
             let completed = &completed;
             async move {
                 completed.set(completed.get() + 1);
-                if hash == ContentHash::from_bytes([1; 32]) {
+                if hash == BookId::from_bytes([1; 32]) {
                     Err(TransferError::retryable("temporary failure"))
-                } else if hash == ContentHash::from_bytes([2; 32]) {
+                } else if hash == BookId::from_bytes([2; 32]) {
                     Err(TransferError::rejected("permanent failure"))
                 } else { Ok(()) }
             }
@@ -223,13 +223,13 @@ mod tests {
     async fn authentication_failure_cancels_in_flight_downloads_and_stops_the_page() {
         let started = Rc::new(Cell::new(0));
         let active = Rc::new(Cell::new(0));
-        let result = download_page((0..12).map(|index| ContentHash::from_bytes([index; 32])), |hash| {
+        let result = download_page((0..12).map(|index| BookId::from_bytes([index; 32])), |hash| {
             let (started, active) = (started.clone(), active.clone());
             async move {
                 started.set(started.get() + 1);
                 active.set(active.get() + 1);
                 let _active = Active(active);
-                if hash == ContentHash::from_bytes([0; 32]) {
+                if hash == BookId::from_bytes([0; 32]) {
                     for _ in 0..100 {
                         if started.get() == 4 { break; }
                         tokio::task::yield_now().await;

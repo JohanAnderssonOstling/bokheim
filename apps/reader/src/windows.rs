@@ -4,13 +4,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use book_content::{Book, BookFormat as BookSourceFormat};
+use book_content::comic::{ComicBook, ComicReader};
+use book_model::ReadingPosition;
 use gpui::prelude::*;
 use gpui::{AnyView, App, AppContext, BackgroundExecutor, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, SharedString, Task, Window};
 use html_view_core::{RendererInitialConfig, RendererPreparation};
-use library_backend::{BookFormat, BoxedBookReader, DocumentSource, LibraryClient, ResolvedBook};
+use library_backend::{BackendError, BookFormat, BoxedBookReader, DocumentSource, LibraryClient, ResolvedBook};
 use library_model::BookLocator;
 
 use crate::book::NativeBook;
+use crate::comic::ComicReaderView;
 use crate::epub::ReaderView as EpubReaderView;
 use crate::pdf::PdfReaderView;
 use crate::settings::{ReaderPreferences, ReaderSettings, SaveReaderSettings};
@@ -25,6 +28,7 @@ enum PreparedBook {
     Book { book: Arc<NativeBook>, preparation: Box<RendererPreparation> },
     Pdf { page_source: Option<Arc<dyn pdf_reader_core::PdfPageSource>>, metadata: Option<pdf_reader_core::PdfReaderMetadata>, reader: BoxedBookReader, initial_page: usize, initial_full_page_position: f32 },
     Audiobook { resolved: ResolvedBook, initial_target: Option<String> },
+    Comic { reader: ComicReader, initial_page: usize, offset: f32 },
 }
 
 enum ReaderState {
@@ -51,9 +55,9 @@ pub fn configure(preferences: ReaderPreferences, save: SaveReaderSettings, cx: &
     cx.set_global(ReaderSettings { preferences, save });
 }
 
-async fn prepare_pdf(locator: &BookLocator, content: ResolvedBook, library: &LibraryClient, initial_target: Option<String>) -> Result<PreparedBook, String> {
+async fn prepare_pdf(locator: &BookLocator, content: ResolvedBook, library: &LibraryClient, initial_target: Option<String>) -> Result<PreparedBook, BackendError> {
     let content_hash = locator.content_hash();
-    let (stored_page, stored_position) = library.pdf_reading_position(content_hash).await.map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or((0, 0.0));
+    let (stored_page, stored_position) = library.pdf_reading_position(content_hash).await.map_err(|error| error.context("stage=reading_position"))?.unwrap_or((0, 0.0));
     // A requested destination outranks the stored position: it is the reason
     // the book was opened. A contents row asks for `pdf-page:<n>`; anything
     // else is a target for another format and is ignored rather than guessed at.
@@ -67,11 +71,12 @@ async fn prepare_pdf(locator: &BookLocator, content: ResolvedBook, library: &Lib
 
 async fn prepare_book(
     locator: &BookLocator, content: ResolvedBook, format: BookFormat, library: &LibraryClient, executor: &BackgroundExecutor, renderer_config: RendererInitialConfig, initial_target: Option<String>,
-) -> Result<PreparedBook, String> {
+) -> Result<PreparedBook, BackendError> {
     let book_format = match format {
         BookFormat::Epub => BookSourceFormat::Epub,
         BookFormat::Mobi => BookSourceFormat::Mobi,
-        _ => return Err(format!("stage=prepare: {} is not a book format", format.canonical_extension())),
+        BookFormat::Fb2 => BookSourceFormat::Fb2,
+        _ => return Err(format!("stage=prepare: {} is not a book format", format.canonical_extension()).into()),
     };
     let content = content.into_document()?;
     let book = executor
@@ -87,7 +92,7 @@ async fn prepare_book(
         })
         .await?;
     let content_hash = locator.content_hash();
-    let nav_state = library.reading_position(content_hash).await.map_err(|error| format!("stage=reading_position: {error}"))?;
+    let nav_state = library.reading_position(content_hash).await.map_err(|error| error.context("stage=reading_position"))?;
     let book = Arc::new(book);
     let image_executor = executor.clone();
     let image_loader = book.image_loader(move |task| {
@@ -104,13 +109,30 @@ async fn prepare_book(
     Ok(PreparedBook::Book { book, preparation: Box::new(preparation) })
 }
 
-async fn load_book(locator: &BookLocator, library: &LibraryClient, executor: &BackgroundExecutor, renderer_config: RendererInitialConfig, initial_target: Option<String>) -> Result<PreparedBook, String> {
-    let content = library.resolve_book(locator.content_hash()).await.map_err(|error| format!("stage=book_resolve: {error}"))?;
+async fn load_book(locator: &BookLocator, library: &LibraryClient, executor: &BackgroundExecutor, renderer_config: RendererInitialConfig, initial_target: Option<String>) -> Result<PreparedBook, BackendError> {
+    let content = library.resolve_book(locator.content_hash()).await.map_err(|error| error.context("stage=book_resolve"))?;
     let format = content.format();
     match format {
         BookFormat::Pdf => prepare_pdf(locator, content, library, initial_target).await,
         BookFormat::M4b | BookFormat::Mp3Folder => Ok(PreparedBook::Audiobook { resolved: content, initial_target }),
-        BookFormat::Epub | BookFormat::Mobi => prepare_book(locator, content, format, library, executor, renderer_config, initial_target).await,
+        BookFormat::Epub | BookFormat::Mobi | BookFormat::Fb2 => prepare_book(locator, content, format, library, executor, renderer_config, initial_target).await,
+        BookFormat::Cbz => {
+            let stored = library.reading_position(locator.content_hash()).await?;
+            let (initial_page, offset) = match stored.as_deref().and_then(|value| ReadingPosition::parse(value).ok()) {
+                Some(ReadingPosition::Cbz { page, full_page_position }) => (page as usize, full_page_position),
+                _ => (0, 0.0),
+            };
+            let (initial_page, offset) = initial_target.as_deref().and_then(book_model::cbz_toc_page).map(|page| (page, 0.0)).unwrap_or((initial_page, offset));
+            let source = content.into_document()?.source;
+            let reader = executor.spawn(async move {
+                let book = match source {
+                    DocumentSource::Async(source) => ComicBook::open(move || source.reader()).await?,
+                    DocumentSource::Reader(reader) => ComicBook::open_reader(reader)?,
+                };
+                book.into_reader().await
+            }).await.map_err(BackendError::operation)?;
+            Ok(PreparedBook::Comic { reader, initial_page, offset })
+        }
     }
 }
 
@@ -123,8 +145,9 @@ impl ReaderView {
             window.defer(cx, move |window, cx| match view.downcast::<EpubReaderView>() {
                 Ok(reader) => reader.update(cx, |reader, cx| reader.native_back(window, cx)),
                 Err(view) => {
-                    if let Ok(reader) = view.downcast::<PdfReaderView>() {
-                        reader.update(cx, |reader, cx| reader.native_back(window, cx));
+                    match view.downcast::<PdfReaderView>() {
+                        Ok(reader) => reader.update(cx, |reader, cx| reader.native_back(window, cx)),
+                        Err(view) => if let Ok(reader) = view.downcast::<ComicReaderView>() { reader.update(cx, |reader, cx| reader.native_back(window, cx)); },
                     }
                 }
             });
@@ -137,15 +160,16 @@ impl ReaderView {
         cx.emit(CloseRequested);
     }
 
-    fn opening_failed(&mut self, error: String, cx: &mut Context<Self>) {
+    fn opening_failed(&mut self, error: BackendError, cx: &mut Context<Self>) {
         log::error!("cannot load reader page for {:?}: {error}", self.title);
         self.state = ReaderState::Error(ui_components::user_facing_error(&error, "Could not open this book. Try opening it again, or download another copy.").into());
-        cx.emit(BookOpenFailed(error));
+        cx.emit(BookOpenFailed(error.to_string()));
         cx.notify();
     }
 
     fn watch_open_failure<T: EventEmitter<BookOpenFailed> + 'static>(&self, reader: &Entity<T>, cx: &mut Context<Self>) {
-        cx.subscribe(reader, |this, _, error: &BookOpenFailed, cx| this.opening_failed(error.0.clone(), cx)).detach();
+        // Format readers report their own failures as text; they stay unclassified.
+        cx.subscribe(reader, |this, _, error: &BookOpenFailed, cx| this.opening_failed(BackendError::message(error.0.clone()), cx)).detach();
     }
 
     pub fn new(locator: BookLocator, title: String, initial_target: Option<String>, app: app::AppClient, library: Rc<LibraryClient>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -182,6 +206,9 @@ impl ReaderView {
                                 let session = crate::open_audiobook(locator, library.as_ref().clone(), resolved, initial_target, cx);
                                 cx.emit(AudiobookOpened(session));
                                 return;
+                            }
+                            PreparedBook::Comic { reader, initial_page, offset } => {
+                                cx.new(|cx| ComicReaderView::new(locator, title, reader, initial_page, offset, app, library, close_reader, window, cx)).into()
                             }
                         };
                         reader_view.state = ReaderState::Ready(view);

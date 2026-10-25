@@ -42,13 +42,22 @@ impl BrightnessControls {
         Self { brightness, natural }
     }
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "kobo")]
+        if !components::kobo::has_frontlight(cx) { return; }
         self.brightness.update(cx, |control, cx| control.request(None, window, cx));
+        #[cfg(feature = "kobo")]
+        if !components::kobo::has_warmth(cx) { return; }
         self.natural.update(cx, |control, cx| control.request(None, window, cx));
     }
 }
 impl Render for BrightnessControls {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        components::reader_settings_dropdown(window, components::browser_theme(cx)).child(self.brightness.clone()).child(self.natural.clone())
+        let panel = components::reader_settings_dropdown(window, components::browser_theme(cx)).child(self.brightness.clone());
+        #[cfg(feature = "kobo")]
+        let show_warmth = components::kobo::has_warmth(cx);
+        #[cfg(not(feature = "kobo"))]
+        let show_warmth = true;
+        panel.when(show_warmth, |panel| panel.child(self.natural.clone()))
     }
 }
 

@@ -143,7 +143,7 @@ impl<B: Backend> ser::Serializer for Serializer<B> {
         B::text(variant)
     }
     fn serialize_newtype_struct<T: Serialize + ?Sized>(self, name: &'static str, value: &T) -> Result<B::Output, SerializerError> {
-        if name == "ContentHash" {
+        if matches!(name, "ContentHash" | "BookId") {
             value.serialize(Self::new(true))
         } else {
             B::newtype(value.serialize(self)?)

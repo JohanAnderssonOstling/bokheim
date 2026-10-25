@@ -50,3 +50,11 @@ pub fn pdf_toc_target(page_index: usize) -> String {
 pub fn pdf_toc_page(target: &str) -> Option<usize> {
     target.strip_prefix(PDF_TOC_TARGET_PREFIX)?.parse().ok()
 }
+
+pub fn cbz_toc_target(page_index: usize) -> String {
+    format!("cbz-page:{page_index}")
+}
+
+pub fn cbz_toc_page(target: &str) -> Option<usize> {
+    target.strip_prefix("cbz-page:")?.parse().ok()
+}

@@ -18,9 +18,26 @@
 
 use gpui::prelude::*;
 use gpui::{Div, ElementId, MouseButton, SharedString, Stateful, div, px};
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, IconName};
+use std::rc::Rc;
 
 use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DIGIT_WIDTH_EM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, CONTENTS_ROW_MIN_HEIGHT_REM, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS};
+
+pub type ContentsReadReset = Rc<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App)>;
+
+pub fn contents_read_checkmark(id: impl Into<ElementId>, on_reset: ContentsReadReset) -> Button {
+    crate::base_button(id)
+        .ghost()
+        .icon(Icon::new(IconName::Check).size(gpui::rems(TEXT_XS)))
+        .tooltip("Mark chapter as unread")
+        .debug_selector(|| "chapter-read-checkmark".into())
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            on_reset(event, window, cx);
+        })
+}
 
 /// What one row of a contents list is.
 ///
@@ -38,8 +55,7 @@ pub struct ContentsRow {
     /// its ancestors do not: a navigation document never says that a parent is
     /// partly read.
     pub marked: bool,
-    /// A leaf entry before the current position in reading order. Parent
-    /// entries stay neutral because they can contain both read and unread text.
+    /// A completed leaf, or a parent whose children are all complete.
     pub read: bool,
     /// The keyboard cursor, which is not the same thing as where the reader is.
     pub focused: bool,
@@ -113,8 +129,8 @@ pub fn contents_disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: Br
 /// The current entry — where the reader is — is the solid accent, the keyboard
 /// cursor is `accent_wash` and the pointer is the light `hover`, as the ladder
 /// in `tokens.rs` sets out. The cursor on the current entry steps it to
-/// `accent_hover`. Earlier leaf entries use muted ink.
-pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: Option<impl IntoElement>, title: impl IntoElement, amount: Option<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
+/// `accent_hover`. Finished entries use muted ink and a checkmark.
+pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: Option<impl IntoElement>, title: impl IntoElement, amount: Option<SharedString>, reset: Option<ContentsReadReset>, theme: BrowserTheme) -> Stateful<Div> {
     let (background, hovered, ink) = match (row.marked, row.focused) {
         (true, true) => (Some(theme.accent_hover), theme.accent_hover, theme.accent_text),
         (true, false) => (Some(theme.accent), theme.accent_hover, theme.accent_text),
@@ -156,6 +172,10 @@ pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: Opti
         .children(disclosure)
         .children(row.number.map(|number| contents_number(number, number_width, quiet)))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+        .when(row.read, |row| match reset {
+            Some(reset) => row.child(contents_read_checkmark("chapter-read-checkmark", reset).text_color(quiet)),
+            None => row.child(Icon::new(IconName::Check).size(gpui::rems(TEXT_XS)).text_color(quiet)),
+        })
         .children(amount.map(|amount| div().w(gpui::rems(CONTENTS_AMOUNT_WIDTH_REM)).flex_none().text_right().text_size(gpui::rems(TEXT_XS)).text_color(quiet).child(amount)))
 }
 

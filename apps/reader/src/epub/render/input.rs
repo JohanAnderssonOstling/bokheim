@@ -29,7 +29,7 @@ impl ReaderView {
         self.chrome.hide_for_motion(window, cx);
         let LoadState::Ready(renderer) = &self.load_state else { return };
         let renderer = renderer.clone();
-        let outgoing = PageTurn::<HtmlPageSnapshot>::enabled(cx).then(|| renderer.read(cx).page_snapshot()).flatten();
+        let outgoing = PageTurn::<HtmlPageSnapshot>::enabled(cx).then(|| renderer.update(cx, |view, _| view.page_snapshot())).flatten();
         let moved = renderer.update(cx, |renderer, cx| if forward { renderer.next_page(cx) } else { renderer.previous_page(cx) });
         if moved {
             let drag = self.swipe_preview.take_offset();
@@ -68,7 +68,12 @@ impl CommandTarget<PreviousLine> for ReaderView {
         self.page_turn = None;
         self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
-        self.with_renderer(cx, |renderer, cx| renderer.previous_line(cx));
+        self.dismiss_touch_selection(cx);
+        self.with_renderer(cx, |renderer, cx| {
+            if !renderer.step_reading_ruler(false, cx) {
+                renderer.previous_line(cx);
+            }
+        });
     }
 }
 
@@ -77,7 +82,12 @@ impl CommandTarget<NextLine> for ReaderView {
         self.page_turn = None;
         self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
-        self.with_renderer(cx, |renderer, cx| renderer.next_line(cx));
+        self.dismiss_touch_selection(cx);
+        self.with_renderer(cx, |renderer, cx| {
+            if !renderer.step_reading_ruler(true, cx) {
+                renderer.next_line(cx);
+            }
+        });
     }
 }
 

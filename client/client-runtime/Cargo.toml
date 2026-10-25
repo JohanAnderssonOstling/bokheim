@@ -6,7 +6,13 @@ publish = false
 
 [dependencies]
 client-platform-runtime = { path = "../platforms/runtime" }
+operation-failure = { path = "../operation-failure" }
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1.3"
 serde_bytes = "0.11"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
+reqwest = { workspace = true, default-features = false, optional = true }
+
+[features]
+# Classifies failed HTTP requests; see `BackendError::http`.
+http = ["dep:reqwest"]

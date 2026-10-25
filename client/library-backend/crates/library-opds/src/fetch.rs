@@ -1,6 +1,7 @@
 //! Fetching feed pages, straight from the device: no Bokheim server in
 //! between.
 use crate::{opensearch_template, parse, Feed, Search};
+use client_runtime::{BackendError, Failure};
 use library_model::OpdsCredentials;
 use std::sync::LazyLock;
 use url::{Origin, Url};
@@ -31,77 +32,68 @@ impl<'a> Access<'a> {
     }
 }
 
-pub(crate) enum Failure {
-    /// The feed asks for credentials this device does not have, or refused
-    /// the ones it has.
-    SignIn,
-    Other(String),
-}
-
-impl From<String> for Failure {
-    fn from(message: String) -> Self {
-        Self::Other(message)
-    }
-}
-
-impl From<&str> for Failure {
-    fn from(message: &str) -> Self {
-        Self::Other(message.to_owned())
-    }
+fn request_failure(url: &Url, error: reqwest::Error) -> BackendError {
+    BackendError::http(format_args!("could not load {url}"), error)
 }
 
 /// The page's bytes, its content type, and the URL it was finally served
-/// from, which relative links resolve against.
-async fn get(url: &Url, access: &Access<'_>) -> Result<(Vec<u8>, Option<String>, Url), Failure> {
+/// from, which relative links resolve against. A feed that wants
+/// credentials fails as [`Failure::Unauthorized`].
+async fn get(url: &Url, access: &Access<'_>) -> Result<(Vec<u8>, Option<String>, Url), BackendError> {
     let mut request = CLIENT.get(url.clone());
     if let Some(credentials) = access.credentials.filter(|_| url.origin() == access.origin) {
         request = request.basic_auth(&credentials.username, Some(&credentials.password));
     }
-    let response = request.send().await.map_err(|error| format!("could not load {url}: {error}"))?;
+    let response = request.send().await.map_err(|error| request_failure(url, error))?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(Failure::SignIn);
+        return Err(BackendError::classified(Failure::Unauthorized, format!("{url} asks to sign in")));
     }
     if response.headers().get("cf-mitigated").is_some_and(|value| value == "challenge") {
-        const ERROR: &str = "Browser verification could not be completed for this catalog. Please try another catalog.";
+        let blocked = |detail: &str| BackendError::classified(Failure::Forbidden, format!("browser verification failed for {url}: {detail}"));
         #[cfg(not(target_arch = "wasm32"))]
         {
             use base64::{engine::general_purpose::STANDARD, Engine};
             let served = response.url();
             let authorization = access.credentials.filter(|_| served.origin() == access.origin).map(|credentials| format!("Basic {}", STANDARD.encode(format!("{}:{}", credentials.username, credentials.password))));
-            let (status, bytes, content_type, served) = crate::browser::get(served, authorization, access.root).await.map_err(|_| Failure::Other(ERROR.into()))?;
+            let (status, bytes, content_type, served) = crate::browser::get(served, authorization, access.root).await.map_err(|error| blocked(&error))?;
             if status == 401 {
-                return Err(Failure::SignIn);
+                return Err(BackendError::classified(Failure::Unauthorized, format!("{url} asks to sign in")));
             }
             if !(200..300).contains(&status) {
-                return Err(ERROR.into());
+                return Err(blocked(&format!("status {status}")));
             }
             return Ok((bytes, content_type, served));
         }
         #[cfg(target_arch = "wasm32")]
-        return Err(ERROR.into());
+        return Err(blocked("unavailable in the browser"));
     }
     if response.status() == reqwest::StatusCode::FORBIDDEN {
-        return Err("This catalog is blocking access from Bokheim. Please try another catalog.".into());
+        return Err(BackendError::classified(Failure::Forbidden, format!("{url} refused access")));
     }
-    let response = response.error_for_status().map_err(|error| format!("could not load {url}: {error}"))?;
+    let response = response.error_for_status().map_err(|error| request_failure(url, error))?;
     let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).map(str::to_owned);
     let served = response.url().clone();
-    let bytes = response.bytes().await.map_err(|error| format!("could not load {url}: {error}"))?;
+    let bytes = response.bytes().await.map_err(|error| request_failure(url, error))?;
     Ok((bytes.to_vec(), content_type, served))
 }
 
 /// A file the feed links to: a book or a cover.
-pub(crate) async fn bytes(url: &Url, access: &Access<'_>) -> Result<Vec<u8>, Failure> {
+pub(crate) async fn bytes(url: &Url, access: &Access<'_>) -> Result<Vec<u8>, BackendError> {
     Ok(client_platform_runtime::transfers::retry(|| get(url, access)).await?.0)
 }
 
-pub(crate) async fn feed(url: &Url, access: &Access<'_>) -> Result<Feed, Failure> {
+/// A book acquisition explicitly requested by the user.
+pub(crate) async fn download(url: &Url, access: &Access<'_>) -> Result<Vec<u8>, BackendError> {
+    Ok(get(url, access).await?.0)
+}
+
+pub(crate) async fn feed(url: &Url, access: &Access<'_>) -> Result<Feed, BackendError> {
     let (bytes, content_type, served) = get(url, access).await?;
-    Ok(parse(&bytes, content_type.as_deref(), &served)?)
+    parse(&bytes, content_type.as_deref(), &served).map_err(|error| BackendError::classified(Failure::NotACatalog, format!("{url}: {error}")))
 }
 
 /// The results page for `query` on a feed that offers search.
-pub(crate) async fn search(feed: &Feed, query: &str, access: &Access<'_>) -> Result<Url, Failure> {
+pub(crate) async fn search(feed: &Feed, query: &str, access: &Access<'_>) -> Result<Url, BackendError> {
     let template = match &feed.search {
         Some(Search::Template(template)) => template.clone(),
         Some(Search::Description(url)) => {

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 log = "0.4"
+update-files = { path = "../../shared/update-files" }
 update-client = { path = "../update-client", features = ["native-state"] }
 library-database = { path = "../library-backend/crates/library-database" }
 subject-projection = { path = "../../shared/subject-projection" }

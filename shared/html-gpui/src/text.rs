@@ -397,6 +397,34 @@ const SHAPE_CACHE_CAPACITY: usize = 4096;
 const LINE_SHAPE_CACHE_CAPACITY: usize = 1024;
 const FONT_SETUP_CACHE_CAPACITY: usize = 32;
 
+/// Split fallback lists without breaking quoted installed family names.
+fn font_family_names(list: &str) -> impl Iterator<Item = (String, bool)> + '_ {
+    let mut characters = list.chars().peekable();
+    std::iter::from_fn(move || {
+        characters.peek()?;
+        let mut name = String::new();
+        let mut quote = None;
+        let mut quoted = false;
+        while let Some(character) = characters.next() {
+            match character {
+                '\\' => {
+                    if let Some(escaped) = characters.next() {
+                        name.push(escaped);
+                    }
+                }
+                '\'' | '"' if quote.is_none() => {
+                    quote = Some(character);
+                    quoted = true;
+                }
+                character if quote == Some(character) => quote = None,
+                ',' if quote.is_none() => break,
+                _ => name.push(character),
+            }
+        }
+        Some((name.trim().to_owned(), quoted))
+    })
+}
+
 pub struct GpuiTextCache {
     text_system: Arc<gpui::WindowTextSystem>,
     font_families: HashMap<String, String>,
@@ -483,17 +511,16 @@ impl GpuiTextCache {
     }
 
     fn resolve_family(&self, family_list: Option<&str>) -> String {
-        for family in family_list.into_iter().flat_map(|list| list.split(',')) {
-            let family = family.trim().trim_matches(['\'', '"']);
+        for (family, quoted) in family_list.into_iter().flat_map(font_family_names) {
             if family.is_empty() {
                 continue;
             }
-            let generic = match family.to_ascii_lowercase().as_str() {
-                "serif" => self.available_family(&["NV Garamond", "Noto Serif", "DejaVu Serif", "Times New Roman"]),
-                "sans-serif" => self.available_family(&["Raleway", "Noto Sans", "DejaVu Sans", "Arial", ".SystemUIFont"]),
-                "monospace" | "ui-monospace" => self.available_family(&["Noto Sans Mono", "DejaVu Sans Mono", ".ZedMono"]),
-                "system-ui" | "ui-sans-serif" => Some(".SystemUIFont".to_owned()),
-                "ui-serif" => self.available_family(&["NV Garamond", "Noto Serif", "DejaVu Serif"]),
+            let generic = match (quoted, family.to_ascii_lowercase().as_str()) {
+                (false, "serif") => self.available_family(&["NV Garamond", "Noto Serif", "DejaVu Serif", "Times New Roman"]),
+                (false, "sans-serif") => self.available_family(&["Raleway", "Noto Sans", "DejaVu Sans", "Arial", ".SystemUIFont"]),
+                (false, "monospace" | "ui-monospace") => self.available_family(&["Noto Sans Mono", "DejaVu Sans Mono", ".ZedMono"]),
+                (false, "system-ui" | "ui-sans-serif") => Some(".SystemUIFont".to_owned()),
+                (false, "ui-serif") => self.available_family(&["NV Garamond", "Noto Serif", "DejaVu Serif"]),
                 _ => None,
             };
             if let Some(generic) = generic {
@@ -580,7 +607,9 @@ impl GpuiTextCache {
             if !single_font_size {
                 let boundaries = Arc::make_mut(&mut raw_cluster_boundaries);
                 boundaries[0] = true;
-                *boundaries.last_mut().expect("validated non-empty line") = true;
+                if let Some(last) = boundaries.last_mut() {
+                    *last = true;
+                }
             }
             let mut glyphs = Vec::new();
             let mut x_base = 0.0f32;
@@ -678,7 +707,8 @@ impl GpuiTextCache {
             (cached.glyphs.clone(), cached.caret_stops.clone())
         } else {
             let mut glyphs = cached.glyphs.to_vec();
-            let Some(caret_stops) = apply_line_placements(placement_request.expect("adjusted line request"), &cached.character_bytes, &cached.caret_stops, &mut glyphs) else { return Ok(None) };
+            let Some(request) = placement_request else { return Ok(None) };
+            let Some(caret_stops) = apply_line_placements(request, &cached.character_bytes, &cached.caret_stops, &mut glyphs) else { return Ok(None) };
             (Arc::from(glyphs), caret_stops)
         };
 
@@ -1075,8 +1105,12 @@ fn build_text_boundaries_with_offsets(text: &str, layout: &gpui::LineLayout, cha
 fn build_text_boundaries_from_clusters(text: &str, layout: &gpui::LineLayout, character_bytes: &[usize], byte_offset: usize, cluster_bytes: impl Iterator<Item = usize>) -> (Arc<[f32]>, Arc<[bool]>) {
     let mut caret_stops = vec![0.0; character_bytes.len()];
     let mut cluster_boundaries = vec![false; character_bytes.len()];
-    cluster_boundaries[0] = true;
-    *cluster_boundaries.last_mut().expect("non-empty boundary list") = true;
+    if let Some(first) = cluster_boundaries.first_mut() {
+        *first = true;
+    }
+    if let Some(last) = cluster_boundaries.last_mut() {
+        *last = true;
+    }
     let mut glyphs = layout.runs.iter().flat_map(|run| run.glyphs.iter()).peekable();
     // Preserve GPUI's first-match lookup even for the mixed-order fallback.
     let mut x_for_index = |index| {
@@ -1119,6 +1153,13 @@ fn build_text_boundaries_from_clusters(text: &str, layout: &gpui::LineLayout, ch
 mod boundary_tests {
     use super::*;
     use gpui::{FontId, LineLayout, ShapedGlyph, ShapedRun, point};
+
+    #[test]
+    fn installed_font_names_preserve_commas_quotes_and_backslashes() {
+        let families: Vec<_> = font_family_names(r#""A, B's \"Serif\" \\ Font", NV Garamond, serif"#).collect();
+        assert_eq!(families, vec![("A, B's \"Serif\" \\ Font".into(), true), ("NV Garamond".into(), false), ("serif".into(), false)]);
+        assert_eq!(font_family_names("'serif', sans-serif").collect::<Vec<_>>(), vec![("serif".into(), true), ("sans-serif".into(), false)]);
+    }
 
     fn layout(text: &str, runs: &[&[(usize, f32)]], width: f32) -> LineLayout {
         LineLayout {

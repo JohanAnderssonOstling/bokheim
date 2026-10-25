@@ -39,6 +39,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends GameActivity {
+    /** Distribution policy is compiled into the Java package, never read from
+     * intent extras or inferred from the installer. Rust shares this policy. */
+    public static boolean isPlayStoreBuild() {
+        return BuildConfig.PLAY_STORE;
+    }
+
     public static String taxonomyFile(android.content.Context context) throws IOException {
         return TaxonomyAssets.prepare(context).getAbsolutePath();
     }
@@ -141,7 +147,7 @@ public final class MainActivity extends GameActivity {
 
     private static final String LOG_TAG = "Bokheim";
     private static final String DIRECTORY_MIME = DocumentsContract.Document.MIME_TYPE_DIR;
-    private static final String[] BOOK_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b"};
+    private static final String[] BOOK_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b", "fb2", "fbz", "fb2.zip", "cbz"};
 
     private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
     private ActivityResultLauncher<Intent> pathPromptLauncher;
@@ -151,6 +157,7 @@ public final class MainActivity extends GameActivity {
      * explicit Settings action; installer return codes never prove activation.
      */
     public static String updateCommand(android.content.Context context, String encoded) throws Exception {
+        if (isPlayStoreBuild()) throw new UnsupportedOperationException("Application updates are managed by Google Play");
         org.json.JSONObject request = new org.json.JSONObject(encoded);
         String action = request.getString("action");
         if (action.equals("prepare")) {
@@ -237,10 +244,8 @@ public final class MainActivity extends GameActivity {
     private native void nativeSelectedDirectoryLocalRoot(long requestId, String path);
     private native void nativeStorageAccessChanged(boolean granted, String documentsLibraryRoot);
     private native void nativeOpenBook(String name, int fileDescriptor);
-    static native boolean nativeTransfersAllowed();
     static native void nativeNetworkCostChanged(int cost);
     static void startNetworkCostMonitor(android.content.Context context) { NetworkCostMonitor.start(context); }
-    static void useTransferPolicy() { BookDownload.transfersAllowed = MainActivity::nativeTransfersAllowed; }
     private native void nativeVolumeButton(boolean next);
     private native void nativeWindowInsets(
         int safeLeft,
@@ -671,9 +676,8 @@ public final class MainActivity extends GameActivity {
         if (separator < 0 || separator == name.length() - 1) {
             return false;
         }
-        String extension = name.substring(separator + 1).toLowerCase(Locale.ROOT);
         for (String accepted : extensions) {
-            if (extension.equals(accepted.toLowerCase(Locale.ROOT))) {
+            if (name.toLowerCase(Locale.ROOT).endsWith("." + accepted.toLowerCase(Locale.ROOT))) {
                 return true;
             }
         }
@@ -751,6 +755,21 @@ public final class MainActivity extends GameActivity {
                 case "azw3":
                     mimeTypes.add("application/vnd.amazon.ebook");
                     mimeTypes.add("application/x-mobi8-ebook");
+                    break;
+                case "fb2":
+                    mimeTypes.add("application/x-fictionbook+xml");
+                    mimeTypes.add("text/xml");
+                    mimeTypes.add("application/xml");
+                    break;
+                case "fbz":
+                case "zip":
+                    mimeTypes.add("application/zip");
+                    mimeTypes.add("application/x-zip-compressed-fb2");
+                    break;
+                case "cbz":
+                    mimeTypes.add("application/vnd.comicbook+zip");
+                    mimeTypes.add("application/x-cbz");
+                    mimeTypes.add("application/zip");
                     break;
                 case "m4b":
                     mimeTypes.add("audio/mp4");

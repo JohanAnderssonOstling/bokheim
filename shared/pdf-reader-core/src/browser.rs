@@ -23,8 +23,8 @@ thread_local! {
     static DOCUMENTS: RefCell<HashMap<u64, PdfDocumentSession>> = RefCell::new(HashMap::new());
     static PENDING: RefCell<HashMap<u64, Completion>> = RefCell::new(HashMap::new());
     static FAILED: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
-    static FAILURE_CALLBACK: Closure<dyn FnMut(String, bool)> = Closure::new(fail);
-    static COMPLETION_CALLBACK: Closure<dyn FnMut(String)> = Closure::new(complete);
+    static FAILURE_CALLBACK: Closure<dyn FnMut(String, bool)> = Closure::own_aborting(fail);
+    static COMPLETION_CALLBACK: Closure<dyn FnMut(String)> = Closure::own_aborting(complete);
 }
 
 fn fail(message: String, retryable: bool) {

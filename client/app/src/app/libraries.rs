@@ -1,8 +1,76 @@
 use super::core::*;
 use crate::host::startup_profile::StartupProfile;
+use crate::{LibraryFolderError, LibraryFolderStep};
 use library_backend::library::handle::{LibraryActorCommand, LibraryControl};
 use library_backend::library::{LibraryOpenConfig, LibraryRuntimeSpec};
+use std::collections::HashMap;
+use std::fs;
+use std::io::ErrorKind;
 use std::sync::Arc;
+
+fn check_library_folder(path: &Path) -> Result<PathBuf, (LibraryFolderStep, BackendError)> {
+    let access_error = |error: std::io::Error| {
+        let error = if error.kind() == ErrorKind::NotFound { BackendError::classified(Failure::LibraryFolderUnavailable, error.to_string()) } else { BackendError::from(error) };
+        (LibraryFolderStep::CheckFolder, error)
+    };
+    let metadata = fs::metadata(path).map_err(access_error)?;
+    if !metadata.is_dir() {
+        return Err((LibraryFolderStep::NotAFolder, BackendError::message("selected path is not a directory")));
+    }
+    // is_dir() hides access errors. Opening the listing keeps permission and
+    // unavailable-drive failures distinct without modifying the user's files.
+    let _ = fs::read_dir(path).map_err(access_error)?;
+    path.canonicalize().map_err(access_error)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod folder_add_tests {
+    use super::*;
+
+    #[test]
+    fn missing_folder_and_selected_file_are_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let (step, error) = check_library_folder(&root.path().join("missing")).unwrap_err();
+        assert_eq!(step, LibraryFolderStep::CheckFolder);
+        assert_eq!(error.failure(), Some(Failure::LibraryFolderUnavailable));
+        let file = root.path().join("book.epub");
+        fs::write(&file, "book").unwrap();
+        assert_eq!(check_library_folder(&file).unwrap_err().0, LibraryFolderStep::NotAFolder);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readable_folder_without_write_permission_passes_the_access_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let result = check_library_folder(root.path());
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(result.unwrap(), root.path().canonicalize().unwrap());
+    }
+
+    #[tokio::test]
+    async fn adding_registered_folder_retries_a_failed_open() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("app-data");
+        fs::create_dir_all(&data).unwrap();
+        let books = root.path().join("My Library");
+        fs::create_dir(&books).unwrap();
+        let context = BackendContext::initialize(AppDataLocation::native_path(&data)).unwrap();
+        let entry = context.registry.create_with_asset_storage("My Library", Some(books.to_string_lossy().into_owned()), false).unwrap();
+        let db = PathBuf::from(context.registry.library_database_locator(entry.library_id(), entry.storage_locator()));
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        fs::write(&db, b"this is not a SQLite database").unwrap();
+        let backend = AppBackend::new_without_libraries(context).unwrap();
+        for _ in 0..2 {
+            let (added, failures) = backend.create_libraries_from_paths_with_asset_storage(vec![books.clone()], false).unwrap();
+            assert!(added.is_empty());
+            assert_eq!(failures.len(), 1, "a registered but unavailable library must not be silently skipped");
+            assert_eq!(failures[0].folder_name.as_deref(), Some("My Library"));
+            assert_eq!(failures[0].step, LibraryFolderStep::OpenLibrary);
+        }
+    }
+}
 
 impl AppBackend {
     pub(crate) fn libraries(&self) -> Result<Vec<LibraryEntry>, BackendError> {
@@ -47,39 +115,53 @@ impl AppBackend {
     ///
     /// Paths remain inside the backend after this call. Frontends identify the
     /// resulting libraries only by `LibraryId`.
-    pub(crate) fn create_libraries_from_paths_with_asset_storage(&self, paths: Vec<PathBuf>, asset_storage_enabled: bool) -> Result<(Vec<LibraryId>, Vec<String>), BackendError> {
-        let mut known_paths = self.libraries()?.into_iter().map(|entry| PathBuf::from(entry.storage_locator())).collect::<HashSet<_>>();
+    pub(crate) fn create_libraries_from_paths_with_asset_storage(&self, paths: Vec<PathBuf>, asset_storage_enabled: bool) -> Result<(Vec<LibraryId>, Vec<LibraryFolderError>), BackendError> {
+        let mut known_paths = self.libraries()?.into_iter().map(|entry| (PathBuf::from(entry.storage_locator()), *entry.library_id())).collect::<HashMap<_, _>>();
         let mut created_ids = Vec::new();
         let mut errors = Vec::new();
         for path in paths {
             let display_path = path.display().to_string();
-            if !path.is_dir() {
-                errors.push(format!("{display_path}: not a folder"));
-                continue;
-            }
-            let canonical_path = match path.canonicalize() {
+            let failure = |step, error: BackendError| LibraryFolderError { folder_name: Some(library_name_for_folder(&path)), step, error: error.context(display_path.clone()) };
+            let canonical_path = match check_library_folder(&path) {
                 Ok(path) => path,
-                Err(error) => {
-                    errors.push(format!("{display_path}: {error}"));
+                Err((step, error)) => {
+                    errors.push(failure(step, error));
                     continue;
                 }
             };
-            if known_paths.contains(&canonical_path) {
+            if let Some(id) = known_paths.get(&canonical_path) {
+                // A prior attempt may have saved the registry entry but failed
+                // to open its local data. Adding it again must retry that open.
+                match self.open_registered_library(id) {
+                    Ok(()) => {
+                        if !created_ids.contains(id) {
+                            created_ids.push(*id);
+                        }
+                        self.send_library_list_changed();
+                    }
+                    Err(error) => errors.push(failure(LibraryFolderStep::OpenLibrary, error)),
+                }
                 continue;
             }
-            let opened = self.register_library_with_asset_storage(&library_name_for_folder(&path), Some(path.to_string_lossy().into_owned()), asset_storage_enabled).and_then(|entry| {
-                // Opening starts any required library-owned work before the UI
-                // receives the registry entry.
-                self.open_registered_library(entry.library_id())?;
-                self.finish_created_library(entry)
-            });
+            if let Err(error) = library_registry::read_library_manifest(&canonical_path) {
+                errors.push(failure(LibraryFolderStep::ReadLibraryInfo, BackendError::operation(error)));
+                continue;
+            }
+            let entry = match self.register_library_with_asset_storage(&library_name_for_folder(&path), Some(canonical_path.to_string_lossy().into_owned()), asset_storage_enabled) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.push(failure(LibraryFolderStep::SaveLibraryInfo, error));
+                    continue;
+                }
+            };
+            let opened = self.finish_created_library(entry);
             match opened {
                 Ok(entry) => {
                     // Opening the library already queued its filesystem scan.
-                    known_paths.insert(PathBuf::from(entry.storage_locator()));
+                    known_paths.insert(PathBuf::from(entry.storage_locator()), *entry.library_id());
                     created_ids.push(*entry.library_id());
                 }
-                Err(error) => errors.push(format!("{display_path}: {error}")),
+                Err(error) => errors.push(failure(LibraryFolderStep::OpenLibrary, error)),
             }
         }
         Ok((created_ids, errors))
@@ -102,7 +184,7 @@ impl AppBackend {
         })
     }
 
-    fn finish_created_library(&self, entry: LibraryEntry) -> Result<LibraryEntry, BackendError> {
+    pub(super) fn finish_created_library(&self, entry: LibraryEntry) -> Result<LibraryEntry, BackendError> {
         self.open_registered_library(entry.library_id())?;
         self.send_library_list_changed();
         Ok(entry)
@@ -147,7 +229,10 @@ impl AppBackend {
                     }
                     Err(error) => log::warn!("could not read pending local library purges: {error}"),
                 }
-                crate::executor::sleep(std::time::Duration::from_secs(30)).await;
+                if let Err(error) = crate::executor::sleep(std::time::Duration::from_secs(30)).await {
+                    log::warn!("local library purge retries stopped: {error}");
+                    break;
+                }
             }
         });
     }
@@ -222,7 +307,7 @@ impl AppBackend {
     fn library_runtime_spec(&self, library_path: &str, library_id: LibraryId) -> Result<(LibraryRuntimeSpec, Option<Vec<u8>>), BackendError> {
         let reset_key = format!("cloud-storage-reset:{library_id}");
         let reset_token = self.state.registry.read_value(&reset_key).map_err(BackendError::operation)?;
-        let cloud_enabled = self.library_asset_storage_enabled(&library_id)?;
+        let storage = self.state.registry.storage(&library_id).map_err(BackendError::operation)?;
         let display_name = self.library_entry(&library_id)?.library_name().to_owned();
         Ok((
             LibraryRuntimeSpec {
@@ -234,10 +319,11 @@ impl AppBackend {
                     default_sync_server_url: crate::api_server_url(),
                     metadata_server_url: crate::METADATA_SERVER_ORIGIN.to_owned(),
                     google_books_api_key: super::google_books_api_key(),
-                    asset_storage_enabled: cloud_enabled,
+                    storage,
                     reset_cloud_presence: reset_token.is_some(),
                 },
                 account: self.state.account.library_account(),
+                cloud: self.state.cloud.clone(),
                 notification_interest: self.state.notification_interest.clone(),
             },
             reset_token,

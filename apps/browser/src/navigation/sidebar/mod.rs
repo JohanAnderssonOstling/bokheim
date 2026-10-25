@@ -3,7 +3,9 @@
 //! Renders whichever route the shell says is current; it owns no route of its
 //! own, only the open/closed state of its own overlays.
 
+mod add_library;
 mod switcher_overlay;
+mod cloud_library;
 
 use gpui::prelude::*;
 use gpui::{Context, Edges, Entity, FocusHandle, Pixels, SharedString};
@@ -25,7 +27,6 @@ pub(crate) const RAIL_ROUTES: [Route; 7] = [
     Route::Global(GlobalRoute::Settings),
 ];
 
-
 /// Where the keyboard is inside the open library switcher.
 ///
 /// A grid rather than a list: rows are the add button and then one per library,
@@ -42,6 +43,8 @@ pub(crate) struct Sidebar {
     switcher_open: bool,
     library_menu: Option<(sync_common::LibraryId, Entity<gpui_component::menu::PopupMenu>, gpui::Subscription)>,
     library_name_dialog: Option<switcher_overlay::LibraryNameDialog>,
+    cloud_library_dialog: Option<cloud_library::CloudLibraryDialog>,
+    add_library_choices: Option<add_library::AddLibraryChoices>,
     navigate: Navigate,
     pub(super) switcher_cursor: SwitcherCursor,
     pub(super) switcher_focus: FocusHandle,
@@ -64,7 +67,7 @@ pub(super) fn route_definition(route: Route) -> (&'static str, Icon) {
 
 impl Sidebar {
     pub(crate) fn new(libraries: Entity<Libraries>, navigate: Navigate, cx: &mut Context<Self>) -> Self {
-        Self { libraries, library_menu: None, library_name_dialog: None, switcher_open: false, navigate, switcher_cursor: SwitcherCursor::Add, switcher_focus: cx.focus_handle() }
+        Self { libraries, library_menu: None, library_name_dialog: None, cloud_library_dialog: None, add_library_choices: None, switcher_open: false, navigate, switcher_cursor: SwitcherCursor::Add, switcher_focus: cx.focus_handle() }
     }
 
     /// Draws the rail or the bottom bar, whichever the window width calls for.
@@ -80,11 +83,7 @@ impl Sidebar {
     fn render_bottom_navigation(&self, emitter: Entity<Self>, route: Route, library_view: LibraryRoute, safe_area: Edges<Pixels>, cx: &gpui::App) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let in_library_view = matches!(route, Route::Library(view) if super::LIBRARY_VIEWS.contains(&view));
-        let tabs = if components::touch_ui() {
-            vec![Route::Library(LibraryRoute::Home), Route::Library(library_view), Route::Library(LibraryRoute::Catalog), Route::Global(GlobalRoute::Settings)]
-        } else {
-            RAIL_ROUTES.to_vec()
-        };
+        let tabs = if components::touch_ui() { vec![Route::Library(LibraryRoute::Home), Route::Library(library_view), Route::Library(LibraryRoute::Catalog), Route::Global(GlobalRoute::Settings)] } else { RAIL_ROUTES.to_vec() };
         let mut navigation = components::bottom_navigation(theme);
         for target in tabs {
             let (id, icon) = route_definition(target);

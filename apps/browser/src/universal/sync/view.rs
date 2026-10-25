@@ -52,17 +52,21 @@ impl Render for AccountIdentityView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let email = self.account_status.email().unwrap_or_default().to_owned();
-        let mut actions = Vec::with_capacity(2);
+        let mut actions = Vec::with_capacity(3);
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
             let password = self.page.clone();
-            actions.push(components::link_button("account-change-password", "Change password…", theme, false).on_click(move |_, window, cx| {
+            actions.push(components::link_button("account-change-password", "Change password", theme, false).on_click(move |_, window, cx| {
                 password.update(cx, |page, cx| page.open_password_change(window, cx));
             }));
         }
         let logout = self.page.clone();
         actions.push(components::link_button("account-log-out", "Log out", theme, false).on_click(move |_, _, cx| {
             logout.update(cx, |page, cx| page.start_logout(cx));
+        }));
+        let delete = self.page.clone();
+        actions.push(components::link_button("account-delete", "Delete account", theme, false).on_click(move |_, window, cx| {
+            delete.update(cx, |page, cx| page.open_account_deletion(window, cx));
         }));
         components::account_identity(account_initial(&email), email, actions, theme)
     }
@@ -246,7 +250,15 @@ impl SyncPage {
                 actions = actions.child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
                     resend.update(cx, |page, cx| page.start_resend_verification(cx));
                 }));
-                form.child(components::section_header("Check your email", "", theme)).children(feedback).child(OtpInput::new(&self.authentication.verification_pin)).child(actions).child(self.access_link(
+                // The PIN proves the mailbox; the password chosen at
+                // registration proves this registrant, so it is asked again.
+                form.child(components::section_header("Check your email", "", theme))
+                    .children(feedback)
+                    .child(OtpInput::new(&self.authentication.verification_pin))
+                    .child(self.password_input(&self.authentication.registration_password, "toggle-verification-password", entity))
+                    .child(components::form_hint("The password you chose for this account.", theme))
+                    .child(actions)
+                    .child(self.access_link(
                     entity,
                     "account-restart-registration",
                     "Wrong address? Start over",
@@ -337,6 +349,9 @@ impl SyncPage {
         };
 
         let signed_in = self.state.read(cx).account_status.signed_in();
+        if signed_in && self.deletion.is_some() {
+            return components::browser_settings_fieldset("Account", theme).child(components::browser_settings_block(theme).child(self.account_deletion_form(&entity, feedback, theme)));
+        }
         let account = if signed_in {
             components::browser_settings_fieldset("Account", theme).child(components::browser_settings_block(theme).child(self.identity.clone()).child(self.storage_body(theme, cx)))
         } else {
@@ -496,6 +511,10 @@ impl SyncPage {
                 LibrarySyncState::RemoteMissing => ("Not on server", theme.warning),
                 LibrarySyncState::LocalOnly => ("On this device", theme.text_muted),
             }};
+            let (status, status_color) = if row.status.pending_provider_uploads != 0 && !row.status.issues.has_issues() {
+                let count = row.status.pending_provider_uploads;
+                (format!("{count} {} waiting for upload", if count == 1 { "book" } else { "books" }), theme.warning)
+            } else { (status.to_owned(), status_color) };
             let library_id = row.status.library_id;
             // The folder is the button that opens it, labelled with its path.
             #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -513,11 +532,22 @@ impl SyncPage {
             // The column heading names the switch; stacked, with no heading,
             // the switch names itself.
             let cloud_page = page.clone();
-            let cloud = Checkbox::new(SharedString::from(format!("asset-storage-{library_id}")))
-                .when(compact, |checkbox| checkbox.label("Cloud"))
-                .checked(row.status.asset_storage_enabled)
-                .disabled(self.asset_storage_pending.contains(&library_id))
-                .on_click(move |enabled, _, cx| cloud_page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx)));
+            let cloud = if let Some(root) = row.status.storage.external() {
+                let provider = match root.scope.provider {
+                    app::CloudProvider::GoogleDrive => "Google Drive",
+                    app::CloudProvider::Dropbox => "Dropbox",
+                    app::CloudProvider::OneDrive => "OneDrive",
+                    app::CloudProvider::WebDav => "WebDAV",
+                    app::CloudProvider::S3 => "S3",
+                };
+                div().text_color(theme.text_muted).child(provider).into_any_element()
+            } else {
+                Checkbox::new(SharedString::from(format!("asset-storage-{library_id}")))
+                    .when(compact, |checkbox| checkbox.label("Bokheim"))
+                    .checked(row.status.asset_storage_enabled)
+                    .disabled(self.asset_storage_pending.contains(&library_id))
+                    .on_click(move |enabled, _, cx| cloud_page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx))).into_any_element()
+            };
             libraries = libraries.child(components::library_table_row(row.name.clone(), path, local_bytes, (status, status_color), cloud, compact, theme).when(!has_rows, |row| row.border_t_0()));
             has_rows = true;
         }

@@ -14,9 +14,9 @@ use crate::shell::chrome;
 use crate::shell::input::{self as shell_input, CommandTarget};
 use crate::shell::page::ReaderSurface;
 use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent};
-use crate::{DecreaseColumnWidth, DecreaseFont, IncreaseColumnWidth, IncreaseFont, NextPage, NextSection, PreviousPage, PreviousSection, ToggleFullscreen};
+use crate::{DecreaseColumnWidth, DecreaseFont, IncreaseColumnWidth, IncreaseFont, NextLine, NextPage, NextSection, PreviousLine, PreviousPage, PreviousSection, ToggleFullscreen};
 use gpui::prelude::*;
-use gpui::{App, Context, Div, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, Point, Render, ScrollDelta, Window};
+use gpui::{App, Context, Div, FocusHandle, Focusable, IntoElement, Pixels, Point, Render, ScrollDelta, Window};
 use ui_components as components;
 
 impl Focusable for ReaderView {
@@ -36,7 +36,10 @@ impl Focusable for ReaderView {
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(all(target_os = "android", feature = "native-tts", not(feature = "kobo")))]
-        self.tts.sync_volume_buttons(cx);
+        self.tts.sync_volume_buttons(ReaderSettings::preferences(cx).reading_ruler != html_view_gpui::ReadingRulerStyle::Off, cx);
+        if cfg!(target_os = "android") {
+            self.install_ruler_hardware_keys(window, cx);
+        }
         components::sync_reader_rem_size(window, cx);
         crate::invalidation::record_render(Component::ReaderShell);
         let theme = components::browser_theme(cx);
@@ -71,12 +74,15 @@ impl Render for ReaderView {
             self.open_search(cx);
         }
         let preferences = ReaderSettings::preferences(cx);
+        let ruler_style = preferences.reading_ruler;
+        let ruler_lines = preferences.reading_ruler_lines;
         let (split_sidebar_width, horizontal_margin, available_width) = Self::horizontal_layout(window, cx, sidebar_visible);
         let vertical_margin = preferences.vertical_margin_px.min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
         let max_columns = self.max_columns_for_gap(f64::from(available_width), cx);
         let fitted_column_width = self.fitted_column_width(f64::from(available_width), cx);
         let column_gap = f64::from(preferences.min_column_gap_px) / preferences.scale.max(0.1);
         if let LoadState::Ready(renderer) = &self.load_state {
+            renderer.update(cx, |view, cx| view.set_reading_ruler(ruler_style, ruler_lines, cx));
             let plan = (renderer.entity_id(), f64::from(available_width), fitted_column_width, max_columns, column_gap);
             if self.touch_swipe.is_none() || self.last_column_viewport_plan != Some(plan) {
                 renderer.update(cx, |renderer, cx| {
@@ -219,6 +225,60 @@ fn swipe_document(document: impl IntoElement, offset: Point<Pixels>) -> Div {
 const WHEEL_SCROLL_END_DELAY: Duration = Duration::from_millis(150);
 
 impl ReaderView {
+    fn reading_ruler_enabled(&self, cx: &App) -> bool {
+        ReaderSettings::preferences(cx).reading_ruler != html_view_gpui::ReadingRulerStyle::Off
+    }
+
+    fn advance_from_gesture(&mut self, forward: bool, vertical: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if vertical && self.reading_ruler_enabled(cx) {
+            if forward {
+                self.execute(&NextLine, window, cx);
+            } else {
+                self.execute(&PreviousLine, window, cx);
+            }
+        } else if forward {
+            self.execute(&NextPage, window, cx);
+        } else {
+            self.execute(&PreviousPage, window, cx);
+        }
+    }
+
+    fn install_ruler_hardware_keys(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = cx.entity().downgrade();
+        let handle = window.window_handle();
+        window.use_keyed_state(("epub-ruler-hardware", cx.entity_id()), cx, move |_, cx| {
+            cx.intercept_keystrokes(move |event, window, cx| {
+                if window.window_handle() != handle || !event.context_stack.iter().any(|context| context.contains(DOCUMENT_CONTEXT)) {
+                    return;
+                }
+                if let Some(target) = target.upgrade() {
+                    target.update(cx, |reader, cx| reader.handle_ruler_hardware_key(&event.keystroke, window, cx));
+                }
+            })
+        });
+    }
+
+    /// Android's captured volume keys arrive as Page Up/Down. Only take them
+    /// while the document has focus, leaving inputs and settings in control.
+    fn handle_ruler_hardware_key(&mut self, key: &gpui::Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        if !cfg!(target_os = "android")
+            || !self.reading_ruler_enabled(cx)
+            || self.document_focus(cx).is_none_or(|focus| !focus.is_focused(window))
+            || key.modifiers.control
+            || key.modifiers.alt
+            || key.modifiers.platform
+            || key.modifiers.shift
+        {
+            return;
+        }
+        match key.key.as_str() {
+            "pagedown" => self.execute(&NextLine, window, cx),
+            "pageup" => self.execute(&PreviousLine, window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
     /// Reclaim document focus on hover without interrupting sidebar keyboard input.
     fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sidebar_focus.contains_focused(window, cx) || self.rail_focus.contains_focused(window, cx) || self.marks.selected().is_some() {
@@ -228,11 +288,11 @@ impl ReaderView {
         self.focus_document(window, cx);
     }
 
-    /// Turns the page on a wheel gesture rather than scrolling the document.
+    /// Advances the ruler, or turns the page when the ruler is disabled.
     ///
     /// Android touch swipes commit on their end event. Physical wheel and
-    /// trackpad bursts use a quiet period so one flick advances only one page.
-    /// Scrolling down goes forward, the same direction the browse grid pages.
+    /// trackpad bursts use a quiet period so one flick advances one line/page.
+    /// Scrolling down goes forward, the same direction as vertical touch swipes.
     fn handle_mouse_wheel(&mut self, event: &gpui::ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.touch_selection.active {
             cx.stop_propagation();
@@ -249,11 +309,7 @@ impl ReaderView {
             }
             cx.notify();
             if direction.is_finite() && direction != 0.0 {
-                if direction < 0.0 {
-                    self.execute(&NextPage, window, cx);
-                } else {
-                    self.execute(&PreviousPage, window, cx);
-                }
+                self.advance_from_gesture(direction < 0.0, delta.y.abs() >= delta.x.abs(), window, cx);
             }
             cx.stop_propagation();
             return;
@@ -282,7 +338,7 @@ impl ReaderView {
                     self.wheel_debounce.take();
                     self.touch_swipe = Some(travel);
                     self.touch_swipe_from_edge = components::in_bottom_gesture_edge(event.position, window);
-                    if !self.touch_swipe_from_edge {
+                    if !self.touch_swipe_from_edge && (!self.reading_ruler_enabled(cx) || travel.x.abs() > travel.y.abs()) {
                         if self.swipe_preview.drag_in_viewport(travel, self.page_size.unwrap_or(window.viewport_size())) {
                             cx.notify();
                         }
@@ -291,10 +347,12 @@ impl ReaderView {
                     return;
                 }
                 gpui::TouchPhase::Moved if self.touch_swipe.is_some() => {
+                    let ruler_enabled = self.reading_ruler_enabled(cx);
                     if let Some(swipe) = &mut self.touch_swipe {
                         *swipe = gpui::point(swipe.x + travel.x, swipe.y + travel.y);
                         if !self.touch_swipe_from_edge {
-                            if self.swipe_preview.drag_in_viewport(*swipe, self.page_size.unwrap_or(window.viewport_size())) {
+                            let preview = if ruler_enabled && swipe.y.abs() >= swipe.x.abs() { gpui::point(0.0, 0.0) } else { *swipe };
+                            if self.swipe_preview.drag_in_viewport(preview, self.page_size.unwrap_or(window.viewport_size())) {
                                 cx.notify();
                             }
                         }
@@ -308,11 +366,7 @@ impl ReaderView {
                     let from_edge = std::mem::take(&mut self.touch_swipe_from_edge);
                     match components::swipe_turns_forward(swipe, window).filter(|_| !from_edge) {
                         Some(forward) => {
-                            if forward {
-                                self.execute(&NextPage, window, cx)
-                            } else {
-                                self.execute(&PreviousPage, window, cx)
-                            }
+                            self.advance_from_gesture(forward, swipe.y.abs() >= swipe.x.abs(), window, cx);
                         }
                         None => self.swipe_preview.settle(),
                     }
@@ -343,10 +397,8 @@ impl ReaderView {
             let _ = reader.update_in(cx, |reader, window, cx| {
                 reader.wheel_debounce.take();
                 let delta = std::mem::take(&mut reader.wheel_delta);
-                if delta < 0.0 {
-                    reader.execute(&NextPage, window, cx);
-                } else if delta > 0.0 {
-                    reader.execute(&PreviousPage, window, cx);
+                if delta != 0.0 {
+                    reader.advance_from_gesture(delta < 0.0, true, window, cx);
                 }
             });
         }));
@@ -362,20 +414,15 @@ const DOCUMENT_CONTEXT: &str = "ReaderDocument";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     shell_input::bind_document_keys(cx, DOCUMENT_CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("secondary-left", PreviousSection, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("secondary-right", NextSection, Some(DOCUMENT_CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("f11", ToggleFullscreen, Some("Reader")),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, Some("Reader")),
-        KeyBinding::new("secondary-alt-=", IncreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("secondary-alt-+", IncreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("secondary-alt--", DecreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("alt-=", IncreaseFont, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("alt-+", IncreaseFont, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("alt--", DecreaseFont, Some(DOCUMENT_CONTEXT)),
-    ]);
+    use ui_components::{ShortcutPage::Reader, bind_shortcut};
+    bind_shortcut(cx, Reader, "reader.previous_section", "Previous section", &["secondary-left"], PreviousSection, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.next_section", "Next section", &["secondary-right"], NextSection, DOCUMENT_CONTEXT);
+    #[cfg(not(target_os = "macos"))]
+    bind_shortcut(cx, Reader, "reader.fullscreen", "Toggle fullscreen", &["f11"], ToggleFullscreen, "Reader");
+    #[cfg(target_os = "macos")]
+    bind_shortcut(cx, Reader, "reader.fullscreen", "Toggle fullscreen", &["ctrl-cmd-f"], ToggleFullscreen, "Reader");
+    bind_shortcut(cx, Reader, "reader.font_increase", "Increase book font size", &["alt-="], IncreaseFont, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.font_decrease", "Decrease book font size", &["alt--"], DecreaseFont, DOCUMENT_CONTEXT);
 }
 
 #[cfg(test)]

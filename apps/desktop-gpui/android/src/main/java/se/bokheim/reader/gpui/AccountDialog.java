@@ -102,7 +102,7 @@ final class AccountDialog extends Dialog {
         if (!finished) {
             finished = true;
             if (!committed && autofill != null) autofill.cancel();
-            emit("closed", "", "", "");
+            submit.send(sessionId, JSONObject.quote("closed"));
         }
         super.dismiss();
     }
@@ -233,10 +233,13 @@ final class AccountDialog extends Dialog {
         feedback(message, false);
         email = field(R.id.account_email, "Email", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
             flow.equals("register") ? "newUsername" : View.AUTOFILL_HINT_USERNAME, address);
-        if (flow.equals("login") || flow.equals("register") || flow.equals("reset")) {
-            password = field(R.id.account_password, flow.equals("reset") ? "New password" : "Password",
+        if (flow.equals("verify")) pin = field(R.id.account_pin, "Verification PIN", InputType.TYPE_CLASS_NUMBER, null, "");
+        // Verification asks for the registration password too: the PIN proves
+        // the mailbox, the password proves the registrant.
+        if (flow.equals("login") || flow.equals("register") || flow.equals("reset") || flow.equals("verify")) {
+            password = field(R.id.account_password, flow.equals("reset") ? "New password" : flow.equals("verify") ? "Password you chose" : "Password",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD,
-                flow.equals("login") ? View.AUTOFILL_HINT_PASSWORD : "newPassword", "");
+                flow.equals("login") || flow.equals("verify") ? View.AUTOFILL_HINT_PASSWORD : "newPassword", "");
             password.setTransformationMethod(PasswordTransformationMethod.getInstance());
             Button reveal = button("Show password", () -> {});
             LinearLayout.LayoutParams revealLayout = new LinearLayout.LayoutParams(-2, -2);
@@ -250,11 +253,10 @@ final class AccountDialog extends Dialog {
                 reveal.setText(hidden ? "Hide password" : "Show password");
                 reveal.setContentDescription(hidden ? "Hide password" : "Show password");
             });
-            if (!flow.equals("login")) text("Use at least " + minimum + " characters.", 14).setTextColor(colors[MUTED]);
+            if (flow.equals("register") || flow.equals("reset")) text("Use at least " + minimum + " characters.", 14).setTextColor(colors[MUTED]);
         }
-        if (flow.equals("verify")) pin = field(R.id.account_pin, "Verification PIN", InputType.TYPE_CLASS_NUMBER, null, "");
         if (flow.equals("reset")) token = field(R.id.account_reset_token, "Reset code from your email", InputType.TYPE_CLASS_TEXT, null, "");
-        EditText last = token != null ? token : pin != null ? pin : password != null ? password : email;
+        EditText last = token != null ? token : password != null ? password : email;
         last.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         last.setOnEditorActionListener((v, action, event) -> {
             if (action == EditorInfo.IME_ACTION_DONE) { perform(flow); return true; }
@@ -285,23 +287,28 @@ final class AccountDialog extends Dialog {
     private void perform(String action) {
         if (busy || finished) return;
         String address = email.getText().toString().trim();
-        String secret = pin != null && action.equals("verify") ? pin.getText().toString() : password != null ? password.getText().toString() : "";
+        String secret = password != null ? password.getText().toString() : "";
+        String code = pin != null ? pin.getText().toString().trim() : "";
         String resetToken = token == null ? "" : token.getText().toString().trim();
         if (!android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches()) { email.setError("Enter a valid email address"); email.requestFocus(); return; }
-        if ((action.equals("login") && secret.isEmpty()) || ((action.equals("register") || action.equals("reset")) && secret.codePointCount(0, secret.length()) < minimum)) {
-            password.setError(action.equals("login") ? "Enter your password" : "Use at least " + minimum + " characters"); password.requestFocus(); return;
+        if (action.equals("verify") && !code.matches("[0-9]{6}")) { pin.setError("Enter the six-digit PIN"); pin.requestFocus(); return; }
+        if (((action.equals("login") || action.equals("verify")) && secret.isEmpty()) || ((action.equals("register") || action.equals("reset")) && secret.codePointCount(0, secret.length()) < minimum)) {
+            password.setError(action.equals("register") || action.equals("reset") ? "Use at least " + minimum + " characters" : "Enter your password"); password.requestFocus(); return;
         }
-        if (action.equals("verify") && !secret.matches("[0-9]{6}")) { pin.setError("Enter the six-digit PIN"); pin.requestFocus(); return; }
         if (action.equals("reset") && resetToken.isEmpty()) { token.setError("Enter the reset code from your email"); token.requestFocus(); return; }
         pending = action;
         setBusy(true);
         feedback("Please wait…", false);
-        emit(action, address, secret, resetToken);
-    }
-    private void emit(String action, String email, String secret, String token) {
+        // Each action sends exactly its own fields; Rust parses this into an enum.
         try {
-            JSONObject message = new JSONObject().put("action", action).put("email", email).put("secret", secret).put("token", token);
-            submit.send(sessionId, message.toString());
+            JSONObject request = new JSONObject().put("action", action);
+            switch (action) {
+                case "login": case "register": request.put("email", address).put("password", secret); break;
+                case "verify": request.put("email", address).put("pin", code).put("password", secret); break;
+                case "resend": case "request-reset": request.put("email", address); break;
+                case "reset": request.put("token", resetToken).put("password", secret); break;
+            }
+            submit.send(sessionId, new JSONObject().put("submit", request).toString());
         } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
     }
     void complete(String error) {

@@ -36,6 +36,8 @@ pub struct NowPlayingBook {
     /// from the player, so the page's chapter mark and cover bar keep up
     /// rather than waiting for the position to be saved and reloaded.
     pub position: Rc<dyn Fn(&App) -> Option<(std::time::Duration, f32)>>,
+    pub chapter_read_status: Rc<dyn Fn(&App) -> book_model::ChapterReadStatus>,
+    pub reset_chapter_read_status: Rc<dyn Fn(Option<String>, &mut App)>,
 }
 
 impl gpui::Global for NowPlaying {}
@@ -74,7 +76,7 @@ impl BrowserRoot {
         self.shell.update(cx, |shell, cx| shell.set_content_footer(footer, cx));
     }
 
-    pub fn open_book_detail(&mut self, library_id: sync_common::LibraryId, content_hash: sync_common::ContentHash, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_book_detail(&mut self, library_id: sync_common::LibraryId, content_hash: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.open_book_detail(library_id, content_hash, window, cx));
     }
 
@@ -179,7 +181,7 @@ impl BrowserRoot {
     }
 
     /// Reports a failure that occurred before an incoming file reached the shell.
-    pub fn incoming_import_failed(&mut self, error: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn incoming_import_failed(&mut self, error: app::BackendError, window: &mut Window, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.incoming_import_failed(error, window, cx));
     }
 
@@ -320,6 +322,10 @@ mod session_tests {
         let first_preferences = first.update(cx, |root, _, _| root.preferences.clone()).unwrap();
         let second_preferences = second.update(cx, |root, _, _| root.preferences.clone()).unwrap();
         assert_eq!(first_preferences.entity_id(), second_preferences.entity_id());
+        let shortcuts = app_preferences::KeyboardShortcuts::from([("browse.undo".into(), vec!["alt-z".into()])]);
+        let shortcut_save = first.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.save_keyboard_shortcuts(shortcuts.clone(), cx))).unwrap();
+        shortcut_save.await.unwrap();
+        second.update(cx, |root, _, cx| assert_eq!(root.preferences.read(cx).browsing().keyboard_shortcuts(), &shortcuts)).unwrap();
         assert_eq!(second.update(cx, |root, _, cx| root.preferences.read(cx).ui_font_size_px()).unwrap(), 18);
         let metered_save = first.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.save_metered_transfers(true, cx))).unwrap();
         second.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.update_browsing(BrowsingPreferencePatch::CatalogLanguages(Some(vec!["swe".into()])), cx)).unwrap()).unwrap();

@@ -1,4 +1,5 @@
-use content_address::ContentHash;
+use content_address::BookId;
+use operation_failure::Failure;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -11,7 +12,8 @@ pub enum BrowserDownloadPhase {
     Importing,
     Waiting,
     Completed,
-    Failed,
+    /// Why it failed, when that is known; the UI words it.
+    Failed(Option<Failure>),
     Dismissed,
 }
 
@@ -25,6 +27,8 @@ pub struct BrowserDownloadUpdate {
     pub phase: BrowserDownloadPhase,
     #[serde(default)]
     pub percent: Option<u8>,
+    /// Progress wording for an ongoing download. A failure's wording comes
+    /// from its phase, never from this text.
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -78,12 +82,12 @@ pub enum DownloadState {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BookDownloadStatus {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub state: DownloadState,
 }
 
 impl BookDownloadStatus {
-    pub fn new(content_hash: ContentHash, state: DownloadState) -> Self {
+    pub fn new(content_hash: BookId, state: DownloadState) -> Self {
         Self { content_hash, state }
     }
 }

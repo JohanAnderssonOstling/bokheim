@@ -8,10 +8,10 @@ use library_files::AssetStore;
 use library_files::asset_store::{CopiedBook, ImportOptions, PublishedStagedBook, StagedBook};
 #[cfg(target_arch = "wasm32")]
 use library_model::BlobKind;
-use sync_common::ContentHash;
+use sync_common::BookId;
 use sync_common::DirId;
 
-pub fn evict_local_book(assets: &AssetStore, database: &Database, hash: &ContentHash) -> Result<(), BackendError> {
+pub fn evict_local_book(assets: &AssetStore, database: &Database, hash: &BookId) -> Result<(), BackendError> {
     // Refuse eviction before touching the files that an unfinished upload needs.
     if !database.check_local_book_eviction(hash)? {
         return Ok(());
@@ -63,7 +63,7 @@ pub async fn run_file_jobs(assets: &AssetStore, database: &Database) -> Result<(
 
 /// Removes a purged book's bytes and thumbnails, then acknowledges the purge.
 /// Does nothing while another operation holds the book.
-fn purge_book(assets: &AssetStore, database: &Database, hash: &ContentHash) -> Result<(), BackendError> {
+fn purge_book(assets: &AssetStore, database: &Database, hash: &BookId) -> Result<(), BackendError> {
     #[cfg(not(target_arch = "wasm32"))]
     if !assets.root_available() {
         return Err(BackendError::message("library storage is unavailable"));
@@ -79,7 +79,7 @@ fn purge_book(assets: &AssetStore, database: &Database, hash: &ContentHash) -> R
     Ok(())
 }
 
-pub async fn run_file_jobs_for(assets: &AssetStore, database: &Database, hash: &ContentHash) -> Result<(), BackendError> {
+pub async fn run_file_jobs_for(assets: &AssetStore, database: &Database, hash: &BookId) -> Result<(), BackendError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let jobs = database.native_file_work()?.into_iter().filter(|work| &work.content_hash == hash).collect();

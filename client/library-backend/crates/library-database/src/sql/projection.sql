@@ -67,27 +67,27 @@ SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=:content_hash);
 SELECT deleted_at IS NOT NULL FROM book WHERE content_hash=:content_hash;
 
 -- name: projection_set_book_facts !
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: format: Option<i64>
 -- param: added_at: Option<i64>
 UPDATE book SET format=:format,added_at=:added_at
 WHERE content_hash=:content_hash AND (format,added_at) IS NOT (:format,:added_at);
 
 -- name: projection_set_book_popularity !
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: rating_count: Option<f64>
 UPDATE book SET popularity_rating_count=:rating_count
 WHERE content_hash=:content_hash AND popularity_rating_count IS NOT :rating_count;
 
 -- name: projection_set_book_lifecycle !
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: deleted_at: Option<i64>
 -- param: origin: Option<&str>
 UPDATE book SET deleted_at=:deleted_at,trash_origin_dir_id=:origin
 WHERE content_hash=:content_hash AND (deleted_at,trash_origin_dir_id) IS NOT (:deleted_at,:origin);
 
 -- name: projection_set_book_reading !
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: position: Option<&str>
 -- param: progress: f32
 -- param: read_at: Option<i64>

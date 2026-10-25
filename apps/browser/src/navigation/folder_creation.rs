@@ -3,7 +3,7 @@ use gpui::SelectedDirectory;
 use library_backend::BookFormat;
 
 fn eligible(path: &[String]) -> bool {
-    !path.iter().any(|part| part.starts_with('.')) && path.last().and_then(|name| std::path::Path::new(name).extension()).and_then(|ext| ext.to_str()).and_then(BookFormat::from_import_extension).is_some()
+    !path.iter().any(|part| part.starts_with('.')) && path.last().and_then(|name| BookFormat::from_file_name(name)).is_some()
 }
 
 pub(super) fn retain_eligible_files(directory: &mut SelectedDirectory) {

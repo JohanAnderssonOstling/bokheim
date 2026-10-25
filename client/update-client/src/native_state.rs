@@ -1,11 +1,12 @@
 //! Persistent private update state and staging for native hosts. These operations
 //! belong on the backend worker, never the UI thread. They never install files
 //! into the application or modify a library database.
-use crate::coordinator::{additional_space, ArtifactKind, Coordinator, Phase, Record, Store, WaitReason};
-use rusqlite::{params, Connection, OptionalExtension};
+use crate::coordinator::{ArtifactKind, Coordinator, Phase, Record, Store, WaitReason, additional_space};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use update_protocol::verify_file;
 
 pub struct SqliteStore {
     connection: Connection,
@@ -82,11 +83,6 @@ fn artifact_path(root: &Path, plan_id: &str, kind: ArtifactKind) -> Result<PathB
     Ok(root.join("staging").join(plan_id).join(kind.filename()))
 }
 
-fn verify_file(path: &Path, artifact: &crate::Artifact) -> Result<(), String> {
-    let input = File::open(path).map_err(|e| e.to_string())?;
-    update_protocol::copy_verified(input, &mut std::io::sink(), artifact)
-}
-
 impl UpdateLock {
     fn check_root(&self, root: &Path) -> Result<(), String> {
         if root.canonicalize().map_err(|e| e.to_string())? != self.root {
@@ -132,10 +128,9 @@ impl<S: Store> Coordinator<S> {
             }
             let parent = path.parent().ok_or("invalid staging path")?;
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            let partial = path.with_extension("part");
-            // Completed artifacts are reused. An interrupted partial download
-            // restarts cleanly; range requests can be added independently.
-            let mut output = File::create(&partial).map_err(|e| e.to_string())?;
+            // Reclaim an interrupted partial before calculating the space
+            // needed to download the complete authenticated artifact again.
+            update_files::remove_file_if_exists(&path.with_extension("part")).map_err(|e| e.to_string())?;
             let completed = &self.record().approved.as_ref().ok_or("no approved update")?.completed;
             let remaining = plan.artifacts.iter().filter(|a| !completed.contains(&a.kind)).try_fold(workspace_bytes, |sum, a| sum.checked_add(a.artifact.bytes).ok_or("staging size overflow"))?;
             let free = fs2::available_space(parent).map_err(|e| e.to_string())?;
@@ -143,14 +138,7 @@ impl<S: Store> Coordinator<S> {
             if missing > 0 {
                 return self.preparation_failed(now, WaitReason::Space { additional_bytes: missing }, "insufficient staging space".into());
             }
-            if let Err(error) = crate::blocking::download(client, &entry.artifact, &mut output) {
-                drop(output);
-                let _ = fs::remove_file(&partial);
-                return Err(error);
-            }
-            output.sync_all().map_err(|e| e.to_string())?;
-            drop(output);
-            crate::native_files::replace(&partial, &path)?;
+            crate::blocking::download(client, &entry.artifact, &path)?;
             self.artifact_prepared(entry.kind)?;
         }
         Ok(())

@@ -6,13 +6,13 @@ use crate::{AudiobookSql, Database, DatabaseError, chapters_from_navigation};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AuthorId, NARRATOR_MARC_RELATOR_CODE};
 use library_model::{BookDetail, BookDetailAuthor, BookTocEntry};
 use library_replica::{EnrichmentResult, LibraryStateEntry};
-use sync_common::{ContentHash, wire};
+use sync_common::{BookId, wire};
 
 impl Database {
     /// Everything one book's page states, in one snapshot rather than a request
     /// per panel: the card, its folder trail, its credits, its navigation, and
     /// where the reader is inside it.
-    pub fn browse_book_detail(&self, content_hash: &ContentHash) -> Result<BookDetail, DatabaseError> {
+    pub fn browse_book_detail(&self, content_hash: &BookId) -> Result<BookDetail, DatabaseError> {
         let hash = &content_hash;
         self.with_browse_snapshot(|| {
             let mut found = None;
@@ -111,7 +111,9 @@ impl Database {
                 }
             };
 
-            Ok(BookDetail { book, external_url: None, audiobook_chapter_count, description, year, source_directory_id, path, authors, credits, current_entry, current_target, toc })
+            let mut chapter_read_status = self.chapter_read_status(content_hash)?;
+            chapter_read_status.update_parents(&toc);
+            Ok(BookDetail { book, external_url: None, audiobook_chapter_count, description, year, source_directory_id, path, authors, credits, current_entry, current_target, toc, chapter_read_status })
         })
     }
 }

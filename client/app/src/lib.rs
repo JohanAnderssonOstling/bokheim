@@ -5,6 +5,8 @@ pub mod host;
 mod api;
 mod app;
 mod library_client;
+mod library_folder_error;
+pub use library_folder_error::{LibraryFolderError, LibraryFolderStep};
 use client_platform_runtime::executor;
 pub(crate) use library_backend::integration as notification_interest;
 mod platform;
@@ -14,7 +16,10 @@ pub use app::{API_SERVER_ORIGIN, METADATA_SERVER_ORIGIN, Url, api_server_url, me
 pub use app::{APP_NAME, APP_NAME_LOWER};
 pub use app::{AccountSnapshot, AppClient, AppStartupState};
 pub use app::{AccountStatus, AppDataLocation, LibraryEntry, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
-pub use client_runtime::BackendError;
+pub use app::{CloudFolderListing, CloudLoginRequest};
+pub use cloud_storage::{CloudEntry, CloudFolder, oauth::GoogleAccount};
+pub use sync_common::storage::{CloudLibraryRoot, CloudProvider, LibraryStorage, ProviderId, ProviderScope};
+pub use client_runtime::{BackendError, Classified, Failure, WifiFailure};
 pub(crate) type DeviceAccountSession = library_backend::integration::LibraryAccountSession<app::BackendContext>;
 
 #[cfg(target_arch = "wasm32")]

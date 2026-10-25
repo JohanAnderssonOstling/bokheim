@@ -4,7 +4,7 @@ use crate::{Database, DatabaseError};
 use library_model::RelativeDirPath;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TorrentRecord {
@@ -105,7 +105,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn book_torrents(&self, book: &ContentHash) -> Result<Vec<BookTorrent>, DatabaseError> {
+    pub fn book_torrents(&self, book: &BookId) -> Result<Vec<BookTorrent>, DatabaseError> {
         let mut query = self.connection.prepare("SELECT t.info_hash,bt.torrent_file_index,t.source,t.keep_seeding FROM book_torrent bt JOIN book b ON b.row_id=bt.book_row_id JOIN torrent t ON t.info_hash=bt.torrent_info_hash WHERE b.content_hash=?1 ORDER BY t.info_hash,bt.torrent_file_index")?;
         Ok(query.query_map([book], |row| Ok(BookTorrent { info_hash: row.get(0)?, file_index: row.get::<_, i64>(1)? as usize, source: row.get(2)?, keep_seeding: row.get(3)? }))?.collect::<Result<_, _>>()?)
     }
@@ -199,8 +199,8 @@ mod tests {
         let db = database();
         let folder = db.create_directory(&ROOT_DIR_ID, &"Books".into()).unwrap().id;
         db.connection.execute("INSERT INTO local_directory_projection VALUES(?1,'/Books')", [folder.to_string()]).unwrap();
-        let novel = ContentHash::new(&"a".repeat(64));
-        let audio = ContentHash::new(&"b".repeat(64));
+        let novel = BookId::new(&"a".repeat(64));
+        let audio = BookId::new(&"b".repeat(64));
         for (hash, name) in [(novel, "Novel.epub"), (audio, "Audio")] {
             db.connection.execute("INSERT INTO book(content_hash,title) VALUES(?1,?2)", params![hash, name]).unwrap();
             db.connection.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,?2,'',1 FROM book WHERE content_hash=?3", params![folder.to_string(), name, hash]).unwrap();
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn root_audiobook_tracks_link_and_follow_the_book_folder() {
         let db = database();
-        let audio = ContentHash::new(&"a".repeat(64));
+        let audio = BookId::new(&"a".repeat(64));
         db.connection.execute("INSERT INTO book(content_hash,title) VALUES(?1,'Books')", [audio]).unwrap();
         db.connection.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'Books','',1 FROM book WHERE content_hash=?2", params![ROOT_DIR_ID.to_string(), audio]).unwrap();
         db.connection.execute("INSERT INTO local_file_projection VALUES(?1,?2,'/Books')", params![audio, ROOT_DIR_ID.to_string()]).unwrap();
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn version_36_migrates_without_losing_existing_books() {
         let db = database();
-        let hash = ContentHash::new(&"e".repeat(64));
+        let hash = BookId::new(&"e".repeat(64));
         db.connection.execute("INSERT INTO book(content_hash,title) VALUES(?1,'Existing')", [hash]).unwrap();
         crate::browse::revision::remove(&db.connection).unwrap();
         db.connection
