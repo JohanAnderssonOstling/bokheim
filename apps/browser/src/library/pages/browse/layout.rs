@@ -167,6 +167,7 @@ pub(super) fn paginator_groups(
     page: Option<&BrowsePageState>,
     book_indices: &BTreeMap<usize, Entity<BookCardView>>,
     heading_rows: &BTreeMap<usize, BrowseRow>,
+    mobile: bool,
     cx: &mut App,
 ) -> Vec<PaginatorGroup> {
     let cover_text = crate::stores::current_cover_text(cx);
@@ -181,6 +182,7 @@ pub(super) fn paginator_groups(
     let section_ids: HashSet<_> = page.into_iter().flat_map(|page| page.section_ids.iter().copied()).collect();
 
     let headings = page.and_then(|page| page.headings.as_ref());
+    let author_cards = headings.is_some() || chips.iter().any(|chip| is_author_heading(chip.id));
     let rows = outer_heading_rows(&chips, headings, heading_rows);
     for chip in rows {
         let Some(chip) = chip else {
@@ -256,7 +258,14 @@ pub(super) fn paginator_groups(
         groups.push(PaginatorGroup::new(policy, chip_children));
     }
     if !card_children.is_empty() {
-        groups.push(PaginatorGroup::new(if shelves { browse_shelf_card_policy(cover_text) } else { browse_section_card_policy(cover_text) }, card_children));
+        let policy = if shelves {
+            browse_shelf_card_policy(cover_text)
+        } else {
+            let policy = browse_section_card_policy(cover_text, mobile);
+            // Author cards retain their compact width, with room for covers and text.
+            if author_cards { PaginatorGroupPolicy { sizing: browse_shelf_card_policy(cover_text).sizing, ..policy } } else { policy }
+        };
+        groups.push(PaginatorGroup::new(policy, card_children));
     }
     if !book_children.is_empty() {
         groups.push(PaginatorGroup::new(book_card_policy(cover_text), book_children));

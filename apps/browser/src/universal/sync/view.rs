@@ -52,17 +52,21 @@ impl Render for AccountIdentityView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let email = self.account_status.email().unwrap_or_default().to_owned();
-        let mut actions = Vec::with_capacity(2);
+        let mut actions = Vec::with_capacity(3);
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
             let password = self.page.clone();
-            actions.push(components::link_button("account-change-password", "Change password…", theme, false).on_click(move |_, window, cx| {
+            actions.push(components::link_button("account-change-password", "Change password", theme, false).on_click(move |_, window, cx| {
                 password.update(cx, |page, cx| page.open_password_change(window, cx));
             }));
         }
         let logout = self.page.clone();
         actions.push(components::link_button("account-log-out", "Log out", theme, false).on_click(move |_, _, cx| {
             logout.update(cx, |page, cx| page.start_logout(cx));
+        }));
+        let delete = self.page.clone();
+        actions.push(components::link_button("account-delete", "Delete account", theme, false).on_click(move |_, window, cx| {
+            delete.update(cx, |page, cx| page.open_account_deletion(window, cx));
         }));
         components::account_identity(account_initial(&email), email, actions, theme)
     }
@@ -246,7 +250,15 @@ impl SyncPage {
                 actions = actions.child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
                     resend.update(cx, |page, cx| page.start_resend_verification(cx));
                 }));
-                form.child(components::section_header("Check your email", "", theme)).children(feedback).child(OtpInput::new(&self.authentication.verification_pin)).child(actions).child(self.access_link(
+                // The PIN proves the mailbox; the password chosen at
+                // registration proves this registrant, so it is asked again.
+                form.child(components::section_header("Check your email", "", theme))
+                    .children(feedback)
+                    .child(OtpInput::new(&self.authentication.verification_pin))
+                    .child(self.password_input(&self.authentication.registration_password, "toggle-verification-password", entity))
+                    .child(components::form_hint("The password you chose for this account.", theme))
+                    .child(actions)
+                    .child(self.access_link(
                     entity,
                     "account-restart-registration",
                     "Wrong address? Start over",
@@ -337,6 +349,9 @@ impl SyncPage {
         };
 
         let signed_in = self.state.read(cx).account_status.signed_in();
+        if signed_in && self.deletion.is_some() {
+            return components::browser_settings_fieldset("Account", theme).child(components::browser_settings_block(theme).child(self.account_deletion_form(&entity, feedback, theme)));
+        }
         let account = if signed_in {
             components::browser_settings_fieldset("Account", theme).child(components::browser_settings_block(theme).child(self.identity.clone()).child(self.storage_body(theme, cx)))
         } else {

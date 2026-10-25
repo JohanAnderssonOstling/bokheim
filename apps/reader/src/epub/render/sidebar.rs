@@ -4,6 +4,7 @@ use crate::invalidation::notify;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, IntoElement, Window};
 use library_backend::Annotation;
+use std::rc::Rc;
 use ui_components as components;
 
 use crate::epub::ReaderView;
@@ -37,19 +38,44 @@ impl AnnotationTreeTarget for ReaderView {
 impl ReaderView {
     fn render_toc_body(&self, entity: Entity<Self>, theme: components::BrowserTheme, cx: &App) -> AnyElement {
         let active_link = self.toc.active_link();
-        let toc = state_panel::reader_toc_tree(&self.toc_tree, &entity, active_link.as_deref(), self.settings_navigation.keyboard_visible(), theme, cx, |link, activation, window, this: &mut Self, cx| {
-            this.navigate_to(link.to_owned(), cx);
-            if activation == TocActivation::Pointer {
-                this.focus_sidebar_body(window, cx);
-                #[cfg(feature = "kobo")]
-                {
-                    this.sidebar.close(cx);
-                    this.focus_document(window, cx);
-                    notify(cx, Component::ReaderShell, "toc_navigated");
-                }
-            }
+        let reset_entity = entity.clone();
+        let reset_read: state_panel::TocReadReset = Rc::new(move |target, _, cx| {
+            reset_entity.update(cx, |this, cx| {
+                this.reading_positions.reset_chapter_read_status(target.to_owned());
+                this.toc.reset_chapter_read_status(target);
+                cx.notify();
+            });
         });
-        components::reader_toc(theme).child(toc).into_any_element()
+        let toc = state_panel::reader_toc_tree(
+            &self.toc_tree,
+            &entity,
+            active_link.as_deref(),
+            self.toc.read_status.completed.iter().cloned().collect(),
+            Some(reset_read),
+            self.settings_navigation.keyboard_visible(),
+            theme,
+            cx,
+            |link, activation, window, this: &mut Self, cx| {
+                this.navigate_to(link.to_owned(), cx);
+                if activation == TocActivation::Pointer {
+                    this.focus_sidebar_body(window, cx);
+                    #[cfg(feature = "kobo")]
+                    {
+                        this.sidebar.close(cx);
+                        this.focus_document(window, cx);
+                        notify(cx, Component::ReaderShell, "toc_navigated");
+                    }
+                }
+            },
+        );
+        let reset = components::topbar_action_button("reset-chapter-read-status", "Reset read status", gpui_component::IconName::Undo2, theme).on_click(move |_, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.reading_positions.reset_read_status();
+                this.toc.read_status.reset();
+                cx.notify();
+            });
+        });
+        components::reader_toc(theme).child(gpui::div().flex_none().p(gpui::px(components::SPACE_SM)).child(reset)).child(toc).into_any_element()
     }
 
     fn render_annotations_body(&mut self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {

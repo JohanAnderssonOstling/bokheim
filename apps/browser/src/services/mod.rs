@@ -5,12 +5,15 @@ mod book_command;
 pub(crate) use book_command::BookCommand;
 mod update_prompt;
 pub(crate) mod updates;
-pub use updates::{UpdateAction, UpdateActionHandler, UpdateControls, UpdateView};
+#[cfg(not(target_arch = "wasm32"))]
+pub use updates::bind_worker as bind_update_worker;
+pub use updates::{PublishUpdate, UpdateAction, UpdateActionHandler, UpdateControls, UpdateEvent, UpdateView};
 mod format;
 pub(crate) use format::format_storage_bytes;
 pub(crate) mod library_removal;
 pub use library_removal::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService, library_is_being_removed};
-pub(crate) type UiFuture<T> = std::pin::Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
+use ::app::BackendError;
+pub(crate) type UiFuture<T> = std::pin::Pin<Box<dyn Future<Output = Result<T, BackendError>> + 'static>>;
 mod book_transfer_error;
 mod catalog_progress;
 pub(crate) use catalog_progress::track_catalog_import;

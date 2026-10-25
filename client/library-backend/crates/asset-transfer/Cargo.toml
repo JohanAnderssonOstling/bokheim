@@ -8,7 +8,7 @@ publish = false
 book-access = { path = "../book-access" }
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 book-model = { path = "../../../../shared/book-model" }
-client-runtime = { path = "../../../client-runtime" }
+client-runtime = { path = "../../../client-runtime", features = ["http"] }
 cpu-host = { path = "../cpu-host" }
 thumbnail = { path = "../thumbnail" }
 library-files = { path = "../library-files" }
@@ -27,6 +27,8 @@ tokio = { version = "1", features = ["macros", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+tempfile = "3"
+book-inspection = { path = "../book-inspection" }
 library-database = { path = "../library-database" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "test-util"] }
 

@@ -1,6 +1,7 @@
 //! Copy first, then atomically remove a revalidated source selection.
 use super::LibraryClient;
 use crate::library::{LibraryCommand, ReadyCommand};
+use crate::BackendError;
 use library_database::transfer::TransferPlan;
 pub use library_database::transfer::TransferSelection;
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ pub struct LibraryTransferOutcome {
     pub removed_folders: Vec<(DirId, Option<DirId>)>,
     pub removed_placements: Vec<(ContentHash, DirId)>,
     /// Completed destination changes remain undoable after a partial failure.
-    pub error: Option<String>,
+    pub error: Option<BackendError>,
 }
 impl LibraryClient {
     pub async fn transfer_from(&self, source: &LibraryClient, selection: TransferSelection, destination: DirId, move_source: bool) -> LibraryTransferOutcome {
@@ -23,7 +24,7 @@ impl LibraryClient {
         }
         outcome
     }
-    async fn transfer_from_inner(&self, source: &LibraryClient, selection: TransferSelection, destination: DirId, move_source: bool, outcome: &mut LibraryTransferOutcome) -> Result<(), String> {
+    async fn transfer_from_inner(&self, source: &LibraryClient, selection: TransferSelection, destination: DirId, move_source: bool, outcome: &mut LibraryTransferOutcome) -> Result<(), BackendError> {
         if self.id() == source.id() {
             return Err("use ordinary placement operations within one library".into());
         }
@@ -42,8 +43,8 @@ impl LibraryClient {
         }
         for book in &plan.books {
             let parent = if book.direct { destination } else { *folders.get(&book.directory).ok_or("destination folder hierarchy is incomplete")? };
-            let resource = source.transport.handle().await.map_err(|error| error.to_string())?.export_transfer_book(book.content_hash).await.map_err(|error| error.to_string())?;
-            let created = self.transport.handle().await.map_err(|error| error.to_string())?.import_transfer_book(parent, book.file_name.clone(), resource).await.map_err(|error| error.to_string())?;
+            let resource = source.transport.handle().await?.export_transfer_book(book.content_hash).await?;
+            let created = self.transport.handle().await?.import_transfer_book(parent, book.file_name.clone(), resource).await?;
             // Entire imported trees are already covered by their root's undo.
             if created && book.direct {
                 outcome.created_placements.push((book.content_hash, parent));

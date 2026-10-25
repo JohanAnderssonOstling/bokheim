@@ -113,7 +113,7 @@ impl PdfReaderView {
         let zoom_mode = self.pdf.read(cx).zoom_mode();
         let visible_page_count = self.pdf.read(cx).visible_page_count();
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
-        components::reader_settings_tab_body(theme)
+        let general = components::reader_settings_tab_body(theme)
             .when(!cfg!(feature = "kobo"), |body| body.child(components::reader_settings_group(theme).child(self.settings_navigation.row(SettingsRow::Theme, &rows, crate::shell::theme_picker::reader_theme_picker(cx, theme), theme))))
             .children(self.settings_navigation.fullscreen_group(&rows, window, theme))
             .child(
@@ -150,13 +150,18 @@ impl PdfReaderView {
                     }))
                     .children(matches!(zoom_mode, PdfZoomMode::Fixed { .. }).then(|| {
                         components::reader_setting_row("Zoom").map(|row| self.settings_navigation.row(SettingsRow::PdfZoom, &rows, row, theme)).child(components::settings_stepper(
-                            components::settings_stepper_button("pdf-zoom-out", "−", false, theme).tooltip(components::shortcut_tooltip("Zoom out", "secondary--")).on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
+                            components::settings_stepper_button("pdf-zoom-out", "−", false, theme)
+                                .tooltip("Zoom out")
+                                .on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
                             format!("{:.0}%", zoom * 100.0),
-                            components::settings_stepper_button("pdf-zoom-in", "+", false, theme).tooltip(components::shortcut_tooltip("Zoom in", "secondary-+")).on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
+                            components::settings_stepper_button("pdf-zoom-in", "+", false, theme)
+                                .tooltip("Zoom in")
+                                .on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
                             theme,
                         ))
                     })),
             )
-            .into_any_element()
+            .into_any_element();
+        crate::shell::keyboard_settings::with_keyboard_settings(general, window, cx)
     }
 }

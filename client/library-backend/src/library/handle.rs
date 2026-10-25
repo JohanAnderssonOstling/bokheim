@@ -2,6 +2,8 @@
 
 use crate::executor::BackendExecutor;
 use client_platform_runtime::startup_profile::StartupProfile;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::pending::OnDrop;
 use crate::library::ResolvedBook;
 use crate::{DirectoryImport, ImportFailure, LibrarySyncState, LibrarySyncStatus};
 use std::cell::Cell;
@@ -385,16 +387,18 @@ impl LibraryHandle {
         let library_executor = crate::executor::LibraryExecutor::new().map_err(BackendError::operation)?;
         profile.mark("thread_spawn");
         let executor_for_actor = library_executor.clone();
-        let handle = library_executor.run_blocking(move || -> Result<LibraryHandle, BackendError> {
-            profile.mark("thread_ready");
-            let session = LibrarySession::open(spec)?;
-            profile.mark("session_open");
-            session.events.sync.request_remote_refresh();
-            session.events.assets.wake();
-            let handle = session.spawn_actor(executor_for_actor);
-            profile.mark("actor_schedule");
-            Ok(handle)
-        })?;
+        let handle = library_executor
+            .run_blocking(move || -> Result<LibraryHandle, BackendError> {
+                profile.mark("thread_ready");
+                let session = LibrarySession::open(spec)?;
+                profile.mark("session_open");
+                session.events.sync.request_remote_refresh();
+                session.events.assets.wake();
+                let handle = session.spawn_actor(executor_for_actor);
+                profile.mark("actor_schedule");
+                Ok(handle)
+            })
+            .map_err(BackendError::operation)??;
         Ok(handle)
     }
     #[cfg(target_arch = "wasm32")]
@@ -583,7 +587,8 @@ impl LibrarySession {
     }
 
     /// Walks the library folder and applies what it finds, walking again while
-    /// the database changed underneath. The scanning flag clears once applied.
+    /// the database changed underneath. Errors and cancellation release the
+    /// scanning flag too, so file replay can continue between scan attempts.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn scan_folder(&self) -> Result<(), BackendError> {
         if !self.assets.local_access_enabled() || !self._scanner.enabled() {
@@ -591,18 +596,21 @@ impl LibrarySession {
             return Ok(());
         }
         self.filesystem_scanning.set(true);
+        let scanning = OnDrop::new(|| {
+            self.filesystem_scanning.set(false);
+            self.emit(LibraryEvent::ScanComplete { busy: self.scanner_running() });
+        });
         loop {
             let snapshot = self.db.scan_snapshot()?;
             self.emit(LibraryEvent::ScanStarted);
             match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(self.scan_once(snapshot))).await.unwrap_or_else(|_| Err(BackendError::message("library scan panicked")))? {
                 library_database::ScanApplyResult::Applied => break,
                 // Coalesce changes while the actor keeps serving requests.
-                library_database::ScanApplyResult::Stale => crate::executor::sleep(std::time::Duration::from_millis(250)).await,
+                library_database::ScanApplyResult::Stale => crate::executor::sleep(std::time::Duration::from_millis(250)).await.map_err(BackendError::operation)?,
             }
         }
-        self.filesystem_scanning.set(false);
         self.emit(LibraryEvent::ContentsChanged);
-        self.emit(LibraryEvent::ScanComplete { busy: self.scanner_running() });
+        drop(scanning);
         self.db.bind_torrent_books()?;
         // A completed scan can leave lifecycle and metadata mutations
         // that need a sync pass before dependent asset work is ready.

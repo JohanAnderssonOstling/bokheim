@@ -47,20 +47,20 @@ impl AppBackend {
     ///
     /// Paths remain inside the backend after this call. Frontends identify the
     /// resulting libraries only by `LibraryId`.
-    pub(crate) fn create_libraries_from_paths_with_asset_storage(&self, paths: Vec<PathBuf>, asset_storage_enabled: bool) -> Result<(Vec<LibraryId>, Vec<String>), BackendError> {
+    pub(crate) fn create_libraries_from_paths_with_asset_storage(&self, paths: Vec<PathBuf>, asset_storage_enabled: bool) -> Result<(Vec<LibraryId>, Vec<BackendError>), BackendError> {
         let mut known_paths = self.libraries()?.into_iter().map(|entry| PathBuf::from(entry.storage_locator())).collect::<HashSet<_>>();
         let mut created_ids = Vec::new();
         let mut errors = Vec::new();
         for path in paths {
             let display_path = path.display().to_string();
             if !path.is_dir() {
-                errors.push(format!("{display_path}: not a folder"));
+                errors.push(BackendError::classified(Failure::LibraryFolderUnavailable, format!("{display_path}: not a folder")));
                 continue;
             }
             let canonical_path = match path.canonicalize() {
                 Ok(path) => path,
                 Err(error) => {
-                    errors.push(format!("{display_path}: {error}"));
+                    errors.push(BackendError::from(error).context(display_path));
                     continue;
                 }
             };
@@ -79,7 +79,7 @@ impl AppBackend {
                     known_paths.insert(PathBuf::from(entry.storage_locator()));
                     created_ids.push(*entry.library_id());
                 }
-                Err(error) => errors.push(format!("{display_path}: {error}")),
+                Err(error) => errors.push(error.context(display_path)),
             }
         }
         Ok((created_ids, errors))
@@ -147,7 +147,10 @@ impl AppBackend {
                     }
                     Err(error) => log::warn!("could not read pending local library purges: {error}"),
                 }
-                crate::executor::sleep(std::time::Duration::from_secs(30)).await;
+                if let Err(error) = crate::executor::sleep(std::time::Duration::from_secs(30)).await {
+                    log::warn!("local library purge retries stopped: {error}");
+                    break;
+                }
             }
         });
     }

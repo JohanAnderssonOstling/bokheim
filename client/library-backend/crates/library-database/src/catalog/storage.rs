@@ -23,7 +23,7 @@ struct ActiveCatalog {
     generation: u64,
 }
 static ACTIVE: OnceLock<Mutex<ActiveCatalog>> = OnceLock::new();
-const PROJECTION_VERSION: i64 = 15;
+const PROJECTION_VERSION: i64 = 16;
 const SCHEMA: &str = include_str!("schema.sql");
 const COMPACT_SCHEMA: &str = include_str!("compact.sql");
 // An inactive catalog exposes empty browse tables without allocating source records.
@@ -419,6 +419,8 @@ fn build_projection_in(db: &Connection, taxonomy_revision: &str, ids: StableIds)
             db.execute_batch(&format!("DROP {} {table}", kind.to_uppercase()))?;
         }
     }
+    // Format-8 snapshots published before audio durations remain readable.
+    db.execute_batch("CREATE TABLE IF NOT EXISTS book_audiobook_duration(book_row_id INTEGER PRIMARY KEY REFERENCES book(row_id),duration_ms INTEGER NOT NULL CHECK(duration_ms>0)) STRICT;")?;
     db.execute_batch(COMPACT_SCHEMA)?;
     let mut next_id = ids.books.values().copied().max().map_or(0, |id| id + 1);
     for identity in keys {
@@ -461,6 +463,7 @@ fn build_projection_in(db: &Connection, taxonomy_revision: &str, ids: StableIds)
             external_url,
             download_url,
             file_format: format,
+            audiobook_duration_ms: None,
             sources: sources.remove(&text_key).unwrap_or_default(),
             title,
             subtitle,
@@ -524,9 +527,12 @@ pub fn entry(key: CardKey) -> Result<Option<CatalogBook>, DatabaseError> {
 
 pub(super) fn load_entry(db: &Connection, key: CardKey) -> Result<Option<CatalogBook>, DatabaseError> {
     let found = db
-        .query_row("SELECT external,format,search_title,search_author FROM catalog_browse_book WHERE key=?1", [&key.0[..]], |row| Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))
+        .query_row("SELECT external,format,search_title,search_author,duration_ms FROM catalog_browse_book WHERE key=?1", [&key.0[..]], |row| {
+            let duration = row.get::<_, Option<i64>>(4)?.map(u64::try_from).transpose().map_err(|error| SqlError::FromSqlConversionFailure(4, Type::Integer, Box::new(error)))?;
+            Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, duration))
+        })
         .optional()?;
-    let Some((external, format, search_title, search_author)) = found else { return Ok(None) };
+    let Some((external, format, search_title, search_author, audiobook_duration_ms)) = found else { return Ok(None) };
     let view = if external { "catalog_external" } else { "catalog_hosted" };
     let (title, subtitle, description, year) = db.query_row(&format!("SELECT title,subtitle,description,year FROM {view} WHERE identity=?1"), [&key.0[..]], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i32>>(3)?))
@@ -550,6 +556,7 @@ pub(super) fn load_entry(db: &Connection, key: CardKey) -> Result<Option<Catalog
         external_url,
         download_url,
         file_format: BookFormat::from_code(format).ok_or_else(|| DatabaseError::message("catalog entry has an unsupported file format"))?,
+        audiobook_duration_ms,
         sources: sources.remove(&identity).unwrap_or_default(),
         title,
         subtitle,

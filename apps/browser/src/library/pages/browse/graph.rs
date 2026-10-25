@@ -76,10 +76,14 @@ struct CachedGraph {
     target: Drawn,
 }
 
+struct NodeMotion {
+    origin: Point<f32>,
+    appearing: bool,
+}
+
 struct GraphMotion {
     started: Instant,
-    from: Vec<Point<f32>>,
-    appearing: Vec<bool>,
+    nodes: HashMap<String, NodeMotion>,
     from_camera: CanvasCamera,
     last_camera: CanvasCamera,
     target_camera: CanvasCamera,
@@ -376,7 +380,7 @@ impl BrowseGraph {
         self.layout_kind = kind;
         let root = self.target.take().map(|target| target.key.root);
         self.placed_for = None;
-        self.center_for = self.drawn.as_ref().and_then(|drawn| drawn.layout.path.last().and_then(|&id| drawn.entries[id].trail.last().map(|crumb| crumb.location).or(root)));
+        self.center_for = self.drawn.as_ref().and_then(|drawn| drawn.layout.path().last().and_then(|&id| drawn.entries[id].trail.last().map(|crumb| crumb.location).or(root)));
     }
 
     /// Arrows walk the hierarchy and its ordered column. Page Up/Down (also
@@ -384,24 +388,24 @@ impl BrowseGraph {
     /// Enter opens the selected location in cards.
     pub(super) fn key(&mut self, key: &str) -> Option<GraphTap> {
         let drawn = self.drawn.as_ref()?;
-        let selection = *drawn.layout.path.last()?;
+        let selection = *drawn.layout.path().last()?;
         let selected_node = drawn.layout.node(selection)?;
         let parent = selected_node.parent;
         if key == "pageup" {
             return self.activate(parent?);
         }
         if key == "pagedown" {
-            let child = drawn.layout.nodes.iter().find(|placed| placed.parent == Some(selection))?.node;
+            let child = drawn.layout.nodes().iter().find(|placed| placed.parent == Some(selection))?.node;
             return self.activate(child);
         }
-        if drawn.layout.kind == GraphLayoutKind::AdaptiveRadial {
-            let children = || drawn.layout.nodes.iter().find(|placed| placed.parent == Some(selection)).map(|placed| placed.node);
+        if drawn.layout.kind() == GraphLayoutKind::AdaptiveRadial {
+            let children = || drawn.layout.nodes().iter().find(|placed| placed.parent == Some(selection)).map(|placed| placed.node);
             let node = match key {
                 "left" => parent?,
                 "right" => children()?,
                 "up" | "down" => {
                     let parent = parent?;
-                    let siblings: Vec<usize> = drawn.layout.nodes.iter().filter(|placed| placed.parent == Some(parent)).map(|placed| placed.node).collect();
+                    let siblings: Vec<usize> = drawn.layout.nodes().iter().filter(|placed| placed.parent == Some(parent)).map(|placed| placed.node).collect();
                     let index = siblings.iter().position(|&node| node == selection)?;
                     siblings[if key == "down" { (index + 1) % siblings.len() } else { (index + siblings.len() - 1) % siblings.len() }]
                 }
@@ -411,7 +415,7 @@ impl BrowseGraph {
             return self.activate(node);
         }
         let side = if selected_node.angle.cos() < 0.0 { -1.0 } else { 1.0 };
-        let first_child = |direction: f32| drawn.layout.nodes.iter().find(|placed| placed.parent == Some(selection) && placed.angle.cos() * direction > 0.0).map(|placed| placed.node);
+        let first_child = |direction: f32| drawn.layout.nodes().iter().find(|placed| placed.parent == Some(selection) && placed.angle.cos() * direction > 0.0).map(|placed| placed.node);
         let node = match key {
             "left" if selection == 0 => first_child(-1.0)?,
             "right" if selection == 0 => first_child(1.0)?,
@@ -420,7 +424,7 @@ impl BrowseGraph {
             "left" => parent?,
             "right" => first_child(side)?,
             "up" | "down" => {
-                let siblings: Vec<usize> = drawn.layout.nodes.iter().filter(|placed| placed.parent == parent && parent.is_some() && placed.angle.cos() * side > 0.0).map(|placed| placed.node).collect();
+                let siblings: Vec<usize> = drawn.layout.nodes().iter().filter(|placed| placed.parent == parent && parent.is_some() && placed.angle.cos() * side > 0.0).map(|placed| placed.node).collect();
                 let index = siblings.iter().position(|&node| node == selection)?;
                 let next = if key == "down" { (index + 1) % siblings.len() } else { (index + siblings.len() - 1) % siblings.len() };
                 siblings[next]
@@ -436,7 +440,7 @@ impl BrowseGraph {
 
     fn activate(&mut self, node: usize) -> Option<GraphTap> {
         let drawn = self.drawn.as_ref()?;
-        if Some(&node) == drawn.layout.path.last() {
+        if Some(&node) == drawn.layout.path().last() {
             return Some(GraphTap::Open);
         }
         drawn.layout.node(node)?;
@@ -457,6 +461,9 @@ impl BrowseGraph {
         let key = GraphKey { root, root_label: root_label.to_string(), root_book_count, path: path.to_vec(), compact, rem_size: window.rem_size(), font_family: font_family.clone(), kind: self.layout_kind };
         let target_changed = !self.target.as_ref().is_some_and(|target| target.key == key);
         if target_changed {
+            // Camera destinations and node roles belong to this target. A
+            // replacement target starts a fresh transition, if needed.
+            self.motion = None;
             self.target = None;
             if let Some((tree, entries, selection)) = graph_tree(root, &root_label, root_book_count, path, &self.children) {
                 // Each label is measured in every role, since the layout picks
@@ -470,8 +477,10 @@ impl BrowseGraph {
                         ((node, role), size(f32::from(measured.width), f32::from(measured.height)))
                     })
                     .collect();
-                let layout = components::graph_layout(self.layout_kind, &tree, selection, &|node, role| sizes[&(node, role)], &params);
-                self.target = Some(CachedGraph { key, target: Drawn { layout: Arc::new(layout), entries: Arc::new(entries) } });
+                match components::graph_layout(self.layout_kind, &tree, selection, &|node, role| sizes[&(node, role)], &params) {
+                    Ok(layout) => self.target = Some(CachedGraph { key, target: Drawn { layout: Arc::new(layout), entries: Arc::new(entries) } }),
+                    Err(error) => log::error!("Could not lay out browse graph: {error}"),
+                }
             }
         }
         if let Some(CachedGraph { target, .. }) = &self.target {
@@ -490,7 +499,7 @@ impl BrowseGraph {
         let Some(drawn) = &self.drawn else {
             return components::infinite_canvas(&self.canvas).into_any_element();
         };
-        let ghost = self.motion.as_ref().filter(|motion| !motion.departing.nodes.is_empty() && motion.ghost_opacity > 0.0);
+        let ghost = self.motion.as_ref().filter(|motion| !motion.departing.nodes().is_empty() && motion.ghost_opacity > 0.0);
         let theme = components::browser_theme(cx);
         let graph = cx.weak_entity();
         // A tap browses the node, unless the press that ended on it was a pan;
@@ -499,8 +508,8 @@ impl BrowseGraph {
         let departing_entries = ghost.map(|motion| Arc::clone(&motion.departing_entries));
         let canvas = self.canvas.clone();
         let node = move |placed: &components::PlacedNode, departing: bool| {
-            let entries = if departing { departing_entries.as_ref().expect("a departing node belongs to the motion") } else { &entries };
-            let entry = &entries[placed.node];
+            let entries = if departing { departing_entries.as_ref() } else { Some(&entries) };
+            let Some(entry) = entries.and_then(|entries| entries.get(placed.node)) else { return div().into_any_element() };
             let label = components::graph_label(SharedString::from(format!("graph-node-{}", entry.key)), placed.role, &entry.name, entry.count(), compact, theme, font_family.clone());
             if departing {
                 return label.into_any_element();
@@ -527,7 +536,14 @@ impl BrowseGraph {
     fn place_camera(&mut self, layout: &GraphLayout, entries: &[GraphEntry], location: BrowseLocation, window: &Window, cx: &mut App) {
         let compact = components::WindowWidthClass::for_window(window).is_compact();
         let center_new = self.center_for == Some(location);
-        let selection = *layout.path.last().expect("the path always holds the root");
+        let Some(&selection) = layout.path().last() else {
+            self.motion = None;
+            return;
+        };
+        let Some(entry) = entries.get(selection) else {
+            self.motion = None;
+            return;
+        };
         let Some(bounds) = self.canvas.read(cx).bounds else {
             window.request_animation_frame();
             return;
@@ -535,32 +551,37 @@ impl BrowseGraph {
         let camera = if center_new {
             let anchor = point(bounds.size.width / 2.0, bounds.size.height / 2.0);
             let zoom = self.canvas.read(cx).camera.zoom;
-            components::anchored_camera(layout, selection, anchor, zoom).expect("the selected node is placed")
+            let Some(camera) = components::anchored_camera(layout, selection, anchor, zoom) else {
+                self.motion = None;
+                return;
+            };
+            camera
         } else {
             components::framing_camera(layout, Bounds::new(point(px(0.0), px(0.0)), bounds.size), compact, 1.0)
         };
         let from_camera = self.canvas.read(cx).camera;
-        let selected_key = &entries[selection].key;
-        let previous = self.drawn.as_ref().and_then(|drawn| drawn.layout.nodes.iter().find(|placed| drawn.entries[placed.node].key == *selected_key).map(|placed| (drawn, placed.center)));
+        let selected_key = &entry.key;
+        let previous = self.drawn.as_ref().and_then(|drawn| drawn.layout.nodes().iter().find(|placed| drawn.entries.get(placed.node).is_some_and(|entry| entry.key == *selected_key)).map(|placed| (drawn, placed.center)));
         if center_new && !cx.reduce_motion() && !cfg!(feature = "kobo") {
             if let Some((drawn, old_center)) = previous {
-                let old_centers: HashMap<&str, Point<f32>> = drawn.layout.nodes.iter().map(|placed| (drawn.entries[placed.node].key.as_str(), placed.center)).collect();
-                let mut from = vec![point(0.0, 0.0); entries.len()];
-                let mut appearing = vec![false; entries.len()];
-                for placed in &layout.nodes {
-                    let key = entries[placed.node].key.as_str();
-                    from[placed.node] = old_centers.get(key).copied().or_else(|| placed.parent.and_then(|parent| old_centers.get(entries[parent].key.as_str()).copied())).unwrap_or(placed.center);
-                    appearing[placed.node] = !old_centers.contains_key(key);
-                }
+                let old_centers: HashMap<&str, Point<f32>> = drawn.layout.nodes().iter().filter_map(|placed| drawn.entries.get(placed.node).map(|entry| (entry.key.as_str(), placed.center))).collect();
+                let nodes = layout
+                    .nodes()
+                    .iter()
+                    .filter_map(|placed| {
+                        let entry = entries.get(placed.node)?;
+                        let origin = old_centers.get(entry.key.as_str()).copied().or_else(|| placed.parent.and_then(|parent| entries.get(parent)).and_then(|parent| old_centers.get(parent.key.as_str()).copied())).unwrap_or(placed.center);
+                        Some((entry.key.clone(), NodeMotion { origin, appearing: !old_centers.contains_key(entry.key.as_str()) }))
+                    })
+                    .collect();
                 let anchor = from_camera.to_screen(point(px(old_center.x), px(old_center.y)));
                 let visible: HashSet<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
                 let mut departing = GraphLayout::clone(&drawn.layout);
-                departing.retain_nodes(|placed| !visible.contains(drawn.entries[placed.node].key.as_str()));
-                Arc::make_mut(&mut departing.edges).retain(|edge| !visible.contains(drawn.entries[edge.to].key.as_str()));
+                departing.retain_nodes(|placed| drawn.entries.get(placed.node).is_some_and(|entry| !visible.contains(entry.key.as_str())));
+                departing.retain_edges(|edge| drawn.entries.get(edge.to).is_some_and(|entry| !visible.contains(entry.key.as_str())));
                 self.motion = Some(GraphMotion {
                     started: Instant::now(),
-                    from,
-                    appearing,
+                    nodes,
                     from_camera,
                     last_camera: from_camera,
                     target_camera: camera,
@@ -586,8 +607,11 @@ impl BrowseGraph {
         let Some(motion) = &mut self.motion else {
             return layout.clone();
         };
-        let selection = *layout.path.last().expect("the path always holds the root");
-        if entries[selection].key != motion.selected_key || self.canvas.read(cx).camera != motion.last_camera {
+        let Some((&selection, entry)) = layout.path().last().and_then(|selection| entries.get(*selection).map(|entry| (selection, entry))) else {
+            self.motion = None;
+            return layout.clone();
+        };
+        if entry.key != motion.selected_key || self.canvas.read(cx).camera != motion.last_camera {
             // A wheel, pinch, or drag takes control of the camera immediately.
             self.motion = None;
             return layout.clone();
@@ -595,18 +619,17 @@ impl BrowseGraph {
         let elapsed = motion.started.elapsed();
         motion.ghost_opacity = 1.0 - (elapsed.as_secs_f32() / 0.12).clamp(0.0, 1.0);
         let progress = (elapsed.saturating_sub(PIN_DURATION).as_secs_f32() / MOVE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-        let mut centers = vec![point(0.0, 0.0); entries.len()];
-        let mut opacity = vec![1.0; entries.len()];
-        for placed in &layout.nodes {
-            let old = motion.from[placed.node];
-            centers[placed.node] = point(old.x + (placed.center.x - old.x) * progress, old.y + (placed.center.y - old.y) * progress);
-            if motion.appearing[placed.node] {
-                opacity[placed.node] = progress;
-            }
-        }
-        let posed = layout.with_pose(&centers, &opacity);
-        let selected = posed.node(selection).expect("selected node is placed").center;
-        let target = layout.node(selection).expect("selected node is placed").center;
+        let posed = layout.posed(|placed| {
+            let entry = entries.get(placed.node)?;
+            let node = motion.nodes.get(&entry.key)?;
+            let center = point(node.origin.x + (placed.center.x - node.origin.x) * progress, node.origin.y + (placed.center.y - node.origin.y) * progress);
+            Some((center, if node.appearing { progress } else { 1.0 }))
+        });
+        let (Some(selected), Some(target)) = (posed.node(selection), layout.node(selection)) else {
+            self.motion = None;
+            return layout.clone();
+        };
+        let (selected, target) = (selected.center, target.center);
         let end = motion.target_camera.to_screen(point(px(target.x), px(target.y)));
         let zoom = motion.from_camera.zoom + (motion.target_camera.zoom - motion.from_camera.zoom) * progress;
         let screen = point(motion.anchor.x + (end.x - motion.anchor.x) * progress, motion.anchor.y + (end.y - motion.anchor.y) * progress);
@@ -663,5 +686,81 @@ fn graph_tree(root: BrowseLocation, root_label: &str, root_book_count: usize, pa
         });
         location = crumb.location;
     }
-    Some((GraphTree::new(parents), entries, parent))
+    match GraphTree::new(parents) {
+        Ok(tree) => Some((tree, entries, parent)),
+        Err(error) => {
+            log::error!("Could not build browse graph: {error}");
+            None
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
+mod tests {
+    use super::*;
+    use crate::library::pages::browse::listing::BrowseListing;
+    use crate::navigation::LibrarySession;
+    use gpui::{EmptyView, TestAppContext};
+    use std::rc::Rc;
+
+    fn row(id: i64) -> BrowseRow {
+        BrowseRow { id: BrowseLocation::Subject(id), name: format!("Subject {id}"), path: None, book_count: 1, downloaded_book_count: 0 }
+    }
+
+    #[gpui::test]
+    async fn refreshed_graph_replaces_motion_for_the_previous_layout(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let window = cx.add_window(|_, _| EmptyView);
+        let kind = BrowseKind::Subject;
+        let root = kind.root_location();
+        let selected = BrowseLocation::Subject(1);
+        let path = [BrowseCrumb { location: selected, label: "Subject 1".into() }];
+
+        for layout_kind in [GraphLayoutKind::Columns, GraphLayoutKind::AdaptiveRadial] {
+            // Adding nodes used to index past the animation's arrays. Removing
+            // or reordering nodes also invalidates what those indices mean.
+            for refreshed in [vec![row(3), row(4), row(5)], vec![row(3)], vec![row(4), row(3)]] {
+                let listing = BrowseListing::new(library.clone(), kind, Rc::new(|_, _, _| {}), false);
+                let navigator = cx.new(|cx| BrowseNavigator::new(library.clone(), kind, listing, cx));
+                let graph = cx.new(|cx| BrowseGraph::new(navigator.clone(), layout_kind, cx));
+                window
+                    .update(cx, |_, window, cx| {
+                        navigator.update(cx, |navigator, _| {
+                            navigator.listing.children = Rc::new(vec![row(1), row(2)]);
+                        });
+                        graph.update(cx, |graph, cx| {
+                            graph.canvas.update(cx, |canvas, _| canvas.bounds = Some(Bounds::new(point(px(0.0), px(0.0)), size(px(800.0), px(600.0)))));
+                            graph.install(&Loaded { left: None, refresh: false }, cx);
+                            graph.render(kind, 10, &[], window, cx);
+                        });
+                        navigator.update(cx, |navigator, _| {
+                            navigator.destination.location = selected;
+                            navigator.listing.ancestors = vec![(root, vec![row(1), row(2)])];
+                            navigator.listing.children = Rc::new(vec![row(3), row(4)]);
+                        });
+                        graph.update(cx, |graph, cx| {
+                            graph.install(&Loaded { left: Some(root), refresh: false }, cx);
+                            graph.center_for = Some(selected);
+                            graph.render(kind, 10, &path, window, cx);
+                            let started = graph.motion.as_ref().expect("navigation starts an animation").started;
+                            graph.render(kind, 10, &path, window, cx);
+                            assert_eq!(graph.motion.as_ref().unwrap().started, started, "an unchanged target keeps its animation");
+                        });
+                        navigator.update(cx, |navigator, _| navigator.listing.children = Rc::new(refreshed.clone()));
+                        graph.update(cx, |graph, cx| {
+                            graph.install(&Loaded { left: None, refresh: true }, cx);
+                            let camera = graph.canvas.read(cx).camera;
+                            graph.render(kind, 10, &path, window, cx);
+                            assert!(graph.motion.is_none(), "a replacement layout must discard the old animation");
+                            assert_eq!(graph.canvas.read(cx).camera, camera, "a refresh preserves the current camera");
+                            let drawn = graph.drawn.as_ref().unwrap();
+                            let children: Vec<_> = drawn.layout.nodes().iter().filter(|node| node.parent == Some(1)).map(|node| drawn.entries[node.node].trail.last().unwrap().location).collect();
+                            assert_eq!(children, refreshed.iter().map(|row| row.id).collect::<Vec<_>>());
+                        });
+                    })
+                    .unwrap();
+            }
+        }
+    }
 }

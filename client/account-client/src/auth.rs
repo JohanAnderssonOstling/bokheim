@@ -1,8 +1,8 @@
-use crate::http::{decode_response, post_empty, request, with_body};
+use crate::http::{decode_response, post_empty, request, send, with_body};
 use crate::session::{AuthError, Session};
 use crate::Url;
-use account_contract::{AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest};
-use reqwest::Method;
+use account_contract::{AuthResponse, DeleteAccountRequest, EmailRequest, EmailVerificationRequest, LoginRequest, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest};
+use reqwest::{Method, StatusCode};
 use serde::Serialize;
 
 async fn post_auth(server_url: &Url, endpoint: &str, body: &impl Serialize) -> Result<Session, AuthError> {
@@ -22,8 +22,8 @@ pub async fn resend_verification(server_url: &Url, email: &str) -> Result<(), Au
     post_empty(server_url, "api/auth/resend-verification", &EmailRequest { email: email.to_owned() }).await
 }
 
-pub async fn verify_email(server_url: &Url, email: &str, pin: &str) -> Result<Session, AuthError> {
-    post_auth(server_url, "api/auth/verify-email", &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned() }).await
+pub async fn verify_email(server_url: &Url, email: &str, pin: &str, password: &str) -> Result<Session, AuthError> {
+    post_auth(server_url, "api/auth/verify-email", &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned(), password: password.to_owned() }).await
 }
 
 pub async fn request_password_reset(server_url: &Url, email: &str) -> Result<(), AuthError> {
@@ -35,14 +35,24 @@ pub async fn reset_password(server_url: &Url, token: &str, new_password: &str) -
 }
 
 pub async fn logout(session: &Session) -> Result<(), AuthError> {
-    let refresh_token = session.refresh_token().ok_or_else(|| AuthError::InvalidData("session has no refresh token; sign in again".to_owned()))?;
+    let refresh_token = session.refresh_token().ok_or(AuthError::SignInRequired("session has no refresh token"))?;
     post_empty(session.server_url(), "api/auth/logout", &RefreshRequest { refresh_token: refresh_token.to_owned() }).await
 }
 
+/// Deletes the account only after checking its current password again.
+pub async fn delete_account(session: &Session, password: &str) -> Result<(), AuthError> {
+    let body = DeleteAccountRequest { email: session.email().to_owned(), password: password.to_owned(), confirmation: "DELETE".to_owned() };
+    let response = send(request(session.server_url(), Method::POST, "api/auth/delete-account")?.json(&body)).await?;
+    if response.status() != StatusCode::NO_CONTENT {
+        return Err(AuthError::InvalidData("account deletion was not confirmed by the server".into()));
+    }
+    Ok(())
+}
+
 pub async fn refresh_session(session: &Session) -> Result<Session, AuthError> {
-    let refresh_token = session.refresh_token().ok_or_else(|| AuthError::InvalidData("session has no refresh token; sign in again".to_owned()))?;
+    let refresh_token = session.refresh_token().ok_or(AuthError::SignInRequired("session has no refresh token"))?;
     if session.refresh_expires_within(0) {
-        return Err(AuthError::InvalidData("refresh token has expired; sign in again".to_owned()));
+        return Err(AuthError::SignInRequired("refresh token has expired"));
     }
     let refreshed = post_auth(session.server_url(), "api/auth/refresh", &RefreshRequest { refresh_token: refresh_token.to_owned() }).await?;
     if refreshed.user_id() != session.user_id() {
@@ -65,6 +75,30 @@ mod tests {
     use std::sync::Arc;
     use sync_common::transport as wire;
 
+    #[tokio::test]
+    async fn deletion_requires_server_confirmation_and_preserves_authentication_errors() {
+        let app = Router::new().route(
+            "/api/auth/delete-account",
+            post(|headers: HeaderMap, axum::Json(body): axum::Json<DeleteAccountRequest>| async move {
+                assert_eq!(body.email, "reader@example.com");
+                assert_eq!(body.confirmation, "DELETE");
+                assert!(!headers.contains_key(header::AUTHORIZATION), "fresh password authorizes deletion");
+                match body.password.as_str() {
+                    "correct-password" => StatusCode::NO_CONTENT,
+                    "wrong-password" => StatusCode::UNAUTHORIZED,
+                    _ => StatusCode::OK,
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session = Session::try_new(origin, "user-1".into(), "reader@example.com".into(), "a".repeat(43)).unwrap();
+        delete_account(&session, "correct-password").await.unwrap();
+        assert!(delete_account(&session, "wrong-password").await.unwrap_err().is_unauthorized());
+        assert!(matches!(delete_account(&session, "unexpected-response").await, Err(AuthError::InvalidData(_))));
+        server.abort();
+    }
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn gzip_response(body: &[u8], content_type: &'static str) -> Response {

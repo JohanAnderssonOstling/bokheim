@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 #[cfg(not(target_arch = "wasm32"))]
 use library_backend::library::AudioStreamControl;
 use std::cell::Cell;
@@ -8,6 +10,8 @@ pub use session::{ActiveAudiobook, PlaybackSession};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use gpui::{App, Bounds, ClickEvent, Context, DispatchPhase, Entity, Image, ImageFormat, IntoElement, MouseButton, MouseMoveEvent, Pixels, Render, SharedString, Styled, Window, canvas, div, prelude::*, px};
@@ -37,13 +41,18 @@ mod audio_engine;
 #[path = "android_audio.rs"]
 pub mod android;
 
+// The service bridge and source-reader tests need no Android runtime.
+#[cfg(all(test, not(target_arch = "wasm32"), not(target_os = "android")))]
+#[path = "android_audio.rs"]
+mod android_audio_tests;
+
 #[cfg(target_os = "android")]
 use android::AudioEngine;
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 use audio_engine::AudioEngine;
 #[cfg(target_arch = "wasm32")]
 mod web_audio;
-use book_model::AudiobookChapter;
+use book_model::{AudiobookChapter, BookTocEntry, ChapterReadStatus, audiobook_toc_target};
 use gpui_component::menu::PopupMenu;
 use gpui_component::{ElementExt, Icon, IconName};
 use library_backend::LibraryClient;
@@ -53,7 +62,52 @@ use library_model::BookLocator;
 use web_audio::AudioEngine;
 
 const POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(5);
-type PlaybackPosition = (Duration, f32);
+#[derive(Debug, PartialEq)]
+enum PlaybackPosition {
+    Position { position: Duration, progress: f32 },
+    ResetReadStatus { target: Option<String> },
+}
+
+impl PlaybackPosition {
+    fn new(position: Duration, progress: f32) -> Self {
+        Self::Position { position, progress }
+    }
+}
+
+/// Recover small playback-state records after a worker unwinds. Source readers
+/// use fallible locks instead: a poisoned reader must not be reused.
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_state<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(error) => {
+            log::error!("Recovering poisoned audiobook state");
+            let guard = error.into_inner();
+            state.clear_poison();
+            guard
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod lock_tests {
+    use super::lock_state;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Mutex;
+
+    #[test]
+    fn playback_state_remains_available_after_a_worker_unwinds() {
+        let state = Mutex::new(42);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = state.lock().unwrap();
+            panic!("worker failed while holding playback state");
+        }));
+        assert!(state.is_poisoned());
+        *lock_state(&state) += 1;
+        assert!(!state.is_poisoned());
+        assert_eq!(*lock_state(&state), 43);
+    }
+}
 /// How far the transport's two skip controls move. Back is shorter than
 /// forward: it is used to hear something again.
 const SKIP_BACK_SECONDS: f64 = -15.0;
@@ -71,9 +125,8 @@ fn browser_position_update(seconds: f64, fraction: f64) -> Option<PlaybackPositi
         return None;
     }
     let position = Duration::try_from_secs_f64(seconds).ok()?;
-    Some((position, (fraction.clamp(0.0, 1.0) * 100.0) as f32))
+    Some(PlaybackPosition::new(position, (fraction.clamp(0.0, 1.0) * 100.0) as f32))
 }
-
 
 #[cfg(not(target_arch = "wasm32"))]
 trait ReadSeek: Read + Seek + Send + Sync {}
@@ -130,11 +183,17 @@ pub enum SleepPlan {
 
 impl SleepPlan {
     pub fn deadline(self) -> Option<Instant> {
-        match self { Self::Until(deadline) => Some(deadline), Self::EndOfChapter(_) => None }
+        match self {
+            Self::Until(deadline) => Some(deadline),
+            Self::EndOfChapter(_) => None,
+        }
     }
 
     pub fn chapter(self) -> Option<usize> {
-        match self { Self::EndOfChapter(chapter) => Some(chapter), Self::Until(_) => None }
+        match self {
+            Self::EndOfChapter(chapter) => Some(chapter),
+            Self::Until(_) => None,
+        }
     }
 
     pub fn label(self, now: Instant) -> SharedString {
@@ -204,10 +263,11 @@ struct PlaybackChoice<T> {
     label: SharedString,
     checked: bool,
     value: T,
+    reset: Option<T>,
 }
 
 pub fn speed_menu(current_rate: f64) -> PlaybackMenu<f64> {
-    let choices = PLAYBACK_SPEEDS.into_iter().map(|rate| PlaybackChoice { id: format!("speed-{rate}").into(), label: format_playback_rate(rate).into(), checked: same_rate(rate, current_rate), value: rate }).collect();
+    let choices = PLAYBACK_SPEEDS.into_iter().map(|rate| PlaybackChoice { id: format!("speed-{rate}").into(), label: format_playback_rate(rate).into(), checked: same_rate(rate, current_rate), value: rate, reset: None }).collect();
     PlaybackMenu { id: "playback-speed", title: "Playback speed", status: None, choices }
 }
 
@@ -217,18 +277,30 @@ pub fn sleep_menu(remaining: Option<&str>) -> PlaybackMenu<SleepChoice> {
 
 /// Reader narration can end at a PDF page instead of an audio chapter.
 pub fn sleep_menu_for_section(remaining: Option<&str>, section: &str) -> PlaybackMenu<SleepChoice> {
-    let choices = SleepChoice::offered(remaining.is_some()).map(|choice| PlaybackChoice {
-        id: choice.id(),
-        label: if matches!(choice, SleepChoice::EndOfChapter) { format!("End of {section}").into() } else { choice.label() },
-        checked: false,
-        value: choice,
-    }).collect();
+    let choices = SleepChoice::offered(remaining.is_some())
+        .map(|choice| PlaybackChoice { id: choice.id(), label: if matches!(choice, SleepChoice::EndOfChapter) { format!("End of {section}").into() } else { choice.label() }, checked: false, value: choice, reset: None })
+        .collect();
     let status = remaining.map(|remaining| if remaining == "Chapter" { format!("Until end of {section}") } else { sleep_status(remaining) });
     PlaybackMenu { id: "sleep", title: "Sleep timer", status, choices }
 }
 
-fn chapters_menu(chapters: &[AudiobookChapter], active: usize) -> PlaybackMenu<usize> {
-    let choices = chapters.iter().enumerate().map(|(index, chapter)| PlaybackChoice { id: format!("chapter-{index}").into(), label: chapter_display_title(&chapter.title).into(), checked: index == active, value: index }).collect();
+#[derive(Clone, Copy)]
+enum ChapterChoice {
+    Open(usize),
+    Reset(usize),
+    ResetAll,
+}
+
+fn chapters_menu(chapters: &[AudiobookChapter], active: usize, read_status: &ChapterReadStatus) -> PlaybackMenu<ChapterChoice> {
+    let mut choices: Vec<_> = chapters
+        .iter()
+        .enumerate()
+        .map(|(index, chapter)| {
+            let read = read_status.completed.contains(&audiobook_toc_target(chapter.start_ms));
+            PlaybackChoice { id: format!("chapter-{index}").into(), label: chapter_display_title(&chapter.title).into(), checked: index == active, value: ChapterChoice::Open(index), reset: read.then_some(ChapterChoice::Reset(index)) }
+        })
+        .collect();
+    choices.push(PlaybackChoice { id: "reset-chapter-read-status".into(), label: "Reset read status".into(), checked: false, value: ChapterChoice::ResetAll, reset: None });
     PlaybackMenu { id: "chapters", title: "Chapters", status: None, choices }
 }
 
@@ -249,11 +321,18 @@ impl<T: Copy + 'static> PlaybackMenu<T> {
     fn sheet<H: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(self, choose: impl Fn(T) -> H, dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
         let id = self.id;
         let rows = self.choices.into_iter().map(|choice| {
+            let reset = choice.reset.map(|value| {
+                let handler = choose(value);
+                std::rc::Rc::new(handler) as ui_components::ContentsReadReset
+            });
             let choose = choose(choice.value);
-            ui_components::bottom_sheet_row(choice.id, choice.label, choice.checked, theme).on_click(move |event, window, cx| {
-                cx.stop_propagation();
-                choose(event, window, cx);
-            })
+            let checkmark_ink = if choice.checked { theme.accent_text } else { theme.text_muted };
+            ui_components::bottom_sheet_row(choice.id, choice.label, choice.checked, theme)
+                .when_some(reset, |row, reset| row.child(ui_components::contents_read_checkmark("chapter-read-checkmark", reset).text_color(checkmark_ink)))
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    choose(event, window, cx);
+                })
         });
         let rows = ui_components::column(0.0).id(SharedString::from(format!("{id}-rows"))).flex_1().min_h_0().overflow_y_scroll().children(self.status.map(|status| ui_components::bottom_sheet_section(status, theme))).children(rows);
         let sheet = ui_components::bottom_sheet_surface(theme).id(SharedString::from(format!("{id}-sheet"))).child(ui_components::bottom_sheet_header(self.title, theme)).child(rows);
@@ -333,7 +412,6 @@ fn sleep_remaining(plan: SleepPlan, position: Duration, chapters: &[AudiobookCha
 fn sleep_gain(remaining: Duration) -> f32 {
     (remaining.as_secs_f32() / 30.0).clamp(0.0, 1.0)
 }
-
 
 /// Whether two speeds are the same offered step. Playback rates are a short
 /// list of round numbers, so exact comparison is what is meant.

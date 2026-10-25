@@ -79,16 +79,36 @@ pub struct GraphEdge {
 
 #[derive(Clone)]
 pub struct GraphLayout {
-    pub kind: GraphLayoutKind,
-    pub nodes: Vec<PlacedNode>,
-    pub edges: Arc<Vec<GraphEdge>>,
-    pub path: Vec<usize>,
+    pub(super) kind: GraphLayoutKind,
+    pub(super) nodes: Vec<PlacedNode>,
+    pub(super) edges: Arc<Vec<GraphEdge>>,
+    pub(super) path: Vec<usize>,
     node_index: Vec<Option<usize>>,
 }
 
 impl GraphLayout {
+    pub fn kind(&self) -> GraphLayoutKind {
+        self.kind
+    }
+
+    pub fn nodes(&self) -> &[PlacedNode] {
+        &self.nodes
+    }
+
+    pub fn edges(&self) -> &[GraphEdge] {
+        &self.edges
+    }
+
+    pub fn path(&self) -> &[usize] {
+        &self.path
+    }
+
+    pub fn retain_edges(&mut self, keep: impl FnMut(&GraphEdge) -> bool) {
+        Arc::make_mut(&mut self.edges).retain(keep);
+    }
+
     pub fn node(&self, node: usize) -> Option<&PlacedNode> {
-        self.node_index.get(node).copied().flatten().map(|index| &self.nodes[index])
+        self.node_index.get(node).copied().flatten().and_then(|index| self.nodes.get(index))
     }
 
     pub fn retain_nodes(&mut self, mut keep: impl FnMut(&PlacedNode) -> bool) {
@@ -102,20 +122,26 @@ impl GraphLayout {
     /// A display pose of this layout, preserving the target's node identities
     /// while moving nodes and their connectors to the supplied centres.
     pub fn with_pose(&self, centers: &[Point<f32>], opacity: &[f32]) -> Self {
+        self.posed(|node| Some((centers.get(node.node).copied().unwrap_or(node.center), opacity.get(node.node).copied().unwrap_or(1.0))))
+    }
+
+    /// Supplies a node's position and opacity together. Nodes without a pose
+    /// keep their settled geometry, with connectors updated from that geometry.
+    pub fn posed(&self, mut pose: impl FnMut(&PlacedNode) -> Option<(Point<f32>, f32)>) -> Self {
         let mut posed = self.clone();
         for node in &mut posed.nodes {
-            if let Some(&center) = centers.get(node.node) {
+            if let Some((center, opacity)) = pose(node) {
                 let delta = point(center.x - node.center.x, center.y - node.center.y);
                 node.center = center;
                 node.bounds = shifted(node.bounds, delta);
+                node.opacity = opacity;
             }
-            node.opacity = opacity.get(node.node).copied().unwrap_or(1.0);
         }
         let nodes = &posed.nodes;
         let node_index = &posed.node_index;
-        for edge in Arc::make_mut(&mut posed.edges) {
-            let from = &nodes[node_index[edge.from].expect("edge parent is placed")];
-            let to = &nodes[node_index[edge.to].expect("edge child is placed")];
+        Arc::make_mut(&mut posed.edges).retain_mut(|edge| {
+            let placed = |id: usize| node_index.get(id).copied().flatten().and_then(|index| nodes.get(index));
+            let (Some(from), Some(to)) = (placed(edge.from), placed(edge.to)) else { return false };
             edge.opacity = to.opacity;
             if self.kind == GraphLayoutKind::AdaptiveRadial {
                 let (dx, dy) = (to.center.x - from.center.x, to.center.y - from.center.y);
@@ -127,20 +153,21 @@ impl GraphLayout {
                 edge.start = point(from.center.x + dx * a, from.center.y + dy * a);
                 edge.end = point(to.center.x - dx * b, to.center.y - dy * b);
             } else {
-                let old_from = self.node(edge.from).expect("edge parent is placed");
-                let old_to = self.node(edge.to).expect("edge child is placed");
+                let (Some(old_from), Some(old_to)) = (self.node(edge.from), self.node(edge.to)) else { return false };
                 edge.start = point(edge.start.x + from.center.x - old_from.center.x, edge.start.y + from.center.y - old_from.center.y);
                 edge.end = point(edge.end.x + to.center.x - old_to.center.x, edge.end.y + to.center.y - old_to.center.y);
             }
-        }
+            true
+        });
         posed
     }
 }
 
 /// Lays out the root, the path to `selection`, and the children of each, with
 /// each node the size `size` gives it in its role.
-pub fn graph_layout(kind: GraphLayoutKind, tree: &GraphTree, selection: usize, size: &dyn Fn(usize, NodeRole) -> Size<f32>, params: &LayoutParams) -> GraphLayout {
-    let path = tree.ancestry(selection);
+/// Returns an error if the selection does not belong to this tree.
+pub fn graph_layout(kind: GraphLayoutKind, tree: &GraphTree, selection: usize, size: &dyn Fn(usize, NodeRole) -> Size<f32>, params: &LayoutParams) -> Result<GraphLayout, &'static str> {
+    let path = tree.ancestry(selection).ok_or("Graph selection is out of bounds")?;
     let mut builder = Builder { tree, size, params, selection, path: &path, nodes: Vec::new(), node_index: vec![None; tree.parents.len()], edges: Vec::new() };
     builder.place(0, NodeRole::Root, None, point(0.0, 0.0), 0.0);
     match kind {
@@ -151,7 +178,7 @@ pub fn graph_layout(kind: GraphLayoutKind, tree: &GraphTree, selection: usize, s
         }
     }
     let Builder { nodes, edges, node_index, .. } = builder;
-    GraphLayout { kind, nodes, edges: Arc::new(edges), path, node_index }
+    Ok(GraphLayout { kind, nodes, edges: Arc::new(edges), path, node_index })
 }
 
 struct RadialChild {
@@ -197,8 +224,8 @@ impl Builder<'_> {
         self.nodes.push(PlacedNode { node, parent, role, center, angle, bounds, opacity: 1.0 });
     }
 
-    fn placed(&self, node: usize) -> &PlacedNode {
-        &self.nodes[self.node_index[node].expect("parent is placed before children")]
+    fn placed(&self, node: usize) -> Option<&PlacedNode> {
+        self.node_index.get(node).copied().flatten().and_then(|index| self.nodes.get(index))
     }
 
     /// Use the nearest clear point on each spoke, then give every open
@@ -208,7 +235,7 @@ impl Builder<'_> {
         if children.is_empty() {
             return;
         }
-        let parent = self.placed(node).clone();
+        let Some(parent) = self.placed(node).cloned() else { return };
         let root = node == 0;
         let path_fan = !root && self.path.contains(&node);
         let count = children.len();
@@ -231,8 +258,7 @@ impl Builder<'_> {
             };
             let clear = |radius: f32, placed: &[RadialChild]| {
                 let (_, bounds) = candidate(radius);
-                self.nodes.iter().all(|other| path_fan && other.node != node || !overlaps(bounds, other.bounds, self.params.radial_gap))
-                    && placed.iter().all(|other| !overlaps(bounds, other.bounds, self.params.radial_gap))
+                self.nodes.iter().all(|other| path_fan && other.node != node || !overlaps(bounds, other.bounds, self.params.radial_gap)) && placed.iter().all(|other| !overlaps(bounds, other.bounds, self.params.radial_gap))
             };
             let mut radius = if root { self.params.root_radius } else { 1.0 };
             let mut last_blocked = radius;
@@ -270,9 +296,9 @@ impl Builder<'_> {
     }
 
     fn lengthen_path_node(&mut self, node: usize, children: &mut [RadialChild]) {
-        let index = self.node_index[node].expect("path node is placed");
-        let original = self.nodes[index].clone();
-        let parent = self.placed(original.parent.expect("non-root path node has parent")).center;
+        let Some(index) = self.node_index.get(node).copied().flatten() else { return };
+        let Some(original) = self.nodes.get(index).cloned() else { return };
+        let Some(parent) = original.parent.and_then(|parent| self.placed(parent)).map(|parent| parent.center) else { return };
         let angle = (original.center.y - parent.y).atan2(original.center.x - parent.x);
         let (ux, uy) = (angle.cos(), angle.sin());
         let outside: Vec<Bounds<f32>> = self.nodes.iter().filter(|other| other.node != node).map(|other| other.bounds).collect();
@@ -313,8 +339,8 @@ impl Builder<'_> {
     }
 
     fn radial_edges(&mut self) {
-        for child in self.nodes.iter().filter(|node| node.parent.is_some()) {
-            let parent = self.placed(child.parent.expect("child has parent"));
+        for child in &self.nodes {
+            let Some(parent) = child.parent.and_then(|parent| self.placed(parent)) else { continue };
             let (dx, dy) = (child.center.x - parent.center.x, child.center.y - parent.center.y);
             let from = ray_box_fraction(parent.bounds, dx, dy);
             let to = ray_box_fraction(child.bounds, dx, dy);
@@ -336,7 +362,7 @@ impl Builder<'_> {
         if children.is_empty() {
             return;
         }
-        let parent = self.placed(node);
+        let Some(parent) = self.placed(node) else { return };
         let (parent_center, parent_width) = (parent.center, parent.bounds.size.width);
         // Each child's slot fits it in any role it can take below a placed parent.
         let slots: Vec<Size<f32>> = children
@@ -413,4 +439,37 @@ fn ray_box_fraction(bounds: Bounds<f32>, dx: f32, dy: f32) -> f32 {
     let fx = if dx.abs() > f32::EPSILON { bounds.size.width / (2.0 * dx.abs()) } else { f32::INFINITY };
     let fy = if dy.abs() > f32::EPSILON { bounds.size.height / (2.0 * dy.abs()) } else { f32::INFINITY };
     fx.min(fy).min(0.5)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::framing_camera;
+    use gpui::{px, size};
+
+    #[test]
+    fn an_invalid_selection_is_rejected_before_measuring_nodes() {
+        let tree = GraphTree::new(vec![None]).unwrap();
+        assert!(graph_layout(GraphLayoutKind::Columns, &tree, 1, &|_, _| panic!("invalid selection must not request layout"), &LayoutParams::desktop()).is_err());
+    }
+
+    #[test]
+    fn a_filtered_layout_can_be_posed_and_framed_without_its_selection() {
+        for kind in [GraphLayoutKind::Columns, GraphLayoutKind::AdaptiveRadial] {
+            let tree = GraphTree::new(vec![None, Some(0), Some(0)]).unwrap();
+            let mut layout = graph_layout(kind, &tree, 1, &|_, _| size(20.0, 20.0), &LayoutParams::desktop()).unwrap();
+            layout.retain_nodes(|node| node.node != 1);
+            let posed = layout.with_pose(&[point(0.0, 0.0), point(50.0, 50.0), point(100.0, 100.0)], &[1.0; 3]);
+            assert_eq!(posed.edges.len(), 1);
+            assert!(posed.edges.iter().all(|edge| posed.node(edge.from).is_some() && posed.node(edge.to).is_some()));
+            assert_eq!(posed.node(2).unwrap().center, point(100.0, 100.0));
+
+            let area = Bounds::new(point(px(0.0), px(0.0)), size(px(800.0), px(600.0)));
+            let camera = framing_camera(&posed, area, false, 1.0);
+            assert_eq!(camera.pan, area.center());
+            assert_eq!(camera.zoom, 1.0);
+            layout.path.clear();
+            assert_eq!(framing_camera(&layout, area, true, 1.0), camera);
+        }
+    }
 }

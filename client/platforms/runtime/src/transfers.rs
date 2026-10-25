@@ -1,5 +1,5 @@
-//! Device-wide admission and cancellation for file transfers. Small requests
-//! such as sign-in and browsing do not need this gate.
+//! Device-wide admission and cancellation for automatic file transfers.
+//! Reading and explicit user downloads bypass this gate.
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::OnceLock;
@@ -65,6 +65,14 @@ impl TransferPolicy {
     /// retries it, keeping the original queue entry and publication intent.
     pub async fn run<T>(&self, request: impl Future<Output = T>) -> Result<T, Deferred> {
         self.wait().await;
+        self.try_run(request).await
+    }
+    /// Leave deferred work with its queue instead of occupying a worker while
+    /// waiting. This lets later user-initiated jobs bypass the restriction.
+    pub async fn try_run<T>(&self, request: impl Future<Output = T>) -> Result<T, Deferred> {
+        if !self.allowed() {
+            return Err(Deferred);
+        }
         tokio::select! {
             biased;
             _ = self.wait_until(false) => Err(Deferred),
@@ -90,6 +98,9 @@ pub async fn wait() {
 }
 pub async fn run<T>(request: impl Future<Output = T>) -> Result<T, Deferred> {
     POLICY.run(request).await
+}
+pub async fn try_run<T>(request: impl Future<Output = T>) -> Result<T, Deferred> {
+    POLICY.try_run(request).await
 }
 pub async fn retry<T, F: Future<Output = T>>(request: impl FnMut() -> F) -> T {
     POLICY.retry(request).await
@@ -126,6 +137,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deferred_queue_work_releases_the_worker_without_polling_the_request() {
+        let policy = TransferPolicy::default();
+        policy.set_network_cost(NetworkCost::Metered);
+        assert!(policy.try_run(async { panic!("deferred requests must not start") }).await.is_err());
+        policy.set_network_cost(NetworkCost::Unmetered);
+        assert_eq!(policy.try_run(async { 42 }).await.unwrap(), 42);
+    }
+
+    #[tokio::test]
     async fn metered_admission_waits_and_override_releases_it() {
         let policy = Arc::new(TransferPolicy::default());
         policy.set_network_cost(NetworkCost::Metered);
@@ -140,7 +160,7 @@ mod tests {
                     .await
             }
         });
-        sleep(Duration::from_millis(300)).await;
+        sleep(Duration::from_millis(300)).await.unwrap();
         assert!(received.try_recv().is_err());
         policy.set_allow_metered(true);
         worker.await.unwrap().unwrap();
@@ -180,7 +200,7 @@ mod tests {
             let policy = policy.clone();
             async move { policy.retry(|| async { 42 }).await }
         });
-        sleep(Duration::from_millis(300)).await;
+        sleep(Duration::from_millis(300)).await.unwrap();
         assert!(!resumed.is_finished());
         policy.set_network_cost(NetworkCost::Unmetered);
         assert_eq!(resumed.await.unwrap(), 42);

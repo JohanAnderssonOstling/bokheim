@@ -1,5 +1,5 @@
 use super::{crypto, email_taken, internal, issue_token_pair, issued_session, normalized_email, PostgresAccountService, TOKEN_LEN};
-use crate::core::{AuthError, AuthenticatedUser, IssuedSession};
+use crate::core::{AccountEmailKind, AuthError, AuthenticatedUser, IssuedSession};
 use account_contract::{PASSWORD_MAX_BYTES, PASSWORD_MIN_CHARACTERS};
 use chrono::{Duration, Utc};
 use sqlx::{Postgres, Transaction};
@@ -8,10 +8,10 @@ const REGISTRATION_TTL_HOURS: i64 = 24;
 const PASSWORD_RESET_TTL_MINUTES: i64 = 60;
 const RESEND_COOLDOWN_SECONDS: i64 = 60;
 
-async fn queue_email(service: &PostgresAccountService, transaction: &mut Transaction<'_, Postgres>, recipient: &str, kind: &str, token: &str) -> Result<(), AuthError> {
+async fn queue_email(service: &PostgresAccountService, transaction: &mut Transaction<'_, Postgres>, recipient: &str, kind: AccountEmailKind, token: &str) -> Result<(), AuthError> {
     let id = uuid::Uuid::new_v4().to_string();
     let token_ciphertext = service.token_protector.encrypt_outbox_token(&id, recipient, kind, token)?;
-    sqlx::query("INSERT INTO account_email_outbox(id, recipient, message_kind, token_ciphertext) VALUES ($1, $2, $3, $4)").bind(id).bind(recipient).bind(kind).bind(token_ciphertext).execute(&mut **transaction).await.map_err(internal)?;
+    sqlx::query("INSERT INTO account_email_outbox(id, recipient, message_kind, token_ciphertext) VALUES ($1, $2, $3, $4)").bind(id).bind(recipient).bind(kind.stored_name()).bind(token_ciphertext).execute(&mut **transaction).await.map_err(internal)?;
     Ok(())
 }
 
@@ -75,17 +75,22 @@ impl PostgresAccountService {
         let (token, token_hash) = crypto::mint_verification_pin(&self.token_protector, &email);
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         sqlx::query("DELETE FROM pending_registration WHERE expires_at <= now()").execute(&mut *transaction).await.map_err(internal)?;
-        let conflict: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM users WHERE email=$1)
-                OR EXISTS(SELECT 1 FROM pending_registration WHERE email=$1)",
-        )
-        .bind(&email)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(internal)?;
-        if conflict {
+        let registered: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email=$1)").bind(&email).fetch_one(&mut *transaction).await.map_err(internal)?;
+        if registered {
             transaction.commit().await.map_err(internal)?;
             return Ok(());
+        }
+        let pending: Option<(String, chrono::DateTime<Utc>)> =
+            sqlx::query_as("SELECT id, last_sent_at FROM pending_registration WHERE email=$1 FOR UPDATE").bind(&email).fetch_optional(&mut *transaction).await.map_err(internal)?;
+        if let Some((id, last_sent_at)) = pending {
+            // The latest registrant's password replaces an earlier one, whoever
+            // sent it. Verification needs this password together with the PIN
+            // mailed to the address, so neither party alone can verify.
+            sqlx::query("UPDATE pending_registration SET password_hash=$2 WHERE id=$1").bind(&id).bind(password_hash).execute(&mut *transaction).await.map_err(internal)?;
+            if last_sent_at <= Utc::now() - Duration::seconds(RESEND_COOLDOWN_SECONDS) {
+                self.send_new_verification_pin(&mut transaction, &id, &email).await?;
+            }
+            return transaction.commit().await.map_err(internal);
         }
 
         let inserted = sqlx::query(
@@ -102,7 +107,7 @@ impl PostgresAccountService {
         if let Err(error) = inserted {
             return if email_taken(&error) { Ok(()) } else { Err(internal(error)) };
         }
-        queue_email(self, &mut transaction, &email, "verify_email", &token).await?;
+        queue_email(self, &mut transaction, &email, AccountEmailKind::VerifyEmail, &token).await?;
         transaction.commit().await.map_err(internal)
     }
 
@@ -119,38 +124,57 @@ impl PostgresAccountService {
             transaction.commit().await.map_err(internal)?;
             return Ok(());
         }
-        let (token, token_hash) = crypto::mint_verification_pin(&self.token_protector, &email);
+        self.send_new_verification_pin(&mut transaction, &id, &email).await?;
+        transaction.commit().await.map_err(internal)
+    }
+
+    async fn send_new_verification_pin(&self, transaction: &mut Transaction<'_, Postgres>, pending_id: &str, email: &str) -> Result<(), AuthError> {
+        let (token, token_hash) = crypto::mint_verification_pin(&self.token_protector, email);
         sqlx::query(
             "UPDATE pending_registration
              SET verification_hash=$2, expires_at=$3, last_sent_at=now()
              WHERE id=$1",
         )
-        .bind(id)
+        .bind(pending_id)
         .bind(token_hash)
         .bind(Utc::now() + Duration::hours(REGISTRATION_TTL_HOURS))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .map_err(internal)?;
-        sqlx::query("DELETE FROM account_email_outbox WHERE recipient=$1 AND message_kind='verify_email' AND claimed_by IS NULL").bind(&email).execute(&mut *transaction).await.map_err(internal)?;
-        queue_email(self, &mut transaction, &email, "verify_email", &token).await?;
-        transaction.commit().await.map_err(internal)
+        sqlx::query("DELETE FROM account_email_outbox WHERE recipient=$1 AND message_kind='verify_email' AND claimed_by IS NULL").bind(email).execute(&mut **transaction).await.map_err(internal)?;
+        queue_email(self, transaction, email, AccountEmailKind::VerifyEmail, &token).await
     }
 
-    pub(super) async fn verify_email_impl(&self, email: &str, pin: &str) -> Result<IssuedSession, AuthError> {
+    pub(super) async fn verify_email_impl(&self, email: &str, pin: &str, password: &str) -> Result<IssuedSession, AuthError> {
         let email = normalized_email(email)?;
-        if !super::valid_verification_pin(pin) {
+        if !super::valid_verification_pin(pin) || !super::valid_password_size(password) {
             return Err(AuthError::InvalidOneTimeToken);
         }
         let token_hash = self.token_protector.verification_hash(&email, pin);
+        let candidate: Option<String> = sqlx::query_scalar("SELECT password_hash FROM pending_registration WHERE email=$1 AND verification_hash=$2 AND expires_at > now()")
+            .bind(&email)
+            .bind(&token_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(internal)?;
+        let Some(candidate) = candidate else {
+            return Err(AuthError::InvalidOneTimeToken);
+        };
+        if !self.verify_password(password.to_owned(), candidate.clone()).await? {
+            return Err(AuthError::InvalidOneTimeToken);
+        }
         let mut transaction = self.pool.begin().await.map_err(internal)?;
+        // Recheck the hash under the lock so a concurrent re-registration
+        // cannot be verified with the password it replaced.
         let pending: Option<(String, String, String)> = sqlx::query_as(
             "SELECT id, email, password_hash
              FROM pending_registration
-             WHERE email=$1 AND verification_hash=$2 AND expires_at > now()
+             WHERE email=$1 AND verification_hash=$2 AND password_hash=$3 AND expires_at > now()
              FOR UPDATE",
         )
         .bind(&email)
         .bind(token_hash)
+        .bind(candidate)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(internal)?;
@@ -195,7 +219,7 @@ impl PostgresAccountService {
         .await
         .map_err(internal)?;
         sqlx::query("DELETE FROM account_email_outbox WHERE recipient=$1 AND message_kind='reset_password' AND claimed_by IS NULL").bind(&email).execute(&mut *transaction).await.map_err(internal)?;
-        queue_email(self, &mut transaction, &email, "reset_password", &token).await?;
+        queue_email(self, &mut transaction, &email, AccountEmailKind::ResetPassword, &token).await?;
         transaction.commit().await.map_err(internal)
     }
 

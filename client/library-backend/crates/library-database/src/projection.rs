@@ -273,7 +273,7 @@ fn project_value(tx: &Transaction<'_>, body: &LibraryStateEntry, purged: &HashSe
             };
             tx.set_remote_directory_lifecycle(&dir_id.to_string(), value).map_err(DatabaseError::operation)?;
         }
-        LibraryStateEntry::BookLifecycle { .. } | LibraryStateEntry::ReadingPosition { .. } | LibraryStateEntry::BookAdd { .. } => {
+        LibraryStateEntry::BookLifecycle { .. } | LibraryStateEntry::ReadingPosition { .. } | LibraryStateEntry::ChapterReadStatus { .. } | LibraryStateEntry::BookAdd { .. } => {
             unreachable!("book records and scalar registers are projected together")
         }
         LibraryStateEntry::Placement { dir_id, content_hash, present, origin_folder_id } => {

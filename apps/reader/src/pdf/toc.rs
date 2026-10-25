@@ -6,7 +6,9 @@
 //! page lookup and the active-entry search all agree on identity without
 //! anything having to be stored twice.
 
-use book_model::{BookTocEntry, pdf_toc_page};
+use std::collections::HashSet;
+
+use book_model::{BookTocEntry, ChapterReadStatus, ReadingPosition, pdf_toc_page};
 use gpui_component::tree::TreeItem;
 
 const TOC_ID_PREFIX: &str = "pdf-toc-";
@@ -22,11 +24,35 @@ fn toc_order(id: &str) -> Option<usize> {
 #[derive(Default)]
 pub(crate) struct PdfTocState {
     entries: Vec<BookTocEntry>,
+    pub(crate) read_status: ChapterReadStatus,
     /// The entry the current page sits under, if any.
     active_id: Option<String>,
 }
 
 impl PdfTocState {
+    pub(crate) fn reset_chapter_read_status(&mut self, id: &str) -> Option<String> {
+        let target = self.entry(id)?.target.clone();
+        self.read_status.reset_chapter(&self.entries, &target);
+        Some(target)
+    }
+    pub(crate) fn update_read_status(&mut self, page: usize, at_end: bool) {
+        self.read_status.update_position(&self.entries, &ReadingPosition::pdf_page(page as u32), None, at_end);
+    }
+
+    pub(crate) fn read_ids(&self) -> HashSet<String> {
+        fn visit(entries: &[BookTocEntry], status: &ChapterReadStatus, next: &mut usize, ids: &mut HashSet<String>) {
+            for entry in entries {
+                if status.completed.contains(&entry.target) {
+                    ids.insert(toc_id(*next));
+                }
+                *next += 1;
+                visit(&entry.children, status, next, ids);
+            }
+        }
+        let mut ids = HashSet::new();
+        visit(&self.entries, &self.read_status, &mut 0, &mut ids);
+        ids
+    }
     pub(crate) fn has_entries(&self) -> bool {
         !self.entries.is_empty()
     }

@@ -114,6 +114,7 @@ fn portable_relative_path(path: &Path) -> Option<String> {
 pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> FilesystemScan {
     let root = root.into();
     let known = snapshot.directories.iter().map(|directory| (directory.id, directory)).collect::<HashMap<_, _>>();
+    let tombstoned = snapshot.tombstoned_files.iter().map(|(directory, name)| (*directory, name.as_str())).collect::<HashSet<_>>();
     let mut result = FilesystemScan { readable: true, ..FilesystemScan::default() };
     let mut walk = library_files::filesystem::walk(&root);
     let mut parents = vec![ROOT_DIR_ID];
@@ -164,6 +165,15 @@ pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> Filesystem
             result.readable = false;
             continue;
         };
+        // Soft removal retains the bytes on disk. Respect the saved placement
+        // tombstone so a later scan cannot import the book back out of Trash.
+        // Skip audiobook folders before walking their tracks as well.
+        if entry.file_name().to_str().is_some_and(|name| tombstoned.contains(&(parent_id, name))) {
+            if entry.is_dir() {
+                walk.skip_current_dir();
+            }
+            continue;
+        }
         if entry.is_dir() {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 result.readable = false;
@@ -315,7 +325,7 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
                         log::warn!("scanner skipped {} after {} inspection attempts: {error}", path.display(), attempt + 1);
                         return Err((file.path.clone(), error.to_string()));
                     }
-                    Err(_) => client_platform_runtime::executor::sleep(std::time::Duration::from_millis(100)).await,
+                    Err(_) => client_platform_runtime::executor::sleep(std::time::Duration::from_millis(100)).await.map_err(|error| (file.path.clone(), error.to_string()))?,
                 }
             }
             unreachable!("inspection attempts return a result")
@@ -355,6 +365,94 @@ mod tests {
     }
     fn host() -> Arc<dyn cpu_host::CpuHost> {
         Arc::new(FailingHost)
+    }
+
+    #[tokio::test]
+    async fn trashed_books_stay_trashed_after_reopening_and_scanning() {
+        use book_inspection::InspectedBook;
+        use book_model::{BookDetails, BookRecord};
+        use library_database::{Database, ScanApplyResult};
+
+        for format in [BookFormat::Epub, BookFormat::Mp3Folder] {
+            for remove_last_placement in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let name = if format == BookFormat::Epub { "book.epub" } else { "Story" };
+                let path = root.path().join(name);
+                if format == BookFormat::Mp3Folder {
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::write(path.join("01.mp3"), b"audio").unwrap();
+                } else {
+                    std::fs::write(&path, b"book").unwrap();
+                }
+                let database_path = root.path().join(".library.db");
+                let db = Database::open(&database_path).unwrap();
+                db.initialize_library().unwrap();
+                let mut snapshot = db.scan_snapshot().unwrap();
+                let discovery = discover(root.path(), &snapshot);
+                let fingerprint = discovery.files[0].fingerprint;
+                let hash = ContentHash::from(blake3::hash(b"book"));
+                let book = ScannedBook {
+                    directory: ROOT_DIR_ID,
+                    name: name.into(),
+                    path: name.into(),
+                    fingerprint,
+                    content_hash: hash,
+                    size_bytes: 4,
+                    extension: format.canonical_extension().into(),
+                    inspection: InspectedBook {
+                        metadata: BookRecord { metadata: BookDetails { title: "Story".into(), subtitle: None, contributors: vec![], book: Default::default() }, description: String::new() },
+                        toc: vec![],
+                        audiobook: None,
+                        pdf: None,
+                    },
+                    inspection_version: book_inspection::inspection_version(format),
+                };
+                let inspected = InspectedFilesystemScan { readable: true, books: vec![book] };
+                assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &inspected, true, None).unwrap(), ScanApplyResult::Applied);
+                if remove_last_placement {
+                    assert!(db.remove_book_placement(&hash, &ROOT_DIR_ID).unwrap());
+                } else {
+                    db.trash_book(&hash).unwrap();
+                }
+                drop(db);
+
+                let reopened = Database::open(&database_path).unwrap();
+                reopened.initialize_library().unwrap();
+                let mut snapshot = reopened.scan_snapshot().unwrap();
+                assert_eq!(snapshot.tombstoned_files, [(ROOT_DIR_ID, name.into())]);
+                let discovery = discover(root.path(), &snapshot);
+                assert!(discovery.readable);
+                assert!(discovery.files.is_empty(), "retained files must not be reimported");
+                let inspected = inspect(root.path(), &discovery, &snapshot, &host()).await;
+                assert!(inspected.readable);
+                assert_eq!(reopened.apply_filesystem_scan_batch(&mut snapshot, &discovery, &inspected, true, None).unwrap(), ScanApplyResult::Applied);
+                assert_eq!(reopened.library_trash().unwrap().books[0].content_hash, hash);
+                assert!(path.exists(), "Trash must retain the physical book");
+
+                reopened.restore_book(&hash).unwrap();
+                let snapshot = reopened.scan_snapshot().unwrap();
+                assert!(snapshot.tombstoned_files.is_empty(), "explicit restore clears the scan tombstone");
+                assert!(reopened.library_trash().unwrap().books.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn removed_placements_do_not_hide_books_in_other_directories() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Removed")).unwrap();
+        std::fs::create_dir(root.path().join("Live")).unwrap();
+        for name in ["book.epub", "Removed/book.epub", "Live/book.epub"] {
+            std::fs::write(root.path().join(name), b"book").unwrap();
+        }
+        let mut snapshot = ScanSnapshot { placements: vec![], work_revision: 0, scan_id: 1, excluded_paths: vec![], directories: vec![], tombstoned_files: vec![], books: vec![] };
+        let initial = discover(root.path(), &snapshot);
+        let removed = initial.directories.iter().find(|directory| directory.name == "Removed").unwrap().id;
+        snapshot.tombstoned_files = vec![(ROOT_DIR_ID, "book.epub".into()), (removed, "book.epub".into())];
+        let scan = discover(root.path(), &snapshot);
+        assert!(scan.readable);
+        assert_eq!(scan.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), ["Live/book.epub"]);
+        assert_eq!(scan.directories.len(), 2);
     }
 
     #[tokio::test]

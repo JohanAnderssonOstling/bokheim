@@ -319,8 +319,9 @@ impl Database {
     }
 
     /// Drops every queued directory reconciliation without performing it.
-    pub fn clear_local_directory_work(&self) {
-        self.connection.clear_local_directory_work().expect("clear local directory work");
+    pub fn clear_local_directory_work(&self) -> Result<(), DatabaseError> {
+        self.connection.clear_local_directory_work()?;
+        Ok(())
     }
 
     pub fn native_book_work_directory_ids(&self) -> Result<Vec<DirId>, DatabaseError> {
@@ -471,3 +472,24 @@ fn native_directory_record(connection: &rusqlite::Connection, id: &DirId) -> Res
 }
 
 use crate::native::observations::ObservationsSql;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clearing_directory_work_returns_write_errors_and_preserves_pending_work() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        let dir = DirId::from_u128(1);
+        db.create_directory_with_id(&dir, &sync_common::ROOT_DIR_ID, &"Pending".into()).unwrap();
+        let pending = db.native_directory_work_ids().unwrap();
+        assert!(!pending.is_empty());
+        db.connection.pragma_update(None, "query_only", true).unwrap();
+        assert!(db.clear_local_directory_work().is_err());
+        assert_eq!(db.native_directory_work_ids().unwrap(), pending);
+        db.connection.pragma_update(None, "query_only", false).unwrap();
+        db.clear_local_directory_work().unwrap();
+        assert!(db.native_directory_work_ids().unwrap().is_empty());
+    }
+}

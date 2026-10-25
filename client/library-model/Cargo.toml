@@ -11,6 +11,7 @@ random-ids = ["uuid/v4", "book-model/random-ids"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
+operation-failure = { path = "../operation-failure" }
 content-address = { path = "../../shared/content-address" }
 book-model = { path = "../../shared/book-model", default-features = false }
 uuid = { version = "1", features = ["v5", "serde"] }

@@ -10,9 +10,11 @@ pub(crate) fn book_key(body: &LibraryStateEntry) -> Option<&ContentHash> {
     match body {
         LibraryStateEntry::DirectoryName { .. } | LibraryStateEntry::DirectoryParent { .. } | LibraryStateEntry::DirectoryLifecycle { .. } => None,
         LibraryStateEntry::Annotation { value, .. } => Some(&value.content_hash),
-        LibraryStateEntry::BookAdd { content_hash, .. } | LibraryStateEntry::BookLifecycle { content_hash, .. } | LibraryStateEntry::Placement { content_hash, .. } | LibraryStateEntry::ReadingPosition { content_hash, .. } => {
-            Some(content_hash)
-        }
+        LibraryStateEntry::BookAdd { content_hash, .. }
+        | LibraryStateEntry::BookLifecycle { content_hash, .. }
+        | LibraryStateEntry::Placement { content_hash, .. }
+        | LibraryStateEntry::ReadingPosition { content_hash, .. }
+        | LibraryStateEntry::ChapterReadStatus { content_hash, .. } => Some(content_hash),
     }
 }
 

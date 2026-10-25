@@ -100,7 +100,7 @@ impl State {
                     let spec = (self.resolve_worker)(&role, id)?;
                     let worker = super::endpoint::module_worker(&spec.url, &spec.name)?;
                     let control = self.control.clone();
-                    let error = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+                    let error = Closure::<dyn FnMut(web_sys::Event)>::own_aborting(move |event: web_sys::Event| {
                         event.prevent_default();
                         let error = field(event.as_ref(), "message").as_string().unwrap_or_else(|| "Dedicated worker failed".into());
                         let _ = control.post_message(&object(&[("transport", "worker_failed".into()), ("id", id.into()), ("error", error.into())]));
@@ -178,13 +178,13 @@ impl TabConnection {
             },
         );
         let weak = Rc::downgrade(&state);
-        let pagehide = Closure::<dyn FnMut()>::new(move || {
+        let pagehide = Closure::<dyn FnMut()>::own_aborting(move || {
             if let Some(state) = weak.upgrade() {
                 state.shutdown();
             }
         })
         .into_js_value();
-        let pageshow = Closure::<dyn FnMut(web_sys::PageTransitionEvent)>::new(move |event: web_sys::PageTransitionEvent| {
+        let pageshow = Closure::<dyn FnMut(web_sys::PageTransitionEvent)>::own_aborting(move |event: web_sys::PageTransitionEvent| {
             if event.persisted() {
                 on_restore();
             }

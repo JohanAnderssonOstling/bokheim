@@ -1,3 +1,4 @@
+use client_platform_native::filesystem::parent_directory;
 pub(crate) use super::*;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
@@ -85,7 +86,7 @@ impl PreparedDirectory {
         let marker_exists = record(&marker)?;
         let owned = marker_exists && std::fs::read_to_string(&marker)?.trim() == id.to_string();
         let chosen = if exists && !owned {
-            let mut occupied = std::fs::read_dir(destination.parent().unwrap())?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
+            let mut occupied = std::fs::read_dir(parent_directory(&destination)?)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
             occupied.extend(sibling_names.iter().cloned());
             let chosen = library_replica::unique_folder_name(name, occupied.iter().map(String::as_str));
             destination.set_file_name(&chosen);

@@ -5,10 +5,10 @@ use gpui::Window;
 pub const MEDIUM_WINDOW_WIDTH: f32 = 600.0;
 pub const EXPANDED_WINDOW_WIDTH: f32 = 840.0;
 
-/// Mobile app navigation also serves compact web and desktop windows. Kobo
-/// keeps its device controls instead of the phone's Back/title header.
+/// Mobile app navigation also serves compact web and desktop windows.
+/// Kobo browsing keeps the sidebar; its reader uses touch controls separately.
 pub fn uses_mobile_navigation(window: &Window) -> bool {
-    has_native_back_button() || (!cfg!(feature = "kobo") && WindowWidthClass::for_window(window).is_compact())
+    !cfg!(feature = "kobo") && (has_native_back_button() || WindowWidthClass::for_window(window).is_compact())
 }
 
 /// Touch readers use tappable bars and sheets even when browsing uses a rail.

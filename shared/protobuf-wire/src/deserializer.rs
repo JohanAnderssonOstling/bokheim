@@ -103,7 +103,7 @@ impl<'de> de::Deserializer<'de> for Deserializer {
         let (variant, value) = match self.value.kind {
             Some(Kind::StringValue(value)) => (Key::String(value), None),
             Some(Kind::Map(mut value)) if value.entries.len() == 1 => {
-                let entry = value.entries.pop().unwrap();
+                let entry = value.entries.pop().ok_or_else(|| error("enum requires a single-entry map"))?;
                 let key = domain_value(entry.key.ok_or_else(|| error("missing map key"))?, byte_fields).map_err(|failure| error(&failure.to_string()))?;
                 (key, Some(entry.value.ok_or_else(|| error("missing map value"))?))
             }

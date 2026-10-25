@@ -37,7 +37,16 @@ pub enum LibraryUpdate {
     Contents,
     Covers(Vec<ContentHash>),
     Download(crate::BookDownloadStatus),
-    CatalogImport { entry: CardKey, progress: crate::CatalogImportProgress },
+    /// A queued user action failed after its initial command was accepted.
+    DownloadFailed {
+        content_hash: ContentHash,
+        /// Why it failed, when known; the diagnostic stays in the backend log.
+        failure: Option<operation_failure::Failure>,
+    },
+    CatalogImport {
+        entry: CardKey,
+        progress: crate::CatalogImportProgress,
+    },
     Scanning(bool),
 }
 
@@ -613,6 +622,8 @@ pub struct BookDetail {
     /// list that could never mark anything.
     pub current_target: Option<String>,
     pub toc: Vec<BookTocEntry>,
+    #[serde(default)]
+    pub chapter_read_status: book_model::ChapterReadStatus,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

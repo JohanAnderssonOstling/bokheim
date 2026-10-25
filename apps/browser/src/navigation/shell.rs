@@ -76,7 +76,7 @@ impl BrowserShell {
         let active_library_id = saved.library_id;
         let shell = cx.entity().downgrade();
         let navigate_callback: Navigate = std::rc::Rc::new(move |route, window, cx| {
-            let _ = shell.update(cx, |shell, cx| shell.navigate(route, window, cx));
+            let _ = shell.update(cx, |shell, cx| shell.select_destination(route, window, cx));
         });
         let libraries = cx.new(|cx| Libraries::new(services.backend.clone(), open_book.clone(), libraries, active_library_id, cx));
         let session = libraries.read(cx).selected_session();
@@ -171,18 +171,7 @@ impl BrowserShell {
         if self.libraries.read(cx).creating_libraries() {
             return components::library_section_content().child(components::browser_loading_message("Adding library…", theme)).into_any_element();
         }
-        let navigation = self.navigation.clone();
-        let create = self.navigation.clone();
-        let mut actions = gpui::div().flex().flex_wrap().justify_center().gap(gpui::px(components::SPACE_SM));
-        #[cfg(not(target_arch = "arm"))]
-        {
-            actions = actions
-                .child(components::primary_action_button("add-first-library", "Add library", gpui_component::IconName::Plus, false).on_click(move |_, _, cx| navigation.update(cx, |navigation, cx| navigation.choose_library_folders(cx))));
-        }
-        let actions = actions.child(
-            components::secondary_action_button("create-first-library", "Create library", gpui_component::IconName::Plus, false)
-                .on_click(move |_, window, cx| create.update(cx, |navigation, cx| navigation.open_create_library_dialog(window, cx))),
-        );
+        let actions = self.navigation.read(cx).render_add_library_control(self.navigation.clone(), components::primary_action_button("add-first-library", "Add library", gpui_component::IconName::ChevronDown, false), false);
         components::library_section_content().child(components::browser_actionable_empty_without_description("No libraries yet", actions, theme).size_full()).into_any_element()
     }
 
@@ -193,13 +182,9 @@ impl BrowserShell {
     }
 
     fn open_pending_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((library_id, _, _)) = &self.pending_folder else { return };
         let libraries = self.libraries.read(cx);
-        if libraries.selected_id() != Some(*library_id) {
-            return;
-        }
         let Some(session) = libraries.selected_session() else { return };
-        let (_, directory_id, title) = self.pending_folder.take().unwrap();
+        let Some((_, directory_id, title)) = self.pending_folder.take_if(|(library_id, _, _)| libraries.selected_id() == Some(*library_id)) else { return };
         self.route = Route::Library(super::LibraryRoute::Folders);
         session.update(cx, |session, cx| session.open_folder(directory_id, title, window, cx));
         cx.notify();
@@ -212,13 +197,9 @@ impl BrowserShell {
     }
 
     fn open_pending_subject(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((library_id, _, _)) = &self.pending_subject else { return };
         let libraries = self.libraries.read(cx);
-        if libraries.selected_id() != Some(*library_id) {
-            return;
-        }
         let Some(session) = libraries.selected_session() else { return };
-        let (_, location, label) = self.pending_subject.take().unwrap();
+        let Some((_, location, label)) = self.pending_subject.take_if(|(library_id, _, _)| libraries.selected_id() == Some(*library_id)) else { return };
         self.route = Route::Library(super::LibraryRoute::Subjects);
         session.update(cx, |session, cx| session.open_subject(location, label, window, cx));
         cx.notify();
@@ -237,7 +218,7 @@ impl BrowserShell {
                 let library = backend.library_for_import(library_id).await?;
                 let _progress = root.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(window, cx)).ok();
                 let hash = library.import_stored_book(ROOT_DIR_ID, name, path.clone()).await?;
-                Ok::<_, String>(library_model::BookLocator::new(*library.id(), hash))
+                Ok::<_, app::BackendError>(library_model::BookLocator::new(*library.id(), hash))
             }
             .await;
             let _ = std::fs::remove_file(&path);
@@ -245,7 +226,7 @@ impl BrowserShell {
                 Ok(locator) => open_book(locator, title, None, window, cx),
                 Err(error) => {
                     log::warn!("Could not import downloaded book: {error}");
-                    notify_error("incoming-book-import-error", crate::services::book_transfer_error_message(&error), window, cx);
+                    notify_error("incoming-book-import-error", crate::services::book_transfer_error_message(error.failure()), window, cx);
                 }
             });
         })
@@ -253,7 +234,7 @@ impl BrowserShell {
     }
 
     /// Reports a failure that occurred before an incoming file reached the library.
-    pub fn incoming_import_failed(&mut self, error: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn incoming_import_failed(&mut self, error: app::BackendError, window: &mut Window, cx: &mut Context<Self>) {
         notify_error("incoming-book-stage-error", format!("Could not prepare this book for import. {}", user_facing_error(&error, "Please try again.")), window, cx);
     }
 
@@ -284,6 +265,26 @@ impl BrowserShell {
         {
             session.read(cx).focus_handle(cx).focus(window, cx);
         }
+    }
+
+    /// Selecting the active destination returns it to its root. Switching
+    /// destinations keeps the cached page, as ordinary navigation does.
+    fn select_destination(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        if self.route != route {
+            self.navigate(route, window, cx);
+            return;
+        }
+        match route {
+            Route::Library(_) => {
+                if let Some(session) = self.libraries.read(cx).selected_session() {
+                    session.update(cx, |session, cx| session.open_root(window, cx));
+                }
+            }
+            Route::Global(GlobalRoute::Settings) => {
+                self.settings.update(cx, |page, cx| page.open_root(window, cx));
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
@@ -369,7 +370,7 @@ impl Render for BrowserShell {
             },
             Route::Global(GlobalRoute::Settings) => components::library_section_content().child(self.settings.clone()).into_any_element(),
         };
-        let compact_navigation = components::WindowWidthClass::for_window(window).is_compact();
+        let compact_navigation = components::uses_mobile_navigation(window);
         let mobile_heading = components::uses_mobile_navigation(window).then(|| route).and_then(|route| match route {
             Route::Global(super::GlobalRoute::Settings) => {
                 let theme = components::browser_theme(cx);

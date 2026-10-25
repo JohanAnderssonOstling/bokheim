@@ -1,5 +1,22 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
+
+/// Device-local shortcut overrides, with one combination per action.
+/// Missing actions retain their defaults; an empty list disables the shortcut.
+/// Lists remain in the saved format for compatibility with older profiles.
+pub type KeyboardShortcuts = BTreeMap<String, Vec<String>>;
+
+fn normalize_keyboard_shortcuts(mut shortcuts: KeyboardShortcuts) -> KeyboardShortcuts {
+    for keys in shortcuts.values_mut() {
+        keys.truncate(1);
+    }
+    shortcuts
+}
+
+fn deserialize_keyboard_shortcuts<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<KeyboardShortcuts, D::Error> {
+    KeyboardShortcuts::deserialize(deserializer).map(normalize_keyboard_shortcuts)
+}
 
 pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 64.0;
@@ -109,6 +126,8 @@ impl UiFontFamily {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowsingPreferences {
+    #[serde(default, deserialize_with = "deserialize_keyboard_shortcuts")]
+    keyboard_shortcuts: KeyboardShortcuts,
     #[serde(default)]
     allow_metered_transfers: bool,
     theme: ApplicationTheme,
@@ -140,6 +159,7 @@ fn default_keyboard_layouts() -> Vec<String> {
 impl Default for BrowsingPreferences {
     fn default() -> Self {
         Self {
+            keyboard_shortcuts: KeyboardShortcuts::new(),
             allow_metered_transfers: false,
             theme: ApplicationTheme::default(),
             appearance_override: None,
@@ -155,7 +175,12 @@ impl Default for BrowsingPreferences {
 }
 
 impl BrowsingPreferences {
-    pub fn allow_metered_transfers(&self) -> bool { self.allow_metered_transfers }
+    pub fn keyboard_shortcuts(&self) -> &KeyboardShortcuts {
+        &self.keyboard_shortcuts
+    }
+    pub fn allow_metered_transfers(&self) -> bool {
+        self.allow_metered_transfers
+    }
     pub fn theme(&self) -> ApplicationTheme {
         self.theme
     }
@@ -243,6 +268,7 @@ impl CoverText {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "preference", content = "value", rename_all = "snake_case")]
 pub enum BrowsingPreferencePatch {
+    KeyboardShortcuts(KeyboardShortcuts),
     AllowMeteredTransfers(bool),
     Theme(ApplicationTheme),
     Palette(ApplicationTheme, ResolvedAppearance),
@@ -258,6 +284,7 @@ pub enum BrowsingPreferencePatch {
 impl BrowsingPreferencePatch {
     pub fn apply(self, preferences: &mut BrowsingPreferences) -> Result<(), PreferenceValueError> {
         match self {
+            Self::KeyboardShortcuts(value) => preferences.keyboard_shortcuts = normalize_keyboard_shortcuts(value),
             Self::AllowMeteredTransfers(value) => preferences.allow_metered_transfers = value,
             Self::Theme(value) => preferences.theme = value,
             Self::Palette(theme, appearance) => {
@@ -745,7 +772,21 @@ impl ReaderPreferencePatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowsingPreferencePatch, BrowsingPreferences, CoverText, ReaderPreferences, UiFontFamily, DEFAULT_READER_MARGIN_PX};
+    use super::{BrowsingPreferencePatch, BrowsingPreferences, CoverText, DEFAULT_READER_MARGIN_PX, ReaderPreferences, UiFontFamily};
+
+    #[test]
+    fn keyboard_shortcuts_preserve_legacy_profiles_and_disabled_actions() {
+        let mut legacy = serde_json::to_value(BrowsingPreferences::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("keyboard_shortcuts");
+        let mut preferences: BrowsingPreferences = serde_json::from_value(legacy).unwrap();
+        assert!(preferences.keyboard_shortcuts().is_empty());
+        let shortcuts = super::KeyboardShortcuts::from([("reader.search".into(), vec!["ctrl-shift-f".into(), "alt-f".into()]), ("browse.undo".into(), vec![])]);
+        BrowsingPreferencePatch::KeyboardShortcuts(shortcuts.clone()).apply(&mut preferences).unwrap();
+        let restored: BrowsingPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
+        assert_eq!(restored.keyboard_shortcuts(), &super::normalize_keyboard_shortcuts(shortcuts));
+        BrowsingPreferencePatch::KeyboardShortcuts(Default::default()).apply(&mut preferences).unwrap();
+        assert!(preferences.keyboard_shortcuts().is_empty());
+    }
 
     #[test]
     fn metered_transfer_preference_defaults_off_and_round_trips() {

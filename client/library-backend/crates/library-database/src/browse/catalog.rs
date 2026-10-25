@@ -20,6 +20,7 @@ use super::authors::{Author, index_rows, page_author_rows};
 use super::books::MatchingBooks;
 use super::facets::{add_format_count, include_selected_facets};
 use super::options::{BrowseOptions, file_type_of};
+use super::rows::invalid_integer_column;
 #[cfg(test)]
 use super::sections::SectionSelection;
 #[cfg(test)]
@@ -298,7 +299,7 @@ pub(super) fn card_rows_in(db: &Connection, selected: &BTreeSet<i64>, options: &
                 downloaded: false,
                 download_requested: false,
                 format_category: file_type_of(row.get(6)?),
-                audiobook_duration_ms: None,
+                audiobook_duration_ms: row.get::<_, Option<i64>>(8)?.map(u64::try_from).transpose().map_err(|error| invalid_integer_column(8, error.to_string()))?,
                 added_at: 0,
                 source_directory: None,
             },
@@ -334,7 +335,7 @@ fn card(book: &CatalogBook) -> BookCardRow {
         downloaded: false,
         download_requested: false,
         format_category: file_type_of(Some(book.format() as i64)),
-        audiobook_duration_ms: None,
+        audiobook_duration_ms: book.audiobook_duration_ms,
         added_at: 0,
         source_directory: None,
     }
@@ -366,6 +367,7 @@ fn book_detail(book: &CatalogBook) -> BookDetail {
         credits: Vec::new(),
         current_entry: None,
         current_target: None,
+        chapter_read_status: Default::default(),
         toc: book.toc.clone(),
     }
 }
@@ -429,8 +431,11 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(include_str!("../catalog/schema.sql")).unwrap();
         for (index, book) in books.iter().enumerate() {
-            db.execute("INSERT INTO catalog_browse_book VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)", params![index as i64, &book.key.0[..], book.hash.is_none(), book.format() as i32, book.search_title, book.search_author, book.source_priority()])
-                .unwrap();
+            db.execute(
+                "INSERT INTO catalog_browse_book(row_id,key,external,format,search_title,search_author,source_priority,popularity_score) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)",
+                params![index as i64, &book.key.0[..], book.hash.is_none(), book.format() as i32, book.search_title, book.search_author, book.source_priority()],
+            )
+            .unwrap();
             for language in &book.languages {
                 db.execute("INSERT INTO catalog_browse_language VALUES(?1,?2)", params![index as i64, language]).unwrap();
             }
@@ -485,6 +490,7 @@ mod tests {
             external_url: None,
             download_url: None,
             file_format: BookFormat::Epub,
+            audiobook_duration_ms: None,
             sources: Vec::new(),
             title: record.title.clone(),
             subtitle: None,
@@ -505,7 +511,8 @@ mod tests {
 
     #[test]
     fn composite_catalog_authors_use_individual_credits_and_exclude_non_authors() {
-        let mut books = vec![authored_book(1, vec![credit(1, "Alex Smith, Jamie Jones, Terry White", b"aut"), credit(2, "Alex Smith", b"aut"), credit(3, "Jamie Jones", b"aut"), credit(4, "Terry White", b"edt"), credit(5, "Untyped Credit", b"ctb")])];
+        let mut books =
+            vec![authored_book(1, vec![credit(1, "Alex Smith, Jamie Jones, Terry White", b"aut"), credit(2, "Alex Smith", b"aut"), credit(3, "Jamie Jones", b"aut"), credit(4, "Terry White", b"edt"), credit(5, "Untyped Credit", b"ctb")])];
         crate::catalog::normalize_author_lists(&mut books);
         assert_eq!(books[0].record.authors().map(|author| author.name()).collect::<Vec<_>>(), ["Alex Smith", "Jamie Jones"]);
         assert_eq!(books[0].author, "Alex Smith, Jamie Jones");
@@ -862,6 +869,7 @@ mod tests {
             external_url: None,
             download_url: None,
             file_format: BookFormat::Epub,
+            audiobook_duration_ms: None,
             sources: Vec::new(),
             title: "Public book".into(),
             subtitle: None,

@@ -11,12 +11,13 @@ pub use book_access::remote_file::BrowserReader as Reader;
 pub use client_platform_web::transport::range::connect;
 
 use crate::library::commands::{LibraryCommand, LibraryReply};
-use crate::{BookSource, ResolvedBookData};
+use crate::{BackendError, BookSource, ResolvedBookData};
+use client_runtime::Failure;
 
 /// Library-scoped command transport supplied by the application host.
 pub trait BookTransport: Clone + 'static {
-    fn request<T: LibraryReply>(&self, command: LibraryCommand) -> impl Future<Output = Result<T, String>>;
-    fn subscribe_book(&self, content_hash: ContentHash) -> impl Future<Output = Result<(async_channel::Receiver<()>, ResolvedBookData), String>>;
+    fn request<T: LibraryReply>(&self, command: LibraryCommand) -> impl Future<Output = Result<T, BackendError>>;
+    fn subscribe_book(&self, content_hash: ContentHash) -> impl Future<Output = Result<(async_channel::Receiver<()>, ResolvedBookData), BackendError>>;
 }
 
 fn audiobook<T: BookTransport>(source: crate::library::PlaybackSource, lease: Option<async_channel::Receiver<()>>, library: T, content_hash: ContentHash) -> ResolvedBook {
@@ -25,8 +26,9 @@ fn audiobook<T: BookTransport>(source: crate::library::PlaybackSource, lease: Op
             let library = library.clone();
             async move {
                 let direct: crate::library::DirectPlayback =
-                    library.request(LibraryCommand::Pending(PendingCommand::RenewRemoteAudio { content_hash })).await.map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-                js_sys::JSON::parse(&serde_json::to_string(&direct).unwrap())
+                    library.request(LibraryCommand::Pending(PendingCommand::RenewRemoteAudio { content_hash })).await.map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+                let json = serde_json::to_string(&direct).map_err(|error| wasm_bindgen::JsValue::from_str(&format!("Invalid direct playback configuration: {error}")))?;
+                js_sys::JSON::parse(&json)
             }
         })
     });
@@ -38,11 +40,11 @@ fn audiobook<T: BookTransport>(source: crate::library::PlaybackSource, lease: Op
     ResolvedBook::Audiobook(crate::library::browser_audiobook::BrowserAudiobook::new(source.metadata, url, local_tracks, direct, lease, renew))
 }
 
-pub async fn resolve_book<T: BookTransport>(library: &T, content_hash: ContentHash) -> Result<ResolvedBook, String> {
+pub async fn resolve_book<T: BookTransport>(library: &T, content_hash: ContentHash) -> Result<ResolvedBook, BackendError> {
     if let Some(source) = library.request(LibraryCommand::Pending(PendingCommand::OpenRemoteAudio { content_hash })).await? {
         return Ok(audiobook(source, None, library.clone(), content_hash));
     }
-    let (lease, resolved) = crate::executor::timeout(std::time::Duration::from_secs(65), library.subscribe_book(content_hash)).await.map_err(|_| "opening the book source timed out".to_owned())??;
+    let (lease, resolved) = crate::executor::timeout(std::time::Duration::from_secs(65), library.subscribe_book(content_hash)).await.map_err(|_| BackendError::classified(Failure::TimedOut, "opening the book source timed out"))??;
     if matches!(resolved.format, book_model::BookFormat::Epub | book_model::BookFormat::Mobi) {
         let source = match resolved.source {
             BookSource::Local { capability, length } => {
@@ -53,11 +55,10 @@ pub async fn resolve_book<T: BookTransport>(library: &T, content_hash: ContentHa
                     let lease = lease.clone();
                     Box::pin(async move {
                         let _lease = lease;
-                        let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Ready(ReadyCommand::ReadBookRange { capability, offset, length })).await?;
+                        let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Ready(ReadyCommand::ReadBookRange { capability, offset, length })).await.map_err(|error| error.to_string())?;
                         Ok(bytes.into_vec())
                     })
-                })
-                .map_err(|error| error.to_string())?
+                })?
             }
             BookSource::Remote { source, prefix } => {
                 let library = library.clone();
@@ -67,11 +68,10 @@ pub async fn resolve_book<T: BookTransport>(library: &T, content_hash: ContentHa
                     let lease = lease.clone();
                     Box::pin(async move {
                         let _lease = lease;
-                        let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Pending(PendingCommand::ReadFileRange { source, offset, length })).await?;
+                        let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Pending(PendingCommand::ReadFileRange { source, offset, length })).await.map_err(|error| error.to_string())?;
                         Ok(bytes.into_vec())
                     })
-                })
-                .map_err(|error| error.to_string())?
+                })?
             }
             _ => return Err("browser received an invalid EPUB source".into()),
         };
@@ -88,11 +88,10 @@ pub async fn resolve_book<T: BookTransport>(library: &T, content_hash: ContentHa
                 let lease = lease.clone();
                 Box::pin(async move {
                     let _lease = lease;
-                    let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Ready(ReadyCommand::ReadBookRange { capability, offset, length })).await?;
+                    let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Ready(ReadyCommand::ReadBookRange { capability, offset, length })).await.map_err(|error| error.to_string())?;
                     Ok(bytes.into_vec())
                 })
-            })
-            .map_err(|error| error.to_string())?
+            })?
         }
         BookSource::Remote { source, prefix } => {
             let library = library.clone();
@@ -101,11 +100,10 @@ pub async fn resolve_book<T: BookTransport>(library: &T, content_hash: ContentHa
                     let library = library.clone();
                     let source = source.clone();
                     Box::pin(async move {
-                        let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Pending(PendingCommand::ReadFileBundle { source, ranges })).await?;
+                        let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Pending(PendingCommand::ReadFileBundle { source, ranges })).await.map_err(|error| error.to_string())?;
                         Ok(bytes.into_vec())
                     })
-                })
-                .map_err(|error| error.to_string())?;
+                })?;
                 let (reader, hook) = book_access::pdf_bundle::open(index, prefix, fetch).map_err(|error| error.to_string())?;
                 pdf_page_source = Some(hook);
                 reader
@@ -114,11 +112,10 @@ pub async fn resolve_book<T: BookTransport>(library: &T, content_hash: ContentHa
                     let library = library.clone();
                     let source = source.clone();
                     Box::pin(async move {
-                        let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Pending(PendingCommand::ReadFileRange { source, offset, length })).await?;
+                        let bytes: serde_bytes::ByteBuf = library.request(LibraryCommand::Pending(PendingCommand::ReadFileRange { source, offset, length })).await.map_err(|error| error.to_string())?;
                         Ok(bytes.into_vec())
                     })
-                })
-                .map_err(|error| error.to_string())?
+                })?
             }
         }
         BookSource::Inline(_) => return Err("browser received bytes instead of a book source".into()),

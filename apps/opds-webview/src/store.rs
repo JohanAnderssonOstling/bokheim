@@ -1,7 +1,5 @@
 //! A native GPUI browser window with an embedded Wry webpage. Downloads
 //! are reported to the app, which imports supported books into the library.
-#[cfg(target_os = "macos")]
-mod macos_downloads;
 #[cfg(target_os = "linux")]
 mod native_downloads;
 #[cfg(target_os = "linux")]
@@ -13,12 +11,9 @@ mod native_host;
 #[cfg(target_os = "linux")]
 mod native_navigation;
 mod passwords;
-#[cfg(target_os = "windows")]
-mod windows_downloads;
 use crate::address::{AddressHistory, normalize};
 use anyhow::{Result, bail};
 use app_preferences::ResolvedAppearance;
-use client_platform_runtime::transfers;
 use gpui::prelude::*;
 use gpui::{App, AppContext, Bounds, Context, Entity, Focusable, KeyDownEvent, MouseButton, Subscription, Window, WindowBounds, WindowOptions, canvas, deferred, div, px, rems, size};
 use gpui_component::input::{InputEvent, InputState};
@@ -35,11 +30,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
-    Arc, LazyLock, Mutex,
+    Arc, LazyLock, Mutex, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-use ui_components::{BrowserDownloadPhase, BrowserDownloads};
+use ui_components::{BrowserDownloadPhase, BrowserDownloads, Failure};
 use ui_components::{SPACE_SM, SelectedPalette, TEXT_SM, apply_appearance, browser_address_control, browser_theme, error_text, outlined_icon_button, register_fonts, topbar_action_height_rem, user_facing_error};
 use url::Url;
 #[cfg(target_os = "linux")]
@@ -65,9 +60,6 @@ enum Action {
     PasswordMessage(passwords::Message),
     PageLoaded(String),
     PageVisited(PageMetadata),
-    #[cfg(target_os = "macos")]
-    DownloadEnded(String),
-    DownloadDeferred(String),
     Feedback(BrowserFeedback),
     Open(String),
     Refused(PathBuf),
@@ -87,9 +79,6 @@ pub(crate) fn run() -> Result<()> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let request: StoreRequest = serde_json::from_str(&line)?;
-    if let Some(path) = &request.transfer_policy_file {
-        transfers::configure_reader(path.clone());
-    }
     let start = Url::parse(&request.url)?;
     if !matches!(start.scheme(), "http" | "https") && start.as_str() != "about:blank" {
         bail!("a browser needs an HTTP address");
@@ -99,7 +88,7 @@ pub(crate) fn run() -> Result<()> {
     gtk::init()?;
     let web_context = crate::profile::context(&request.data_directory)?;
     let app_closed = Arc::new(AtomicBool::new(false));
-    std::thread::spawn({
+    std::thread::Builder::new().name("browser-feedback".into()).spawn({
         let app_closed = app_closed.clone();
         move || {
             loop {
@@ -108,12 +97,12 @@ pub(crate) fn run() -> Result<()> {
                     break;
                 }
                 if let Ok(feedback) = serde_json::from_str::<BrowserFeedback>(&line) {
-                    FEEDBACK.lock().unwrap().retain(|sender| sender.send(Action::Feedback(feedback.clone())).is_ok());
+                    FEEDBACK.lock().unwrap_or_else(PoisonError::into_inner).retain(|sender| sender.send(Action::Feedback(feedback.clone())).is_ok());
                 }
             }
             app_closed.store(true, Ordering::Relaxed);
         }
-    });
+    })?;
     gpui_platform::application().with_assets(ui_components::Assets).with_http_client(Arc::new(ReqwestClient::new())).run(move |cx: &mut App| {
         gpui_component::init(cx);
         if let Err(error) = register_fonts(cx) {
@@ -144,10 +133,12 @@ pub(crate) fn run() -> Result<()> {
 fn open_browser_window(request: StoreRequest, web_context: WebContext, app_closed: Arc<AtomicBool>, cx: &mut App) -> Result<()> {
     let bounds = Bounds::centered(None, size(px(1100.0), px(800.0)), cx);
     let (sender, receiver) = mpsc::channel();
-    FEEDBACK.lock().unwrap().push(sender.clone());
+    let profile_directory = web_context.data_directory().ok_or_else(|| anyhow::anyhow!("browser profile has no persistent storage directory"))?;
+    let passwords = passwords::Autofill::new(crate::passwords::profile_directory(profile_directory), sender.clone());
+    FEEDBACK.lock().unwrap_or_else(PoisonError::into_inner).push(sender.clone());
     cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, move |window, cx| {
         window.set_window_title(&request.title);
-        let browser = cx.new(|cx| Browser::new(request, web_context, app_closed, sender, receiver, window, cx));
+        let browser = cx.new(|cx| Browser::new(request, web_context, passwords, app_closed, sender, receiver, window, cx));
         let closing = browser.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             // Release the native surface before its GPUI parent disappears.
@@ -185,11 +176,6 @@ struct Browser {
     native_host: Option<Rc<native_host::NativeHost>>,
     _web_context: WebContext,
     downloads: BrowserDownloads,
-    deferred_downloads: VecDeque<String>,
-    #[cfg(target_os = "windows")]
-    download_gate: Option<windows_downloads::Gate>,
-    #[cfg(target_os = "macos")]
-    download_gate: Option<macos_downloads::Gate>,
     receiver: Receiver<Action>,
     sender: Sender<Action>,
     _subscription: Subscription,
@@ -211,8 +197,7 @@ impl Browser {
         }
     }
 
-    fn new(request: StoreRequest, mut web_context: WebContext, app_closed: Arc<AtomicBool>, sender: Sender<Action>, receiver: Receiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let passwords = passwords::Autofill::new(crate::passwords::profile_directory(web_context.data_directory().expect("persistent browser profile")), sender.clone());
+    fn new(request: StoreRequest, mut web_context: WebContext, passwords: passwords::Autofill, app_closed: Arc<AtomicBool>, sender: Sender<Action>, receiver: Receiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let window_request = request.clone();
         let history_file = request.history_file.unwrap_or_else(|| request.data_directory.join("address-history.json"));
         let history = AddressHistory::load(history_file);
@@ -301,7 +286,7 @@ impl Browser {
             #[cfg(target_os = "linux")]
             native_downloads::observe(&page, sender.clone());
             if request.url == "about:blank" {
-                let html = ui_components::browser_start_page(history.most_visited().iter().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), browser_theme(cx));
+                let html = ui_components::browser_start_page(history.start_page_shortcuts().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), browser_theme(cx));
                 page.load_html(&html)?;
             } else {
                 page.load_url(&request.url)?;
@@ -318,10 +303,6 @@ impl Browser {
                 (None, Some(user_facing_error(&error.to_string(), "Could not open the webpage. Try reopening the browser.").to_owned()))
             }
         };
-        #[cfg(target_os = "windows")]
-        let download_gate = webview.as_ref().and_then(|page| windows_downloads::Gate::attach(page, sender.clone()).map_err(|error| eprintln!("Could not monitor browser transfers: {error}")).ok());
-        #[cfg(target_os = "macos")]
-        let download_gate = webview.as_ref().and_then(|page| macos_downloads::Gate::attach(page, sender.clone()));
         #[cfg(target_os = "linux")]
         let native_focus = webview.as_ref().and_then(|page| native_focus::NativeFocus::attach(page, native_host.as_ref()?.parent()));
         #[cfg(target_os = "linux")]
@@ -398,13 +379,10 @@ impl Browser {
             webview,
             _web_context: web_context,
             downloads: BrowserDownloads::default(),
-            deferred_downloads: VecDeque::new(),
             receiver,
             sender,
             _subscription: subscription,
             page_layout: None,
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
-            download_gate,
             #[cfg(target_os = "linux")]
             native_focus,
             #[cfg(target_os = "linux")]
@@ -521,24 +499,6 @@ impl Browser {
                         eprintln!("Could not save browser page visit: {error}");
                     }
                 }
-                #[cfg(target_os = "macos")]
-                Action::DownloadEnded(url) => {
-                    if let Some(gate) = &mut self.download_gate {
-                        gate.complete(&url);
-                    }
-                }
-                Action::DownloadDeferred(url) => {
-                    if !self.deferred_downloads.contains(&url) {
-                        self.deferred_downloads.push_back(url);
-                    }
-                    if self.downloads.is_empty() {
-                        self.downloads.apply(
-                            BrowserFeedback { replaces: None, download: "network-transfer".into(), name: "Downloads".into(), phase: BrowserDownloadPhase::Waiting, percent: None, message: Some("Waiting for an unmetered connection".into()) },
-                            window,
-                            cx,
-                        );
-                    }
-                }
                 Action::Feedback(feedback) => self.downloads.apply(feedback, window, cx),
                 Action::Open(url) => {
                     let mut request = self.request.clone();
@@ -554,9 +514,9 @@ impl Browser {
                             replaces: None,
                             download: path.to_string_lossy().into_owned(),
                             name: download_name(&path),
-                            phase: BrowserDownloadPhase::Failed,
+                            phase: BrowserDownloadPhase::Failed(Some(Failure::DrmProtected)),
                             percent: None,
-                            message: Some("This file is not supported. Bokheim cannot read DRM-protected downloads.".into()),
+                            message: None,
                         },
                         window,
                         cx,
@@ -571,32 +531,11 @@ impl Browser {
                 }
                 Action::DownloadFinished { path, succeeded } => {
                     let id = path.to_string_lossy().into_owned();
-                    if !succeeded && !transfers::allowed() {
-                        self.downloads.waiting(&id, window, cx);
-                    } else {
-                        self.downloads.apply(
-                            BrowserFeedback { replaces: None, download: id, name: download_name(&path), phase: if succeeded { BrowserDownloadPhase::Completed } else { BrowserDownloadPhase::Failed }, percent: None, message: None },
-                            window,
-                            cx,
-                        );
-                    }
-                }
-            }
-        }
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        if let Some(gate) = &mut self.download_gate {
-            gate.tick(!self.downloads.is_empty());
-        }
-        if transfers::allowed() {
-            self.downloads.apply(BrowserFeedback { replaces: None, download: "network-transfer".into(), name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }, window, cx);
-            if let Some(url) = self.deferred_downloads.pop_front() {
-                if let Some(page) = &self.webview {
-                    #[cfg(target_os = "linux")]
-                    page.webview().download_uri(&url);
-                    #[cfg(not(target_os = "linux"))]
-                    if let Err(error) = page.load_url(&url) {
-                        eprintln!("Could not resume a browser download: {error}");
-                    }
+                    self.downloads.apply(
+                        BrowserFeedback { replaces: None, download: id, name: download_name(&path), phase: if succeeded { BrowserDownloadPhase::Completed } else { BrowserDownloadPhase::Failed(None) }, percent: None, message: None },
+                        window,
+                        cx,
+                    );
                 }
             }
         }
@@ -1023,20 +962,18 @@ fn with_downloads<'a>(builder: WebViewBuilder<'a>, downloads: PathBuf, sender: S
         let saving = saving.clone();
         let sender = sender.clone();
         move |url: String, path: &mut PathBuf| {
-            if !transfers::allowed() {
-                let _ = sender.send(Action::DownloadDeferred(url));
-                return false;
-            }
             let name = path.file_name().map_or_else(|| PathBuf::from("download"), PathBuf::from);
-            *path = unused_path_unless(&downloads, &name, |candidate| saving.borrow().values().any(|paths| paths.iter().any(|path| path == candidate)));
+            let Some(destination) = unused_path_unless(&downloads, &name, |candidate| saving.borrow().values().any(|paths| paths.iter().any(|path| path == candidate))) else {
+                eprintln!("Could not find an unused download filename");
+                return false;
+            };
+            *path = destination;
             saving.borrow_mut().entry(url).or_default().push_back(path.clone());
             let _ = sender.send(Action::DownloadStarted(path.clone()));
             true
         }
     };
     let completed = move |url: String, path: Option<PathBuf>, succeeded: bool| {
-        #[cfg(target_os = "macos")]
-        let _ = sender.send(Action::DownloadEnded(url.clone()));
         let mut saving = saving.borrow_mut();
         let pending = saving.get_mut(&url);
         let path = match (pending, path) {
@@ -1102,7 +1039,7 @@ fn book(path: &Path) -> Option<PathBuf> {
     let extension = path.extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase);
     match sniffed {
         Some(sniffed) if extension.as_deref() != Some(sniffed) => {
-            let named = unused_path(path.parent()?, &path.with_extension(sniffed));
+            let named = unused_path(path.parent()?, &path.with_extension(sniffed))?;
             std::fs::rename(path, &named).ok()?;
             Some(named)
         }
@@ -1112,17 +1049,14 @@ fn book(path: &Path) -> Option<PathBuf> {
 }
 
 /// `name` in `directory`, numbered where that name is taken.
-fn unused_path(directory: &Path, name: &Path) -> PathBuf {
+fn unused_path(directory: &Path, name: &Path) -> Option<PathBuf> {
     unused_path_unless(directory, name, |_| false)
 }
 
-fn unused_path_unless(directory: &Path, name: &Path, occupied: impl Fn(&Path) -> bool) -> PathBuf {
+fn unused_path_unless(directory: &Path, name: &Path, occupied: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let stem = name.file_stem().unwrap_or_default().to_string_lossy();
     let extension = name.extension().map(|extension| format!(".{}", extension.to_string_lossy())).unwrap_or_default();
-    (1..)
-        .map(|number| if number == 1 { directory.join(format!("{stem}{extension}")) } else { directory.join(format!("{stem} ({number}){extension}")) })
-        .find(|path| !path.exists() && !occupied(path))
-        .expect("numeric name suffix space is unbounded")
+    (1..=u64::MAX).map(|number| if number == 1 { directory.join(format!("{stem}{extension}")) } else { directory.join(format!("{stem} ({number}){extension}")) }).find(|path| !path.exists() && !occupied(path))
 }
 
 fn report(event: StoreEvent) {

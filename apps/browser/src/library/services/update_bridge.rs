@@ -86,6 +86,14 @@ impl LibraryUpdateBridge {
                 while let Ok(update) = updates.try_recv() {
                     batch.absorb(update);
                 }
+                // The session owns this subscription, so an alert still arrives
+                // after its initiating card or detail page has been closed.
+                for (_, failure) in &batch.download_failures {
+                    let message = crate::services::book_transfer_error_message(*failure);
+                    if let Err(error) = bridge.update_in(cx, |_, window, cx| crate::services::notify_error("book-download-error", message, window, cx)) {
+                        log::warn!("could not show download failure: {error}");
+                    }
+                }
                 cx.defer_update(bridge.clone(), move |bridge, cx| bridge.apply(batch, cx));
             }
         });
@@ -188,7 +196,7 @@ impl LibraryUpdateBridge {
     }
 
     fn apply(&mut self, batch: UpdateBatch, cx: &mut Context<Self>) {
-        let UpdateBatch { contents, covers, downloads, scanning } = batch;
+        let UpdateBatch { contents, covers, downloads, scanning, .. } = batch;
         if let Some(scanning) = scanning {
             self.scanning = Some(scanning);
             if !scanning {
@@ -221,6 +229,7 @@ struct UpdateBatch {
     /// Kept per book: each status names a different book, or supersedes an
     /// earlier status for the same one.
     downloads: Vec<BookDownloadStatus>,
+    download_failures: Vec<(ContentHash, Option<ui_components::Failure>)>,
     scanning: Option<bool>,
 }
 
@@ -232,6 +241,10 @@ impl UpdateBatch {
             LibraryUpdate::Download(status) => {
                 self.downloads.retain(|existing| existing.content_hash != status.content_hash);
                 self.downloads.push(status);
+            }
+            LibraryUpdate::DownloadFailed { content_hash, failure } => {
+                self.download_failures.retain(|(hash, _)| *hash != content_hash);
+                self.download_failures.push((content_hash, failure));
             }
             LibraryUpdate::Scanning(scanning) => self.scanning = Some(scanning),
             // Catalog imports own their progress subscriptions and toasts.
@@ -247,6 +260,19 @@ mod tests {
     use gpui::TestAppContext;
     use library_model::DownloadProgress;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn download_alerts_survive_progress_coalescing_and_keep_each_books_failure() {
+        let first = ContentHash::from_bytes([1; 32]);
+        let second = ContentHash::from_bytes([2; 32]);
+        let mut batch = UpdateBatch::default();
+        use ui_components::Failure;
+        batch.absorb(LibraryUpdate::DownloadFailed { content_hash: first, failure: Some(Failure::StorageFull) });
+        batch.absorb(LibraryUpdate::Download(BookDownloadStatus::new(first, DownloadState::NotDownloaded)));
+        batch.absorb(LibraryUpdate::DownloadFailed { content_hash: second, failure: Some(Failure::PermissionDenied) });
+        assert_eq!(batch.download_failures, vec![(first, Some(Failure::StorageFull)), (second, Some(Failure::PermissionDenied))]);
+        assert_eq!(batch.downloads, vec![BookDownloadStatus::new(first, DownloadState::NotDownloaded)]);
+    }
 
     #[gpui::test]
     async fn download_progress_emits_precise_events_without_notifying_session_observers(cx: &mut TestAppContext) {

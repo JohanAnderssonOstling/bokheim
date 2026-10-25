@@ -4,6 +4,8 @@
 //! [`navigation::Libraries`] owns library lifecycle and per-library
 //! pages, and global pages remain stable across library selection.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 mod library;
 mod model;
 mod navigation;
@@ -19,6 +21,15 @@ use gpui::{App, KeyBinding, actions};
 pub use gpui_component::menu::OpenContextMenu;
 use library::CursorMove;
 use library_backend::{DirectoryImport, DirectoryImportFile, ImportSource};
+
+/// Set by the Android host before opening any settings or libraries.
+#[cfg(target_os = "android")]
+pub struct AndroidStoragePolicy {
+    pub all_files_access_available: bool,
+}
+
+#[cfg(target_os = "android")]
+impl gpui::Global for AndroidStoragePolicy {}
 
 pub(crate) fn split_panes_available(window: &gpui::Window) -> bool {
     native_windows_available() && !ui_components::WindowWidthClass::for_window(window).is_compact()
@@ -77,7 +88,9 @@ pub use navigation::{GlobalRoute, LibraryRoute, Route};
 pub use root::{BrowserRoot, NowPlaying, NowPlayingBook, OpenBookRequested};
 #[cfg(feature = "kobo")]
 pub use services::SaveKoboAutoRotate;
-pub use services::{AppServices, AppStartup, UpdateAction, UpdateActionHandler, UpdateControls, UpdateView};
+#[cfg(not(target_arch = "wasm32"))]
+pub use services::bind_update_worker;
+pub use services::{AppServices, AppStartup, PublishUpdate, UpdateAction, UpdateActionHandler, UpdateControls, UpdateEvent, UpdateView};
 pub use services::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService, library_is_being_removed};
 pub use session::{BrowsePageSession, NavigationSession, ReaderSession, SaveNavigationSession, WindowSession};
 #[cfg(target_arch = "wasm32")]
@@ -89,6 +102,7 @@ pub use universal::sync::SyncEvent;
 pub(crate) struct OpenLibraryView(pub(crate) LibraryRoute);
 
 pub use universal::sync::SyncState;
+pub use universal::sync::AuthenticationRequest;
 
 /// Release retained library cover images before displaying a reader. Cached
 /// pages preserve navigation and reload their artwork when rendered again.
@@ -105,23 +119,21 @@ pub(crate) struct ToggleGridSelection(pub(crate) CursorMove);
 const GRID_SELECTION_KEY_CONTEXT: &str = "BrowseSelection && !BrowseItem && !Input && !PopupMenu && !Dialog";
 
 pub fn bind_keys(cx: &mut App) {
-    // Number shortcuts follow the order drawn by the navigation rail.
+    use ui_components::{ShortcutPage::Browse, bind_shortcut};
+    bind_shortcut(cx, Browse, "browse.dismiss", "Close settings", &["escape"], DismissSettings, "Browser");
+    bind_shortcut(cx, Browse, "browse.font_decrease", "Decrease interface font size", &["secondary--"], DecreaseUiFontSize, "Browser");
+    bind_shortcut(cx, Browse, "browse.font_increase", "Increase interface font size", &["secondary-="], IncreaseUiFontSize, "Browser");
+    bind_shortcut(cx, Browse, "browse.previous_destination", "Previous destination", &["secondary-up"], PreviousDestination, "Browser");
+    bind_shortcut(cx, Browse, "browse.next_destination", "Next destination", &["secondary-down"], NextDestination, "Browser");
+    // Selection contexts retain precedence over destination navigation.
+    bind_shortcut(cx, Browse, "browse.select_left", "Toggle selection to the left", &["secondary-left"], ToggleGridSelection(CursorMove::Left), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_right", "Toggle selection to the right", &["secondary-right"], ToggleGridSelection(CursorMove::Right), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_up", "Toggle selection above", &["secondary-up"], ToggleGridSelection(CursorMove::Up), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_down", "Toggle selection below", &["secondary-down"], ToggleGridSelection(CursorMove::Down), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.undo", "Undo library action", &["secondary-z"], UndoLibraryAction, "Browser");
     cx.bind_keys([
-        KeyBinding::new("escape", DismissSettings, Some("Browser")),
-        // Only platforms with an OS back button/gesture send this key.
         #[cfg(not(target_os = "android"))]
         KeyBinding::new("back", DismissSettings, Some("Browser")),
-        KeyBinding::new("secondary--", DecreaseUiFontSize, Some("Browser")),
-        KeyBinding::new("secondary-=", IncreaseUiFontSize, Some("Browser")),
-        KeyBinding::new("secondary-+", IncreaseUiFontSize, Some("Browser")),
-        // Selectable grids override these destination shortcuts below.
-        KeyBinding::new("secondary-up", PreviousDestination, Some("Browser")),
-        KeyBinding::new("secondary-down", NextDestination, Some("Browser")),
-        KeyBinding::new("secondary-left", ToggleGridSelection(CursorMove::Left), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("secondary-right", ToggleGridSelection(CursorMove::Right), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("secondary-up", ToggleGridSelection(CursorMove::Up), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("secondary-down", ToggleGridSelection(CursorMove::Down), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("secondary-z", UndoLibraryAction, Some("Browser")),
         // Settings is a form rather than a grid, so it is walked control by
         // control. The arrows do what Tab does, for the devices whose only
         // keyboard is a four-way pad; a text field keeps them for its cursor,

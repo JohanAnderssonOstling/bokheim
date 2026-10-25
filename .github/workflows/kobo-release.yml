@@ -95,12 +95,12 @@ jobs:
           # single host that is too often unreachable to sit in the release
           # path. The installers embed the committed package rather than
           # rebuilding or downloading it, so a checkout is all CI needs.
-          package=apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          package=apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz
           if [ ! -s "$package" ]; then
             echo "::error::$package is missing. Rebuild it with apps/desktop-gpui/scripts/package-kobo.sh and commit the result."
             exit 1
           fi
-          tar -tzf "$package" >/dev/null
+          python3 apps/desktop-gpui/scripts/verify-kobo-package.py "$package" --multi-device
           ls -l "$package"
 
       - name: Install Rust
@@ -129,7 +129,7 @@ jobs:
         working-directory: bokheim
         shell: pwsh
         run: |
-          $archive = (Resolve-Path "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz").Path
+          $archive = (Resolve-Path "apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz").Path
           $env:BOKHEIM_KOBO_ARCHIVE = $archive
           $env:BOKHEIM_VERSION = "${{ needs.version.outputs.version }}"
           $env:RUSTFLAGS = "-C target-feature=+crt-static"
@@ -142,7 +142,7 @@ jobs:
         shell: pwsh
         run: |
           $installer = "release/Bokheim-Kobo-Installer-Windows-x86_64.exe"
-          $archive = "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz"
+          $archive = "apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz"
           if (!(Test-Path $installer) -or (Get-Item $installer).Length -le (Get-Item $archive).Length) {
             throw "The installer is missing its embedded Kobo package"
           }
@@ -183,12 +183,12 @@ jobs:
           # single host that is too often unreachable to sit in the release
           # path. The installers embed the committed package rather than
           # rebuilding or downloading it, so a checkout is all CI needs.
-          package=apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          package=apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz
           if [ ! -s "$package" ]; then
             echo "::error::$package is missing. Rebuild it with apps/desktop-gpui/scripts/package-kobo.sh and commit the result."
             exit 1
           fi
-          tar -tzf "$package" >/dev/null
+          python3 apps/desktop-gpui/scripts/verify-kobo-package.py "$package" --multi-device
           ls -l "$package"
 
       - name: Install build and AppImage dependencies
@@ -210,6 +210,7 @@ jobs:
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
             pkg-config
+          sudo apt-get -o Acquire::Retries=3 install -y cpio zstd
 
       - name: Install Rust
         run: |
@@ -224,7 +225,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             bokheim/apps/kobo-installer/target
-          key: kobo-installer-linux-v3-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
+          key: kobo-installer-linux-glibc217-v1-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock', 'bokheim/scripts/linux/toolchain.json', 'bokheim/scripts/linux/toolchain.py', 'bokheim/scripts/linux/compiler.py') }}
 
       - name: Download pinned AppImage tools
         run: |
@@ -244,9 +245,9 @@ jobs:
       - name: Build Linux installer
         working-directory: bokheim
         env:
-          BOKHEIM_KOBO_ARCHIVE: ${{ github.workspace }}/bokheim/apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          BOKHEIM_KOBO_ARCHIVE: ${{ github.workspace }}/bokheim/apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz
           BOKHEIM_VERSION: ${{ needs.version.outputs.version }}
-        run: cargo build --release --manifest-path apps/kobo-installer/Cargo.toml
+        run: python3 scripts/linux/toolchain.py -- cargo build --release --manifest-path apps/kobo-installer/Cargo.toml
 
       - name: Build installer AppImage
         working-directory: bokheim
@@ -263,12 +264,24 @@ jobs:
           release/Bokheim-Kobo-Installer-Linux-x86_64.AppImage --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/bokheim-kobo-installer
           test -f squashfs-root/se.bokheim.KoboInstaller.desktop
+          bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh squashfs-root 2.17
+          bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh release/Bokheim-Kobo-Installer-Linux-x86_64.AppImage 2.17
           (cd release && sha256sum --check Bokheim-Kobo-Installer-Linux-x86_64.AppImage.sha256)
           ldd squashfs-root/usr/bin/bokheim-kobo-installer > "$RUNNER_TEMP/kobo-installer-ldd.txt"
           if grep -F 'not found' "$RUNNER_TEMP/kobo-installer-ldd.txt"; then
             cat "$RUNNER_TEMP/kobo-installer-ldd.txt"
             exit 1
           fi
+
+      - name: Package verified ARM updates
+        working-directory: bokheim
+        run: |
+          cp apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz release/
+          # Existing Libra 2 updaters still request the historical asset name.
+          cp release/Bokheim-Kobo-armv7.tar.gz release/Bokheim-Kobo-Libra2-armv7.tar.gz
+          (cd release && sha256sum Bokheim-Kobo-armv7.tar.gz > Bokheim-Kobo-armv7.tar.gz.sha256)
+          (cd release && sha256sum Bokheim-Kobo-Libra2-armv7.tar.gz > Bokheim-Kobo-Libra2-armv7.tar.gz.sha256)
+          printf '%s\n' "$GITHUB_SHA" > release/kobo-source-commit.txt
 
       - name: Retain Linux installer artifact
         uses: actions/upload-artifact@v7
@@ -316,5 +329,7 @@ jobs:
           # Refuse to overwrite assets after a release has become public.
           test "$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft --jq .isDraft)" = true
           printf '%s\n' "$(git rev-parse HEAD)" > release/kobo-source-commit.txt
+          cp apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz release/
+          (cd release && sha256sum Bokheim-Kobo-armv7.tar.gz > Bokheim-Kobo-armv7.tar.gz.sha256)
           gh release upload "$RELEASE_TAG" release/* \
             --repo "$GH_REPO" --clobber

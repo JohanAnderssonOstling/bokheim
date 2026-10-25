@@ -56,8 +56,7 @@ impl PdfPageTextLayout {
                 let gap = line.bounds.top() - bounds.bottom();
                 line.bounds.top() > bounds.top() && gap >= -median_height * 0.3 && gap <= median_height * 0.8 && (line.bounds.left() - bounds.left()).abs() <= median_height * 2.0
             });
-            if continuation {
-                let fragment = result.last_mut().expect("previous reading line");
+            if let Some(fragment) = result.last_mut().filter(|_| continuation) {
                 fragment.text.push(' ');
                 fragment.text.push_str(&line.text);
                 fragment.rects.push(line.bounds);

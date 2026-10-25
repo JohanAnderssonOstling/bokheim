@@ -14,12 +14,11 @@ impl ReaderView {
         let book = self.book.clone();
         let content_hash = self.locator.content_hash();
         cx.spawn(async move |this, cx| {
-            let entries = match library.book_detail(content_hash).await {
-                Ok(detail) if !detail.toc.is_empty() => to_epub_entries(&detail.toc),
-                Ok(_) => to_content_entries(book.toc()),
+            let (entries, read_status) = match library.book_detail(content_hash).await {
+                Ok(detail) => (if detail.toc.is_empty() { to_content_entries(book.toc()) } else { to_epub_entries(&detail.toc) }, detail.chapter_read_status),
                 Err(error) => {
                     log::warn!("could not load EPUB table of contents from library database: {error}");
-                    to_content_entries(book.toc())
+                    (to_content_entries(book.toc()), Default::default())
                 }
             };
             let (entries, resolutions, positions) = cx
@@ -36,6 +35,7 @@ impl ReaderView {
                     LoadState::Loading | LoadState::Error(_) => return,
                 };
                 let anchors = crate::epub::toc::TocState::anchor_strings_by_doc(&resolutions, this.book.document_uris().len());
+                this.toc.read_status = read_status;
                 this.set_toc(entries, resolutions, positions, cx);
                 renderer.update(cx, |renderer, cx| renderer.set_toc_anchor_strings_by_doc(anchors, cx));
             });
@@ -48,6 +48,7 @@ impl ReaderView {
         self.toc_tree.update(cx, |tree, cx| tree.set_items(tree_items, cx));
         self.toc.set(entries, resolutions);
         self.toc.install_source_positions(positions, self.book.document_uris().len());
+        self.toc.update_read_status(self.progress.fraction >= 1.0);
         self.search.rebuild_rows(&self.toc);
         self.sync_toc_position(cx);
         self.record_current_reading_position(cx);

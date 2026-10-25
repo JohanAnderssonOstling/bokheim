@@ -7,15 +7,9 @@ use wry::{WebContext, WebView};
 // Also accept requests from desktop executables that still send a per-origin
 // path, so replacing just the helper does not create a separate session.
 fn directory(requested: &Path) -> PathBuf {
-    if requested.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-        name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
-    }) {
+    if requested.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())) {
         if let Some(parent) = requested.parent() {
-            let root = if parent.file_name().is_some_and(|name| name == "stores") {
-                parent.parent().unwrap_or(parent)
-            } else {
-                parent
-            };
+            let root = if parent.file_name().is_some_and(|name| name == "stores") { parent.parent().unwrap_or(parent) } else { parent };
             return shared_profile(root);
         }
     }
@@ -30,7 +24,7 @@ pub(crate) fn context(requested: &Path) -> Result<WebContext> {
 
 pub(crate) fn prepare(page: &WebView, context: &WebContext) -> Result<()> {
     #[cfg(target_os = "linux")]
-    linux::prepare(page, context.data_directory().expect("persistent browser profile"))?;
+    linux::prepare(page, context.data_directory().ok_or_else(|| anyhow::anyhow!("browser profile has no persistent storage directory"))?)?;
     #[cfg(not(target_os = "linux"))]
     let _ = (page, context);
     Ok(())
@@ -41,8 +35,8 @@ mod linux {
     use super::*;
     use anyhow::{Context, anyhow};
     use gtk::glib::MainContext;
-    use soup::{Cookie, CookieJarText};
     use soup::prelude::CookieJarExt;
+    use soup::{Cookie, CookieJarText};
     use std::collections::HashMap;
     use std::fs::{self, File};
     use webkit2gtk::{CookieManagerExt, CookiePersistentStorage, WebContextExt, WebViewExt};
@@ -52,17 +46,14 @@ mod linux {
         // Serialize the one-time import, rather than locking the profile for
         // the lifetime of a window. SQLite writes individual cookie changes;
         // parallel helpers cannot overwrite a whole text jar with stale data.
-        let lock = File::options().read(true).write(true).create(true).truncate(false)
-            .open(directory.join("cookie-import.lock"))?;
+        let lock = File::options().read(true).write(true).create(true).truncate(false).open(directory.join("cookie-import.lock"))?;
         lock.lock()?;
-        let manager = page.webview().context().and_then(|context| context.cookie_manager())
-            .ok_or_else(|| anyhow!("browser cookie storage is unavailable"))?;
+        let manager = page.webview().context().and_then(|context| context.cookie_manager()).ok_or_else(|| anyhow!("browser cookie storage is unavailable"))?;
         manager.set_persistent_storage(&directory.join("cookies.sqlite").to_string_lossy(), CookiePersistentStorage::Sqlite);
         let marker = directory.join("cookies-imported");
         if !marker.exists() {
             for mut cookie in legacy_cookies(directory)? {
-                MainContext::default().block_on(manager.add_cookie_future(&mut cookie))
-                    .context("could not preserve a saved browser cookie")?;
+                MainContext::default().block_on(manager.add_cookie_future(&mut cookie)).context("could not preserve a saved browser cookie")?;
             }
             fs::write(marker, b"")?;
         }
@@ -73,7 +64,9 @@ mod linux {
         let mut sources = Vec::new();
         if let Some(root) = directory.parent().and_then(Path::parent).filter(|root| shared_profile(root) == directory) {
             for parent in [root.to_owned(), root.join("stores")] {
-                if !parent.is_dir() { continue; }
+                if !parent.is_dir() {
+                    continue;
+                }
                 for entry in fs::read_dir(parent)? {
                     let entry = entry?;
                     let path = entry.path();
@@ -86,7 +79,9 @@ mod linux {
         // Newer legacy profiles win conflicts; the existing globe profile has
         // final priority so its most recent completed verification is retained.
         sources.sort_by_key(|path| fs::metadata(path).and_then(|metadata| metadata.modified()).ok());
-        if directory.join("cookies").is_file() { sources.push(directory.join("cookies")); }
+        if directory.join("cookies").is_file() {
+            sources.push(directory.join("cookies"));
+        }
         let mut cookies = HashMap::new();
         for source in sources {
             // Surface an unreadable file rather than marking a partial import
@@ -112,7 +107,8 @@ mod linux {
             let old = root.path().join("stores").join("a".repeat(64));
             fs::create_dir_all(&directory).unwrap();
             fs::create_dir_all(&old).unwrap();
-            fs::write(old.join("cookies"), "#HttpOnly_.example.com\tTRUE\t/\tTRUE\t1893456000\tverified\tolder\tStrict\n.example.org\tTRUE\t/\tFALSE\t1893456000\tsignin\tkept\tLax\n.example.org\tTRUE\t/\tFALSE\t1\texpired\tdeleted\tLax\n").unwrap();
+            fs::write(old.join("cookies"), "#HttpOnly_.example.com\tTRUE\t/\tTRUE\t1893456000\tverified\tolder\tStrict\n.example.org\tTRUE\t/\tFALSE\t1893456000\tsignin\tkept\tLax\n.example.org\tTRUE\t/\tFALSE\t1\texpired\tdeleted\tLax\n")
+                .unwrap();
             fs::write(directory.join("cookies"), "#HttpOnly_.example.com\tTRUE\t/\tTRUE\t1893456000\tverified\tcurrent\tStrict\n").unwrap();
             let mut cookies = legacy_cookies(&directory).unwrap();
             assert_eq!(cookies.len(), 2);

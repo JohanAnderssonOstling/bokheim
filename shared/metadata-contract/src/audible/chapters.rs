@@ -310,15 +310,17 @@ fn duration_pattern(local: &[AudiobookChapter], remote: &[AudiobookChapter], boo
     if local.windows(2).any(|w| w[0].end_ms.abs_diff(w[1].start_ms) > 100) || remote.windows(2).any(|w| w[0].end_ms.abs_diff(w[1].start_ms) > 100) {
         return None;
     }
-    let prefix = |cs: &[AudiobookChapter]| {
+    let prefix = |cs: &[AudiobookChapter]| -> Option<Vec<u64>> {
         let mut p = vec![0u64];
+        let mut total = 0u64;
         for c in cs {
-            p.push(p.last().unwrap() + c.end_ms - c.start_ms);
+            total = total.checked_add(c.end_ms.checked_sub(c.start_ms)?)?;
+            p.push(total);
         }
-        p
+        Some(p)
     };
-    let a = prefix(local);
-    let b = prefix(remote);
+    let a = prefix(local)?;
+    let b = prefix(remote)?;
     let mut dp = vec![0f64; (n + 1) * (m + 1)];
     let mut back = vec![(0usize, 0usize); dp.len()];
     for i in 1..=n {

@@ -57,20 +57,15 @@ where
 
 /// Binds commands handled by the reader shell rather than the document.
 pub(crate) fn bind_reader_keys(cx: &mut App) {
+    use ui_components::{ShortcutPage::Reader, bind_shortcut};
+    bind_shortcut(cx, Reader, "reader.next_tab", "Next sidebar tab", &["ctrl-tab"], NextSidebarTab, "Reader");
+    bind_shortcut(cx, Reader, "reader.previous_tab", "Previous sidebar tab", &["ctrl-shift-tab"], PreviousSidebarTab, "Reader");
+    bind_shortcut(cx, Reader, "reader.sidebar", "Toggle sidebar", &["secondary-s"], ToggleSidebar, "Reader");
+    bind_shortcut(cx, Reader, "reader.contents", "Toggle contents", &["secondary-t"], ToggleToc, "Reader");
+    bind_shortcut(cx, Reader, "reader.search", "Search in book", &["secondary-f"], FocusReaderSearch, "Reader");
+    bind_shortcut(cx, Reader, "reader.close_search", "Close search or sidebar", &["escape"], CloseSearch, "Reader");
+    bind_shortcut(cx, Reader, "reader.library", "Return to library", &["backspace"], ReturnToLibrary, "Reader");
     cx.bind_keys([
-        KeyBinding::new("tab", NextSidebarTab, Some("Reader")),
-        KeyBinding::new("shift-tab", PreviousSidebarTab, Some("Reader")),
-        KeyBinding::new("ctrl-tab", NextSidebarTab, Some("Reader")),
-        KeyBinding::new("ctrl-shift-tab", PreviousSidebarTab, Some("Reader")),
-        KeyBinding::new("secondary-s", ToggleSidebar, Some("Reader")),
-        KeyBinding::new("secondary-t", ToggleToc, Some("Reader")),
-        KeyBinding::new("secondary-f", FocusReaderSearch, Some("Reader")),
-        KeyBinding::new("escape", CloseSearch, Some("Reader")),
-        // Backspace leaves the book the same way the toolbar's library button
-        // does, so the keyboard and the chrome cannot drift apart. The OS back
-        // button/gesture does the same on native mobile, where the on-screen
-        // back button is hidden.
-        KeyBinding::new("backspace", ReturnToLibrary, Some("Reader")),
         #[cfg(not(target_os = "android"))]
         KeyBinding::new("back", ReturnToLibrary, Some("Reader")),
         #[cfg(target_os = "android")]
@@ -85,13 +80,21 @@ pub(crate) fn install_reader_shortcuts<R: CommandTarget<FocusReaderSearch> + Com
     window.use_keyed_state(("reader-panel-keyboard", cx.entity_id()), cx, move |_, cx| {
         cx.intercept_keystrokes(move |event, window, cx| {
             let key = &event.keystroke;
-            if window.window_handle() != window_handle || !event.context_stack.iter().any(|context| context.contains("Reader")) || !matches!(key.key.as_str(), "f" | "t") || !ui_components::primary_modifier_only(key.modifiers) {
+            if window.window_handle() != window_handle || !event.context_stack.iter().any(|context| context.contains("Reader")) || event.context_stack.iter().any(|context| context.contains("ShortcutSettings")) {
+                return;
+            }
+            let contents = ui_components::matches_shortcut("reader.contents", key, cx);
+            let search = ui_components::matches_shortcut("reader.search", key, cx);
+            if !contents && !search {
                 return;
             }
             if let Some(target) = target.upgrade() {
-                target.update(cx, |reader, cx| match key.key.as_str() {
-                    "t" => reader.execute(&ToggleToc, window, cx),
-                    _ => reader.execute(&FocusReaderSearch, window, cx),
+                target.update(cx, |reader, cx| {
+                    if contents {
+                        reader.execute(&ToggleToc, window, cx);
+                    } else {
+                        reader.execute(&FocusReaderSearch, window, cx);
+                    }
                 });
                 cx.stop_propagation();
             }
@@ -101,16 +104,9 @@ pub(crate) fn install_reader_shortcuts<R: CommandTarget<FocusReaderSearch> + Com
 
 /// Binds navigation shared by reflowable and fixed-layout documents.
 pub(crate) fn bind_document_keys(cx: &mut App, context: &'static str) {
-    cx.bind_keys([
-        KeyBinding::new("up", PreviousLine, Some(context)),
-        KeyBinding::new("down", NextLine, Some(context)),
-        KeyBinding::new("left", PreviousPage, Some(context)),
-        KeyBinding::new("right", NextPage, Some(context)),
-        KeyBinding::new("pageup", PreviousPage, Some(context)),
-        KeyBinding::new("pagedown", NextPage, Some(context)),
-        KeyBinding::new("space", NextPage, Some(context)),
-        KeyBinding::new("secondary-=", IncreaseScale, Some(context)),
-        KeyBinding::new("secondary-+", IncreaseScale, Some(context)),
-        KeyBinding::new("secondary--", DecreaseScale, Some(context)),
-    ]);
+    use ui_components::{ShortcutPage::Reader, bind_shortcut};
+    bind_shortcut(cx, Reader, "reader.previous_line", "Previous line", &["up"], PreviousLine, context);
+    bind_shortcut(cx, Reader, "reader.next_line", "Next line", &["down"], NextLine, context);
+    bind_shortcut(cx, Reader, "reader.previous_page", "Previous page", &["left", "pageup"], PreviousPage, context);
+    bind_shortcut(cx, Reader, "reader.next_page", "Next page", &["right", "pagedown", "space"], NextPage, context);
 }

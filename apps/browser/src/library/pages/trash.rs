@@ -286,7 +286,7 @@ impl TrashPage {
 
     /// Runs one Trash action. Success needs no reload here: the library
     /// reports its contents changed, and that refreshes this page.
-    fn run<F: Future<Output = Result<(), String>> + 'static>(&mut self, operation: impl FnOnce(LibraryClient) -> F, action: &'static str, cx: &mut Context<Self>) {
+    fn run<F: Future<Output = Result<(), library_backend::BackendError>> + 'static>(&mut self, operation: impl FnOnce(LibraryClient) -> F, action: &'static str, cx: &mut Context<Self>) {
         let operation = operation(self.ui.backend().clone());
         cx.spawn(async move |page, cx| {
             if let Err(error) = operation.await {

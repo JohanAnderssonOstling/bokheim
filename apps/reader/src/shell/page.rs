@@ -38,6 +38,14 @@ pub(crate) struct ReaderSurface {
     pub(crate) bottom_bar_id: &'static str,
 }
 
+struct ReaderPage {
+    document_ready: bool,
+    loading_focus: FocusHandle,
+    chrome_visible: bool,
+    mobile_chrome: MobileChrome,
+    content: AnyElement,
+}
+
 pub(crate) fn reader_surface<C: CommonReaderCommands + SidebarTarget>(owner: &C, surface: ReaderSurface, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>) -> Div {
     let ReaderSurface { document, dock, sidebar, active_tab, chrome_visible, document_ready, loading_focus, title, chapter, progress_label, bottom_bar_id } = surface;
     if !components::uses_mobile_reader_controls(window) {
@@ -47,19 +55,17 @@ pub(crate) fn reader_surface<C: CommonReaderCommands + SidebarTarget>(owner: &C,
             None => document,
         };
         let no_bars = MobileChrome { top_bar: None, bottom_bar: None, dock: None, sheet: None, partial_sheet: false };
-        return reader_page(window, cx, theme, document_ready, &loading_focus, chrome_visible, no_bars, content);
+        return reader_page(ReaderPage { document_ready, loading_focus, chrome_visible, mobile_chrome: no_bars, content }, theme, window, cx);
     }
     let target = cx.entity();
-    let top_bar = chrome_visible.then(|| reader_top_bar(&target, title, chapter, progress_label, theme));
-    let bottom_bar = chrome_visible.then(|| reader_bottom_bar(bottom_bar_id, owner, &target, active_tab, theme));
+    let top_bar = chrome_visible.then(|| reader_top_bar(&target, title, chapter, progress_label, theme, cx));
+    let bottom_bar = chrome_visible.then(|| reader_bottom_bar(bottom_bar_id, owner, &target, active_tab, theme, cx));
     let mobile_chrome = MobileChrome { top_bar, bottom_bar, dock, sheet: sidebar, partial_sheet: active_tab == Some(SidebarTab::Settings) };
-    reader_page(window, cx, theme, document_ready, &loading_focus, chrome_visible, mobile_chrome, document)
+    reader_page(ReaderPage { document_ready, loading_focus, chrome_visible, mobile_chrome, content: document }, theme, window, cx)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn reader_page<C: CommonReaderCommands>(
-    window: &mut Window, cx: &mut Context<C>, theme: components::BrowserTheme, document_ready: bool, loading_focus: &FocusHandle, chrome_visible: bool, mobile_chrome: MobileChrome, content: AnyElement,
-) -> Div {
+fn reader_page<C: CommonReaderCommands>(page: ReaderPage, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>) -> Div {
+    let ReaderPage { document_ready, loading_focus, chrome_visible, mobile_chrome, content } = page;
     input::install_reader_shortcuts(window, cx);
     let safe_area = window.insets().effective();
     let mobile = components::uses_mobile_reader_controls(window);
@@ -68,7 +74,7 @@ pub(crate) fn reader_page<C: CommonReaderCommands>(
         .relative()
         .key_context("Reader")
         .when(chrome_visible && !mobile, |page| page.pt(safe_area.top))
-        .when(!document_ready, |page| page.track_focus(loading_focus))
+        .when(!document_ready, |page| page.track_focus(&loading_focus))
         .on_action(cx.listener(input::dispatch::<C, PreviousPage>))
         .on_action(cx.listener(input::dispatch::<C, NextPage>))
         .on_action(cx.listener(input::dispatch::<C, PreviousLine>))
@@ -154,7 +160,12 @@ mod tests {
             let dock = self.dock.then(|| components::player_dock(div(), div(), div(), theme).debug_selector(|| "test-dock".into()).into_any_element());
             let sheet = self.sheet.then(|| div().size_full().debug_selector(|| "test-sheet".into()).bg(theme.page_bg).into_any_element());
             let content = components::reader_document_body().debug_selector(|| "test-document".into()).into_any_element();
-            reader_page(window, cx, theme, true, &self.focus, self.chrome, MobileChrome { top_bar, bottom_bar, dock, sheet, partial_sheet: self.partial }, content)
+            reader_page(
+                ReaderPage { document_ready: true, loading_focus: self.focus.clone(), chrome_visible: self.chrome, mobile_chrome: MobileChrome { top_bar, bottom_bar, dock, sheet, partial_sheet: self.partial }, content },
+                theme,
+                window,
+                cx,
+            )
         }
     }
 

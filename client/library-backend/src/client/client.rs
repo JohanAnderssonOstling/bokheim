@@ -3,7 +3,6 @@ use crate::library::commands::LibraryReply;
 use crate::library::LibraryCommand;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::library::LibraryHandle;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::BackendError;
 #[cfg(target_arch = "wasm32")]
 use crate::ContentHash;
@@ -30,22 +29,21 @@ impl LibraryClient {
         &self.library_id
     }
 
-    pub async fn request<T: LibraryReply>(&self, command: LibraryCommand) -> Result<T, String> {
+    pub async fn request<T: LibraryReply>(&self, command: LibraryCommand) -> Result<T, BackendError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.transport.handle().await.map_err(|error| error.to_string())?.dispatch(command).await.and_then(client_runtime::reply::Reply::take).map_err(|error| error.to_string())
+            self.transport.handle().await?.dispatch(command).await.and_then(client_runtime::reply::Reply::take)
         }
         #[cfg(target_arch = "wasm32")]
         {
-            client_runtime::wire::decode_worker_payload(self.transport.request(command).await?).map_err(|error| error.to_string())
+            client_runtime::wire::decode_worker_payload(self.transport.request(command).await?)
         }
     }
 
-    pub async fn updates(&self) -> Result<(LibraryUpdates, bool), String> {
+    pub async fn updates(&self) -> Result<(LibraryUpdates, bool), BackendError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let handle = self.transport.handle().await.map_err(|error| error.to_string())?;
-            handle.subscribe_updates().await.map_err(|error| error.to_string())
+            self.transport.handle().await?.subscribe_updates().await
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -68,7 +66,7 @@ impl ClientTransport for LibraryHandle {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub type TransportResult<'a, T> = BoxedBackendFuture<'a, Result<T, String>>;
+pub type TransportResult<'a, T> = BoxedBackendFuture<'a, Result<T, BackendError>>;
 
 /// Browser hosts route library requests and subscriptions over their worker transport.
 #[cfg(target_arch = "wasm32")]

@@ -388,10 +388,10 @@ pub const COMPACT_HIERARCHY_ITEM_ROW_GAP: f32 = SPACE_SM;
 pub const COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING: f32 = CONTENT_INSET;
 pub const COMPACT_HIERARCHY_ITEM_CONTENT_GAP: f32 = SPACE_SM;
 
-/// Section cards: a title and total over columns of child entries, with a
-/// single row of covers in the space left by the first column.
-/// Preferred width for two cover cells, a 48px peek and the container insets.
-pub const SECTION_CARD_WIDTH: f32 = (SECTION_CARD_COVER_WIDTH + BOOK_CARD_PADDING * 2.0) * 2.0 + SPACE_2XL + SPACE_MD;
+/// Container cards show two columns of four child entries beneath the title.
+pub const SECTION_CARD_WIDTH: f32 = 384.0;
+pub const SECTION_CARD_SUBJECT_COLUMNS: usize = 2;
+pub const SECTION_CARD_SUBJECT_ROWS: usize = 4;
 pub const SECTION_CARD_HEADING_HEIGHT_REM: f32 = 2.5;
 pub const SECTION_CARD_HEADING_PADDING_REM: f32 = 0.5;
 pub const SECTION_CARD_SUBJECT_ROW_HEIGHT_REM: f32 = 1.5;

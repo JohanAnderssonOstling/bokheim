@@ -1,4 +1,5 @@
 use content_address::ContentHash;
+use operation_failure::Failure;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -11,7 +12,8 @@ pub enum BrowserDownloadPhase {
     Importing,
     Waiting,
     Completed,
-    Failed,
+    /// Why it failed, when that is known; the UI words it.
+    Failed(Option<Failure>),
     Dismissed,
 }
 
@@ -25,6 +27,8 @@ pub struct BrowserDownloadUpdate {
     pub phase: BrowserDownloadPhase,
     #[serde(default)]
     pub percent: Option<u8>,
+    /// Progress wording for an ongoing download. A failure's wording comes
+    /// from its phase, never from this text.
     #[serde(default)]
     pub message: Option<String>,
 }

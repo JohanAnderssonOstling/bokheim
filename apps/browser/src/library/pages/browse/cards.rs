@@ -11,9 +11,10 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, IntoElement, Pixels, Point, Render, Subscription, Window};
 use library_model::BrowseLocation;
 use sync_common::DirId;
+use ui_components::uses_mobile_navigation;
 
 use super::drag_drop::FolderDrop;
-use super::listing::{BrowseItem, resolve_items};
+use super::listing::{BrowseItem, BrowseKind, resolve_items};
 use super::navigator::{BrowseNavigator, Loaded};
 use super::page::BrowseSplitSide;
 use super::section_card::SectionCard;
@@ -42,6 +43,7 @@ pub(super) struct CardView {
     /// Kept across refreshes so a card keeps its strip's position.
     section_cards: HashMap<BrowseLocation, Entity<SectionCard>>,
     positions: HashMap<BrowseLocation, PaginatorPosition>,
+    mobile: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -85,9 +87,9 @@ impl CardView {
                     cards.navigator.update(cx, |navigator, cx| navigator.load_more(cx));
                 }
             }),
-            cx.observe_global::<crate::stores::CoverTextSetting>(|cards, cx| cards.refresh_cover_text(cx)),
+            cx.observe_global::<crate::stores::CoverTextSetting>(|cards, cx| cards.refresh_layout(cx)),
         ];
-        Self { navigator, events, paginator, section_cards: HashMap::new(), positions: HashMap::new(), _subscriptions: subscriptions }
+        Self { navigator, events, paginator, section_cards: HashMap::new(), positions: HashMap::new(), mobile: false, _subscriptions: subscriptions }
     }
 
     fn install(&mut self, loaded: &Loaded, cx: &mut Context<Self>) {
@@ -121,14 +123,14 @@ impl CardView {
         self.navigator.update(cx, |navigator, cx| navigator.load_page_range(range, compact, cx));
     }
 
-    /// Rebuilds the grid's row height for the current "cover text" setting.
+    /// Rebuilds row heights when the cover text or mobile layout changes.
     ///
     /// The cards themselves pick the change up on their own — see
     /// `BookCardView`'s own global observer — but the row height the
     /// paginator reserves for them is decided here, and has to be recomputed
     /// alongside them or the grid keeps the old gap under a card that no
     /// longer has anything in it.
-    fn refresh_cover_text(&mut self, cx: &mut Context<Self>) {
+    fn refresh_layout(&mut self, cx: &mut Context<Self>) {
         let groups = self.groups(cx);
         self.paginator.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
         cx.notify();
@@ -142,18 +144,19 @@ impl CardView {
         // and its books sit in a folder a move can name as their source.
         let source = navigator.destination.location.folder();
         let revision = navigator.listing.revision;
+        let mobile_sections = self.mobile && kind != BrowseKind::Home;
         let mut cards = HashMap::new();
         for section in &sections {
             let id = section.parent.id;
             let card = match self.section_cards.remove(&id) {
                 Some(card) => {
-                    card.update(cx, |card, cx| card.set_section(section, revision, cx));
+                    card.update(cx, |card, cx| card.set_section(section, revision, mobile_sections, cx));
                     card
                 }
                 None => {
                     let events = self.events.clone();
                     let navigator = self.navigator.clone();
-                    cx.new(|cx| SectionCard::new(events, library_id, format!("{}-section-{id}", kind.list_prefix()), kind, section, navigator, revision, cx))
+                    cx.new(|cx| SectionCard::new(events, library_id, format!("{}-section-{id}", kind.list_prefix()), kind, section, navigator, revision, mobile_sections, cx))
                 }
             };
             cards.insert(id, card);
@@ -163,7 +166,7 @@ impl CardView {
         let page = navigator.listing.page.clone();
         let book_indices = navigator.listing.book_indices.clone();
         let heading_rows = navigator.listing.heading_rows.clone();
-        super::layout::paginator_groups(self.events.clone(), library_id, children, kind, books, source, &self.section_cards, items, page.as_ref(), &book_indices, &heading_rows, cx)
+        super::layout::paginator_groups(self.events.clone(), library_id, children, kind, books, source, &self.section_cards, items, page.as_ref(), &book_indices, &heading_rows, mobile_sections, cx)
     }
 
     pub(super) fn is_empty(&self, cx: &App) -> bool {
@@ -211,7 +214,12 @@ impl CardView {
 }
 
 impl Render for CardView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mobile = uses_mobile_navigation(window);
+        if self.mobile != mobile {
+            self.mobile = mobile;
+            self.refresh_layout(cx);
+        }
         self.paginator.clone()
     }
 }

@@ -99,38 +99,57 @@ async fn wait_for_maintenance(requests: &mut watch::Receiver<()>, changes: &mut 
     let changed = tokio::select! {
         changed = requests.changed() => changed,
         changed = changes.changed() => changed,
-        _ = sleep(MAINTENANCE_RETRY_INTERVAL), if retry => return true,
+        result = sleep(MAINTENANCE_RETRY_INTERVAL), if retry => return result.is_ok(),
     };
     if changed.is_err() {
         return false;
     }
-    sleep(MAINTENANCE_DEBOUNCE).await;
+    if sleep(MAINTENANCE_DEBOUNCE).await.is_err() {
+        return false;
+    }
     requests.borrow_and_update();
     changes.borrow_and_update();
     true
+}
+
+/// An account request's error, with what the account client knows about it.
+pub(super) fn auth_error(error: account_client::AuthError) -> BackendError {
+    match error {
+        account_client::AuthError::SignInRequired(reason) => BackendError::classified(Failure::SignInRequired, reason),
+        error => BackendError::operation(error),
+    }
+}
+
+/// An account session's error, with what the account client knows about it.
+pub(super) fn account_error(error: account_client::AccountSessionError) -> BackendError {
+    match error {
+        account_client::AccountSessionError::Authentication(error) => auth_error(error),
+        account_client::AccountSessionError::Changed => BackendError::classified(Failure::AccountChanged, "account changed while the request was in progress"),
+        error => BackendError::operation(error),
+    }
 }
 
 impl AppBackend {
     pub(crate) fn account_status(&self) -> Result<AccountStatus, BackendError> {
         let mut account = self.current_account()?;
         if account.is_none() {
-            account = self.state.account.restore_if_empty().map_err(BackendError::operation)?;
+            account = self.state.account.restore_if_empty().map_err(account_error)?;
         }
         Ok(account.as_ref().map(|session| AccountStatus::authenticated(session.server_url().as_str(), session.email())).unwrap_or_else(AccountStatus::signed_out))
     }
 
     pub(crate) async fn login(&self, email: &str, password: &str) -> Result<(), BackendError> {
-        let session = account_client::login(&crate::api_server_url(), email, password).await.map_err(BackendError::operation)?;
+        let session = account_client::login(&crate::api_server_url(), email, password).await.map_err(auth_error)?;
         self.adopt_session(session)
     }
 
     pub(crate) fn adopt_session(&self, session: account_client::Session) -> Result<(), BackendError> {
-        self.state.account.set(session.clone()).map_err(BackendError::operation)?;
+        self.state.account.set(session.clone()).map_err(account_error)?;
         Ok(())
     }
 
-    pub(crate) async fn verify_email(&self, email: &str, pin: &str) -> Result<(), BackendError> {
-        let session = account_client::verify_email(&crate::api_server_url(), email, pin).await.map_err(BackendError::operation)?;
+    pub(crate) async fn verify_email(&self, email: &str, pin: &str, password: &str) -> Result<(), BackendError> {
+        let session = account_client::verify_email(&crate::api_server_url(), email, pin, password).await.map_err(auth_error)?;
         self.adopt_session(session)
     }
 
@@ -144,8 +163,17 @@ impl AppBackend {
         })
     }
 
+    pub(crate) async fn delete_account(&self, email: &str, password: &str) -> Result<(), BackendError> {
+        let session = self.require_account()?;
+        if session.email() != email {
+            return Err(BackendError::classified(Failure::AccountChanged, "the signed-in account is not the one being deleted"));
+        }
+        account_client::delete_account(&session, password).await.map_err(auth_error)?;
+        self.state.account.clear_user(session.user_id()).map_err(account_error)
+    }
+
     pub(super) fn logout_with_notification<F: BackendFuture<()>>(&self, notify: impl FnOnce(account_client::Session) -> F) -> Result<(), BackendError> {
-        let session = self.state.account.take().map_err(BackendError::operation)?;
+        let session = self.state.account.take().map_err(account_error)?;
         if let Some(session) = session {
             // Revoke only the captured session. A subsequent login must not
             // wait for or be affected by this best-effort notification.
@@ -160,13 +188,13 @@ impl AppBackend {
         let (snapshot, policies) = tokio::try_join!(
             async {
                 let started = web_time::Instant::now();
-                let result = self.state.account.request(|session| Box::pin(account_client::account_snapshot(session))).await.map_err(BackendError::operation);
+                let result = self.state.account.request(|session| Box::pin(account_client::account_snapshot(session))).await.map_err(account_error);
                 log::debug!("account snapshot request took {:?}", started.elapsed());
                 result
             },
             async {
                 let started = web_time::Instant::now();
-                let result = self.state.account.request(|session| Box::pin(account_client::cloud_storage(session))).await.map_err(BackendError::operation);
+                let result = self.state.account.request(|session| Box::pin(account_client::cloud_storage(session))).await.map_err(account_error);
                 log::debug!("account cloud storage request took {:?}", started.elapsed());
                 result
             },
@@ -335,11 +363,11 @@ impl AppBackend {
     }
 
     pub(super) fn require_account(&self) -> Result<account_client::Session, BackendError> {
-        self.state.account.require().map_err(BackendError::operation)
+        self.state.account.require().map_err(account_error)
     }
 
     pub(super) fn current_account(&self) -> Result<Option<account_client::Session>, BackendError> {
-        self.state.account.current().map_err(BackendError::operation)
+        self.state.account.current().map_err(account_error)
     }
 
     async fn publish_pending_library_names(&self) -> Result<(), BackendError> {
@@ -355,7 +383,7 @@ impl AppBackend {
                     return Ok::<(), BackendError>(());
                 };
                 let name = String::from_utf8(pending.clone()).map_err(BackendError::operation)?;
-                self.state.account.request(|session| Box::pin(account_client::rename_library(session, id, name.clone()))).await.map_err(BackendError::operation)?;
+                self.state.account.request(|session| Box::pin(account_client::rename_library(session, id, name.clone()))).await.map_err(account_error)?;
                 self.with_storage(move |this| {
                     // A second rename during the request must remain queued.
                     if this.state.registry.read_value(&key).map_err(BackendError::operation)?.as_ref() == Some(&pending) {
@@ -435,7 +463,7 @@ impl AppBackend {
         let (change_id, value) = text.split_once(':').ok_or_else(|| BackendError::message("Invalid pending cloud storage change"))?;
         let change = CloudStorageChange { change_id: change_id.parse().map_err(BackendError::operation)?, enabled: value == "1" };
         let account = self.account_identity()?;
-        let result = self.state.account.request(|session| Box::pin(account_client::set_cloud_storage(session, id, change.clone()))).await.map_err(BackendError::operation)?;
+        let result = self.state.account.request(|session| Box::pin(account_client::set_cloud_storage(session, id, change.clone()))).await.map_err(account_error)?;
         self.with_storage(move |this| {
             this.check_account_identity(&account)?;
             if this.state.registry.read_value(&key).map_err(BackendError::operation)?.as_ref() == Some(&pending) {

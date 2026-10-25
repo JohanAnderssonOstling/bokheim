@@ -41,6 +41,8 @@ pub struct CatalogBook {
     pub download_url: Option<String>,
     /// Source media format, independent of hosting or download permissions.
     pub file_format: BookFormat,
+    /// Total recording time advertised by the source, when available.
+    pub audiobook_duration_ms: Option<u64>,
     /// Acquisition sources retained by the snapshot, including every source
     /// credited for a hosted file shared by several catalogs.
     pub sources: Vec<String>,

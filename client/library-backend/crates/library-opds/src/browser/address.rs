@@ -123,6 +123,14 @@ impl AddressHistory {
         &self.visited[..self.visited.len().min(8)]
     }
 
+    /// Automatic start-page tiles exclude Gutenberg without removing visits
+    /// or typed addresses from the browser history.
+    pub fn start_page_shortcuts(&self) -> impl Iterator<Item = &VisitedPage> {
+        self.visited.iter().filter(|saved| {
+            !web_url(&saved.page.url).is_some_and(|url| url.host_str().is_some_and(|host| host == "gutenberg.org" || host.ends_with(".gutenberg.org")))
+        }).take(8)
+    }
+
     pub fn page(&self, url: &str) -> Option<&PageMetadata> {
         self.visited.iter().find(|saved| saved.page.url == url).map(|saved| &saved.page)
     }
@@ -336,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_are_limited_to_eight_and_recover_from_invalid_storage() {
+    fn shortcuts_exclude_gutenberg_and_fill_eight_slots_without_losing_history() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.json");
         fs::write(path.with_extension("visits.json"), b"broken").unwrap();
@@ -348,5 +356,19 @@ mod tests {
         assert_eq!(history.most_visited().len(), 8);
         assert_eq!(history.most_visited()[0].page.title, "Page 00");
         assert_eq!(history.most_visited()[7].page.title, "Page 07");
+        for url in ["https://gutenberg.org/", "http://www.gutenberg.org/", "https://m.gutenberg.org/"] {
+            history.remember(url).unwrap();
+            for _ in 0..2 {
+                history.record_visit(PageMetadata::for_url(url)).unwrap();
+            }
+        }
+        let reopened = AddressHistory::load(history.path.clone());
+        let shortcuts: Vec<_> = reopened.start_page_shortcuts().collect();
+        assert_eq!(shortcuts.len(), 8);
+        assert_eq!(shortcuts[0].page.title, "Page 00");
+        assert_eq!(shortcuts[7].page.title, "Page 07");
+        assert!(shortcuts.iter().all(|saved| saved.page.url.starts_with("https://example.com/")));
+        assert!(reopened.page("https://gutenberg.org/").is_some());
+        assert_eq!(reopened.suggestions("gutenberg").len(), 3);
     }
 }

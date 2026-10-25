@@ -28,18 +28,13 @@ impl StateKey {
         }
     }
     pub fn from_storage(kind: &str, bytes: &[u8]) -> Result<Self, String> {
-        if book_kind(kind) {
-            ContentHash::try_from(bytes).map(Self::Book).map_err(|error| error.to_string())
-        } else {
-            String::from_utf8(bytes.to_vec()).map(Self::Text).map_err(|error| error.to_string())
-        }
+        if book_kind(kind) { ContentHash::try_from(bytes).map(Self::Book).map_err(|error| error.to_string()) } else { String::from_utf8(bytes.to_vec()).map(Self::Text).map_err(|error| error.to_string()) }
     }
 }
 pub(crate) fn book_kind(kind: &str) -> bool {
     // The relay can still carry opaque entries from older clients. Retaining
     // their key encoding does not make the current replica author those kinds.
-    matches!(kind, "book_add" | "enrichment" | "book_lifecycle" | "placement" | "reading_position"
-        | "book_facts" | "metadata" | "description" | "pdf_reader_metadata" | "book_toc")
+    matches!(kind, "book_add" | "enrichment" | "book_lifecycle" | "placement" | "reading_position" | "chapter_read_status" | "book_facts" | "metadata" | "description" | "pdf_reader_metadata" | "book_toc")
 }
 impl From<ContentHash> for StateKey {
     fn from(value: ContentHash) -> Self {

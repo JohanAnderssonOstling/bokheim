@@ -54,16 +54,16 @@ pub fn origin(address: &str) -> Option<String> {
     (url.host_str().is_some() && url.username().is_empty() && url.password().is_none() && (url.scheme() == "https" || (url.scheme() == "http" && loopback))).then(|| url.origin().ascii_serialization())
 }
 
-pub fn fill_script(login: &Login, nonce: &str) -> Zeroizing<String> {
-    let password = Zeroizing::new(serde_json::to_string(login.password.as_str()).unwrap());
+pub fn fill_script(login: &Login, nonce: &str) -> Result<Zeroizing<String>, serde_json::Error> {
+    let password = Zeroizing::new(serde_json::to_string(login.password.as_str())?);
     let args = Zeroizing::new(format!(
         "{{\"kind\":\"fill\",\"nonce\":{},\"origin\":{},\"username\":{},\"password\":{}}}",
-        serde_json::to_string(nonce).unwrap(),
-        serde_json::to_string(&login.site.origin).unwrap(),
-        serde_json::to_string(&login.site.username).unwrap(),
+        serde_json::to_string(nonce)?,
+        serde_json::to_string(&login.site.origin)?,
+        serde_json::to_string(&login.site.username)?,
         password.as_str()
     ));
-    Zeroizing::new(format!("({})({})", include_str!("passwords.js"), args.as_str()))
+    Ok(Zeroizing::new(format!("({})({})", include_str!("passwords.js"), args.as_str())))
 }
 
 pub(crate) trait SecretStore {
@@ -259,6 +259,22 @@ mod tests {
     fn login(origin: &str, username: &str, password: &str) -> Login {
         Login { site: SavedLogin { origin: origin.into(), username: username.into() }, password: Zeroizing::new(password.into()) }
     }
+
+    #[test]
+    fn autofill_script_preserves_special_characters_in_credentials() {
+        let login = login("https://example.com", "reader\"\\\n", "secret\"\\\n)(\u{0}日本語");
+        let nonce = "document\"\\\n";
+        let script = fill_script(&login, nonce).unwrap();
+        let prefix = format!("({})(", include_str!("passwords.js"));
+        let arguments = script.strip_prefix(&prefix).unwrap().strip_suffix(')').unwrap();
+        let value: serde_json::Value = serde_json::from_str(arguments).unwrap();
+        assert_eq!(value["kind"], "fill");
+        assert_eq!(value["origin"], login.site.origin);
+        assert_eq!(value["username"], login.site.username);
+        assert_eq!(value["password"], login.password.as_str());
+        assert_eq!(value["nonce"], nonce);
+    }
+
     #[test]
     fn passwords_stay_out_of_profile_files_and_survive_reopening() {
         let directory = tempfile::tempdir().unwrap();

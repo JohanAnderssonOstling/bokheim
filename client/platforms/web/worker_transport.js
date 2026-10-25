@@ -1,5 +1,9 @@
 // Adapt the dedicated worker's existing global-message transport to a direct
 // coordinator port. No application requests pass through the tab's UI thread.
+
+// Another tab already owns the library's browser storage.
+export class StorageBusyError extends Error {}
+
 export function runWorkerEndpoint(initialize, lifetimeLock = null) {
     if (!new URL(self.location.href).searchParams.has('endpoint')) {
         return initialize();
@@ -25,7 +29,7 @@ export function runWorkerEndpoint(initialize, lifetimeLock = null) {
             };
             const started = lifetimeLock
                 ? navigator.locks.request(lifetimeLock, {mode: 'exclusive', ifAvailable: true}, lock => {
-                    if (!lock) throw new Error('BOKHEIM_STORAGE_BUSY');
+                    if (!lock) throw new StorageBusyError('another tab holds the browser storage lock');
                     return start();
                 })
                 : start();

@@ -14,7 +14,7 @@ pub use app::{API_SERVER_ORIGIN, METADATA_SERVER_ORIGIN, Url, api_server_url, me
 pub use app::{APP_NAME, APP_NAME_LOWER};
 pub use app::{AccountSnapshot, AppClient, AppStartupState};
 pub use app::{AccountStatus, AppDataLocation, LibraryEntry, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
-pub use client_runtime::BackendError;
+pub use client_runtime::{BackendError, Classified, Failure, WifiFailure};
 pub(crate) type DeviceAccountSession = library_backend::integration::LibraryAccountSession<app::BackendContext>;
 
 #[cfg(target_arch = "wasm32")]

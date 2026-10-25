@@ -353,12 +353,12 @@ impl ReaderDestination {
     }
 
     /// Keep keyboard hints consistent across the rail and mobile controls.
-    pub fn tooltip(self, label: impl Into<SharedString>) -> SharedString {
+    pub fn tooltip(self, label: impl Into<SharedString>, cx: &gpui::App) -> SharedString {
         let label = label.into();
         let shortcut = match self {
             Self::Library => "backspace",
-            Self::Contents => "secondary-t",
-            Self::Search => "secondary-f",
+            Self::Contents => return crate::configured_shortcut_tooltip(label, "reader.contents", cx),
+            Self::Search => return crate::configured_shortcut_tooltip(label, "reader.search", cx),
             Self::Notes | Self::Settings | Self::Tts => return label,
         };
         crate::shortcut_tooltip(label, shortcut)
@@ -387,15 +387,20 @@ pub fn reader_sheet_grab(theme: BrowserTheme) -> Div {
     div().flex_none().w_full().pt(px(SPACE_SM)).pb(px(SPACE_XS)).flex().justify_center().child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(theme.rule))
 }
 
+/// Book and current chapter on one line, joined as "Title: Chapter".
 pub fn reader_top_bar_title(title: impl Into<SharedString>, chapter: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).child(title.into()))
-        .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(0.75)).text_color(theme.text_muted).child(chapter.into()))
+    let title = title.into();
+    let chapter = chapter.into();
+    let title = title.trim();
+    let chapter = chapter.trim();
+    let heading = if title.is_empty() {
+        chapter.to_owned()
+    } else if chapter.is_empty() || chapter == title {
+        title.to_owned()
+    } else {
+        format!("{title}: {chapter}")
+    };
+    div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(heading)
 }
 
 /// On a phone the only place reading progress is shown.
@@ -406,13 +411,13 @@ pub fn reader_top_bar_progress(label: impl Into<SharedString>, theme: BrowserThe
 /// A phone bar action below the page: the library's bottom bar item over the
 /// destination's glyph. Reading aloud marks its glyph with the rail's activity
 /// dot, and tints it while it plays.
-pub fn reader_bottom_bar_item(id: impl Into<ElementId>, destination: ReaderDestination, mark: ReaderRailMark, theme: BrowserTheme) -> gpui_component::button::Button {
+pub fn reader_bottom_bar_item(id: impl Into<ElementId>, destination: ReaderDestination, mark: ReaderRailMark, theme: BrowserTheme, cx: &gpui::App) -> gpui_component::button::Button {
     let glyph = div()
         .relative()
         .when(mark == ReaderRailMark::Active, |glyph| glyph.text_color(theme.accent))
         .child(destination.glyph(crate::NAV_RAIL_ICON_SIZE_REM, theme))
         .children(reader_activity_dot(mark, theme).map(|dot| dot.top(px(-2.0)).right(px(-6.0))));
-    crate::browser::bottom_navigation_tile(id, glyph, destination.label(), mark == ReaderRailMark::Selected, theme).tooltip(destination.tooltip(destination.label()))
+    crate::browser::bottom_navigation_tile(id, glyph, destination.label(), mark == ReaderRailMark::Selected, theme).tooltip(destination.tooltip(destination.label(), cx))
 }
 
 /// Width of the reader sidebar's icon rail. The rail belongs to the sidebar:
@@ -447,8 +452,8 @@ pub enum ReaderRailMark {
 }
 
 /// One rail destination: an icon, named by its tooltip.
-pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination, label: impl Into<SharedString>, mark: ReaderRailMark, theme: BrowserTheme) -> Stateful<Div> {
-    let label = destination.tooltip(label);
+pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination, label: impl Into<SharedString>, mark: ReaderRailMark, theme: BrowserTheme, cx: &gpui::App) -> Stateful<Div> {
+    let label = destination.tooltip(label, cx);
     let ink = match mark {
         ReaderRailMark::Selected => theme.text,
         ReaderRailMark::Active => theme.accent,

@@ -31,7 +31,7 @@ impl AppServices {
         self
     }
 
-    pub async fn for_new_window(&self) -> Result<Self, String> {
+    pub async fn for_new_window(&self) -> Result<Self, app::BackendError> {
         let mut startup = (*self.startup).clone();
         startup.libraries = self.backend.libraries().await?;
         let mut services = self.clone();

@@ -75,21 +75,22 @@ impl LibraryContext {
                             let mut source = file.source;
                             source.path = vec![file.name.clone()];
                             let directory = crate::directory_import(gpui::SelectedDirectory { local_path: None, name: file.name, directories: Vec::new(), files: vec![source] });
-                            library.import_directory(parent_id, directory, false).await.and_then(|failures| if failures.is_empty() { Ok(()) } else { Err(failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n")) })
+                            library.import_directory(parent_id, directory, false).await.map(|failures| failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"))
                         };
-                        result.map(|_| ())
+                        result
                     }
                     None => return,
                 },
                 Ok(Ok(None)) => return,
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(Err(error)) => Err(library_backend::BackendError::message(error.to_string())),
+                Err(error) => Err(library_backend::BackendError::message(error.to_string())),
             };
-            if let Err(error) = result {
-                let _ = view.update_in(cx, |_, window, cx| {
-                    crate::services::notify_error("add-book-error", format!("Could not add book. {}", user_facing_error(&error, "Please try again.")), window, cx);
-                });
-            }
+            let _ = view.update_in(cx, |_, window, cx| match result {
+                // Import failures already carry their own wording.
+                Ok(failures) if !failures.is_empty() => crate::services::notify_error("add-book-error", failures, window, cx),
+                Ok(_) => {}
+                Err(error) => crate::services::notify_error("add-book-error", format!("Could not add book. {}", user_facing_error(&error, "Please try again.")), window, cx),
+            });
         })
         .detach();
     }
@@ -121,8 +122,8 @@ impl LibraryContext {
                     None => return,
                 },
                 Ok(Ok(None)) => return,
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(Err(error)) => Err(library_backend::BackendError::message(error.to_string())),
+                Err(error) => Err(library_backend::BackendError::message(error.to_string())),
             };
             let _ = view.update_in(cx, |_, window, cx| match result {
                 Ok(failures) if !failures.is_empty() => crate::services::notify_warning("add-folder-warning", failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),

@@ -111,7 +111,9 @@ impl Database {
                 }
             };
 
-            Ok(BookDetail { book, external_url: None, audiobook_chapter_count, description, year, source_directory_id, path, authors, credits, current_entry, current_target, toc })
+            let mut chapter_read_status = self.chapter_read_status(content_hash)?;
+            chapter_read_status.update_parents(&toc);
+            Ok(BookDetail { book, external_url: None, audiobook_chapter_count, description, year, source_directory_id, path, authors, credits, current_entry, current_target, toc, chapter_read_status })
         })
     }
 }

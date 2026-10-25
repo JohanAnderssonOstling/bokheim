@@ -1,4 +1,5 @@
 use crate::runtime::{AppCommand, LibraryReply, Transport};
+use crate::BackendError;
 use library_backend::LibraryClient;
 use sync_common::LibraryId;
 
@@ -14,8 +15,8 @@ pub struct AppClient {
 }
 
 impl AppClient {
-    pub(crate) async fn request<T: LibraryReply>(&self, command: AppCommand) -> Result<T, String> {
-        self.transport.request(command).await.map_err(|error| error.to_string())
+    pub(crate) async fn request<T: LibraryReply>(&self, command: AppCommand) -> Result<T, BackendError> {
+        self.transport.request(command).await
     }
 
     pub fn library(&self, library_id: LibraryId) -> LibraryClient {

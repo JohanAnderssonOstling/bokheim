@@ -1,6 +1,6 @@
-//! One card of a sectioned listing. Child-entry columns and book covers share
-//! one horizontal paginator, with entries first. Tab reaches each child and
-//! book; Enter opens it and Ctrl+Enter opens its context menu.
+//! Container cards page through two columns of four child entries.
+//! Home shelves and author cards show books in a horizontal strip.
+//! Tab reaches each child and book; Enter opens it and Ctrl+Enter opens its menu.
 
 use ui_components::user_facing_error;
 
@@ -16,11 +16,18 @@ use ui_components as components;
 use super::cards::{CardEvent, CardEvents};
 use super::drag_drop::{BookDrag, drag_payload};
 use super::layout::{child_frame, download_mark, keyboard_item};
-use super::listing::{BrowseItem, BrowseKind, BrowseSection, shown_count};
+use super::listing::{BrowseItem, BrowseKind, BrowseSection, is_author_heading, section_shows_books, shown_count};
 use super::navigator::BrowseNavigator;
 use super::profile::Stage;
 use crate::library::widgets::BookCardView;
 use crate::library::widgets::{BookCardInteraction, BookCardPresentation, Paginator, PaginatorAxis, PaginatorChild, PaginatorGroup, browse_section_item_policy, browse_section_subject_rows};
+
+#[derive(Clone, Copy, PartialEq)]
+struct SectionLayout {
+    rem_size: Pixels,
+    cover_text: CoverText,
+    mobile: bool,
+}
 
 pub(super) struct SectionCard {
     events: CardEvents,
@@ -30,7 +37,7 @@ pub(super) struct SectionCard {
     band_index: usize,
     section: BrowseSection,
     flow: Entity<Paginator>,
-    layout: (Pixels, CoverText),
+    layout: SectionLayout,
     _flow_subscription: Subscription,
     navigator: WeakEntity<BrowseNavigator>,
     revision: u64,
@@ -41,12 +48,12 @@ pub(super) struct SectionCard {
 }
 
 impl SectionCard {
-    pub(super) fn new(events: CardEvents, library_id: uuid::Uuid, id: String, kind: BrowseKind, section: &BrowseSection, navigator: Entity<BrowseNavigator>, revision: u64, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(events: CardEvents, library_id: uuid::Uuid, id: String, kind: BrowseKind, section: &BrowseSection, navigator: Entity<BrowseNavigator>, revision: u64, mobile: bool, cx: &mut Context<Self>) -> Self {
         let child_icon = kind.child_icon();
-        let layout = (px(16.0), crate::stores::current_cover_text(cx));
+        let layout = SectionLayout { rem_size: px(16.0), cover_text: crate::stores::current_cover_text(cx), mobile };
         let loaded_books = section.books.iter().cloned().enumerate().collect();
-        let groups = mixed_groups(&id, events.clone(), library_id, section, &loaded_books, child_icon, layout.0, cx);
-        let flow = cx.new(|_| Paginator::new(format!("{id}-contents"), groups).flow_axis(PaginatorAxis::Horizontal).max_rows(1).horizontal_only());
+        let groups = mixed_groups(&id, events.clone(), library_id, section, &loaded_books, child_icon, layout, cx);
+        let flow = cx.new(|_| Paginator::new(format!("{id}-contents"), groups).flow_axis(PaginatorAxis::Horizontal).max_rows(1).horizontal_only().next_page_preview(!container_section(section)));
         let subscription = cx.observe(&flow, |card, _, cx| {
             card.load_visible_books(cx);
             cx.notify();
@@ -85,18 +92,19 @@ impl SectionCard {
     }
 
     /// Installs a refreshed section in place, keeping the strip's position.
-    pub(super) fn set_section(&mut self, section: &BrowseSection, revision: u64, cx: &mut Context<Self>) {
-        if self.revision != revision {
+    pub(super) fn set_section(&mut self, section: &BrowseSection, revision: u64, mobile: bool, cx: &mut Context<Self>) {
+        if self.revision != revision || self.layout.mobile != mobile {
             self.request.take();
             self.request_failed = false;
             self.pending_turn = None;
             self.loaded_books = section.books.iter().cloned().enumerate().collect();
             self.revision = revision;
         }
-        let groups = mixed_groups(&self.id, self.events.clone(), self.library_id, section, &self.loaded_books, self.child_icon, self.layout.0, cx);
+        self.layout.mobile = mobile;
+        self.layout.cover_text = crate::stores::current_cover_text(cx);
+        let groups = mixed_groups(&self.id, self.events.clone(), self.library_id, section, &self.loaded_books, self.child_icon, self.layout, cx);
         self.flow.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
         self.section = section.clone();
-        self.layout.1 = crate::stores::current_cover_text(cx);
         self.update_band();
         cx.notify();
     }
@@ -138,10 +146,13 @@ impl SectionCard {
     /// Fetch only missing covers in the measured page. Entry columns occupy
     /// slots before books, so a strip of subjects needs no book request.
     fn request_books(&mut self, range: Range<usize>, turn: Option<bool>, cx: &mut Context<Self>) -> bool {
+        if container_section(&self.section) {
+            return false;
+        }
         let Some(total) = self.section.book_count else {
             return false;
         };
-        let columns = self.section.children.len().div_ceil(browse_section_subject_rows(self.layout.1, self.layout.0));
+        let columns = self.section.children.len().div_ceil(browse_section_subject_rows(self.layout.cover_text, self.layout.rem_size, false));
         let Some(missing) = missing_book_range(range, columns, total, |index| self.loaded_books.contains_key(&index)) else {
             return false;
         };
@@ -184,7 +195,7 @@ impl SectionCard {
                         card.section.book_count = Some(page.total);
                         card.loaded_books.retain(|index, _| *index < page.total);
                         card.loaded_books.extend((page.offset..).zip(books));
-                        let groups = mixed_groups(&card.id, card.events.clone(), card.library_id, &card.section, &card.loaded_books, card.child_icon, card.layout.0, cx);
+                        let groups = mixed_groups(&card.id, card.events.clone(), card.library_id, &card.section, &card.loaded_books, card.child_icon, card.layout, cx);
                         card.flow.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
                         card.pending_turn = turn.filter(|_| unchanged);
                     }
@@ -220,7 +231,10 @@ fn missing_book_range(slots: Range<usize>, columns: usize, total: usize, loaded:
 
 #[cfg(test)]
 mod tests {
-    use super::missing_book_range;
+    use super::*;
+    use gpui::TestAppContext;
+    use library_model::{BrowseLocation, BrowseRow};
+    use uuid::Uuid;
 
     #[test]
     fn child_columns_do_not_fetch_books_and_mixed_pages_start_at_the_first_cover() {
@@ -235,6 +249,37 @@ mod tests {
         assert_eq!(missing_book_range(18..25, 0, 20, |_| false), Some(18..20));
         assert_eq!(missing_book_range(0..10, 0, 0, |_| false), None);
         assert_eq!(missing_book_range(30..40, 0, 20, |_| false), None);
+    }
+
+    #[gpui::test]
+    fn containers_page_all_children_without_book_slots_on_every_platform(cx: &mut TestAppContext) {
+        let row = |id| BrowseRow { id: BrowseLocation::Folder(Uuid::from_u128(id)), name: format!("Category {id}"), path: None, book_count: 20, downloaded_book_count: 0 };
+        let section = BrowseSection { parent: row(1), children: (2..15).map(row).collect(), books: Vec::new(), book_count: Some(20) };
+        let events: CardEvents = Rc::new(|_, _, _| {});
+        cx.update(|cx| {
+            for cover_text in [CoverText::Always, CoverText::CoverOnly] {
+                for mobile in [false, true] {
+                    let layout = SectionLayout { rem_size: px(16.0), cover_text, mobile };
+                    let groups = mixed_groups("test", events.clone(), Uuid::nil(), &section, &BTreeMap::new(), components::NavigationIcon::Folder, layout, cx);
+                    let flow = Paginator::new("test", groups);
+                    for (column, child) in [0, 4, 8, 12].into_iter().enumerate() {
+                        assert_eq!(flow.child_id(column), Some(&SharedString::from(format!("column:{}", section.children[child].id))));
+                    }
+                    assert!(flow.child_id(4).is_none(), "container cards must not reserve slots for books");
+                }
+
+                for location in [BrowseLocation::Home(None), BrowseLocation::Author(Some(Uuid::from_u128(1))), BrowseLocation::CatalogAuthor(Some(Uuid::from_u128(1)))] {
+                    for mobile in [false, true] {
+                        let shelf = BrowseSection { parent: BrowseRow { id: location, ..section.parent.clone() }, children: Vec::new(), books: Vec::new(), book_count: Some(20) };
+                        let layout = SectionLayout { rem_size: px(16.0), cover_text, mobile };
+                        let groups = mixed_groups("test", events.clone(), Uuid::nil(), &shelf, &BTreeMap::new(), components::NavigationIcon::Folder, layout, cx);
+                        let flow = Paginator::new("test", groups);
+                        assert_eq!(flow.child_id(0), Some(&SharedString::from("test-book-slot-0")));
+                        assert_eq!(flow.child_id(19), Some(&SharedString::from("test-book-slot-19")));
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -256,12 +301,11 @@ impl gpui::View for SectionCardElement {
 
 impl SectionCard {
     fn render_card(&mut self, focused: bool, selected: bool, marquee: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let layout = (window.rem_size(), crate::stores::current_cover_text(cx));
+        let layout = SectionLayout { rem_size: window.rem_size(), cover_text: crate::stores::current_cover_text(cx), ..self.layout };
         if self.layout != layout {
-            // Font and cover-text changes alter how many entry rows fit beside
-            // a cover. Repack the columns while retaining the strip's position.
+            // Recompute heights at the current font size without losing the page.
             self.layout = layout;
-            let groups = mixed_groups(&self.id, self.events.clone(), self.library_id, &self.section, &self.loaded_books, self.child_icon, layout.0, cx);
+            let groups = mixed_groups(&self.id, self.events.clone(), self.library_id, &self.section, &self.loaded_books, self.child_icon, layout, cx);
             self.flow.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
         }
         let theme = components::browser_theme(cx);
@@ -283,18 +327,26 @@ impl SectionCard {
             .gap(gpui::px(4.0))
             .text_size(gpui::rems(0.875))
             .text_color(gpui::rgb(0xf2efe8))
-            .child(arrow("previous-contents", "Previous entries or books", IconName::ArrowLeft, flow.has_previous() && self.request.is_none() && self.pending_turn.is_none(), false))
-            .child(arrow("next-contents", "Next entries or books", IconName::ArrowRight, flow.has_next() && self.request.is_none() && self.pending_turn.is_none(), true));
+            .child(arrow("previous-contents", "Previous entries", IconName::ArrowLeft, flow.has_previous() && self.request.is_none() && self.pending_turn.is_none(), false))
+            .child(arrow("next-contents", "Next entries", IconName::ArrowRight, flow.has_next() && self.request.is_none() && self.pending_turn.is_none(), true));
         // A shelf of Home is a row of the page, not a place to go.
         let parent = &self.section.parent;
+        let author = is_author_heading(parent.id);
         let opens = !matches!(parent.id, library_model::BrowseLocation::Home(_));
         let count = opens.then_some(self.section.book_count.unwrap_or(self.section.books.len()));
-        let heading =
-            components::section_card_heading(format!("browse-card-title-{}", parent.id), parent.name.clone(), count, arrows.into_any_element(), opens, focused, marquee, theme).debug_selector(|| format!("browse-card-title-{}", parent.id));
+        let pager = (!components::uses_mobile_navigation(window)).then(|| arrows.into_any_element());
+        let heading = components::section_card_heading(format!("browse-card-title-{}", parent.id), parent.name.clone(), count, pager, opens, focused, marquee, theme).debug_selector(|| format!("browse-card-title-{}", parent.id));
         components::section_card_frame(focused || selected, theme)
-            .child(components::section_card_band(self.band_index, heading))
+            .child(components::section_card_band(self.band_index, heading).when(author, |band| band.px(px(components::BOOK_CARD_PADDING))))
             .child(
-                components::section_card_content(theme).child(components::section_card_body().id(format!("{}-body", self.id)).mx(gpui::px(-components::BOOK_CARD_PADDING)).child(self.flow.clone()).on_click(|_, _, cx| cx.stop_propagation())),
+                components::section_card_content(theme).when(author, |content| content.px_0()).child(
+                    components::section_card_body()
+                        .id(format!("{}-body", self.id))
+                        // Author books supply the inset themselves; cancel only the content border.
+                        .mx(px(if author { -1.0 } else { -components::BOOK_CARD_PADDING }))
+                        .child(self.flow.clone())
+                        .on_click(|_, _, cx| cx.stop_propagation()),
+                ),
             )
             .into_any_element()
     }
@@ -306,21 +358,24 @@ impl Render for SectionCard {
     }
 }
 
-/// Child-entry columns come first in the same horizontal paginator as the
-/// covers. A later page contains only covers once every entry has passed.
+fn container_section(section: &BrowseSection) -> bool {
+    !section_shows_books(section.parent.id)
+}
+
+/// Containers page through child entries; Home and author cards page through books.
 fn mixed_groups(
-    id: &str, events: CardEvents, library_id: uuid::Uuid, section: &BrowseSection, loaded_books: &BTreeMap<usize, Entity<BookCardView>>, child_icon: components::NavigationIcon, rem_size: Pixels, cx: &mut App,
+    id: &str, events: CardEvents, library_id: uuid::Uuid, section: &BrowseSection, loaded_books: &BTreeMap<usize, Entity<BookCardView>>, child_icon: components::NavigationIcon, layout: SectionLayout, cx: &mut App,
 ) -> Vec<PaginatorGroup> {
     // The folder this card shows, on a folder page. Its subfolders and books
     // are dragged out of it, and subfolders take drops.
     let folder = section.parent.id.folder();
     let mut children = Vec::new();
-    let cover_text = crate::stores::current_cover_text(cx);
-    let rows_per_column = browse_section_subject_rows(cover_text, rem_size);
+    let container = container_section(section);
+    let rows_per_column = browse_section_subject_rows(layout.cover_text, layout.rem_size, container);
     let subject_columns = section.children.len().div_ceil(rows_per_column);
     for (column_index, column) in section.children.chunks(rows_per_column).enumerate() {
         let column = column.to_vec();
-        let before_direct_books = column_index + 1 == subject_columns && section.book_count.unwrap_or(section.books.len()) > 0;
+        let before_direct_books = !container && column_index + 1 == subject_columns && section.book_count.unwrap_or(section.books.len()) > 0;
         let item_id = format!("column:{}", column[0].id);
         let events = events.clone();
         let id = id.to_owned();
@@ -352,7 +407,8 @@ fn mixed_groups(
         );
     }
     let placeholder = PaginatorChild::new(|_, _, _| div().size_full().into_any_element());
-    for index in 0..section.book_count.unwrap_or(section.books.len()) {
+    let book_count = if container { 0 } else { section.book_count.unwrap_or(section.books.len()) };
+    for index in 0..book_count {
         let slot = format!("{id}-book-slot-{index}");
         let Some(book) = loaded_books.get(&index) else {
             children.push(placeholder.clone().with_id(slot));
@@ -362,5 +418,5 @@ fn mixed_groups(
         let drag = Some(Rc::new(move |_: &PaginatorState, _: &SharedString, cx: &App| drag_payload(&[BrowseItem::Book(dragged.clone())], folder, library_id, child_icon, cx)) as BookDrag);
         children.push(super::layout::book_child(book.clone(), BookCardPresentation::Section, |_, _, _| BookCardInteraction::default(), drag, cx).with_id(slot));
     }
-    vec![PaginatorGroup::new(browse_section_item_policy(cover_text), children)]
+    vec![PaginatorGroup::new(browse_section_item_policy(layout.cover_text, container), children)]
 }

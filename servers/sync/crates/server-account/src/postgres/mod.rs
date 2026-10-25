@@ -2,6 +2,7 @@
 
 use std::sync::PoisonError;
 mod crypto;
+mod deletion;
 mod outbox;
 mod public_registration;
 mod rate_limit;
@@ -512,8 +513,8 @@ impl PostgresAccountService {
         self.resend_verification_impl(email).await
     }
 
-    pub async fn verify_email(&self, email: &str, pin: &str) -> Result<IssuedSession, AuthError> {
-        self.verify_email_impl(email, pin).await
+    pub async fn verify_email(&self, email: &str, pin: &str, password: &str) -> Result<IssuedSession, AuthError> {
+        self.verify_email_impl(email, pin, password).await
     }
 
     pub async fn request_password_reset(&self, email: &str) -> Result<(), AuthError> {

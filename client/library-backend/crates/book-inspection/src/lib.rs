@@ -14,6 +14,10 @@ use std::time::Instant;
 
 pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn cached_regex(cache: &'static OnceLock<Result<Regex, String>>, pattern: &str) -> std::io::Result<&'static Regex> {
+    cache.get_or_init(|| Regex::new(pattern).map_err(|error| error.to_string())).as_ref().map_err(|error| std::io::Error::other(error.clone()))
+}
+
 mod book;
 pub use book::{AudiobookMetadata, InspectedBook, inspect_book_reader, inspect_book_reader_with_hash};
 pub mod evidence;

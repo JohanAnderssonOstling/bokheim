@@ -15,18 +15,18 @@ mod library_state;
 pub use enrichment::EnrichmentResult;
 
 pub use folder_management::{file_name_candidates, folder_name_candidates, numbered_file_name, numbered_folder_name, unique_file_name, unique_folder_name};
-pub use library_state::{portable_name_key, BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState};
+pub use library_state::{BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState, portable_name_key};
 
 use serde::{Deserialize, Serialize};
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use sync_common::ContentHash;
 pub use sync_common::VersionKey;
 use sync_common::{ConflictRank, DirId, FileName, OpaqueStateEntry, Publication, ReplicaId, ReplicaSeq, StateAddress, StatePayload, UnixMillis, Versioned};
 
 mod directory_projection;
 pub(crate) mod serde_enum;
-pub use directory_projection::{project_directories, DirectoryIntent, DirectoryProjection};
+pub use directory_projection::{DirectoryIntent, DirectoryProjection, project_directories};
 
 /// The complete, immutable facts admitted when a file is added to a library.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -51,6 +51,7 @@ pub enum LibraryStateEntry {
     ReadingPosition { content_hash: ContentHash, value: ReadingPositionState },
     Annotation { value: Annotation },
     BookAdd { content_hash: ContentHash, value: BookAddition },
+    ChapterReadStatus { content_hash: ContentHash, value: book_model::ChapterReadStatus },
 }
 
 /// A publication uses the same envelope whether its state is decoded or opaque.
@@ -88,7 +89,9 @@ impl LibraryStateEntry {
         match self {
             Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } | Self::BookLifecycle { value: BookLifecycleState::Purged, .. } | Self::Placement { present: false, .. } => None,
             Self::Annotation { value, .. } => (!value.deleted).then_some(value.content_hash),
-            Self::BookLifecycle { content_hash, .. } | Self::Placement { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::BookAdd { content_hash, .. } => Some(*content_hash),
+            Self::BookLifecycle { content_hash, .. } | Self::Placement { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::ChapterReadStatus { content_hash, .. } | Self::BookAdd { content_hash, .. } => {
+                Some(*content_hash)
+            }
         }
     }
 
@@ -104,7 +107,7 @@ impl LibraryStateEntry {
             Self::DirectoryName { dir_id, .. } | Self::DirectoryParent { dir_id, .. } | Self::DirectoryLifecycle { dir_id, .. } => (dir_id.to_string().into(), String::new()),
             Self::Placement { content_hash, dir_id, .. } => ((*content_hash).into(), dir_id.to_string()),
             Self::Annotation { value } => (value.id.clone().into(), String::new()),
-            Self::BookLifecycle { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::BookAdd { content_hash, .. } => ((*content_hash).into(), String::new()),
+            Self::BookLifecycle { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::ChapterReadStatus { content_hash, .. } | Self::BookAdd { content_hash, .. } => ((*content_hash).into(), String::new()),
         };
         StateAddress { kind: self.kind().to_owned(), entity_key, entity_subkey }
     }
@@ -114,7 +117,9 @@ impl LibraryStateEntry {
         match self {
             Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } => None,
             Self::Annotation { value, .. } => Some(value.content_hash),
-            Self::BookLifecycle { content_hash, .. } | Self::Placement { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::BookAdd { content_hash, .. } => Some(*content_hash),
+            Self::BookLifecycle { content_hash, .. } | Self::Placement { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::ChapterReadStatus { content_hash, .. } | Self::BookAdd { content_hash, .. } => {
+                Some(*content_hash)
+            }
         }
     }
 
@@ -331,5 +336,23 @@ mod tests {
         let encoded = sync_common::transport::encode(&complete).unwrap();
         let decoded: StatePublication = sync_common::transport::decode_byte_fields(&encoded, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
         assert_eq!(decoded, complete);
+    }
+
+    #[test]
+    fn chapter_completion_has_a_separate_register_and_preserves_reading_position_encoding() {
+        #[derive(Serialize)]
+        struct LegacyPosition {
+            location: book_model::ReadingPosition,
+            progress: f32,
+        }
+        let position = ReadingPositionState { location: book_model::ReadingPosition::audiobook_millis(1500), progress: 30.0 };
+        let legacy = LegacyPosition { location: position.location.clone(), progress: position.progress };
+        assert_eq!(sync_common::wire::encode(&position).unwrap(), sync_common::wire::encode(&legacy).unwrap());
+        let status = LibraryStateEntry::ChapterReadStatus { content_hash: ContentHash::from_bytes([7; 32]), value: book_model::ChapterReadStatus::default() };
+        let encoded = sync_common::wire::encode(&status).unwrap();
+        assert_eq!(sync_common::wire::decode::<LibraryStateEntry>(&encoded, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap(), status);
+        assert_eq!(status.address().kind, "chapter_read_status");
+        let key = status.address().entity_key;
+        assert_eq!(sync_common::StateKey::from_storage("chapter_read_status", key.as_bytes()).unwrap(), key);
     }
 }

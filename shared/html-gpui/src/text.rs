@@ -580,7 +580,9 @@ impl GpuiTextCache {
             if !single_font_size {
                 let boundaries = Arc::make_mut(&mut raw_cluster_boundaries);
                 boundaries[0] = true;
-                *boundaries.last_mut().expect("validated non-empty line") = true;
+                if let Some(last) = boundaries.last_mut() {
+                    *last = true;
+                }
             }
             let mut glyphs = Vec::new();
             let mut x_base = 0.0f32;
@@ -678,7 +680,8 @@ impl GpuiTextCache {
             (cached.glyphs.clone(), cached.caret_stops.clone())
         } else {
             let mut glyphs = cached.glyphs.to_vec();
-            let Some(caret_stops) = apply_line_placements(placement_request.expect("adjusted line request"), &cached.character_bytes, &cached.caret_stops, &mut glyphs) else { return Ok(None) };
+            let Some(request) = placement_request else { return Ok(None) };
+            let Some(caret_stops) = apply_line_placements(request, &cached.character_bytes, &cached.caret_stops, &mut glyphs) else { return Ok(None) };
             (Arc::from(glyphs), caret_stops)
         };
 
@@ -1075,8 +1078,12 @@ fn build_text_boundaries_with_offsets(text: &str, layout: &gpui::LineLayout, cha
 fn build_text_boundaries_from_clusters(text: &str, layout: &gpui::LineLayout, character_bytes: &[usize], byte_offset: usize, cluster_bytes: impl Iterator<Item = usize>) -> (Arc<[f32]>, Arc<[bool]>) {
     let mut caret_stops = vec![0.0; character_bytes.len()];
     let mut cluster_boundaries = vec![false; character_bytes.len()];
-    cluster_boundaries[0] = true;
-    *cluster_boundaries.last_mut().expect("non-empty boundary list") = true;
+    if let Some(first) = cluster_boundaries.first_mut() {
+        *first = true;
+    }
+    if let Some(last) = cluster_boundaries.last_mut() {
+        *last = true;
+    }
     let mut glyphs = layout.runs.iter().flat_map(|run| run.glyphs.iter()).peekable();
     // Preserve GPUI's first-match lookup even for the mixed-order fallback.
     let mut x_for_index = |index| {

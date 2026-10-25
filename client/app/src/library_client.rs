@@ -47,16 +47,16 @@ use library_backend::client::TransportResult;
 #[cfg(target_arch = "wasm32")]
 impl ClientTransport for Connection {
     fn request(&self, command: LibraryCommand) -> TransportResult<'_, client_runtime::wire::WorkerPayload> {
-        Box::pin(async move { self.app.transport.library_request(self.library_id, command).await.map_err(|error| error.to_string()) })
+        Box::pin(async move { self.app.transport.library_request(self.library_id, command).await })
     }
     fn updates(&self) -> TransportResult<'_, (library_backend::LibraryUpdates, bool)> {
-        Box::pin(async move { self.app.transport.library_updates_transport(self.library_id).await.map(|(updates, scanning)| (updates.into(), scanning)).map_err(|error| error.to_string()) })
+        Box::pin(async move { self.app.transport.library_updates_transport(self.library_id).await.map(|(updates, scanning)| (updates.into(), scanning)) })
     }
     fn subscribe_book(&self, content_hash: ContentHash) -> TransportResult<'_, (async_channel::Receiver<()>, ResolvedBookData)> {
-        Box::pin(async move { self.app.transport.book_subscription(self.library_id, content_hash).await.map_err(|error| error.to_string()) })
+        Box::pin(async move { self.app.transport.book_subscription(self.library_id, content_hash).await })
     }
     fn import_directory(&self, parent_id: DirId, directory: DirectoryImport, create_root: bool) -> TransportResult<'_, Vec<ImportFailure>> {
-        Box::pin(async move { self.app.transport.import_selected_directory(self.library_id, parent_id, directory, create_root).await.map_err(|error| error.to_string()) })
+        Box::pin(async move { self.app.transport.import_selected_directory(self.library_id, parent_id, directory, create_root).await })
     }
 }
 

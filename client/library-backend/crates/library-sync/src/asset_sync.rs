@@ -1,7 +1,7 @@
 //! One database-driven asset pass per library. Cursors advance before execution;
 //! failed work stays durable and cannot hold later pages behind it.
 use super::{error::SyncResult, library_sync::LibrarySync};
-use asset_transfer::{transfer::AssetExecutor, TransferError};
+use asset_transfer::{TransferError, transfer::AssetExecutor};
 use library_model::TransferJobKind;
 use library_runtime::events::LibraryEvent;
 use sync_common::ContentHash;
@@ -16,7 +16,7 @@ where
     F: FnMut(ContentHash) -> Fut,
     Fut: std::future::Future<Output = Result<(), TransferError>>,
 {
-    use futures_util::{stream, StreamExt};
+    use futures_util::{StreamExt, stream};
     // Poll on the library thread; no connection or transaction crosses threads.
     let mut downloads = stream::iter(hashes.into_iter().map(download)).buffer_unordered(4);
     let mut failed = false;
@@ -33,7 +33,7 @@ impl LibrarySync {
         match result {
             Err(TransferError::AuthenticationRequired) => Err(TransferError::AuthenticationRequired),
             Err(error) => {
-                log::warn!("{kind:?} will retry on the next asset pass: {error}");
+                log::warn!("{kind:?} failed: {error}");
                 *failed = true;
                 Ok(())
             }
@@ -72,11 +72,7 @@ impl LibrarySync {
             executor.flush_availability_changes();
             result?;
         }
-        if failed {
-            Err(TransferError::retryable("asset pass has pending failures"))
-        } else {
-            Ok(())
-        }
+        if failed { Err(TransferError::retryable("asset pass has pending failures")) } else { Ok(()) }
     }
 
     async fn asset_phase(&self, executor: &AssetExecutor, kind: TransferJobKind, failed: &mut bool) -> Result<(), TransferError> {

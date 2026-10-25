@@ -5,6 +5,13 @@ Libra 2 connected as USB storage. The verified `tar.gz` package is embedded in
 the Windows executable and Linux AppImage at build time; users do not select or
 download a second payload.
 
+The Linux AppImage uses the same glibc 2.17 release SDK and ELF checks as the
+desktop app. Build it with `python3 scripts/linux/toolchain.py -- cargo build
+--release --manifest-path apps/kobo-installer/Cargo.toml`, then run
+`apps/kobo-installer/linux/build-appimage.sh`. See
+[`../desktop-gpui/linux/README.md`](../desktop-gpui/linux/README.md) for SDK and
+AppImage tool requirements.
+
 The installer:
 
 - attempts to mount an unmounted removable USB volume labeled `KOBOeReader`
@@ -17,6 +24,20 @@ The installer:
   after extraction;
 - queues the pinned NickelMenu v0.6.0 build with Bokheim direct-launch support; and
 - attempts to safely eject the Kobo when installation finishes.
+
+With a package supporting on-device updates, open **Settings → Kobo → Check
+for updates** on the reader. Bokheim downloads the latest Kobo release over
+Wi-Fi, verifies its published size and SHA-256 digest, and stages its files.
+**Restart and install** closes the application before the launcher replaces
+the program and starts it again. The packaged version must match the release
+tag. Books, settings, databases, and optional SSH tools are excluded. This
+flow keeps the existing NickelMenu installation and Kobo firmware.
+
+A complete program-file backup is saved before replacement. If installation
+is interrupted, the firmware shell restores it before the next launch. This
+recovers installation failures; it does not roll back database migrations
+after a successfully installed release. Older launchers need one USB install
+of a package with on-device update support.
 
 Tapping **Bokheim** in Kobo's bottom navigation opens Bokheim immediately.
 The button uses Bokheim's logo, with gray and black versions for its normal
@@ -132,7 +153,7 @@ The Kobo package itself is built on a maintainer machine, not in CI. It uses
 the pinned Bootlin ARMv7 glibc toolchain and bundles its runtime alongside
 PDFium so the reader can load PDFium without replacing firmware libraries.
 The built package is committed to the repository at
-`package/Bokheim-Kobo-Libra2-armv7.tar.gz`, and the `Kobo release` workflow
+`package/Bokheim-Kobo-armv7.tar.gz`, and the `Kobo release` workflow
 embeds whatever is committed there.
 
 Whenever the Kobo application changes, rebuild and commit the package before
@@ -140,7 +161,7 @@ running the workflow:
 
 ```sh
 apps/desktop-gpui/scripts/refresh-kobo-package.sh
-git add apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+git add apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz
 git commit -m "Refresh the committed Kobo package"
 ```
 

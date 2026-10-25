@@ -82,29 +82,15 @@ impl AssetApplication {
         if owned { Ok(()) } else { Err(AssetError::Forbidden) }
     }
 
-    async fn has_book_entitlement(&self, user_id: &str, hash: &ContentHash) -> Result<bool, AssetError> {
-        sqlx::query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM user_blob_charge
-                 WHERE user_id=$1 AND content_hash=$2
-                 UNION ALL
-                 SELECT 1 FROM user_blob_reference
-                 WHERE user_id=$1 AND content_hash=$2 AND reference_count > 0
-             )",
-        )
-        .bind(user_id)
-        .bind(hash.as_bytes().as_slice())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| AssetError::Storage(error.to_string()))
-    }
-
-    async fn claim_existing_book(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash) -> Result<Option<u64>, AssetError> {
-        let Some(size) = self.store.size(user_id, AssetKind::Book, hash).await? else {
-            return Ok(None);
-        };
-        assets::claim_existing_book(&self.pool, user_id, library_id, hash, size).await?;
-        Ok(Some(size))
+    /// A book is readable only once this account has uploaded its bytes. A
+    /// synchronized lifecycle reference is client-declared and grants nothing.
+    async fn has_book_charge(&self, user_id: &str, hash: &ContentHash) -> Result<bool, AssetError> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_blob_charge WHERE user_id=$1 AND content_hash=$2)")
+            .bind(user_id)
+            .bind(hash.as_bytes().as_slice())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| AssetError::Storage(error.to_string()))
     }
 
     pub async fn negotiate_books(&self, user_id: &str, library_id: &sync_common::LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, AssetError> {
@@ -142,13 +128,8 @@ impl AssetApplication {
     pub async fn open_from(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
         self.require_library(user_id, library_id).await?;
         if kind == AssetKind::Book {
-            if !self.has_book_entitlement(user_id, hash).await? {
+            if !self.has_book_charge(user_id, hash).await? {
                 return Ok(None);
-            }
-            match self.claim_existing_book(user_id, library_id, hash).await {
-                Ok(Some(_)) => {}
-                Ok(None) | Err(AssetError::Forbidden) => return Ok(None),
-                Err(error) => return Err(error),
             }
         } else {
             let Some(size) = self.store.size(user_id, kind, hash).await? else {

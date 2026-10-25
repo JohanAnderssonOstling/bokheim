@@ -7,6 +7,7 @@ use sync_common::api::assets::{
     ThumbnailPresenceResponse,
 };
 use sync_common::{ContentHash, LibraryId};
+use url::{ParseError, Url};
 
 /// HTTP and wire-format failures during asset transfers.
 ///
@@ -19,6 +20,7 @@ pub enum AssetResponseError {
     Retryable(reqwest::Error),
     Rejected(reqwest::Error),
     Wire(sync_common::transport::WireError),
+    Url(ParseError),
 }
 
 impl fmt::Display for AssetResponseError {
@@ -28,6 +30,7 @@ impl fmt::Display for AssetResponseError {
             Self::StorageQuotaExceeded => formatter.write_str("book storage quota exceeded"),
             Self::Retryable(error) | Self::Rejected(error) => error.fmt(formatter),
             Self::Wire(error) => error.fmt(formatter),
+            Self::Url(error) => error.fmt(formatter),
         }
     }
 }
@@ -37,6 +40,7 @@ impl Error for AssetResponseError {
         match self {
             Self::Retryable(error) | Self::Rejected(error) => Some(error),
             Self::Wire(error) => Some(error),
+            Self::Url(error) => Some(error),
             Self::AuthenticationRequired | Self::StorageQuotaExceeded => None,
         }
     }
@@ -74,18 +78,18 @@ pub fn classify_asset_status(status: u16) -> AssetStatus {
     }
 }
 
-pub fn blob_endpoint(server_url: &reqwest::Url, library_id: &LibraryId, content_hash: &ContentHash) -> reqwest::Url {
-    server_url.join(&format!("api/libraries/{library_id}/blobs/{content_hash}")).expect("a synchronization server origin accepts relative API paths")
+pub fn blob_endpoint(server_url: &Url, library_id: &LibraryId, content_hash: &ContentHash) -> Result<Url, ParseError> {
+    server_url.join(&format!("api/libraries/{library_id}/blobs/{content_hash}"))
 }
 
-pub fn thumbnail_batch_endpoint(server_url: &reqwest::Url, library_id: &LibraryId) -> reqwest::Url {
-    server_url.join(&format!("api/libraries/{library_id}/thumbnail-batch")).expect("a synchronization server origin accepts relative API paths")
+pub fn thumbnail_batch_endpoint(server_url: &Url, library_id: &LibraryId) -> Result<Url, ParseError> {
+    server_url.join(&format!("api/libraries/{library_id}/thumbnail-batch"))
 }
-pub fn thumbnail_presence_endpoint(server_url: &reqwest::Url, library_id: &LibraryId) -> reqwest::Url {
-    server_url.join(&format!("api/libraries/{library_id}/thumbnails/presence")).expect("valid endpoint")
+pub fn thumbnail_presence_endpoint(server_url: &Url, library_id: &LibraryId) -> Result<Url, ParseError> {
+    server_url.join(&format!("api/libraries/{library_id}/thumbnails/presence"))
 }
-pub fn thumbnail_endpoint(server_url: &reqwest::Url, library_id: &LibraryId, content_hash: &ContentHash) -> reqwest::Url {
-    server_url.join(&format!("api/libraries/{library_id}/thumbnails/{content_hash}")).expect("valid endpoint")
+pub fn thumbnail_endpoint(server_url: &Url, library_id: &LibraryId, content_hash: &ContentHash) -> Result<Url, ParseError> {
+    server_url.join(&format!("api/libraries/{library_id}/thumbnails/{content_hash}"))
 }
 
 pub async fn thumbnail_presence(client: &reqwest::Client, credentials: &SyncCredentials, library_id: &LibraryId, content_hashes: Vec<ContentHash>) -> Result<ThumbnailPresenceResponse, SyncRequestError> {
@@ -101,13 +105,13 @@ pub async fn negotiate_blobs(client: &reqwest::Client, credentials: &SyncCredent
 
 /// Upload bytes addressed and verified by their content hash.
 pub async fn upload_book_stream(
-    client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, identity: &ContentHash, content_length: u64, body: reqwest::Body,
+    client: &reqwest::Client, server_url: &Url, access_token: &str, library_id: &LibraryId, identity: &ContentHash, content_length: u64, body: reqwest::Body,
 ) -> Result<(), AssetResponseError> {
     let mut trace = PerformanceTrace::new("book_http_upload", "send_body_wait_response");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} bytes={content_length}", trace.id(), library_id);
     let upload_started = web_time::Instant::now();
     let response = client
-        .put(blob_endpoint(server_url, library_id, identity))
+        .put(blob_endpoint(server_url, library_id, identity).map_err(AssetResponseError::Url)?)
         .bearer_auth(access_token)
         .header("x-bokheim-trace-id", trace.id())
         .header(reqwest::header::CONTENT_LENGTH, content_length)
@@ -125,11 +129,12 @@ pub async fn upload_book_stream(
     Ok(())
 }
 
-pub async fn upload_thumbnail_batch(client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, thumbnails: Vec<ThumbnailBatchEntry>) -> Result<(), AssetResponseError> {
+pub async fn upload_thumbnail_batch(client: &reqwest::Client, server_url: &Url, access_token: &str, library_id: &LibraryId, thumbnails: Vec<ThumbnailBatchEntry>) -> Result<(), AssetResponseError> {
     let mut trace = PerformanceTrace::new("thumbnail_http_upload", "encode");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} thumbnails={}", trace.id(), library_id, thumbnails.len());
     let request =
-        encoded_request(client.put(thumbnail_batch_endpoint(server_url, library_id)).header("x-bokheim-trace-id", trace.id()).bearer_auth(access_token), &ThumbnailBatchUploadRequest { thumbnails }).map_err(AssetResponseError::Wire)?;
+        encoded_request(client.put(thumbnail_batch_endpoint(server_url, library_id).map_err(AssetResponseError::Url)?).header("x-bokheim-trace-id", trace.id()).bearer_auth(access_token), &ThumbnailBatchUploadRequest { thumbnails })
+            .map_err(AssetResponseError::Wire)?;
     trace.phase("send_body_wait_response");
     let response = request.send().await.map_err(AssetResponseError::Retryable)?;
     log::debug!(target: "sync_performance", "trace_id={} http_status={}", trace.id(), response.status().as_u16());
@@ -139,8 +144,9 @@ pub async fn upload_thumbnail_batch(client: &reqwest::Client, server_url: &reqwe
     Ok(())
 }
 
-pub async fn download_thumbnail_batch(client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, content_hashes: Vec<ContentHash>) -> Result<ThumbnailBatchDownloadResponse, AssetResponseError> {
-    let request = encoded_request(client.post(thumbnail_batch_endpoint(server_url, library_id)).bearer_auth(access_token), &ThumbnailBatchDownloadRequest { content_hashes }).map_err(AssetResponseError::Wire)?;
+pub async fn download_thumbnail_batch(client: &reqwest::Client, server_url: &Url, access_token: &str, library_id: &LibraryId, content_hashes: Vec<ContentHash>) -> Result<ThumbnailBatchDownloadResponse, AssetResponseError> {
+    let request =
+        encoded_request(client.post(thumbnail_batch_endpoint(server_url, library_id).map_err(AssetResponseError::Url)?).bearer_auth(access_token), &ThumbnailBatchDownloadRequest { content_hashes }).map_err(AssetResponseError::Wire)?;
     let response = request.send().await.map_err(AssetResponseError::Retryable)?;
     let response = validate_streaming_asset_response(response)?;
     let bytes = crate::body::read(response, sync_common::api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).await.map_err(AssetResponseError::from)?;
@@ -154,6 +160,39 @@ mod tests {
     use futures_util::StreamExt;
     use std::{convert::Infallible, time::Duration};
     use sync_common::{api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES, transport::WireError};
+
+    #[test]
+    fn asset_endpoints_reject_opaque_origins_and_preserve_server_prefixes() {
+        let library = LibraryId::from_u128(1);
+        let hash = ContentHash::from_bytes([0xab; 32]);
+        let invalid = Url::parse("data:text/plain,invalid-origin").unwrap();
+        for endpoint in [blob_endpoint(&invalid, &library, &hash), thumbnail_batch_endpoint(&invalid, &library), thumbnail_presence_endpoint(&invalid, &library), thumbnail_endpoint(&invalid, &library, &hash)] {
+            assert_eq!(endpoint.unwrap_err(), ParseError::RelativeUrlWithCannotBeABaseBase);
+        }
+        let origin = Url::parse("https://example.com/reader/").unwrap();
+        for (endpoint, path) in [
+            (blob_endpoint(&origin, &library, &hash), format!("blobs/{hash}")),
+            (thumbnail_batch_endpoint(&origin, &library), "thumbnail-batch".into()),
+            (thumbnail_presence_endpoint(&origin, &library), "thumbnails/presence".into()),
+            (thumbnail_endpoint(&origin, &library, &hash), format!("thumbnails/{hash}")),
+        ] {
+            assert_eq!(endpoint.unwrap().as_str(), format!("https://example.com/reader/api/libraries/{library}/{path}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn asset_requests_return_url_errors_before_sending() {
+        let client = reqwest::Client::new();
+        let origin = Url::parse("data:text/plain,invalid-origin").unwrap();
+        let library = LibraryId::from_u128(1);
+        let hash = ContentHash::from_bytes([0xab; 32]);
+        let upload = upload_book_stream(&client, &origin, "test-token", &library, &hash, 1, reqwest::Body::from("x")).await;
+        assert!(matches!(upload, Err(AssetResponseError::Url(_))));
+        let upload = upload_thumbnail_batch(&client, &origin, "test-token", &library, Vec::new()).await;
+        assert!(matches!(upload, Err(AssetResponseError::Url(_))));
+        let download = download_thumbnail_batch(&client, &origin, "test-token", &library, Vec::new()).await;
+        assert!(matches!(download, Err(AssetResponseError::Url(_))));
+    }
 
     #[tokio::test]
     async fn thumbnail_requests_preserve_methods_headers_and_payloads() {

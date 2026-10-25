@@ -52,7 +52,15 @@ impl fmt::Display for AccountSessionError {
     }
 }
 
-impl std::error::Error for AccountSessionError {}
+impl std::error::Error for AccountSessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Authentication(error) => Some(error),
+            Self::Persistence(error) => Some(error),
+            Self::Poisoned | Self::Changed => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AccountSession<P: SessionPersistence> {
@@ -115,7 +123,7 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     pub fn require(&self) -> Result<Session, AccountSessionError> {
-        self.current()?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("not signed in".to_owned())))
+        self.current()?.ok_or(AccountSessionError::Authentication(AuthError::SignInRequired("not signed in")))
     }
 
     pub fn set(&self, session: Session) -> Result<(), AccountSessionError> {
@@ -127,6 +135,18 @@ impl<P: SessionPersistence> AccountSession<P> {
             let previous = state.session.clone();
             this.replace(state, None)?;
             Ok(previous)
+        })
+    }
+
+    /// A completed deletion must not clear a different account signed in
+    /// while the server request was in flight.
+    pub fn clear_user(&self, user_id: &str) -> Result<(), AccountSessionError> {
+        let user_id = user_id.to_owned();
+        self.with_storage(move |this, state| {
+            if state.session.as_ref().is_some_and(|session| session.user_id() == user_id) {
+                this.replace(state, None)?;
+            }
+            Ok(())
         })
     }
 
@@ -205,7 +225,7 @@ impl<P: SessionPersistence> AccountSession<P> {
             match result {
                 Ok(session) => this.replace(state, session)?,
                 Err(error) => {
-                    if error.is_unauthorized() || matches!(error, AuthError::InvalidData(_) | AuthError::Wire(_)) {
+                    if error.is_unauthorized() || matches!(error, AuthError::InvalidData(_) | AuthError::SignInRequired(_) | AuthError::Wire(_)) {
                         this.replace(state, None)?;
                     }
                     return Err(AccountSessionError::Authentication(error));
@@ -216,11 +236,11 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     pub async fn request<T>(&self, mut request: impl for<'a> FnMut(&'a Session) -> SessionFuture<'a, Result<T, AuthError>>) -> Result<T, AccountSessionError> {
-        let session = self.refresh_if_needed().await?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("not signed in".to_owned())))?;
+        let session = self.refresh_if_needed().await?.ok_or(AccountSessionError::Authentication(AuthError::SignInRequired("not signed in")))?;
         match request(&session).await {
             Ok(value) => Ok(value),
             Err(error) if error.is_unauthorized() => {
-                let refreshed = self.refresh_after_unauthorized(session.token()).await?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("authentication expired; sign in again".to_owned())))?;
+                let refreshed = self.refresh_after_unauthorized(session.token()).await?.ok_or(AccountSessionError::Authentication(AuthError::SignInRequired("authentication expired")))?;
                 request(&refreshed).await.map_err(AccountSessionError::Authentication)
             }
             Err(error) => Err(AccountSessionError::Authentication(error)),
@@ -264,6 +284,20 @@ mod tests {
     fn session(token: char) -> Session {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
         Session::try_new_with_tokens("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), token.to_string().repeat(43), Some(now + 120), Some("r".repeat(43)), Some(now + 3600)).unwrap()
+    }
+
+    #[test]
+    fn completed_deletion_clears_only_the_deleted_users_credentials() {
+        let persistence = MemoryPersistence::default();
+        let account = AccountSession::load(persistence.clone(), "https://example.com".parse().unwrap()).unwrap();
+        account.set(session('a')).unwrap();
+        account.clear_user("previous-user").unwrap();
+        assert!(account.current().unwrap().is_some(), "a newer account must stay signed in");
+        assert!(persistence.load_account_session().unwrap().is_some());
+        account.clear_user("user").unwrap();
+        assert!(account.credentials_session().is_none());
+        assert!(persistence.load_account_session().unwrap().is_none());
+        account.clear_user("user").unwrap();
     }
 
     #[tokio::test]

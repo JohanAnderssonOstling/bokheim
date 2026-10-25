@@ -523,8 +523,26 @@ impl Render for AudiobookDock {
                 gpui::deferred(page_sheet(super::speed_menu(rate).sheet(|rate| cx.listener(move |dock, _, _, cx| dock.set_rate(rate, cx)), cx.listener(|dock, _, _, cx| dock.toggle_speed_menu(cx)), theme), window)).with_priority(2)
             });
             let chapters_sheet = player.book.as_ref().filter(|_| self.chapters_menu_open).map(|book| {
-                let menu = super::chapters_menu(&book.chapters, active_chapter);
-                gpui::deferred(page_sheet(menu.sheet(|index| cx.listener(move |dock, _, _, cx| dock.choose_chapter(index, cx)), cx.listener(|dock, _, _, cx| dock.toggle_chapters_menu(cx)), theme), window)).with_priority(2)
+                let menu = super::chapters_menu(&book.chapters, active_chapter, &player.read_status);
+                gpui::deferred(page_sheet(
+                    menu.sheet(
+                        |index| {
+                            cx.listener(move |dock, _, _, cx| match index {
+                                super::ChapterChoice::Open(index) => dock.choose_chapter(index, cx),
+                                super::ChapterChoice::Reset(index) => dock.player.update(cx, |player, cx| {
+                                    if let Some(target) = player.book.as_ref().and_then(|book| book.chapters.get(index)).map(|chapter| super::audiobook_toc_target(chapter.start_ms)) {
+                                        player.reset_chapter_read_status_at(target, cx);
+                                    }
+                                }),
+                                super::ChapterChoice::ResetAll => dock.player.update(cx, |player, cx| player.reset_chapter_read_status(cx)),
+                            })
+                        },
+                        cx.listener(|dock, _, _, cx| dock.toggle_chapters_menu(cx)),
+                        theme,
+                    ),
+                    window,
+                ))
+                .with_priority(2)
             });
 
             return bar

@@ -13,7 +13,7 @@ watcher = ["scanner", "dep:notify"]
 kobo = ["client-platform-kobo/device"]
 
 [dependencies]
-client-runtime = { path = "../client-runtime" }
+client-runtime = { path = "../client-runtime", features = ["http"] }
 book-model = { path = "../../shared/book-model" }
 metadata-contract = { path = "../../shared/metadata-contract" }
 library-files = { path = "crates/library-files" }

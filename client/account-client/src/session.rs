@@ -12,6 +12,8 @@ pub enum AuthError {
     Wire(WireError),
     Url(ParseError),
     InvalidData(String),
+    /// No usable session: none is stored, or it can no longer be refreshed.
+    SignInRequired(&'static str),
 }
 
 impl fmt::Display for AuthError {
@@ -21,6 +23,7 @@ impl fmt::Display for AuthError {
             Self::Wire(error) => error.fmt(formatter),
             Self::Url(error) => error.fmt(formatter),
             Self::InvalidData(message) => write!(formatter, "invalid authentication data: {message}"),
+            Self::SignInRequired(reason) => write!(formatter, "sign-in required: {reason}"),
         }
     }
 }
@@ -31,7 +34,7 @@ impl std::error::Error for AuthError {
             Self::Http(error) => Some(error),
             Self::Wire(error) => Some(error),
             Self::Url(error) => Some(error),
-            Self::InvalidData(_) => None,
+            Self::InvalidData(_) | Self::SignInRequired(_) => None,
         }
     }
 }

@@ -60,7 +60,10 @@ android {
         versionCode = androidVersionCode
         versionName = desktopVersion
         testInstrumentationRunner = "se.bokheim.reader.gpui.UpdateMetadataInstrumentation"
+        buildConfigField("boolean", "PLAY_STORE", "false")
     }
+
+    buildFeatures.buildConfig = true
 
     testBuildType = "release"
 
@@ -92,7 +95,18 @@ android {
                 else -> null
             }
         }
+        // Keep the existing debug/release APK tasks and their distribution
+        // behavior. Play shares the optimized native build, but has its own
+        // Java policy, manifest and bundle output.
+        create("play") {
+            initWith(getByName("release"))
+            matchingFallbacks += "release"
+            buildConfigField("boolean", "PLAY_STORE", "true")
+        }
     }
+
+    sourceSets.getByName("play").assets.srcDir(layout.buildDirectory.dir("taxonomyAssets/release"))
+    sourceSets.getByName("play").jniLibs.srcDir(stagedRustReleaseLibraries)
 }
 
 val requireReleaseSigning by tasks.registering {
@@ -102,6 +116,15 @@ val requireReleaseSigning by tasks.registering {
         }
         if (!localSigning && productionSigning && !file(releaseKeyStore!!).isFile) {
             throw GradleException("The configured Android release keystore does not exist")
+        }
+    }
+}
+
+val requirePlayBundleSigning by tasks.registering {
+    dependsOn(requireReleaseSigning)
+    doLast {
+        if (localSigning) {
+            throw GradleException("Google Play bundles require a release/upload key. Use assemblePlay with -Pbokheim.localSigning=true only for local device testing.")
         }
     }
 }
@@ -233,16 +256,17 @@ val stageTaxonomyRelease by tasks.registering(Copy::class) {
 tasks.configureEach {
     if (name.contains("Lint") || name.startsWith("lint")) {
         if (name.contains("Debug")) dependsOn(stageTaxonomyDebug)
-        if (name.contains("Release")) dependsOn(stageTaxonomyRelease)
+        if (name.contains("Release") || name.contains("Play")) dependsOn(stageTaxonomyRelease)
     }
     if (name == "mergeDebugAssets") dependsOn(stageTaxonomyDebug)
-    if (name == "mergeReleaseAssets") dependsOn(stageTaxonomyRelease)
-    if (name == "mergeDebugAssets" || name == "mergeReleaseAssets") dependsOn(prepareSpeech)
-    if (name == "packageRelease" || name == "signReleaseBundle") dependsOn(requireReleaseSigning)
+    if (name == "mergeReleaseAssets" || name == "mergePlayAssets") dependsOn(stageTaxonomyRelease)
+    if (name == "mergeDebugAssets" || name == "mergeReleaseAssets" || name == "mergePlayAssets") dependsOn(prepareSpeech)
+    if (name == "packageRelease" || name == "signReleaseBundle" || name == "packagePlay" || name == "signPlayBundle") dependsOn(requireReleaseSigning)
+    if (name == "signPlayBundle") dependsOn(requirePlayBundleSigning)
     if (name == "mergeDebugJniLibFolders" || name == "mergeDebugNativeLibs") {
         dependsOn(stageRustDebug)
     }
-    if (name == "mergeReleaseJniLibFolders" || name == "mergeReleaseNativeLibs") {
+    if (name == "mergeReleaseJniLibFolders" || name == "mergeReleaseNativeLibs" || name == "mergePlayJniLibFolders" || name == "mergePlayNativeLibs") {
         dependsOn(stageRustRelease)
     }
 }

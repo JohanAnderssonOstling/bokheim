@@ -34,6 +34,23 @@ export function compatibilityMessage(userAgent) {
     return 'Update your browser to its latest version.';
 }
 
+// Detect standardized exception handling (exnref), rather than the older
+// try/catch proposal. Module bytes are from wasm-feature-detect's
+// exceptions-final probe (Copyright 2023 Google Inc., Apache-2.0):
+// https://www.apache.org/licenses/LICENSE-2.0
+// https://github.com/GoogleChromeLabs/wasm-feature-detect/blob/main/src/detectors/exceptions-final/index.js
+function supportsUnwinding(wasm) {
+    if (typeof wasm?.validate !== 'function' || !wasm.JSTag) return false;
+    try {
+        return wasm.validate(new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0,
+            10, 16, 1, 14, 0, 2, 105, 31, 64, 1, 3, 0, 0, 11, 0, 11, 26, 11,
+        ]));
+    } catch {
+        return false;
+    }
+}
+
 export function requiredCapabilities(env = globalThis) {
     const issues = [];
     const browser = browserVersion(env.navigator?.userAgent || '');
@@ -45,6 +62,7 @@ export function requiredCapabilities(env = globalThis) {
     if (!env.isSecureContext) issues.push('Open Bokheim over HTTPS (or localhost for local testing).');
     if (!env.crossOriginIsolated) issues.push('This site is missing the cross-origin isolation required by Bokheim. The site administrator needs to check its COOP and COEP headers.');
     if (!env.WebAssembly || typeof env.SharedArrayBuffer !== 'function') issues.push('This browser cannot provide the WebAssembly shared memory required by Bokheim.');
+    if (!supportsUnwinding(env.WebAssembly)) issues.push('This browser lacks the WebAssembly exception handling required by Bokheim. Update your browser.');
     if (typeof env.Atomics?.waitAsync !== 'function') issues.push('This browser cannot wait asynchronously for shared-memory work. Update your browser.');
     if (typeof env.Worker !== 'function') issues.push('This browser does not support background workers.');
     if (typeof env.SharedWorker !== 'function') issues.push('This browser does not support shared background workers. On Android, Chrome 148 or newer is required.');

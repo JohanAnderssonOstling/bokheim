@@ -91,6 +91,10 @@ WHERE book_download IS NOT NULL
   AND (book_download_at > :after_at OR (book_download_at = :after_at AND content_hash > COALESCE(:after_hash,X'')))
 ORDER BY book_download_at, content_hash LIMIT :limit;
 
+-- name: book_download_origin?
+-- param: content_hash: &ContentHash
+SELECT book_download FROM book_transfer WHERE content_hash=:content_hash AND book_download IS NOT NULL;
+
 -- Durable download state in one row: bytes marked downloaded anywhere, and
 -- a live placement with a queued request. Single-row existence checks only.
 -- name: transfer_download_state?

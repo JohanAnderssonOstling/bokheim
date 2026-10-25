@@ -108,7 +108,13 @@ impl UnifiedTaxonomy {
 }
 
 pub(super) fn current() -> Arc<UnifiedTaxonomyRuntime> {
-    RUNTIME.get_or_init(|| RwLock::new(default_runtime())).read().expect("unified taxonomy runtime lock must not be poisoned").clone()
+    let runtime = RUNTIME.get_or_init(|| RwLock::new(default_runtime()));
+    // The protected value is an immutable Arc snapshot. A failed replacement
+    // leaves a valid snapshot available for subsequent readers.
+    runtime.read().unwrap_or_else(|error| {
+        runtime.clear_poison();
+        error.into_inner()
+    }).clone()
 }
 
 pub fn install_unified_taxonomy_concepts(concepts: Vec<UnifiedConceptDefinition>) -> Result<(), String> {
@@ -137,6 +143,14 @@ pub fn unified_subject_paths(system_id: &str, code: &str) -> Vec<String> {
         return concept_for_path(&runtime, code).into_iter().flat_map(|id| runtime.routes.paths_for_concept(id)).collect();
     }
     matching_concepts(&runtime, system_id, code).into_iter().flat_map(|id| runtime.routes.paths_for_concept(id)).collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+pub(super) fn resolved_subject_concepts(system_id: &str, code: &str) -> BTreeSet<i64> {
+    let runtime = current();
+    if system_id == crate::UNIFIED_SYSTEM_ID {
+        return concept_for_path(&runtime, code).into_iter().collect();
+    }
+    matching_concepts(&runtime, system_id, code)
 }
 
 /// Remove only assigned ancestors of other assignments. Sibling branches and

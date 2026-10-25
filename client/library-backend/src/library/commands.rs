@@ -8,9 +8,10 @@ use crate::executor::BackendOutput;
 use crate::library::RemoteFile;
 use crate::{BackendError, ContentHash, DirId};
 pub(crate) use client_runtime::reply::Reply;
-use library_model::{BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
+use library_model::{BrowseLocation, BrowsePageRequest, LibraryBrowseQuery, LibraryUpdate};
 
 pub(crate) use super::LibrarySession;
+use super::events::LibraryEvent;
 use super::handle::LibraryActor;
 pub(crate) use super::pending::OperationKind;
 pub(crate) use futures_util::future::LocalBoxFuture;
@@ -202,6 +203,10 @@ pub enum ReadyCommand {
     },
     PdfReadingPosition {
         content_hash: ContentHash,
+    },
+    ResetChapterReadStatus {
+        content_hash: ContentHash,
+        target: Option<String>,
     },
     UpdateReadingPosition {
         content_hash: ContentHash,
@@ -409,6 +414,13 @@ fn execute_ready(actor: &mut LibraryActor, command: ReadyCommand) -> Result<Repl
         ReadyCommand::BookFormat { content_hash } => Reply::new(library.db.book_format(&content_hash).map_err(BackendError::operation)?),
         ReadyCommand::ReadingPosition { content_hash } => Reply::new(library.db.reading_position(&content_hash).map_err(BackendError::operation)?),
         ReadyCommand::PdfReadingPosition { content_hash } => Reply::new(library.db.pdf_reading_position(&content_hash).map_err(BackendError::operation)?),
+        ReadyCommand::ResetChapterReadStatus { content_hash, target } => {
+            if library.db.reset_chapter_read_status_at(&content_hash, target.as_deref()).map_err(BackendError::operation)? {
+                actor.coordination.reading_position_changed(content_hash, &library.events);
+                library.emit(LibraryEvent::ContentsChanged);
+            }
+            Reply::new(library.db.chapter_read_status(&content_hash).map_err(BackendError::operation)?)
+        }
         // `entry` is the navigation entry the reader resolved the position to. It
         // travels with the position because that is when it changes, and it is
         // stored locally rather than synchronized: any device can recompute it
@@ -416,6 +428,8 @@ fn execute_ready(actor: &mut LibraryActor, command: ReadyCommand) -> Result<Repl
         ReadyCommand::UpdateReadingPosition { content_hash, position, progress, entry } => {
             if library.db.update_reading_position(&content_hash, &position, progress, entry.as_deref()).map_err(BackendError::operation)? {
                 actor.coordination.reading_position_changed(content_hash, &library.events);
+                // Shelf membership, recency and progress change locally, before sync.
+                library.events.publish_update(LibraryUpdate::Contents);
             }
             Reply::new(())
         }

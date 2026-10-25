@@ -72,9 +72,12 @@ async fn exercise(magnet: bool) {
         TorrentInput::File(bytes.to_vec().into())
     };
     assert_eq!(library.add_torrent(input).await.unwrap(), hash);
+    let policy = TransferPolicy::default();
+    policy.set_network_cost(transfers::NetworkCost::Metered);
+    assert!(library.torrents.next_check(library, &policy).unwrap().is_some(), "explicit torrents keep progressing on metered connections");
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            library.torrents.pass(library).await.unwrap();
+            library.torrents.pass_with_policy(library, &policy).await.unwrap();
             if library.db.torrents().unwrap()[0].imported {
                 break;
             }

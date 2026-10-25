@@ -34,6 +34,7 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "js"] }
 web-time = "1"
+unicode-normalization.workspace = true
 pdf-reader-core = { path = "../../shared/pdf-reader-core" }
 pdf-view-gpui = { path = "crates/pdf/pdf-view" }
 

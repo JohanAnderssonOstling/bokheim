@@ -41,11 +41,13 @@ pub(super) fn chapters(input: &str, tracks: &[AudiobookTrack]) -> Result<Vec<Aud
                 if file.is_none() || !rest.split_whitespace().nth(1).is_some_and(|kind| kind.eq_ignore_ascii_case("AUDIO")) { return Err("CUE track is not audio".into()); }
                 current = Some((None, None));
             }
-            "TITLE" if current.is_some() => {
+            "TITLE" => {
+                let Some((current_title, _)) = current.as_mut() else { continue };
                 let title = if rest.starts_with('"') { argument(rest).ok_or("CUE TITLE is empty")? } else { rest };
-                current.as_mut().unwrap().0 = Some(title.to_owned());
+                *current_title = Some(title.to_owned());
             }
-            "INDEX" if current.is_some() => {
+            "INDEX" => {
+                let Some((_, current_offset)) = current.as_mut() else { continue };
                 let mut fields = rest.split_whitespace();
                 if fields.next() == Some("01") {
                     // mm:ss:ff, with 75 frames to the second.
@@ -53,7 +55,7 @@ pub(super) fn chapters(input: &str, tracks: &[AudiobookTrack]) -> Result<Vec<Aud
                     let (Some(Some(minutes)), Some(Some(seconds)), Some(Some(frames)), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return Err("invalid CUE INDEX 01".into()) };
                     if seconds >= 60 || frames >= 75 { return Err("invalid CUE INDEX 01".into()); }
                     let offset_ms = minutes.checked_mul(60).and_then(|value| value.checked_add(seconds)).and_then(|value| value.checked_mul(1000)).and_then(|value| value.checked_add((frames * 1000 + 37) / 75)).ok_or("invalid CUE INDEX 01")?;
-                    current.as_mut().unwrap().1 = Some(offset_ms);
+                    *current_offset = Some(offset_ms);
                 }
             }
             _ => {},

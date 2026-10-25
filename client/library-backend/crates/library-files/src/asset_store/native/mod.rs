@@ -1,12 +1,13 @@
 //! Native library-file access and adjacent transfer staging.
 
 use crate::APP_HIDDEN_DIR;
+use client_platform_native::filesystem::parent_directory;
 use content_address::hash_file;
 use fs2::{FileExt, lock_contended_error};
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, PoisonError};
 pub(crate) mod projection;
 pub(crate) use projection::readable_path;
 pub(crate) use projection::{create_directory, evict_book_files};
@@ -50,7 +51,10 @@ pub(crate) fn upload_stream(book: super::VerifiedBook) -> impl futures_util::Str
     })
 }
 
-pub(crate) struct Lease(#[allow(dead_code)] pub(crate) File);
+pub(crate) struct Lease {
+    // Closing the owned file releases its lock when the lease is dropped.
+    _file: File,
+}
 
 pub(crate) fn lease(handle: &Handle, hash: &str, exclusive: bool) -> Result<Option<Lease>, AssetStoreError> {
     if !handle.enabled.load(Ordering::Acquire) {
@@ -59,7 +63,7 @@ pub(crate) fn lease(handle: &Handle, hash: &str, exclusive: bool) -> Result<Opti
     let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(handle.leases_root.join(hash))?;
     let result = if exclusive { FileExt::try_lock_exclusive(&file) } else { FileExt::try_lock_shared(&file) };
     match result {
-        Ok(()) => Ok(Some(Lease(file))),
+        Ok(()) => Ok(Some(Lease { _file: file })),
         Err(error) if error.kind() == ErrorKind::WouldBlock || error.raw_os_error().is_some_and(|code| Some(code) == lock_contended_error().raw_os_error()) => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -74,10 +78,10 @@ pub(crate) fn open(library_locator: &str) -> Result<Handle, AssetStoreError> {
     let root = library_root.join(APP_HIDDEN_DIR).join("assets");
     // Create children one level at a time. Never recreate a library root
     // that disappears after its identity was checked.
-    for directory in [root.parent().unwrap().to_path_buf(), root.clone(), root.join("thumbnail")] {
+    for directory in [parent_directory(&root)?.to_path_buf(), root.clone(), root.join("thumbnail")] {
         create_child_directory(&directory)?;
     }
-    let marker = root.parent().unwrap().join("storage-identity");
+    let marker = parent_directory(&root)?.join("storage-identity");
     let identity = match std::fs::read_to_string(&marker) {
         Ok(value) => value,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -343,13 +347,15 @@ pub(crate) struct DirectBook {
 
 impl Drop for DirectBook {
     fn drop(&mut self) {
-        DIRECT_IMPORTS.get().unwrap().lock().unwrap().remove(&self.path);
+        if let Some(imports) = DIRECT_IMPORTS.get() {
+            imports.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.path);
+        }
     }
 }
 
 pub(crate) fn import_in_progress(path: &Path) -> bool {
     let Some(imports) = DIRECT_IMPORTS.get() else { return false };
-    let imports = imports.lock().unwrap();
+    let imports = imports.lock().unwrap_or_else(PoisonError::into_inner);
     !imports.is_empty() && path.canonicalize().is_ok_and(|path| imports.contains(&path))
 }
 
@@ -439,7 +445,16 @@ pub(crate) async fn write(handle: &Handle, name: String, bytes: &[u8]) -> Result
 
 pub(crate) async fn write_thumbnail_set(handle: &Handle, hash: &ContentHash, bytes: &[u8], browse: &[u8], card_high_density: &[u8]) -> Result<(), AssetStoreError> {
     let Some(lease) = lease(handle, hash.to_hex().as_str(), true)? else { return Err(AssetStoreError::operation("thumbnail is being updated")) };
-    write_files(handle, vec![(super::asset_name(super::BlobKind::Thumbnail, hash), bytes.to_owned()), (super::thumbnail_variant_name(hash, thumbnail::BROWSE_THUMBNAIL_WIDTH), browse.to_owned()), (super::thumbnail_variant_name(hash, thumbnail::THUMBNAIL_WIDTH), card_high_density.to_owned())], lease).await
+    write_files(
+        handle,
+        vec![
+            (super::asset_name(super::BlobKind::Thumbnail, hash), bytes.to_owned()),
+            (super::thumbnail_variant_name(hash, thumbnail::BROWSE_THUMBNAIL_WIDTH), browse.to_owned()),
+            (super::thumbnail_variant_name(hash, thumbnail::THUMBNAIL_WIDTH), card_high_density.to_owned()),
+        ],
+        lease,
+    )
+    .await
 }
 
 async fn write_files(handle: &Handle, files: Vec<(String, Vec<u8>)>, lease: Lease) -> Result<(), AssetStoreError> {
@@ -449,7 +464,7 @@ async fn write_files(handle: &Handle, files: Vec<(String, Vec<u8>)>, lease: Leas
         let _lease = lease;
         for (name, bytes) in files {
             let destination = root.join(name);
-            let mut file = tempfile::Builder::new().prefix(".bokheim-thumbnail.part-").tempfile_in(destination.parent().unwrap())?;
+            let mut file = tempfile::Builder::new().prefix(".bokheim-thumbnail.part-").tempfile_in(parent_directory(&destination)?)?;
             file.write_all(&bytes)?;
             file.as_file().sync_all()?;
             file.persist(&destination).map_err(|error| error.error)?;

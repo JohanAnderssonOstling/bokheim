@@ -59,7 +59,7 @@ impl ReaderView {
                 let selected = self.search.match_position.is_some_and(|(current, _)| current == index + 1);
                 let request = self.search.current_request();
                 let reader = reader.downgrade();
-                search::result_row(("epub-search-hit", index), result.excerpt.clone(), selected, theme)
+                search::result_row(("epub-search-hit", index), result.excerpt.clone(), self.search.query.as_deref().unwrap_or_default(), self.search.options, selected, theme)
                     .on_click(move |_, window, cx| {
                         let Some(reader) = reader.upgrade() else { return };
                         reader.update(cx, |reader, cx| {

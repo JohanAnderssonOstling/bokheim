@@ -5,9 +5,9 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "android")]
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 #[cfg(not(target_os = "android"))]
-use std::sync::{Mutex, Once};
+use std::sync::{Mutex, Once, PoisonError};
 #[cfg(not(target_os = "android"))]
 use std::time::Duration;
 
@@ -18,20 +18,20 @@ static START: Once = Once::new();
 /// The registry owns the preference; this small atomic mirror lets the browser
 /// helper and native update workers observe the same setting across processes.
 pub fn initialize(directory: &Path, allow: bool) -> io::Result<()> {
-    *FILE.lock().unwrap() = Some(directory.join("transfer-policy.json"));
+    *FILE.lock().unwrap_or_else(PoisonError::into_inner) = Some(directory.join("transfer-policy.json"));
     save_allow_metered(allow)?;
     start();
     Ok(())
 }
 
 pub fn configure_reader(path: PathBuf) {
-    *FILE.lock().unwrap() = Some(path);
+    *FILE.lock().unwrap_or_else(PoisonError::into_inner) = Some(path);
     refresh();
     start();
 }
 
 pub fn save_allow_metered(allow: bool) -> io::Result<()> {
-    let file = FILE.lock().unwrap();
+    let file = FILE.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(path) = file.as_ref() {
         let mut staged = tempfile::NamedTempFile::new_in(path.parent().ok_or_else(|| io::Error::other("missing policy directory"))?)?;
         staged.write_all(if allow { b"true" } else { b"false" })?;
@@ -43,7 +43,7 @@ pub fn save_allow_metered(allow: bool) -> io::Result<()> {
 }
 
 fn refresh() {
-    if let Some(path) = FILE.lock().unwrap().as_ref() {
+    if let Some(path) = FILE.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
         if let Ok(value) = fs::read_to_string(path) {
             match value.trim() {
                 "true" => POLICY.set_allow_metered(true),
@@ -67,15 +67,15 @@ fn start() {
         POLICY.cost.store(3, std::sync::atomic::Ordering::Release);
         #[cfg(target_os = "macos")]
         macos::start();
-        std::thread::Builder::new()
-            .name("network-cost".into())
-            .spawn(|| loop {
-                refresh();
-                #[cfg(not(target_os = "macos"))]
-                POLICY.set_network_cost(platform_cost());
-                std::thread::sleep(Duration::from_secs(1));
-            })
-            .expect("could not start network cost monitor");
+        if let Err(error) = std::thread::Builder::new().name("network-cost".into()).spawn(|| loop {
+            refresh();
+            #[cfg(not(target_os = "macos"))]
+            POLICY.set_network_cost(platform_cost());
+            std::thread::sleep(Duration::from_secs(1));
+        }) {
+            log::warn!("could not start network cost monitor: {error}");
+            POLICY.set_network_cost(NetworkCost::Unknown);
+        }
     });
 }
 

@@ -4,6 +4,8 @@ mod android;
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android_updates;
 mod blocking_worker;
+#[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows")), all(feature = "android", target_os = "android")))]
+mod update_binding;
 #[cfg(any(all(feature = "android", target_os = "android"), test))]
 mod book_browser;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
@@ -29,6 +31,8 @@ use application_shell::ApplicationRoot;
 #[cfg(feature = "kobo")]
 use browser_ui::SaveKoboAutoRotate;
 use browser_ui::{AppServices, AppStartup, WindowSession};
+#[cfg(all(feature = "android", target_os = "android"))]
+use gpui::AnyView;
 use gpui::{App, AppContext, Bounds, Entity, SharedString, WeakEntity, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 #[cfg(feature = "kobo")]
@@ -83,7 +87,7 @@ pub struct IncomingBook {
     pub name: String,
     pub path: PathBuf,
 }
-pub type IncomingBookResult = Result<IncomingBook, String>;
+pub type IncomingBookResult = Result<IncomingBook, app::BackendError>;
 
 #[cfg(any(target_os = "android", test))]
 fn stage_incoming_book(mut source: impl std::io::Read, path: &std::path::Path) -> std::io::Result<()> {
@@ -122,7 +126,10 @@ pub fn open_ui(
     }
     profile.mark("fonts_register");
     #[cfg(feature = "kobo")]
-    if let Err(error) = cx.text_system().add_fonts(vec![Cow::Borrowed(include_bytes!("../../ui/design-tokens/assets/fonts/terminus/TerminusTTF-Regular.ttf")), Cow::Borrowed(include_bytes!("../../ui/design-tokens/assets/fonts/terminus/TerminusTTF-Bold.ttf"))]) {
+    if let Err(error) = cx
+        .text_system()
+        .add_fonts(vec![Cow::Borrowed(include_bytes!("../../ui/design-tokens/assets/fonts/terminus/TerminusTTF-Regular.ttf")), Cow::Borrowed(include_bytes!("../../ui/design-tokens/assets/fonts/terminus/TerminusTTF-Bold.ttf"))])
+    {
         log::warn!("failed to install device fonts: {error}");
     }
     #[cfg(all(feature = "desktop", target_os = "linux"))]
@@ -163,10 +170,19 @@ pub fn open_ui(
     #[cfg(all(target_os = "android", feature = "android"))]
     let android_private_library_root = backend_context.app_data_dir().join("libraries");
     profile.mark("ui_initialize");
-    let (backend_worker, backend_startup) = AppClient::start_native(backend_context).expect("failed to initialize application backend");
+    let (backend_worker, backend_startup) = match AppClient::start_native(backend_context) {
+        Ok(started) => started,
+        Err(error) => {
+            log::error!("failed to initialize application backend: {error}");
+            cx.quit();
+            return None;
+        }
+    };
     profile.mark("backend_start");
     #[cfg(all(target_os = "android", feature = "android"))]
-    android::watch_storage_access(backend_worker.clone(), android_private_library_root, cx);
+    if cx.global::<browser_ui::AndroidStoragePolicy>().all_files_access_available {
+        android::watch_storage_access(backend_worker.clone(), android_private_library_root, cx);
+    }
     let AppStartupState { libraries, browsing_preferences, account_status, reader_preferences: shared_reader_preferences } = backend_startup;
     let startup = AppStartup { libraries, browsing_preferences, account_status };
     session_saves.update(cx, |owner, _| owner.session.reader_preferences.apply_synchronized(&shared_reader_preferences));
@@ -308,22 +324,33 @@ pub fn open_ui(
                 let content = platform_content(application.clone(), cx);
                 #[cfg(all(feature = "android", target_os = "android"))]
                 let content = {
-                    let content = book_browser::wrap(content, window, cx);
-                    let host = content.downgrade();
-                    application.update(cx, |application, _| application.set_native_back_overlay(move |window, cx| host.update(cx, |host, cx| host.native_back(window, cx)).unwrap_or(false)));
-                    content
+                    match book_browser::wrap(content.clone(), window, cx) {
+                        Ok(content) => {
+                            let host = content.downgrade();
+                            application.update(cx, |application, _| application.set_native_back_overlay(move |window, cx| host.update(cx, |host, cx| host.native_back(window, cx)).unwrap_or(false)));
+                            AnyView::from(content)
+                        }
+                        Err(error) => {
+                            log::error!("could not attach Android browser: {error}");
+                            AnyView::from(content)
+                        }
+                    }
                 };
                 cx.new(|cx| Root::new(content, window, cx))
             },
         )
-        .expect("failed to open browsing window");
+        .inspect_err(|error| {
+            log::error!("failed to open browsing window: {error}");
+            cx.quit();
+        })
+        .ok()?;
     profile.mark("window_open");
 
     #[cfg(feature = "desktop")]
     #[cfg(any(feature = "kobo", feature = "mobile"))]
     let _ = _browser_window;
-    if let Some(incoming_files) = incoming_files {
-        forward_incoming_files(incoming_files, application_root.clone().expect("browsing window has an application root"), cx);
+    if let (Some(incoming_files), Some(root)) = (incoming_files, application_root.clone()) {
+        forward_incoming_files(incoming_files, root, cx);
     }
 
     let quit_session_saves = session_saves.clone();

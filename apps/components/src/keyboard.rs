@@ -10,12 +10,23 @@ pub fn shortcut_tooltip(label: impl Into<SharedString>, shortcut: &str) -> Share
 }
 
 /// List alternative bindings for the same action inside one pair of parentheses.
+/// Invalid shortcut hints are omitted so they cannot prevent a control rendering.
 pub fn shortcut_tooltip_with_alternatives(label: impl Into<SharedString>, shortcuts: &[&str]) -> SharedString {
     let label = label.into();
-    if shortcuts.is_empty() {
+    let keys = shortcuts
+        .iter()
+        .filter_map(|shortcut| match Keystroke::parse(shortcut) {
+            Ok(keystroke) => Some(Kbd::format(&keystroke)),
+            Err(error) => {
+                log::warn!("Invalid tooltip shortcut: {error}");
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if keys.is_empty() {
         return label;
     }
-    let keys = shortcuts.iter().map(|shortcut| Kbd::format(&Keystroke::parse(shortcut).expect("valid tooltip keyboard shortcut"))).collect::<Vec<_>>().join(" / ");
     format!("{label} ({keys})").into()
 }
 
@@ -59,5 +70,13 @@ mod tests {
         let expected = if cfg!(target_os = "macos") { "Previous match (⇧⏎ / ↑)" } else { "Previous match (Shift+Enter / Up)" };
         assert_eq!(shortcut_tooltip_with_alternatives("Previous match", &["shift-enter", "up"]).as_ref(), expected);
         assert_eq!(shortcut_tooltip_with_alternatives("Cancel", &[]).as_ref(), "Cancel");
+    }
+
+    #[test]
+    fn invalid_shortcut_hints_do_not_prevent_tooltips_rendering() {
+        assert!(Keystroke::parse("invalid-shortcut").is_err());
+        assert_eq!(shortcut_tooltip("Search", "invalid-shortcut").as_ref(), "Search");
+        let expected = shortcut_tooltip("Search", "secondary-f");
+        assert_eq!(shortcut_tooltip_with_alternatives("Search", &["invalid-shortcut", "secondary-f"]).as_ref(), expected.as_ref());
     }
 }

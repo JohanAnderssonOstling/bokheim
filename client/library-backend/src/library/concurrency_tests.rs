@@ -44,9 +44,37 @@ pub(in crate::library) fn fixture(root: &std::path::Path, url: account_client::U
     (actor, handle, inbox)
 }
 
+#[cfg(feature = "scanner")]
 #[tokio::test]
-async fn saving_a_reading_position_schedules_a_delayed_sync_without_other_activity() {
+async fn failed_scan_releases_busy_state_and_can_scan_again() {
+    use library_model::LibraryUpdate;
+
+    let root = tempfile::tempdir().unwrap();
+    let (mut actor, _handle, _inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let updates = actor.coordination.subscribe_updates();
+    let session = Rc::get_mut(&mut actor.session).unwrap();
+    let scanner = session._scanner.clone();
+    session._scanner = Arc::new(LibraryScanner { root: root.path().join("offline").to_string_lossy().into_owned() });
+
+    assert!(actor.session.scan_folder().await.is_err());
+    assert!(!actor.session.scanner_running(), "a failed scan must not block file replay");
+    actor.coordination.drain(&actor.session.events);
+    let mut observed = Vec::new();
+    while let Ok(update) = updates.try_recv() {
+        observed.push(update);
+    }
+    assert!(observed.contains(&LibraryUpdate::Scanning(true)));
+    assert!(observed.contains(&LibraryUpdate::Scanning(false)));
+
+    Rc::get_mut(&mut actor.session).unwrap()._scanner = scanner;
+    actor.session.scan_folder().await.unwrap();
+    assert!(!actor.session.scanner_running());
+}
+
+#[tokio::test]
+async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
     use crate::library::commands::prepare_library_request;
+    use library_model::{BrowseBookSort, BrowseChipSort, BrowseLocation, HomeShelf, LibraryBrowseQuery};
     use library_runtime::scheduler::SyncRequest;
     use sync_common::ROOT_DIR_ID;
 
@@ -74,14 +102,47 @@ async fn saving_a_reading_position_schedules_a_delayed_sync_without_other_activi
             restore_paths: Vec::new(),
         })
         .unwrap();
+    let query = LibraryBrowseQuery {
+        location: BrowseLocation::Home(Some(HomeShelf::RecentlyRead)),
+        search: String::new(),
+        file_types: Vec::new(),
+        chip_sort: BrowseChipSort::DefaultOrder,
+        book_sort: BrowseBookSort::DefaultOrder,
+        languages: Vec::new(),
+        hide_finished: false,
+        include_direct_child_books: false,
+    };
+    assert!(actor.session.db.browse_contents(&query, false).unwrap().books.is_empty());
+    actor.coordination.drain(&actor.session.events);
+    let asset_requests = actor.requests.as_ref().unwrap().assets.len();
+    let file_requests = actor.requests.as_ref().unwrap().files.len();
     let requests = actor.requests.as_ref().unwrap().sync.clone();
+    let updates = actor.coordination.subscribe_updates();
     assert!(requests.is_empty());
     prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/2)".into(), progress: Some(10.0), entry: None })).unwrap();
     let SyncRequest::WakeAfter(delay) = requests.try_recv().unwrap() else { panic!("position changes should schedule their own publication deadline") };
     assert!(delay <= Duration::from_secs(5) && delay > Duration::from_secs(4));
     assert_eq!(actor.session.db.reading_position(&hash).unwrap().as_deref(), Some("epubcfi(/6/2)"));
+    actor.coordination.drain(&actor.session.events);
+    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
+    let recent = actor.session.db.browse_contents(&query, false).unwrap().books;
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].content_hash(), Some(hash));
+    assert_eq!(recent[0].progress, 10.0);
+    assert!(updates.is_empty());
+    assert_eq!(actor.requests.as_ref().unwrap().assets.len(), asset_requests, "saving progress must not start asset work");
+    assert_eq!(actor.requests.as_ref().unwrap().files.len(), file_requests, "saving progress must not start file replay");
     let mut outbox = actor.session.db.sync_prepare_outbox_excluding_positions(actor.session.events.reading_positions.borrow().waiting(web_time::Instant::now())).unwrap();
     assert!(actor.session.db.sync_next_outbox_page(&mut outbox).unwrap().iter().all(|p| p.state.value.kind() != "reading_position"));
+
+    // Updates within a chapter must refresh too, without needing a completed chapter.
+    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/4)".into(), progress: Some(20.0), entry: None })).unwrap();
+    actor.coordination.drain(&actor.session.events);
+    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
+    assert_eq!(actor.session.db.browse_contents(&query, false).unwrap().books[0].progress, 20.0);
+    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/4)".into(), progress: Some(20.0), entry: None })).unwrap();
+    actor.coordination.drain(&actor.session.events);
+    assert!(updates.is_empty(), "an unchanged position should not reload the library");
 }
 
 #[tokio::test]
@@ -456,6 +517,41 @@ async fn selected_import_copies_all_files_before_shared_inspection() {
     assert!(!paths.is_empty());
     assert!(paths.iter().all(|path| path.as_str() == "/Shelf/book.epub"));
     assert!(std::fs::read_dir(library.path().join("Shelf")).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".bokheim-copy-")));
+}
+
+#[tokio::test]
+async fn selected_folder_import_survives_source_removal_and_library_reopen() {
+    use crate::{DirectoryImport, DirectoryImportFile, DirectoryImportReader, ImportSource};
+    use std::fs::{self, File};
+
+    let library = tempfile::tempdir().unwrap();
+    let provider = tempfile::tempdir().unwrap();
+    let source = provider.path().join("book.epub");
+    let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
+    fs::write(&source, bytes).unwrap();
+    let hash = ContentHash::from(blake3::hash(bytes));
+    {
+        let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+        let directory = DirectoryImport {
+            name: "Selected books".into(),
+            directories: vec![vec!["Nested".into()]],
+            files: vec![DirectoryImportFile {
+                path: vec!["Nested".into(), "book.epub".into()],
+                source: ImportSource::new(Box::new(move || Box::pin(async move { Ok(Box::new(File::open(source).map_err(|error| error.to_string())?) as DirectoryImportReader) }))),
+            }],
+        };
+        let failures = actor.session.import_selected_directory(sync_common::ROOT_DIR_ID, directory, false, &|| false).await.unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(fs::read(provider.path().join("book.epub")).unwrap(), bytes, "importing must leave the selected source untouched");
+    }
+    // A completed picker import must need neither the provider nor its URI
+    // grant after restart. Only the managed library is opened again.
+    provider.close().unwrap();
+    let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+    assert_eq!(fs::read(library.path().join("Nested/book.epub")).unwrap(), bytes);
+    let paths = actor.session.db.book_paths(&hash).unwrap();
+    assert!(!paths.is_empty());
+    assert!(paths.iter().all(|path| path.as_str() == "/Nested/book.epub"));
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenu;
 use gpui_component::{Disableable, WindowExt};
 use sync_common::LibraryId;
-use ui_components as components;
+use ui_components::{self as components, ScrollableElement};
 
 use super::{Sidebar, SwitcherCursor};
 
@@ -161,6 +161,7 @@ impl Sidebar {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(gpui::div().text_color(theme.text).child(if dialog.id.is_none() { "Create library" } else { "Rename library" }))
             .child(Input::new(&dialog.input).disabled(dialog.busy || dialog.folders.is_some()))
+            .children(dialog.folders.as_ref().filter(|folders| folders.iter().any(|folder| folder.local_path.is_none())).map(|_| gpui::div().child("Books will be copied into Bokheim. The originals will stay in the selected folder.")))
             .children((dialog.id.is_none()).then(|| {
                 let toggle = emitter.clone();
                 let estimate = match dialog.estimate {
@@ -224,7 +225,7 @@ impl Sidebar {
     }
 
     pub(crate) fn is_library_switcher_open(&self) -> bool {
-        self.switcher_open || self.library_name_dialog.is_some()
+        self.switcher_open || self.library_name_dialog.is_some() || self.add_library_choices.is_some()
     }
 
     /// Opens the switcher and hands it the keyboard. Every way in — the rail
@@ -262,7 +263,7 @@ impl Sidebar {
     }
 
     fn move_switcher_cursor(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.library_name_dialog.is_some() || self.library_menu.is_some() {
+        if self.library_name_dialog.is_some() || self.library_menu.is_some() || self.add_library_choices.is_some() {
             return;
         }
         let count = self.libraries(cx).len();
@@ -305,9 +306,7 @@ impl Sidebar {
     fn activate_switcher_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.switcher_cursor {
             SwitcherCursor::Add => {
-                self.switcher_open = false;
-                cx.notify();
-                self.choose_library_folders(cx);
+                self.open_add_library_choices(window, cx);
             }
             SwitcherCursor::Library { index, menu } => {
                 let Some(library) = self.libraries(cx).get(index).cloned() else { return };
@@ -350,6 +349,10 @@ impl Sidebar {
     }
 
     pub(crate) fn close_library_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_library_choices.is_some() {
+            self.close_add_library_choices(window, cx);
+            return;
+        }
         if !self.switcher_open && self.library_name_dialog.is_none() {
             return;
         }
@@ -365,7 +368,12 @@ impl Sidebar {
     }
 
     pub(crate) fn library_switcher_overlay(&self, emitter: Entity<Self>, window: &gpui::Window, cx: &gpui::App) -> Option<gpui::AnyElement> {
-        if self.switcher_open { Some(self.render_library_switcher_overlay(emitter, window, cx)) } else { self.render_library_name_dialog(emitter, window, cx) }
+        let switcher = if self.switcher_open { Some(self.render_library_switcher_overlay(emitter.clone(), window, cx)) } else { self.render_library_name_dialog(emitter.clone(), window, cx) };
+        let choices = self.render_add_library_overlay(emitter, window, cx);
+        if switcher.is_none() && choices.is_none() {
+            return None;
+        }
+        Some(components::absolute_full_size().children(switcher).children(choices).into_any_element())
     }
 
     pub(crate) fn choose_library_folders(&mut self, cx: &mut Context<Self>) {
@@ -390,7 +398,10 @@ impl Sidebar {
         let title = if directories.len() == 1 { directories[0].name.clone() } else { format!("{} library folders", directories.len()) };
         self.open_create_library_dialog(window, cx);
         self.switcher_open = false;
-        let dialog = self.library_name_dialog.as_mut().unwrap();
+        let Some(dialog) = self.library_name_dialog.as_mut() else {
+            log::error!("Library creation dialog could not be opened");
+            return;
+        };
         dialog.input.update(cx, |input, cx| input.set_value(title, window, cx));
         dialog.folders = Some(directories);
         dialog.estimate = locators.is_empty().then_some((books, bytes, unavailable));
@@ -434,25 +445,19 @@ impl Sidebar {
         let libraries = self.libraries(cx);
         let library_count = libraries.len();
         let cursor = self.switcher_cursor;
-        let add = emitter.clone();
         let keys = emitter.clone();
-        let mut header = components::library_switcher_header("Libraries", theme);
-        #[cfg(not(target_arch = "arm"))]
-        {
-            header = header.child(components::library_switcher_add_button(matches!(cursor, SwitcherCursor::Add), theme).on_click(move |_, _, cx| {
-                add.update(cx, |navigation, cx| {
-                    navigation.switcher_open = false;
-                    cx.notify();
-                    navigation.choose_library_folders(cx);
-                });
-            }));
-        }
-        let mut panel = components::library_switcher_panel()
+        let header = components::library_switcher_header("Libraries", theme)
+            .flex_none()
+            .child(self.render_add_library_control(emitter.clone(), components::library_switcher_add_button(matches!(cursor, SwitcherCursor::Add), theme), true));
+        let panel = components::library_switcher_panel()
+            .flex_1()
+            .min_h_0()
             .track_focus(&self.switcher_focus)
             .on_key_down(move |event, window, cx| {
                 keys.update(cx, |navigation, cx| navigation.move_switcher_cursor(event, window, cx));
             })
             .child(header);
+        let mut list = components::library_switcher_panel().flex_1().min_h_0().overflow_y_scrollbar_with_id("library-switcher-list").hide_scrollbar();
 
         for (index, library) in libraries.into_iter().enumerate() {
             let library_id = library.id;
@@ -461,7 +466,7 @@ impl Sidebar {
             let select_id = library_id;
             let manage = emitter.clone();
             let menu_was_open = self.library_menu.as_ref().is_some_and(|(id, _, _)| *id == library_id);
-            panel = panel.child(components::library_switcher_row(
+            list = list.child(components::library_switcher_row(
                 components::library_switcher_item(format!("library-switcher-{library_id}"), library.name.clone(), selected, cursor == SwitcherCursor::Library { index, menu: false }, theme).on_click(move |_, _window, cx| {
                     select.update(cx, |navigation, cx| {
                         navigation.switcher_open = false;
@@ -513,11 +518,8 @@ impl Sidebar {
                         }))
                         .child(
                             components::navigation_modal_list(library_count, window.rem_size(), theme)
-                                .pt(gpui::px(components::SPACE_MD))
-                                .pr(gpui::px(components::SPACE_MD))
-                                .pb(gpui::px(components::SPACE_MD))
-                                .pl(gpui::px(components::SPACE_MD - components::SPACE_SM))
-                                .child(panel),
+                                .p(gpui::px(components::SPACE_MD))
+                                .child(panel.child(list)),
                         ),
                     window,
                 ))

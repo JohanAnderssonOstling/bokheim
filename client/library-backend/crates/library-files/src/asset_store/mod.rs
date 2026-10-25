@@ -7,6 +7,8 @@
 use book_access::BoxedBookReader;
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_native::file_fingerprint::file_fingerprint;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_native::filesystem::parent_directory;
 use library_model::BlobKind;
 use library_model::RelativeBookPath;
 use std::fmt;
@@ -165,7 +167,7 @@ impl AssetStore {
                 return Ok(None);
             }
             reader.seek(SeekFrom::Start(0))?;
-            Ok(Some(VerifiedBook { reader, length, content_hash: actual, _lease: BookLease(lease) }))
+            Ok(Some(VerifiedBook { reader, length, content_hash: actual, _lease: BookLease::new(lease) }))
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -189,7 +191,7 @@ impl AssetStore {
                         continue;
                     }
                     reader.seek(SeekFrom::Start(0))?;
-                    return Ok(Some(VerifiedBook { reader, length: hasher.count(), content_hash: actual, _lease: BookLease(lease) }));
+                    return Ok(Some(VerifiedBook { reader, length: hasher.count(), content_hash: actual, _lease: BookLease::new(lease) }));
                 }
                 Ok(None)
             })
@@ -273,7 +275,7 @@ impl AssetStore {
     pub async fn stage_book(&self, relative: RelativeBookPath, mut source: Box<dyn std::io::Read + Send>) -> Result<CopiedBook, AssetStoreError> {
         let store = self.clone();
         client_platform_runtime::executor::run_blocking(move || {
-            let directory = imp::placement_path(&store.0, &relative).parent().expect("a book path has a folder").to_owned();
+            let directory = parent_directory(&imp::placement_path(&store.0, &relative))?.to_owned();
             let mut file = tempfile::Builder::new()
                 .prefix(".bokheim-import.part-")
                 .tempfile_in(&directory)
@@ -288,7 +290,7 @@ impl AssetStore {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn begin_book_write(&self, relative: &RelativeBookPath, hash: &ContentHash) -> Result<AsyncAssetWriter, AssetStoreError> {
         let destination = imp::placement_path(&self.0, relative);
-        let temporary = client_platform_runtime::executor::run_blocking(move || tempfile::Builder::new().prefix(".bokheim-download.part-").tempfile_in(destination.parent().unwrap())).await.map_err(AssetStoreError::operation)??;
+        let temporary = client_platform_runtime::executor::run_blocking(move || tempfile::Builder::new().prefix(".bokheim-download.part-").tempfile_in(parent_directory(&destination)?)).await.map_err(AssetStoreError::operation)??;
         let (file, temporary_path) = temporary.into_parts();
         let inner = imp::AsyncWriter { file: tokio::fs::File::from_std(file), temporary_path };
         Ok(AsyncAssetWriter { inner, file_name: relative.as_str().to_owned(), expected_hash: *hash, hasher: blake3::Hasher::new(), store: self.clone(), written: 0, next_storage_check: 0 })
@@ -309,7 +311,7 @@ impl AssetStore {
     pub fn check_write_capacity(&self, additional_bytes: u64) -> Result<(), AssetStoreError> {
         if let Some(available) = imp::write_capacity(&self.0)? {
             if additional_bytes > available {
-                return Err(AssetStoreError::operation("not enough free storage to write book".to_owned()));
+                return Err(std::io::Error::new(std::io::ErrorKind::StorageFull, "not enough free storage to write book").into());
             }
         }
         Ok(())
@@ -369,7 +371,7 @@ impl AssetStore {
     /// missing folder that its snapshot still considers live.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn ensure_placement_parent(&self, relative: &RelativeBookPath) -> Result<(), AssetStoreError> {
-        std::fs::create_dir_all(imp::placement_path(&self.0, relative).parent().expect("a book path has a folder"))?;
+        std::fs::create_dir_all(parent_directory(&imp::placement_path(&self.0, relative))?)?;
         Ok(())
     }
 
@@ -380,7 +382,7 @@ impl AssetStore {
 
     /// Try to hold a book exclusively while publishing or removing bytes.
     pub fn try_exclusive_lease(&self, hash: &ContentHash) -> Result<Option<BookLease>, AssetStoreError> {
-        imp::lease(&self.0, hash.to_hex().as_str(), true).map(|lease| lease.map(BookLease))
+        imp::lease(&self.0, hash.to_hex().as_str(), true).map(|lease| lease.map(BookLease::new))
     }
 
     /// Hold across book and the referencing metadata commit. Cleanup
@@ -388,9 +390,9 @@ impl AssetStore {
     pub async fn lease_book(&self, hash: &ContentHash) -> Result<BookLease, AssetStoreError> {
         loop {
             if let Some(lease) = imp::lease(&self.0, hash.to_hex().as_str(), false)? {
-                return Ok(BookLease(lease));
+                return Ok(BookLease::new(lease));
             }
-            client_platform_runtime::executor::sleep(Duration::from_millis(25)).await;
+            client_platform_runtime::executor::sleep(Duration::from_millis(25)).await.map_err(AssetStoreError::operation)?;
         }
     }
 
@@ -398,7 +400,7 @@ impl AssetStore {
     pub fn lease_book_blocking(&self, hash: &ContentHash) -> Result<BookLease, AssetStoreError> {
         loop {
             if let Some(lease) = imp::lease(&self.0, hash.to_hex().as_str(), false)? {
-                return Ok(BookLease(lease));
+                return Ok(BookLease::new(lease));
             }
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -495,7 +497,16 @@ impl CopiedBook {
     }
 }
 
-pub struct BookLease(#[allow(dead_code)] imp::Lease);
+pub struct BookLease {
+    // The guard keeps the platform lease alive for this value's lifetime.
+    _guard: imp::Lease,
+}
+
+impl BookLease {
+    fn new(guard: imp::Lease) -> Self {
+        Self { _guard: guard }
+    }
+}
 
 /// A downloaded book being written to disk, hashed as it arrives.
 #[cfg(not(target_arch = "wasm32"))]
@@ -593,10 +604,8 @@ impl StagedBook {
         // destination; re-running the move/dedup logic below would find that
         // path already occupied by itself and discard it as a duplicate.
         if let Some(direct) = direct {
-            imp::sync_parent(&direct.path)?;
-            let fingerprint = Some(file_fingerprint(&direct.path)?.to_string());
+            let fingerprint = finalize_direct_import(temporary_path, &direct.path, imp::sync_parent)?;
             let name = relative_path.file_name().to_owned();
-            temporary_path.keep().map_err(|error| AssetStoreError::operation(format!("could not finalize the imported book '{}': {}", direct.path.display(), error.error)))?;
             return Ok(PublishedStagedBook { name, relative_path: relative_path.to_string(), published: true, fingerprint });
         }
         // The caller knows the book's format; an MP3-folder book travels as a
@@ -616,10 +625,10 @@ impl StagedBook {
                             return Ok(PublishedStagedBook { name, relative_path: relative.to_string(), published: false, fingerprint: None });
                         }
                     }
-                    name = alternatives.next().expect("numeric name suffix space is unbounded");
+                    name = alternatives.next().ok_or_else(|| AssetStoreError::operation("no collision-free file name remains"))?;
                     continue;
                 }
-                let staged = tempfile::Builder::new().prefix(".bokheim-audio-").tempdir_in(destination.parent().unwrap())?;
+                let staged = tempfile::Builder::new().prefix(".bokheim-audio-").tempdir_in(parent_directory(&destination)?)?;
                 audiobook_folder::extract_download(File::open(&temporary_path)?, staged.path(), track_titles)?;
                 if ContentHash::from(audiobook_folder::folder_hash(staged.path())?) != hash {
                     return Err(AssetStoreError::operation("downloaded audiobook cannot be reconstructed with its original content identity"));
@@ -648,17 +657,17 @@ impl StagedBook {
                         Ok(()) => true,
                         Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
                             temporary = error.path;
-                            chosen = alternatives.next().expect("numeric name suffix space is unbounded");
+                            chosen = alternatives.next().ok_or_else(|| AssetStoreError::operation("no collision-free file name remains"))?;
                             continue;
                         }
                         Err(error) => return Err(AssetStoreError::operation(format!("could not move the temporary book to '{}' without replacing existing files: {}", destination.display(), error.error))),
                     }
                 };
                 imp::sync_parent(&destination)?;
-                let fingerprint = if published { Some(file_fingerprint(&destination)?.to_string()) } else { None };
+                let fingerprint = if published { published_fingerprint(&destination)? } else { None };
                 return Ok(PublishedStagedBook { name: chosen, relative_path: relative.to_string(), published, fingerprint });
             }
-            chosen = alternatives.next().expect("numeric name suffix space is unbounded");
+            chosen = alternatives.next().ok_or_else(|| AssetStoreError::operation("no collision-free file name remains"))?;
         }
     }
 
@@ -678,6 +687,32 @@ impl StagedBook {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn finalize_direct_import(temporary_path: tempfile::TempPath, path: &Path, sync_parent: impl FnOnce(&Path) -> Result<(), AssetStoreError>) -> Result<Option<String>, AssetStoreError> {
+    // Inspection has accepted these bytes. From here on a durability failure
+    // must leave them available for discovery and a later retry.
+    temporary_path.keep().map_err(|mut error| {
+        error.path.disable_cleanup(true);
+        AssetStoreError::operation(format!("could not finalize the imported book '{}': {}", path.display(), error.error))
+    })?;
+    sync_parent(path)?;
+    published_fingerprint(path)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn published_fingerprint(path: &Path) -> Result<Option<String>, AssetStoreError> {
+    match file_fingerprint(path) {
+        Ok(value) => Ok(Some(value.to_string())),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Err(error.into()),
+        Err(error) => {
+            // Fingerprints are a scan optimization. A completed publication can
+            // be recorded without one and inspected again by the next scan.
+            log::warn!("could not fingerprint published book '{}'; discovery will retry: {error}", path.display());
+            Ok(None)
+        }
+    }
+}
+
 fn asset_name(kind: BlobKind, content_hash: &ContentHash) -> String {
     format!("{}/{content_hash}", kind.storage())
 }
@@ -694,6 +729,55 @@ pub(crate) use native as imp;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_disappeared_publication_is_not_recorded_as_successful() {
+        let library = tempfile::tempdir().unwrap();
+        assert!(published_fingerprint(&library.path().join("missing.epub")).is_err());
+    }
+
+    #[test]
+    fn direct_import_survives_a_failed_directory_sync_and_can_be_finalized_again() {
+        use std::io::{Error, Write};
+        let library = tempfile::tempdir().unwrap();
+        let mut file = tempfile::NamedTempFile::new_in(library.path()).unwrap();
+        file.write_all(b"verified book").unwrap();
+        let path = file.path().to_path_buf();
+        let error = finalize_direct_import(file.into_temp_path(), &path, |_| Err(Error::from(ErrorKind::PermissionDenied).into())).unwrap_err();
+        assert!(error.to_string().contains("permission denied"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"verified book");
+        let retained = tempfile::TempPath::try_from_path(path.clone()).unwrap();
+        assert!(finalize_direct_import(retained, &path, imp::sync_parent).unwrap().is_some());
+        assert_eq!(std::fs::read(path).unwrap(), b"verified book");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fingerprint_failure_preserves_completed_imports_and_retry_does_not_duplicate_them() {
+        use std::io::Cursor;
+        use std::time::UNIX_EPOCH;
+        for direct in [false, true] {
+            let library = tempfile::tempdir().unwrap();
+            let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+            let bytes = b"verified book";
+            let hash = ContentHash::from(blake3::hash(bytes));
+            let (_, copied) = store.copy_import(path("book.epub"), Box::new(Cursor::new(bytes)), vec![], ImportOptions { direct }).await.unwrap();
+            // This filesystem can store a timestamp that the fingerprint
+            // format cannot represent, while the book itself remains readable.
+            File::options().write(true).open(copied.path()).unwrap().set_modified(UNIX_EPOCH - Duration::from_secs(1)).unwrap();
+            assert!(file_fingerprint(copied.path()).is_err());
+            let published = copied.into_staged(hash, bytes.len() as u64).publish_snapshot(&store, &path("book.epub"), &[], false).unwrap();
+            assert!(published.published);
+            assert!(published.fingerprint.is_none());
+            assert_eq!(std::fs::read(library.path().join("book.epub")).unwrap(), bytes);
+
+            let retry = store.stage_book(path("book.epub"), Box::new(Cursor::new(bytes))).await.unwrap().into_staged(hash, bytes.len() as u64);
+            let published = retry.publish_snapshot(&store, &path("book.epub"), &[], false).unwrap();
+            assert!(!published.published);
+            assert_eq!(published.name, "book.epub");
+            assert!(!library.path().join("book 2.epub").exists());
+        }
+    }
 
     fn path(value: &str) -> RelativeBookPath {
         RelativeBookPath::parse(value).unwrap()

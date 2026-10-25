@@ -73,14 +73,12 @@ pub mod assets {
         pub reason: BlobManifestRejectionReason,
     }
 
-    /// Every requested hash appears exactly once across these four collections.
-    /// `claimed` means a globally stored, validated blob was charged to this
-    /// account atomically; `upload` means the bytes still require the ordinary
-    /// quota-checked upload admission path.
+    /// Every requested hash appears exactly once across these three collections.
+    /// `upload` means the bytes still require the ordinary quota-checked upload
+    /// admission path, even when another account stores the same blob.
     #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
     pub struct BlobManifestResponse {
         pub owned: Vec<ContentHash>,
-        pub claimed: Vec<ContentHash>,
         pub upload: Vec<ContentHash>,
         pub rejected: Vec<RejectedBlobManifestEntry>,
     }
@@ -110,7 +108,7 @@ pub mod assets {
         if requested.len() != request.blobs.len() {
             return Err(BlobManifestValidationError::DuplicateRequestHash);
         }
-        let classified = response.owned.iter().chain(&response.claimed).chain(&response.upload).chain(response.rejected.iter().map(|entry| &entry.content_hash));
+        let classified = response.owned.iter().chain(&response.upload).chain(response.rejected.iter().map(|entry| &entry.content_hash));
         let mut unique = HashSet::with_capacity(requested.len());
         for hash in classified {
             if !requested.contains(hash) || !unique.insert(*hash) {

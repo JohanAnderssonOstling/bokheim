@@ -16,8 +16,6 @@ import java.util.UUID;
 /** Streams authenticated browser downloads into the library's hidden staging
  * folder. Only complete files are handed to Rust for placement and import. */
 final class BookDownload {
-    static volatile java.util.function.BooleanSupplier transfersAllowed = () -> true;
-    private static final class Deferred extends IOException {}
     static final class Cancellation {
         private volatile boolean cancelled;
         private HttpURLConnection connection;
@@ -90,32 +88,13 @@ final class BookDownload {
 
     static File save(String address, String userAgent, String referer, String disposition,
                      String mime, File directory, Progress progress) throws IOException {
-        return save(address, userAgent, referer, disposition, mime, directory, progress, () -> {});
+        return save(address, userAgent, referer, disposition, mime, directory, progress, new Cancellation());
     }
 
     static File save(String address, String userAgent, String referer, String disposition,
-                     String mime, File directory, Progress progress, Runnable waiting) throws IOException {
-        return save(address, userAgent, referer, disposition, mime, directory, progress, waiting, new Cancellation());
-    }
-
-    static File save(String address, String userAgent, String referer, String disposition,
-                     String mime, File directory, Progress progress, Runnable waiting, Cancellation cancellation) throws IOException {
-        for (;;) {
-            cancellation.check();
-            if (!transfersAllowed.getAsBoolean()) waiting.run();
-            while (!transfersAllowed.getAsBoolean()) {
-                cancellation.check();
-                try { Thread.sleep(250); }
-                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException("Download interrupted", interrupted); }
-            }
-            try { return saveAllowed(address, userAgent, referer, disposition, mime, directory, progress, cancellation); }
-            catch (Deferred deferred) { waiting.run(); }
-            catch (IOException error) { cancellation.check(); if (transfersAllowed.getAsBoolean()) throw error; waiting.run(); }
-        }
-    }
-
-    private static File saveAllowed(String address, String userAgent, String referer, String disposition,
                      String mime, File directory, Progress progress, Cancellation cancellation) throws IOException {
+        // Browser downloads are explicit user requests, regardless of network cost.
+        cancellation.check();
         if (!webAddress(address)) throw new IOException("This download needs an HTTP or HTTPS link");
         HttpURLConnection connection = null;
         File partial = null;
@@ -124,7 +103,6 @@ final class BookDownload {
             CookieManager cookies = CookieManager.getInstance();
             for (int redirects = 0; ; redirects++) {
                 cancellation.check();
-                if (!transfersAllowed.getAsBoolean()) throw new Deferred();
                 connection = (HttpURLConnection) url.openConnection();
                 cancellation.connected(connection);
                 connection.setInstanceFollowRedirects(false);
@@ -179,7 +157,6 @@ final class BookDownload {
                 int length;
                 while ((length = input.read(buffer)) != -1) {
                     cancellation.check();
-                    if (!transfersAllowed.getAsBoolean()) throw new Deferred();
                     output.write(buffer, 0, length);
                     count += length;
                     progress.update(count, total);

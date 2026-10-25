@@ -51,7 +51,7 @@ impl StartupProfile {
             log::log!(target: "startup_profile", level, "scope={} stage={} duration_ms={:.3} elapsed_ms={:.3} since_start_ms={:.3} library_id={}",
                 self.scope, stage, (now - previous).as_secs_f64() * 1000.0,
                 (now - started).as_secs_f64() * 1000.0,
-                now.duration_since(*ORIGIN.get().expect("profile origin initialized")).as_secs_f64() * 1000.0,
+                now.duration_since(*ORIGIN.get_or_init(|| started)).as_secs_f64() * 1000.0,
                 self.library_id.as_deref().unwrap_or("-"));
         }
     }

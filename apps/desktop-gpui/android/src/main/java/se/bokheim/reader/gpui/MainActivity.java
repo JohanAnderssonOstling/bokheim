@@ -39,6 +39,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends GameActivity {
+    /** Distribution policy is compiled into the Java package, never read from
+     * intent extras or inferred from the installer. Rust shares this policy. */
+    public static boolean isPlayStoreBuild() {
+        return BuildConfig.PLAY_STORE;
+    }
+
     public static String taxonomyFile(android.content.Context context) throws IOException {
         return TaxonomyAssets.prepare(context).getAbsolutePath();
     }
@@ -151,6 +157,7 @@ public final class MainActivity extends GameActivity {
      * explicit Settings action; installer return codes never prove activation.
      */
     public static String updateCommand(android.content.Context context, String encoded) throws Exception {
+        if (isPlayStoreBuild()) throw new UnsupportedOperationException("Application updates are managed by Google Play");
         org.json.JSONObject request = new org.json.JSONObject(encoded);
         String action = request.getString("action");
         if (action.equals("prepare")) {
@@ -237,10 +244,8 @@ public final class MainActivity extends GameActivity {
     private native void nativeSelectedDirectoryLocalRoot(long requestId, String path);
     private native void nativeStorageAccessChanged(boolean granted, String documentsLibraryRoot);
     private native void nativeOpenBook(String name, int fileDescriptor);
-    static native boolean nativeTransfersAllowed();
     static native void nativeNetworkCostChanged(int cost);
     static void startNetworkCostMonitor(android.content.Context context) { NetworkCostMonitor.start(context); }
-    static void useTransferPolicy() { BookDownload.transfersAllowed = MainActivity::nativeTransfersAllowed; }
     private native void nativeVolumeButton(boolean next);
     private native void nativeWindowInsets(
         int safeLeft,

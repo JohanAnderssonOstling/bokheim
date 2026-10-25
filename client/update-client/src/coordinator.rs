@@ -11,6 +11,7 @@ pub enum UpdateAction {
     Restart,
     Install,
     GrantPermission,
+    Check,
 }
 
 /// Technical errors stay in diagnostics. Only actionable reasons enter the UI.
@@ -29,6 +30,9 @@ pub enum UpdateView {
     },
     NeedsPermission,
     Activating,
+    Current { version: String, checked: bool },
+    Checking,
+    Downloading { bytes: u64, total: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,9 +246,6 @@ impl<S: Store> Coordinator<S> {
             if plan.phase == Phase::Quarantined {
                 return UpdateView::Hidden;
             }
-            if plan.phase == Phase::Preparing && !client_platform_runtime::transfers::allowed() {
-                return UpdateView::WaitingForConnection;
-            }
             match plan.waiting {
                 Some(WaitReason::Connection) => return UpdateView::WaitingForConnection,
                 Some(WaitReason::Space { additional_bytes }) => return UpdateView::NeedsSpace { additional_bytes },
@@ -381,7 +382,7 @@ impl<S: Store> Coordinator<S> {
             return Err("update activation must wait for a later launch".into());
         }
         let manifest = self.approved_manifest()?;
-        let plan = self.record.approved.as_ref().unwrap();
+        let plan = self.record.approved.as_ref().ok_or("no approved update")?;
         if plan.artifacts.iter().any(|a| a.kind == ArtifactKind::Application) && self.device.target.ends_with("-apk") {
             let required = manifest.application.as_ref().ok_or("APK update lacks application metadata")?;
             if self.device.application < required.version {
@@ -389,7 +390,7 @@ impl<S: Store> Coordinator<S> {
             }
         }
         let mut next = self.record.clone();
-        next.approved.as_mut().unwrap().phase = Phase::Activating;
+        next.approved.as_mut().ok_or("no approved update")?.phase = Phase::Activating;
         self.commit(next)?;
         Ok(manifest)
     }
@@ -397,7 +398,7 @@ impl<S: Store> Coordinator<S> {
     /// Host must have validated every required installation and data migration.
     pub fn activated(&mut self, installed: DeviceVersion) -> Result<(), String> {
         let manifest = self.approved_manifest()?;
-        let plan = self.record.approved.as_ref().unwrap();
+        let plan = self.record.approved.as_ref().ok_or("no approved update")?;
         if plan.phase != Phase::Activating {
             return Err("update is not activating".into());
         }

@@ -152,7 +152,8 @@ impl FragmentSelection {
                         2
                     }
                 };
-                let kind = category(self.text[offset..].chars().next().unwrap());
+                let Some(ch) = self.text.get(offset..).and_then(|text| text.chars().next()) else { return false };
+                let kind = category(ch);
                 if kind == 2 {
                     self.range = run.range.clone();
                     return true;

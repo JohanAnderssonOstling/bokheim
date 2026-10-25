@@ -20,8 +20,9 @@ use speech_text::prepare_speech_text;
 use std::mem::take;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{
-    Arc, Mutex, OnceLock, Weak,
+    Arc, Mutex, MutexGuard, OnceLock, Weak,
     atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     mpsc,
 };
@@ -161,8 +162,32 @@ struct Shared {
 }
 
 impl Shared {
+    /// Cancel stale PCM before recovering a lock. Each field still contains a
+    /// valid Rust value, but a partially completed handoff must not keep playing.
+    fn lock<'a, T>(&self, mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
+        mutex.lock().unwrap_or_else(|error| {
+            self.fail("Speech state was interrupted. Start reading aloud again to retry.");
+            mutex.clear_poison();
+            error.into_inner()
+        })
+    }
+
+    fn fail(&self, message: &str) {
+        self.paused.store(true, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        // This can run while another speech lock is held, including route.
+        // Never wait for that lock while reporting a failure.
+        if let Ok(route) = self.route.try_lock() {
+            if let Some(client) = route.as_ref() {
+                let _ = client.events.try_send(SpeechEvent::Failed { generation: client.generation.load(Ordering::Acquire), message: message.into() });
+            }
+        }
+        eprintln!("{message}");
+    }
+
     fn update_output(&self, commands: &mpsc::Sender<Command>) {
-        if let Some(output) = self.output.lock().unwrap().as_ref() {
+        let output = self.lock(&self.output).clone();
+        if let Some(output) = output {
             if self.paused.load(Ordering::Acquire) {
                 output.pause();
             } else if let Err(message) = output.resume() {
@@ -175,6 +200,16 @@ impl Shared {
         #[cfg(target_os = "android")]
         android::changed_for(self);
     }
+}
+
+/// Registry entries and settings snapshots can be retained after unwinding;
+/// they do not contain an in-progress audio ownership transition.
+fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| {
+        eprintln!("Recovering interrupted speech registry state");
+        mutex.clear_poison();
+        error.into_inner()
+    })
 }
 
 /// Pause lengths applied during synthesis. `sentence_scale` stretches or
@@ -204,7 +239,19 @@ impl SpeechEvents {
             Self::Direct(sender) => sender.try_send(event),
             Self::Routed(shared) => {
                 let Some(shared) = shared.upgrade() else { return Ok(()) };
-                let route = shared.route.lock().unwrap();
+                let route = match shared.route.lock() {
+                    Ok(route) => route,
+                    Err(error) => {
+                        let message = "Speech event routing was interrupted. Start reading aloud again to retry.";
+                        shared.fail(message);
+                        let route = error.into_inner();
+                        shared.route.clear_poison();
+                        if let Some(client) = route.as_ref() {
+                            let _ = client.events.try_send(SpeechEvent::Failed { generation: client.generation.load(Ordering::Acquire), message: message.into() });
+                        }
+                        return Ok(());
+                    }
+                };
                 let Some(client) = route.as_ref() else { return Ok(()) };
                 let generation = match &event {
                     SpeechEvent::Requested { generation, .. } | SpeechEvent::Started { generation, .. } | SpeechEvent::Finished { generation } | SpeechEvent::Failed { generation, .. } | SpeechEvent::Remote { generation, .. } => *generation,
@@ -271,7 +318,20 @@ impl SpeechRuntime {
         let events = SpeechEvents::Routed(Arc::downgrade(&shared));
         let worker_shared = shared.clone();
         let wake = commands.clone();
-        thread::Builder::new().name("reader-tts".into()).spawn(move || worker(receiver, wake, events, worker_shared)).map_err(|error| error.to_string())?;
+        thread::Builder::new()
+            .name("reader-tts".into())
+            .spawn(move || {
+                if catch_unwind(AssertUnwindSafe(|| worker(receiver, wake, events, worker_shared.clone()))).is_err() {
+                    worker_shared.fail("The speech worker stopped unexpectedly. Reopen the reader to retry.");
+                    let player = recover_lock(&worker_shared.player).take();
+                    let output = recover_lock(&worker_shared.output).take();
+                    if let Some(player) = player {
+                        player.stop();
+                    }
+                    drop(output);
+                }
+            })
+            .map_err(|error| error.to_string())?;
         Ok(Self { commands, shared })
     }
 }
@@ -287,12 +347,22 @@ pub struct DesktopSpeech {
 
 impl DesktopSpeech {
     pub fn new() -> Result<Self, String> {
-        let mut runtime = RUNTIME.get_or_init(|| Mutex::new(None)).lock().unwrap();
-        if runtime.is_none() {
-            *runtime = Some(SpeechRuntime::new()?);
+        let mut runtime = recover_lock(RUNTIME.get_or_init(|| Mutex::new(None)));
+        if let Some(current) = runtime.as_ref() {
+            if current.commands.send(Command::Wake).is_ok() {
+                return Ok(Self::for_worker(current.commands.clone(), current.shared.clone()));
+            }
         }
-        let runtime = runtime.as_ref().expect("speech runtime");
-        Ok(Self::for_worker(runtime.commands.clone(), runtime.shared.clone()))
+        let next = SpeechRuntime::new()?;
+        let speech = Self::for_worker(next.commands.clone(), next.shared.clone());
+        *runtime = Some(next);
+        Ok(speech)
+    }
+
+    fn send(&self, command: Command) {
+        if self.commands.send(command).is_err() {
+            self.shared.fail("The speech worker is unavailable. Reopen the reader to retry.");
+        }
     }
 
     fn for_worker(commands: mpsc::Sender<Command>, shared: Arc<Shared>) -> Self {
@@ -312,13 +382,13 @@ impl DesktopSpeech {
     }
 
     fn owned<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
-        let owner = self.shared.owner.lock().unwrap();
+        let owner = self.shared.lock(&self.shared.owner);
         (*owner == self.client.id).then(action)
     }
 
     pub fn set_title(&self, title: &str) {
-        let owner = self.shared.owner.lock().unwrap();
-        self.client.settings.lock().unwrap().title = title.into();
+        let owner = self.shared.lock(&self.shared.owner);
+        self.shared.lock(&self.client.settings).title = title.into();
         #[cfg(target_os = "android")]
         if *owner == self.client.id {
             android::set_title(self.client.android_id, title);
@@ -327,16 +397,16 @@ impl DesktopSpeech {
     }
 
     pub fn stop(&self) {
-        let mut owner = self.shared.owner.lock().unwrap();
+        let mut owner = self.shared.lock(&self.shared.owner);
         if *owner != self.client.id {
             return;
         }
         self.shared.count.store(0, Ordering::Release);
         let generation = self.invalidate_audio();
-        let _ = self.commands.send(Command::Stop { generation });
+        self.send(Command::Stop { generation });
         #[cfg(target_os = "android")]
         android::stop(self.client.android_id);
-        self.shared.route.lock().unwrap().take();
+        self.shared.lock(&self.shared.route).take();
         *owner = 0;
     }
 
@@ -349,15 +419,15 @@ impl DesktopSpeech {
     /// resources; the worker also rejects a release overtaken by a new start.
     pub fn release_resources(&self) {
         self.stop();
-        let owner = self.shared.owner.lock().unwrap();
+        let owner = self.shared.lock(&self.shared.owner);
         let generation = self.client.generation.load(Ordering::Acquire);
         if *owner == 0 && generation == self.shared.generation.load(Ordering::Acquire) {
-            let _ = self.commands.send(Command::Release { generation });
+            self.send(Command::Release { generation });
         }
     }
 
     pub fn is_current(&self) -> bool {
-        *self.shared.owner.lock().unwrap() == self.client.id
+        *self.shared.lock(&self.shared.owner) == self.client.id
     }
 
     pub fn replace(&self, text: Vec<String>) -> u64 {
@@ -374,22 +444,22 @@ impl DesktopSpeech {
     }
 
     fn start(&self, count: usize, start: usize, command: impl FnOnce(u64) -> Command) -> u64 {
-        let mut owner = self.shared.owner.lock().unwrap();
+        let mut owner = self.shared.lock(&self.shared.owner);
         if *owner != self.client.id {
-            let previous = self.shared.route.lock().unwrap().take();
+            let previous = self.shared.lock(&self.shared.route).take();
             if let Some(previous) = previous {
                 #[cfg(target_os = "android")]
                 android::stop(previous.android_id);
                 let _ = previous.events.try_send(SpeechEvent::Remote { generation: previous.generation.load(Ordering::Acquire), command: SpeechControl::Stop });
             }
             *owner = self.client.id;
-            *self.shared.route.lock().unwrap() = Some(self.client.clone());
+            *self.shared.lock(&self.shared.route) = Some(self.client.clone());
         }
         let generation = self.invalidate_audio();
-        let settings = self.client.settings.lock().unwrap();
+        let settings = self.shared.lock(&self.client.settings);
         self.shared.rate.store(settings.rate.to_bits(), Ordering::Release);
-        *self.shared.pauses.lock().unwrap() = settings.pauses;
-        *self.shared.voice.lock().unwrap() = settings.voice;
+        *self.shared.lock(&self.shared.pauses) = settings.pauses;
+        *self.shared.lock(&self.shared.voice) = settings.voice;
         self.shared.end.store(usize::MAX, Ordering::Release);
         self.shared.cursor.store(start, Ordering::Release);
         self.shared.count.store(count, Ordering::Release);
@@ -404,14 +474,14 @@ impl DesktopSpeech {
             }
         }
         drop(settings);
-        let _ = self.commands.send(command(generation));
+        self.send(command(generation));
         generation
     }
 
     pub fn provide_chunk(&self, generation: u64, index: usize, glyph_start: u32, chunk: Option<SpeechChunk>) {
         self.owned(|| {
             if generation == self.client.generation.load(Ordering::Acquire) {
-                let _ = self.commands.send(Command::Chunk { generation, index, glyph_start, chunk });
+                self.send(Command::Chunk { generation, index, glyph_start, chunk });
             }
         });
     }
@@ -422,7 +492,7 @@ impl DesktopSpeech {
             let generation = self.invalidate_audio();
             self.shared.cursor.store(index, Ordering::Release);
             self.shared.paused.store(paused, Ordering::Release);
-            let _ = self.commands.send(Command::Skip { generation, index });
+            self.send(Command::Skip { generation, index });
             generation
         })
         .unwrap_or_else(|| self.client.generation.load(Ordering::Acquire))
@@ -431,7 +501,7 @@ impl DesktopSpeech {
     pub fn set_end_fragment(&self, end: Option<usize>) -> u64 {
         self.owned(|| {
             self.shared.end.store(end.unwrap_or(usize::MAX), Ordering::Release);
-            let _ = self.commands.send(Command::Wake);
+            self.send(Command::Wake);
         });
         self.client.generation.load(Ordering::Acquire)
     }
@@ -448,7 +518,7 @@ impl DesktopSpeech {
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.client.generation.store(generation, Ordering::Release);
         self.shared.paused.store(true, Ordering::Release);
-        if let Some(player) = self.shared.player.lock().unwrap().as_ref() {
+        if let Some(player) = self.shared.lock(&self.shared.player).as_ref() {
             player.stop();
             player.pause();
         }
@@ -456,9 +526,9 @@ impl DesktopSpeech {
     }
 
     pub fn set_rate(&self, rate: f32) -> u64 {
-        let owner = self.shared.owner.lock().unwrap();
+        let owner = self.shared.lock(&self.shared.owner);
         let rate = rate.clamp(0.5, 3.0);
-        let mut settings = self.client.settings.lock().unwrap();
+        let mut settings = self.shared.lock(&self.client.settings);
         if settings.rate == rate {
             return self.client.generation.load(Ordering::Acquire);
         }
@@ -479,34 +549,34 @@ impl DesktopSpeech {
             let index = self.shared.cursor.load(Ordering::Acquire);
             let generation = self.invalidate_audio();
             self.shared.paused.store(paused, Ordering::Release);
-            let _ = self.commands.send(Command::Skip { generation, index });
+            self.send(Command::Skip { generation, index });
         }
     }
 
     /// Replace the active voice at the current logical passage, preserving pause state.
     pub fn set_voice(&self, voice: Voice) -> u64 {
-        let owner = self.shared.owner.lock().unwrap();
-        let mut settings = self.client.settings.lock().unwrap();
+        let owner = self.shared.lock(&self.shared.owner);
+        let mut settings = self.shared.lock(&self.client.settings);
         if settings.voice == voice {
             return self.client.generation.load(Ordering::Acquire);
         }
         settings.voice = voice;
         if *owner == self.client.id {
-            *self.shared.voice.lock().unwrap() = voice;
+            *self.shared.lock(&self.shared.voice) = voice;
             self.restart_current();
         }
         self.client.generation.load(Ordering::Acquire)
     }
 
     pub fn set_pauses(&self, pauses: Pauses) -> u64 {
-        let owner = self.shared.owner.lock().unwrap();
-        let mut settings = self.client.settings.lock().unwrap();
+        let owner = self.shared.lock(&self.shared.owner);
+        let mut settings = self.shared.lock(&self.client.settings);
         if settings.pauses == pauses {
             return self.client.generation.load(Ordering::Acquire);
         }
         settings.pauses = pauses;
         if *owner == self.client.id {
-            *self.shared.pauses.lock().unwrap() = pauses;
+            *self.shared.lock(&self.shared.pauses) = pauses;
             self.restart_current();
         }
         self.client.generation.load(Ordering::Acquire)
@@ -515,7 +585,7 @@ impl DesktopSpeech {
     pub fn pause(&self) {
         self.owned(|| {
             self.shared.paused.store(true, Ordering::Release);
-            if let Some(player) = self.shared.player.lock().unwrap().as_ref() {
+            if let Some(player) = self.shared.lock(&self.shared.player).as_ref() {
                 player.pause();
             }
             self.shared.update_output(&self.commands);
@@ -526,8 +596,8 @@ impl DesktopSpeech {
     pub fn resume(&self) {
         self.owned(|| {
             self.shared.paused.store(false, Ordering::Release);
-            let _ = self.commands.send(Command::Wake);
-            if let Some(player) = self.shared.player.lock().unwrap().as_ref() {
+            self.send(Command::Wake);
+            if let Some(player) = self.shared.lock(&self.shared.player).as_ref() {
                 player.play();
             }
             self.shared.update_output(&self.commands);
@@ -610,7 +680,7 @@ impl Source for OwnedPcm {
         None
     }
     fn channels(&self) -> NonZeroU16 {
-        NonZeroU16::new(1).expect("mono")
+        NonZeroU16::MIN
     }
     fn sample_rate(&self) -> NonZeroU32 {
         self.rate
@@ -642,8 +712,8 @@ impl SpeechEngine for OfflineTts {
 /// Break source ownership cycles before closing the device. The loaded voice is
 /// deliberately independent of the output, so a quick subsequent start stays warm.
 fn release_output<O>(shared: &Shared, player: &mut Option<Arc<Player>>, output: &mut Option<O>) {
-    let retired = shared.player.lock().expect("speech player lock").take();
-    let device = shared.output.lock().unwrap().take();
+    let retired = shared.lock(&shared.player).take();
+    let device = shared.lock(&shared.output).take();
     drop(retired);
     drop(device);
     drop(player.take());
@@ -936,7 +1006,7 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
                 passage = None;
                 continue;
             };
-            let voice = *shared.voice.lock().unwrap();
+            let voice = *shared.lock(&shared.voice);
             if engine_voice != Some(voice) {
                 // Drop the previous session before allocating the next model.
                 unload_voice(&mut engine);
@@ -961,8 +1031,8 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
                         drain_time = delay;
                         next.pause();
                         let sink = Arc::new(sink);
-                        *shared.output.lock().unwrap() = Some(sink.clone());
-                        *shared.player.lock().expect("speech player lock") = Some(next.clone());
+                        *shared.lock(&shared.output) = Some(sink.clone());
+                        *shared.lock(&shared.player) = Some(next.clone());
                         player = Some(next);
                         output = Some(sink);
                     }
@@ -974,12 +1044,12 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
                 }
             }
             let speed = f32::from_bits(shared.rate.load(Ordering::Acquire));
-            let pauses = *shared.pauses.lock().expect("speech pauses lock");
+            let pauses = *shared.lock(&shared.pauses);
             let final_chunk = item.position.as_ref().map_or_else(|| item.text()[span.end..].trim().is_empty(), |position| position.next_glyph.is_none());
             let text = prepare_speech_text(&item.text()[span.clone()]);
             let mut config = narration_config(speed, pauses);
             config.sid = voice.speaker_id();
-            let audio = engine.as_ref().expect("speech model").generate(&text, &config, &shared, generation);
+            let audio = engine.as_ref().ok_or_else(|| "The speech model is unavailable.".to_owned()).and_then(|engine| engine.generate(&text, &config, &shared, generation));
             if generation != shared.generation.load(Ordering::Acquire) {
                 continue;
             }
@@ -1005,9 +1075,9 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
                     started: false,
                     pending_consumed: 0,
                 };
-                let player = player.as_ref().expect("speech player");
+                let player = player.as_ref().ok_or("The speech output is unavailable.")?;
                 player.append(source);
-                let guard = shared.player.lock().expect("speech player lock");
+                let guard = shared.lock(&shared.player);
                 if generation == shared.generation.load(Ordering::Acquire) && !shared.paused.load(Ordering::Acquire) {
                     player.play();
                 }
@@ -1019,7 +1089,9 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
             })();
             if let Err(message) = result {
                 active = false;
-                player.as_ref().expect("speech player").stop();
+                if let Some(player) = &player {
+                    player.stop();
+                }
                 let _ = events.try_send(SpeechEvent::Failed { generation, message });
             } else if final_chunk {
                 next_index += 1;

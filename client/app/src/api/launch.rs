@@ -11,6 +11,7 @@ pub struct BackendLaunch {
     data_dir: PathBuf,
     default_library_root: PathBuf,
     discovery: Option<(String, PathBuf)>,
+    private_library_storage: bool,
     pub(crate) libraries_after_first_frame: bool,
 }
 
@@ -21,12 +22,21 @@ impl BackendLaunch {
         // Desktop startup opens instance and update locks before the backend
         // registry, which otherwise creates this directory on first launch.
         fs::create_dir_all(&data_dir).map_err(|error| format!("failed to create app-data directory {}: {error}", data_dir.display()))?;
-        Ok(Self { data_dir, default_library_root, discovery: None, libraries_after_first_frame: false })
+        Ok(Self { data_dir, default_library_root, discovery: None, private_library_storage: false, libraries_after_first_frame: false })
     }
 
     /// Location for platform-owned files such as desktop instance locks and UI sessions.
     pub fn app_data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Put future libraries in app-owned storage, including after switching
+    /// from a distribution that allowed a shared-storage default. Existing
+    /// registered libraries and their files are never moved or deleted.
+    pub fn with_private_library_storage(mut self) -> Self {
+        self.default_library_root = self.data_dir.join("libraries");
+        self.private_library_storage = true;
+        self
     }
 
     /// Use this root for discovery and future libraries, registering a fallback
@@ -47,6 +57,9 @@ impl BackendLaunch {
 
     pub(crate) fn into_context(self) -> Result<BackendContext, String> {
         let context = BackendContext::open(self.data_dir, &self.default_library_root)?;
+        if self.private_library_storage {
+            context.registry.set_default_library_save_location(&self.default_library_root.to_string_lossy()).map_err(|error| error.to_string())?;
+        }
         if let Some((name, fallback)) = self.discovery {
             context.registry.discover(&self.default_library_root).map_err(|error| error.to_string())?;
             if context.registry.entries().map_err(|error| error.to_string())?.is_empty() && context.registry.pending_local_purges().map_err(|error| error.to_string())?.is_empty() {
@@ -91,6 +104,29 @@ mod tests {
         let error = BackendLaunch::initialize(AppDataLocation::native_path(file.join("bokheim"))).unwrap_err();
         assert!(error.contains("failed to create app-data directory"), "{error}");
         assert_eq!(fs::read(file).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn private_storage_replaces_a_shared_default_without_moving_registered_libraries() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("private");
+        let location = AppDataLocation::native_path(&data);
+        let original = BackendContext::initialize(location.clone()).unwrap();
+        let shared = root.path().join("Documents");
+        original.registry.set_default_library_save_location(shared.to_str().unwrap()).unwrap();
+        let existing = original.registry.create("Existing", None).unwrap();
+        let existing_path = PathBuf::from(existing.storage_locator());
+        fs::write(existing_path.join("keep.txt"), "original library").unwrap();
+        drop(original);
+
+        let context = BackendLaunch::initialize(location).unwrap().with_private_library_storage().into_context().unwrap();
+        assert_eq!(context.registry.entries().unwrap()[0].storage_locator(), existing.storage_locator());
+        assert_eq!(fs::read_to_string(existing_path.join("keep.txt")).unwrap(), "original library");
+        let created = context.registry.create("Imported", None).unwrap();
+        let remote = context.registry.attach_remote(&LibraryId::new_v4(), "Remote").unwrap();
+        let private = data.canonicalize().unwrap().join("libraries");
+        assert_eq!(Path::new(created.storage_locator()), private.join("Imported"));
+        assert_eq!(Path::new(remote.storage_locator()), private.join("Remote"));
     }
 
     #[test]

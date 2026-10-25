@@ -49,7 +49,7 @@ pub enum AppCommand {
     AccountSnapshot,
     LocalStorageUsage,
     Login { email: String, password: String },
-    VerifyEmail { email: String, pin: String },
+    VerifyEmail { email: String, pin: String, password: String },
     Logout,
     SubscribeNotifications { browsing: bool },
     SubscribeLibraryList,
@@ -69,6 +69,7 @@ pub enum AppCommand {
     RemoveStore { id: library_model::StoreId },
     OpenStore { id: library_model::StoreId, library_id: LibraryId },
     OpenBrowser { library_id: LibraryId },
+    DeleteAccount { email: String, password: String },
 }
 
 impl AppCommand {
@@ -130,12 +131,16 @@ pub(super) async fn dispatch_request(backend: AppBackend, command: AppCommand) -
             backend.login(&email, &password).await.map_err(message)?;
             reply(backend.account_snapshot().await.map_err(message)?)?
         }
-        AppCommand::VerifyEmail { email, pin } => {
-            backend.verify_email(&email, &pin).await.map_err(message)?;
+        AppCommand::VerifyEmail { email, pin, password } => {
+            backend.verify_email(&email, &pin, &password).await.map_err(message)?;
             reply(backend.account_snapshot().await.map_err(message)?)?
         }
         AppCommand::Logout => {
             backend.logout().map_err(message)?;
+            reply(backend.account_snapshot().await.map_err(message)?)?
+        }
+        AppCommand::DeleteAccount { email, password } => {
+            backend.delete_account(&email, &password).await.map_err(message)?;
             reply(backend.account_snapshot().await.map_err(message)?)?
         }
 
@@ -170,7 +175,7 @@ pub(super) async fn dispatch_request(backend: AppBackend, command: AppCommand) -
             reply((file_name, serde_bytes::ByteBuf::from(bytes)))?
         }
         #[cfg(not(target_arch = "wasm32"))]
-        AppCommand::OpdsDescription { entry } => reply(library_opds::description(entry).map_err(BackendError::message)?)?,
+        AppCommand::OpdsDescription { entry } => reply(library_opds::description(entry)?)?,
         #[cfg(not(target_arch = "wasm32"))]
         AppCommand::BuyOpdsBook { entry, library_id } => reply(backend.buy_opds_book(entry, library_id).await.map_err(message)?)?,
         // Asks the helper once, so it waits on a process start.

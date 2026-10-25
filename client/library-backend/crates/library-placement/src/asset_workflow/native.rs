@@ -33,7 +33,7 @@ fn apply_file_work(assets: &AssetStore, database: &Database, movable: &HashMap<C
             if let Some((dir, name)) = snapshot.placement.clone() {
                 let mut alternatives = library_replica::file_name_candidates(&name, snapshot.occupied_names.iter().map(String::as_str).chain(std::iter::once(name.as_str())));
                 while assets.placement_conflicts(&hash, &path)? {
-                    let chosen = alternatives.next().expect("numeric name suffix space is unbounded");
+                    let chosen = alternatives.next().ok_or_else(|| BackendError::message("no collision-free file name remains"))?;
                     path = path.with_file_name(&chosen).map_err(BackendError::operation)?;
                     renamed = Some((dir.clone(), chosen));
                 }

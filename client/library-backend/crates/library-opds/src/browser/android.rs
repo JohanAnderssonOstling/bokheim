@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, LazyLock, Mutex, OnceLock,
+    Arc, LazyLock, Mutex, OnceLock, PoisonError,
 };
 use std::time::Duration;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -41,7 +41,8 @@ pub fn available() -> bool {
 /// staging folder before they enter the library import flow.
 pub fn receive(id: u64, message: &str) {
     let Ok(event) = from_str(message) else { return };
-    if let Some(sender) = SESSIONS.lock().unwrap().get(&id) {
+    let sender = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner).get(&id).cloned();
+    if let Some(sender) = sender {
         let _ = sender.send(event);
     }
 }
@@ -93,7 +94,7 @@ impl StoreWindow {
 
 impl Drop for StoreWindow {
     fn drop(&mut self) {
-        SESSIONS.lock().unwrap().remove(&self.id);
+        SESSIONS.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.id);
         if let Some(transport) = TRANSPORT.get() {
             let _ = transport(&json!({ "command": "close", "id": self.id }).to_string());
         }
@@ -105,7 +106,7 @@ pub(super) async fn open_store(request: StoreRequest) -> Result<StoreWindow, Str
     let downloads = request.downloads.canonicalize().map_err(|error| error.to_string())?;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (sender, events) = unbounded_channel();
-    SESSIONS.lock().unwrap().insert(id, sender);
+    SESSIONS.lock().unwrap_or_else(PoisonError::into_inner).insert(id, sender);
     let mut window = StoreWindow { id, downloads, events };
     transport(&json!({ "command": "open", "id": id, "request": request }).to_string())?;
     match tokio::time::timeout(Duration::from_secs(30), window.events.recv()).await {

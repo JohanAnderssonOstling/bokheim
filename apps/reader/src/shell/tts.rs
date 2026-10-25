@@ -104,7 +104,9 @@ impl Narration {
         } else {
             None
         };
-        let service = self.service.as_ref().expect("speech service");
+        let Some(service) = self.service.as_ref() else {
+            return Err("Speech service is unavailable. Try starting read aloud again.".into());
+        };
         service.set_title(&self.media_title);
         service.set_rate(self.rate() as f32);
         service.set_pauses(speech_pauses(self.pauses));

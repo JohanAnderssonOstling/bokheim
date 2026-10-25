@@ -53,7 +53,7 @@ impl AsyncCallback {
         F: FnMut() -> Fut + 'static,
         Fut: std::future::Future<Output = Result<JsValue, JsValue>> + 'static,
     {
-        Self(Closure::new(move || wasm_bindgen_futures::future_to_promise(callback())))
+        Self(Closure::own_aborting(move || wasm_bindgen_futures::future_to_promise(callback())))
     }
     pub fn value(&self) -> JsValue {
         self.0.as_ref().clone()

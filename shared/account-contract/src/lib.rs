@@ -14,6 +14,14 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+/// Explicit credentials and confirmation for the public account-deletion page.
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteAccountRequest {
+    pub email: String,
+    pub password: String,
+    pub confirmation: String,
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct PublicRegistrationRequest {
     pub email: String,
@@ -29,6 +37,9 @@ pub struct EmailRequest {
 pub struct EmailVerificationRequest {
     pub email: String,
     pub pin: String,
+    /// The registration password. The PIN proves mailbox control; the password
+    /// proves the verifier is the registrant whose password the account gets.
+    pub password: String,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]

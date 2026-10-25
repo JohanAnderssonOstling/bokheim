@@ -19,7 +19,7 @@ use crate::library::widgets::{BookCardEvents, BookCardView};
 /// commands that go with them; subjects and authors are queries over the
 /// library, Books is the flat library, and Home is its shelves of recent activity.
 /// Catalog is the public-domain catalog's subject tree: books not in the library.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BrowseKind {
     Home,
     Books,
@@ -303,8 +303,13 @@ impl BrowseListing {
             }
             None => BookCardView::create_in_grid(book, self.ui.clone(), self.book_events.clone(), self.folder_commands, self.kind == BrowseKind::Books, cx),
         };
-        let sections =
-            sections.into_iter().map(|section| BrowseSection { parent: section.parent, children: section.children, books: section.books.into_iter().map(|book| card_for(book, cx)).collect(), book_count: section.book_count }).collect();
+        let sections = sections
+            .into_iter()
+            .map(|section| {
+                let books = if section_shows_books(section.parent.id) { section.books.into_iter().map(|book| card_for(book, cx)).collect() } else { Vec::new() };
+                BrowseSection { parent: section.parent, children: section.children, books, book_count: section.book_count }
+            })
+            .collect();
         let books: Rc<Vec<_>> = Rc::new(books.into_iter().map(|book| card_for(book, cx)).collect());
         self.book_indices = self.page.as_ref().map(|page| (page.book_offset..).zip(books.iter().cloned()).collect()).unwrap_or_default();
         self.sections = sections;
@@ -419,6 +424,10 @@ impl BrowseListing {
 
 pub(super) fn is_author_heading(location: BrowseLocation) -> bool {
     matches!(location, BrowseLocation::Author(Some(_)) | BrowseLocation::CatalogAuthor(Some(_)))
+}
+
+pub(super) fn section_shows_books(location: BrowseLocation) -> bool {
+    matches!(location, BrowseLocation::Home(_)) || is_author_heading(location)
 }
 
 fn compatible_pages(current: &BrowsePageState, next: &BrowsePageState) -> bool {

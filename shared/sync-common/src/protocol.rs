@@ -94,8 +94,9 @@ impl PushBatcher {
             if !batch.is_empty() && bytes.saturating_add(next.bytes) > MAX_PUSH_BATCH_BYTES {
                 break;
             }
-            bytes = bytes.saturating_add(next.bytes);
-            batch.push(self.ready.pop_front().expect("the inspected mutation is still queued").publication);
+            let Some(mutation) = self.ready.pop_front() else { break };
+            bytes = bytes.saturating_add(mutation.bytes);
+            batch.push(mutation.publication);
         }
         self.ready_bytes -= bytes;
         batch

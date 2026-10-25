@@ -16,7 +16,7 @@ use crate::shell::page::ReaderSurface;
 use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent};
 use crate::{DecreaseColumnWidth, DecreaseFont, IncreaseColumnWidth, IncreaseFont, NextPage, NextSection, PreviousPage, PreviousSection, ToggleFullscreen};
 use gpui::prelude::*;
-use gpui::{App, Context, Div, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, Point, Render, ScrollDelta, Window};
+use gpui::{App, Context, Div, FocusHandle, Focusable, IntoElement, Pixels, Point, Render, ScrollDelta, Window};
 use ui_components as components;
 
 impl Focusable for ReaderView {
@@ -362,20 +362,15 @@ const DOCUMENT_CONTEXT: &str = "ReaderDocument";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     shell_input::bind_document_keys(cx, DOCUMENT_CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("secondary-left", PreviousSection, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("secondary-right", NextSection, Some(DOCUMENT_CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("f11", ToggleFullscreen, Some("Reader")),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, Some("Reader")),
-        KeyBinding::new("secondary-alt-=", IncreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("secondary-alt-+", IncreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("secondary-alt--", DecreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("alt-=", IncreaseFont, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("alt-+", IncreaseFont, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("alt--", DecreaseFont, Some(DOCUMENT_CONTEXT)),
-    ]);
+    use ui_components::{ShortcutPage::Reader, bind_shortcut};
+    bind_shortcut(cx, Reader, "reader.previous_section", "Previous section", &["secondary-left"], PreviousSection, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.next_section", "Next section", &["secondary-right"], NextSection, DOCUMENT_CONTEXT);
+    #[cfg(not(target_os = "macos"))]
+    bind_shortcut(cx, Reader, "reader.fullscreen", "Toggle fullscreen", &["f11"], ToggleFullscreen, "Reader");
+    #[cfg(target_os = "macos")]
+    bind_shortcut(cx, Reader, "reader.fullscreen", "Toggle fullscreen", &["ctrl-cmd-f"], ToggleFullscreen, "Reader");
+    bind_shortcut(cx, Reader, "reader.font_increase", "Increase book font size", &["alt-="], IncreaseFont, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.font_decrease", "Decrease book font size", &["alt--"], DecreaseFont, DOCUMENT_CONTEXT);
 }
 
 #[cfg(test)]

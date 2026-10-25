@@ -3,7 +3,7 @@
 //! enrichment answer, an external catalog audiobook from its source, or a
 //! book from an OPDS feed, enriched like any import.
 
-use client_runtime::BackendError;
+use client_runtime::{BackendError, Failure};
 use library_database::catalog::CatalogBook;
 use library_model::{CardKey, LibraryUpdate};
 use library_placement::stage_import;
@@ -14,17 +14,17 @@ use crate::LibraryImport;
 
 impl LibraryImport {
     pub async fn import_catalog_book(&self, parent_id: DirId, hash: ContentHash) -> Result<ContentHash, BackendError> {
-        let book = library_database::catalog::entry(CardKey(*hash.as_bytes())).map_err(BackendError::operation)?.filter(|book| book.hash.is_some()).ok_or("the book is not in the catalog")?;
+        let book = library_database::catalog::entry(CardKey(*hash.as_bytes())).map_err(BackendError::operation)?.filter(|book| book.hash.is_some()).ok_or_else(|| BackendError::classified(Failure::NotFound, "the book is not in the catalog"))?;
         let entry = CardKey(*hash.as_bytes());
-        let bytes = library_catalog::download_book_with_progress(hash, &|progress| self.events.publish_update(LibraryUpdate::CatalogImport { entry, progress })).await.map_err(BackendError::message)?;
+        let bytes = library_catalog::download_book_with_progress(hash, &|progress| self.events.publish_update(LibraryUpdate::CatalogImport { entry, progress })).await?;
         self.import_catalog_download(parent_id, &book, bytes).await
     }
 
     /// Downloads an external audiobook from its source and imports it with
     /// the catalog's record, as a hosted catalog book is.
     pub async fn import_external_catalog_audiobook(&self, parent_id: DirId, entry: CardKey) -> Result<ContentHash, BackendError> {
-        let book = library_database::catalog::entry(entry).map_err(BackendError::operation)?.filter(|book| book.hash.is_none()).ok_or("the audiobook is not in the catalog")?;
-        let bytes = library_catalog::download_audiobook_with_progress(entry, &|progress| self.events.publish_update(LibraryUpdate::CatalogImport { entry, progress })).await.map_err(BackendError::message)?;
+        let book = library_database::catalog::entry(entry).map_err(BackendError::operation)?.filter(|book| book.hash.is_none()).ok_or_else(|| BackendError::classified(Failure::NotFound, "the audiobook is not in the catalog"))?;
+        let bytes = library_catalog::download_audiobook_with_progress(entry, &|progress| self.events.publish_update(LibraryUpdate::CatalogImport { entry, progress })).await?;
         let imported = self.import_catalog_download(parent_id, &book, bytes).await?;
         self.refresh_external_catalog_audiobook_cover(imported, entry).await?;
         Ok(imported)

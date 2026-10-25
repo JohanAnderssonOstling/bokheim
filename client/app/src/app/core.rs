@@ -15,7 +15,7 @@ use std::time::Duration;
 pub(super) use sync_common::LibraryId;
 use tokio::sync::watch;
 
-pub(super) use crate::BackendError;
+pub(super) use crate::{BackendError, Failure};
 pub(super) use crate::DeviceAccountSession;
 pub(super) use library_backend::{LibrarySyncState, LibrarySyncStatus};
 

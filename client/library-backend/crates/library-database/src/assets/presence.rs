@@ -1,6 +1,6 @@
 use super::TransfersSql;
 use crate::*;
-use library_model::BlobKind;
+use library_model::{BlobKind, TransferOrigin};
 use std::collections::HashSet;
 use sync_common::ContentHash;
 
@@ -36,6 +36,16 @@ impl Database {
             Ok(())
         })?;
         Ok(rows)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn book_download_origin(&self, hash: &ContentHash) -> Result<Option<TransferOrigin>, DatabaseError> {
+        let mut origin = None;
+        self.connection.book_download_origin(hash, |row| {
+            origin = TransferOrigin::parse_storage(&row.get::<_, String>(0)?);
+            Ok(())
+        })?;
+        Ok(origin)
     }
 }
 

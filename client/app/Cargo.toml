@@ -14,7 +14,7 @@ crate-type = ["rlib"]
 kobo = ["client-platform-kobo/device"]
 
 [dependencies]
-client-runtime = { path = "../client-runtime" }
+client-runtime = { path = "../client-runtime", features = ["http"] }
 cpu-host = { path = "../library-backend/crates/cpu-host" }
 thumbnail = { path = "../library-backend/crates/thumbnail" }
 client-platform-desktop = { path = "crates/platform-desktop" }

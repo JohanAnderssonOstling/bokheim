@@ -11,7 +11,7 @@ use rodio::{
 };
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 pub(super) trait OutputControl: Send + Sync {
@@ -32,11 +32,25 @@ struct CallbackGate {
 }
 
 impl CallbackGate {
+    fn state(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(|error| {
+            let mut state = error.into_inner();
+            state.closed = true;
+            self.state.clear_poison();
+            self.changed.notify_all();
+            eprintln!("Speech output was interrupted; closing the audio callback");
+            state
+        })
+    }
+
     fn new(park_on_pause: bool) -> Self {
         Self { state: Mutex::new(GateState { paused: true, closed: false }), changed: Condvar::new(), park_on_pause: AtomicBool::new(park_on_pause) }
     }
     fn set_paused(&self, paused: bool) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
+        if state.closed {
+            return false;
+        }
         if state.paused == paused {
             return false;
         }
@@ -47,14 +61,23 @@ impl CallbackGate {
         true
     }
     fn wait(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         while state.paused && !state.closed && self.park_on_pause.load(Ordering::Acquire) {
-            state = self.changed.wait(state).unwrap();
+            state = match self.changed.wait(state) {
+                Ok(state) => state,
+                Err(error) => {
+                    let mut state = error.into_inner();
+                    state.closed = true;
+                    self.state.clear_poison();
+                    self.changed.notify_all();
+                    state
+                }
+            };
         }
         !state.closed
     }
     fn close(&self) {
-        self.state.lock().unwrap().closed = true;
+        self.state().closed = true;
         self.changed.notify_all();
     }
 }
@@ -75,6 +98,9 @@ impl OutputControl for DeviceOutput {
         }
     }
     fn resume(&self) -> Result<(), String> {
+        if self.gate.state().closed {
+            return Err("Speech output is closed. Start reading aloud again to retry.".into());
+        }
         if self.gate.set_paused(false) {
             if let Err(error) = self.stream.play() {
                 self.gate.set_paused(true);

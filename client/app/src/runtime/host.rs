@@ -13,7 +13,10 @@ impl BackendWorkerHost {
     /// update manifest publishes, installed before any library opens.
     /// Finish migrations before opening sessions; failures propagate to the page.
     pub async fn initialize(location: AppDataLocation) -> Result<Self, BackendError> {
-        crate::initialize_web_storage().await?;
+        crate::initialize_web_storage().await.map_err(|error| match error {
+            crate::platform::web_storage::StorageInitError::Busy(error) => BackendError::classified(crate::Failure::StorageBusy, error),
+            crate::platform::web_storage::StorageInitError::Failed(error) => BackendError::message(error),
+        })?;
         super::bisac::install().await.map_err(BackendError::message)?;
         super::taxonomy::install().await.map_err(BackendError::message)?;
         let context = crate::app::BackendContext::initialize(location).map_err(BackendError::message)?;

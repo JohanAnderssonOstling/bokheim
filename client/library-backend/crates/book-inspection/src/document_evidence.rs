@@ -3,7 +3,7 @@
 use crate::evidence::{self, SectionEvidence};
 use book_content::{Book, TocEntry};
 use book_model::BookRecord;
-use quick_xml::{events::Event, Reader};
+use quick_xml::{Reader, events::Event};
 use std::{
     collections::BTreeMap,
     io::{self, BufReader, Read},
@@ -64,74 +64,6 @@ pub(super) fn inspect(provider: &mut Book, book: &BookRecord) -> Vec<SectionEvid
         }
     }
     sections
-}
-
-#[allow(dead_code)]
-fn ranked_images(reader: &mut dyn Read, uri: &str, anchors: &BTreeMap<String, bool>) -> io::Result<Vec<(String, bool)>> {
-    let mut xml = Reader::from_reader(BufReader::new(reader));
-    xml.expand_empty_elements(true);
-    xml.check_end_names(false);
-    let mut buffer = Vec::new();
-    let mut hidden = 0usize;
-    let mut priority = anchors.get("") == Some(&true);
-    let mut images = Vec::new();
-    let mut section_start = 0;
-    loop {
-        match xml.read_event_into(&mut buffer) {
-            Ok(Event::Start(e)) => {
-                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_lowercase();
-                if matches!(name.as_str(), "head" | "style" | "script") {
-                    hidden += 1;
-                }
-                if hidden > 0 {
-                    buffer.clear();
-                    continue;
-                }
-                let attrs = e.attributes().flatten().filter_map(|a| a.unescape_value().ok().map(|v| (String::from_utf8_lossy(a.key.as_ref()).into_owned(), v.into_owned()))).collect::<Vec<_>>();
-                let toc = attrs.iter().filter(|(k, _)| k == "id" || k == "name").find_map(|(_, v)| anchors.get(v));
-                let typed = attrs.iter().any(|(k, v)| k == "epub:type" && v.split_whitespace().any(|v| v == "copyright-page"));
-                if toc.is_some() || typed {
-                    priority = typed || toc == Some(&true);
-                    section_start = images.len();
-                }
-                if matches!(name.as_str(), "img" | "image") {
-                    for (key, value) in &attrs {
-                        if matches!(key.rsplit(':').next(), Some("src" | "href")) && images.len() < 128 {
-                            let path = book_content::resolve_resource_href(uri, value);
-                            let image_path = path.split(['?', '#']).next().unwrap_or(&path);
-                            let is_cover = image_path.rsplit('/').next().unwrap_or(image_path).to_ascii_lowercase().contains("cover");
-                            if !is_cover {
-                                images.push((path, priority));
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(Event::End(e)) => {
-                if matches!(e.local_name().as_ref(), b"head" | b"style" | b"script") {
-                    hidden = hidden.saturating_sub(1);
-                }
-            }
-            Ok(Event::Text(e)) if hidden == 0 => {
-                let raw = String::from_utf8_lossy(e.as_ref()).replace("&copy;", "©").replace("&nbsp;", " ");
-                if let Ok(text) = quick_xml::escape::unescape(&raw) {
-                    if copyright(&text) {
-                        priority = true;
-                        for (_, value) in &mut images[section_start..] {
-                            *value = true;
-                        }
-                    } else if text.len() < 160 && boundary(&text) {
-                        priority = false;
-                        section_start = images.len();
-                    }
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buffer.clear();
-    }
-    Ok(images)
 }
 
 struct Block<'a> {

@@ -13,7 +13,7 @@ use std::time::Duration;
 use gpui::{App, Context};
 use library_backend::LibraryClient;
 
-pub(crate) type PersistenceFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
+pub(crate) type PersistenceFuture<T> = Pin<Box<dyn Future<Output = Result<T, library_backend::BackendError>> + 'static>>;
 type Mutation = Box<dyn FnOnce(&LibraryClient) -> PersistenceFuture<()> + 'static>;
 
 /// Awaits `op` against the library, then applies `apply` to the view with its
@@ -74,7 +74,8 @@ const POSITION_DEBOUNCE: Duration = Duration::from_secs(1);
 ///
 /// Page turns arrive far faster than the database should be written. Each
 /// update waits out [`POSITION_DEBOUNCE`]; anything that queued up meanwhile is
-/// drained and only the newest position is persisted.
+/// coalesced within a chapter. Chapter transitions and resets stay ordered so
+/// a rapid sequence of navigations retains every chapter the user entered.
 pub(crate) struct PositionWriter<P> {
     updates: async_channel::Sender<P>,
 }
@@ -82,18 +83,24 @@ pub(crate) struct PositionWriter<P> {
 impl<P: 'static> PositionWriter<P> {
     /// Starts the debouncing task. `persist` performs the actual library
     /// write for the newest position; `what` names it for log messages.
-    pub(crate) fn new(cx: &App, what: &'static str, persist: impl Fn(&LibraryClient, &P) -> PersistenceFuture<()> + 'static, library: Rc<LibraryClient>) -> Self {
+    pub(crate) fn new(cx: &App, what: &'static str, persist: impl Fn(&LibraryClient, &P) -> PersistenceFuture<()> + 'static, coalesce: impl Fn(&P, &P) -> bool + 'static, library: Rc<LibraryClient>) -> Self {
         let (updates, incoming) = async_channel::unbounded::<P>();
         let executor = cx.background_executor().clone();
         let persist = Rc::new(persist);
         cx.spawn(async move |_cx| {
-            while let Ok(mut position) = incoming.recv().await {
+            while let Ok(position) = incoming.recv().await {
                 executor.timer(POSITION_DEBOUNCE).await;
+                let mut positions = vec![position];
                 while let Ok(newer) = incoming.try_recv() {
-                    position = newer;
+                    if positions.last().is_some_and(|previous| coalesce(previous, &newer)) {
+                        positions.pop();
+                    }
+                    positions.push(newer);
                 }
-                if let Err(error) = persist(library.as_ref(), &position).await {
-                    log::error!("failed to {what}: {error}");
+                for position in positions {
+                    if let Err(error) = persist(library.as_ref(), &position).await {
+                        log::error!("failed to {what}: {error}");
+                    }
                 }
             }
         })
@@ -108,6 +115,12 @@ impl<P: 'static> PositionWriter<P> {
             log::warn!("{what} persistence task stopped");
         }
     }
+}
+
+#[derive(Clone)]
+enum ChapterReadReset {
+    All,
+    Chapter(String),
 }
 
 /// One reading position as the library stores it.
@@ -125,13 +138,14 @@ pub(crate) struct StoredPosition {
     /// it. Only the renderer can resolve a CFI or a page to an entry, so the
     /// library cannot work it out later — it travels with the position instead.
     entry: Option<String>,
+    reset_read_status: Option<ChapterReadReset>,
 }
 
 impl StoredPosition {
     /// The renderer reports how far through the book layout has reached as a
     /// 0–1 fraction.
     pub(crate) fn epub(cfi: String, fraction: f32) -> Self {
-        Self { position: cfi, percent: book_model::layout_fraction_progress(fraction), entry: None }
+        Self { position: cfi, percent: book_model::layout_fraction_progress(fraction), entry: None, reset_read_status: None }
     }
 
     /// Pages are a PDF's only progress signal: there is no reflowed text to
@@ -139,7 +153,12 @@ impl StoredPosition {
     /// stored. `offset` locates the view within the page and rides along in
     /// the position string without affecting progress.
     pub(crate) fn pdf_page(page_index: usize, offset: f32, page_count: usize) -> Self {
-        Self { position: book_model::pdf_page_position_reading_position(page_index as u32, offset), percent: book_model::pdf_page_progress(page_index, page_count), entry: Some(book_model::pdf_toc_target(page_index)) }
+        Self {
+            position: book_model::pdf_page_position_reading_position(page_index as u32, offset),
+            percent: book_model::pdf_page_progress(page_index, page_count),
+            entry: Some(book_model::pdf_toc_target(page_index)),
+            reset_read_status: None,
+        }
     }
 
     /// The entry resolved from this reading position. It may become available
@@ -163,6 +182,7 @@ impl StoredPosition {
 pub(crate) struct ReadingPositionWriter {
     writer: PositionWriter<StoredPosition>,
     narration_position: RefCell<Option<(u64, StoredPosition)>>,
+    last_position: RefCell<Option<StoredPosition>>,
 }
 
 impl ReadingPositionWriter {
@@ -174,12 +194,26 @@ impl ReadingPositionWriter {
                 let stored = position.position.clone();
                 let percent = position.percent;
                 let entry = position.entry.clone();
+                let reset = position.reset_read_status.clone();
                 let library = library.clone();
-                Box::pin(async move { library.update_reading_position(content_hash, stored, Some(percent), entry).await })
+                Box::pin(async move {
+                    library.update_reading_position(content_hash, stored, Some(percent), entry).await?;
+                    match reset {
+                        Some(ChapterReadReset::All) => {
+                            library.reset_chapter_read_status(content_hash).await?;
+                        }
+                        Some(ChapterReadReset::Chapter(target)) => {
+                            library.reset_chapter_read_status_at(content_hash, target).await?;
+                        }
+                        None => {}
+                    }
+                    Ok(())
+                })
             },
+            |previous, next| previous.entry == next.entry && (previous.percent >= 100.0) == (next.percent >= 100.0) && previous.reset_read_status.is_none() && next.reset_read_status.is_none(),
             library,
         );
-        Self { writer, narration_position: RefCell::new(None) }
+        Self { writer, narration_position: RefCell::new(None), last_position: RefCell::new(None) }
     }
 
     pub(crate) fn record(&self, position: StoredPosition, navigation_revision: u64) {
@@ -191,6 +225,7 @@ impl ReadingPositionWriter {
                 position
             }
         };
+        *self.last_position.borrow_mut() = Some(position.clone());
         self.writer.record(position, "reading position");
     }
 
@@ -198,7 +233,22 @@ impl ReadingPositionWriter {
     /// passage or reflowing its page may emit a coarser viewport position later.
     pub(crate) fn record_narration(&self, position: StoredPosition, navigation_revision: u64) {
         *self.narration_position.borrow_mut() = Some((navigation_revision, position.clone()));
+        *self.last_position.borrow_mut() = Some(position.clone());
         self.writer.record(position, "reading position");
+    }
+
+    pub(crate) fn reset_read_status(&self) {
+        if let Some(mut position) = self.last_position.borrow().clone() {
+            position.reset_read_status = Some(ChapterReadReset::All);
+            self.writer.record(position, "reset chapter read status");
+        }
+    }
+
+    pub(crate) fn reset_chapter_read_status(&self, target: String) {
+        if let Some(mut position) = self.last_position.borrow().clone() {
+            position.reset_read_status = Some(ChapterReadReset::Chapter(target));
+            self.writer.record(position, "reset chapter read status");
+        }
     }
 }
 
@@ -208,7 +258,7 @@ mod tests {
 
     fn writer() -> (ReadingPositionWriter, async_channel::Receiver<StoredPosition>) {
         let (updates, incoming) = async_channel::unbounded();
-        (ReadingPositionWriter { writer: PositionWriter { updates }, narration_position: RefCell::new(None) }, incoming)
+        (ReadingPositionWriter { writer: PositionWriter { updates }, narration_position: RefCell::new(None), last_position: RefCell::new(None) }, incoming)
     }
 
     #[test]

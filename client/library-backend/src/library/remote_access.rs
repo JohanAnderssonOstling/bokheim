@@ -22,7 +22,7 @@ impl LibrarySession {
         crate::executor::timeout(
             std::time::Duration::from_secs(30),
             authenticated_file_request(&account, |session| async move {
-                let mut endpoint = sync_transport::blob_endpoint(session.server_url(), &library, &hash);
+                let mut endpoint = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
                 endpoint.set_path(&format!("{}/playback", endpoint.path()));
                 let response = self.sync.http_client.post(endpoint).bearer_auth(session.token()).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).send().await.map_err(RemoteFileError::transport)?;
                 if !response.status().is_success() {
@@ -62,7 +62,7 @@ impl LibrarySession {
             let source = source.clone();
             let ranges = ranges.clone();
             async move {
-                let url = sync_transport::blob_endpoint(session.server_url(), &library, &source.hash);
+                let url = sync_transport::blob_endpoint(session.server_url(), &library, &source.hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
                 book_access::remote_file::fetch_bundle(&client, url, &source, session.token(), ranges).await
             }
         })
@@ -85,13 +85,15 @@ pub(crate) fn file_auth_error(error: library_runtime::account::AccountSessionErr
     }
 }
 
+/// Opening and reading books is interactive and always allowed on metered
+/// connections. Automatic transfer callers apply their own transfer policy.
 pub(crate) async fn authenticated_file_request<T, F: Future<Output = Result<T, RemoteFileError>>>(account: &library_runtime::account::LibraryAccount, mut request: impl FnMut(account_client::Session) -> F) -> Result<T, RemoteFileError> {
     let session = account.refresh_if_needed().await.map_err(file_auth_error)?.ok_or("sign in to read this remote file")?;
     let token = session.token().to_owned();
-    match client_platform_runtime::transfers::retry(|| request(session.clone())).await {
+    match request(session).await {
         Err(RemoteFileError::Unauthorized) => {
             let refreshed = account.refresh_after_unauthorized(&token).await.map_err(file_auth_error)?.ok_or("sign in to read this remote file")?;
-            client_platform_runtime::transfers::retry(|| request(refreshed.clone())).await
+            request(refreshed).await
         }
         result => result,
     }
@@ -99,7 +101,7 @@ pub(crate) async fn authenticated_file_request<T, F: Future<Output = Result<T, R
 
 pub(crate) async fn describe_remote_file(client: &reqwest::Client, account: &library_runtime::account::LibraryAccount, library: LibraryId, hash: ContentHash) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
     authenticated_file_request(account, |session| async move {
-        let url = sync_transport::blob_endpoint(session.server_url(), &library, &hash);
+        let url = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
         book_access::remote_file::describe(client, url, session.token(), hash).await
     })
     .await
@@ -107,7 +109,7 @@ pub(crate) async fn describe_remote_file(client: &reqwest::Client, account: &lib
 
 pub(crate) async fn read_remote_file(client: &reqwest::Client, account: &library_runtime::account::LibraryAccount, library: LibraryId, source: &RemoteFile, offset: u64, length: usize) -> Result<Vec<u8>, RemoteFileError> {
     authenticated_file_request(account, |session| async move {
-        let url = sync_transport::blob_endpoint(session.server_url(), &library, &source.hash);
+        let url = sync_transport::blob_endpoint(session.server_url(), &library, &source.hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
         book_access::remote_file::fetch_range(client, url, source, session.token(), offset, length).await
     })
     .await

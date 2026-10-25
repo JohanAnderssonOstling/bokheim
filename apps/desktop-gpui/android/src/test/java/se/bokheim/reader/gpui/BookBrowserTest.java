@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
@@ -56,7 +57,6 @@ public class BookBrowserTest {
     }
 
     @After public void tearDown() throws Exception {
-        BookDownload.transfersAllowed = () -> true;
         if (browser != null) browser.close();
         server.close();
         controller.pause().stop().destroy();
@@ -363,54 +363,36 @@ public class BookBrowserTest {
         assertEquals("a complete epub", new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
     }
 
-    @Test public void meteredDownloadsWaitAndRestartWithoutPublishingPartialFiles() throws Exception {
-        java.util.concurrent.atomic.AtomicBoolean allowed = new java.util.concurrent.atomic.AtomicBoolean(false);
-        java.util.concurrent.atomic.AtomicBoolean interrupted = new java.util.concurrent.atomic.AtomicBoolean(false);
-        java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
-        BookDownload.transfersAllowed = allowed::get;
+    @Test public void explicitDownloadsProceedOnMeteredNetworks() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger networkCost = new java.util.concurrent.atomic.AtomicInteger();
+        NetworkCostMonitor monitor = new NetworkCostMonitor(networkCost::set);
+        android.net.Network mobile = org.robolectric.shadows.ShadowNetwork.newInstance(2);
+        android.net.NetworkCapabilities metered = new android.net.NetworkCapabilities();
+        Shadows.shadowOf(metered).removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+        monitor.onAvailable(mobile);
+        monitor.onCapabilitiesChanged(mobile, metered);
+        assertEquals(2, networkCost.get());
         byte[] body = new byte[512 * 1024];
         java.util.Arrays.fill(body, (byte) 42);
-        server.serve("/metered.epub", request -> {
-            requests.incrementAndGet();
-            request.respond(200, "Content-Type: application/epub+zip\r\n", body, body.length);
-        });
+        server.serve("/metered.epub", request -> request.respond(200, "Content-Type: application/epub+zip\r\n", body, body.length));
         server.start();
-        CountDownLatch admission = new CountDownLatch(1);
-        CountDownLatch suspended = new CountDownLatch(1);
-        ExecutorService download = Executors.newSingleThreadExecutor();
-        try {
-            java.util.concurrent.Future<File> completed = download.submit(() -> BookDownload.save(url("/metered.epub"), null, null, null, null, directory,
-                (bytes, total) -> { if (interrupted.compareAndSet(false, true)) allowed.set(false); },
-                () -> { if (interrupted.get()) suspended.countDown(); else admission.countDown(); }));
-            assertTrue(admission.await(5, TimeUnit.SECONDS));
-            assertEquals(0, requests.get());
-            assertEquals(0, directory.list().length);
-            allowed.set(true);
-            assertTrue(suspended.await(5, TimeUnit.SECONDS));
-            assertFalse(completed.isDone());
-            assertEquals(0, directory.list().length);
-            allowed.set(true);
-            File file = completed.get(10, TimeUnit.SECONDS);
-            assertArrayEquals(body, Files.readAllBytes(file.toPath()));
-            assertEquals(2, requests.get());
-            assertEquals(1, directory.list().length);
-        } finally { allowed.set(true); download.shutdownNow(); }
-    }
-
-    @Test public void cancellingAWaitingDownloadDoesNotFetchOrImportIt() throws Exception {
-        BookDownload.transfersAllowed = () -> false;
         List<JSONObject> events = new ArrayList<>();
         browser = new BookBrowserSurface(activity, 31, new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath()), anchor, (id, message) -> {
             try { events.add(new JSONObject(message)); } catch (Exception error) { throw new AssertionError(error); }
         });
-        String address = url("/waiting.epub");
-        browser.startDownload(address, null, null, null);
-        awaitEvent(events, "download_waiting");
-        browser.command(new JSONObject().put("command", "cancel_download").put("download", address));
-        assertEquals(address, awaitEvent(events, "cancel_download").getString("download"));
-        browser.close();
-        awaitEvent(events, "closed");
-        assertFalse(events.stream().anyMatch(event -> event.optString("kind").equals("downloaded") || event.optString("kind").equals("download_finished")));
+        browser.startDownload(url("/metered.epub"), null, null, null);
+        JSONObject downloaded = awaitEvent(events, "downloaded");
+        assertArrayEquals(body, Files.readAllBytes(new File(downloaded.getString("path")).toPath()));
+        assertFalse(awaitEvent(events, "download_finished").has("error"));
+        assertFalse(events.stream().anyMatch(event -> event.optString("kind").equals("download_waiting")));
+        assertEquals(1, directory.list().length);
+    }
+
+    @Test public void cancellingBeforeADownloadStartsDoesNotFetchOrPublishIt() throws Exception {
+        BookDownload.Cancellation cancellation = new BookDownload.Cancellation();
+        cancellation.cancel();
+        assertThrows(IOException.class, () -> BookDownload.save(url("/cancelled.epub"), null, null, null, null, directory,
+            (bytes, total) -> fail("A cancelled download must not report progress"), cancellation));
         assertEquals(0, directory.list().length);
     }
 
@@ -420,7 +402,7 @@ public class BookBrowserTest {
         server.start();
         BookDownload.Cancellation cancellation = new BookDownload.Cancellation();
         assertThrows(IOException.class, () -> BookDownload.save(url("/cancel.epub"), null, null, null, null, directory,
-                (bytes, total) -> cancellation.cancel(), () -> {}, cancellation));
+                (bytes, total) -> cancellation.cancel(), cancellation));
         assertTrue(cancellation.isCancelled());
         assertEquals(0, directory.list().length);
     }

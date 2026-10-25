@@ -122,5 +122,6 @@ pub(crate) fn fingerprint(path: &Path) -> std::io::Result<u64> {
         hasher.update(cover.name.as_bytes());
         hasher.update(&library_files::filesystem::fingerprint(cover.path)?.to_le_bytes());
     }
-    Ok(u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap()))
+    let [a, b, c, d, e, f, g, h, ..] = *hasher.finalize().as_bytes();
+    Ok(u64::from_le_bytes([a, b, c, d, e, f, g, h]))
 }

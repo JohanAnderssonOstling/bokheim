@@ -89,7 +89,7 @@ pub(crate) fn annotation_tree_rows<C: AnnotationTreeTarget>(
             let click_target = target.clone();
             let key_target = target.clone();
             rows.push(
-                components::contents_row(("reader-annotation-branch", id), row, Some(components::contents_disclosure(("reader-annotation-disclosure", id), row, theme)), branch.title.clone(), None, theme)
+                components::contents_row(("reader-annotation-branch", id), row, Some(components::contents_disclosure(("reader-annotation-disclosure", id), row, theme)), branch.title.clone(), None, None, theme)
                     .flex_none()
                     .debug_selector(move || format!("reader-annotation-branch-{id}"))
                     .focusable()
