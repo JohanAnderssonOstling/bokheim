@@ -34,7 +34,9 @@ def main():
     if not args.offline:
         subprocess.run(["rustup", "toolchain", "install", pins["rust"], "--profile", "minimal",
             "--component", "rust-src", "--target", "aarch64-linux-android", "--no-self-update"], env=environment, check=True)
-    cargo = ["cargo", "fetch", "--locked", "--target", "aarch64-linux-android"]
+    # Cross builds also resolve host-side build dependencies. Fetch the whole
+    # locked graph so a fresh Cargo home can compile without network access.
+    cargo = ["cargo", "fetch", "--locked"]
     if args.offline:
         cargo.append("--offline")
     subprocess.run(cargo, cwd=ROOT, env=environment, check=True)
