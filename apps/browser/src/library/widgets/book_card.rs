@@ -25,7 +25,7 @@ use library_model::{BookCardRow, BookSource, CardKey};
 use ui_components as components;
 
 use crate::library::services::{DownloadSubscription, LibraryContext, LibraryCoversChanged};
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 use uuid::Uuid;
 use zune_core::bytestream::ZCursor;
 use zune_core::colorspace::ColorSpace;
@@ -81,11 +81,11 @@ pub(crate) enum BookCardEvent {
     /// being activated would read one that is leased, and panic.
     OpenDetail(BookCardRow, Option<LoadedCover>),
     /// Copy a flat listing's selection while retaining every existing placement.
-    CopyToFolder(Vec<ContentHash>),
+    CopyToFolder(Vec<BookId>),
     /// Copy or move the book out of the folder it is listed in.
-    Place(sync_common::ContentHash, DirId, BookPlacement),
+    Place(sync_common::BookId, DirId, BookPlacement),
     /// Take the book out of the folder it is listed in.
-    Remove(sync_common::ContentHash, DirId),
+    Remove(sync_common::BookId, DirId),
 }
 
 pub(crate) type BookCardEvents = Rc<dyn Fn(BookCardEvent, &mut Window, &mut gpui::App)>;
@@ -101,20 +101,9 @@ pub(crate) fn cover_aspect_ratio(image: &RenderImage) -> f32 {
 /// source-entry identity keeps the cover consistent across cards and detail
 /// pages; both are hashes already, so their first bytes are evenly spread.
 pub(crate) fn generated_cover_variant(key: CardKey) -> u64 {
-    u64::from_le_bytes(key.0[..8].try_into().expect("a card key has 32 bytes"))
-}
-
-/// Short enough to fit on a cover while still distinguishing, for example,
-/// a seven-hour book from one that runs nearly eight hours.
-fn audiobook_card_length(duration_ms: u64) -> String {
-    let total_minutes = (duration_ms / 60_000).max(1);
-    let hours = total_minutes / 60;
-    let minutes = total_minutes % 60;
-    match (hours, minutes) {
-        (0, minutes) => format!("{minutes} m"),
-        (hours, 0) => format!("{hours} h"),
-        (hours, minutes) => format!("{hours} h {minutes} m"),
-    }
+    let mut bytes = [0; 8];
+    bytes.copy_from_slice(&key.0[..8]);
+    u64::from_le_bytes(bytes)
 }
 
 pub(crate) fn loaded_cover_from_jpeg(bytes: Vec<u8>) -> Option<LoadedCover> {
@@ -312,7 +301,7 @@ impl BookCardView {
     }
 
     /// The book's file, when it has one.
-    pub(crate) fn content_hash(&self) -> Option<ContentHash> {
+    pub(crate) fn content_hash(&self) -> Option<BookId> {
         self.book.content_hash()
     }
 
@@ -374,7 +363,7 @@ impl BookCardView {
                 card.download_task.take();
                 if let Err(error) = result {
                     log::warn!("Could not download library book {content_hash}: {error}");
-                    notify_error("book-download-error", book_transfer_error_message(&error), window, cx);
+                    notify_error("book-download-error", book_transfer_error_message(error.failure()), window, cx);
                 }
                 cx.notify();
             });
@@ -434,7 +423,7 @@ impl BookCardView {
         cx.notify();
     }
 
-    fn subscribe_to_cover_updates(ui: &LibraryContext, content_hash: sync_common::ContentHash, cx: &mut Context<Self>) -> Subscription {
+    fn subscribe_to_cover_updates(ui: &LibraryContext, content_hash: sync_common::BookId, cx: &mut Context<Self>) -> Subscription {
         let updates = ui.updates();
         cx.subscribe(&updates, move |view, _, event: &LibraryCoversChanged, cx| {
             if event.contains(&content_hash) {
@@ -443,7 +432,7 @@ impl BookCardView {
         })
     }
 
-    fn subscribe_to_download_updates(ui: &LibraryContext, content_hash: Option<ContentHash>, cx: &mut Context<Self>) -> Option<DownloadSubscription> {
+    fn subscribe_to_download_updates(ui: &LibraryContext, content_hash: Option<BookId>, cx: &mut Context<Self>) -> Option<DownloadSubscription> {
         let content_hash = content_hash?;
         let mut previous = ui.updates().read(cx).download_state(content_hash);
         Some(ui.subscribe_download(content_hash, cx, move |_view, state, cx| {
@@ -500,7 +489,7 @@ impl BookCardView {
             let result = match load.await {
                 Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await.map(Some).ok_or_else(|| format!("thumbnail for book {content_hash} is not a readable JPEG")),
                 Ok(None) => Ok(None),
-                Err(error) => Err(error),
+                Err(error) => Err(error.to_string()),
             };
             cover_stage.finish(match &result {
                 Ok(Some(_)) => "decoded",
@@ -549,13 +538,13 @@ impl BookCardView {
         self.load_remote_cover(entry, resolution, load, cx);
     }
 
-    fn load_remote_cover(&mut self, entry: CardKey, resolution: ThumbnailResolution, load: impl Future<Output = Result<Option<Vec<u8>>, String>> + 'static, cx: &mut Context<Self>) {
+    fn load_remote_cover(&mut self, entry: CardKey, resolution: ThumbnailResolution, load: impl Future<Output = Result<Option<Vec<u8>>, library_backend::BackendError>> + 'static, cx: &mut Context<Self>) {
         let generation = cover_generation(cx);
         let decoder = cx.background_executor().clone();
         self.cover_task = Some(cx.spawn(async move |view, cx| {
             let cover_stage = Stage::deferred("cover retrieval and decoding");
             let cover = match load.await {
-                Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await.map(Some).ok_or_else(|| "catalog or feed cover is not a readable JPEG".to_owned()),
+                Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await.map(Some).ok_or_else(|| library_backend::BackendError::message("catalog or feed cover is not a readable JPEG")),
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
             };
@@ -696,7 +685,7 @@ impl BookCardView {
 
     /// Runs a book command from the card menu: the backend call, with failures
     /// surfaced as toasts.
-    fn run_menu_action(target: Entity<Self>, command: BookCommand, operation: impl std::future::Future<Output = Result<(), String>> + 'static, cx: &mut App) {
+    fn run_menu_action(target: Entity<Self>, command: BookCommand, operation: impl std::future::Future<Output = Result<(), library_backend::BackendError>> + 'static, cx: &mut App) {
         let keep_alive = target.clone();
         target.update(cx, |_, cx| {
             cx.spawn(async move |card, cx| {
@@ -780,7 +769,7 @@ impl BookCardView {
                             for book in downloads {
                                 library.remove_local_book_copy(book).await?;
                             }
-                            Ok::<_, String>(())
+                            Ok::<_, library_backend::BackendError>(())
                         };
                         evict_target.update(cx, |_, cx| {
                             cx.spawn(async move |card, cx| {
@@ -998,7 +987,7 @@ impl BookCardView {
             // The cover's action — add, download, or the held mark — is on every
             // cover, including those in section cards and the graph.
             .children(download_badge)
-            .when(grid_cover && book.format_category == library_model::LibraryFileTypeFilter::Audiobook, |frame| frame.child(components::book_cover_audiobook_length(book.audiobook_duration_ms.map(audiobook_card_length), theme)));
+            .when(book.format_category == library_model::LibraryFileTypeFilter::Audiobook, |frame| frame.child(components::book_cover_audiobook_length(book.audiobook_duration_ms, theme)));
 
         let context_menu = self.context_menu.as_ref().map(|active| mobile_context_menu::render(active.menu.clone(), active.position, window));
         let context_menu_target = cx.entity();

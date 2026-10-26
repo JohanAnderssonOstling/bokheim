@@ -5,6 +5,8 @@ mod catalog;
 mod core;
 pub(crate) mod data;
 mod libraries;
+mod cloud;
+pub use cloud::{CloudFolderListing, CloudLoginRequest};
 #[cfg(not(target_arch = "wasm32"))]
 mod opds;
 pub mod preferences;

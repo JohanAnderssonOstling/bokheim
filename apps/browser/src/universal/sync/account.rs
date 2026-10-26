@@ -24,21 +24,30 @@ pub(super) fn login(backend: &AppClient, email: String, password: String) -> UiF
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn verify_email(backend: &AppClient, email: String, pin: String) -> UiFuture<CloudSnapshot> {
+pub(super) fn verify_email(backend: &AppClient, email: String, pin: String, password: String) -> UiFuture<CloudSnapshot> {
     let backend = backend.clone();
-    Box::pin(async move { backend.verify_email(email, pin).await })
+    Box::pin(async move { backend.verify_email(email, pin, password).await })
 }
 
 impl SyncPage {
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn send_event(&mut self, event: super::SyncEvent, cx: &mut Context<Self>) {
+        if self.events.try_send(event).is_err() {
+            self.asset_storage_pending.clear();
+            self.apply_error(app::BackendError::message("the web sync event inbox is closed"), cx);
+        }
+    }
+
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    pub(super) fn authentication_error(&self, error: &str) -> &'static str {
+    pub(super) fn authentication_error(&self, error: &app::BackendError) -> &'static str {
         use crate::model::AccountFlow;
+        use ui_components::AccountAction;
         let action = match self.flow {
-            AccountFlow::SignIn => "login",
-            AccountFlow::Register => "register",
-            AccountFlow::VerifyEmail => "verify",
-            AccountFlow::RequestPasswordReset => "request-reset",
-            AccountFlow::ResetPassword => "reset",
+            AccountFlow::SignIn => AccountAction::Login,
+            AccountFlow::Register => AccountAction::Register,
+            AccountFlow::VerifyEmail => AccountAction::Verify,
+            AccountFlow::RequestPasswordReset => AccountAction::RequestReset,
+            AccountFlow::ResetPassword => AccountAction::Reset,
         };
         ui_components::authentication_error(error, action)
     }
@@ -96,7 +105,7 @@ impl SyncPage {
         cx.notify();
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = self.events.try_send(super::SyncEvent::AccountRefreshRequested);
+            self.send_event(super::SyncEvent::AccountRefreshRequested, cx);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -136,7 +145,7 @@ impl SyncPage {
         cx.notify();
         if std::mem::take(&mut self.local_usage_due) {
             #[cfg(target_arch = "wasm32")]
-            let _ = self.events.try_send(super::SyncEvent::LocalStorageUsageRequested);
+            self.send_event(super::SyncEvent::LocalStorageUsageRequested, cx);
             #[cfg(not(target_arch = "wasm32"))]
             self.request_local_storage_usage(cx);
         }
@@ -166,7 +175,14 @@ impl SyncPage {
         .detach();
     }
 
-    pub(super) fn apply_error(&mut self, error: String, cx: &mut Context<Self>) {
+    pub(super) fn apply_error(&mut self, error: app::BackendError, cx: &mut Context<Self>) {
+        if self.activity == super::AccountActivity::DeletingAccount {
+            self.activity = super::AccountActivity::Idle;
+            self.message = None;
+            self.error = Some(ui_components::authentication_error(&error, ui_components::AccountAction::DeleteAccount).into());
+            cx.notify();
+            return;
+        }
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         let authentication_message = (self.activity == super::AccountActivity::AccountRequest && !self.state.read(cx).account_status.signed_in()).then(|| self.authentication_error(&error));
         #[cfg(any(target_arch = "wasm32", target_os = "android"))]
@@ -219,7 +235,7 @@ impl SyncPage {
             self.error = None;
             self.message = Some("Signing out…".into());
             cx.notify();
-            let _ = self.events.try_send(super::SyncEvent::LogoutRequested);
+            self.send_event(super::SyncEvent::LogoutRequested, cx);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -237,7 +253,7 @@ impl SyncPage {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = self.events.try_send(super::SyncEvent::AssetStorageRequested { library_id, enabled });
+            self.send_event(super::SyncEvent::AssetStorageRequested { library_id, enabled }, cx);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {

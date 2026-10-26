@@ -68,7 +68,7 @@ impl PaintedImages {
             if self.bytes <= self.target {
                 break;
             }
-            let entry = self.images.remove(&id).expect("selected cached image");
+            let Some(entry) = self.images.remove(&id) else { continue };
             self.bytes -= entry.bytes;
             evicted.push(entry.image);
         }

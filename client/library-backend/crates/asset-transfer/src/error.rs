@@ -21,6 +21,14 @@ impl TransferError {
         Self::Rejected(BackendError::message(message))
     }
 
+    /// What the user can do about this failure, when that is known.
+    pub fn failure(&self) -> Option<client_runtime::Failure> {
+        match self {
+            Self::AuthenticationRequired => Some(client_runtime::Failure::SignInRequired),
+            Self::Retryable(error) | Self::Rejected(error) => error.failure(),
+        }
+    }
+
     /// Admission failures caused by the book or account are durable
     /// until the local file changes or the account's quota changes. An upload
     /// already in progress is different: another worker may release it, so it
@@ -61,6 +69,7 @@ impl From<sync_transport::AssetResponseError> for TransferError {
             sync_transport::AssetResponseError::Retryable(error) => Self::Retryable(BackendError::operation(error)),
             sync_transport::AssetResponseError::Rejected(error) => Self::Rejected(BackendError::operation(error)),
             sync_transport::AssetResponseError::Wire(error) => Self::retryable(error),
+            sync_transport::AssetResponseError::Url(error) => Self::Rejected(BackendError::operation(error)),
         }
     }
 }

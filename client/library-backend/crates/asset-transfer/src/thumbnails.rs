@@ -9,7 +9,7 @@ use library_model::BlobKind;
 use library_runtime::account::SharedSyncCredentials;
 use library_runtime::events::{LibraryEvent, LibraryEventRouter};
 use std::{collections::HashSet, sync::Arc};
-use sync_common::{ContentHash, LibraryId};
+use sync_common::{BookId, LibraryId};
 use sync_transport::SyncCredentials;
 const MAX_THUMBNAIL_BYTES: usize = sync_common::MAX_THUMBNAIL_BYTES as usize;
 use sync_common::api::assets::ThumbnailBatchEntry;
@@ -26,6 +26,7 @@ pub struct ThumbnailTransfers {
 }
 impl ThumbnailTransfers {
     fn credentials(&self) -> Result<SyncCredentials, TransferError> {
+        if self.database.storage_policy()?.external().is_some() { return Err(TransferError::rejected("external library thumbnails belong to the selected storage provider")); }
         self.credentials.credentials().ok_or(TransferError::AuthenticationRequired)
     }
     fn check_transfer_account(&self, credentials: &SyncCredentials) -> Result<(), TransferError> {
@@ -34,7 +35,7 @@ impl ThumbnailTransfers {
         }
         Ok(())
     }
-    async fn upload_pair(&self, hash: ContentHash) -> Result<Option<ThumbnailBatchEntry>, TransferError> {
+    async fn upload_pair(&self, hash: BookId) -> Result<Option<ThumbnailBatchEntry>, TransferError> {
         // Writers hold book leases while replacing local variants. An exclusive
         // lease keeps this upload snapshot from mixing two cover generations.
         let _lease = self.assets.try_exclusive_lease(&hash)?.ok_or_else(|| TransferError::retryable("thumbnail is being updated"))?;
@@ -55,7 +56,7 @@ impl ThumbnailTransfers {
     }
 
     /// Upload a bounded page in one request, enforcing its aggregate byte bound.
-    pub async fn upload_thumbnail_batch(&self, hashes: &[ContentHash]) -> Result<(), TransferError> {
+    pub async fn upload_thumbnail_batch(&self, hashes: &[BookId]) -> Result<(), TransferError> {
         let mut thumbnails = Vec::with_capacity(hashes.len());
         let mut total_bytes = 0usize;
         for hash in hashes {
@@ -79,12 +80,12 @@ impl ThumbnailTransfers {
     }
     /// Covers that are ready, received or missing are written once for the
     /// batch, also when it fails partway: what was stored still counts.
-    pub async fn download_thumbnail_batch(&self, hashes: &[ContentHash]) -> Result<(), TransferError> {
+    pub async fn download_thumbnail_batch(&self, hashes: &[BookId]) -> Result<(), TransferError> {
         let mut ready = Vec::new();
         let mut received = Vec::new();
         let mut missing = Vec::new();
         let result: Result<(), TransferError> = async {
-            let mut requested = HashSet::<ContentHash>::new();
+            let mut requested = HashSet::<BookId>::new();
             for thumbnail_hash in hashes {
                 let is_local = self.assets.thumbnail_set_exists(thumbnail_hash)?;
                 if is_local {
@@ -149,7 +150,7 @@ impl ThumbnailTransfers {
         }
         result
     }
-    fn discard_invalid_thumbnail(&self, content_hash: ContentHash) -> Result<(), TransferError> {
+    fn discard_invalid_thumbnail(&self, content_hash: BookId) -> Result<(), TransferError> {
         self.assets.remove(BlobKind::Thumbnail, &content_hash)?;
         self.database.request_missing_thumbnail(&content_hash)?;
         Ok(())

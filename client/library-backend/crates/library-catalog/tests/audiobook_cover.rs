@@ -1,4 +1,5 @@
 use audiobook_archive::{archived_cover, archived_tracks, write_archive, Track};
+use client_platform_runtime::transfers::{NetworkCost, POLICY};
 use library_model::{CardKey, CatalogImportProgress};
 use rusqlite::Connection;
 use std::{
@@ -49,11 +50,14 @@ async fn audiobook_archive_is_unchanged_and_thumbnail_source_bypasses_browsing_c
         }
     });
     assert_eq!(library_catalog::external_cover(key, true).await.unwrap(), old);
+    POLICY.set_network_cost(NetworkCost::Metered);
+    POLICY.set_allow_metered(false);
     let progress = RefCell::new(Vec::new());
     let downloaded = library_catalog::download_audiobook_with_progress(key, &|update| progress.borrow_mut().push(update)).await.unwrap();
     assert_eq!(progress.borrow().last(), Some(&CatalogImportProgress::Importing));
     assert!(progress.borrow().contains(&CatalogImportProgress::Downloading { downloaded_bytes: archive_bytes, total_bytes: Some(archive_bytes) }));
     assert_eq!(library_catalog::fresh_external_cover(key).await.unwrap().unwrap(), selected);
+    assert!(!POLICY.allowed(), "explicit acquisitions must not enable automatic transfers");
     server.join().unwrap();
     assert_eq!(archived_cover(Cursor::new(&downloaded)).unwrap(), None);
     let track = &archived_tracks(Cursor::new(&downloaded)).unwrap()[0];

@@ -2,17 +2,20 @@
 pub(crate) use super::*;
 use crate::SqlParam;
 use crate::query_methods::query_rows;
-use content_address::ContentHash;
+use content_address::BookId;
 pub(crate) use rusqlite::{Connection, OptionalExtension};
 use sync_common::StateKey;
 
-pub(crate) fn book_key(body: &LibraryStateEntry) -> Option<&ContentHash> {
+pub(crate) fn book_key(body: &LibraryStateEntry) -> Option<&BookId> {
     match body {
         LibraryStateEntry::DirectoryName { .. } | LibraryStateEntry::DirectoryParent { .. } | LibraryStateEntry::DirectoryLifecycle { .. } => None,
         LibraryStateEntry::Annotation { value, .. } => Some(&value.content_hash),
-        LibraryStateEntry::BookAdd { content_hash, .. } | LibraryStateEntry::BookLifecycle { content_hash, .. } | LibraryStateEntry::Placement { content_hash, .. } | LibraryStateEntry::ReadingPosition { content_hash, .. } => {
-            Some(content_hash)
-        }
+        LibraryStateEntry::BookAdd { content_hash, .. }
+        | LibraryStateEntry::ExternalBook { content_hash, .. }
+        | LibraryStateEntry::BookLifecycle { content_hash, .. }
+        | LibraryStateEntry::Placement { content_hash, .. }
+        | LibraryStateEntry::ReadingPosition { content_hash, .. }
+        | LibraryStateEntry::ChapterReadStatus { content_hash, .. } => Some(content_hash),
     }
 }
 
@@ -50,7 +53,7 @@ pub(crate) fn merge_inner<T: std::borrow::Borrow<LibraryStateEntry>>(conn: &Conn
     {
         return Ok(false);
     }
-    let previous_book: Option<ContentHash> = conn.registers_previous_owner(&kind, &key, &subkey, |r| r.get(0)).optional()?.flatten();
+    let previous_book: Option<BookId> = conn.registers_previous_owner(&kind, &key, &subkey, |r| r.get(0)).optional()?.flatten();
     if previous_book.as_ref() != book_key(body)
         && let Some(hash) = previous_book
     {
@@ -134,7 +137,7 @@ pub(crate) fn schedule(conn: &Connection, kind: &str, key: &StateKey, subkey: &s
     Ok(())
 }
 
-pub(crate) fn book_fields(conn: &Connection, hash: &ContentHash) -> Result<Vec<sync_common::StateAddress>, DatabaseError> {
+pub(crate) fn book_fields(conn: &Connection, hash: &BookId) -> Result<Vec<sync_common::StateAddress>, DatabaseError> {
     Ok(query_rows(|callback| conn.registers_book_fields(&hash, callback), |r| Ok(sync_common::StateAddress { kind: r.get(0)?, entity_key: r.get(1)?, entity_subkey: r.get(2)? }))?.collect::<Result<Vec<_>, _>>()?)
 }
 

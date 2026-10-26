@@ -5,7 +5,7 @@ use std::rc::Rc;
 use gpui::App;
 use library_model::{BookLocator, BrowseLocation};
 use serde::{Deserialize, Serialize};
-use sync_common::{ContentHash, LibraryId};
+use sync_common::{BookId, LibraryId};
 
 use crate::{LibraryRoute, Route};
 
@@ -33,7 +33,7 @@ pub struct ReaderSession {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowsePageSession {
     pub path: Vec<(BrowseLocation, String)>,
-    pub detail: Option<ContentHash>,
+    pub detail: Option<BookId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ mod tests {
             library_id: Some(selected),
             route: Route::Library(LibraryRoute::Folders),
             pages: vec![BrowsePageSession { path: vec![(BrowseLocation::Folder(LibraryId::from_u128(3)), "Fiction".into())], detail: None }],
-            reader: Some(ReaderSession { locator: BookLocator::new(selected, ContentHash::from_bytes([7; 32])), title: "Book".into() }),
+            reader: Some(ReaderSession { locator: BookLocator::new(selected, BookId::from_bytes([7; 32])), title: "Book".into() }),
         };
         let expected = session.clone();
         session.reconcile(&[first, selected]);
@@ -96,7 +96,7 @@ mod tests {
             library_id: Some(removed),
             route: Route::Library(LibraryRoute::Folders),
             pages: vec![BrowsePageSession::default()],
-            reader: Some(ReaderSession { locator: BookLocator::new(removed, ContentHash::from_bytes([7; 32])), title: "Book".into() }),
+            reader: Some(ReaderSession { locator: BookLocator::new(removed, BookId::from_bytes([7; 32])), title: "Book".into() }),
         };
         session.reconcile(&[remaining]);
         assert_eq!(session.library_id, Some(remaining));

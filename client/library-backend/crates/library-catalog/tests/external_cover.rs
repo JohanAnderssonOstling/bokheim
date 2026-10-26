@@ -1,4 +1,4 @@
-use content_address::ContentHash;
+use content_address::BookId;
 use library_model::CardKey;
 use rusqlite::Connection;
 use std::{
@@ -33,8 +33,8 @@ async fn retained_external_cover_does_not_authorize_book_downloads() {
     // Served from cache after the origin is gone.
     assert_eq!(library_catalog::external_cover(key, false).await.as_deref(), Some(body.as_slice()));
     assert!(library_catalog::external_cover(CardKey([5; 32]), false).await.is_none());
-    let synthetic_hash: ContentHash = key.to_string().parse().unwrap();
+    let synthetic_hash: BookId = key.to_string().parse().unwrap();
     assert_eq!(library_catalog::cover(synthetic_hash, false).await.as_deref(), Some(body.as_slice()));
-    assert_eq!(library_catalog::download_book(synthetic_hash).await.unwrap_err(), "the book is not in the catalog");
+    assert_eq!(library_catalog::download_book(synthetic_hash).await.unwrap_err().failure(), Some(client_runtime::Failure::NotFound));
     assert!(library_database::catalog::entry(key).unwrap().unwrap().hash.is_none());
 }

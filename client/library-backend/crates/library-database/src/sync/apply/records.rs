@@ -22,7 +22,7 @@ pub(crate) fn publication_version(conn: &Connection, kind: &str, key: &StateKey,
 }
 
 /// Keep an offline addition locally until it has a definitive enrichment answer.
-pub(crate) fn stage(conn: &Connection, hash: &sync_common::ContentHash, value: library_replica::BookAddition) -> Result<(), DatabaseError> {
+pub(crate) fn stage(conn: &Connection, hash: &sync_common::BookId, value: library_replica::BookAddition) -> Result<(), DatabaseError> {
     if value.enrichment.is_some() {
         return Err(DatabaseError::message("completed addition cannot be staged"));
     }
@@ -87,14 +87,14 @@ mod tests {
     use super::*;
     use crate::Database;
     use library_replica::EnrichmentResult;
-    use sync_common::ContentHash;
+    use sync_common::BookId;
 
     #[test]
     fn immutable_publication_survives_reopen_without_a_mutable_version_or_duplicate_sequence() {
         let path = std::env::temp_dir().join(format!("immutable-publication-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(path.to_str().unwrap()).unwrap();
         db.initialize_library().unwrap();
-        let hash = ContentHash::new(&"d".repeat(64));
+        let hash = BookId::new(&"d".repeat(64));
         let tx = db.connection.unchecked_transaction().unwrap();
         tx.fixtures_insert_book_7(&hash).unwrap();
         let body = LibraryStateEntry::BookAdd {

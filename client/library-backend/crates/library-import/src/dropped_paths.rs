@@ -202,6 +202,13 @@ impl LibraryImport {
             let import = self.validate_import(&parent, name)?;
             (import, ingest_file(path, name.to_owned(), &*self.cpu).await?)
         };
+        if self.database.storage_policy()?.external().is_some() {
+            if import.format == BookFormat::Mp3Folder { return Err(BackendError::message("MP3 folder uploads to external storage are not configured yet")); }
+            let relative_path = self.database.native_book_path(parent, name)?.ok_or_else(|| BackendError::message("destination folder no longer exists"))?;
+            let copied = self.assets.stage_book(relative_path, Box::new(fs::File::open(root.join(relative))?)).await?;
+            self.finish_provider_import(import, copied.into_staged(ingested.content_hash, ingested.size_bytes), ingested.inspection).await?;
+            return Ok(());
+        }
         let _lease = self.assets.lease_book(&ingested.content_hash).await?;
         // A concurrent folder move must not register these bytes at another path.
         validate_import_destination(&self.database, &parent)?;
@@ -303,7 +310,7 @@ fn discard_incomplete_audiobooks(payload: &Path, failed_members: &[PathBuf]) -> 
 }
 
 fn supported(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| BookFormat::from_import_extension(extension).is_some())
+    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| BookFormat::from_file_name(name).is_some())
 }
 
 /// Keep the tracks and sidecars until the staged tree can be classified as
@@ -370,7 +377,7 @@ mod tests {
         let (enrichment, _) = SyncScheduler::new();
         let (events, _) = LibraryEventRouter::new(sync, asset_work, files, enrichment);
         let placement = Arc::new(LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
-        LibraryImport { database, assets, cpu: Arc::new(client_platform_native::cpu_host::NativeHost), events, placement, root: root.to_str().unwrap().into() }
+        LibraryImport { library_id: DirId::new_v4(), cloud: Default::default(), provider_upload_lock: Default::default(), database, assets, cpu: Arc::new(client_platform_native::cpu_host::NativeHost), events, placement, root: root.to_str().unwrap().into() }
     }
 
     #[tokio::test]

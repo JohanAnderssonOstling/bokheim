@@ -13,6 +13,10 @@
 //! stays inside the page instead of escaping into the navigation rail, which
 //! has no way back. Moving focus scrolls the section it landed in into view.
 
+mod keyboard;
+#[cfg(feature = "kobo")]
+mod kobo_updates;
+
 use ui_components::user_facing_error;
 
 use crate::services::UpdateControls;
@@ -42,7 +46,7 @@ const REVEAL_MARGIN: f32 = 16.0;
 /// An upper bound on the walk that wraps focus back to the last control. The
 /// page has a few dozen controls at most; the bound only keeps a malformed tab
 /// order from spinning.
-const MAX_CONTROLS: usize = 128;
+const MAX_CONTROLS: usize = 512;
 
 /// The blocks the page scrolls between, in the order it draws them. Focus moves
 /// control by control, but the page scrolls section by section: a section is the
@@ -86,6 +90,8 @@ struct SettingsSection {
 }
 
 pub(crate) struct SettingsPage {
+    keyboard: Entity<components::KeyboardShortcutEditor>,
+    keyboard_tab: bool,
     updates: Option<Entity<UpdateControls>>,
     _update_changes: Option<gpui::Subscription>,
     _preference_changes: gpui::Subscription,
@@ -100,6 +106,10 @@ pub(crate) struct SettingsPage {
     transfer_save_error: Option<SharedString>,
     #[cfg(feature = "kobo")]
     uninstall_error: Option<SharedString>,
+    #[cfg(feature = "kobo")]
+    kobo_updates: Entity<UpdateControls>,
+    #[cfg(feature = "kobo")]
+    _kobo_update_changes: gpui::Subscription,
     focus: FocusHandle,
     scroll: ScrollHandle,
     sections: [SettingsSection; SECTION_COUNT],
@@ -111,7 +121,14 @@ impl SettingsPage {
         let preference_changes = cx.observe(&preferences, |_, _, cx| cx.notify());
         let libraries = cx.new(|cx| LibrariesView::new(account.clone(), cx));
         let sections = std::array::from_fn(|_| SettingsSection { focus: cx.focus_handle(), bounds: Rc::new(Cell::new(Bounds::default())) });
+        let keyboard = cx.new(|cx| components::KeyboardShortcutEditor::new(components::ShortcutPage::Browse, cx));
+        #[cfg(feature = "kobo")]
+        let kobo_updates = kobo_updates::bind(cx);
+        #[cfg(feature = "kobo")]
+        let kobo_update_changes = cx.observe(&kobo_updates, |_, _, cx| cx.notify());
         Self {
+            keyboard,
+            keyboard_tab: false,
             updates,
             _update_changes: update_changes,
             _preference_changes: preference_changes,
@@ -122,6 +139,10 @@ impl SettingsPage {
             transfer_save_error: None,
             #[cfg(feature = "kobo")]
             uninstall_error: None,
+            #[cfg(feature = "kobo")]
+            kobo_updates,
+            #[cfg(feature = "kobo")]
+            _kobo_update_changes: kobo_update_changes,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::default(),
             sections,
@@ -143,7 +164,7 @@ impl SettingsPage {
                             return Err("Reinstall Bokheim with the latest installer before uninstalling from Settings.".to_owned());
                         }
                         let path = std::env::var_os("BOKHEIM_KOBO_EXIT_ACTION_FILE").ok_or_else(|| "The Kobo launcher is unavailable.".to_owned())?;
-                        std::fs::write(path, "uninstall").map_err(|error| user_facing_error(&error.to_string(), "Could not start uninstalling Bokheim. Restart Bokheim and try again.").to_owned())
+                        std::fs::write(path, "uninstall").map_err(|error| user_facing_error(&app::BackendError::from(error), "Could not start uninstalling Bokheim. Restart Bokheim and try again.").to_owned())
                     })();
                     match result {
                         Ok(()) => cx.quit(),
@@ -161,38 +182,8 @@ impl SettingsPage {
     /// One conditional banner above the settings. The backend decides which
     /// state needs attention; recoverable errors are never dialogs.
     fn update_row(&self, cx: &Context<Self>) -> Option<gpui::Div> {
-        use crate::services::{UpdateAction, UpdateView};
-        let controls = self.updates.as_ref()?.read(cx);
-        let (message, button) = match &controls.view {
-            UpdateView::Hidden => return None,
-            UpdateView::Available => ("Update available".to_owned(), Some(("Update", UpdateAction::Update, false))),
-            UpdateView::Preparing => ("Preparing update…".into(), Some(("Update", UpdateAction::Update, true))),
-            UpdateView::WaitingForConnection => ("Check your internet connection, then retry the update.".into(), Some(("Retry", UpdateAction::Update, false))),
-            UpdateView::Ready { action } => ("Update ready".into(), Some((if *action == UpdateAction::Install { "Install" } else { "Restart" }, action.clone(), false))),
-            UpdateView::NeedsSpace { additional_bytes } => (format!("Free up {} to continue", crate::services::updates::needed_space(*additional_bytes)), Some(("Retry", UpdateAction::Update, false))),
-            UpdateView::NeedsPermission => ("Allow Bokheim to install the update to continue.".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
-            UpdateView::Activating => ("Updating your library…".into(), None),
-        };
-        let message = if controls.worker_failed && button.is_some() { "Could not continue update. Try again.".to_owned() } else { message };
         let theme = components::browser_theme(cx);
-        let mut row = gpui::div().w_full().px(px(components::SPACE_MD)).py(px(components::SPACE_SM)).min_h(px(56.0)).flex().flex_wrap().items_center().justify_between().gap(px(components::SPACE_SM)).child(message);
-        if let Some((label, action, preparing)) = button {
-            let handler = controls.action.clone();
-            let loading = preparing && !controls.worker_failed;
-            let label = if loading {
-                "Updating…"
-            } else if controls.worker_failed {
-                "Retry"
-            } else {
-                label
-            };
-            row = row.child(
-                components::browser_settings_header_button("apply-update", label, true, theme)
-                    .when(loading, |button| button.icon(gpui_component::IconName::LoaderCircle))
-                    .loading(loading)
-                    .on_click(move |_, _, cx| handler(action.clone(), cx)),
-            );
-        }
+        let row = crate::services::updates::render_row(self.updates.as_ref()?, "apply-update", theme, cx)?;
         Some(self.section(Section::Updates, components::browser_settings_banner(theme).child(row)))
     }
 
@@ -233,6 +224,7 @@ impl SettingsPage {
             BrowsingPreferencePatch::GeneratedCoversOnly(_) => ("Covers", if showing.generated_covers_only() { "Generated" } else { "Book art" }.to_owned()),
             BrowsingPreferencePatch::CatalogGrouping(_) => ("Catalog grouping", showing.catalog_grouping().label().to_owned()),
             BrowsingPreferencePatch::CatalogLanguages(_) => ("Catalog languages", showing.catalog_languages().map_or_else(|| "Default".into(), |languages| if languages.is_empty() { "Any".into() } else { languages.join(", ") })),
+            BrowsingPreferencePatch::KeyboardShortcuts(_) => ("Keyboard shortcuts", "Previous shortcuts".to_owned()),
             BrowsingPreferencePatch::KeyboardLayouts(_) => ("Keyboard layouts", showing.keyboard_layouts().join(", ")),
         };
         let result = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(patch, cx));
@@ -283,6 +275,10 @@ impl SettingsPage {
 
     /// Scrolls whichever section now holds focus into view.
     fn reveal_focused_section(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keyboard_tab && self.keyboard.read(cx).reveal_focused_row(&self.scroll, window, cx) {
+            cx.notify();
+            return;
+        }
         let Some(section) = self.sections.iter().find(|section| section.focus.contains_focused(window, cx)) else {
             return;
         };
@@ -306,9 +302,14 @@ impl Focusable for SettingsPage {
 }
 
 impl Render for SettingsPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let preferences = self.preferences.read(cx).browsing();
+        let desktop = !components::uses_mobile_navigation(window) && !cfg!(feature = "kobo");
+        if desktop && self.keyboard_tab {
+            let keyboard = self.keyboard_panel();
+            return self.settings_container(keyboard, desktop, cx).into_any_element();
+        }
         let current_font_size = preferences.ui_font_size_px();
 
         #[cfg(not(feature = "kobo"))]
@@ -327,8 +328,8 @@ impl Render for SettingsPage {
         };
 
         let [decrease, increase] = [
-            ("decrease-ui-font-size", "−", components::shortcut_tooltip("Decrease interface font size", "secondary--"), current_font_size.saturating_sub(1).max(UI_FONT_SIZE_MIN), UI_FONT_SIZE_MIN),
-            ("increase-ui-font-size", "+", components::shortcut_tooltip("Increase interface font size", "secondary-+"), current_font_size.saturating_add(1).min(UI_FONT_SIZE_MAX), UI_FONT_SIZE_MAX),
+            ("decrease-ui-font-size", "−", components::configured_shortcut_tooltip("Decrease interface font size", "browse.font_decrease", cx), current_font_size.saturating_sub(1).max(UI_FONT_SIZE_MIN), UI_FONT_SIZE_MIN),
+            ("increase-ui-font-size", "+", components::configured_shortcut_tooltip("Increase interface font size", "browse.font_increase", cx), current_font_size.saturating_add(1).min(UI_FONT_SIZE_MAX), UI_FONT_SIZE_MAX),
         ]
         .map(|(id, label, tooltip, value, limit)| Self::preference_button(components::settings_stepper_button(id, label, current_font_size == limit, theme).tooltip(tooltip), BrowsingPreferencePatch::UiFontSizePx(value), cx));
         let font_size = components::settings_stepper(decrease, format!("{current_font_size}px"), increase, theme);
@@ -393,7 +394,7 @@ impl Render for SettingsPage {
             .child(Self::preference_button(components::browser_settings_choice_button("transfers-unmetered", "Off", !metered, theme), BrowsingPreferencePatch::AllowMeteredTransfers(false), cx))
             .child(Self::preference_button(components::browser_settings_choice_button("transfers-metered", "On", metered, theme), BrowsingPreferencePatch::AllowMeteredTransfers(true), cx));
         let transfers = components::browser_settings_fieldset("Transfers", theme)
-            .child(components::browser_settings_compact_row("Allow transfers on metered connections", transfer_choices, theme).border_t_0())
+            .child(components::browser_settings_compact_row("Allow automatic transfers on metered connections", transfer_choices, theme).border_t_0())
             .children(self.transfer_save_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
         let mut sections = components::browser_settings_sections().child(appearance_settings).child(self.section(Section::Transfers, transfers)).child(self.section(Section::Account, self.account.clone()));
 
@@ -401,13 +402,14 @@ impl Render for SettingsPage {
         {
             let uninstall = components::base_button("uninstall-bokheim").label("Uninstall Bokheim").danger().on_click(cx.listener(|page, _, window, cx| page.confirm_uninstall(window, cx)));
             let device = components::browser_settings_fieldset("Kobo", theme)
-                .child(components::browser_settings_row("Uninstall Bokheim", "Remove the app and its menu entry, keep your books and settings, and return to Kobo.", uninstall, theme).border_t_0())
+                .children(crate::services::updates::render_row(&self.kobo_updates, "kobo-update", theme, cx))
+                .child(components::browser_settings_row("Uninstall Bokheim", "Remove the app and its menu entry, keep your books and settings, and return to Kobo.", uninstall, theme))
                 .children(self.uninstall_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
             sections = sections.child(self.section(Section::KoboUninstall, device));
         }
 
         #[cfg(target_os = "android")]
-        {
+        if cx.try_global::<crate::AndroidStoragePolicy>().is_some_and(|policy| policy.all_files_access_available) {
             let access = components::browser_settings_path_button("android-file-access", "Manage file access", theme).on_click(|_, _, _| gpui_android::request_all_files_access());
             sections =
                 sections.child(self.section(Section::LibraryStorage, components::browser_settings_fieldset("Library storage", theme).child(components::browser_settings_compact_row("Android permissions", access, theme).border_t_0())));
@@ -418,12 +420,6 @@ impl Render for SettingsPage {
         // Keep account and library invalidations inside their own entities.
         // Transfer progress reaches the library rows several times a second and
         // must not rebuild the settings controls above them.
-        components::browser_settings_page_with_scroll(&self.scroll)
-            .key_context(SETTINGS_KEY_CONTEXT)
-            .track_focus(&self.focus)
-            .tab_group()
-            .on_action(cx.listener(Self::focus_next))
-            .on_action(cx.listener(Self::focus_previous))
-            .child(components::browser_settings_content().children(self.update_row(cx)).child(sections))
+        self.settings_container(components::browser_settings_content().children(self.update_row(cx)).child(sections), desktop, cx).into_any_element()
     }
 }

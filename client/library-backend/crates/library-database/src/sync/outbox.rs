@@ -4,7 +4,7 @@ use crate::query_methods::query_rows;
 pub(crate) use crate::sync::SyncOutboxSql;
 use crate::transactions::WriteOutcome::Commit;
 pub(crate) use crate::{Database, DatabaseError};
-use content_address::ContentHash;
+use content_address::BookId;
 pub(crate) use library_replica::{LibraryStateEntry, StatePublication};
 use rusqlite::{Connection, Row, named_params, types::ValueRef};
 use std::collections::HashSet;
@@ -73,9 +73,9 @@ pub(crate) fn decode_outbox_row(row: OutboxRow<'_>) -> Result<StatePublication, 
 /// All book state waits for its draft to complete. Non-removal state also
 /// waits for the book bytes when cloud storage is enabled.
 struct PublicationDependencies {
-    drafts: HashSet<ContentHash>,
-    uploads: HashSet<ContentHash>,
-    reading_positions: HashSet<ContentHash>,
+    drafts: HashSet<BookId>,
+    uploads: HashSet<BookId>,
+    reading_positions: HashSet<BookId>,
 }
 
 /// Prepared queue bounds and dependencies. Contains no connection or transaction.
@@ -102,14 +102,14 @@ fn outbox_pending_uploads(connection: &Connection) -> Result<PublicationDependen
     })?;
     let mut pending = PublicationDependencies { drafts: HashSet::new(), uploads: HashSet::new(), reading_positions: HashSet::new() };
     connection.sync_pending_book_drafts(|row| {
-        pending.drafts.insert(row.get::<_, ContentHash>(0)?);
+        pending.drafts.insert(row.get::<_, BookId>(0)?);
         Ok(())
     })?;
     if cloud_storage_enabled == Some(0) {
         return Ok(pending);
     }
     connection.sync_pending_uploads(|row| {
-        pending.uploads.insert(row.get::<_, ContentHash>(0)?);
+        pending.uploads.insert(row.get::<_, BookId>(0)?);
         Ok(())
     })?;
     Ok(pending)
@@ -201,7 +201,7 @@ impl Database {
 
     /// The coordinator supplies its publication policy as a value snapshot.
     /// Storage freezes these exclusions for the duration of this bounded scan.
-    pub fn sync_prepare_outbox_excluding_positions(&self, waiting: HashSet<ContentHash>) -> Result<OutboxScan, DatabaseError> {
+    pub fn sync_prepare_outbox_excluding_positions(&self, waiting: HashSet<BookId>) -> Result<OutboxScan, DatabaseError> {
         self.with_publications(|connection| {
             let through = connection.sync_outbox_watermark(|row| row.get(0))?;
             let mut pending = outbox_pending_uploads(connection)?;
@@ -271,7 +271,7 @@ impl Database {
     }
 
     /// Enqueues one reading-position change directly into the durable outbox.
-    pub fn enqueue_outbox_reading_change(&self, state_key: &ContentHash, body: &[u8], changed_at: i64) -> Result<(), DatabaseError> {
+    pub fn enqueue_outbox_reading_change(&self, state_key: &BookId, body: &[u8], changed_at: i64) -> Result<(), DatabaseError> {
         self.with_write_transaction(|tx| {
             let body: LibraryStateEntry = sync_common::wire::decode(body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?;
             if !matches!(&body,LibraryStateEntry::ReadingPosition { content_hash,.. } if content_hash==state_key) {
@@ -345,7 +345,7 @@ mod performance_tests {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
         db.set_asset_storage_policy(false, false).unwrap();
-        let hash = ContentHash::from_bytes([1; 32]);
+        let hash = BookId::from_bytes([1; 32]);
         let body = LibraryStateEntry::BookLifecycle { content_hash: hash, value: library_replica::BookLifecycleState::Present };
         let version = VersionKey::new(1, body.conflict_rank(), ReplicaId::from_u128(1), ReplicaSeq::new(1).unwrap());
         let body = wire::encode(&body).unwrap();
@@ -375,7 +375,7 @@ mod performance_tests {
         db.initialize_library().unwrap();
         db.set_asset_storage_policy(false, false).unwrap();
         let value = LibraryStateEntry::BookAdd {
-            content_hash: ContentHash::from_bytes([1; 32]),
+            content_hash: BookId::from_bytes([1; 32]),
             value: BookAddition {
                 facts: BookFacts { added_at: 1, format: book_model::BookFormat::Epub },
                 record: book_model::BookRecord { metadata: Default::default(), description: "x".repeat(payload) },
@@ -391,7 +391,7 @@ mod performance_tests {
             for index in 1..=count {
                 let mut hash = [0; 32];
                 hash[..8].copy_from_slice(&(index as u64).to_le_bytes());
-                let hash = ContentHash::from_bytes(hash);
+                let hash = BookId::from_bytes(hash);
                 let mut body = value.clone();
                 if let LibraryStateEntry::BookAdd { content_hash, .. } = &mut body {
                     *content_hash = hash;

@@ -2,7 +2,7 @@
 
 use crate::DatabaseError;
 use crate::SqlParam;
-use content_address::ContentHash;
+use content_address::BookId;
 #[cfg(test)]
 mod all_books;
 mod author_query;

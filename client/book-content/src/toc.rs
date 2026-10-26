@@ -1,4 +1,4 @@
-use scraper::{ElementRef, Selector};
+use scraper::ElementRef;
 
 /// Navigation shared by every supported book container.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub(crate) fn nest_entries(entries: impl IntoIterator<Item = (usize, TocEntry)>)
 }
 
 fn finish_level(path: &mut Vec<(usize, Vec<TocEntry>)>, roots: &mut Vec<TocEntry>) {
-    let (_, mut children) = path.pop().unwrap();
+    let Some((_, mut children)) = path.pop() else { return };
     if let Some((_, parent)) = path.last_mut() {
         if let Some(last) = parent.last_mut() {
             last.children.append(&mut children);
@@ -37,9 +37,10 @@ fn finish_level(path: &mut Vec<(usize, Vec<TocEntry>)>, roots: &mut Vec<TocEntry
 }
 
 pub(crate) fn html_entries(root: ElementRef<'_>, resolve: impl Fn(ElementRef<'_>) -> Option<String>) -> Vec<TocEntry> {
-    let links = Selector::parse("a[href], a[filepos]").unwrap();
     nest_entries(
-        root.select(&links)
+        root.descendants()
+            .filter_map(ElementRef::wrap)
+            .filter(|element| element.id() != root.id() && element.value().name() == "a" && (element.value().attr("href").is_some() || element.value().attr("filepos").is_some()))
             .filter_map(|element| {
                 let link = resolve(element)?;
                 let title = element.text().collect::<Vec<_>>().join(" ").split_whitespace().collect::<Vec<_>>().join(" ");

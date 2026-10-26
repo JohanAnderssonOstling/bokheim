@@ -4,14 +4,14 @@
 use book_model::BookRecord;
 use library_runtime::events::LibraryEvent;
 use std::time::Duration;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 use crate::{EnrichmentResult, LibraryEnrichment};
 
 impl LibraryEnrichment {
     /// Looks up the cover of every answered book in `scope` that has none.
     /// Returns how many covers were filled.
-    pub(crate) async fn fill_covers(&self, scope: &[ContentHash]) -> EnrichmentResult<usize> {
+    pub(crate) async fn fill_covers(&self, scope: &[BookId]) -> EnrichmentResult<usize> {
         if !self.assets.local_access_enabled() { return Ok(0); }
         let mut filled = 0;
         for hash in self.database.enrichment_cover_candidates(scope)? {
@@ -42,7 +42,7 @@ impl LibraryEnrichment {
         Ok(filled)
     }
 
-    async fn fetch_enriched_cover(&self, hash: ContentHash, record: &BookRecord) -> EnrichmentResult<Option<bool>> {
+    async fn fetch_enriched_cover(&self, hash: BookId, record: &BookRecord) -> EnrichmentResult<Option<bool>> {
         let expected = self.database.thumbnail_work_state(&hash)?;
         let bytes = self.covers.book_cover(record).await?;
         let versions = match bytes {
@@ -54,7 +54,7 @@ impl LibraryEnrichment {
 
     /// Stores fetched art only if the book still has no cover and its
     /// thumbnail work is unchanged since the fetch began. None means it changed.
-    pub(crate) async fn apply_enriched_cover(&self, hash: ContentHash, expected: &Option<String>, versions: Option<&cpu_host::ThumbnailBytes>) -> EnrichmentResult<Option<bool>> {
+    pub(crate) async fn apply_enriched_cover(&self, hash: BookId, expected: &Option<String>, versions: Option<&cpu_host::ThumbnailBytes>) -> EnrichmentResult<Option<bool>> {
         let _lease = self.assets.lease_book(&hash).await?;
         if self.assets.read_bytes(library_model::BlobKind::Thumbnail, &hash).await?.is_some() || self.database.thumbnail_work_state(&hash)? != *expected {
             return Ok(None);

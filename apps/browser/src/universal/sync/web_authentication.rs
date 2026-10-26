@@ -16,7 +16,7 @@ extern "C" {
 
 pub(super) struct WebAuthentication {
     panel: JsValue,
-    _submit: Closure<dyn FnMut(String, String, String, String) -> js_sys::Promise>,
+    _submit: Closure<dyn FnMut(String) -> js_sys::Promise>,
 }
 impl Drop for WebAuthentication {
     fn drop(&mut self) {
@@ -27,12 +27,14 @@ impl Drop for WebAuthentication {
 impl SyncPage {
     pub(super) fn open_web_authentication(&mut self, cx: &mut Context<Self>) {
         let events = self.events.clone();
-        let submit = Closure::new(move |action: String, email: String, secret: String, token: String| {
+        // The form sends one JSON request; never log it, it carries credentials.
+        let submit = Closure::own_aborting(move |request: String| {
             let events = events.clone();
             wasm_bindgen_futures::future_to_promise(async move {
+                let request = serde_json::from_str::<super::AuthenticationRequest>(&request).map_err(|_| JsValue::from_str("Could not read the sign-in form. Reload the page and try again."))?;
                 let (reply, result) = async_channel::bounded(1);
-                events.try_send(super::SyncEvent::Authenticate { action, email, secret, token, reply }).map_err(|_| JsValue::from_str("The application window is closed"))?;
-                result.recv().await.map_err(|_| JsValue::from_str("The application window is closed"))?.map_err(|error| JsValue::from_str(&error))?;
+                events.try_send(super::SyncEvent::Authenticate { request, reply }).map_err(|_| JsValue::from_str("The application window is closed"))?;
+                result.recv().await.map_err(|_| JsValue::from_str("The application window is closed"))?.map_err(JsValue::from_str)?;
                 Ok(JsValue::UNDEFINED)
             })
         });

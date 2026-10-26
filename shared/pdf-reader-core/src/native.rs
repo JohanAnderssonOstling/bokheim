@@ -190,9 +190,11 @@ impl PdfDocumentSession {
 
     pub(super) fn for_inspection(reader: impl Read + Seek + Send + 'static) -> PdfResult<Self> {
         Self::load(move || {
+            let document = load_document(reader)?;
+            let right_to_left = document.catalog().is_right_to_left();
             Ok(LocalDocumentSession {
-                document: load_document(reader)?,
-                info: PdfDocumentInfo { source_name: String::new(), pages: Vec::new(), outline: Vec::new(), skippable_pages: Vec::new() },
+                document,
+                info: PdfDocumentInfo { source_name: String::new(), pages: Vec::new(), outline: Vec::new(), skippable_pages: Vec::new(), right_to_left },
                 analysis: RefCell::new(PageAnalysisCache::default()),
                 page_source: None,
             })

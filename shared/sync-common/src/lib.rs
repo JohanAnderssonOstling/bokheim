@@ -9,12 +9,13 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 pub mod api;
+pub mod storage;
 pub use protobuf_wire as transport;
 pub use wire;
 mod protocol;
 pub use protocol::{validate_pull_batch, validate_push_response, MutationIssue, PullBatchError, PushBatcher, PushResponseError, ValidatedPushResponse};
 
-pub use content_address::ContentHash;
+pub use content_address::BookId;
 
 /// Deterministic content-address fixture shared by protocol client and server tests.
 
@@ -230,7 +231,7 @@ pub struct Publication<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpaqueStateEntry {
     pub address: StateAddress,
-    pub book: Option<ContentHash>,
+    pub book: Option<BookId>,
     // Keep opaque payloads as byte buffers in the codec's intermediate trees.
     // Protobuf bytes and the persisted bincode layout stay identical.
     #[serde(with = "serde_bytes")]

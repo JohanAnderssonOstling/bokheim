@@ -85,6 +85,7 @@ impl Preferences {
             log::warn!("failed to install interface fonts: {error}");
         }
         let browsing = services.startup.browsing_preferences.clone();
+        ui_components::apply_keyboard_shortcuts(browsing.keyboard_shortcuts(), cx);
         apply_appearance(&browsing, cx);
         cx.set_global(CoverTextSetting(browsing.cover_text()));
         cx.set_global(GeneratedCoversOnly(browsing.generated_covers_only()));
@@ -93,6 +94,14 @@ impl Preferences {
         cx.set_global(gpui_kobo::KoboKeyboardLayouts(browsing.keyboard_layouts().to_vec()));
         let store = cx.new(|_| Self { backend, browsing });
         cx.set_global(PreferencesStore(store.clone()));
+        let shortcut_preferences = store.clone();
+        ui_components::configure_shortcut_saving(
+            move |shortcuts, cx| {
+                let saved = shortcut_preferences.update(cx, |preferences, cx| preferences.save_keyboard_shortcuts(shortcuts, cx));
+                cx.spawn(async move |_| saved.await.map_err(|error| Box::new(error) as ui_components::ShortcutSaveError))
+            },
+            cx,
+        );
         // The keyboard's layout key rotates the global; save what it chose.
         #[cfg(feature = "kobo")]
         cx.observe_global::<gpui_kobo::KoboKeyboardLayouts>(|cx| {
@@ -123,9 +132,24 @@ impl Preferences {
         self.browsing.ui_font_size_px()
     }
 
+    pub(crate) fn save_keyboard_shortcuts(&mut self, shortcuts: app_preferences::KeyboardShortcuts, cx: &mut Context<Self>) -> Task<Result<(), app::BackendError>> {
+        let backend = self.backend.clone();
+        cx.spawn(async move |preferences, cx| {
+            let saved = backend.update_browsing_preference(BrowsingPreferencePatch::KeyboardShortcuts(shortcuts)).await?;
+            preferences
+                .update(cx, |preferences, cx| {
+                    let shortcuts = saved.keyboard_shortcuts().clone();
+                    ui_components::apply_keyboard_shortcuts(&shortcuts, cx);
+                    let _ = BrowsingPreferencePatch::KeyboardShortcuts(shortcuts).apply(&mut preferences.browsing);
+                    cx.notify();
+                })
+                .map_err(|error| app::BackendError::message(error.to_string()))
+        })
+    }
+
     /// Commit this backend-enforced setting only after acknowledgement. The
     /// caller owns any window-specific presentation of a failed save.
-    pub(crate) fn save_metered_transfers(&mut self, enabled: bool, cx: &mut Context<Self>) -> Task<Result<(), String>> {
+    pub(crate) fn save_metered_transfers(&mut self, enabled: bool, cx: &mut Context<Self>) -> Task<Result<(), app::BackendError>> {
         let backend = self.backend.clone();
         cx.spawn(async move |preferences, cx| {
             let saved = backend.update_browsing_preference(BrowsingPreferencePatch::AllowMeteredTransfers(enabled)).await?;
@@ -134,7 +158,7 @@ impl Preferences {
                     let _ = BrowsingPreferencePatch::AllowMeteredTransfers(saved.allow_metered_transfers()).apply(&mut preferences.browsing);
                     cx.notify();
                 })
-                .map_err(|error| error.to_string())
+                .map_err(|error| app::BackendError::message(error.to_string()))
         })
     }
 
@@ -157,6 +181,9 @@ impl Preferences {
         let appearance_changed =
             previous.theme() != browsing.theme() || previous.appearance_override() != browsing.appearance_override() || previous.ui_font_size_px() != browsing.ui_font_size_px() || previous.ui_font_family() != browsing.ui_font_family();
         self.browsing = browsing.clone();
+        if previous.keyboard_shortcuts() != browsing.keyboard_shortcuts() {
+            ui_components::apply_keyboard_shortcuts(browsing.keyboard_shortcuts(), cx);
+        }
         if appearance_changed {
             apply_appearance(&browsing, cx);
         }

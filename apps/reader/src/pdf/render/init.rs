@@ -33,6 +33,7 @@ impl PdfReaderView {
         let preferences = ReaderSettings::preferences(cx);
         let zoom_mode = stored_zoom_mode(preferences);
         let trim_margins = preferences.pdf_trim_margins;
+        let direction = preferences.pdf_reading_direction;
         let source_name = title.clone();
         let interaction_style = library_interaction_style(cx);
         let imported = crate::pdf::marks::imported_annotations(locator.content_hash(), metadata.as_ref());
@@ -41,6 +42,7 @@ impl PdfReaderView {
             pdf.set_interaction_style(interaction_style, cx);
             pdf.set_zoom_mode(zoom_mode, cx);
             pdf.set_trim_margins(trim_margins, cx);
+            pdf.set_direction_override(direction.override_right_to_left(), cx);
             pdf.set_full_page_position(initial_full_page_position, cx);
             pdf
         });

@@ -13,6 +13,6 @@ pub async fn complete(database: &Database) -> Result<usize, DatabaseError> {
         after = next;
         // Each page has committed before yielding so the browser event loop
         // stays responsive through long recoveries.
-        client_platform_runtime::executor::sleep(std::time::Duration::from_millis(1)).await;
+        client_platform_runtime::executor::sleep(std::time::Duration::from_millis(1)).await.map_err(DatabaseError::operation)?;
     }
 }

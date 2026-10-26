@@ -119,7 +119,7 @@ impl WorkerDispatchResult<client_runtime::reply::Reply> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use library_backend::ContentHash;
+    use library_backend::BookId;
 
     #[tokio::test]
     async fn library_list_watch_delivers_coalesced_wire_notifications_and_closes() {
@@ -142,7 +142,7 @@ mod tests {
                     "App": {
                         "SubscribeBook": {
                             "library_id": LibraryId::new_v4(),
-                            "content_hash": ContentHash::from_bytes([7; 32]),
+                            "content_hash": BookId::from_bytes([7; 32]),
                         }
                     }
                 }

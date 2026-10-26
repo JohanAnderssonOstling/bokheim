@@ -19,7 +19,7 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_image_eviction::track_image;
 use library_backend::{LibraryClient, ThumbnailResolution};
 use library_model::{CardKey, LibraryTrashView, TrashedBook, TrashedFolder};
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 use ui_components as components;
 use web_time::{SystemTime, UNIX_EPOCH};
 
@@ -37,7 +37,7 @@ const GROUPS: [(&str, i64); 3] = [("Past day", DAY_MS), ("Past week", 7 * DAY_MS
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum TrashKey {
     Folder(DirId),
-    Book(ContentHash),
+    Book(BookId),
 }
 
 impl std::fmt::Display for TrashKey {
@@ -148,7 +148,7 @@ pub(crate) struct TrashPage {
     request: Option<Task<()>>,
     selection: HashSet<TrashKey>,
     /// Loaded covers, and `None` for a book known to have none.
-    covers: HashMap<ContentHash, Option<LoadedCover>>,
+    covers: HashMap<BookId, Option<LoadedCover>>,
     covers_need_reload: bool,
     _cover_evictions: Subscription,
     cover_request: Option<Task<()>>,
@@ -219,7 +219,7 @@ impl TrashPage {
     /// Loads the covers of books not yet tried, and shows them all at once.
     fn load_covers(&mut self, cx: &mut Context<Self>) {
         let Some(contents) = &self.contents else { return };
-        let missing: Vec<ContentHash> = contents.books.iter().map(|book| book.content_hash).filter(|content_hash| !self.covers.contains_key(content_hash)).collect();
+        let missing: Vec<BookId> = contents.books.iter().map(|book| book.content_hash).filter(|content_hash| !self.covers.contains_key(content_hash)).collect();
         if missing.is_empty() {
             return;
         }
@@ -286,7 +286,7 @@ impl TrashPage {
 
     /// Runs one Trash action. Success needs no reload here: the library
     /// reports its contents changed, and that refreshes this page.
-    fn run<F: Future<Output = Result<(), String>> + 'static>(&mut self, operation: impl FnOnce(LibraryClient) -> F, action: &'static str, cx: &mut Context<Self>) {
+    fn run<F: Future<Output = Result<(), library_backend::BackendError>> + 'static>(&mut self, operation: impl FnOnce(LibraryClient) -> F, action: &'static str, cx: &mut Context<Self>) {
         let operation = operation(self.ui.backend().clone());
         cx.spawn(async move |page, cx| {
             if let Err(error) = operation.await {
@@ -355,10 +355,10 @@ impl TrashPage {
         self.contents.as_ref().map(trash_items).unwrap_or_default().into_iter().filter(|item| self.selection.contains(&item.key())).collect()
     }
 
-    fn render_cover(&self, content_hash: ContentHash, theme: components::BrowserTheme) -> gpui::AnyElement {
+    fn render_cover(&self, content_hash: BookId, theme: components::BrowserTheme) -> gpui::AnyElement {
         match self.covers.get(&content_hash) {
             Some(Some(cover)) => components::book_cover(theme, components::BOOK_COVER_ASPECT_RATIO).child(components::book_cover_image(format!("trash-cover-{content_hash}"), cover.image.clone(), 1.0, false, theme)).into_any_element(),
-            Some(None) => components::book_thumbnail_generated(generated_cover_variant(CardKey(*content_hash.as_bytes())), theme).into_any_element(),
+            Some(None) => components::book_thumbnail_generated(generated_cover_variant(CardKey::from(content_hash)), theme).into_any_element(),
             None => components::book_cover(theme, components::BOOK_COVER_ASPECT_RATIO).into_any_element(),
         }
     }

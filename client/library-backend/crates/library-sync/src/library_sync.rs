@@ -8,7 +8,7 @@ pub(crate) use library_runtime::events::{LibraryEvent, LibraryEventRouter};
 pub(crate) use library_runtime::interest::NotificationInterest;
 pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) use std::sync::Arc;
-pub(crate) use sync_common::ContentHash;
+pub(crate) use sync_common::BookId;
 pub(crate) use sync_common::{LibraryId, ReplicaId};
 pub(crate) use crate::engine::SyncOutcome;
 
@@ -167,12 +167,12 @@ impl LibrarySync {
     /// Tests run one metadata exchange followed by one asset pass.
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn request_download(&self, content_hash: ContentHash) -> SyncResult<()> {
+    pub fn request_download(&self, content_hash: BookId) -> SyncResult<()> {
         self.request_downloads(std::slice::from_ref(&content_hash))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn request_downloads(&self, content_hashes: &[ContentHash]) -> SyncResult<()> {
+    pub fn request_downloads(&self, content_hashes: &[BookId]) -> SyncResult<()> {
         self.database.sync_request_book_downloads(content_hashes, TransferOrigin::UserInitiated)?;
         if let Some(tx) = &self.events {
             for content_hash in content_hashes {

@@ -36,6 +36,26 @@ fn main() {
         std::fs::remove_file(&bisac_path).expect("replace generated BISAC reference");
     }
     subject_taxonomy::bisac_reference::compile(&bisac_path, &bisac_csv, &bisac_revision).expect("compile BISAC reference");
+    // Compile an allocation-free source for fallback lookups too. Both forms
+    // come from the same rows, including duplicate-code ordering and literal
+    // path components; a broken runtime SQLite cache cannot lose assignments.
+    let bisac = Connection::open(&bisac_path).expect("open compiled BISAC reference");
+    let mut query = bisac.prepare("SELECT path,code,normalized_path,tail_component,component_count FROM bisac_node ORDER BY id").expect("read compiled BISAC nodes");
+    let nodes = query
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?)))
+        .expect("query compiled BISAC nodes")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect compiled BISAC nodes");
+    let nodes = nodes
+        .into_iter()
+        .map(|(path, code, normalized_path, tail_component, component_count)| {
+            format!("BundledNode {{ path: {path:?}, code: {code:?}, normalized_path: {normalized_path:?}, tail_component: {tail_component:?}, component_count: {component_count} }}")
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    std::fs::write(output_dir.join("bisac-reference-nodes.rs"), format!("&[\n{nodes}\n]\n")).expect("write bundled BISAC nodes");
+    drop(query);
+    drop(bisac);
     let bisac_image = std::fs::read(&bisac_path).expect("read compiled BISAC reference");
     let bisac_digest = blake3::hash(&bisac_image).to_hex().to_string();
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());

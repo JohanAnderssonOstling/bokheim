@@ -13,15 +13,20 @@ launcher_profile_mark() {
 }
 
 WORKDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$WORKDIR/.update/installing" ]; then
+    /bin/sh "$WORKDIR/update-recovery.sh" "$WORKDIR" || exit 1
+fi
 LOG="$WORKDIR/desktop-gpui-kobo.log"
 export BOKHEIM_KOBO_EXIT_ACTION_FILE="$WORKDIR/exit-action"
 export BOKHEIM_KOBO_CAN_UNINSTALL=1
+export BOKHEIM_KOBO_CAN_UPDATE=1
+export BOKHEIM_KOBO_INSTALL_ROOT="${WORKDIR%/.adds/bokheim}"
 rm -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export RUST_LOG="${RUST_LOG:-warn,book_startup=debug}"
 export BOKHEIM_KOBO_CANVAS_MODE_FILE="${BOKHEIM_KOBO_CANVAS_MODE_FILE:-$WORKDIR/data/canvas-mode}"
 export BOKHEIM_WESTERN_SHAPING_BENCHMARK=1
-NICKEL_WAS_RUNNING=0
+NICKEL_WAS_RUNNING=${BOKHEIM_KOBO_RESTORE_NICKEL:-0}
 export BOKHEIM_KOBO_WIFI_HELPER="$WORKDIR/wifi-power.sh"
 # Read only selected hardware hints while Nickel still exists. Never eval /proc data.
 nickel_pid=''
@@ -75,11 +80,11 @@ uninstall_bokheim() {
     rm -f "$WORKDIR/desktop-gpui-kobo" "$WORKDIR/taxonomy.sqlite3" \
         "$WORKDIR/run.sh" "$WORKDIR/run-monitored.sh" "$WORKDIR/monitor-nickel.sh" \
         "$WORKDIR/wifi-power.sh" "$WORKDIR/command-timeout.sh" \
-        "$WORKDIR/probe-kobo-audio.sh" "$WORKDIR/BUILD-INFO.txt" \
+        "$WORKDIR/probe-kobo-audio.sh" "$WORKDIR/update-recovery.sh" "$WORKDIR/BUILD-INFO.txt" \
         "$WORKDIR/LICENSE-APACHE" "$WORKDIR/LICENSE-FBINK-GPLv3" \
         "$WORKDIR/LICENSE-LILEX-OFL.txt" "$WORKDIR/LICENSE-WPA-CTRL-BSL-1.0" || return 1
     rm -rf "$WORKDIR/runtime" "$WORKDIR/pdfium" "$WORKDIR/third-party-source" \
-        "$WORKDIR/command-shims" "$WORKDIR/nickelmenu-install" "$WORKDIR/nickelmenu-icons" || return 1
+        "$WORKDIR/command-shims" "$WORKDIR/nickelmenu-install" "$WORKDIR/nickelmenu-icons" "$WORKDIR/.update" || return 1
     rm -f "$WORKDIR/../nm/desktop-gpui-kobo" "$WORKDIR/fbink"
 }
 
@@ -201,8 +206,25 @@ Loading...'
         printf '[%s] Possible terminating signal: %s\n' "$(date)" "$((app_status - 128))"
     fi
     sync
-    # Deployment uses SIGTERM to stop the reader before replacing its files.
-    # A controlled stop should restore Nickel without a failure screen.
+    if [ -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE" ] && [ "$(head -n 1 "$BOKHEIM_KOBO_EXIT_ACTION_FILE")" = update ]; then
+        rm -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE"
+        "$WORKDIR/fbink" -q -c -f -p -m -M -W GC16 -S 3 'Updating Bokheim...' || true
+        if LD_LIBRARY_PATH= "$WORKDIR/desktop-gpui-kobo" --apply-update; then
+            # The new launcher keeps the old session's obligation to restore
+            # Nickel when the user later quits Bokheim.
+            trap - 0 1 2 15
+            export BOKHEIM_KOBO_RESTORE_NICKEL="$NICKEL_WAS_RUNNING"
+            exec /bin/sh "$WORKDIR/run.sh"
+        fi
+        printf 'Kobo update installation failed; restoring the previous program\n'
+        /bin/sh "$WORKDIR/update-recovery.sh" "$WORKDIR" || exit 1
+        rm -f "$WORKDIR/.update/ready.json"
+        printf 'The update could not be installed. Download it again and retry.\n' >"$WORKDIR/.update/error"
+        "$WORKDIR/fbink" -q -c -f -p -m -M -W GC16 -S 3 'Update failed. Open Bokheim to try again.' || true
+        exit 1
+    fi
+    # Deployment uses SIGTERM before replacing files. A controlled stop should
+    # restore Nickel without a failure screen.
     if [ "$app_status" -ne 0 ] && [ "$app_status" -ne 143 ]; then
         "$WORKDIR/fbink" -q -c -f -p -m -M -h \
             "Bokheim Kobo failed; see desktop-gpui-kobo.log"

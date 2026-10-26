@@ -7,7 +7,7 @@ use crate::DatabaseError;
 #[cfg(test)]
 use book_model::Contributor;
 use book_model::{BookFormat, BookRecord, BookTocEntry};
-use content_address::ContentHash;
+use content_address::BookId;
 use library_model::CardKey;
 use rusqlite::Connection;
 #[cfg(test)]
@@ -23,8 +23,8 @@ pub(crate) use storage::{read, read_snapshot};
 
 /// Only identical hosted bytes of the same format supply an import answer.
 /// Source-linked entries have catalog identities rather than content hashes.
-pub fn import_record(hash: ContentHash, format: BookFormat) -> Result<Option<BookRecord>, DatabaseError> {
-    Ok(entry(CardKey(*hash.as_bytes()))?.filter(|book| book.hash == Some(hash) && book.format() == format).map(|book| book.record))
+pub fn import_record(hash: BookId, format: BookFormat) -> Result<Option<BookRecord>, DatabaseError> {
+    Ok(entry(CardKey::from(hash))?.filter(|book| book.hash == Some(hash) && book.format() == format).map(|book| book.record))
 }
 
 /// The single catalog snapshot layout this application reads.
@@ -33,7 +33,7 @@ pub const FORMAT_VERSION: u32 = 8;
 /// One catalog book, with what browsing filters, sorts and shows, and the
 /// record a library adding it records as its enrichment answer.
 pub struct CatalogBook {
-    pub hash: Option<ContentHash>,
+    pub hash: Option<BookId>,
     pub key: CardKey,
     pub external_url: Option<String>,
     /// An external audiobook's archive on its source, which adding the
@@ -41,6 +41,8 @@ pub struct CatalogBook {
     pub download_url: Option<String>,
     /// Source media format, independent of hosting or download permissions.
     pub file_format: BookFormat,
+    /// Total recording time advertised by the source, when available.
+    pub audiobook_duration_ms: Option<u64>,
     /// Acquisition sources retained by the snapshot, including every source
     /// credited for a hosted file shared by several catalogs.
     pub sources: Vec<String>,

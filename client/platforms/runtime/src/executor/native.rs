@@ -1,8 +1,8 @@
-use std::sync::Mutex;
 use super::task::{owned_local_task, owned_task, BackendTask};
 use super::{BackendExecutorError, BackendFuture, BackendOutput, BackendSend, BackendTimeout};
 use std::future::Future;
-use std::sync::Arc;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::watch;
 
 // Startup trials may inspect local state, but background sync/import must not
@@ -19,7 +19,7 @@ pub struct LibraryMaintenancePermit(watch::Sender<bool>);
 
 impl Drop for LibraryMaintenancePermit {
     fn drop(&mut self) {
-        *LIBRARY_MAINTENANCE_GATE.lock().expect("library maintenance gate poisoned") = None;
+        *LIBRARY_MAINTENANCE_GATE.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.0.send_replace(true);
     }
 }
@@ -28,7 +28,7 @@ impl Drop for LibraryMaintenancePermit {
 /// the library actor's command loop or the update trial's side-effect barrier.
 pub fn defer_library_maintenance() -> LibraryMaintenancePermit {
     let (sender, receiver) = watch::channel(false);
-    let mut gate = LIBRARY_MAINTENANCE_GATE.lock().expect("library maintenance gate poisoned");
+    let mut gate = LIBRARY_MAINTENANCE_GATE.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(gate.is_none(), "library maintenance is already deferred");
     *gate = Some(receiver);
     LibraryMaintenancePermit(sender)
@@ -36,7 +36,7 @@ pub fn defer_library_maintenance() -> LibraryMaintenancePermit {
 
 /// Waits for the host's first-frame gate without gating open actors' commands.
 pub async fn library_maintenance_ready() {
-    let receiver = LIBRARY_MAINTENANCE_GATE.lock().expect("library maintenance gate poisoned").clone();
+    let receiver = LIBRARY_MAINTENANCE_GATE.lock().unwrap_or_else(PoisonError::into_inner).clone();
     if let Some(mut receiver) = receiver {
         loop {
             if *receiver.borrow_and_update() {
@@ -52,19 +52,19 @@ pub async fn library_maintenance_ready() {
 pub struct StartupPermit(watch::Sender<bool>);
 impl StartupPermit {
     pub fn release(self) {
-        *STARTUP_GATE.lock().expect("startup gate poisoned") = None;
+        *STARTUP_GATE.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.0.send_replace(true);
     }
 }
 pub fn defer_background_work() -> StartupPermit {
     let (sender, receiver) = watch::channel(false);
-    let mut gate = STARTUP_GATE.lock().expect("startup gate poisoned");
+    let mut gate = STARTUP_GATE.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(gate.is_none(), "startup work is already deferred");
     *gate = Some(receiver);
     StartupPermit(sender)
 }
 async fn startup_ready() {
-    let receiver = STARTUP_GATE.lock().expect("startup gate poisoned").clone();
+    let receiver = STARTUP_GATE.lock().unwrap_or_else(PoisonError::into_inner).clone();
     if let Some(mut receiver) = receiver {
         loop {
             let ready = *receiver.borrow_and_update();
@@ -158,7 +158,9 @@ impl LibraryExecutor {
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&runtime, async move {
                     while let Some(job) = jobs.recv().await {
-                        job();
+                        // A failed job drops its reply without terminating the
+                        // owner thread and stranding unrelated library work.
+                        let _ = catch_unwind(AssertUnwindSafe(job));
                     }
                 });
             })
@@ -178,12 +180,12 @@ impl LibraryExecutor {
     /// Runs `job` on this thread and blocks the calling thread for its
     /// result. For synchronous, non-runtime call sites (library open) that
     /// need the outcome before continuing.
-    pub fn run_blocking<T: Send + 'static>(&self, job: impl FnOnce() -> T + Send + 'static) -> T {
+    pub fn run_blocking<T: Send + 'static>(&self, job: impl FnOnce() -> T + Send + 'static) -> Result<T, BackendExecutorError> {
         let (reply, result) = std::sync::mpsc::channel();
         self.run(move || {
             let _ = reply.send(job());
         });
-        result.recv().expect("library executor thread is running")
+        result.recv().map_err(|_| BackendExecutorError("library executor stopped before returning a result".into()))
     }
 
     /// Spawns a non-`Send` future on this thread and returns a handle with
@@ -220,8 +222,9 @@ pub fn spawn_detached(future: impl BackendFuture<()>) {
     });
 }
 
-pub async fn sleep(duration: std::time::Duration) {
+pub async fn sleep(duration: std::time::Duration) -> Result<(), BackendExecutorError> {
     tokio::time::sleep(duration).await;
+    Ok(())
 }
 
 pub async fn timeout<T>(duration: std::time::Duration, future: impl Future<Output = T>) -> Result<T, BackendTimeout> {
@@ -233,6 +236,21 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn failed_library_job_returns_an_error_and_preserves_the_executor() {
+        let executor = LibraryExecutor::new().unwrap();
+        assert!(executor.run_blocking(|| panic!("failed library open")).is_err());
+        assert_eq!(executor.run_blocking(|| 42).unwrap(), 42);
+    }
+
+    #[test]
+    fn stopped_library_executor_returns_an_error() {
+        let (submit, jobs) = tokio::sync::mpsc::unbounded_channel();
+        drop(jobs);
+        let executor = LibraryExecutor { submit };
+        assert!(executor.run_blocking(|| 42).is_err());
+    }
 
     #[test]
     fn startup_gate_prevents_background_side_effects_until_commit() {

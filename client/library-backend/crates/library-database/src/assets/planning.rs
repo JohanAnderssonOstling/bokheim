@@ -9,7 +9,7 @@ use crate::*;
 // checks out SQLite or chooses transaction boundaries itself.
 
 use super::TransfersSql;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 #[derive(Clone, Debug)]
 pub struct BookUploadSnapshot {
@@ -20,12 +20,12 @@ pub struct BookUploadSnapshot {
 impl Database {
     /// One bounded page of covers to fetch. Skip books without a local path;
     /// advance the SQL cursor internally so skipped rows cannot hide later work.
-    pub fn pending_thumbnail_downloads(&self, after: Option<&ContentHash>, limit: i64) -> Result<Vec<ContentHash>, DatabaseError> {
+    pub fn pending_thumbnail_downloads(&self, after: Option<&BookId>, limit: i64) -> Result<Vec<BookId>, DatabaseError> {
         let mut after = after.copied();
         loop {
             let mut page = Vec::new();
             self.connection.pending_thumbnail_downloads(after.as_ref(), limit, |row| {
-                page.push(row.get::<_, ContentHash>(0)?);
+                page.push(row.get::<_, BookId>(0)?);
                 Ok(())
             })?;
             let Some(last) = page.last() else { return Ok(Vec::new()) };

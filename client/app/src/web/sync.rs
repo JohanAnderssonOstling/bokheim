@@ -120,8 +120,10 @@ impl State {
                 biased;
                 command = commands.recv() => match command { Ok(command) => Update::Command(command), Err(_) => Update::Closed },
                 outcome = self.jobs.next(), if !self.jobs.is_empty() => {
-                    let (key, outcome) = outcome.expect("running sync job");
-                    Update::Complete(key, outcome)
+                    match outcome {
+                        Some((key, outcome)) => Update::Complete(key, outcome),
+                        None => Update::Closed,
+                    }
                 },
             };
             if commands.is_closed() {

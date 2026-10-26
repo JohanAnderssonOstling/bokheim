@@ -12,6 +12,8 @@ client-platform-runtime = { path = "../../../platforms/runtime" }
 client-runtime = { path = "../../../client-runtime" }
 library-catalog = { path = "../library-catalog" }
 cpu-host = { path = "../cpu-host" }
+cloud-storage = { path = "../cloud-storage" }
+content-address = { path = "../../../../shared/content-address" }
 library-database = { path = "../library-database" }
 library-files = { path = "../library-files" }
 library-model = { path = "../../../library-model" }
@@ -20,12 +22,17 @@ library-replica = { path = "../library-replica" }
 library-runtime = { path = "../library-runtime" }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 sync-common = { path = "../../../../shared/sync-common" }
 web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+blake3 = "1"
 client-platform-native = { path = "../../../platforms/native" }
 filesystem-scanner = { path = "../filesystem-scanner" }
+tokio = { version = "1", features = ["fs", "io-util"] }
 tempfile = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -34,6 +41,8 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+cloud-storage = { path = "../cloud-storage", features = ["test-support"] }
+url = "2"
 library-database = { path = "../library-database", features = ["scanner"] }
 thumbnail = { path = "../thumbnail" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

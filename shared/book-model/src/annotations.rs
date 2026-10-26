@@ -1,5 +1,5 @@
 use crate::UnixMillis;
-use content_address::ContentHash;
+use content_address::BookId;
 use serde::{Deserialize, Serialize};
 use wire::WireError;
 
@@ -69,7 +69,7 @@ impl AnnotationAnchor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Annotation {
     pub id: String,
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub anchor: AnnotationAnchor,
     pub exact_text: String,
     pub style: AnnotationStyle,

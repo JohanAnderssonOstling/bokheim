@@ -1,34 +1,17 @@
 //! GPUI binding for the Linux startup/update host. Activation belongs to startup.
-use browser_ui::{UpdateAction, UpdateControls, UpdateView};
-use gpui::{App, AppContext, Entity};
+pub use crate::update_binding::{bind_desktop as bind, healthy, trial_pending};
 use linux_update_host::Host;
 pub use linux_update_host::Startup;
 use std::{
-    cell::RefCell,
     path::{Path, PathBuf},
     time::Duration,
 };
-thread_local! {
-    // Startup owns the host until healthy() commits; the worker then takes it.
-    static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
-}
 
 pub use crate::update_entry::candidate_entry;
 
 pub fn initialize(data: &Path) -> Result<Startup, String> {
-    let config = match update_client::DiscoveryConfig::bundled() {
-        Ok(mut config) => {
-            if let Ok(endpoint) = std::env::var("BOKHEIM_UPDATE_ENDPOINT") {
-                config.endpoint = endpoint;
-            }
-            config
-        }
-        Err(error) => {
-            if data.join("updates/activation.json").exists() || data.join("updates/active-taxonomy.json").exists() {
-                return Err(error);
-            }
-            return Ok(Startup::Run);
-        }
+    let Some(config) = crate::update_binding::startup_config(data)? else {
+        return Ok(Startup::Run);
     };
     let appimage = std::env::var_os("APPIMAGE").filter(|_| std::env::var_os("BOKHEIM_DISABLE_SELF_UPDATE").is_none()).map(PathBuf::from).map(|p| p.canonicalize().map_err(|e| e.to_string())).transpose()?;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -37,23 +20,9 @@ pub fn initialize(data: &Path) -> Result<Startup, String> {
     let trial = args.windows(2).find(|a| a[0] == "--bokheim-update-trial").map(|a| a[1].as_str());
     let startup = host.startup(trial)?;
     if matches!(startup, Startup::Run) {
-        HOST.with_borrow_mut(|slot| {
-            if slot.is_some() {
-                return Err("Linux update host already initialized");
-            }
-            *slot = Some(host);
-            Ok(())
-        })?;
+        crate::update_binding::store(host)?;
     }
     Ok(startup)
-}
-
-pub fn trial_pending() -> bool {
-    HOST.with_borrow(|host| host.as_ref().is_some_and(Host::is_trial))
-}
-
-pub fn healthy() -> Result<(), String> {
-    HOST.with_borrow_mut(|host| host.as_mut().map_or(Ok(()), Host::healthy))
 }
 
 /// Parent waits only during a new launch, while no previous user session exists.
@@ -79,82 +48,4 @@ pub fn launch(data: &Path, executable: &Path, trial: Option<&str>) -> Result<boo
             Ok(false)
         }
     }
-}
-
-pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
-    let restart = HOST.with_borrow(|host| host.as_ref().map(|host| host.executable.clone()))?;
-    // APPIMAGE points to the persistent package, current_exe to its temporary mount.
-    let restart = std::env::var_os("APPIMAGE").map(PathBuf::from).unwrap_or(restart);
-    let (actions, requests) = std::sync::mpsc::channel();
-    let (views, received) = async_channel::unbounded();
-    let controls = cx.new(|_| {
-        UpdateControls::new(
-            UpdateView::Hidden,
-            std::rc::Rc::new(move |action, cx| {
-                if action == UpdateAction::Restart {
-                    cx.set_restart_path(restart.clone());
-                    cx.restart();
-                } else {
-                    let _ = actions.send(action);
-                }
-            }),
-        )
-    });
-    let weak = controls.downgrade();
-    let worker = crate::blocking_worker::BlockingWorker::new(cx.background_executor(), 1);
-    // The startup callback commits healthy() before this task transfers ownership.
-    cx.spawn(async move |_| {
-        let Some(mut host) = HOST.with_borrow_mut(Option::take) else { return };
-        let _ = worker
-            .dispatch(move || {
-                let mut action = None;
-                loop {
-                    let result = (|| {
-                        if action.is_none() {
-                            host.check_for_updates()?;
-                        } else if action == Some(UpdateAction::Update) {
-                            host.approve()?;
-                        }
-                        // Publish availability or committed approval before downloading.
-                        views.try_send(Ok(host.view())).map_err(|_| "update UI closed".to_owned())?;
-                        host.prepare()
-                    })();
-                    match result {
-                        Ok(view) => {
-                            if views.try_send(Ok(view)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            log::warn!("update work failed: {error}");
-                            if views.try_send(Ok(host.view())).is_err() || views.try_send(Err(())).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    action = match requests.recv() {
-                        Ok(action) => Some(action),
-                        Err(_) => break,
-                    };
-                }
-            })
-            .recv()
-            .await;
-    })
-    .detach();
-    cx.spawn(async move |cx| {
-        while let Ok(view) = received.recv().await {
-            if weak
-                .update(cx, |controls, cx| match view {
-                    Ok(view) => controls.apply(view, cx),
-                    Err(()) => controls.work_failed(cx),
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
-    })
-    .detach();
-    Some(controls)
 }

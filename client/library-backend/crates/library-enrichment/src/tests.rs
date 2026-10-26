@@ -19,7 +19,7 @@ use std::{
     io::Cursor,
     sync::{Arc, Mutex},
 };
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 
 use super::{google_matches, isbn_key, isbns};
 use crate::{CoverClient, LibraryEnrichment, MetadataClient};
@@ -204,7 +204,7 @@ async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_
     let temporary = tempfile::tempdir().unwrap();
     let db = Arc::new(Database::open(":memory:").unwrap());
     db.initialize_library().unwrap();
-    let hash = ContentHash::new(&"a".repeat(64));
+    let hash = BookId::new(&"a".repeat(64));
     db.commit_import(ImportCommit {
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),

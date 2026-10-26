@@ -4,7 +4,7 @@
 SELECT COUNT(*) FROM book_transfer w JOIN book b ON b.content_hash=w.content_hash WHERE w.cover_state = 'pending' AND b.deleted_at IS NULL;
 
 -- name: thumbnail_local_format?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT b.format
 FROM book b
 WHERE b.content_hash = :content_hash
@@ -14,11 +14,11 @@ WHERE b.content_hash = :content_hash
   );
 
 -- name: thumbnail_has_remote ->
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT EXISTS(SELECT 1 FROM book_transfer WHERE content_hash = :content_hash AND server_has_cover);
 
 -- name: thumbnail_remote_presence_candidates?
--- param: after: Option<&ContentHash>
+-- param: after: Option<&BookId>
 SELECT DISTINCT b.content_hash FROM book b
 JOIN book_dir bd ON bd.book_row_id = b.row_id AND bd.deleted_at IS NULL
 JOIN dir d ON d.id = bd.dir_id AND d.deleted_at IS NULL
@@ -26,24 +26,24 @@ WHERE b.content_hash > COALESCE(:after,X'') AND b.deleted_at IS NULL
 ORDER BY b.content_hash LIMIT 512;
 
 -- name: thumbnail_set_result!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: state: &str
 INSERT INTO book_transfer(content_hash, cover_state) SELECT content_hash, :state FROM book WHERE content_hash = :content_hash
 ON CONFLICT(content_hash) DO UPDATE SET cover_state = excluded.cover_state;
 
 -- name: thumbnail_discard!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 UPDATE book_transfer SET cover_state = NULL WHERE content_hash = :content_hash;
 
 -- name: thumbnail_request_missing!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT INTO book_transfer(content_hash, cover_state)
 SELECT content_hash, 'pending' FROM book WHERE content_hash = :content_hash AND deleted_at IS NULL
 ON CONFLICT(content_hash) DO UPDATE SET cover_state = 'pending'
 WHERE cover_state IS NULL OR cover_state = 'ready';
 
 -- name: thumbnail_work_state?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT cover_state FROM book_transfer WHERE content_hash = :content_hash AND cover_state IS NOT NULL;
 
 -- name: upload_preparation_snapshot?

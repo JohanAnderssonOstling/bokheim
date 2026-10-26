@@ -2,6 +2,7 @@
 //! its publications cards, and its next page and facets locations of their
 //! own.
 use crate::{fetch, pages, publications, Feed, NavigationLink, Publication, PDF};
+use client_runtime::{BackendError, Failure};
 use library_model::{BookCardRow, BookSource, BrowseContents, BrowseLocation, BrowseRow, CardKey, FeedFacet, FeedFacetGroup, FeedPage, LibraryFileTypeFilter, OpdsCredentials, OpdsSource, OpdsSourceId};
 use url::Url;
 
@@ -12,17 +13,17 @@ use url::Url;
 /// Only this page is fetched: the pages its links lead to are fetched when
 /// opened. Feeds such as Project Gutenberg's link every listed book to a
 /// page of its own, and fetching those alongside held the page back.
-pub async fn browse(source: &OpdsSource, credentials: Option<&OpdsCredentials>, page: Option<u32>, search: &str) -> Result<(BrowseContents, FeedPage), String> {
+pub async fn browse(source: &OpdsSource, credentials: Option<&OpdsCredentials>, page: Option<u32>, search: &str) -> Result<(BrowseContents, FeedPage), BackendError> {
     let root = root(&source.url)?;
     let url = match page {
         None => root.clone(),
-        Some(page) => pages::url(source.id, page).ok_or("this page is no longer known; open the feed again")?,
+        Some(page) => pages::url(source.id, page).ok_or_else(|| BackendError::classified(Failure::NotFound, "this feed page is no longer known"))?,
     };
     let access = fetch::Access::new(&root, credentials);
     let feed = match fetch_page(&url, search, &access).await {
         Ok(feed) => feed,
-        Err(fetch::Failure::SignIn) => return Ok((BrowseContents::default(), FeedPage { sign_in: true, ..FeedPage::default() })),
-        Err(fetch::Failure::Other(error)) => return Err(error),
+        Err(error) if error.failure() == Some(Failure::Unauthorized) => return Ok((BrowseContents::default(), FeedPage { sign_in: true, ..FeedPage::default() })),
+        Err(error) => return Err(error),
     };
     let source = source.id;
     let children = feed.navigation.iter().map(|link| chip(source, link)).collect();
@@ -36,7 +37,7 @@ pub async fn browse(source: &OpdsSource, credentials: Option<&OpdsCredentials>, 
     Ok((BrowseContents { children, books }, FeedPage { next: feed.next.as_ref().map(location), facets, sign_in: false }))
 }
 
-async fn fetch_page(url: &Url, search: &str, access: &fetch::Access<'_>) -> Result<Feed, fetch::Failure> {
+async fn fetch_page(url: &Url, search: &str, access: &fetch::Access<'_>) -> Result<Feed, BackendError> {
     let feed = fetch::feed(url, access).await?;
     if search.is_empty() {
         return Ok(feed);
@@ -47,19 +48,19 @@ async fn fetch_page(url: &Url, search: &str, access: &fetch::Access<'_>) -> Resu
 /// The title of the feed at `url`, fetching its root once; this also checks
 /// that it is a feed at all, and that `credentials` let this device in.
 /// Returns `None` when an anonymous request needs credentials.
-pub async fn feed_title(url: &str, credentials: Option<&OpdsCredentials>) -> Result<Option<String>, String> {
+pub async fn feed_title(url: &str, credentials: Option<&OpdsCredentials>) -> Result<Option<String>, BackendError> {
     let url = root(url)?;
     let feed = match fetch::feed(&url, &fetch::Access::new(&url, credentials)).await {
         Ok(feed) => feed,
-        Err(fetch::Failure::SignIn) if credentials.is_some() => return Err("the feed refused this username and password".into()),
-        Err(fetch::Failure::SignIn) => return Ok(None),
-        Err(fetch::Failure::Other(error)) => return Err(error),
+        Err(error) if error.failure() == Some(Failure::Unauthorized) && credentials.is_some() => return Err(BackendError::classified(Failure::CatalogCredentialsRejected, format!("{url} refused the username and password"))),
+        Err(error) if error.failure() == Some(Failure::Unauthorized) => return Ok(None),
+        Err(error) => return Err(error),
     };
     Ok(Some(if feed.title.is_empty() { url.host_str().unwrap_or("OPDS feed").to_owned() } else { feed.title }))
 }
 
-fn root(url: &str) -> Result<Url, String> {
-    Url::parse(url.trim()).map_err(|error| format!("not a feed address: {error}"))
+fn root(url: &str) -> Result<Url, BackendError> {
+    Url::parse(url.trim()).map_err(|error| BackendError::classified(Failure::InvalidAddress, format!("not a feed address: {error}")))
 }
 
 fn chip(source: OpdsSourceId, link: &NavigationLink) -> BrowseRow {

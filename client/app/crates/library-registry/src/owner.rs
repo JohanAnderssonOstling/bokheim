@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use sync_common::LibraryId;
 use uuid::Uuid;
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 thread_local! {
     static REGISTRIES: RefCell<HashMap<Uuid, LocalRegistry>> = RefCell::new(HashMap::new());
@@ -144,6 +145,21 @@ impl LibraryRegistry {
         self.run(move |registry| registry.asset_storage_enabled(&id))
     }
 
+    pub fn storage(&self, id: &LibraryId) -> RegistryResult<super::LibraryStorage> {
+        let id = *id;
+        self.run(move |registry| registry.storage(&id))
+    }
+
+    pub fn cache_remote_storage(&self, id: &LibraryId, storage: super::LibraryStorage) -> RegistryResult<()> {
+        let id = *id;
+        self.run(move |registry| registry.cache_remote_storage(&id, storage))
+    }
+
+    pub fn create_with_storage(&self, name: &str, locator: Option<String>, storage: super::LibraryStorage) -> RegistryResult<LibraryEntry> {
+        let name = name.to_owned();
+        self.run(move |registry| registry.create_with_storage(&name, locator, storage))
+    }
+
     pub fn set_asset_storage_enabled(&self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
         let id = *id;
         self.run(move |registry| registry.set_asset_storage_enabled(&id, enabled))
@@ -240,6 +256,20 @@ impl LibraryRegistry {
     pub fn read_value(&self, key: &str) -> RegistryResult<Option<Vec<u8>>> {
         let key = key.to_owned();
         self.run(move |registry| registry.read_value(&key))
+    }
+
+    /// Compare and replace device credentials in one owner command. `None`
+    /// preserves a newer login or a connection removed during token refresh.
+    pub fn update_value(&self, key: &str, update: impl FnOnce(Option<&[u8]>) -> RegistryResult<Option<Vec<u8>>> + Send + 'static) -> RegistryResult<bool> {
+        let key = key.to_owned();
+        self.run(move |registry| {
+            let tx = registry.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current: Option<Vec<u8>> = tx.query_row("SELECT value FROM app_value WHERE key=?1", [&key], |row| row.get(0)).optional()?;
+            let Some(value) = update(current.as_deref())? else { return Ok(false); };
+            tx.execute(include_str!("sql/set_sync_disabled.sql"), params![key, value])?;
+            tx.commit()?;
+            Ok(true)
+        })
     }
 
     pub fn write_value(&self, key: &str, value: &[u8]) -> RegistryResult<()> {

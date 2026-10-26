@@ -26,7 +26,7 @@ impl PdfReaderMetadata {
     pub fn valid_for(&self, content_hash: &str) -> bool {
         self.version == 1
             && self.content_hash == content_hash
-            && content_hash.len() == 64
+            && (content_hash.len() == 64 || (content_hash.len() == 66 && content_hash.starts_with("01")))
             && content_hash.bytes().all(|c| c.is_ascii_hexdigit())
             && !self.pages.is_empty()
             && self.pages.len() <= 32767

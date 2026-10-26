@@ -27,13 +27,12 @@ use crate::pdf::toc::PdfTocState;
 use crate::shell::annotation_editor;
 use crate::shell::chrome;
 use crate::shell::context_sheet::{ContextAction, ContextActionTarget, ContextActions};
-use crate::shell::input::{self as shell_input, CommandTarget};
+use crate::shell::input as shell_input;
 use crate::shell::marks::MarkSession;
 use crate::shell::page::ReaderSurface;
 use crate::shell::persistence::ReadingPositionWriter;
 use crate::shell::state_panel::{SidebarState, SidebarTab};
 use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent};
-use crate::{NextPage, PreviousPage};
 
 /// One zoom step, in pixels per PDF point.
 const ZOOM_STEP: f32 = 0.1;
@@ -98,8 +97,9 @@ impl Focusable for PdfReaderView {
 impl Render for PdfReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(all(target_os = "android", feature = "native-tts", not(feature = "kobo")))]
-        self.tts.sync_volume_buttons(cx);
+        self.tts.sync_volume_buttons(false, cx);
         components::sync_reader_rem_size(window, cx);
+        Self::install_directional_page_keys(window, cx);
         crate::invalidation::record_render(Component::PdfShell);
         let theme = components::browser_theme(cx);
         let entity = cx.entity();
@@ -221,10 +221,10 @@ impl Render for PdfReaderView {
             .on_mouse_move(cx.listener(|reader: &mut Self, _, window, cx| reader.reclaim_hover_focus(window, cx)));
         let interactions = chrome::surface_interactions("pdf", chrome_visible, sidebar_visible, touch_input, cx, |reader: &mut Self, action, window, cx| match action {
             chrome::SurfaceAction::PreviousPage => {
-                reader.execute(&PreviousPage, window, cx);
+                reader.turn_horizontal(false, window, cx);
             }
             chrome::SurfaceAction::NextPage => {
-                reader.execute(&NextPage, window, cx);
+                reader.turn_horizontal(true, window, cx);
             }
             chrome::SurfaceAction::ToggleChrome => reader.chrome.toggle(cx),
             chrome::SurfaceAction::ShowChrome => {

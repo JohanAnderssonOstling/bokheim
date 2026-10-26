@@ -4,17 +4,17 @@ use super::*;
 use crate::LibraryClient;
 use crate::client::TransferSelection;
 use book_model::{Annotation, AnnotationAnchor, AnnotationStyle};
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 
 const EPUB: &[u8] = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
 const OTHER_EPUB: &[u8] = include_bytes!("../../crates/book-inspection/tests/fixtures/malformed-language.epub");
 
-async fn seed(session: &LibrarySession, parent: DirId, name: &str, bytes: &[u8]) -> ContentHash {
+async fn seed(session: &LibrarySession, parent: DirId, name: &str, bytes: &[u8]) -> BookId {
     let input = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(input.path(), bytes).unwrap();
     session.import.import_stored_book(parent, name.into(), input.path().into()).await.unwrap()
 }
-fn selection(folders: Vec<DirId>, books: Vec<ContentHash>, source: Option<DirId>) -> TransferSelection {
+fn selection(folders: Vec<DirId>, books: Vec<BookId>, source: Option<DirId>) -> TransferSelection {
     TransferSelection { folders, books, source }
 }
 fn clients(source: &LibraryHandle, destination: &LibraryHandle) -> (LibraryClient, LibraryClient) {

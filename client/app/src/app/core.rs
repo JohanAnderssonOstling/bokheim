@@ -15,7 +15,7 @@ use std::time::Duration;
 pub(super) use sync_common::LibraryId;
 use tokio::sync::watch;
 
-pub(super) use crate::BackendError;
+pub(super) use crate::{BackendError, Failure};
 pub(super) use crate::DeviceAccountSession;
 pub(super) use library_backend::{LibrarySyncState, LibrarySyncStatus};
 
@@ -28,6 +28,9 @@ pub struct LibraryListState {
 pub(crate) struct AppState {
     pub(super) executor: BackendExecutor,
     pub(super) registry: LibraryRegistry,
+    pub(super) cloud: cloud_storage::connections::CloudConnections,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) cloud_logins: std::sync::Mutex<std::collections::HashMap<uuid::Uuid, super::cloud::CloudLoginReceiver>>,
     /// Durable registry/account policy remain app-owned. The library module
     /// owns the in-memory directory of resource-bearing sessions.
     pub(super) library_directory: Arc<LibraryDirectory>,
@@ -91,10 +94,14 @@ impl AppBackend {
         let api_server = crate::api_server_url();
         let account = DeviceAccountSession::load(context.clone(), api_server).map_err(BackendError::operation)?;
         profile.mark("account_load");
+        let cloud = super::cloud::connections(context.registry.clone())?;
         let state = Arc::new_cyclic(|weak| AppState {
             account_task: Some(super::account::start(&executor, weak, account.clone(), account_wake.clone(), account_requests, notification_interest.clone(), library_directory.clone())),
             executor: executor.clone(),
             registry: context.registry,
+            cloud,
+            #[cfg(not(target_arch = "wasm32"))]
+            cloud_logins: Default::default(),
             library_directory,
             account: account.clone(),
             library_list_changed: watch::channel(()).0,

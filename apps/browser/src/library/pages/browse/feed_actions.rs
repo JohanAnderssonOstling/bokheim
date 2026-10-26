@@ -132,7 +132,7 @@ impl FeedActions {
         let submitted_url = dialog.url.read(cx).value().trim().to_owned();
         let app = self.ui.app().clone();
         let name = Some(dialog.name.read(cx).value().trim().to_owned()).filter(|name| !name.is_empty());
-        let request: futures_util::future::LocalBoxFuture<'static, Result<AddOpdsFeedResult, String>> = match (&dialog.sign_in, credentials) {
+        let request: futures_util::future::LocalBoxFuture<'static, Result<AddOpdsFeedResult, app::BackendError>> = match (&dialog.sign_in, credentials) {
             (Some((source, _)), Some(credentials)) => {
                 let source = *source;
                 Box::pin(async move { app.set_opds_credentials(source, credentials).await.map(|_| AddOpdsFeedResult::Added) })

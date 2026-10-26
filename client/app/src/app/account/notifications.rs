@@ -41,7 +41,13 @@ pub(super) async fn run(account: DeviceAccountSession, account_wake: watch::Send
         tokio::select! {
             result = activity.changed() => { if result.is_err() { return; } retry = 1; continue; },
             result = changed.changed() => { if result.is_err() { return; } retry = 1; },
-            _ = crate::executor::sleep(Duration::from_secs(retry)) => { retry = (retry * 2).min(30); },
+            result = crate::executor::sleep(Duration::from_secs(retry)) => {
+                if let Err(error) = result {
+                    log::warn!("Notification reconnects stopped: {error}");
+                    return;
+                }
+                retry = (retry * 2).min(30);
+            },
         }
     }
 }

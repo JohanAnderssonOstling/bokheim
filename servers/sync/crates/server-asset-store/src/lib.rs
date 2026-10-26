@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use sync_common::ContentHash;
+use sync_common::BookId;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -36,7 +36,7 @@ pub struct StoredAsset {
     pub reader: Box<dyn StoredAssetReader>,
     pub total_len: u64,
     pub offset: u64,
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -201,7 +201,7 @@ impl FsAssetStore {
         blake3::hash(user_id.as_bytes()).to_hex().to_string()
     }
 
-    fn path(&self, user_id: &str, kind: AssetKind, hash: &ContentHash) -> Result<PathBuf, AssetError> {
+    fn path(&self, user_id: &str, kind: AssetKind, hash: &BookId) -> Result<PathBuf, AssetError> {
         Ok(match kind {
             AssetKind::Book => self.books_root.join(&hash.to_hex().as_str()[..2]).join(hash.to_hex().as_str()),
             AssetKind::Thumbnail => self.thumbnails_root.join("users").join(Self::user_scope(user_id)).join(format!("{hash}.jpg")),
@@ -249,7 +249,7 @@ impl FsAssetStore {
         Ok(())
     }
 
-    pub async fn size(&self, user_id: &str, kind: AssetKind, hash: &ContentHash) -> Result<Option<u64>, AssetError> {
+    pub async fn size(&self, user_id: &str, kind: AssetKind, hash: &BookId) -> Result<Option<u64>, AssetError> {
         if kind != AssetKind::Book {
             if let Some((bytes, browse)) = self.thumbnail_pair(user_id, hash).await? {
                 return Ok(Some(if kind == AssetKind::Thumbnail { bytes.len() } else { browse.len() } as u64));
@@ -263,12 +263,12 @@ impl FsAssetStore {
         }
     }
 
-    fn thumbnail_pair_path(&self, user_id: &str, hash: &ContentHash) -> PathBuf {
+    fn thumbnail_pair_path(&self, user_id: &str, hash: &BookId) -> PathBuf {
         self.thumbnails_root.join("users").join(Self::user_scope(user_id)).join(format!("{hash}.pair"))
     }
 
     /// Publish both opaque variants with a single atomic rename.
-    pub async fn put_thumbnail_pair(&self, user_id: &str, hash: &ContentHash, bytes: &[u8], browse_bytes: &[u8]) -> Result<(), AssetError> {
+    pub async fn put_thumbnail_pair(&self, user_id: &str, hash: &BookId, bytes: &[u8], browse_bytes: &[u8]) -> Result<(), AssetError> {
         for variant in [bytes, browse_bytes] {
             if variant.is_empty() {
                 return Err(AssetError::InvalidInput("thumbnail variants must not be empty".into()));
@@ -296,7 +296,7 @@ impl FsAssetStore {
     }
 
     /// Opening one file pins both variants even when another upload replaces it.
-    pub async fn thumbnail_pair(&self, user_id: &str, hash: &ContentHash) -> Result<Option<(Vec<u8>, Vec<u8>)>, AssetError> {
+    pub async fn thumbnail_pair(&self, user_id: &str, hash: &BookId) -> Result<Option<(Vec<u8>, Vec<u8>)>, AssetError> {
         let file = match File::open(self.thumbnail_pair_path(user_id, hash)).await {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -315,7 +315,7 @@ impl FsAssetStore {
         Ok(Some((data.split_off(12), browse)))
     }
 
-    pub async fn remove_thumbnail(&self, user_id: &str, hash: &ContentHash) -> Result<(), AssetError> {
+    pub async fn remove_thumbnail(&self, user_id: &str, hash: &BookId) -> Result<(), AssetError> {
         match tokio::fs::remove_file(self.thumbnail_pair_path(user_id, hash)).await {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -335,7 +335,7 @@ impl FsAssetStore {
     /// A cheap validator for the atomically published cover pair. Replacing a cover uses
     /// atomic rename, so a new inode changes this token even when byte length
     /// and filesystem timestamp resolution are unchanged.
-    pub async fn thumbnail_revision(&self, user_id: &str, hash: &ContentHash) -> Result<Option<ContentHash>, AssetError> {
+    pub async fn thumbnail_revision(&self, user_id: &str, hash: &BookId) -> Result<Option<BookId>, AssetError> {
         let metadata = match tokio::fs::metadata(self.thumbnail_pair_path(user_id, hash)).await {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => return Ok(None),
@@ -353,10 +353,10 @@ impl FsAssetStore {
             hasher.update(&metadata.dev().to_le_bytes());
             hasher.update(&metadata.ino().to_le_bytes());
         }
-        Ok(Some(ContentHash::from(hasher.finalize())))
+        Ok(Some(BookId::from(hasher.finalize())))
     }
 
-    pub async fn open_from(&self, user_id: &str, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
+    pub async fn open_from(&self, user_id: &str, kind: AssetKind, hash: &BookId, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
         if kind != AssetKind::Book {
             if let Some((bytes, browse)) = self.thumbnail_pair(user_id, hash).await? {
                 let bytes = if kind == AssetKind::Thumbnail { bytes } else { browse };
@@ -382,7 +382,7 @@ impl FsAssetStore {
         Ok(Some(StoredAsset { reader: Box::new(file), total_len: len, offset, content_hash: *hash }))
     }
 
-    pub async fn book_tracks(&self, content_hash: &ContentHash) -> Result<Vec<audiobook_archive::ArchivedTrack>, AssetError> {
+    pub async fn book_tracks(&self, content_hash: &BookId) -> Result<Vec<audiobook_archive::ArchivedTrack>, AssetError> {
         let path = self.path("", AssetKind::Book, content_hash)?;
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
@@ -390,7 +390,7 @@ impl FsAssetStore {
         }).await.map_err(|error| AssetError::Storage(error.to_string()))?
     }
 
-    pub async fn put(&self, user_id: &str, kind: AssetKind, hash: &ContentHash, expected_len: Option<u64>, mut reader: AssetReader) -> Result<u64, AssetError> {
+    pub async fn put(&self, user_id: &str, kind: AssetKind, hash: &BookId, expected_len: Option<u64>, mut reader: AssetReader) -> Result<u64, AssetError> {
         let _staging_permit = if kind == AssetKind::Book { Some(self.staging.acquire(user_id, expected_len.ok_or(AssetError::LengthRequired)?)?) } else { None };
         let final_path = self.path(user_id, kind, hash)?;
         let parent = final_path.parent().ok_or_else(|| AssetError::Storage("asset path has no parent".to_string()))?;
@@ -556,7 +556,7 @@ mod tests {
         store.initialize().await.unwrap();
         let bytes = epub(false);
         let len = bytes.len() as u64;
-        let hash = ContentHash::from(blake3::hash(&bytes));
+        let hash = BookId::from(blake3::hash(&bytes));
         store.put("user", AssetKind::Book, &hash, Some(len), reader(bytes)).await.unwrap();
         assert!(store.size("other-user", AssetKind::Book, &hash).await.unwrap().is_some(), "book blobs remain globally deduplicated");
         let wrong = epub_with_chapter("different book", false);
@@ -585,7 +585,7 @@ mod tests {
         let bytes = epub(false);
         let expected_suffix = bytes[4..].to_vec();
         let expected_len = bytes.len() as u64;
-        let hash = ContentHash::from(blake3::hash(&bytes));
+        let hash = BookId::from(blake3::hash(&bytes));
         store.put("user", AssetKind::Book, &hash, Some(expected_len), reader(bytes)).await.unwrap();
 
         let mut stored = store.open_from("user", AssetKind::Book, &hash, 4).await.unwrap().unwrap();
@@ -601,7 +601,7 @@ mod tests {
         let store = FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs"));
         store.initialize().await.unwrap();
         let bytes = epub(false);
-        let hash = ContentHash::from(blake3::hash(&bytes));
+        let hash = BookId::from(blake3::hash(&bytes));
         assert!(matches!(store.put("user", AssetKind::Book, &hash, Some(bytes.len() as u64 - 1), reader(bytes)).await, Err(AssetError::LengthMismatch { .. })));
         assert!(store.size("user", AssetKind::Book, &hash).await.unwrap().is_none());
     }
@@ -611,7 +611,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs")));
         store.initialize().await.unwrap();
-        let hash = ContentHash::new(&"a".repeat(64));
+        let hash = BookId::new(&"a".repeat(64));
         let final_path = store.path("user", AssetKind::Book, &hash).unwrap();
         let parent = final_path.parent().unwrap().to_path_buf();
         let (mut writer, reader) = tokio::io::duplex(8);
@@ -641,7 +641,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs")));
         store.initialize().await.unwrap();
-        let hash = ContentHash::new(&"d".repeat(64));
+        let hash = BookId::new(&"d".repeat(64));
         store.put_thumbnail_pair("alice", &hash, b"master", b"browse-one").await.unwrap();
         let old_revision = store.thumbnail_revision("alice", &hash).await.unwrap();
         store.put_thumbnail_pair("alice", &hash, b"master", b"browse-two").await.unwrap();
@@ -680,7 +680,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs"));
         store.initialize().await.unwrap();
-        let hash = ContentHash::new(&"e".repeat(64));
+        let hash = BookId::new(&"e".repeat(64));
         store.put("alice", AssetKind::Thumbnail, &hash, None, reader(b"old master".to_vec())).await.unwrap();
         assert!(store.thumbnail_pair("alice", &hash).await.unwrap().is_none());
         assert!(store.thumbnail_revision("alice", &hash).await.unwrap().is_none());
@@ -694,7 +694,7 @@ mod tests {
         let thumbnails = temp.path().join("thumbs");
         let store = FsAssetStore::new(temp.path().join("books"), thumbnails.clone());
         store.initialize().await.unwrap();
-        let hash = ContentHash::new(&"a".repeat(64));
+        let hash = BookId::new(&"a".repeat(64));
         let thumbnail_limit = AssetKind::Thumbnail.max_bytes().unwrap();
         assert!(matches!(store.put("alice", AssetKind::Thumbnail, &hash, None, reader(vec![0; thumbnail_limit as usize + 1])).await, Err(AssetError::TooLarge { .. })));
 
@@ -722,7 +722,7 @@ mod tests {
 
         // The server intentionally does not inspect cover contents. Clients
         // validate and decode within their own limits before display.
-        let opaque_hash = ContentHash::new(&"b".repeat(64));
+        let opaque_hash = BookId::new(&"b".repeat(64));
         let opaque = b"arbitrary private client bytes".to_vec();
         store.put("alice", AssetKind::Thumbnail, &opaque_hash, None, reader(opaque.clone())).await.unwrap();
         let mut stored = store.open_from("alice", AssetKind::Thumbnail, &opaque_hash, 0).await.unwrap().unwrap();

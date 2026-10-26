@@ -312,9 +312,6 @@ final class BookBrowserSurface {
                         lastPercent[0] = percent;
                         ui.post(() -> { if (!cancellation.isCancelled()) downloadEvent("download_progress", url, null, percent < 0 ? null : (int) percent, null, false); });
                     }
-                }, () -> {
-                    lastPercent[0] = -2;
-                    ui.post(() -> { if (!cancellation.isCancelled()) downloadEvent("download_waiting", url, null, null, null, false); });
                 }, cancellation);
                 ui.post(() -> {
                     if (cancellation.isCancelled()) {

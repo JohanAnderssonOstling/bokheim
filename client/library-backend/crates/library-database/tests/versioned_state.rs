@@ -139,8 +139,8 @@ fn prepared_outbox_orders_lifecycles_and_survives_acknowledgements_and_new_edits
     assert!(db.sync_next_outbox_page(&mut scan).unwrap().is_empty());
 }
 
-fn import_book(database: &Database, folder: DirId, number: u64, name: &str) -> sync_common::ContentHash {
-    let hash = sync_common::ContentHash::new(&format!("{number:064x}"));
+fn import_book(database: &Database, folder: DirId, number: u64, name: &str) -> sync_common::BookId {
+    let hash = sync_common::BookId::new(&format!("{number:064x}"));
     database
         .commit_import(library_database::ImportCommit {
             parent_id: folder,
@@ -171,7 +171,7 @@ fn acknowledge(database: &Database) {
 #[test]
 fn reader_metadata_imports_publish_complete_documents_once_and_skip_identical_reinspection() {
     let database = database();
-    let hash = sync_common::ContentHash::new(&format!("{:064x}", 1));
+    let hash = sync_common::BookId::new(&format!("{:064x}", 1));
     let pdf = pdf_view_common::PdfReaderMetadata {
         version: 1,
         content_hash: hash.to_string(),
@@ -206,7 +206,7 @@ fn reader_metadata_imports_publish_complete_documents_once_and_skip_identical_re
     complete_no_match(&database, &hash);
     assert!(database.sync_publishable_mutations().unwrap().is_empty());
 
-    let hash = sync_common::ContentHash::new(&format!("{:064x}", 2));
+    let hash = sync_common::BookId::new(&format!("{:064x}", 2));
     let tracks = vec![book_model::AudiobookTrack { name: "chapter.mp3".into(), start_ms: 0, end_ms: 1000, offset: 0, length: 100, archive_hash: Some(hash) }];
     let metadata = book_inspection::AudiobookMetadata {
         title: "Audio".into(),
@@ -303,7 +303,7 @@ fn offline_addition_waits_for_enrichment_then_publishes_one_complete_document() 
     assert_eq!(source.enrichment_popularity(&hash).unwrap(), answer.popularity);
 }
 
-fn complete_no_match(database: &Database, hash: &sync_common::ContentHash) {
+fn complete_no_match(database: &Database, hash: &sync_common::BookId) {
     use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
     let Some(candidate) = database.enrichment_candidates(&[*hash], 0).unwrap().pop() else { return };
     database.record_enrichment(hash, &candidate.request_key, &BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, detail: String::new() }, 0).unwrap();
@@ -322,7 +322,7 @@ fn verified_audio_download_reuses_complete_synced_metadata_without_local_inspect
         let path = std::env::temp_dir().join(format!("synced-audio-cache-{}.db", uuid::Uuid::new_v4()));
         let target = Database::open(&path).unwrap();
         target.initialize_library().unwrap();
-        let hash = sync_common::ContentHash::new(&format!("{:064x}", 42));
+        let hash = sync_common::BookId::new(&format!("{:064x}", 42));
         let tracks = if format == BookFormat::Mp3Folder && complete { vec![AudiobookTrack { name: "01.mp3".into(), start_ms: 0, end_ms: 1000, offset: 0, length: 100, archive_hash: Some(hash) }] } else { vec![] };
         source
             .commit_import(ImportCommit {

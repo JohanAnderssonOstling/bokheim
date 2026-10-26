@@ -30,7 +30,7 @@ pub fn path() -> Result<PathBuf, String> {
     let path = directory.join("taxonomy.sqlite3");
     if path.is_file() {
         set_path(&path)?;
-        return Ok(PATH.get().expect("bundled path configured").clone());
+        return Ok(path);
     }
     // Debug builds also support tools whose executable is in a separate target directory.
     #[cfg(debug_assertions)]
@@ -38,7 +38,7 @@ pub fn path() -> Result<PathBuf, String> {
         let generated = PathBuf::from(concat!(env!("OUT_DIR"), "/unified-taxonomy-client-v2.sqlite3"));
         if generated.is_file() {
             set_path(&generated)?;
-            return Ok(PATH.get().expect("bundled path configured").clone());
+            return Ok(generated);
         }
     }
     Err(format!("bundled taxonomy resource is missing: {}", path.display()))

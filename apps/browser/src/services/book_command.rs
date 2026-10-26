@@ -18,7 +18,7 @@ pub(crate) enum BookCommand {
 }
 
 impl BookCommand {
-    pub(crate) fn report_failure(self, error: String, window: &mut Window, cx: &mut App) {
+    pub(crate) fn report_failure(self, error: app::BackendError, window: &mut Window, cx: &mut App) {
         let (id, prefix) = match self {
             Self::RemoveFromFolder => ("book-remove-error", "Could not remove book from folder"),
             Self::TrashBook => ("book-trash-error", "Could not move book to Trash"),

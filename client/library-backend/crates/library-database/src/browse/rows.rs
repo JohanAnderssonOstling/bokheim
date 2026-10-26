@@ -2,7 +2,7 @@
 
 pub(crate) use library_model::BookCardRow;
 use std::io::{Error, ErrorKind};
-pub(crate) use sync_common::ContentHash;
+pub(crate) use sync_common::BookId;
 
 pub fn invalid_text_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
@@ -17,7 +17,7 @@ pub(crate) fn parse_uuid_column(value: String, column: usize) -> rusqlite::Resul
 }
 
 pub(crate) fn read_book_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookCardRow> {
-    let raw_content_hash: ContentHash = row.get("content_hash")?;
+    let raw_content_hash: BookId = row.get("content_hash")?;
     let title: Option<String> = row.get("title")?;
     let duration_column = row.as_ref().column_index("audiobook_duration_ms")?;
     let duration_ms: Option<i64> = row.get(duration_column)?;

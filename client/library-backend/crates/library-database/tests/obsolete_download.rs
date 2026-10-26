@@ -1,11 +1,11 @@
 use library_database::{Database, NativeBookAcknowledgement, NativeBookCompletion, NativeBookSnapshot};
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 
 #[test]
 fn late_download_requeues_removal_after_purge_work_has_finished() {
     let db = Database::open(":memory:").unwrap();
     db.initialize_library().unwrap();
-    let hash = ContentHash::new(&"a".repeat(64));
+    let hash = BookId::new(&"a".repeat(64));
     // The book and its original purge jobs are already gone when the download finishes.
     let mut completion = NativeBookCompletion {
         snapshot: NativeBookSnapshot {

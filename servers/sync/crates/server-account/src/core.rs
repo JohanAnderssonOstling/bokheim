@@ -40,6 +40,7 @@ pub struct SessionRevocation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthAttempt {
     Login,
+    DeleteAccount,
     PublicRegistration,
     ResendVerification,
     VerifyEmail,
@@ -51,6 +52,20 @@ pub enum AuthAttempt {
 pub enum AccountEmailKind {
     VerifyEmail,
     ResetPassword,
+}
+
+impl AccountEmailKind {
+    /// The outbox's stored `message_kind`, also bound into the token's AAD.
+    pub(crate) const fn stored_name(self) -> &'static str {
+        match self {
+            Self::VerifyEmail => "verify_email",
+            Self::ResetPassword => "reset_password",
+        }
+    }
+
+    pub(crate) fn from_stored_name(name: &str) -> Option<Self> {
+        [Self::VerifyEmail, Self::ResetPassword].into_iter().find(|kind| kind.stored_name() == name)
+    }
 }
 
 /// Sensitive, short-lived mail work. Implementations must not log `token` and

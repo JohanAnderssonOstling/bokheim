@@ -1,5 +1,226 @@
 # Android reader
 
+## F-Droid build mode
+
+Use a fresh, isolated checkout with the committed `Cargo.lock`, Python, CMake,
+Ninja, Git, Gradle 8.14.3, JDK 21, Android SDK 36, build-tools 36.0.0,
+NDK 29.0.14206865, and Rust 1.99.1 with the `aarch64-linux-android` target.
+The exact toolchain and APK normalization pins are in
+`scripts/fdroid/toolchains.json`. From the isolated repository root:
+
+```sh
+python3 scripts/fdroid/prefetch.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
+python3 scripts/fdroid/build.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
+```
+
+The preparation script downloads the pinned public companion sources to sibling
+directories, selects the F-Droid repository configuration, and removes unused
+Kobo packages, historical report archives, and binary test fixtures from this
+isolated checkout. It refuses to overwrite existing developer repositories.
+The pinned HtmlViewCore revision receives a small reading-line API compatibility
+patch required by the committed reader; the patch and resulting file hashes are
+recorded in `scripts/fdroid/sources.json`.
+
+F-Droid mode builds PDFium 7961 and Sherpa-ONNX 1.13.8 from pinned source. It
+links Sherpa against Microsoft's MIT-licensed ONNX Runtime 1.28.0 AAR, resolved
+through Maven Central and checked against its pinned SHA-256. The Rustls Android
+certificate verifier is compiled from the vendored upstream Kotlin source.
+Alba's published model card, CC BY 4.0 dataset license, attribution, runtime
+notices, and native source receipts are packaged in the APK assets.
+
+The release APK is unsigned regardless of local production signing settings.
+Google Play Services cannot be enabled. The updater is disabled in Java and
+Rust, and the installer permission and update components are removed. Normal
+Android storage access is retained. Output is under
+`apps/desktop-gpui/android/build/outputs/apk/release/`.
+
+Native caches and Rust outputs are separate from direct release builds.
+`-Pbokheim.pdfiumSourceWork=/path/to/cache` and
+`-Pbokheim.speechSourceWork=/path/to/cache` reuse verified native source work;
+`-Pbokheim.nativeJobs=2` and `-Pbokheim.rustJobs=2` control compilation parallelism.
+Run `verify-fdroid.py --apk <unsigned.apk> --aapt <SDK aapt> --output <report.json>`
+from the Android directory to verify manifest policy, native receipts, API
+architecture, 16 KiB page support, and packaged license notices.
+
+Install `fdroidserver` separately and use `scripts/fdroid/scan.py` for source and
+APK scanning. Scan the prepared sources before building, or use a separate source
+snapshot, so generated libraries are not mistaken for bundled source inputs.
+Android device testing was confirmed complete by the maintainer on 2026-10-26.
+The pinned HtmlEngine and HtmlViewCore sources include GPL-3.0-or-later license
+text and Cargo declarations. F-Droid maintainer review is still required.
+
+For a fresh checkout, keep the source preparation away from existing developer
+repositories. The following commands use the review branch until it is merged;
+`gradle` must be Gradle 8.14.3. Install JDK 21, Python 3 and bubblewrap
+(`bwrap`) on Linux, with unprivileged user namespaces enabled. Allow at least
+30 GiB of free space for downloads and build outputs, in addition to the
+installed Android SDK. The native work directories can live on a larger mounted
+filesystem; use the same paths for prefetch and build:
+
+```sh
+mkdir -p /path/to/isolated-fdroid-build
+cd /path/to/isolated-fdroid-build
+git clone --branch fdroid/android-source-build-20261026 \
+  https://github.com/JohanAnderssonOstling/bokheim.git bokheim
+cd bokheim
+export ANDROID_HOME="$HOME/Android/Sdk"
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+python3 scripts/fdroid/prefetch.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
+python3 scripts/fdroid/build.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
+```
+
+The unsigned output is
+`apps/desktop-gpui/android/build/outputs/apk/release/BokheimGpui-release-unsigned.apk`.
+The preparation step changes this isolated checkout's settings and removes the
+non-Android files described above; do not run it in your development checkout.
+
+### Offline recipe and clean rebuild verification
+
+`scripts/fdroid/metadata/se.bokheim.reader.gpui.yml` is the fdroiddata recipe.
+It pins the application commit, Rustup source, Rust version, Android NDK and
+upstream signing certificate. Its prebuild phase fetches dependencies; its build
+phase runs the unsigned build with Gradle/Cargo downloads disabled and compiler
+caches disabled. Native source archives are SHA-verified before compilation.
+The draft is disabled until a developer-signed F-Droid APK is published at its
+versioned `binary` URL. Publishing a release and submitting fdroiddata remain
+separate steps.
+
+For a network-enforced local check on Linux, run the build inside the provided
+user/network namespace wrapper. It allows loopback for Gradle, rejects external
+interfaces, probes the external network, and records the command result:
+
+```sh
+python3 scripts/fdroid/offline.py --report offline-network.json -- \
+  python3 scripts/fdroid/build.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
+```
+
+For a clean rebuild, use another fresh isolated checkout and fresh Cargo/Android
+outputs. Move aside the builder-owned PDFium `out/android-arm64` and speech
+`build` directories before rebuilding; keep their pinned source archives and
+toolchains. Never remove unrelated developer caches. Run the prefetch phase
+before disabling networking. The second checkout should have a different parent path. The directory name
+may differ: `build.py` mounts the app and its sibling dependencies under
+`/mnt/bokheim-build` in a private mount namespace. This is required because
+Cargo hashes absolute paths into external path dependency identities; Rust
+source-path remapping alone does not stabilize them.
+
+Prefetch includes Cargo's host dependencies, project dependency version
+constraints, AAPT2 and the pinned lint runtime. If other Gradle builds are active,
+use a separate `GRADLE_USER_HOME` for both prefetch and offline compilation to
+avoid shared cache locks. Signing settings must be available in that home's
+`gradle.properties` or through the `BOKHEIM_ANDROID_*` environment settings below.
+
+The build maps Rust and speech source paths to stable paths, fixes the build
+epoch, omits checkout-specific VCS metadata, and normalizes the unsigned APK with
+the SHA-pinned upstream `reproducible-apk-tools` alignment script. Developer
+signing preserves alignment and uses v2/v3 signatures (minimum Android API 26).
+Speech debug data is stripped during linking so its ELF build ID does not retain
+differences from debug paths that would survive a later strip operation.
+
+After building the independent unsigned APK, install the verification tools in
+a separate environment and compare it with the developer-signed reference:
+
+```sh
+python3 -m venv /path/to/fdroid-tools
+/path/to/fdroid-tools/bin/pip install -r scripts/fdroid/requirements.txt
+/path/to/fdroid-tools/bin/python scripts/fdroid/compare.py \
+  --signed-apk /path/to/developer-signed.apk \
+  --rebuilt-apk /path/to/clean-rebuilt-unsigned.apk \
+  --output reproducibility.json
+```
+
+The comparison verifies the reference signature, copies that signature onto the
+independent rebuild using `apksigcopier`, and verifies the result. Matching ZIP
+entry contents alone is insufficient; the signature-copy check must pass.
+F-Droid still needs to repeat this validation on its build infrastructure.
+
+### Automated developer-signed releases
+
+With the production signing settings described below configured, run this from
+the repository root:
+
+```sh
+python3 scripts/fdroid/release.py
+```
+
+The command builds the committed `HEAD` in an isolated source snapshot, prepares
+the companion sources, builds the unsigned F-Droid APK, checks its contents and
+native receipts, signs it with the existing production keystore, and verifies
+the certificate, alignment and unchanged APK contents. It finds JDK 21 and
+Gradle 8.14.3 in the environment or standard local installation/cache locations.
+Android SDK build-tools 36.0.0 and NDK 29.0.14206865 must be installed.
+Uncommitted developer changes are excluded; select another committed source
+with `--ref <commit-or-branch>`.
+
+Both APKs, SHA-256 checksums, and JSON verification reports are saved in a new
+timestamped directory under `artifacts/fdroid-release/`. The reports explicitly
+record that clean-build reproducibility has not been verified. This command
+creates local artifacts; official F-Droid submission and publication are separate.
+
+The helper reads the existing `BOKHEIM_ANDROID_*` environment settings or user
+Gradle properties, including private password files and a separate key password.
+Passwords reach the signing tools through child-process environment variables,
+never command-line password values. The keystore's certificate is checked against
+`BOKHEIM_ANDROID_CERT_SHA256` or `ANDROID_CERT_SHA256` when either is configured.
+The private key and passwords are never copied into the output directory.
+
+To reuse a prepared checkout and native caches:
+
+```sh
+python3 scripts/fdroid/release.py --checkout /path/to/prepared/bokheim \
+  --pdfium-source-work /path/to/pdfium-cache \
+  --speech-source-work /path/to/speech-cache
+```
+
+To sign an existing verified unsigned build without rebuilding:
+
+```sh
+python3 scripts/fdroid/release.py --apk /path/to/BokheimGpui-release-unsigned.apk
+```
+
+Additional options include `--output-dir`, `--gradle`, `--sdk`, `--jobs`,
+`--native-jobs`, and `--offline`. Existing output directories are preserved.
+The normal F-Droid Gradle build continues to produce an unsigned APK without
+requiring production signing credentials.
+
+F-Droid can either sign the app with its own per-app key, or distribute an APK
+signed with the existing developer key after verifying a reproducible build.
+The latter preserves update compatibility with direct APKs using that key, an
+unchanged application ID, and increasing version codes. The F-Droid-mode APK may
+have different features from direct releases; the F-Droid rebuild must match
+the developer-signed **F-Droid-mode** APK exactly, apart from signing data.
+Use the clean-rebuild comparison above to verify reproducibility. See F-Droid's
+[signing and reproducibility documentation](https://f-droid.org/docs/Reproducible_Builds/).
+
+To sign the unsigned F-Droid-mode APK yourself, use the existing production
+keystore and Android SDK `apksigner`; do not enable Gradle's local test signing.
+The following prompts for passwords rather than putting them in shell history:
+
+```sh
+"$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+  --ks "$BOKHEIM_ANDROID_KEYSTORE" \
+  --ks-key-alias "$BOKHEIM_ANDROID_KEY_ALIAS" \
+  --alignment-preserved true --v1-signing-enabled false \
+  --v2-signing-enabled true --v3-signing-enabled true \
+  --out Bokheim-fdroid-signed.apk \
+  apps/desktop-gpui/android/build/outputs/apk/release/BokheimGpui-release-unsigned.apk
+"$ANDROID_HOME/build-tools/36.0.0/apksigner" verify \
+  --verbose --print-certs Bokheim-fdroid-signed.apk
+```
+
+F-Droid needs the public APK and certificate fingerprint for verification; the
+private signing key stays with the developer.
+
 Build an optimized ARM64 release APK with a JDK supported by Gradle (for example JDK 21),
 Android SDK 36, the configured Android NDK, and Rust's `aarch64-linux-android`
 target installed:
@@ -47,6 +268,70 @@ notification. Failed reader restoration clears the saved book so the next launch
 does not repeat the failure. Native Back cancels both the opening overlay and the
 reader's loading screen; the loading screen also keeps an on-screen Back button.
 
+## Google Play build
+
+The `play` build type produces an optimized ARM64 Google Play bundle while
+`assembleRelease` continues to produce the direct-distribution APK:
+
+```sh
+gradle bundlePlay -Prust.ndkHome=/path/to/android/ndk
+```
+
+The bundle is `build/outputs/bundle/play/BokheimGpui-play.aab`. It uses the
+release/upload key configured through `BOKHEIM_ANDROID_*` above. The bundle
+task rejects `-Pbokheim.localSigning=true`. The project configures a 2 GiB Gradle
+heap for finalizing the bundled native runtimes and offline voice. If user-level
+Gradle properties override `org.gradle.jvmargs`, retain at least `-Xmx2g` for
+bundle builds. Before enrolling in Play App Signing,
+choose the app signing certificate deliberately: installations can update
+between Play and direct APKs only with compatible signing identities and an
+increasing version code. The upload key and the app signing key are separate
+roles when Play manages signing. No upload or store publication runs as part of
+this build.
+
+The compiled Java `BuildConfig.PLAY_STORE` flag is read by Rust at startup;
+intent extras and installer identity cannot change distribution policy. Play
+never starts the direct-update coordinator, checks its feed, stages APKs or
+shows its Settings controls. The native-to-Java updater entry point also
+rejects all commands. The Play manifest removes the APK installation permission,
+the private updater services/activity and its staging FileProvider.
+
+Play also removes `MANAGE_EXTERNAL_STORAGE`, its launch prompt and the Manage
+file access setting. New libraries, imports, downloads and synchronized libraries
+use `files/libraries` in app-owned storage, even if an earlier direct installation
+saved a shared-storage default. Registered libraries are never moved or deleted.
+Existing shared folders need to be selected again with the system picker to
+import copies; switching distributions does not grant raw filesystem access.
+
+The system file picker opens individual books, and the folder picker imports
+supported books into a managed library while preserving subfolders. The review
+explains that originals stay in the selected folder. Play always uses the
+provider-backed import path, including when an old all-files grant exists.
+Completed imports are ordinary app-owned files and do not depend on the source
+provider or a persistent URI grant when reopened. These local copies are removed
+if the app is uninstalled; synchronization or separately retained originals are
+needed to recover them.
+
+Run both distributions' Android tests with:
+
+```sh
+gradle testPlayUnitTest testReleaseUnitTest
+```
+
+For a local device trial of Play storage/update behavior without a release key:
+
+```sh
+gradle assemblePlay -Pbokheim.localSigning=true
+adb install -r build/outputs/apk/play/BokheimGpui-play.apk
+```
+
+Use a dedicated test profile/device if an existing installation has a different
+signer; never uninstall an existing library just to bypass a signing mismatch.
+Check file and folder imports (including a cloud document provider), cancellation,
+downloads, reading after restart, and screen-locked audio. Local APK trials do
+not test Play-delivered split APKs; validate the bundle through an internal Play
+track before expanding the beta.
+
 ## Launcher icon
 
 Both launcher icon shapes use the Bokheim adaptive icon, with the shared Android
@@ -72,12 +357,14 @@ the selected library. All payload files download with the standard networking
 settings. Completed content is moved into the library and found by the normal
 scanner; the same files are then used for seeding.
 
-Settings → Transfers controls metered connections for all file transfers,
-including downloads, uploads, torrents, and updates. Allowing metered transfers
-is off by default. Android's connectivity service supplies the connection cost;
-waiting work resumes automatically when allowed. Browser HTTP requests restart
-after an interruption, while torrents reuse their downloaded pieces. Automatic
-suspension preserves the user's seeding preference.
+Settings → Transfers controls automatic transfers on metered connections and is
+off by default. Android's connectivity service supplies the connection cost.
+Automatic uploads, cover/catalog updates and completed torrents' seeding wait
+and resume when allowed. Opening and reading books, explicit downloads from the
+library, catalog, OPDS or browser, and approved app updates always proceed on
+metered connections. Pending user-requested downloads retain this exemption
+across retries and restarts. Automatic suspension preserves the user's seeding
+preference.
 
 Torrent metadata, resume information, and book-to-torrent associations are kept
 in the device's library database. Closing the browser leaves transfers running

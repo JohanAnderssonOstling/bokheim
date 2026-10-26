@@ -1,10 +1,18 @@
-use std::{cell::Cell, rc::Rc};
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, ElementId, Hsla, IntoElement, MouseButton, Pixels, SharedString, Window, div, px};
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
+use std::{cell::Cell, rc::Rc};
 
-use crate::{BrowserTheme, TEXT_SM, browser_theme};
+use crate::{TEXT_SM, browser_theme};
+
+#[derive(Clone, Copy)]
+struct SplitActionStyle {
+    text: Hsla,
+    accent: Hsla,
+    accent_text: Hsla,
+    radius: Pixels,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitSide {
@@ -71,16 +79,14 @@ pub fn menu_item_with_split_actions(left_label: impl Into<SharedString>, right_l
         // hover — the framework's own accent tokens, not this app's
         // `BrowserTheme`, since that is what actually paints a plain row's
         // highlight.
-        let accent = *cx.theme().tokens.accent;
-        let accent_text = cx.theme().accent_foreground;
-        let radius = cx.theme().radius.min(px(8.0));
+        let style = SplitActionStyle { text: theme.text, accent: *cx.theme().tokens.accent, accent_text: cx.theme().accent_foreground, radius: cx.theme().radius.min(px(8.0)) };
         div()
             .flex()
             .flex_1()
             .items_stretch()
-            .child(split_action_half("menu-split-action-left", SplitSide::Left, left_label.clone(), theme, accent, accent_text, radius, selected && render_side.get() == SplitSide::Left, render_side.clone(), on_click.clone()))
+            .child(split_action_half("menu-split-action-left", SplitSide::Left, left_label.clone(), style, selected && render_side.get() == SplitSide::Left, render_side.clone(), on_click.clone()))
             .child(div().flex_none().w(px(1.0)).my(px(2.0)).bg(theme.rule))
-            .child(split_action_half("menu-split-action-right", SplitSide::Right, right_label.clone(), theme, accent, accent_text, radius, selected && render_side.get() == SplitSide::Right, render_side.clone(), on_click.clone()))
+            .child(split_action_half("menu-split-action-right", SplitSide::Right, right_label.clone(), style, selected && render_side.get() == SplitSide::Right, render_side.clone(), on_click.clone()))
             .into_any_element()
     })
     .icon(IconName::ArrowLeft)
@@ -88,11 +94,11 @@ pub fn menu_item_with_split_actions(left_label: impl Into<SharedString>, right_l
     .on_click(move |_, window, cx| activate(side.get(), window, cx))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn split_action_half<F>(id: impl Into<ElementId>, side: SplitSide, label: SharedString, theme: BrowserTheme, accent: Hsla, accent_text: Hsla, radius: Pixels, selected: bool, active_side: Rc<Cell<SplitSide>>, on_click: Rc<F>) -> impl IntoElement
+fn split_action_half<F>(id: impl Into<ElementId>, side: SplitSide, label: SharedString, style: SplitActionStyle, selected: bool, active_side: Rc<Cell<SplitSide>>, on_click: Rc<F>) -> impl IntoElement
 where
     F: Fn(SplitSide, &mut Window, &mut App) + 'static,
 {
+    let SplitActionStyle { text, accent, accent_text, radius } = style;
     div()
         .id(id.into())
         .flex_1()
@@ -105,11 +111,13 @@ where
         .rounded(radius)
         .cursor_pointer()
         .text_size(gpui::rems(TEXT_SM))
-        .text_color(theme.text)
+        .text_color(text)
         .when(selected, |row| row.bg(accent).text_color(accent_text))
         .hover(move |style| style.bg(accent).text_color(accent_text))
         .on_hover(move |hovered, window, _| {
-            if *hovered && active_side.replace(side) != side { window.refresh(); }
+            if *hovered && active_side.replace(side) != side {
+                window.refresh();
+            }
         })
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_: &ClickEvent, window, cx| {

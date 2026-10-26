@@ -76,7 +76,15 @@ mod browser {
                 loop {
                     // A macrotask boundary lets new interactive messages arrive;
                     // chaining ready Rust futures alone would starve that loop.
-                    crate::executor::sleep(std::time::Duration::ZERO).await;
+                    if let Err(error) = crate::executor::sleep(std::time::Duration::ZERO).await {
+                        log::warn!("storage command scheduling stopped: {error}");
+                        let discarded = COMMANDS.with(|commands| std::mem::take(&mut *commands.borrow_mut()));
+                        RUNNING.with(|running| running.set(false));
+                        // Drop replies outside the queue borrow so cancellation
+                        // cleanup can safely submit its own commands.
+                        drop(discarded);
+                        break;
+                    }
                     let command = COMMANDS.with(|commands| commands.borrow_mut().pop());
                     match command {
                         Some(command) => command(),
@@ -96,17 +104,35 @@ mod browser {
 mod native {
     use super::*;
     use std::cell::Cell;
-    use std::sync::{mpsc, Arc, Mutex, OnceLock};
+    use std::sync::{mpsc, Arc, Mutex, PoisonError};
 
     type Command = Box<dyn FnOnce() + Send>;
-    static DISPATCHER: OnceLock<Result<Dispatcher, String>> = OnceLock::new();
+    static DISPATCHER: DispatcherSlot = DispatcherSlot(Mutex::new(None));
     thread_local! {
         static ON_WORKER: Cell<bool> = const { Cell::new(false) };
     }
 
+    #[derive(Clone)]
     struct Dispatcher {
         commands: Arc<Mutex<Queue<Command>>>,
         wake: mpsc::SyncSender<()>,
+    }
+
+    #[derive(Default)]
+    struct DispatcherSlot(Mutex<Option<Dispatcher>>);
+
+    impl DispatcherSlot {
+        fn get_or_start(&self, start: impl FnOnce() -> Result<Dispatcher, String>) -> Result<Dispatcher, String> {
+            let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(dispatcher) = &*slot {
+                return Ok(dispatcher.clone());
+            }
+            // Cache only a running worker. A temporary thread-creation failure
+            // leaves the slot empty so the next request can try again.
+            let dispatcher = start()?;
+            *slot = Some(dispatcher.clone());
+            Ok(dispatcher)
+        }
     }
 
     impl Dispatcher {
@@ -121,7 +147,7 @@ mod native {
                     ON_WORKER.set(true);
                     while ready.recv().is_ok() {
                         loop {
-                            let command = pending.lock().unwrap().pop();
+                            let command = pending.lock().unwrap_or_else(PoisonError::into_inner).pop();
                             let Some(command) = command else { break };
                             // A failed command drops its reply, but cannot kill the
                             // dispatcher and strand every subsequent operation.
@@ -150,7 +176,7 @@ mod native {
         }
 
         fn enqueue(&self, priority: Priority, command: Command) -> Result<(), String> {
-            self.commands.lock().unwrap().push(priority, command).map_err(|_| "storage command queue is full; retry the operation".to_owned())?;
+            self.commands.lock().unwrap_or_else(PoisonError::into_inner).push(priority, command).map_err(|_| "storage command queue is full; retry the operation".to_owned())?;
             self.wake()
         }
 
@@ -164,13 +190,13 @@ mod native {
         fn dispatch_cleanup(&self, operation: impl FnOnce() + Send + 'static) -> Result<(), String> {
             // Closing already-admitted resources must still succeed when request
             // admission is full. Cleanup does not allocate new storage resources.
-            self.commands.lock().unwrap().background.push_back(Box::new(operation));
+            self.commands.lock().unwrap_or_else(PoisonError::into_inner).background.push_back(Box::new(operation));
             self.wake()
         }
     }
 
-    fn dispatcher() -> Result<&'static Dispatcher, String> {
-        DISPATCHER.get_or_init(Dispatcher::new).as_ref().map_err(Clone::clone)
+    fn dispatcher() -> Result<Dispatcher, String> {
+        DISPATCHER.get_or_start(Dispatcher::new)
     }
 
     pub(super) fn run_sync<T: Send + 'static>(priority: Priority, operation: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
@@ -201,6 +227,16 @@ mod native {
     mod tests {
         use super::*;
         use std::time::Duration;
+
+        #[test]
+        fn failed_startup_can_retry_without_replacing_a_running_worker() {
+            let slot = DispatcherSlot::default();
+            assert!(slot.get_or_start(|| Err("temporary thread-creation failure".into())).is_err());
+            let dispatcher = slot.get_or_start(Dispatcher::new).unwrap();
+            let owner = dispatcher.submit(Priority::Interactive, || std::thread::current().id()).unwrap().blocking_recv().unwrap();
+            let retained = slot.get_or_start(|| panic!("a running worker must be reused")).unwrap();
+            assert_eq!(retained.submit(Priority::Interactive, || std::thread::current().id()).unwrap().blocking_recv().unwrap(), owner);
+        }
 
         #[test]
         fn native_worker_prioritizes_interactive_and_skips_cancelled_writes() {

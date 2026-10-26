@@ -77,12 +77,17 @@ impl KoboDeviceBar {
     }
 
     fn exit_kobo(&mut self, action: &str, cx: &mut Context<Self>) {
-        let result = std::env::var_os("BOKHEIM_KOBO_EXIT_ACTION_FILE").ok_or_else(|| "Kobo launcher must be updated before using this action".to_owned()).and_then(|path| std::fs::write(path, action).map_err(|error| error.to_string()));
-        match result {
+        // Older launchers do not offer the exit action file.
+        let Some(path) = std::env::var_os("BOKHEIM_KOBO_EXIT_ACTION_FILE") else {
+            self.power_error = Some("Update Bokheim using the latest installer, then try this action again.".into());
+            cx.notify();
+            return;
+        };
+        match std::fs::write(path, action) {
             Ok(()) => cx.quit(),
             Err(error) => {
                 log::warn!("Could not leave Bokheim: {error}");
-                self.power_error = Some(if error.contains("launcher must be updated") { "Update Bokheim using the latest installer, then try this action again." } else { "Could not leave Bokheim. Restart Bokheim and try again." }.into());
+                self.power_error = Some("Could not leave Bokheim. Restart Bokheim and try again.".into());
                 cx.notify();
             }
         }
@@ -91,6 +96,9 @@ impl KoboDeviceBar {
 impl Render for KoboDeviceBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
+        let has_frontlight = components::kobo::has_frontlight(cx);
+        let has_gyroscope = components::kobo::has_gyroscope(cx);
+        let has_bluetooth = components::kobo::has_bluetooth(cx);
         let popup_top = popup_top(window.rem_size());
         let state = self.panel.read(cx);
         let label = state.label();
@@ -141,13 +149,13 @@ impl Render for KoboDeviceBar {
                     ),
             )
             .child(gpui::div().flex_1())
-            .child(reader_ui::brightness_popover(self.brightness.clone(), None, theme, window).top(popup_top).trigger(device_button("kobo-brightness-button", "Brightness", gpui_component::IconName::Sun)))
-            .child(device_button("kobo-auto-rotate-button", rotate_label, Icon::empty().path(rotate_icon)).on_click(cx.listener(move |bar, _, _, cx| {
+            .when(has_frontlight, |bar| bar.child(reader_ui::brightness_popover(self.brightness.clone(), None, theme, window).top(popup_top).trigger(device_button("kobo-brightness-button", "Brightness", gpui_component::IconName::Sun))))
+            .when(has_gyroscope, |bar| bar.child(device_button("kobo-auto-rotate-button", rotate_label, Icon::empty().path(rotate_icon)).on_click(cx.listener(move |bar, _, _, cx| {
                 bar.auto_rotate = !bar.auto_rotate;
                 rotate_services.save_kobo_auto_rotate(bar.auto_rotate, cx);
                 cx.notify();
-            })))
-            .child(Popover::new("kobo-bluetooth-popup").anchor(gpui::Anchor::TopRight).top(popup_top).p_0().trigger(device_button("kobo-bluetooth-button", bluetooth_label, Icon::empty().path(bluetooth_icon))).child(bluetooth))
+            }))))
+            .when(has_bluetooth, |bar| bar.child(Popover::new("kobo-bluetooth-popup").anchor(gpui::Anchor::TopRight).top(popup_top).p_0().trigger(device_button("kobo-bluetooth-button", bluetooth_label, Icon::empty().path(bluetooth_icon))).child(bluetooth)))
             .child(battery::popover(&self.battery, popup_top, cx))
             .child(
                 Popover::new("kobo-wifi-popup")
@@ -345,7 +353,7 @@ impl WifiPanel {
                 match result {
                     Ok(snapshot) => {
                         if panel.snapshot.error != snapshot.error || snapshot.error.is_none() {
-                            panel.error = snapshot.error.as_deref().map(|error| components::wifi_error_message(error).to_owned());
+                            panel.error = snapshot.error.as_ref().map(|error| components::wifi_error_message(error).to_owned());
                         }
                         panel.snapshot = snapshot;
                     }
@@ -473,7 +481,7 @@ fn network_rows(snapshot: &WifiSnapshot) -> Vec<NetworkRow> {
     let mut rows: Vec<NetworkRow> = Vec::new();
     for network in &snapshot.networks {
         if let Some(row) = rows.iter_mut().find(|row| row.network.as_ref().is_some_and(|other| other.ssid == network.ssid && other.security == network.security)) {
-            if row.network.as_ref().unwrap().signal < network.signal {
+            if row.network.as_ref().is_some_and(|other| other.signal < network.signal) {
                 row.network = Some(network.clone());
             }
         } else {

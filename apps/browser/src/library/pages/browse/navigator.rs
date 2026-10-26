@@ -327,7 +327,7 @@ impl BrowseNavigator {
         }));
     }
 
-    fn finish_request(&mut self, mut destination: BrowseDestination, refresh: bool, searched: bool, query: LibraryBrowseQuery, result: Result<LibraryBrowseData, String>, cx: &mut Context<Self>) {
+    fn finish_request(&mut self, mut destination: BrowseDestination, refresh: bool, searched: bool, query: LibraryBrowseQuery, result: Result<LibraryBrowseData, library_backend::BackendError>, cx: &mut Context<Self>) {
         self.request = None;
         match result {
             Ok(data) => {
@@ -360,7 +360,7 @@ impl BrowseNavigator {
 /// A page from where it lives: a feed page from the feed, through the app,
 /// and anything else from the library. The catalog's root also lists the
 /// account's OPDS feeds, each as a chip without a section.
-async fn fetch(ui: &LibraryContext, query: LibraryBrowseQuery) -> Result<LibraryBrowseData, String> {
+async fn fetch(ui: &LibraryContext, query: LibraryBrowseQuery) -> Result<LibraryBrowseData, library_backend::BackendError> {
     if matches!(query.location, BrowseLocation::Opds { .. }) {
         return ui.app().browse_opds(query).await;
     }

@@ -6,26 +6,27 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::StateAddress;
 use sync_common::api::libraries::{LibraryNameRequest, LibrarySummary};
-use sync_common::{ConflictRank, ContentHash, LibraryId, LibraryRevision, MAX_PULL_BATCH_BYTES, MAX_PULL_CHANGES, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, StateDelivery, SyncCursor, SyncGeneration, UnixMillis, VersionKey, OpaquePublication};
+use sync_common::{ConflictRank, BookId, LibraryId, LibraryRevision, MAX_PULL_BATCH_BYTES, MAX_PULL_CHANGES, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, StateDelivery, SyncCursor, SyncGeneration, UnixMillis, VersionKey, OpaquePublication};
 
 const FETCH_LIFECYCLE_PAGE_SQL: &str = include_str!("sql/sync/fetch_lifecycle_page.sql");
 const FETCH_FIELD_PAGE_SQL: &str = include_str!("sql/sync/fetch_field_page.sql");
 
 pub(super) async fn list_libraries(pool: &PgPool, user_id: &str) -> Result<Vec<LibrarySummary>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String, String)>(include_str!("sql/sync/list_libraries.sql")).bind(user_id).fetch_all(pool).await?;
-    rows.into_iter().map(|(id, name)| Ok(LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name })).collect()
+    let rows = sqlx::query_as::<_, (String, String, String)>(include_str!("sql/sync/list_libraries.sql")).bind(user_id).fetch_all(pool).await?;
+    rows.into_iter().map(|(id, name, storage)| Ok(LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name, storage: serde_json::from_str(&storage).map_err(decode_err)? })).collect()
 }
 
 pub(super) async fn create_library(pool: &PgPool, user_id: &str, request: &LibraryNameRequest) -> Result<Option<LibraryNameOutcome>, sqlx::Error> {
     let library_id = request.library_id.to_string();
-    let row = sqlx::query_as::<_, (String, String, bool)>(include_str!("sql/sync/create_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
-    row.map(|(id, name, changed)| Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name }, changed })).transpose()
+    let storage = serde_json::to_string(&request.storage).map_err(decode_err)?;
+    let row = sqlx::query_as::<_, (String, String, String, bool)>(include_str!("sql/sync/create_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).bind(storage).bind(request.storage.uses_bokheim_assets()).fetch_optional(pool).await?;
+    row.map(|(id, name, storage, changed)| Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name, storage: serde_json::from_str(&storage).map_err(decode_err)? }, changed })).transpose()
 }
 
 pub(super) async fn rename_library(pool: &PgPool, user_id: &str, request: &LibraryNameRequest) -> Result<Option<LibraryNameOutcome>, sqlx::Error> {
     let library_id = request.library_id.to_string();
-    let row = sqlx::query_as::<_, (String, String, bool)>(include_str!("sql/sync/rename_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
-    row.map(|(id, name, changed)| Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name }, changed })).transpose()
+    let row = sqlx::query_as::<_, (String, String, String, bool)>(include_str!("sql/sync/rename_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
+    row.map(|(id, name, storage, changed)| Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name, storage: serde_json::from_str(&storage).map_err(decode_err)? }, changed })).transpose()
 }
 
 pub(super) async fn owns_library(pool: &PgPool, user_id: &str, library_id: &LibraryId) -> Result<bool, sqlx::Error> {
@@ -129,7 +130,7 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
             continue;
         }
         let owner = change.state.value.book;
-        if owner.as_ref().is_some_and(|hash| !existing.contains(hash.as_bytes().as_slice())) {
+        if owner.as_ref().is_some_and(|hash| !existing.contains(hash.as_bytes())) {
             let failed_creation = lifecycles.iter().filter(|c| c.state.value.address.entity_key.book() == owner).find_map(|c| result.rejected.iter().find(|r| r.publisher_seq == c.publisher_seq).map(|r| r.reason.clone()));
             if let Some(reason) = failed_creation {
                 result.rejected.push(MutationRejection { publisher_seq: change.publisher_seq, reason });
@@ -199,8 +200,8 @@ async fn insert_admitted_changes(tx: &mut Transaction<'_, Postgres>, user_id: &s
         // A lifecycle holds its book's bytes unless it is a purge.
         let held = change.state.value.book.filter(|_| change.state.version.conflict_rank != ConflictRank::Purge);
         if let Some(hash) = existing.as_ref().filter(|stored| stored.version_rank != i16::from(u8::from(ConflictRank::Purge))).and_then(|stored| stored.content_hash.as_ref()) {
-            lifecycle_deltas.push((ContentHash::try_from(hash.as_slice()).map_err(decode_err)?, -1));
-            if !held.is_some_and(|next| next.as_bytes().as_slice() == hash) {
+            lifecycle_deltas.push((BookId::try_from(hash.as_slice()).map_err(decode_err)?, -1));
+            if !held.is_some_and(|next| next.as_bytes() == hash) {
                 sqlx::query(include_str!("sql/cloud_storage/delete_claim.sql")).bind(library_id.to_string()).bind(hash).execute(&mut **tx).await?;
             }
         }
@@ -290,7 +291,7 @@ fn decode_change(row: &PgRow) -> Result<StateDelivery, FetchChangesError> {
     let replica_id = ReplicaId::parse_str(&row.try_get::<String, _>("replica_id")?).map_err(|_| corrupt("invalid replica identity"))?;
     let replica_seq = ReplicaSeq::new(u64::try_from(row.try_get::<i64, _>("replica_seq")?).map_err(|_| corrupt("negative replica sequence"))?).map_err(|_| corrupt("invalid replica sequence"))?;
     let revision = LibraryRevision::new(u64::try_from(raw).map_err(|_| corrupt("negative library revision"))?).map_err(|_| corrupt("invalid library revision"))?;
-    let book = row.try_get::<Option<Vec<u8>>, _>("content_hash")?.map(|hash| ContentHash::try_from(hash.as_slice()).map_err(|_| corrupt("invalid book hash"))).transpose()?;
+    let book = row.try_get::<Option<Vec<u8>>, _>("content_hash")?.map(|hash| BookId::try_from(hash.as_slice()).map_err(|_| corrupt("invalid book hash"))).transpose()?;
     let conflict_rank = u8::try_from(row.try_get::<i16, _>("version_rank")?).ok().and_then(|rank| ConflictRank::try_from(rank).ok()).ok_or_else(|| corrupt("invalid conflict rank"))?;
     let version = VersionKey::new(changed_at, conflict_rank, replica_id, replica_seq);
     let value = sync_common::OpaqueStateEntry {

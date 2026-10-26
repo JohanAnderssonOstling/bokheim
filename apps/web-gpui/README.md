@@ -20,6 +20,19 @@ continue to serve the original assets. Production Brotli delivery requires
 installing and reloading the updated Caddy configuration as well as deploying
 the assets; the web-only deployment script does not reload Caddy.
 
+All release WebAssembly modules use `panic=unwind`. The build rebuilds
+`std,panic_unwind` with standardized exception handling, using the existing
+`RUSTC_BOOTSTRAP=1` setup and the `rust-src` component. This lets the Rust
+operation and worker boundaries catch panics, run cleanup, and schedule retries.
+Mutable JavaScript callbacks retain abort behavior if a panic escapes those
+boundaries; arbitrary UI and storage state is not assumed safe to resume.
+Traps, stack overflow, and out-of-memory failures remain unrecoverable.
+
+The web callback migration includes the local `../GPUI-Fork` checkout and
+documented patches in `vendor/wgpu`, `vendor/indexed_db_futures`, and
+`vendor/wasm_thread`. Use the
+wasm-bindgen CLI version recorded in `Cargo.lock` when packaging the modules.
+
 Then serve `apps/web-gpui/dist` with cross-origin isolation headers enabled.
 For an isolated test bundle, set `BOKHEIM_WEB_OUTPUT_DIR` to an absolute
 task-specific directory when building, then pass that path to the server's
@@ -32,7 +45,8 @@ python3 apps/web-gpui/scripts/serve.py
 
 Before downloading the application module, the page checks browser version,
 secure context, cross-origin isolation, shared WASM memory, workers, private
-storage, and Web Locks. Unsupported browsers receive a short message with the
+storage, Web Locks, and standardized WebAssembly exception handling (including
+`WebAssembly.JSTag`). Unsupported browsers receive a short message with the
 required browser version; technical diagnostics are logged to the console.
 The version policy is Chromium desktop 109+, Chromium Android 148+, Firefox
 114+, and Safari/iOS 16.4+; these are necessary version floors, not a claim that

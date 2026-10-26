@@ -342,21 +342,13 @@ pub fn topbar_height_rem() -> f32 {
 }
 /// Also the size of every square icon button (`outlined_icon_button`).
 pub fn topbar_action_height_rem() -> f32 {
-    if touch_ui() {
-        TOUCH_TARGET_REM
-    } else {
-        2.0
-    }
+    if touch_ui() { TOUCH_TARGET_REM } else { 2.0 }
 }
 pub const TOPBAR_ACTION_LABEL_WEIGHT: FontWeight = FontWeight::NORMAL;
 /// Touch-sized icon buttons already carry their spacing as padding around the
 /// glyph, and a row of them must still fit a phone's width beside the title.
 pub fn topbar_action_gap() -> f32 {
-    if touch_ui() {
-        0.0
-    } else {
-        SPACE_SM
-    }
+    if touch_ui() { 0.0 } else { SPACE_SM }
 }
 pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
 
@@ -364,11 +356,7 @@ pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
 /// library rows, their delete buttons, the add button and the header all sit on
 /// it. It was repeated as a bare `40.0` in five places.
 pub fn navigation_modal_row_height_rem() -> f32 {
-    if touch_ui() {
-        TOUCH_TARGET_REM
-    } else {
-        2.0
-    }
+    if touch_ui() { TOUCH_TARGET_REM } else { 2.0 }
 }
 /// The list stops growing here and scrolls instead.
 pub const NAVIGATION_MODAL_MAX_HEIGHT_REM: f32 = 32.0;
@@ -388,10 +376,9 @@ pub const COMPACT_HIERARCHY_ITEM_ROW_GAP: f32 = SPACE_SM;
 pub const COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING: f32 = CONTENT_INSET;
 pub const COMPACT_HIERARCHY_ITEM_CONTENT_GAP: f32 = SPACE_SM;
 
-/// Section cards: a title and total over columns of child entries, with a
-/// single row of covers in the space left by the first column.
-/// Preferred width for two cover cells, a 48px peek and the container insets.
-pub const SECTION_CARD_WIDTH: f32 = (SECTION_CARD_COVER_WIDTH + BOOK_CARD_PADDING * 2.0) * 2.0 + SPACE_2XL + SPACE_MD;
+/// Container cards show two columns of child entries beneath the title.
+pub const SECTION_CARD_WIDTH: f32 = 384.0;
+pub const SECTION_CARD_SUBJECT_COLUMNS: usize = 2;
 pub const SECTION_CARD_HEADING_HEIGHT_REM: f32 = 2.5;
 pub const SECTION_CARD_HEADING_PADDING_REM: f32 = 0.5;
 pub const SECTION_CARD_SUBJECT_ROW_HEIGHT_REM: f32 = 1.5;
@@ -399,6 +386,8 @@ pub const SECTION_CARD_COLUMN_GAP: f32 = SPACE_MD;
 /// The cover art in a section card's strip. The cell adds the book card's
 /// padding around it.
 pub const SECTION_CARD_COVER_WIDTH: f32 = 200.0;
+/// Two cover cells plus the enclosing section's horizontal inset.
+pub const FOLDER_CARD_WIDTH: f32 = (SECTION_CARD_COVER_WIDTH + BOOK_CARD_PADDING * 2.0) * 2.0 + (SPACE_MD - BOOK_CARD_PADDING) * 2.0;
 
 /// The contents list, shared by the reader's sidebar, the audiobook player's
 /// chapter table and the library's detail page.
@@ -434,11 +423,7 @@ pub const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
 /// Shared geometry for settings controls.
 pub fn settings_control_size_rem() -> f32 {
-    if touch_ui() {
-        TOUCH_TARGET_REM
-    } else {
-        2.0
-    }
+    if touch_ui() { TOUCH_TARGET_REM } else { 2.0 }
 }
 pub const SETTINGS_STEPPER_VALUE_WIDTH_REM: f32 = 4.5;
 pub const SETTINGS_CONTROL_GAP: f32 = 1.0;

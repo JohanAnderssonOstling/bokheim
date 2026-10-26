@@ -4,7 +4,7 @@ use crate::SqlParam;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::{DatabaseError, import::ImportCommitSql, sync::SyncApplySql};
 pub(crate) use book_model::{AUTHOR_MARC_RELATOR_CODE, AgentId, Contributor, normalize_search_text};
-use content_address::ContentHash;
+use content_address::BookId;
 
 pub(crate) type Identity = (i64, AgentId);
 pub(crate) type StoredCredit = (i64, Contributor);
@@ -65,8 +65,8 @@ mod tests {
     fn cached_credit_writes_rebind_books_roles_and_empty_lists() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let first = ContentHash::new(&"a".repeat(64));
-        let second = ContentHash::new(&"b".repeat(64));
+        let first = BookId::new(&"a".repeat(64));
+        let second = BookId::new(&"b".repeat(64));
         let author = Contributor::new("First Author", book_model::MarcRelatorCode(*b"aut")).unwrap();
         let editor = Contributor::new("Second Author", book_model::MarcRelatorCode(*b"edt")).unwrap();
         db.with_write_transaction(|tx| {
@@ -87,7 +87,7 @@ mod tests {
             Ok(WriteOutcome::Commit(()))
         })
         .unwrap();
-        let rows = query_rows(|callback| db.connection.fixtures_read_book_contributor_b_content_hash_c(callback), |row| Ok((row.get::<_, ContentHash>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?)))
+        let rows = query_rows(|callback| db.connection.fixtures_read_book_contributor_b_content_hash_c(callback), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?)))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -105,7 +105,7 @@ pub(crate) fn resolve_credits(tx: &rusqlite::Transaction<'_>, credits: &[Contrib
     Ok(stored)
 }
 
-pub(crate) fn write_credits(tx: &rusqlite::Transaction<'_>, hash: &ContentHash, credits: &[StoredCredit]) -> Result<(), DatabaseError> {
+pub(crate) fn write_credits(tx: &rusqlite::Transaction<'_>, hash: &BookId, credits: &[StoredCredit]) -> Result<(), DatabaseError> {
     if !credits.is_empty() {
         for (position, (local, credit)) in credits.iter().enumerate() {
             tx.contributors_upsert_credit(&hash, &local, &(i64::try_from(position).unwrap_or(i64::MAX)), &(credit.name()), &(&credit.role_code().0))?;

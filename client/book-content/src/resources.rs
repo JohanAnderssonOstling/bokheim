@@ -1,4 +1,4 @@
-//! Prepared bytes shared by EPUB and MOBI reading preparation.
+//! Prepared bytes shared by text reading preparation.
 
 use crate::resource_path::{is_container_resource, local_resource_uri, resolve_resource_href};
 use std::collections::HashMap;

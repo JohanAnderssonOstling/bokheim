@@ -1,16 +1,16 @@
 -- Table-of-contents reads.
 
 -- name: book_toc_select?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT toc_json FROM book WHERE content_hash=:content_hash AND toc_json IS NOT NULL;
 
 -- name: reading_entry_select?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT reading_target FROM book_local_state WHERE content_hash=:content_hash AND reading_target IS NOT NULL;
 
 -- Complete synchronized navigation documents replace all optional fields.
 -- name: navigation_upsert!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: entry_count: i64
 -- param: toc_json: &str
 -- param: duration_ms: Option<i64>

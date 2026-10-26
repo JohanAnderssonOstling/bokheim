@@ -39,6 +39,12 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         source.execute("INSERT INTO book_source VALUES(?1,?2)", params![id, source_id]).unwrap();
         source.execute("INSERT INTO book_concept VALUES(?1,?2)", params![id, concepts[usize::from(id > 7)]]).unwrap();
     }
+    source
+        .execute_batch(
+            "CREATE TABLE book_audiobook_duration(book_row_id INTEGER PRIMARY KEY REFERENCES book(row_id),duration_ms INTEGER NOT NULL CHECK(duration_ms>0)) STRICT;
+        INSERT INTO book_audiobook_duration VALUES(3,27789000);",
+        )
+        .unwrap();
     // A coauthored book gives the index more headings than its first window.
     for id in 3_i64..=38 {
         source.execute("INSERT INTO author VALUES(?1,?2,?3)", params![id, uuid::Uuid::from_u128(id as u128).as_bytes().as_slice(), format!("Writer {id}")]).unwrap();
@@ -51,6 +57,10 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
     {
         let db = Database::open(&path).unwrap();
         db.initialize_library().unwrap();
+        let audio_key = library_model::CardKey([3; 32]);
+        assert_eq!(catalog::entry(audio_key).unwrap().unwrap().audiobook_duration_ms, Some(27_789_000));
+        assert_eq!(db.external_catalog_detail(audio_key).unwrap().book.audiobook_duration_ms, Some(27_789_000));
+        assert_eq!(catalog::entry(library_model::CardKey([6; 32])).unwrap().unwrap().audiobook_duration_ms, None);
         let writer = library_writer(&path);
         writer.execute("INSERT INTO book(row_id,content_hash,title,format) VALUES(1,?1,'Held',1)", [[2_u8; 32].as_slice()]).unwrap();
         writer.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(?1,1,'held.epub','',1)", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
@@ -91,6 +101,10 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
                         let mut query =
                             LibraryBrowseQuery { location, search: String::new(), file_types, languages: languages.clone(), chip_sort: BrowseChipSort::Popularity, book_sort: sort, hide_finished: false, include_direct_child_books: false };
                         let full = db.browse(&query, false).unwrap();
+                        for card in full.contents.books.iter().chain(full.sections.iter().flat_map(|section| &section.books)) {
+                            let expected_duration = (card.key() == audio_key).then_some(27_789_000);
+                            assert_eq!(card.audiobook_duration_ms, expected_duration);
+                        }
                         let window_full = db.browse_sections(&query, false, library_model::BROWSE_SECTION_BOOK_LIMIT).unwrap();
                         let mut panels = Vec::new();
                         for offset in 0..window_full.sections.len() {
@@ -176,9 +190,16 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         let attached = Connection::open_in_memory().unwrap();
         attached.execute("ATTACH DATABASE ?1 AS catalog", [catalog_path.to_str().unwrap()]).unwrap();
         let stable_id: i64 = attached.query_row("SELECT row_id FROM catalog.catalog_browse_book WHERE key=?1", [[1_u8; 32].as_slice()], |row| row.get(0)).unwrap();
+        // Older format-8 snapshots omit the optional duration table entirely.
+        source.execute_batch("DROP TABLE book_audiobook_duration").unwrap();
         source.execute("UPDATE book SET title='Retitled' WHERE row_id=1", []).unwrap();
         catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, 8)).unwrap();
-        let published: (i64, String) = attached.query_row("SELECT browse.row_id,source.title FROM catalog.catalog_hosted source JOIN catalog.catalog_browse_book browse ON source.identity=browse.key WHERE browse.key=?1", [[1_u8; 32].as_slice()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(catalog::entry(audio_key).unwrap().unwrap().audiobook_duration_ms, None);
+        let published: (i64, String) = attached
+            .query_row("SELECT browse.row_id,source.title FROM catalog.catalog_hosted source JOIN catalog.catalog_browse_book browse ON source.identity=browse.key WHERE browse.key=?1", [[1_u8; 32].as_slice()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
         assert_eq!(published, (stable_id, "Retitled".into()), "existing attached readers must see the complete replacement with stable IDs");
         assert!(db.browse_result_page(&heading_query, false, revision, BrowsePageRequest::default()).unwrap().is_none());
         assert!(db.browse_result_books(&heading_query, false, revision, section, 0, 2).unwrap().is_none());

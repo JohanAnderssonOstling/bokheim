@@ -6,7 +6,7 @@ CREATE TABLE catalog_browse_revision(
 -- Only search keys and ranking live here; authors have normalized relationships.
 CREATE TABLE catalog_browse_book(
  row_id INTEGER PRIMARY KEY,key BLOB NOT NULL UNIQUE CHECK(length(key)=32),external INTEGER NOT NULL,
- format INTEGER NOT NULL,search_title TEXT NOT NULL,search_author TEXT NOT NULL,
+ format INTEGER NOT NULL,duration_ms INTEGER,search_title TEXT NOT NULL,search_author TEXT NOT NULL,
  source_priority INTEGER NOT NULL,popularity_score REAL
 ) STRICT;
 CREATE TABLE catalog_browse_language(book_row_id INTEGER NOT NULL,language TEXT NOT NULL,PRIMARY KEY(book_row_id,language)) STRICT, WITHOUT ROWID;

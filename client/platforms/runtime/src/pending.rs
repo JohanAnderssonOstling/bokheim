@@ -16,10 +16,10 @@ impl<T> Default for Pending<T> {
     }
 }
 impl<T> Pending<T> {
-    pub fn next_id(&self) -> u64 {
-        let id = self.next.get().checked_add(1).expect("browser request IDs exhausted");
+    pub fn next_id(&self) -> Result<u64, String> {
+        let id = self.next.get().checked_add(1).ok_or_else(|| "browser request IDs exhausted".to_owned())?;
         self.next.set(id);
-        id
+        Ok(id)
     }
     pub fn insert(&self, id: u64, value: T) {
         self.entries.borrow_mut().insert(id, value);
@@ -76,5 +76,20 @@ pub async fn until_cancelled<T>(operation: impl Future<Output = T>, cancelled: i
     match futures_util::future::select(cancelled, operation).await {
         futures_util::future::Either::Left(_) => None,
         futures_util::future::Either::Right((result, _)) => Some(result),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exhausted_ids_leave_existing_requests_available() {
+        let pending = Pending::default();
+        pending.insert(7, "existing request");
+        pending.next.set(u64::MAX);
+        assert!(pending.next_id().is_err());
+        assert_eq!(pending.take(7), Some("existing request"));
+        assert_eq!(pending.next.get(), u64::MAX);
     }
 }

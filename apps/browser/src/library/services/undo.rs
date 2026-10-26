@@ -11,8 +11,8 @@
 
 use std::future::Future;
 
-use library_backend::LibraryClient;
-use sync_common::{ContentHash, DirId};
+use library_backend::{BackendError, LibraryClient};
+use sync_common::{BookId, DirId};
 
 /// One reversal. Each names the operation that undoes a single change.
 #[derive(Clone, Debug)]
@@ -24,17 +24,17 @@ pub(crate) enum UndoStep {
     /// Put a folder back that an action discarded.
     RestoreDirectory { directory: DirId, parent: Option<DirId> },
     /// Put a book back in the folder it was moved out of.
-    MoveBook { book: ContentHash, from: DirId, to: DirId },
+    MoveBook { book: BookId, from: DirId, to: DirId },
     /// Drop a placement an action created.
-    RemoveBookFromDirectory { book: ContentHash, directory: DirId },
+    RemoveBookFromDirectory { book: BookId, directory: DirId },
     /// Put back a placement an action removed.
-    RestoreBookPlacement { book: ContentHash, directory: DirId },
+    RestoreBookPlacement { book: BookId, directory: DirId },
     /// Rename a folder back.
     RenameDirectory { directory: DirId, name: String },
 }
 
 impl UndoStep {
-    async fn apply(self, library: &LibraryClient) -> Result<(), String> {
+    async fn apply(self, library: &LibraryClient) -> Result<(), BackendError> {
         match self {
             Self::MoveDirectory { directory, parent } => library.move_directory(directory, parent).await.map(|_| ()),
             Self::TrashDirectory { directory } => library.move_directory_to_trash(directory).await,
@@ -87,10 +87,10 @@ impl UndoEntry {
     }
 
     /// Stop at the first failure, retaining undo for every completed item.
-    pub(crate) async fn record<T, F, Fut>(&mut self, items: impl IntoIterator<Item = T>, mut apply: F) -> Result<(), String>
+    pub(crate) async fn record<T, F, Fut>(&mut self, items: impl IntoIterator<Item = T>, mut apply: F) -> Result<(), BackendError>
     where
         F: FnMut(T) -> Fut,
-        Fut: Future<Output = Result<UndoStep, String>>,
+        Fut: Future<Output = Result<UndoStep, BackendError>>,
     {
         for item in items {
             self.push(apply(item).await?);
@@ -132,7 +132,7 @@ impl UndoStack {
 
     /// Steps run in reverse: the last change made is the first undone, so a
     /// move that displaced something is put back before whatever displaced it.
-    pub(crate) async fn apply(entry: UndoEntry, library: &LibraryClient) -> Result<(), String> {
+    pub(crate) async fn apply(entry: UndoEntry, library: &LibraryClient) -> Result<(), BackendError> {
         for action in entry.steps.into_iter().rev() {
             action.step.apply(action.library.as_ref().unwrap_or(library)).await?;
         }
@@ -160,7 +160,7 @@ mod tests {
             })
             .now_or_never()
             .unwrap();
-        assert_eq!(result, Err("failed".into()));
+        assert_eq!(result.unwrap_err().to_string(), "failed");
         assert_eq!(attempted, [0, 1, 2]);
         assert_eq!(entry.steps.len(), 2);
         assert!(matches!(&entry.steps[0].step, UndoStep::RenameDirectory { name, .. } if name == "0"));

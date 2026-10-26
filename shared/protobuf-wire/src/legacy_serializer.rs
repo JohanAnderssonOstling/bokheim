@@ -58,7 +58,7 @@ impl ser::Serializer for Serializer {
         self.serialize_str(variant)
     }
     fn serialize_newtype_struct<T: Serialize + ?Sized>(self, name: &'static str, value: &T) -> Result<Value, SerializerError> {
-        if name == "ContentHash" { value.serialize(Serializer(true)) } else { Ok(Value::Newtype(Box::new(value.serialize(self)?))) }
+        if matches!(name, "ContentHash" | "BookId") { value.serialize(Serializer(true)) } else { Ok(Value::Newtype(Box::new(value.serialize(self)?))) }
     }
     fn serialize_newtype_variant<T: Serialize + ?Sized>(self, _: &'static str, _: u32, variant: &'static str, value: &T) -> Result<Value, SerializerError> {
         Ok(Value::Map(BTreeMap::from([(Value::String(variant.to_owned()), value.serialize(self)?)])))

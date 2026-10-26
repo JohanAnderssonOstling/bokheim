@@ -2,7 +2,7 @@
 
 use client_runtime::BackendError;
 use library_placement::stage_import;
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 
 use crate::LibraryImport;
 
@@ -44,7 +44,7 @@ impl LibraryImport {
         Ok(created)
     }
 
-    pub async fn import_stored_book(&self, parent_id: DirId, file_name: String, location: std::path::PathBuf) -> Result<ContentHash, BackendError> {
+    pub async fn import_stored_book(&self, parent_id: DirId, file_name: String, location: std::path::PathBuf) -> Result<BookId, BackendError> {
         let mut import = self.validate_import(&parent_id, &file_name)?;
         let source = std::fs::File::open(&location)?;
         let (name, staged) = stage_import(&self.assets, &self.database, parent_id, import.file_name.clone(), Box::new(source), Default::default()).await.map_err(BackendError::operation)?;

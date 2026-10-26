@@ -22,6 +22,7 @@ impl ReaderView {
                 }
                 let document_changed = self.reading_position.as_ref().is_none_or(|previous| previous.source.document != position.source.document);
                 let toc_changed = self.toc.update_position(&position.source);
+                self.toc.update_read_status(position.fraction >= 1.0);
                 self.progress.update(position.fraction, position.document_fraction, position.location, position.total_locations, position.source.document, position.document_count);
                 self.reading_position = Some(position.clone());
                 if document_changed {

@@ -13,7 +13,7 @@ watcher = ["scanner", "dep:notify"]
 kobo = ["client-platform-kobo/device"]
 
 [dependencies]
-client-runtime = { path = "../client-runtime" }
+client-runtime = { path = "../client-runtime", features = ["http"] }
 book-model = { path = "../../shared/book-model" }
 metadata-contract = { path = "../../shared/metadata-contract" }
 library-files = { path = "crates/library-files" }
@@ -22,6 +22,7 @@ book-access = { path = "crates/book-access", features = ["pdf"] }
 pdf-view-common = { path = "../../shared/pdf-view-common" }
 book-inspection = { path = "crates/book-inspection" }
 cpu-host = { path = "crates/cpu-host" }
+cloud-storage = { path = "crates/cloud-storage" }
 asset-transfer = { path = "crates/asset-transfer" }
 library-import = { path = "crates/library-import" }
 library-catalog = { path = "crates/library-catalog" }
@@ -39,7 +40,7 @@ web-time = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.0", features = ["bundled", "functions", "hooks"] }
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.0", features = ["v4", "v5"] }
 tokio = { version = "1.0", features = ["macros", "rt", "sync", "time"] }
 futures-util = { version = "0.3", features = ["io"] }
 async-channel = "2"
@@ -69,6 +70,7 @@ crossbeam-channel = { version = "0.5", optional = true }
 
 [dev-dependencies]
 library-database = { path = "crates/library-database" }
+library-replica = { path = "crates/library-replica" }
 lopdf = { version = "0.44", default-features = false }
 tempfile = "3"
 

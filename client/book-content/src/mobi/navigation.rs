@@ -7,10 +7,40 @@ use crate::resources::MAX_PREPARED_TEXT_BYTES;
 use crate::toc::root_href;
 use ::mobi::headers::TextEncoding;
 use regex::{Captures, Regex};
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 
 pub(super) mod index;
+
+struct Patterns {
+    pagebreak: Regex,
+    read_filepos: Regex,
+    image: Regex,
+    filepos: Regex,
+    fragment: Regex,
+    named_anchor: Regex,
+}
+
+fn patterns() -> io::Result<&'static Patterns> {
+    static PATTERNS: OnceLock<Result<Patterns, String>> = OnceLock::new();
+    PATTERNS
+        .get_or_init(|| {
+            (|| -> Result<Patterns, regex::Error> {
+                Ok(Patterns {
+                    pagebreak: Regex::new(r"(?i)<mbp:pagebreak\s*/?>")?,
+                    read_filepos: Regex::new(r#"(?i)\bfilepos\s*=\s*["']?(\d+)"#)?,
+                    image: Regex::new(r#"(?i)<img([^>]*?)\srecindex\s*=\s*["']?([0-9]+)["']?([^>]*)>"#)?,
+                    filepos: Regex::new(r#"(?i)\bfilepos\s*=\s*["']?(\d+)["']?"#)?,
+                    fragment: Regex::new(r#"(?i)\bhref\s*=\s*["']#([^"']+)["']"#)?,
+                    named_anchor: Regex::new(r#"(?i)<a\b([^>]*?)\bname\s*=\s*(["'][^"']+["'])([^>]*)>"#)?,
+                })
+            })()
+            .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| io::Error::other(error.clone()))
+}
 
 pub(super) struct ReadingText {
     text: String,
@@ -22,7 +52,8 @@ pub(super) struct ReadingText {
 
 impl ReadingText {
     pub(super) fn new(metadata: &MobiMetadata, text: String, navigation: Option<Vec<index::Entry>>) -> io::Result<Self> {
-        let pagebreak = Regex::new(r"(?i)<mbp:pagebreak\s*/?>").unwrap();
+        let patterns = patterns()?;
+        let pagebreak = &patterns.pagebreak;
         let mut sections = Vec::new();
         let mut start = 0;
         for separator in pagebreak.find_iter(&text) {
@@ -37,7 +68,7 @@ impl ReadingText {
         if sections.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "MOBI contains no readable text"));
         }
-        let filepos = Regex::new(r#"(?i)\bfilepos\s*=\s*["']?(\d+)"#).unwrap();
+        let filepos = &patterns.read_filepos;
         let mut positions: BTreeMap<usize, usize> = filepos.captures_iter(&text).filter_map(|capture| capture[1].parse().ok().map(|position| (position, 0))).collect();
         // Prefer the compiled NCX. Legacy books can declare an inline contents
         // page using a guide reference instead.
@@ -52,8 +83,7 @@ impl ReadingText {
             TextEncoding::CP1252 => {
                 let mut requested = positions.iter_mut().peekable();
                 for (original, (utf8, _)) in text.char_indices().enumerate() {
-                    while requested.peek().is_some_and(|(position, _)| **position <= original) {
-                        let (_, mapped) = requested.next().unwrap();
+                    while let Some((_, mapped)) = requested.next_if(|(position, _)| **position <= original) {
                         *mapped = utf8;
                     }
                 }
@@ -92,10 +122,9 @@ impl ReadingText {
             }
         }
         let mut named_targets = HashMap::new();
-        let anchors = Selector::parse("[id], a[name]").unwrap();
         for (index, section) in sections.iter().enumerate() {
             let html = Html::parse_fragment(&text[section.clone()]);
-            for element in html.select(&anchors) {
+            for element in html.root_element().descendants().filter_map(ElementRef::wrap).filter(|element| element.value().attr("id").is_some() || (element.value().name() == "a" && element.value().attr("name").is_some())) {
                 if let Some(id) = element.value().attr("id").or_else(|| element.value().attr("name")) {
                     named_targets.entry(id.to_owned()).or_insert(index);
                 }
@@ -128,15 +157,29 @@ impl ReadingText {
 
     fn inline_toc(&self) -> Vec<TocEntry> {
         let document = Html::parse_document(&self.text);
-        let reference = Selector::parse("guide reference[type]").unwrap();
-        let Some(contents) = document.select(&reference).find(|element| element.value().attr("type").is_some_and(|kind| kind.split_whitespace().any(|kind| kind.eq_ignore_ascii_case("toc")))) else { return Vec::new() };
+        let Some(contents) = document
+            .root_element()
+            .descendants()
+            .filter_map(ElementRef::wrap)
+            .filter(|element| element.value().name() == "reference" && element.ancestors().filter_map(ElementRef::wrap).any(|ancestor| ancestor.value().name() == "guide"))
+            .find(|element| element.value().attr("type").is_some_and(|kind| kind.split_whitespace().any(|kind| kind.eq_ignore_ascii_case("toc"))))
+        else {
+            return Vec::new();
+        };
         let position = contents.value().attr("filepos").and_then(|value| value.parse().ok());
         let range = position.and_then(|position| self.targets.get(&position)).map(|(document, _)| self.sections[*document].clone());
         let html = if let Some(range) = range {
             Html::parse_fragment(&self.text[range])
         } else if let Some(id) = contents.value().attr("href").and_then(|href| href.strip_prefix('#')) {
-            let all = Selector::parse("[id], a[name]").unwrap();
-            let Some(element) = document.select(&all).find(|element| element.value().attr("id") == Some(id) || element.value().attr("name") == Some(id)) else { return Vec::new() };
+            let Some(element) = document
+                .root_element()
+                .descendants()
+                .filter_map(ElementRef::wrap)
+                .filter(|element| element.value().attr("id").is_some() || (element.value().name() == "a" && element.value().attr("name").is_some()))
+                .find(|element| element.value().attr("id") == Some(id) || element.value().attr("name") == Some(id))
+            else {
+                return Vec::new();
+            };
             // Guides using named anchors typically enclose the TOC in a div.
             let container = std::iter::once(element).chain(element.ancestors().filter_map(scraper::ElementRef::wrap)).find(|element| matches!(element.value().name(), "div" | "nav" | "section" | "body")).unwrap_or(element);
             Html::parse_fragment(&container.inner_html())
@@ -158,10 +201,11 @@ impl ReadingText {
     }
 
     pub(super) fn prepare(self) -> io::Result<PreparedText> {
-        let image = Regex::new(r#"(?i)<img([^>]*?)\srecindex\s*=\s*["']?([0-9]+)["']?([^>]*)>"#).unwrap();
-        let filepos = Regex::new(r#"(?i)\bfilepos\s*=\s*["']?(\d+)["']?"#).unwrap();
-        let fragment = Regex::new(r#"(?i)\bhref\s*=\s*["']#([^"']+)["']"#).unwrap();
-        let named_anchor = Regex::new(r#"(?i)<a\b([^>]*?)\bname\s*=\s*(["'][^"']+["'])([^>]*)>"#).unwrap();
+        let patterns = patterns()?;
+        let image = &patterns.image;
+        let filepos = &patterns.filepos;
+        let fragment = &patterns.fragment;
+        let named_anchor = &patterns.named_anchor;
         let mut resources = HashMap::new();
         let mut documents = Vec::new();
         let mut weights = Vec::new();
@@ -173,9 +217,12 @@ impl ReadingText {
             for (offset, position) in insertions.into_iter().rev() {
                 section.insert_str(offset, &format!("<a id=\"filepos{position}\"></a>"));
             }
-            let section =
-                filepos.replace_all(&section, |capture: &Captures<'_>| capture[1].parse().ok().and_then(|position| self.target(position)).map(|target| format!("href=\"{}\"", target.rsplit_once('/').unwrap().1)).unwrap_or_default());
-            let section = fragment.replace_all(&section, |capture: &Captures<'_>| self.named_target(&capture[1]).map(|target| format!("href=\"{}\"", target.rsplit_once('/').unwrap().1)).unwrap_or_else(|| capture[0].to_owned()));
+            let section = filepos.replace_all(&section, |capture: &Captures<'_>| {
+                capture[1].parse().ok().and_then(|position| self.target(position)).map(|target| format!("href=\"{}\"", target.rsplit_once('/').map_or(target.as_str(), |(_, name)| name))).unwrap_or_default()
+            });
+            let section = fragment.replace_all(&section, |capture: &Captures<'_>| {
+                self.named_target(&capture[1]).map(|target| format!("href=\"{}\"", target.rsplit_once('/').map_or(target.as_str(), |(_, name)| name))).unwrap_or_else(|| capture[0].to_owned())
+            });
             let section =
                 named_anchor.replace_all(&section, |capture: &Captures<'_>| if capture[1].contains("id=") || capture[3].contains("id=") { capture[0].to_owned() } else { format!("<a{} id={}{}>", &capture[1], &capture[2], &capture[3]) });
             let section = image.replace_all(&section, |capture: &Captures<'_>| {

@@ -81,6 +81,10 @@ pub struct Publication {
 
 pub const EPUB: &str = "application/epub+zip";
 pub const PDF: &str = "application/pdf";
+pub const FB2: &str = "application/x-fictionbook+xml";
+pub const FB2_ZIP: &str = "application/x-zip-compressed-fb2";
+pub const CBZ: &str = "application/vnd.comicbook+zip";
+pub const CBZ_LEGACY: &str = "application/x-cbz";
 
 /// Whether acquisition links' media types, their own and those of their
 /// indirect acquisitions, name a DRM license file the book comes through:
@@ -93,16 +97,16 @@ fn protected<'a>(types: impl IntoIterator<Item = &'a str>) -> bool {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Download {
     pub href: Url,
-    /// `EPUB` or `PDF`.
+    /// A supported acquisition media type, including FB2 and CBZ.
     pub media_type: &'static str,
     /// The file's size in bytes, where the feed gives it.
     pub length: Option<u64>,
 }
 
 /// The open-access link to download among `links` (href, media type,
-/// length): an EPUB, else a PDF.
+/// length), preferring reflowable books before fixed-page formats.
 fn choose_download(links: Vec<(Url, String, Option<u64>)>) -> Option<Download> {
-    [EPUB, PDF].into_iter().find_map(|media_type| links.iter().find(|(_, kind, _)| bare_media_type(kind) == media_type).map(|(href, _, length)| Download { href: href.clone(), media_type, length: *length }))
+    [EPUB, FB2, FB2_ZIP, PDF, CBZ, CBZ_LEGACY].into_iter().find_map(|media_type| links.iter().find(|(_, kind, _)| bare_media_type(kind) == media_type).map(|(href, _, length)| Download { href: href.clone(), media_type, length: *length }))
 }
 
 /// How a feed is searched: a URL template with `{searchTerms}`, or an

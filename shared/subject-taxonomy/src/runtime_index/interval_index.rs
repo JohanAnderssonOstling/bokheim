@@ -30,7 +30,7 @@ impl IntervalIndex {
             }
             let middle = nodes.len() / 2;
             let (left, rest) = nodes.split_at_mut(middle);
-            let (root, right) = rest.split_first_mut().unwrap();
+            let (root, right) = rest.split_first_mut()?;
             let mut max_end = root.range;
             for candidate in [augment(left, ranges), augment(right, ranges)].into_iter().flatten() {
                 let (a, b) = (&ranges[candidate], &ranges[max_end]);
@@ -59,7 +59,7 @@ impl IntervalIndex {
                 return;
             }
             let (left, rest) = nodes.split_at(nodes.len() / 2);
-            let (_, right) = rest.split_first().unwrap();
+            let Some((_, right)) = rest.split_first() else { return };
             search(left, ranges, start, end, visit);
             let range = &ranges[root.range];
             if compare_lcc_key(&range.start_letters, range.start_number, start.0, start.1).is_le() {

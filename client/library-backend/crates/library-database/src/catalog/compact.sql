@@ -9,8 +9,9 @@ CREATE TABLE catalog_browse_search(
 ) STRICT;
 CREATE VIEW catalog_browse_book AS
  SELECT browse.row_id,source.row_id AS source_row_id,source.key AS identity,source.key AS key,
- source.external,source.format,browse.search_title,browse.search_author,browse.source_priority,browse.popularity_score
- FROM catalog_browse_search browse JOIN book source ON source.row_id=browse.book_row_id;
+ source.external,source.format,audio.duration_ms,browse.search_title,browse.search_author,browse.source_priority,browse.popularity_score
+ FROM catalog_browse_search browse JOIN book source ON source.row_id=browse.book_row_id
+ LEFT JOIN book_audiobook_duration audio ON audio.book_row_id=source.row_id;
 CREATE VIEW catalog_browse_author AS SELECT author_id,name FROM author;
 CREATE VIEW catalog_browse_author_book AS
  SELECT browse.row_id AS book_row_id,author.author_id FROM book_author credit

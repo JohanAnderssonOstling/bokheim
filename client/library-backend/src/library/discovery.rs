@@ -95,7 +95,7 @@ fn count_books(locators: Vec<String>, cancelled: &std::sync::atomic::AtomicBool)
                 }
                 continue;
             }
-            if !entry.is_file() || entry.path().extension().and_then(|ext| ext.to_str()).and_then(BookFormat::from_extension).is_none() || !visited.insert(entry.path().to_owned()) {
+            if !entry.is_file() || entry.file_name().to_str().and_then(BookFormat::from_file_name).is_none() || !visited.insert(entry.path().to_owned()) {
                 continue;
             }
             match entry.length() {

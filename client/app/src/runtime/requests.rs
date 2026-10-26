@@ -49,7 +49,7 @@ pub enum AppCommand {
     AccountSnapshot,
     LocalStorageUsage,
     Login { email: String, password: String },
-    VerifyEmail { email: String, pin: String },
+    VerifyEmail { email: String, pin: String, password: String },
     Logout,
     SubscribeNotifications { browsing: bool },
     SubscribeLibraryList,
@@ -69,6 +69,14 @@ pub enum AppCommand {
     RemoveStore { id: library_model::StoreId },
     OpenStore { id: library_model::StoreId, library_id: LibraryId },
     OpenBrowser { library_id: LibraryId },
+    DeleteAccount { email: String, password: String },
+    GoogleCloudAccounts,
+    BeginGoogleCloudLogin,
+    WaitGoogleCloudLogin { attempt_id: uuid::Uuid },
+    DisconnectGoogleCloudAccount { account: sync_common::storage::ProviderId },
+    CloudFolders { scope: sync_common::storage::ProviderScope, folder: Option<sync_common::storage::ProviderId>, page: Option<String> },
+    CreateCloudFolder { scope: sync_common::storage::ProviderScope, parent: sync_common::storage::ProviderId, name: String },
+    CreateCloudLibrary { name: String, root: sync_common::storage::CloudLibraryRoot },
 }
 
 impl AppCommand {
@@ -102,6 +110,13 @@ pub(super) async fn dispatch_request(backend: AppBackend, command: AppCommand) -
     }
     let reply = match command {
         AppCommand::Libraries => storage_command(move || reply(backend.libraries().map_err(message)?)).await?,
+        AppCommand::GoogleCloudAccounts => storage_command(move || reply(backend.google_cloud_accounts()?)).await?,
+        AppCommand::BeginGoogleCloudLogin => reply(backend.begin_google_cloud_login().await?)?,
+        AppCommand::WaitGoogleCloudLogin { attempt_id } => reply(backend.wait_google_cloud_login(attempt_id).await?)?,
+        AppCommand::DisconnectGoogleCloudAccount { account } => storage_command(move || reply(backend.disconnect_google_cloud_account(account)?)).await?,
+        AppCommand::CloudFolders { scope, folder, page } => reply(backend.cloud_folders(scope, folder, page).await?)?,
+        AppCommand::CreateCloudFolder { scope, parent, name } => reply(backend.create_cloud_folder(scope, parent, name).await?)?,
+        AppCommand::CreateCloudLibrary { name, root } => reply(backend.create_cloud_library(name, root).await?)?,
 
         AppCommand::EstimateLibraryFolders { locators } => crate::executor::run_blocking(move || {
             let cancelled = std::sync::atomic::AtomicBool::new(false);
@@ -130,12 +145,16 @@ pub(super) async fn dispatch_request(backend: AppBackend, command: AppCommand) -
             backend.login(&email, &password).await.map_err(message)?;
             reply(backend.account_snapshot().await.map_err(message)?)?
         }
-        AppCommand::VerifyEmail { email, pin } => {
-            backend.verify_email(&email, &pin).await.map_err(message)?;
+        AppCommand::VerifyEmail { email, pin, password } => {
+            backend.verify_email(&email, &pin, &password).await.map_err(message)?;
             reply(backend.account_snapshot().await.map_err(message)?)?
         }
         AppCommand::Logout => {
             backend.logout().map_err(message)?;
+            reply(backend.account_snapshot().await.map_err(message)?)?
+        }
+        AppCommand::DeleteAccount { email, password } => {
+            backend.delete_account(&email, &password).await.map_err(message)?;
             reply(backend.account_snapshot().await.map_err(message)?)?
         }
 
@@ -170,7 +189,7 @@ pub(super) async fn dispatch_request(backend: AppBackend, command: AppCommand) -
             reply((file_name, serde_bytes::ByteBuf::from(bytes)))?
         }
         #[cfg(not(target_arch = "wasm32"))]
-        AppCommand::OpdsDescription { entry } => reply(library_opds::description(entry).map_err(BackendError::message)?)?,
+        AppCommand::OpdsDescription { entry } => reply(library_opds::description(entry)?)?,
         #[cfg(not(target_arch = "wasm32"))]
         AppCommand::BuyOpdsBook { entry, library_id } => reply(backend.buy_opds_book(entry, library_id).await.map_err(message)?)?,
         // Asks the helper once, so it waits on a process start.

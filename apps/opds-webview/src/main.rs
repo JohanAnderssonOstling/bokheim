@@ -2,10 +2,10 @@
 
 //! One browser verification attempt, or with `store` a store's window,
 //! isolated from the GPUI event loop.
-mod store;
 mod address;
-mod profile;
 mod passwords;
+mod profile;
+mod store;
 
 use anyhow::{Result, bail};
 use library_opds::browser::{Request, Response};
@@ -59,7 +59,7 @@ enum Message {
 }
 
 fn main() {
-    // Exits successfully only where a webview can open: without WebKitGTK
+    // Checks runtime availability without creating a window: without WebKitGTK
     // this binary does not start, and without WebView2 there is no version.
     if std::env::args().nth(1).as_deref() == Some("probe") {
         std::process::exit(if wry::webview_version().is_ok() { 0 } else { 1 });
@@ -211,7 +211,8 @@ fn write_output(response: Response) {
 fn build_webview<'a>(builder: WebViewBuilder<'a>, window: &'a tao::window::Window) -> wry::Result<wry::WebView> {
     use tao::platform::unix::WindowExtUnix;
     use wry::WebViewBuilderExtUnix;
-    builder.build_gtk(window.default_vbox().expect("Tao window has no GTK container"))
+    let container = window.default_vbox().ok_or_else(|| wry::Error::Io(std::io::Error::other("Tao window has no GTK container")))?;
+    builder.build_gtk(container)
 }
 
 #[cfg(not(target_os = "linux"))]

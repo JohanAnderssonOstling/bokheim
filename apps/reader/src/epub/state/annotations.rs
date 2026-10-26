@@ -37,7 +37,6 @@ impl ReaderView {
         let toc_ordinal = self.toc.ordinal_for_cfi(&cfi_range).or_else(|| self.toc.ordinal_of_active()).map(|ordinal| ordinal as i64);
         self.annotation_note_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         let now = crate::shell::marks::now_millis();
-        let now = u64::try_from(now).expect("annotation timestamps must be nonnegative");
         let annotation = Annotation {
             id: uuid::Uuid::new_v4().to_string(),
             content_hash: self.locator.content_hash(),
@@ -52,7 +51,10 @@ impl ReaderView {
             modified_at: now,
             deleted: false,
         };
-        let overlay = marks::renderer_annotation(&annotation).expect("new EPUB annotation has an EPUB anchor");
+        let Some(overlay) = marks::renderer_annotation(&annotation) else {
+            log::error!("Could not create EPUB annotation overlay");
+            return;
+        };
         let annotation_id = annotation.id.clone();
         self.marks.append(annotation, "save reader annotation");
         self.marks.select(annotation_id);

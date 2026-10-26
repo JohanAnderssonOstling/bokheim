@@ -14,7 +14,7 @@ async fn import_workflow_preserves_foreign_files_for_staged_and_direct_writes() 
         let bytes = vec![7u8; 150_000];
         let options = library_files::asset_store::ImportOptions { direct };
         let (name, staged) = asset_workflow::stage_import(&store, &db, dir, "book.epub".into(), Box::new(std::io::Cursor::new(bytes.clone())), options).await.unwrap();
-        let hash = sync_common::ContentHash::from(blake3::hash(&bytes));
+        let hash = sync_common::BookId::from(blake3::hash(&bytes));
         let staged = staged.into_staged(hash, bytes.len() as u64);
         let _lease = store.lease_book(&hash).await.unwrap();
         let published = asset_workflow::publish_import(&store, &db, dir, &name, staged, false).await.unwrap();

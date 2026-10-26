@@ -80,7 +80,7 @@ impl Request {
 
 pub fn serve(port: MessagePort, input: JsValue, fetch: Option<Function>) -> Result<(), JsValue> {
     let request = super::control::NetworkRequest::decode(&input).map_err(|error| js_sys::TypeError::new(&error))?;
-    let id = REQUESTS.with(|requests| requests.next_id());
+    let id = REQUESTS.with(|requests| requests.next_id()).map_err(|error| JsValue::from_str(&error))?;
     let controller = AbortController::new()?;
     let state = Rc::new_cyclic(|weak: &std::rc::Weak<Request>| {
         let message = weak.clone();
@@ -167,7 +167,7 @@ pub fn fail_all(error: JsValue) {
 
 pub fn start() -> Result<(), JsValue> {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-    let listener = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+    let listener = Closure::<dyn FnMut(MessageEvent)>::own_aborting(move |event: MessageEvent| {
         let data = event.data();
         if field(&data, "transport").as_string().as_deref() != Some("fetch") {
             return;

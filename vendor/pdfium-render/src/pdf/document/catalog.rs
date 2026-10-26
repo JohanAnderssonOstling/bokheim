@@ -54,6 +54,21 @@ impl<'a> PdfCatalog<'a> {
             .is_true(unsafe { self.bindings().FPDFCatalog_IsTagged(self.document_handle()) })
     }
 
+    /// Whether `/ViewerPreferences /Direction` declares right-to-left reading.
+    /// Missing or unrecognized values use the PDF default, left-to-right.
+    pub fn is_right_to_left(&self) -> bool {
+        let mut name = [0u8; 4];
+        let length = unsafe {
+            self.bindings().FPDF_VIEWERREF_GetName(
+                self.document_handle(),
+                "Direction",
+                name.as_mut_ptr().cast(),
+                name.len() as _,
+            )
+        };
+        length == 4 && name == *b"R2L\0"
+    }
+
     #[cfg(any(
         feature = "pdfium_future",
         feature = "pdfium_7881",

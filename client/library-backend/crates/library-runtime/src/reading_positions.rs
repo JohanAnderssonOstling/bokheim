@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use sync_common::ContentHash;
+use sync_common::BookId;
 use web_time::Instant;
 
 const QUIET_PERIOD: Duration = Duration::from_secs(5);
@@ -24,12 +24,12 @@ impl PendingPosition {
 /// A value snapshot, with revisions so a late selection cannot clear a newer edit.
 #[derive(Clone, Default)]
 pub struct ReadingPositionPolicy {
-    pending: HashMap<ContentHash, PendingPosition>,
+    pending: HashMap<BookId, PendingPosition>,
     revision: u64,
 }
 
 impl ReadingPositionPolicy {
-    pub fn changed(&mut self, hash: ContentHash, now: Instant) {
+    pub fn changed(&mut self, hash: BookId, now: Instant) {
         self.revision = self.revision.checked_add(1).expect("reading-position revisions exhausted");
         self.pending
             .entry(hash)
@@ -40,15 +40,15 @@ impl ReadingPositionPolicy {
             .or_insert(PendingPosition { first: now, last: now, revision: self.revision });
     }
 
-    pub fn waiting(&self, now: Instant) -> HashSet<ContentHash> {
+    pub fn waiting(&self, now: Instant) -> HashSet<BookId> {
         self.pending.iter().filter_map(|(hash, pending)| (now < pending.deadline()).then_some(*hash)).collect()
     }
 
-    pub fn revisions(&self, hashes: impl IntoIterator<Item = ContentHash>) -> Vec<(ContentHash, u64)> {
+    pub fn revisions(&self, hashes: impl IntoIterator<Item = BookId>) -> Vec<(BookId, u64)> {
         hashes.into_iter().filter_map(|hash| self.pending.get(&hash).map(|pending| (hash, pending.revision))).collect()
     }
 
-    pub fn selected(&mut self, positions: &[(ContentHash, u64)]) {
+    pub fn selected(&mut self, positions: &[(BookId, u64)]) {
         for (hash, revision) in positions {
             if self.pending.get(hash).is_some_and(|pending| pending.revision == *revision) {
                 self.pending.remove(hash);
@@ -56,12 +56,12 @@ impl ReadingPositionPolicy {
         }
     }
 
-    pub fn no_longer_queued(&self, queued: &HashSet<ContentHash>) -> Vec<(ContentHash, u64)> {
+    pub fn no_longer_queued(&self, queued: &HashSet<BookId>) -> Vec<(BookId, u64)> {
         self.revisions(self.pending.keys().filter(|hash| !queued.contains(hash)).copied())
     }
 
     /// Due work waits for normal sync or its upload dependency, avoiding a spin.
-    pub fn delay(&self, now: Instant, queued: &HashSet<ContentHash>) -> Option<Duration> {
+    pub fn delay(&self, now: Instant, queued: &HashSet<BookId>) -> Option<Duration> {
         self.pending.iter().filter(|(hash, _)| queued.contains(hash)).map(|(_, pending)| pending.deadline()).filter(|deadline| *deadline > now).min().map(|deadline| deadline.duration_since(now))
     }
 }
@@ -70,8 +70,8 @@ impl ReadingPositionPolicy {
 mod tests {
     use super::*;
 
-    fn hash(value: u8) -> ContentHash {
-        ContentHash::from_bytes([value; 32])
+    fn hash(value: u8) -> BookId {
+        BookId::from_bytes([value; 32])
     }
 
     #[test]

@@ -2,12 +2,23 @@
 
 ## AppImage
 
-The release workflow builds an x86-64 AppImage and its SHA-256 checksum.
+Linux desktop and Kobo installer releases target glibc 2.17. The main app,
+bundled native libraries and AppImage runtime are checked against that ceiling.
+The optional WebKitGTK browser helper retains its separate glibc 2.39 ceiling.
+
+The release tooling builds an x86-64 AppImage and its SHA-256 checksum.
 GitHub can store these artifacts, while in-app update discovery uses the signed
 Bokheim feed. The package does not embed a separate zsync update endpoint.
 
 Build the release binary and package it with versioned releases of
-`linuxdeploy` and `appimagetool` available on `PATH`:
+`linuxdeploy` and `appimagetool` available on `PATH`. The build script prepares
+the checksum-pinned Zig 0.15.2/native SDK automatically; it does not use the
+host's glibc headers or C++ runtime for the main executable. Install Python
+3.11+, `cpio`, `zstd`, `pkg-config`, `file`, `binutils`, and the native GPUI
+development packages on the build host. Docker and an old distribution are not
+required. SDK downloads and generated files stay in `.linux-toolchain/`; set
+`BOKHEIM_LINUX_SDK` to use another cache directory. `--offline` requires those
+verified archives to have been downloaded already.
 
 ```sh
 python3 apps/desktop-gpui/scripts/build.py
@@ -23,6 +34,51 @@ WebKitGTK: the helper is copied without linuxdeploy and uses the system's
 `libwebkit2gtk-4.1` at runtime, so WebKit security updates come from the
 distribution. Without it, the rest of Bokheim works: browser verification
 reports that WebKitGTK is missing, and stores are not offered.
+
+The browser helper is optional in the AppImage. By default packaging includes
+the executable beside `bokheim` if it exists. `BOKHEIM_BROWSER=required` makes a
+missing helper an error; an explicit `OPDS_BROWSER` path also requires that file.
+To build and package without a browser (and without WebKitGTK development
+packages), use both options so a stale helper is not accidentally included:
+
+```sh
+python3 apps/desktop-gpui/scripts/build.py --without-browser
+BOKHEIM_BROWSER=disabled apps/desktop-gpui/linux/appimage/build-appimage.sh
+```
+
+For one AppImage with different compatibility baselines, build the main app
+with `--without-browser` on the core build host, build `opds-webview` on the
+browser build host, then set `OPDS_BROWSER=/path/to/bokheim-opds-webview` when
+packaging. Only that executable is copied; its system libraries are not bundled.
+The main app and all its bundled libraries must satisfy glibc 2.17, while the
+optional helper may require up to glibc 2.39 (Ubuntu 24.04). Its build uses the
+host toolchain and its process restores the system library path from before
+AppRun. The main app's compatibility libraries do not override WebKitGTK's
+dependencies.
+
+The SDK pins its GNU C++ headers and runtime together. Packaging includes a
+fallback C++ runtime for older hosts, but prefers a usable system runtime so
+modern graphics drivers retain their matching C++ ABI and X11 libraries. The
+same fallback directory includes the SDK's XCB core/XKB and xkbcommon libraries;
+XCB graphics-driver extensions are not bundled. Fontconfig, FreeType, ALSA, WebKitGTK and graphics
+drivers come from the distribution. A 2.17 glibc baseline does not remove their
+own API and hardware requirements; old kernels and drivers still need runtime
+validation.
+
+The Linux Kobo installer uses the same SDK and packaging checks:
+
+```sh
+python3 scripts/linux/toolchain.py -- cargo build --release --manifest-path apps/kobo-installer/Cargo.toml
+apps/kobo-installer/linux/build-appimage.sh
+```
+
+At runtime the app probes the helper once per launch, with a five-second timeout.
+A missing helper, incompatible glibc, absent WebKitGTK or failed probe hides the
+browser button and stores. Store windows also require X11/XWayland. The probe
+checks that the helper can load its runtime; actual window creation can still
+fail and is handled when opening a browser. Ordinary OPDS requests and the
+reader do not use the helper. Feeds requiring browser verification remain
+unavailable when the helper cannot run.
 
 The embedded browser uses a GTK-owned native surface parented inside the
 GPUI window. GTK handles its native focus events directly; the helper routes
@@ -64,12 +120,13 @@ Each torrent has a separate entry, updated once per second. Downloaded `.torrent
 metadata hands its notification to the payload transfer; completion reports
 whether seeding continues. Both kinds show the same waiting and error states.
 
-Settings → Transfers has one "Allow transfers on metered connections" setting,
-off by default. It covers library downloads/uploads, OPDS and browser downloads,
-torrents, cover transfers, and app/catalog updates. Work waits and resumes when
-the connection permits it. Interrupted HTTP requests restart; torrents retain
-downloaded pieces. Linux uses NetworkManager's reported cost; unavailable cost
-information is treated as unknown and allowed.
+Settings → Transfers has one "Allow automatic transfers on metered connections"
+setting, off by default. Automatic uploads, cover/catalog updates and completed
+torrents' seeding wait and resume when allowed. Opening and reading books,
+explicit downloads from the library, catalog, OPDS or browser, and approved app
+updates proceed on metered connections. Pending user-requested downloads retain
+this exemption across retries and restarts. Linux uses NetworkManager's reported
+cost; unavailable cost information is treated as unknown and allowed.
 
 The globe button, store links, and feed verification share the original globe
 browser profile under `opds-webview/stores` in the application's data directory.
@@ -104,8 +161,10 @@ xvfb-run -a python3 apps/opds-webview/tests/ui.py --display-env --appearance lig
 The packaging script writes `Bokheim-x86_64.AppImage` and
 its `.sha256` file to `release/`. Set `RELEASE_DIRECTORY`, `DESKTOP_BINARY`,
 `LINUXDEPLOY`, or `APPIMAGETOOL` to override the defaults.
-The release workflow also inspects the AppImage runtime and every packaged ELF
-file and rejects an artifact that requires a glibc version newer than 2.35.
+Packaging and local release checks inspect the AppImage runtime and every
+packaged ELF file. The runtime, main executable and bundled libraries must
+require no newer than glibc 2.17. Only `usr/bin/bokheim-opds-webview` is checked
+separately against glibc 2.39; no other executable or library is exempted.
 
 Update discovery is enabled only when the build contains a valid public signing
 key. Settings shows one row when an update is available. Explicit Update consent
@@ -120,7 +179,7 @@ the AUR package must set this variable. Installation permissions and actual stor
 deficits appear only when action is required. See `servers/updates/README.md` for
 public-key configuration, release preparation and signed feed publication.
 
-The GitHub workflow checks out the companion GPUI-Fork, HtmlEngine, and
+The hosted platform workflows check out the companion GPUI-Fork, HtmlEngine, and
 HtmlViewCore repositories beside this repository because the Cargo workspace
 currently uses sibling paths. Their pinned revisions must be updated whenever
 Bokheim starts depending on newer companion commits.
@@ -138,9 +197,14 @@ archive available to Cargo without network access:
 ```sh
 python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu \
   --archive /run/build/bokheim/pdfium-linux-x64.tgz --offline
-cargo build --locked --release -p desktop-gpui --features flatpak
+python3 scripts/linux/toolchain.py --offline -- cargo build --locked --release -p desktop-gpui --features flatpak
 cargo build --locked --release -p opds-webview
 ```
+
+The Flatpak source inputs must also include the checksum-pinned SDK archives
+from `scripts/linux/toolchain.json` in `.linux-toolchain/downloads/`. The core
+executable uses the same 2.17 target; the browser builds against Flatpak's own
+WebKitGTK runtime.
 
 Install the artifacts into the Flatpak application prefix:
 

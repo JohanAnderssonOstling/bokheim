@@ -34,7 +34,7 @@ pub(crate) fn notify_undoable(id: &'static str, message: impl Into<SharedString>
         .id1::<BrowserNotification>(id)
         .action(|_, _, cx| {
             let notification = cx.entity();
-            Button::new("undo").label("Undo").tooltip(ui_components::shortcut_tooltip("Undo", "secondary-z")).ghost().on_click(move |_, window, cx| {
+            Button::new("undo").label("Undo").tooltip(ui_components::configured_shortcut_tooltip("Undo", "browse.undo", cx)).ghost().on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(crate::UndoLibraryAction), cx);
                 notification.update(cx, |notification, cx| notification.dismiss(window, cx));
             })

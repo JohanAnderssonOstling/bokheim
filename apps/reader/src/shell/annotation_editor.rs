@@ -12,7 +12,6 @@ use std::rc::Rc;
 
 use gpui::{AnyElement, Context, Edges, Entity, FocusHandle, Pixels, Point, ScrollHandle, SharedString, Window, px};
 use gpui_component::input::{Input, InputState};
-use gpui_component::scroll::ScrollableElement;
 use ui_components as components;
 
 use book_model::AnnotationStyle;
@@ -196,28 +195,6 @@ fn editor<C: AnnotationEditorTarget>(
     geometry: Geometry, note: &Entity<InputState>, choices: EditorChoices, target: &Entity<C>, scroll: &ScrollHandle, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>,
 ) -> AnyElement {
     let dismiss_target = target.clone();
-    let mut panel = components::reader_annotation_editor(Input::new(note).appearance(false).w_full(), theme)
-        .debug_selector(|| "reader-annotation-popup".to_owned())
-        .absolute()
-        .left(px(geometry.left))
-        .max_h(px(geometry.max_height))
-        .track_scroll(scroll)
-        .vertical_scrollbar(scroll)
-        .when(geometry.above, |panel| panel.bottom(px(geometry.edge_offset)))
-        .when(!geometry.above, |panel| panel.top(px(geometry.edge_offset)))
-        // The panel floats over the document, which treats a click as "put the
-        // cursor here" and would clear the very selection being annotated.
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        // Anywhere else is "done": the note is committed and the panel goes.
-        .on_mouse_down_out(move |_, window, cx| {
-            dismiss_target.update(cx, |this, cx| {
-                this.save_annotation_changes(None, None, cx);
-                this.dismiss_annotation_editor(window, cx);
-            });
-            // Dismissing owns this press, so the book cannot register its
-            // release as a page tap, follow a link, or reveal reader controls.
-            cx.stop_propagation();
-        });
     let mut styles = components::action_row().w_full().min_w_0().flex_none().flex_nowrap().debug_selector(|| "reader-annotation-style-row".into());
     for choice in choices.styles {
         let target = target.clone();
@@ -225,8 +202,6 @@ fn editor<C: AnnotationEditorTarget>(
             target.update(cx, |this, cx| this.save_annotation_changes(Some(choice.style.clone()), None, cx));
         }));
     }
-    panel = panel.child(styles);
-
     let selected_color = choices.colors.iter().position(|choice| choice.selected).unwrap_or(0);
     let palette = Rc::new(choices.colors.iter().map(|choice| choice.color).collect::<Vec<_>>());
     let focus_handles: Rc<Vec<FocusHandle>> =
@@ -269,7 +244,28 @@ fn editor<C: AnnotationEditorTarget>(
             target.update(cx, |this, cx| this.delete_edited_annotation(window, cx));
         }))
     });
-    panel.child(colors).into_any_element()
+    let controls = components::column(components::SPACE_SM).w_full().flex_none().child(styles).child(colors);
+    components::reader_annotation_editor(Input::new(note).appearance(false).w_full(), controls, scroll, theme)
+        .debug_selector(|| "reader-annotation-popup".to_owned())
+        .absolute()
+        .left(px(geometry.left))
+        .max_h(px(geometry.max_height))
+        .when(geometry.above, |panel| panel.bottom(px(geometry.edge_offset)))
+        .when(!geometry.above, |panel| panel.top(px(geometry.edge_offset)))
+        // The panel floats over the document, which treats a click as "put the
+        // cursor here" and would clear the very selection being annotated.
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        // Anywhere else is "done": the note is committed and the panel goes.
+        .on_mouse_down_out(move |_, window, cx| {
+            dismiss_target.update(cx, |this, cx| {
+                this.save_annotation_changes(None, None, cx);
+                this.dismiss_annotation_editor(window, cx);
+            });
+            // Dismissing owns this press, so the book cannot register its
+            // release as a page tap, follow a link, or reveal reader controls.
+            cx.stop_propagation();
+        })
+        .into_any_element()
 }
 
 /// Builds the standard editor and connects its format-specific effects.
@@ -288,7 +284,7 @@ pub(crate) fn standard_editor<C: AnnotationEditorTarget>(
 mod tests {
     use super::*;
     use book_model::AnnotationAnchor;
-    use content_address::ContentHash;
+    use content_address::BookId;
     use gpui::{Render, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, div, point};
 
     fn assert_panel_fits(geometry: &Geometry, document_height: f32, visible_top: f32, visible_bottom: f32) {
@@ -386,7 +382,7 @@ mod tests {
             note: cx.new(|cx| note_input(window, cx)),
             annotation: Annotation {
                 id: "test-highlight".to_owned(),
-                content_hash: ContentHash::from_bytes([0; 32]),
+                content_hash: BookId::from_bytes([0; 32]),
                 anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2/1:0)".to_owned()),
                 exact_text: "Highlighted text".to_owned(),
                 style: AnnotationStyle::Highlight,
@@ -473,6 +469,28 @@ mod tests {
         assert_eq!(bounds.bottom(), viewport.height - px(100.0));
         assert!(bounds.size.height > px(80.0));
         assert!(bounds.size.height <= px(250.0));
+    }
+
+    #[gpui::test]
+    fn short_note_does_not_scroll_when_editor_has_room(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx, false);
+        for note in ["", "A short note", "First line\nSecond line\nThird line"] {
+            view.update_in(cx, |view, window, cx| {
+                view.open = true;
+                view.note.update(cx, |input, cx| input.set_value(note, window, cx));
+                cx.notify();
+            });
+            draw(cx);
+            let bounds = cx.debug_bounds("reader-annotation-popup").unwrap();
+            assert!(bounds.size.height < px(250.0), "short notes must fit below the height limit");
+            let scroll = view.read_with(cx, |view, _| view.scroll.as_ref().unwrap().clone());
+            assert_eq!(scroll.max_offset().y, px(0.0), "a fitting note must not create panel overflow: {note:?}");
+            let note_bounds = cx.debug_bounds("reader-annotation-note-row").unwrap();
+            cx.simulate_event(ScrollWheelEvent { position: note_bounds.center(), delta: ScrollDelta::Pixels(point(px(0.0), px(-100.0))), ..Default::default() });
+            draw(cx);
+            assert_eq!(scroll.offset().y, px(0.0));
+            view.read_with(cx, |view, cx| assert_eq!(view.note.read(cx).scroll_offset().y, px(0.0), "a fitting note must not scroll inside its field"));
+        }
     }
 
     #[gpui::test]

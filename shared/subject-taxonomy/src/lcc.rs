@@ -25,7 +25,7 @@ pub struct LccCall<'a> {
 
 impl LccCall<'_> {
     fn has_known_subclass(&self) -> bool {
-        outline().ranges_by_main.get(&self.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == self.letters))
+        self.letters.chars().next().and_then(|letter| outline().ranges_by_main.get(&letter)).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == self.letters))
     }
 }
 
@@ -265,13 +265,13 @@ fn complete_item_year_suffix(value: &str) -> bool {
     // LC MARC 050/490/830 for OL1648155M records A13 1990/1.
     // Slash chronology identifies a numbered series issue, not a class range.
     if let Some((year, issue)) = value.split_once('/') {
-        if year.len() != 4 || !year.bytes().all(|b| b.is_ascii_digit()) || !(1000..=2999).contains(&year.parse::<u32>().unwrap()) {
+        if year.len() != 4 || !year.bytes().all(|b| b.is_ascii_digit()) || !year.parse::<u32>().is_ok_and(|year| (1000..=2999).contains(&year)) {
             return false;
         }
         // LC 050 for OL4232369M: S37 1978/1979:5. The coverage
         // chronology and issue number jointly describe the series item.
         let issue = if let Some((end, number)) = issue.split_once(':') {
-            if !matches!(end.len(), 2 | 4) || !end.bytes().all(|b| b.is_ascii_digit()) || (end.len() == 4 && !(year.parse::<u32>().unwrap()..=2999).contains(&end.parse::<u32>().unwrap())) {
+            if !matches!(end.len(), 2 | 4) || !end.bytes().all(|b| b.is_ascii_digit()) || (end.len() == 4 && !year.parse::<u32>().ok().zip(end.parse::<u32>().ok()).is_some_and(|(year, end)| (year..=2999).contains(&end))) {
                 return false;
             }
             number
@@ -286,14 +286,14 @@ fn complete_item_year_suffix(value: &str) -> bool {
     if start.len() != 4 || !start.bytes().all(|b| b.is_ascii_digit()) || !matches!(end.len(), 2 | 4) || !end.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
-    let start = start.parse::<u32>().unwrap();
+    let Ok(start) = start.parse::<u32>() else { return false };
     if !(1000..=2999).contains(&start) {
         return false;
     }
     if end.len() == 2 {
         return true;
     }
-    (start..=2999).contains(&end.parse::<u32>().unwrap())
+    end.parse::<u32>().is_ok_and(|end| (start..=2999).contains(&end))
 }
 
 pub fn lcc_enumeration_base(value: &str) -> Option<&str> {

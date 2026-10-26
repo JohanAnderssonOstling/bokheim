@@ -104,7 +104,7 @@ pub struct Server {
 }
 impl Server {
     pub fn sync(length: u64, mut fetch: impl FnMut(u64, usize) -> Result<Vec<u8>, String> + 'static) -> Result<Self, String> {
-        let read = Closure::<dyn FnMut(f64, u32) -> Result<Uint8Array, JsValue>>::new(move |offset, length| fetch(offset as u64, length as usize).map(|bytes| Uint8Array::from(bytes.as_slice())).map_err(|e| JsValue::from_str(&e)));
+        let read = Closure::<dyn FnMut(f64, u32) -> Result<Uint8Array, JsValue>>::own_aborting(move |offset, length| fetch(offset as u64, length as usize).map(|bytes| Uint8Array::from(bytes.as_slice())).map_err(|e| JsValue::from_str(&e)));
         Self::attach(length, read)
     }
     pub fn asynchronous<F, Fut>(length: u64, mut fetch: F) -> Result<Self, String>
@@ -112,7 +112,7 @@ impl Server {
         F: FnMut(u64, usize) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Vec<u8>, String>> + 'static,
     {
-        let read = Closure::<dyn FnMut(f64, u32) -> js_sys::Promise>::new(move |offset, length| {
+        let read = Closure::<dyn FnMut(f64, u32) -> js_sys::Promise>::own_aborting(move |offset, length| {
             let future = fetch(offset as u64, length as usize);
             wasm_bindgen_futures::future_to_promise(async move { future.await.map(|bytes| Uint8Array::from(bytes.as_slice()).into()).map_err(|e| JsValue::from_str(&e)) })
         });

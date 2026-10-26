@@ -18,30 +18,32 @@ pub(crate) enum OperationKind {
 
 /// A reply is resolved even if admission fails, a future panics, or its owner
 /// is dropped before the future is first polled.
-pub(crate) struct PendingReply<T>(Option<async_channel::Sender<Result<T, BackendError>>>);
+pub(crate) struct PendingReply<T> {
+    sender: async_channel::Sender<Result<T, BackendError>>,
+    finished: bool,
+}
 
 impl<T> PendingReply<T> {
     pub fn new(sender: async_channel::Sender<Result<T, BackendError>>) -> Self {
-        Self(Some(sender))
+        Self { sender, finished: false }
     }
     #[cfg(target_arch = "wasm32")]
     pub fn is_closed(&self) -> bool {
-        self.0.as_ref().is_none_or(|sender| sender.is_closed())
+        self.sender.is_closed()
     }
     pub fn sender(&self) -> async_channel::Sender<Result<T, BackendError>> {
-        self.0.as_ref().expect("pending reply").clone()
+        self.sender.clone()
     }
     pub fn finish(mut self, result: Result<T, BackendError>) {
-        if let Some(sender) = self.0.take() {
-            let _ = sender.try_send(result);
-        }
+        self.finished = true;
+        let _ = self.sender.try_send(result);
     }
 }
 
 impl<T> Drop for PendingReply<T> {
     fn drop(&mut self) {
-        if let Some(sender) = self.0.take() {
-            let _ = sender.try_send(Err(BackendError::message("library operation stopped before completing")));
+        if !self.finished {
+            let _ = self.sender.try_send(Err(BackendError::message("library operation stopped before completing")));
         }
     }
 }
@@ -82,7 +84,7 @@ impl<C: 'static> PendingOperations<C> {
         let abandoned = reply.sender();
         self.tasks.push(Box::pin(async move {
             let run = async move {
-                let _permit = permits.acquire().await.expect("operation permits are never closed");
+                let _permit = permits.acquire().await.map_err(BackendError::operation)?;
                 operation.await
             };
             let run = AssertUnwindSafe(run).catch_unwind();

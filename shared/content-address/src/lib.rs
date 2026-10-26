@@ -4,6 +4,9 @@ use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::str::FromStr;
 
+mod book_id;
+pub use book_id::{BookId, InvalidBookId};
+
 /// The raw 32-byte BLAKE3 digest. Hexadecimal is only a text representation.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentHash([u8; 32]);

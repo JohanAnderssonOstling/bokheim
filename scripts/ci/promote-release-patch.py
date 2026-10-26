@@ -64,8 +64,10 @@ def main():
         image = directory / 'Bokheim-macOS-universal.dmg'
         assert mac['artifact']['name'] == image.name
         assert artifacts.fingerprint(image) == {key: mac['artifact'][key] for key in ('bytes', 'sha256')}
-        for name in ('Bokheim-Kobo-Installer-Windows-x86_64.exe', 'Bokheim-Kobo-Installer-Linux-x86_64.AppImage'):
+        for name in ('Bokheim-Kobo-Installer-Windows-x86_64.exe', 'Bokheim-Kobo-Installer-Linux-x86_64.AppImage',
+                     'Bokheim-Kobo-armv7.tar.gz', 'Bokheim-Kobo-Libra2-armv7.tar.gz'):
             assert (directory / (name + '.sha256')).read_text().split() == [artifacts.fingerprint(directory / name)['sha256'], name]
+        assert artifacts.fingerprint(directory / 'Bokheim-Kobo-armv7.tar.gz') == artifacts.fingerprint(directory / 'Bokheim-Kobo-Libra2-armv7.tar.gz'), 'Legacy Kobo alias differs from the universal package'
         provenance = json.loads((directory / 'release-provenance.json').read_text())
         assert provenance['source_commit'] == args.source_commit and provenance['version'] == version
         previous = directory / 'previous'

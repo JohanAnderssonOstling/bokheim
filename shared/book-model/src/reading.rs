@@ -63,6 +63,7 @@ pub enum ReadingPosition {
     Pdf(u32),
     PdfAtPoint { page: u32, full_page_position: f32 },
     Audiobook(u64),
+    Cbz { page: u32, full_page_position: f32 },
 }
 
 /// Protocol-level EPUB position. Unlike an annotation anchor, synchronized
@@ -87,6 +88,14 @@ impl ReadingPosition {
         }
         if let Some(millis) = audiobook_position_millis(value) {
             return Ok(Self::Audiobook(millis));
+        }
+        if let Some(value) = value.strip_prefix("cbzpage(").and_then(|value| value.strip_suffix(')')) {
+            let (page, offset) = value.split_once(',').unwrap_or((value, "0"));
+            if page.is_empty() || (page.len() > 1 && page.starts_with('0')) { return Err(InvalidReadingPosition); }
+            let page = page.parse().map_err(|_| InvalidReadingPosition)?;
+            let full_page_position = offset.parse::<f32>().map_err(|_| InvalidReadingPosition)?;
+            if !full_page_position.is_finite() || !(0.0..=1.0).contains(&full_page_position) { return Err(InvalidReadingPosition); }
+            return Ok(Self::Cbz { page, full_page_position });
         }
         Err(InvalidReadingPosition)
     }
@@ -113,6 +122,7 @@ impl ReadingPosition {
             Self::Pdf(page) => pdf_page_reading_position(*page),
             Self::PdfAtPoint { page, full_page_position } => pdf_page_position_reading_position(*page, *full_page_position),
             Self::Audiobook(millis) => audiobook_reading_position(*millis),
+            Self::Cbz { page, full_page_position } => format!("cbzpage({page},{full_page_position})"),
         }
     }
 
@@ -167,6 +177,11 @@ impl std::hash::Hash for ReadingPosition {
             Self::Audiobook(millis) => {
                 3_u8.hash(state);
                 millis.hash(state);
+            }
+            Self::Cbz { page, full_page_position } => {
+                4_u8.hash(state);
+                page.hash(state);
+                full_page_position.to_bits().hash(state);
             }
         }
     }
@@ -319,6 +334,14 @@ impl Error for InvalidReadProgress {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comic_positions_round_trip_and_reject_invalid_offsets() {
+        let position = ReadingPosition::Cbz { page: 12, full_page_position: 0.375 };
+        assert_eq!(ReadingPosition::parse(&position.as_str()).unwrap(), position);
+        assert_eq!(ReadingPosition::parse("cbzpage(0)").unwrap().as_str(), "cbzpage(0,0)");
+        for value in ["cbzpage(-1)", "cbzpage(01)", "cbzpage(1,NaN)", "cbzpage(1,inf)", "cbzpage(1,-0.1)", "cbzpage(1,1.1)", "cbzpage(1,0,0)"] { assert!(ReadingPosition::parse(value).is_err(), "{value}"); }
+    }
 
     #[test]
     fn epub_cfi_rejects_legacy_numbers_and_malformed_delimiters() {

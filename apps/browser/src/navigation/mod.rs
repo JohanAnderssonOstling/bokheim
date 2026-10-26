@@ -2,6 +2,7 @@
 
 mod folder_creation;
 mod libraries;
+mod library_errors;
 mod library_session;
 mod route;
 pub(crate) mod shell;

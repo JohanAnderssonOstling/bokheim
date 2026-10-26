@@ -133,7 +133,7 @@ mod subject_projection_tests {
     fn database() -> (Database, i64, i64) {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let hash = sync_common::ContentHash::new(&"d".repeat(64));
+        let hash = sync_common::BookId::new(&"d".repeat(64));
         db.connection.fixtures_insert_book(&hash).unwrap();
         let book = db.connection.fixtures_read_book_row_id(&hash, |row| row.get(0)).unwrap();
         let concept = db.connection.fixtures_first_curated_concept(|row| row.get(0)).unwrap();

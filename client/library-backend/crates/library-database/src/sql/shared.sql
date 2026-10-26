@@ -20,7 +20,7 @@ SELECT server_library_created FROM sync_metadata WHERE singleton = 1;
 
 
 -- name: shared_request_thumbnail!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT INTO book_transfer(content_hash, cover_state)
 SELECT content_hash, 'pending' FROM book WHERE content_hash = :content_hash AND deleted_at IS NULL
 ON CONFLICT(content_hash) DO UPDATE SET cover_state = 'pending';
@@ -31,7 +31,7 @@ SELECT CAST(scan_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
 
 
 -- name: shared_scanner_enqueue_upload!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: size_bytes: i64
 -- Queues the bytes under a new upload id: one past any id still stored, so
 -- an earlier upload's preparation never matches it.
@@ -43,7 +43,7 @@ ON CONFLICT(content_hash) DO UPDATE SET upload_id = excluded.upload_id, upload_s
 
 
 -- name: shared_scanner_publish_projection!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: dir_id: &str
 -- param: relative_path: &str
 INSERT INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(:content_hash,:dir_id,:relative_path) ON CONFLICT(content_hash,dir_id) DO UPDATE SET relative_path=excluded.relative_path;
@@ -55,7 +55,7 @@ SELECT file_name FROM book_dir WHERE dir_id = :destination AND deleted_at IS NUL
 
 
 -- name: shared_set_book_hash_downloaded!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: is_downloaded: i32
 UPDATE book_dir
 SET is_downloaded = :is_downloaded
@@ -70,18 +70,18 @@ INSERT OR REPLACE INTO local_directory_work(dir_id) VALUES(:dir_id);
 
 -- name: shared_placements_queue_file_work!
 -- param: operation: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: relative_path: &str
 INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES(:operation,:content_hash,:relative_path);
 
 
 -- name: shared_cancel_book_materialization!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 DELETE FROM local_file_work WHERE content_hash=:content_hash AND operation='materialize';
 
 
 -- name: shared_purge_book_record_insert!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT INTO local_purge_work(content_hash) VALUES(:content_hash)
 ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
 
@@ -95,7 +95,7 @@ SELECT CAST(last_pull_field_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
 
 
 -- name: shared_apply_remote_book_purged_select?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT row_id FROM book WHERE content_hash=:content_hash;
 
 
@@ -107,24 +107,24 @@ VALUES(:stable_id, :name);
 
 
 -- name: shared_transfer_complete_download!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 UPDATE book_transfer SET book_download = NULL, book_download_at = NULL WHERE content_hash = :content_hash;
 
 
 -- name: shared_bytes_seen?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
               WHERE b.content_hash=:content_hash AND bd.size_bytes IS NOT NULL);
 
 -- name: shared_record_size!
 -- param: dir_id: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: size_bytes: i64
 UPDATE book_dir SET size_bytes=:size_bytes
 WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
 
 -- name: shared_request_book_download!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: origin: &str
 -- param: requested_at: i64
 -- A user's request outranks a background one; the first request's time is kept.
@@ -135,21 +135,21 @@ ON CONFLICT(content_hash) DO UPDATE SET
     book_download_at = COALESCE(book_download_at, excluded.book_download_at);
 
 -- name: shared_book_format?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT format FROM book WHERE content_hash = :content_hash;
 
 -- name: shared_audiobook_recording_evidence?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT recording_json FROM book_local_state WHERE content_hash = :content_hash AND recording_json IS NOT NULL;
 
 -- name: shared_book_name_conflict ->
 -- param: dir_id: &str
 -- param: file_name_key: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id=:dir_id AND portable_name_key(bd.file_name)=:file_name_key AND b.content_hash!=:content_hash AND bd.deleted_at IS NULL);
 
 -- name: shared_live_book_placements?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- The book's live placements; Rust turns each into a path.
 SELECT bd.dir_id, bd.file_name
 FROM book_dir bd

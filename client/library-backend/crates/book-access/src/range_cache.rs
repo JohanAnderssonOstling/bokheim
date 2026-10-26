@@ -63,10 +63,11 @@ impl RangeCache {
     pub(crate) fn read(&mut self, offset: u64, output: &mut [u8]) -> usize {
         let Some(index) = self.entries.iter().position(|(start, bytes)| offset >= *start && offset - start < bytes.len() as u64) else { return 0 };
         if index != 0 {
-            let entry = self.entries.remove(index).unwrap();
-            self.entries.push_front(entry);
+            if let Some(entry) = self.entries.remove(index) {
+                self.entries.push_front(entry);
+            }
         }
-        let (start, bytes) = self.entries.front().unwrap();
+        let Some((start, bytes)) = self.entries.front() else { return 0 };
         let within = (offset - start) as usize;
         let count = output.len().min(bytes.len() - within);
         output[..count].copy_from_slice(&bytes[within..within + count]);

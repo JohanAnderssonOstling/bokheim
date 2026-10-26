@@ -14,7 +14,7 @@ use crate::shared_sql::SharedSql;
 use crate::sync::SyncApplySql;
 use crate::sync::apply::{project_book as prepare_book, write_subject_projection};
 use crate::sync::{nonnegative_u64, normalized_description, storage_i64, toc_entry_count};
-use content_address::ContentHash;
+use content_address::BookId;
 use library_replica::{BookAddition, BookDetails, BookLifecycleState, DirectoryIntent, DirectoryLifecycleState, EnrichmentResult, LibraryStateEntry};
 use rusqlite::Transaction;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -27,8 +27,8 @@ pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
         return Ok(());
     }
     let directories = dirty.iter().any(|(kind, _, _)| kind.starts_with("directory_"));
-    let mut books = BTreeMap::<ContentHash, HashSet<String>>::new();
-    for row in query_rows(|callback| tx.projection_dirty_books(callback), |row| Ok((row.get::<_, ContentHash>(0)?, row.get::<_, String>(1)?)))? {
+    let mut books = BTreeMap::<BookId, HashSet<String>>::new();
+    for row in query_rows(|callback| tx.projection_dirty_books(callback), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?)))? {
         let (hash, kind) = row?;
         books.entry(hash).or_default().insert(kind);
     }
@@ -61,7 +61,7 @@ pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
     if directories {
         // Directory deletion cascades placements away. Reproject memberships
         // when directory winners change, including a later explicit recreation.
-        for hash in query_rows(|callback| tx.projection_missing_directory_books(callback), |row| row.get::<_, ContentHash>(0))? {
+        for hash in query_rows(|callback| tx.projection_missing_directory_books(callback), |row| row.get::<_, BookId>(0))? {
             books.entry(hash?).or_default().insert("placement".into());
         }
     }
@@ -175,7 +175,7 @@ fn project_directory_tree(tx: &Transaction<'_>, purged: &HashSet<DirId>) -> Resu
 }
 
 /// Project only changed state kinds. Synthetic book dirtiness requests a full rebuild.
-fn project_book(tx: &Transaction<'_>, hash: &ContentHash, values: &[(LibraryStateEntry, u64)], changed: &HashSet<String>, purged: &HashSet<DirId>) -> Result<(), DatabaseError> {
+fn project_book(tx: &Transaction<'_>, hash: &BookId, values: &[(LibraryStateEntry, u64)], changed: &HashSet<String>, purged: &HashSet<DirId>) -> Result<(), DatabaseError> {
     if values.iter().any(|(body, _)| matches!(body, LibraryStateEntry::BookLifecycle { value: BookLifecycleState::Purged, .. })) {
         return remove_book(tx, hash);
     }
@@ -214,9 +214,10 @@ fn project_book(tx: &Transaction<'_>, hash: &ContentHash, values: &[(LibraryStat
         }
         tx.projection_set_book_reading(hash, reading.as_deref(), progress, read_at)?;
     }
-    if needs("book_add") {
+    if needs("book_add") || needs("external_book") {
         let addition = values.iter().find_map(|(body, _)| match body {
             LibraryStateEntry::BookAdd { value, .. } => Some(value),
+            LibraryStateEntry::ExternalBook { value, .. } => Some(&value.addition),
             _ => None,
         });
         if let Some(addition) = addition {
@@ -230,6 +231,11 @@ fn project_book(tx: &Transaction<'_>, hash: &ContentHash, values: &[(LibraryStat
             tx.projection_clear_navigation(&hash)?;
             tx.projection_clear_pdf_metadata(&hash)?;
             tx.projection_clear_recording(&hash)?;
+        }
+        for (body, _) in values {
+            if let LibraryStateEntry::ExternalBook { value, .. } = body {
+                crate::provider::project_provider_file(tx, hash, &value.file, value.thumbnails.as_ref())?;
+            }
         }
     }
     if needs("annotation") {
@@ -273,7 +279,7 @@ fn project_value(tx: &Transaction<'_>, body: &LibraryStateEntry, purged: &HashSe
             };
             tx.set_remote_directory_lifecycle(&dir_id.to_string(), value).map_err(DatabaseError::operation)?;
         }
-        LibraryStateEntry::BookLifecycle { .. } | LibraryStateEntry::ReadingPosition { .. } | LibraryStateEntry::BookAdd { .. } => {
+        LibraryStateEntry::BookLifecycle { .. } | LibraryStateEntry::ReadingPosition { .. } | LibraryStateEntry::ChapterReadStatus { .. } | LibraryStateEntry::BookAdd { .. } | LibraryStateEntry::ExternalBook { .. } => {
             unreachable!("book records and scalar registers are projected together")
         }
         LibraryStateEntry::Placement { dir_id, content_hash, present, origin_folder_id } => {
@@ -308,7 +314,7 @@ fn project_value(tx: &Transaction<'_>, body: &LibraryStateEntry, purged: &HashSe
 
 /// Select the effective metadata and navigation before writing the addition.
 /// The retained sync record remains the original publication.
-fn project_addition(tx: &Transaction<'_>, hash: &ContentHash, addition: &BookAddition) -> Result<(), DatabaseError> {
+fn project_addition(tx: &Transaction<'_>, hash: &BookId, addition: &BookAddition) -> Result<(), DatabaseError> {
     let (enriched, enriched_entries) = match &addition.enrichment {
         Some(EnrichmentResult::Found { record, toc, .. }) => (Some(record), toc.as_deref()),
         _ => (None, None),
@@ -359,7 +365,7 @@ pub(crate) fn backfill_popularity(tx: &Transaction<'_>) -> Result<(), DatabaseEr
     let mut statement = tx.prepare(include_str!("sql/popularity_backfill.sql"))?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
-        let hash: ContentHash = row.get(0)?;
+        let hash: BookId = row.get(0)?;
         let body: Vec<u8> = row.get(1)?;
         let LibraryStateEntry::BookAdd { value, .. } = wire::decode::<LibraryStateEntry>(&body, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? else {
             return Err(DatabaseError::message("popularity requires an immutable book addition"));
@@ -369,7 +375,7 @@ pub(crate) fn backfill_popularity(tx: &Transaction<'_>) -> Result<(), DatabaseEr
     Ok(())
 }
 
-fn project_metadata(tx: &Transaction<'_>, hash: &ContentHash, metadata: &BookDetails, enriched: Option<&BookDetails>) -> Result<(), DatabaseError> {
+fn project_metadata(tx: &Transaction<'_>, hash: &BookId, metadata: &BookDetails, enriched: Option<&BookDetails>) -> Result<(), DatabaseError> {
     let attributes = enriched.unwrap_or(metadata);
     let projected = prepare_book(&attributes.book)?;
     // Credits from an enrichment answer or another device carry identities of
@@ -395,7 +401,7 @@ fn project_metadata(tx: &Transaction<'_>, hash: &ContentHash, metadata: &BookDet
 /// Local filenames are projection inputs, not synchronized
 /// registers. Seed local values, then admit membership
 /// through the same canonical path used by directory commands.
-pub(crate) fn place_book(tx: &Transaction<'_>, directory: &DirId, hash: &ContentHash, name: &str) -> Result<(), DatabaseError> {
+pub(crate) fn place_book(tx: &Transaction<'_>, directory: &DirId, hash: &BookId, name: &str) -> Result<(), DatabaseError> {
     tx.projection_upsert_placement(&(directory.to_string()), &(&hash), &name)?;
     crate::sync::apply::registers::record_local(tx, LibraryStateEntry::Placement { dir_id: *directory, content_hash: *hash, present: true, origin_folder_id: None })
 }
@@ -416,7 +422,7 @@ mod tests {
     fn addition_and_enrichment_project_only_the_final_metadata() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let hash = ContentHash::new(&"e".repeat(64));
+        let hash = BookId::new(&"e".repeat(64));
         db.connection.fixtures_insert_book(&hash).unwrap();
         db.connection.fixtures_create_transaction_probe().unwrap();
         db.connection.fixtures_track_subject_projection_writes().unwrap();

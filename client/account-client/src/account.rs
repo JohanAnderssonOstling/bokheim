@@ -35,12 +35,16 @@ pub async fn revoke_other_account_sessions(session: &Session) -> Result<OtherSes
 }
 
 pub async fn create_library(session: &Session, library_id: LibraryId, library_name: String) -> Result<LibrarySummary, AuthError> {
-    let request = LibraryNameRequest { library_id, library_name };
+    create_library_with_storage(session, library_id, library_name, Default::default()).await
+}
+
+pub async fn create_library_with_storage(session: &Session, library_id: LibraryId, library_name: String, storage: sync_common::storage::LibraryStorage) -> Result<LibrarySummary, AuthError> {
+    let request = LibraryNameRequest { library_id, library_name, storage };
     decode_response(with_body(authenticated_request(session, Method::POST, "api/libraries")?, &request)?).await
 }
 
 pub async fn rename_library(session: &Session, library_id: LibraryId, library_name: String) -> Result<LibrarySummary, AuthError> {
-    let request = LibraryNameRequest { library_id, library_name };
+    let request = LibraryNameRequest { library_id, library_name, storage: Default::default() };
     decode_response(with_body(authenticated_request(session, Method::PUT, "api/libraries")?, &request)?).await
 }
 
@@ -95,7 +99,7 @@ mod tests {
         let request: LibraryNameRequest = wire::decode(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
         assert_eq!(request.library_id.to_string(), LIBRARY_ID);
         assert_eq!(request.library_name, if method == Method::POST { "Classics" } else { "Renamed" });
-        wire::encode(&LibrarySummary { library_id: request.library_id, library_name: request.library_name }).unwrap()
+        wire::encode(&LibrarySummary { library_id: request.library_id, library_name: request.library_name, storage: Default::default() }).unwrap()
     }
 
     #[tokio::test]
@@ -128,8 +132,8 @@ mod tests {
         let session = Session::try_new(origin, "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into()).unwrap();
         let id = LIBRARY_ID.parse().unwrap();
 
-        assert_eq!(create_library(&session, id, "Classics".into()).await.unwrap(), LibrarySummary { library_id: id, library_name: "Classics".into() });
-        assert_eq!(rename_library(&session, id, "Renamed".into()).await.unwrap(), LibrarySummary { library_id: id, library_name: "Renamed".into() });
+        assert_eq!(create_library(&session, id, "Classics".into()).await.unwrap(), LibrarySummary { library_id: id, library_name: "Classics".into(), storage: Default::default() });
+        assert_eq!(rename_library(&session, id, "Renamed".into()).await.unwrap(), LibrarySummary { library_id: id, library_name: "Renamed".into(), storage: Default::default() });
         assert_eq!(delete_library(&session, &id).await.unwrap().library_id, id);
         delete_opds_feed(&session, id).await.unwrap();
         assert!(delete_library(&session, &LibraryId::nil()).await.unwrap_err().is_unauthorized());

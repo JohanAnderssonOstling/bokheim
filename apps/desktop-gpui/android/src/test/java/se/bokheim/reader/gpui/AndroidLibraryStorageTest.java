@@ -51,13 +51,13 @@ public class AndroidLibraryStorageTest {
         assertThrows(java.io.IOException.class, () -> AndroidLibraryStorage.accessibleChild(root, "../outside"));
     }
 
-    @Test public void grantedLocalTreeUsesItsFilesystemDirectory() throws Exception {
+    @Test public void grantedLocalTreeUsesFilesystemOnlyForDirectDistribution() throws Exception {
         PermissionEnvironment.granted = true;
         java.io.File folder = new java.io.File(Environment.getExternalStorageDirectory(), "Documents/Bokheim");
         assertTrue(folder.mkdirs() || folder.isDirectory());
         android.net.Uri tree = android.provider.DocumentsContract.buildTreeDocumentUri(
                 "com.android.externalstorage.documents", "primary:Documents/Bokheim");
-        assertEquals(folder.getCanonicalFile(), AndroidLibraryStorage.localDirectory(activity, tree));
+        assertEquals(BuildConfig.PLAY_STORE ? null : folder.getCanonicalFile(), AndroidLibraryStorage.localDirectory(activity, tree));
     }
 
     @Test public void providersAndDeniedAccessRetainSaf() throws Exception {

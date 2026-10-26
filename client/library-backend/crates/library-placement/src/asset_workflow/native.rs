@@ -1,11 +1,11 @@
 //! Database policy for native file replay and interrupted directory moves.
 
 use std::collections::{HashMap, HashSet};
-use super::{AssetStore, BackendError, ContentHash, Database, DirId};
+use super::{AssetStore, BackendError, BookId, Database, DirId};
 use sync_common::ROOT_DIR_ID;
 
 pub(super) fn reconcile_file_jobs(assets: &AssetStore, database: &Database, jobs: Vec<library_database::NativeFileWork>) -> Result<(), BackendError> {
-    let mut movable = HashMap::<ContentHash, Vec<library_model::RelativeBookPath>>::new();
+    let mut movable = HashMap::<BookId, Vec<library_model::RelativeBookPath>>::new();
     for job in jobs.iter().filter(|job| job.operation == "remove") {
         movable.entry(job.content_hash).or_default().push(job.original_path.clone());
     }
@@ -20,7 +20,7 @@ pub(super) fn reconcile_file_jobs(assets: &AssetStore, database: &Database, jobs
 
 /// One placement job: removes a file, or materializes it under a free name.
 /// Does nothing when the job is obsolete or another operation holds the book.
-fn apply_file_work(assets: &AssetStore, database: &Database, movable: &HashMap<ContentHash, Vec<library_model::RelativeBookPath>>, work: library_database::NativeFileWork) -> Result<(), BackendError> {
+fn apply_file_work(assets: &AssetStore, database: &Database, movable: &HashMap<BookId, Vec<library_model::RelativeBookPath>>, work: library_database::NativeFileWork) -> Result<(), BackendError> {
     let Some(snapshot) = database.native_file_work_snapshot(work)? else { return Ok(()) };
     let hash = snapshot.work.content_hash;
     let Some(_lease) = assets.try_exclusive_lease(&hash)? else { return Ok(()) };
@@ -33,7 +33,7 @@ fn apply_file_work(assets: &AssetStore, database: &Database, movable: &HashMap<C
             if let Some((dir, name)) = snapshot.placement.clone() {
                 let mut alternatives = library_replica::file_name_candidates(&name, snapshot.occupied_names.iter().map(String::as_str).chain(std::iter::once(name.as_str())));
                 while assets.placement_conflicts(&hash, &path)? {
-                    let chosen = alternatives.next().expect("numeric name suffix space is unbounded");
+                    let chosen = alternatives.next().ok_or_else(|| BackendError::message("no collision-free file name remains"))?;
                     path = path.with_file_name(&chosen).map_err(BackendError::operation)?;
                     renamed = Some((dir.clone(), chosen));
                 }

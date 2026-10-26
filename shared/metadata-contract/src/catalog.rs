@@ -1,15 +1,16 @@
 //! Ranking values projected from server evidence for the compact desktop catalog.
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 pub struct CatalogEvidence {
     pub popularity: Option<CatalogPopularity>,
     pub sources: Vec<String>,
     pub external_audio: bool,
+    pub audiobook_duration_ms: Option<u64>,
 }
 
 /// Raw crawling and merge records stay on the server. Only ranking and source
-/// attribution cross into the published catalog, with audio format resolved.
+/// attribution and audiobook duration cross into the published catalog, with audio format resolved.
 pub fn source_evidence(source: &str, metadata: &Value) -> Result<CatalogEvidence, String> {
     let mut sources = Vec::new();
     let popularity = if source == "bokheim:combined-volumes" {
@@ -28,7 +29,12 @@ pub fn source_evidence(source: &str, metadata: &Value) -> Result<CatalogEvidence
     } else {
         observation(source, metadata)?
     };
-    Ok(CatalogEvidence { popularity, sources, external_audio: metadata["audiobook_download_url"].as_str().is_some() || metadata["audiobook_delivery"] == "external_download" })
+    Ok(CatalogEvidence {
+        popularity,
+        sources,
+        external_audio: metadata["audiobook_download_url"].as_str().is_some() || metadata["audiobook_delivery"] == "external_download",
+        audiobook_duration_ms: metadata["audiobook_duration_ms"].as_u64().filter(|duration| *duration > 0 && *duration <= i64::MAX as u64),
+    })
 }
 
 /// Source observations used by catalog browsing. Litteraturbanken retains its
@@ -138,6 +144,15 @@ pub fn stronger(value: &CatalogPopularity, previous: &CatalogPopularity) -> bool
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn source_audio_duration_preserves_known_values_and_rejects_invalid_values() {
+        let evidence = source_evidence("loyalbooks.com", &json!({"audiobook_duration_ms":27_789_000})).unwrap();
+        assert_eq!(evidence.audiobook_duration_ms, Some(27_789_000));
+        for value in [json!(null), json!(0), json!(-1), json!(u64::MAX), json!("7 hours")] {
+            assert_eq!(source_evidence("loyalbooks.com", &json!({"audiobook_duration_ms":value})).unwrap().audiobook_duration_ms, None);
+        }
+    }
 
     #[test]
     fn standardebooks_ordinal_rank_orders_within_its_source_without_inventing_counts() {

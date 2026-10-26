@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use sync_common::api::assets::{
     BlobManifestRequest, ThumbnailBatchDownloadEntry, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest, MAX_BLOB_MANIFEST_ENTRIES, MAX_THUMBNAIL_BATCH_BYTES, MAX_THUMBNAIL_BATCH_ENTRIES,
 };
-use sync_common::{ContentHash, LibraryId};
+use sync_common::{BookId, LibraryId};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -26,7 +26,7 @@ fn required_content_length(headers: &HeaderMap) -> Result<u64, StatusCode> {
 
 
 
-fn response_headers(kind: AssetKind, hash: &ContentHash) -> HeaderMap {
+fn response_headers(kind: AssetKind, hash: &BookId) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::ACCEPT_RANGES, header::HeaderValue::from_static("bytes"));
     if kind == AssetKind::Book {
@@ -46,7 +46,7 @@ fn response_headers(kind: AssetKind, hash: &ContentHash) -> HeaderMap {
     headers
 }
 
-async fn head(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash) -> Result<Response, StatusCode> {
+async fn head(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &BookId) -> Result<Response, StatusCode> {
     let Some(asset) = state.assets.open_from(user_id, library_id, kind, hash, 0).await.map_err(asset_error)? else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -56,7 +56,7 @@ async fn head(state: &AppState, user_id: &str, library_id: &LibraryId, kind: Ass
     Ok(response)
 }
 
-async fn get(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash, request_headers: &HeaderMap) -> Result<Response, StatusCode> {
+async fn get(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &BookId, request_headers: &HeaderMap) -> Result<Response, StatusCode> {
     let Some(asset) = state.assets.open_from(user_id, library_id, kind, hash, 0).await.map_err(asset_error)? else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -162,7 +162,7 @@ fn parse_range(value: &header::HeaderValue, total_len: u64) -> Result<ByteRange,
     Ok(ByteRange { start, end })
 }
 
-async fn put(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash, headers: &HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
+async fn put(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &BookId, headers: &HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
     let content_length = required_content_length(headers)?;
     if let Some(limit) = kind.max_bytes() {
         let len = content_length;
@@ -198,15 +198,15 @@ async fn put(state: &AppState, user_id: &str, library_id: &LibraryId, kind: Asse
     Ok(StatusCode::OK)
 }
 
-pub(super) async fn head_blob(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>) -> Result<Response, StatusCode> {
+pub(super) async fn head_blob(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, BookId)>) -> Result<Response, StatusCode> {
     head(&state, &user.user_id, &library_id, AssetKind::Book, &hash).await
 }
 
-pub(super) async fn get_blob(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap) -> Result<Response, StatusCode> {
+pub(super) async fn get_blob(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, BookId)>, headers: HeaderMap) -> Result<Response, StatusCode> {
     get(&state, &user.user_id, &library_id, AssetKind::Book, &hash, &headers).await
 }
 
-pub(super) async fn put_blob(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
+pub(super) async fn put_blob(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, BookId)>, headers: HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
     put(&state, &user.user_id, &library_id, AssetKind::Book, &hash, &headers, body).await
 }
 
@@ -219,15 +219,15 @@ pub(super) async fn post_blob_manifest(State(state): State<AppState>, user: Auth
     server_wire_http::response(&headers, response)
 }
 
-pub(super) async fn head_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>) -> Result<Response, StatusCode> {
+pub(super) async fn head_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, BookId)>) -> Result<Response, StatusCode> {
     head(&state, &user.user_id, &library_id, AssetKind::Thumbnail, &hash).await
 }
 
-pub(super) async fn get_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap) -> Result<Response, StatusCode> {
+pub(super) async fn get_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, BookId)>, headers: HeaderMap) -> Result<Response, StatusCode> {
     get(&state, &user.user_id, &library_id, AssetKind::Thumbnail, &hash, &headers).await
 }
 
-pub(super) async fn put_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
+pub(super) async fn put_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, BookId)>, headers: HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
     let content_length = required_content_length(&headers)?;
     let limit = 2 * sync_common::MAX_THUMBNAIL_BYTES + 64 * 1024;
     if content_length > limit { return Err(StatusCode::PAYLOAD_TOO_LARGE); }
@@ -243,7 +243,7 @@ pub(super) async fn put_thumbnail(State(state): State<AppState>, user: AuthUser,
     tokio::time::timeout(server_asset_store::MAX_THUMBNAIL_UPLOAD_DURATION, upload).await.map_err(|_| StatusCode::REQUEST_TIMEOUT)?
 }
 
-pub(super) async fn delete_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>) -> Result<StatusCode, StatusCode> {
+pub(super) async fn delete_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, BookId)>) -> Result<StatusCode, StatusCode> {
     state.assets.remove_thumbnail(&user.user_id, &library_id, &hash).await.map_err(asset_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -342,11 +342,11 @@ mod tests {
     use super::{parse_range, response_headers, ByteRange};
     use axum::http::{header, StatusCode};
     use server_asset_store::AssetKind;
-    use sync_common::ContentHash;
+    use sync_common::BookId;
 
     #[tokio::test]
     async fn audio_track_ranges_are_relative_to_the_mp3_entry() {
-        let content_hash = ContentHash::new(&"c".repeat(64));
+        let content_hash = BookId::new(&"c".repeat(64));
         let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(b"zip!TRACKaudio!tail".to_vec())), total_len: 19, offset: 0, content_hash };
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(header::RANGE, "bytes=2-5".parse().unwrap());
@@ -360,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn range_responses_are_bound_to_the_content_hash() {
-        let content_hash = ContentHash::new(&"b".repeat(64));
+        let content_hash = BookId::new(&"b".repeat(64));
         let payload = b"0123456789abcdef";
         for (range, validator, expected) in [("bytes=4-7", format!("\"{content_hash}\""), StatusCode::PARTIAL_CONTENT), ("bytes=4-7", "\"old-revision\"".into(), StatusCode::OK)] {
             let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(payload.to_vec())), total_len: payload.len() as u64, offset: 0, content_hash };

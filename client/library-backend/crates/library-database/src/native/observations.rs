@@ -3,7 +3,7 @@ pub(crate) use crate::DatabaseError;
 use crate::SqlParam;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use rusqlite::Connection;
-pub(crate) use sync_common::ContentHash;
+pub(crate) use sync_common::BookId;
 
 pub(crate) enum Revision {
     Local { size: i64 },
@@ -13,7 +13,7 @@ pub(crate) enum Revision {
 
 /// Record a verified local file, including an already-existing destination.
 /// Membership and upload scheduling are deliberately separate operations.
-pub(crate) fn record_file(connection: &Connection, directory: &str, hash: &ContentHash, path: &str, fingerprint: Option<&str>, revision: Revision) -> Result<(), DatabaseError> {
+pub(crate) fn record_file(connection: &Connection, directory: &str, hash: &BookId, path: &str, fingerprint: Option<&str>, revision: Revision) -> Result<(), DatabaseError> {
     #[cfg(not(target_arch = "wasm32"))]
     connection.shared_scanner_publish_projection(hash, directory, path)?;
     #[cfg(target_arch = "wasm32")]
@@ -43,7 +43,7 @@ pub(crate) fn record_file(connection: &Connection, directory: &str, hash: &Conte
 }
 
 /// Forget one observed file without changing synchronized membership.
-pub(crate) fn forget_file(connection: &Connection, directory: &str, hash: &ContentHash) -> Result<(), DatabaseError> {
+pub(crate) fn forget_file(connection: &Connection, directory: &str, hash: &BookId) -> Result<(), DatabaseError> {
     connection.observations_mark_missing(&directory, &(&hash))?;
     connection.observations_remove_file(&directory, &(&hash))?;
     Ok(())

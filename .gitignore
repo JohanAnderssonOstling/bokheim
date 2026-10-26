@@ -136,3 +136,4 @@ venv/
 # Verified PDFium dependency cache and prepared platform inputs
 /.pdfium-cache/
 /.pdfium/
+/.linux-toolchain/

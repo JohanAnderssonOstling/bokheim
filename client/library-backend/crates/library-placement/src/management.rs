@@ -2,7 +2,7 @@
 use client_runtime::BackendError;
 use library_model::Dir;
 use library_replica::filenames;
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 
 use crate::LibraryPlacement;
 
@@ -36,7 +36,7 @@ impl LibraryPlacement {
     }
 
     /// Puts a book back in a folder it was removed from.
-    pub fn restore_book_placement(&self, content_hash: &ContentHash, directory_id: &DirId) -> Result<(), BackendError> {
+    pub fn restore_book_placement(&self, content_hash: &BookId, directory_id: &DirId) -> Result<(), BackendError> {
         self.database.restore_book_placement(content_hash, directory_id)?;
         self.events.notify_contents_changed();
         Ok(())
@@ -52,13 +52,13 @@ impl LibraryPlacement {
     }
 
     /// Returns false for an existing assignment so callers retain it when undoing.
-    pub fn copy_book_to_directory(&self, hash: &ContentHash, source: Option<&DirId>, destination: &DirId) -> Result<bool, BackendError> {
+    pub fn copy_book_to_directory(&self, hash: &BookId, source: Option<&DirId>, destination: &DirId) -> Result<bool, BackendError> {
         let created = self.database.copy_book_to_directory(hash, source, destination)?;
         if created { self.events.notify_contents_changed(); }
         Ok(created)
     }
 
-    pub fn transfer_book_placement(&self, hash: &ContentHash, source: &DirId, destination: &DirId, moving: bool) -> Result<String, BackendError> {
+    pub fn transfer_book_placement(&self, hash: &BookId, source: &DirId, destination: &DirId, moving: bool) -> Result<String, BackendError> {
         let name = self.database.transfer_book_placement(hash, source, destination, moving)?;
         self.events.notify_contents_changed();
         Ok(name)
@@ -66,25 +66,25 @@ impl LibraryPlacement {
 
     /// Removes one placement. Returns `true` when the final placement
     /// is removed and the book consequently moves to Trash.
-    pub fn remove_book_from_directory(&self, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, BackendError> {
+    pub fn remove_book_from_directory(&self, content_hash: &BookId, source_id: &DirId) -> Result<bool, BackendError> {
         let orphaned = self.database.remove_book_placement(content_hash, source_id)?;
         self.events.notify_contents_changed();
         Ok(orphaned)
     }
 
-    pub fn move_book_to_trash(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
+    pub fn move_book_to_trash(&self, content_hash: &BookId) -> Result<(), BackendError> {
         self.database.trash_book(content_hash)?;
         self.events.notify_contents_changed();
         Ok(())
     }
 
-    pub fn restore_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
+    pub fn restore_book(&self, content_hash: &BookId) -> Result<(), BackendError> {
         self.database.restore_book(content_hash)?;
         self.events.notify_contents_changed();
         Ok(())
     }
 
-    pub fn purge_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
+    pub fn purge_book(&self, content_hash: &BookId) -> Result<(), BackendError> {
         self.database.purge_book(content_hash)?;
         self.events.notify_contents_changed();
         Ok(())

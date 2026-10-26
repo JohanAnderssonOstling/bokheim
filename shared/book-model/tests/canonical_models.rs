@@ -1,4 +1,4 @@
-use book_model::{Annotation, AnnotationAnchor, AnnotationStyle, BookDetails, BookRecord, ContentHash, PdfAnnotationAnchor, PdfAnnotationRect};
+use book_model::{Annotation, AnnotationAnchor, AnnotationStyle, BookDetails, BookRecord, BookId, PdfAnnotationAnchor, PdfAnnotationRect};
 
 #[test]
 fn composed_book_record_preserves_its_historical_binary_and_json_formats() {
@@ -25,7 +25,7 @@ fn annotations_round_trip_their_binary_form() {
     ] {
         let annotation = Annotation {
             id: "note-1".into(),
-            content_hash: ContentHash::new(&"a".repeat(64)),
+            content_hash: BookId::new(&"a".repeat(64)),
             anchor,
             exact_text: "Text".into(),
             style: AnnotationStyle::Underline,

@@ -110,10 +110,10 @@ pub(crate) fn receive(id: u64, message: &str) {
     }
 }
 
-pub(crate) fn wrap<V: Render + 'static>(content: Entity<V>, window: &mut Window, cx: &mut App) -> Entity<BrowserRoot<V>> {
-    let bridge = BRIDGE.get().expect("Android browser bridge was not initialized");
-    let receiver = bridge.receiver.lock().unwrap().take().expect("Android browser already has a GPUI host");
-    cx.new(|cx| BrowserRoot::new(content, receiver, bridge.native.clone(), window, cx))
+pub(crate) fn wrap<V: Render + 'static>(content: Entity<V>, window: &mut Window, cx: &mut App) -> Result<Entity<BrowserRoot<V>>, String> {
+    let bridge = BRIDGE.get().ok_or("Android browser bridge was not initialized")?;
+    let receiver = bridge.receiver.lock().map_err(|_| "Android browser bridge state is unavailable")?.take().ok_or("Android browser already has a GPUI host")?;
+    Ok(cx.new(|cx| BrowserRoot::new(content, receiver, bridge.native.clone(), window, cx)))
 }
 
 pub(crate) struct BrowserRoot<V: Render + 'static> {
@@ -195,15 +195,19 @@ impl<V: Render + 'static> BrowserRoot<V> {
                     // HTTP books wait for the backend's import result before
                     // reporting completion while this browser is open.
                     if (!torrent || error.is_some()) && self.downloads.get(&format!("{id}:{download}")).is_some() {
+                        // The platform webview reports download failures only as text.
+                        if let Some(error) = &error {
+                            log::warn!("browser download {download} failed: {error}");
+                        }
                         self.download_update(
                             id,
                             BrowserDownloadUpdate {
                                 replaces: None,
                                 download,
                                 name,
-                                phase: if error.is_some() { BrowserDownloadPhase::Failed } else { BrowserDownloadPhase::Preparing },
+                                phase: if error.is_some() { BrowserDownloadPhase::Failed(None) } else { BrowserDownloadPhase::Preparing },
                                 percent: None,
-                                message: error.or_else(|| Some("Adding to library".into())),
+                                message: error.is_none().then(|| "Adding to library".into()),
                             },
                             window,
                             cx,
@@ -332,7 +336,7 @@ impl Browser {
         let history = request["history_file"].as_str().map(PathBuf::from).or_else(|| request["data_directory"].as_str().map(|path| PathBuf::from(path).join("address-history.json"))).map(AddressHistory::load);
         let page = history.as_ref().and_then(|history| history.page(&url)).cloned().unwrap_or_else(|| PageMetadata::for_url(&url));
         request["start_page_html"] =
-            components::browser_start_page(history.iter().flat_map(|history| history.most_visited()).map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), components::browser_theme(cx)).into();
+            components::browser_start_page(history.iter().flat_map(|history| history.start_page_shortcuts()).map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), components::browser_theme(cx)).into();
         request["page_metadata_script"] = PAGE_METADATA_SCRIPT.into();
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("Web address or search").default_value(if url == "about:blank" { "" } else { &url }));
         let focus = cx.focus_handle();
@@ -753,7 +757,7 @@ mod tests {
             send(
                 Message::Command(Command::Feedback {
                     id,
-                    feedback: BrowserDownloadUpdate { download: "failed".into(), replaces: None, name: "Broken book".into(), phase: BrowserDownloadPhase::Failed, percent: None, message: Some("HTTP 500".into()) },
+                    feedback: BrowserDownloadUpdate { download: "failed".into(), replaces: None, name: "Broken book".into(), phase: BrowserDownloadPhase::Failed(None), percent: None, message: None },
                 }),
                 cx,
             );
@@ -900,7 +904,8 @@ mod tests {
         );
         let (root, cx) = cx.add_window_view(|window, cx| {
             let content = cx.new(|_| Library);
-            let browser = wrap(content, window, cx);
+            let browser = wrap(content.clone(), window, cx).unwrap();
+            assert!(wrap(content, window, cx).is_err(), "a second host must not steal the original host's event receiver");
             Root::new(browser, window, cx)
         });
         let root = cx.update(|_, cx| root.read(cx).view().clone().downcast::<BrowserRoot<Library>>().ok().unwrap());
@@ -911,6 +916,7 @@ mod tests {
         history.remember("gutenberg.org").unwrap();
         history.remember("example.com/books").unwrap();
         history.record_visit(PageMetadata { url: "https://gutenberg.org/".into(), title: "Project Gutenberg".into(), icon: None, site_name: None }).unwrap();
+        history.record_visit(PageMetadata { url: "https://example.com/books".into(), title: "Example books".into(), icon: None, site_name: None }).unwrap();
         let request = json!({"command":"open","id":7,"request":{"url":"about:blank","title":"Books","history_file":history_file}});
         command(&request.to_string()).unwrap();
         cx.run_until_parked();
@@ -919,8 +925,8 @@ mod tests {
             let commands = commands.lock().unwrap();
             let opened = commands.iter().find(|command| command["command"] == "open").unwrap();
             let html = opened["request"]["start_page_html"].as_str().unwrap();
-            assert!(html.contains("Project Gutenberg</span>"));
-            assert!(html.contains("href=\"https://gutenberg.org/\""));
+            assert!(html.contains("Example books</span>"));
+            assert!(!html.contains("gutenberg.org"));
             assert_eq!(opened["request"]["page_metadata_script"], PAGE_METADATA_SCRIPT);
         }
         receive(7, r#"{"kind":"page_visited","url":"https://gutenberg.org/","title":"Project Gutenberg","icon":null}"#);

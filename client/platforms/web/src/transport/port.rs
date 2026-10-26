@@ -14,8 +14,10 @@ impl Port {
     }
 
     pub fn new(raw: MessagePort, message: impl FnMut(web_sys::MessageEvent) + 'static, error: impl FnMut(web_sys::MessageEvent) + 'static) -> Self {
-        let message = Closure::<dyn FnMut(MessageEvent)>::new(message);
-        let error = Closure::<dyn FnMut(MessageEvent)>::new(error);
+        // Operation futures catch recoverable panics. A panic escaping an
+        // arbitrary stateful callback still terminates this worker instance.
+        let message = Closure::<dyn FnMut(MessageEvent)>::own_aborting(message);
+        let error = Closure::<dyn FnMut(MessageEvent)>::own_aborting(error);
         raw.set_onmessage(Some(message.as_ref().unchecked_ref()));
         raw.set_onmessageerror(Some(error.as_ref().unchecked_ref()));
         raw.start();

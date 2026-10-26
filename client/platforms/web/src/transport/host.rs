@@ -133,7 +133,7 @@ impl State {
                 }
                 let result = (|| {
                     let weak = Rc::downgrade(self);
-                    let released = Closure::<dyn FnMut()>::new(move || {
+                    let released = Closure::<dyn FnMut()>::own_aborting(move || {
                         if let Some(state) = weak.upgrade() {
                             state.remove(id);
                         }

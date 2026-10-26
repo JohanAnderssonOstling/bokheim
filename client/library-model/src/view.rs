@@ -1,6 +1,6 @@
 use crate::BookTocEntry;
 use book_model::AuthorId;
-use content_address::ContentHash;
+use content_address::BookId;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 
@@ -14,11 +14,11 @@ pub const FINISHED_PROGRESS_THRESHOLD: f32 = 98.0;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BookLocator {
     library_id: LibraryId,
-    content_hash: ContentHash,
+    content_hash: BookId,
 }
 
 impl BookLocator {
-    pub fn new(library_id: LibraryId, content_hash: ContentHash) -> Self {
+    pub fn new(library_id: LibraryId, content_hash: BookId) -> Self {
         Self { library_id, content_hash }
     }
 
@@ -26,7 +26,7 @@ impl BookLocator {
         &self.library_id
     }
 
-    pub fn content_hash(&self) -> ContentHash {
+    pub fn content_hash(&self) -> BookId {
         self.content_hash
     }
 }
@@ -35,9 +35,18 @@ impl BookLocator {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LibraryUpdate {
     Contents,
-    Covers(Vec<ContentHash>),
+    Covers(Vec<BookId>),
     Download(crate::BookDownloadStatus),
-    CatalogImport { entry: CardKey, progress: crate::CatalogImportProgress },
+    /// A queued user action failed after its initial command was accepted.
+    DownloadFailed {
+        content_hash: BookId,
+        /// Why it failed, when known; the diagnostic stays in the backend log.
+        failure: Option<operation_failure::Failure>,
+    },
+    CatalogImport {
+        entry: CardKey,
+        progress: crate::CatalogImportProgress,
+    },
     Scanning(bool),
 }
 
@@ -71,7 +80,7 @@ impl LibraryFileTypeFilter {
             Self::All => true,
             Self::Pdf => extension.eq_ignore_ascii_case("pdf"),
             Self::Audiobook => extension.eq_ignore_ascii_case("m4b") || extension.eq_ignore_ascii_case("mp3folder"),
-            Self::Book => matches!(extension.to_ascii_lowercase().as_str(), "epub" | "mobi" | "azw" | "azw3"),
+            Self::Book => matches!(extension.to_ascii_lowercase().as_str(), "epub" | "mobi" | "azw" | "azw3" | "fb2" | "fbz" | "fb2.zip" | "cbz"),
         }
     }
 }
@@ -357,12 +366,12 @@ pub struct Dir {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BookSource {
     Library {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     /// A catalog book the library does not hold; catalog browsing leaves out
     /// the ones it does.
     Catalog {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     /// A publication in one of the user's OPDS feeds. It has no file, and so
     /// no content hash, until it is downloaded into the library, where it
@@ -488,6 +497,14 @@ pub struct BookCardRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CardKey(pub [u8; 32]);
 
+impl From<BookId> for CardKey {
+    fn from(id: BookId) -> Self { Self(*id.identity_digest()) }
+}
+
+impl From<&BookId> for CardKey {
+    fn from(id: &BookId) -> Self { Self::from(*id) }
+}
+
 impl std::fmt::Display for CardKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.iter().try_for_each(|byte| write!(formatter, "{byte:02x}"))
@@ -497,14 +514,14 @@ impl std::fmt::Display for CardKey {
 impl BookCardRow {
     pub fn key(&self) -> CardKey {
         match self.source {
-            BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => CardKey(*content_hash.as_bytes()),
+            BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => CardKey::from(content_hash),
             BookSource::Opds { entry, .. } | BookSource::ExternalCatalog { entry, .. } => entry,
         }
     }
 
     /// The file of a book in the library; none for catalog and feed books,
     /// which are added rather than read or downloaded.
-    pub fn library_file(&self) -> Option<ContentHash> {
+    pub fn library_file(&self) -> Option<BookId> {
         match self.source {
             BookSource::Library { content_hash } => Some(content_hash),
             BookSource::Catalog { .. } | BookSource::Opds { .. } | BookSource::ExternalCatalog { .. } => None,
@@ -513,7 +530,7 @@ impl BookCardRow {
 
     /// The book's file, when it has one: a feed book has none until it is
     /// downloaded.
-    pub fn content_hash(&self) -> Option<ContentHash> {
+    pub fn content_hash(&self) -> Option<BookId> {
         match self.source {
             BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => Some(content_hash),
             BookSource::Opds { .. } | BookSource::ExternalCatalog { .. } => None,
@@ -523,7 +540,7 @@ impl BookCardRow {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrashedBook {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub title: String,
     pub author: String,
     pub format: String,
@@ -613,6 +630,8 @@ pub struct BookDetail {
     /// list that could never mark anything.
     pub current_target: Option<String>,
     pub toc: Vec<BookTocEntry>,
+    #[serde(default)]
+    pub chapter_read_status: book_model::ChapterReadStatus,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

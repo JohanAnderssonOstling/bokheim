@@ -1,9 +1,12 @@
 //! GPUI reader surfaces embedded by the application shell.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 mod book;
 mod epub;
 mod invalidation;
 mod pdf;
+mod comic;
 mod settings;
 mod shell;
 mod windows;
@@ -65,6 +68,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
     shell::input::bind_reader_keys(cx);
     epub::render::bind_keys(cx);
     pdf::bind_pdf_keys(cx);
+    shell::input::bind_document_keys(cx, "ComicReaderDocument");
 }
 
 /// Returns debug-only invalidation counts grouped by component and reason.

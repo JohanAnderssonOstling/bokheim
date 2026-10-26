@@ -176,7 +176,7 @@ impl Coordinator {
             background: RefCell::new(Vec::new()),
         });
         let weak = Rc::downgrade(&state);
-        let message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let message = Closure::<dyn FnMut(MessageEvent)>::own_aborting(move |event: MessageEvent| {
             if let Some(state) = weak.upgrade() {
                 state.receive(event.data());
             }
@@ -184,7 +184,7 @@ impl Coordinator {
         .into_js_value();
         state.backend.set_onmessage(Some(message.unchecked_ref()));
         let weak = Rc::downgrade(&state);
-        let error = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let error = Closure::<dyn FnMut(web_sys::Event)>::own_aborting(move |event: web_sys::Event| {
             event.prevent_default();
             if let Some(state) = weak.upgrade() {
                 state.fail(field(event.as_ref(), "message").as_string().unwrap_or_else(|| "The browser database worker stopped unexpectedly.".into()));

@@ -98,7 +98,8 @@ impl LocalDocumentSession {
         // holds, and keeping a second copy of the library's navigation only to
         // save that walk is what this stopped being.
         let outline = document_outline(&document);
-        Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline, skippable_pages }, analysis: RefCell::new(PageAnalysisCache::default()), page_source: None })
+        let right_to_left = document.catalog().is_right_to_left();
+        Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline, skippable_pages, right_to_left }, analysis: RefCell::new(PageAnalysisCache::default()), page_source: None })
     }
 }
 
