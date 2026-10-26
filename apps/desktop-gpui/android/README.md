@@ -70,6 +70,55 @@ The unsigned output is
 The preparation step changes this isolated checkout's settings and removes the
 non-Android files described above; do not run it in your development checkout.
 
+### Automated developer-signed releases
+
+With the production signing settings described below configured, run this from
+the repository root:
+
+```sh
+python3 scripts/fdroid/release.py
+```
+
+The command builds the committed `HEAD` in an isolated source snapshot, prepares
+the companion sources, builds the unsigned F-Droid APK, checks its contents and
+native receipts, signs it with the existing production keystore, and verifies
+the certificate, alignment and unchanged APK contents. It finds JDK 21 and
+Gradle 8.14.3 in the environment or standard local installation/cache locations.
+Android SDK build-tools 36.0.0 and NDK 29.0.14206865 must be installed.
+Uncommitted developer changes are excluded; select another committed source
+with `--ref <commit-or-branch>`.
+
+Both APKs, SHA-256 checksums, and JSON verification reports are saved in a new
+timestamped directory under `artifacts/fdroid-release/`. The reports explicitly
+record that clean-build reproducibility has not been verified. This command
+creates local artifacts; official F-Droid submission and publication are separate.
+
+The helper reads the existing `BOKHEIM_ANDROID_*` environment settings or user
+Gradle properties, including private password files and a separate key password.
+Passwords reach the signing tools through child-process environment variables,
+never command-line password values. The keystore's certificate is checked against
+`BOKHEIM_ANDROID_CERT_SHA256` or `ANDROID_CERT_SHA256` when either is configured.
+The private key and passwords are never copied into the output directory.
+
+To reuse a prepared checkout and native caches:
+
+```sh
+python3 scripts/fdroid/release.py --checkout /path/to/prepared/bokheim \
+  --pdfium-source-work /path/to/pdfium-cache \
+  --speech-source-work /path/to/speech-cache
+```
+
+To sign an existing verified unsigned build without rebuilding:
+
+```sh
+python3 scripts/fdroid/release.py --apk /path/to/BokheimGpui-release-unsigned.apk
+```
+
+Additional options include `--output-dir`, `--gradle`, `--sdk`, `--jobs`,
+`--native-jobs`, and `--offline`. Existing output directories are preserved.
+The normal F-Droid Gradle build continues to produce an unsigned APK without
+requiring production signing credentials.
+
 F-Droid can either sign the app with its own per-app key, or distribute an APK
 signed with the existing developer key after verifying a reproducible build.
 The latter preserves update compatibility with direct APKs using that key, an

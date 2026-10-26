@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify an unsigned F-Droid APK and its packaged native-source receipts."""
+"""Verify a F-Droid APK, its signing identity and native-source receipts."""
 import argparse
 import hashlib
 import json
@@ -15,23 +15,30 @@ def require(value, message):
         raise RuntimeError(message)
 
 
-def verify(apk, aapt):
+def verify(apk, aapt, certificate=None, environment=None):
+    if certificate is not None:
+        require(re.fullmatch(r"[0-9a-f]{64}", certificate), "Invalid signing certificate SHA-256")
+        signature = subprocess.check_output([str(Path(aapt).with_name("apksigner")),
+            "verify", "--verbose", "--print-certs", str(apk)], text=True, env=environment)
+        signers = re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$", signature, re.M)
+        require([signer.lower() for signer in signers] == [certificate], "APK signing certificate mismatch")
     zipalign = Path(aapt).with_name("zipalign")
-    subprocess.run([str(zipalign), "-c", "-P", "16", "4", str(apk)], check=True)
-    manifest = subprocess.check_output([str(aapt), "dump", "xmltree", str(apk), "AndroidManifest.xml"], text=True)
+    subprocess.run([str(zipalign), "-c", "-P", "16", "4", str(apk)], check=True, env=environment)
+    manifest = subprocess.check_output([str(aapt), "dump", "xmltree", str(apk), "AndroidManifest.xml"], text=True, env=environment)
     require("android.permission.REQUEST_INSTALL_PACKAGES" not in manifest, "APK requests permission to install updates")
     for name in ("UpdateMigrationService", "UpdateRestartActivity", ".updates"):
         require(name not in manifest, f"Updater component is present: {name}")
     require("android.permission.MANAGE_EXTERNAL_STORAGE" in manifest, "F-Droid storage access was accidentally restricted")
-    badging = subprocess.check_output([str(aapt), "dump", "badging", str(apk)], text=True)
+    badging = subprocess.check_output([str(aapt), "dump", "badging", str(apk)], text=True, env=environment)
     require("application-debuggable" not in badging, "F-Droid release is debuggable")
     require("package: name='se.bokheim.reader.gpui'" in badging, "Unexpected application ID")
     libraries = {}
     with zipfile.ZipFile(apk) as archive:
         names = archive.namelist()
         require(all(name.startswith("lib/arm64-v8a/") for name in names if name.startswith("lib/")), "Unexpected native ABI in APK")
-        require(not any(re.match(r"META-INF/.*\.(RSA|DSA|EC)$", n, re.I) for n in names), "Expected an unsigned APK")
-        require(b"APK Sig Block 42" not in Path(apk).read_bytes(), "Expected no APK v2/v3 signing block")
+        if certificate is None:
+            require(not any(re.match(r"META-INF/.*\.(RSA|DSA|EC)$", n, re.I) for n in names), "Expected an unsigned APK")
+            require(b"APK Sig Block 42" not in Path(apk).read_bytes(), "Expected no APK v2/v3 signing block")
         for name in names:
             if name.endswith(".dex"):
                 dex = archive.read(name)
@@ -66,7 +73,8 @@ def verify(apk, aapt):
             for name in ("LICENSE", "SOURCE.json"):
                 sha = hashlib.sha256(archive.read(f"assets/{directory}/{name}")).hexdigest()
                 require(sha == receipt["files"][name], f"Changed packaged provenance: {directory}/{name}")
-    return {"apk_sha256": hashlib.sha256(Path(apk).read_bytes()).hexdigest(), "unsigned": True,
+    return {"apk_sha256": hashlib.sha256(Path(apk).read_bytes()).hexdigest(), "unsigned": certificate is None,
+        "signing_cert_sha256": [certificate] if certificate else [],
         "updater_components_removed": True, "proprietary_sdk_class_check": "passed", "libraries": libraries,
         "native_receipts_match_apk": True, "apk_supports_16k_page_alignment": True, "device_runtime_tested": False}
 
@@ -76,11 +84,12 @@ def main():
     parser.add_argument("--apk", required=True, type=Path)
     parser.add_argument("--aapt", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--cert-sha256", help="Verify a signed APK against this certificate; otherwise require unsigned")
     args = parser.parse_args()
-    report = verify(args.apk, args.aapt)
+    report = verify(args.apk, args.aapt, args.cert_sha256)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
-    print("F-Droid APK checks passed; device rendering and speech testing remain.")
+    print("F-Droid APK checks passed.")
 
 
 if __name__ == "__main__":
