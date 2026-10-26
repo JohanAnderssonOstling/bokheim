@@ -27,5 +27,6 @@
       "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
     }
   },
-  "ndk_version": "29.0.14206865"
+  "ndk_version": "29.0.14206865",
+  "dependencies_manifest_sha256": "e1341e3b0d42fd2698788844d33ba654888e34f03f10e12eae1e57e1a03231bf"
 }

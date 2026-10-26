@@ -14,7 +14,7 @@ from native_build import apply_source_patch, digest, notices, receipt, revision,
 PINS = Path(__file__).with_name("source.json")
 
 
-def prepare_source(destination, work=None, jobs=2, offline=False):
+def prepare_source(destination, work=None, jobs=2, offline=False, fetch_only=False):
     pins = json.loads(PINS.read_text())
     work = Path(work or ROOT / ".tmp/pdfium-source-build-7961").resolve()
     depot = work / "depot_tools"
@@ -90,6 +90,8 @@ def prepare_source(destination, work=None, jobs=2, offline=False):
             for name in allowed:
                 if (directory / name).read_bytes() != (pristine / name).read_bytes():
                     raise RuntimeError(f"PDFium source differs from the pinned patch set: {name}")
+    if fetch_only:
+        return source
     out = source / "out/android-arm64"
     args = '\n'.join(['target_os = "android"', 'target_cpu = "arm64"', 'is_debug = false',
         'is_component_build = false', 'pdf_is_standalone = true', 'pdf_use_partition_alloc = false',

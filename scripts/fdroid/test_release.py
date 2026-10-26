@@ -100,8 +100,9 @@ class FdroidReleaseTests(unittest.TestCase):
             (checkout / "FDROID-PREPARED.json").write_text("{}\n")
             apk, commit = release.build(args, self.root / "sdk", {})
             command = run.call_args.args[0]
-            self.assertIn("-Pbokheim.fdroid=true", command)
-            self.assertIn("assembleRelease", command)
+            self.assertEqual(Path(command[1]).name, "build.py")
+            self.assertIn("--pdfium-source-work", command)
+            self.assertIn("--speech-source-work", command)
             self.assertFalse(any("localSigning" in value or "googleDrive" in value for value in command))
             self.assertEqual(apk, checkout / release.APK_PATH)
             self.assertIsNone(commit)

@@ -1,10 +1,12 @@
 import groovy.json.JsonSlurper
+import org.gradle.api.artifacts.ProjectDependency
 
 plugins {
     id("com.android.application") version "8.11.0"
 }
 
 val fdroidBuild = providers.gradleProperty("bokheim.fdroid").orNull == "true"
+val fdroidToolchains = JsonSlurper().parse(rootProject.projectDir.resolve("../../../scripts/fdroid/toolchains.json")) as Map<*, *>
 val androidNdkVersion = if (fdroidBuild) "29.0.14206865" else "29.0.13599879"
 val rustTarget = "aarch64-linux-android"
 val rustAbi = "arm64-v8a"
@@ -83,6 +85,7 @@ val stageFdroidNativeNotices by tasks.registering(Copy::class) {
 android {
     namespace = "se.bokheim.reader.gpui"
     compileSdk = 36
+    if (fdroidBuild) buildToolsVersion = fdroidToolchains["build_tools"].toString()
     ndkVersion = androidNdkVersion
 
     defaultConfig {
@@ -131,6 +134,7 @@ android {
     }
     buildTypes {
         getByName("release") {
+            if (fdroidBuild) vcsInfo.include = false
             signingConfig = when {
                 fdroidBuild -> null
                 localSigning -> signingConfigs.getByName("debug")
@@ -150,6 +154,17 @@ android {
 
     sourceSets.getByName("play").assets.srcDir(layout.buildDirectory.dir("taxonomyAssets/release"))
     sourceSets.getByName("play").jniLibs.srcDir(stagedRustReleaseLibraries)
+}
+
+tasks.register("prefetchFdroidDependencies") {
+    doLast {
+        check(fdroidBuild) { "Dependency prefetch requires -Pbokheim.fdroid=true" }
+        rootProject.allprojects.forEach { project ->
+            project.configurations.filter { configuration -> configuration.isCanBeResolved &&
+                listOf("test", "debug", "play").none { configuration.name.contains(it, ignoreCase = true) } }
+                .forEach { configuration -> configuration.copyRecursive { it !is ProjectDependency }.resolve() }
+        }
+    }
 }
 
 val requireReleaseSigning by tasks.registering {
@@ -311,12 +326,25 @@ val stageTaxonomyRelease by tasks.registering(Copy::class) {
 }
 
 tasks.configureEach {
+    if (fdroidBuild && (name == "preparePdfium" || name == "prepareSpeech")) {
+        (this as Exec).environment("SOURCE_DATE_EPOCH", fdroidToolchains["source_date_epoch"].toString())
+    }
     if (fdroidBuild && (name == "buildRustDebug" || name == "buildRustRelease")) {
         val rustTask = this as Exec
         rustTask.environment("CARGO_TARGET_DIR", cargoTargetDirectory.absolutePath)
         rustTask.environment("PDFIUM_PREPARED_DIR", pdfiumDirectory.absolutePath)
         rustTask.environment("PDFIUM_REQUIRE_SOURCE", "1")
         rustTask.environment("CARGO_BUILD_JOBS", providers.gradleProperty("bokheim.rustJobs").orNull ?: "2")
+        rustTask.environment("RUSTUP_TOOLCHAIN", fdroidToolchains["rust"].toString())
+        rustTask.environment("SOURCE_DATE_EPOCH", fdroidToolchains["source_date_epoch"].toString())
+        val userHome = System.getenv("HOME") ?: System.getProperty("user.home")
+        val cargoHome = System.getenv("CARGO_HOME") ?: "$userHome/.cargo"
+        val rustupHome = System.getenv("RUSTUP_HOME") ?: "$userHome/.rustup"
+        rustTask.environment("RUSTFLAGS", listOf(
+            "--remap-path-prefix=${workspaceRoot.parentFile}=/build",
+            "--remap-path-prefix=$cargoHome=/build/cargo",
+            "--remap-path-prefix=$rustupHome=/build/rustup",
+        ).joinToString(" "))
         rustTask.args("--locked")
         if (gradle.startParameter.isOffline) rustTask.args("--offline")
     }

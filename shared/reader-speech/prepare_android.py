@@ -2,6 +2,7 @@
 """Prepare verified ARM64 speech libraries and offline voice assets for Android."""
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import runpy
 import shutil
@@ -53,7 +54,9 @@ def prepare_android(destination, offline=False, from_source=False, onnxruntime_a
             for library in (candidates[0] / name for name in REQUIRED):
                 shutil.copy2(library, libraries / library.name)
             marker.write_text(SHA256 + "\n")
-    prepare(destination / "assets/tts/alba", offline=offline)
+    voice_archive = (Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) /
+        "bokheim/tts/vits-piper-en_GB-alba-medium.tar.bz2") if from_source else None
+    prepare(destination / "assets/tts/alba", offline=offline, archive=voice_archive)
     (destination / "assets/tts/alba/voice.sha256").write_text(VOICE_SHA256 + "\n")
     if from_source:
         license_directory = Path(__file__).with_name("licenses")
