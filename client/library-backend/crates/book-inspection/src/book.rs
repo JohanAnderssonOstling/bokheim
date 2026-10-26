@@ -3,8 +3,9 @@
 //! document inspection; M4B and MP3-folder audiobooks are read here.
 
 use crate::{MetadataResult, inspect_epub_reader, inspect_pdf_reader};
+use book_content::{Book, BookFormat as ContainerFormat, TocEntry, comic::ComicBook};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AudiobookChapter, BookFormat, BookMetadataError, BookRecord, ChapterOrigin, Contributor};
-use content_address::ContentHash;
+use content_address::BookId;
 use std::collections::HashSet;
 #[cfg(target_arch = "wasm32")]
 use std::io::Cursor;
@@ -63,7 +64,7 @@ pub fn inspect_book_reader(source_name: &Path, format: BookFormat, reader: impl 
     inspect_book_reader_with_hash(source_name, format, reader, None)
 }
 
-pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static, content_hash: Option<ContentHash>) -> MetadataResult<InspectedBook> {
+pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static, content_hash: Option<BookId>) -> MetadataResult<InspectedBook> {
     let mut pdf = None;
     let mut pdf_toc = Vec::new();
     let reader = if format == BookFormat::Pdf {
@@ -85,6 +86,20 @@ pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, rea
         }
         BookFormat::Mobi => {
             let (metadata, toc) = crate::inspect_mobi_reader(source_name, reader)?;
+            (metadata, None, toc)
+        }
+        BookFormat::Fb2 => {
+            let mut book = Book::open_reader(ContainerFormat::Fb2, reader)?;
+            let metadata = crate::metadata_from_book(source_name, &mut book)?;
+            let toc = crate::book_toc_entries(book.toc()?.unwrap_or_default());
+            (metadata, None, toc)
+        }
+        BookFormat::Cbz => {
+            let book = ComicBook::open_reader(reader)?;
+            let metadata = crate::metadata_from_declared(source_name, book.metadata)?;
+            let toc = crate::book_toc_entries(book.pages.iter().enumerate().filter_map(|(index, page)| page.bookmark.as_ref().map(|title| TocEntry {
+                title: title.clone(), link: book_model::cbz_toc_target(index), children: Vec::new(),
+            })).collect());
             (metadata, None, toc)
         }
         BookFormat::Pdf => (inspect_pdf_reader(source_name, reader)?.metadata, None, pdf_toc),
@@ -189,7 +204,7 @@ pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, rea
                             }
                             hasher.update(&buffer[..count]);
                         }
-                        ContentHash::from(hasher.finalize())
+                        BookId::from(hasher.finalize())
                     }
                 };
                 let tracks = audiobook_archive::archived_tracks(&mut reader)?;
@@ -337,6 +352,35 @@ fn duration_ms(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fb2_import_keeps_book_authors_separate_from_file_creators_and_print_isbn() {
+        let xml = br#"<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0"><description>
+<title-info><book-title>Example novel</book-title><author><first-name>Ada</first-name><last-name>Writer</last-name></author><lang>en</lang></title-info>
+<document-info><author><first-name>File</first-name><last-name>Creator</last-name></author></document-info>
+<publish-info><isbn>9780306406157</isbn><year>1980</year></publish-info></description><body><section id="chapter"><title><p>First chapter</p></title><p>Book text.</p></section></body></FictionBook>"#;
+        let inspected = inspect_book_reader(Path::new("example.fb2"), BookFormat::Fb2, std::io::Cursor::new(xml.to_vec())).unwrap();
+        assert_eq!(inspected.metadata.metadata.title, "Example novel");
+        assert_eq!(inspected.metadata.metadata.contributors.len(), 1);
+        assert_eq!(inspected.metadata.metadata.contributors[0].name(), "Ada Writer");
+        assert!(inspected.metadata.book.identifiers.is_empty());
+        assert_eq!(inspected.metadata.book.year, None);
+        assert_eq!(inspected.toc[0].title, "First chapter");
+        assert!(inspected.toc[0].target.starts_with("/fb2/section-0.xhtml#"));
+    }
+
+    #[test]
+    fn cbz_import_keeps_comicinfo_bookmarks_as_page_targets() {
+        use std::io::{Cursor, Write};
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in [("1.jpg", b"page".as_slice()), ("2.jpg", b"page".as_slice()), ("ComicInfo.xml", br#"<ComicInfo><Title>Issue One</Title><Writer>Ada Writer</Writer><Pages><Page Image="1" Bookmark="Second part"/></Pages></ComicInfo>"#.as_slice())] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap(); zip.write_all(bytes).unwrap();
+        }
+        let inspected = inspect_book_reader(Path::new("issue.cbz"), BookFormat::Cbz, zip.finish().unwrap()).unwrap();
+        assert_eq!(inspected.metadata.metadata.title, "Issue One");
+        assert_eq!(inspected.metadata.metadata.contributors[0].name(), "Ada Writer");
+        assert_eq!(inspected.toc[0].target, book_model::cbz_toc_target(1));
+    }
 
     #[test]
     fn mp3_folder_cue_replaces_file_chapters_without_changing_track_index() {

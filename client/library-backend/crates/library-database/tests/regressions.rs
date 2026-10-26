@@ -1,7 +1,7 @@
 use crate::query_methods::query_rows;
 use library_database::{Database, ImportCommit, NativeDirectoryAcknowledgement, NativeDirectoryCompletion};
 use library_model::PublishedStagedBook;
-use sync_common::{ContentHash, DirId, ROOT_DIR_ID, StateAddress};
+use sync_common::{BookId, DirId, ROOT_DIR_ID, StateAddress};
 
 fn database() -> Database {
     let db = Database::open(":memory:").unwrap();
@@ -10,7 +10,7 @@ fn database() -> Database {
 }
 
 fn import() -> ImportCommit {
-    let hash = ContentHash::new(&"9".repeat(64));
+    let hash = BookId::new(&"9".repeat(64));
     ImportCommit {
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
@@ -146,7 +146,7 @@ fn failed_contributor_write_rolls_back_book_addition() {
     db.connection.fixtures_create_book_contributor().unwrap();
     let new_import = || {
         let mut next = import();
-        next.content_hash = ContentHash::new(&"b".repeat(64));
+        next.content_hash = BookId::new(&"b".repeat(64));
         next.file_name = "new-book.epub".into();
         next.published.name = "new-book.epub".into();
         next.published.relative_path = "/new-book.epub".into();
@@ -290,7 +290,7 @@ fn navigation_on_book_distinguishes_missing_and_empty_and_replaces_playback_fiel
     use crate::books::toc::TocSql;
 
     let db = database();
-    let hash = ContentHash::new(&"a".repeat(64));
+    let hash = BookId::new(&"a".repeat(64));
     db.connection.fixtures_insert_book_7(&(&hash)).unwrap();
     let read_toc = || {
         let mut toc = None;
@@ -334,7 +334,7 @@ fn stored_audiobook_navigation_syncs_with_its_addition() {
         library_replica::LibraryStateEntry::BookAdd { value, .. } if value.navigation.as_ref().is_some_and(|nav| nav.duration_ms == Some(1000) && nav.entries.len() == 1))));
 }
 
-fn copy_fixture(db: &Database) -> (ContentHash, DirId, DirId) {
+fn copy_fixture(db: &Database) -> (BookId, DirId, DirId) {
     let source = db.create_directory(&ROOT_DIR_ID, &"A".into()).unwrap().id;
     let destination = db.create_directory(&ROOT_DIR_ID, &"Z".into()).unwrap().id;
     let mut book = import();
@@ -410,7 +410,7 @@ mod scanner {
     use super::*;
     use library_database::{FilesystemScan, InspectedFilesystemScan, ScanApplyResult, ScanFileObservation, ScannedBook};
 
-    fn fixture() -> (Database, ContentHash) {
+    fn fixture() -> (Database, BookId) {
         let db = database();
         let mut book = import();
         let hash = book.content_hash;
@@ -430,7 +430,7 @@ mod scanner {
     }
 
     fn replacement() -> ScannedBook {
-        let hash = ContentHash::new(&"b".repeat(64));
+        let hash = BookId::new(&"b".repeat(64));
         ScannedBook {
             directory: ROOT_DIR_ID,
             name: "book.epub".into(),
@@ -444,7 +444,7 @@ mod scanner {
         }
     }
 
-    fn local_state(db: &Database, hash: ContentHash, directory: DirId) -> (bool, bool, String, i64) {
+    fn local_state(db: &Database, hash: BookId, directory: DirId) -> (bool, bool, String, i64) {
         db.connection.fixtures_read_local_file_projection_bd_deleted_at_bd(&(&hash), &(directory.to_string()), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap()
     }
 
@@ -481,7 +481,7 @@ mod scanner {
         let mut second = replacement();
         second.name = "second.epub".into();
         second.path = second.name.clone();
-        second.content_hash = ContentHash::new(&"c".repeat(64));
+        second.content_hash = BookId::new(&"c".repeat(64));
 
         assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { readable: true, books: vec![second] }, false, None).unwrap(), ScanApplyResult::Applied);
         assert_eq!(
@@ -510,7 +510,7 @@ mod scanner {
     fn ordinary_import_still_rejects_an_occupied_filename() {
         let (db, old) = fixture();
         let mut book = import();
-        book.content_hash = ContentHash::new(&"b".repeat(64));
+        book.content_hash = BookId::new(&"b".repeat(64));
         assert!(db.commit_import(book).is_err());
         assert_eq!(local_state(&db, old, ROOT_DIR_ID), (true, true, "1".into(), 1));
     }
@@ -706,7 +706,7 @@ fn subject_fixture() -> (Database, String, String) {
     let db = database();
     for index in 1..=4 {
         let mut book = import();
-        book.content_hash = ContentHash::new(&format!("{index:064x}"));
+        book.content_hash = BookId::new(&format!("{index:064x}"));
 
         book.file_name = format!("book{index}.epub");
         book.published.name = book.file_name.clone();
@@ -769,10 +769,10 @@ fn browse_folder(db: &Database, dir: DirId, search: &str, languages: &[&str]) ->
     db.browse_contents(&query, false).unwrap()
 }
 
-fn import_in_folder(db: &Database, index: u64, dir: DirId) -> ContentHash {
+fn import_in_folder(db: &Database, index: u64, dir: DirId) -> BookId {
     let mut book = import();
     book.parent_id = dir;
-    book.content_hash = ContentHash::new(&format!("{index:064x}"));
+    book.content_hash = BookId::new(&format!("{index:064x}"));
 
     book.file_name = format!("book{index}.epub");
     book.published.name = book.file_name.clone();
@@ -783,7 +783,7 @@ fn import_in_folder(db: &Database, index: u64, dir: DirId) -> ContentHash {
     hash
 }
 
-fn place_book(db: &Database, hash: ContentHash, dir: DirId, downloaded: bool) {
+fn place_book(db: &Database, hash: BookId, dir: DirId, downloaded: bool) {
     db.connection.fixtures_insert_book_dir_4(&(dir.to_string()), &(&hash), &downloaded).unwrap();
 }
 
@@ -1086,7 +1086,7 @@ fn browse_progress_is_derived_without_rewriting_sync_registers_and_audio_is_book
 }
 
 /// Books a search from the root finds, by title or author.
-fn searched(db: &Database, search: &str) -> Vec<ContentHash> {
+fn searched(db: &Database, search: &str) -> Vec<BookId> {
     browse_folder(db, ROOT_DIR_ID, search, &[]).books.into_iter().map(|book| book.content_hash().unwrap()).collect()
 }
 
@@ -1173,7 +1173,7 @@ fn projected_subject_codes(db: &Database) -> Vec<String> {
 #[cfg(test)]
 use crate::sql_fixtures::FixturesSql;
 
-fn complete_no_match(db: &Database, hash: &ContentHash) {
+fn complete_no_match(db: &Database, hash: &BookId) {
     use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
     let Some(candidate) = db.enrichment_candidates(&[*hash], 0).unwrap().pop() else { return };
     db.record_enrichment(hash, &candidate.request_key, &BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, detail: String::new() }, 0).unwrap();
@@ -1313,7 +1313,7 @@ fn flat_book_copy_failure_keeps_the_successful_prefix() {
     let db = database();
     let destination = db.create_directory(&ROOT_DIR_ID, &"Copies".into()).unwrap().id;
     let first = import_in_folder(&db, 905, ROOT_DIR_ID);
-    let missing = ContentHash::new(&"f".repeat(64));
+    let missing = BookId::new(&"f".repeat(64));
     assert!(db.copy_book_to_directory(&first, None, &destination).unwrap());
     assert!(db.copy_book_to_directory(&missing, None, &destination).is_err());
     assert_eq!(browse_folder(&db, destination, "", &[]).books[0].content_hash(), Some(first));

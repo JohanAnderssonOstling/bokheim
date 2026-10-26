@@ -10,6 +10,7 @@ pub enum Component {
     ReaderShell,
     /// The PDF window.
     PdfShell,
+    ComicShell,
 }
 
 impl Component {
@@ -17,6 +18,7 @@ impl Component {
         match self {
             Self::ReaderShell => "reader_shell",
             Self::PdfShell => "pdf_shell",
+            Self::ComicShell => "comic_shell",
         }
     }
 }

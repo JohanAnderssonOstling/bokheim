@@ -1,11 +1,15 @@
+use std::array::from_fn;
+use std::cell::Cell;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::rc::Rc;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use app::host::{LIBRARY_MANIFEST_FILENAME, LibraryMaintenancePermit, defer_library_maintenance};
 use app::{AppDataLocation, host::BackendLaunch};
-use gpui::Application;
-use gpui_kobo::{KoboExperienceMode, KoboPlatform, KoboPlatformOptions, KoboPowerOptions, PageButtonBehavior};
+use gpui::{Application, px, size};
+use gpui_kobo::{KoboExperienceMode, KoboInputProfile, KoboPlatform, KoboPlatformOptions, KoboPowerOptions, KoboTouchProtocol, PageButtonBehavior, TouchTransform};
+use kobo_device::profile::{PROFILES, Profile, TouchProtocol};
 
 #[path = "../kobo_power.rs"]
 mod kobo_power;
@@ -13,7 +17,7 @@ mod kobo_power;
 static LIBRARY_MAINTENANCE: Mutex<Option<LibraryMaintenancePermit>> = Mutex::new(None);
 
 fn release_library_maintenance() {
-    let permit = LIBRARY_MAINTENANCE.lock().expect("library maintenance guard poisoned").take();
+    let permit = LIBRARY_MAINTENANCE.lock().unwrap_or_else(PoisonError::into_inner).take();
     drop(permit);
     println!("KOBO_LIBRARY_MAINTENANCE phase=released_after_first_frame");
 }
@@ -73,7 +77,14 @@ fn log_bluetooth_diagnostics() {
     println!("KOBO_BLUETOOTH processes={process_names:?}");
 }
 
-fn main() {
+fn main() -> Result<(), String> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|argument| argument == "--list-device-models") {
+        for profile in PROFILES {
+            println!("{}\t{}\t{}x{}\t{}", profile.id, profile.product, profile.width, profile.height, profile.name);
+        }
+        return Ok(());
+    }
     #[cfg(target_arch = "arm")]
     if std::env::args().nth(1).as_deref() == Some("--wifi-power-ioctl") {
         let enabled = match std::env::args().nth(2).as_deref() {
@@ -90,13 +101,27 @@ fn main() {
         };
         std::process::exit(status);
     }
+    let install_root = std::env::var_os("BOKHEIM_KOBO_INSTALL_ROOT").map(PathBuf::from).unwrap_or_else(|| {
+        if cfg!(target_arch = "arm") { PathBuf::from("/mnt/onboard") } else { std::env::temp_dir().join("bokheim-kobo-update-preview") }
+    });
+    kobo_update::initialize(install_root, env!("CARGO_PKG_VERSION"))?;
+    if std::env::args().nth(1).as_deref() == Some("--apply-update") {
+        return kobo_update::installation()?.apply();
+    }
     let startup_started = Instant::now();
     println!("KOBO_APP_STARTUP phase=process_start elapsed_ms=0");
-    let args: Vec<String> = std::env::args().collect();
     let no_display = args.iter().any(|argument| argument == "--no-display");
-    let auto_rotate = !args.iter().any(|argument| argument == "--no-rotation");
+    let profile = if no_display {
+        let model = args.iter().position(|arg| arg == "--device-model").map(|index| args.get(index + 1).ok_or("--device-model requires a numeric model ID")?.parse::<u16>().map_err(|_| "Invalid Kobo model ID")).transpose()?.unwrap_or(388);
+        Profile::from_id(model).ok_or_else(|| format!("No Kobo device profile for model {model}"))?
+    } else {
+        if args.iter().any(|arg| arg == "--device-model") { return Err("Device overrides are available only with --no-display".into()); }
+        kobo_device::profile::current().map_err(|error| error.to_string())?
+    };
+    let auto_rotate = profile.has_gyroscope() && !args.iter().any(|argument| argument == "--no-rotation");
+    println!("KOBO_DEVICE model={} product={} name={:?} touch={:?}", profile.id, profile.product, profile.name, profile.touch);
     let data_dir = std::env::var_os("BOKHEIM_KOBO_DATA_DIR").map(PathBuf::from).unwrap_or_else(default_data_dir);
-    let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).expect("failed to initialize Kobo app-data directory");
+    let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).map_err(|error| format!("failed to initialize Kobo app-data directory: {error}"))?;
     println!("KOBO_APP_STARTUP phase=backend_ready elapsed_ms={}", startup_started.elapsed().as_millis());
     let libraries_dir = std::env::var_os("BOKHEIM_KOBO_LIBRARIES_DIR").map(PathBuf::from).unwrap_or_else(default_libraries_dir);
     let backend_context = backend_context.with_library_discovery(libraries_dir.clone(), "Kobo".to_owned(), fallback_library_dir(&libraries_dir)).with_libraries_after_first_frame();
@@ -111,10 +136,16 @@ fn main() {
         }
     }
 
+    // Keep physical control and text sizes consistent across 167–300 DPI panels.
+    let scale_factor = f32::from(profile.dpi) / 150.0;
     let platform = KoboPlatform::new(KoboPlatformOptions {
+        input_profile: input_profile(profile),
+        logical_size: size(px(f32::from(profile.width) / scale_factor), px(f32::from(profile.height) / scale_factor)),
+        scale_factor,
         display: !no_display,
         auto_rotate,
         interactive: !no_display,
+        headless_settle: if no_display { Duration::from_millis(500) } else { Duration::ZERO },
         timeout: Duration::ZERO,
         // Browse lists may not have the page entity focused (for example
         // after opening a control), so synthetic page keys can be lost. Native
@@ -141,28 +172,56 @@ fn main() {
         monochrome_threshold: 160,
         ..Default::default()
     })
-    .expect("failed to initialize Kobo GPUI platform");
+    .map_err(|error| format!("failed to initialize Kobo GPUI platform: {error}"))?;
     println!("KOBO_APP_STARTUP phase=platform_ready elapsed_ms={}", startup_started.elapsed().as_millis());
-    gpui_kobo::begin_application_startup_profile(startup_started).expect("failed to start Kobo application startup profile");
+    gpui_kobo::begin_application_startup_profile(startup_started).map_err(|error| format!("failed to start Kobo application startup profile: {error}"))?;
 
-    *LIBRARY_MAINTENANCE.lock().expect("library maintenance guard poisoned") = Some(defer_library_maintenance());
+    *LIBRARY_MAINTENANCE.lock().unwrap_or_else(PoisonError::into_inner) = Some(defer_library_maintenance());
 
+    let opened = Rc::new(Cell::new(false));
+    let window_opened = opened.clone();
     Application::new_inaccessible(platform.clone()).with_assets(ui_components::Assets).run(move |cx| {
+        cx.set_global(ui_components::kobo::DeviceProfile(profile));
         cx.set_reduce_motion(true);
         println!("KOBO_APP_STARTUP phase=ui_open_begin elapsed_ms={}", startup_started.elapsed().as_millis());
-        desktop_gpui::open_ui(backend_context, desktop_gpui::UiLaunchOptions { kobo_auto_rotate: Some(auto_rotate), ..desktop_gpui::UiLaunchOptions::KOBO }, None, cx);
+        window_opened.set(desktop_gpui::open_ui(backend_context, desktop_gpui::UiLaunchOptions { kobo_auto_rotate: Some(auto_rotate), ..desktop_gpui::UiLaunchOptions::KOBO }, None, cx).is_some());
         println!("KOBO_APP_STARTUP phase=ui_open_complete elapsed_ms={}", startup_started.elapsed().as_millis());
     });
 
     if let Some(error) = platform.take_error() {
-        panic!("Kobo GPUI platform failed: {error}");
+        return Err(format!("Kobo GPUI platform failed: {error}"));
+    }
+    if !opened.get() {
+        return Err("failed to open the Kobo application UI".into());
     }
     if no_display {
         if let Some(frame) = platform.last_frame() {
+            if let Some(index) = args.iter().position(|arg| arg == "--capture") {
+                let path = args.get(index + 1).ok_or("--capture requires a PGM output path")?;
+                gpui_kobo::write_pgm(&frame, path).map_err(|error| error.to_string())?;
+            }
             println!("rendered shared Bokheim UI {}x{}", frame.width(), frame.height());
         } else {
             println!("rendered shared Bokheim UI successfully before shutdown");
         }
+    }
+    Ok(())
+}
+
+fn input_profile(profile: &Profile) -> KoboInputProfile {
+    KoboInputProfile {
+        protocol: match profile.touch {
+            TouchProtocol::Single => KoboTouchProtocol::Single,
+            TouchProtocol::MultitouchA => KoboTouchProtocol::MultitouchA,
+            TouchProtocol::MultitouchB => KoboTouchProtocol::MultitouchB,
+            TouchProtocol::MultitouchC => KoboTouchProtocol::MultitouchC,
+        },
+        touch_transforms: Some(from_fn(|rotation| {
+            let transform = profile.touch_transform(rotation as u8);
+            TouchTransform { swap_axes: transform.swap_axes, invert_x: transform.invert_x, invert_y: transform.invert_y }
+        })),
+        gyroscope_rotations: profile.has_gyroscope().then(|| from_fn(|sensor| profile.gyroscope_rotation(sensor as u8))),
+        invert_page_buttons: from_fn(|rotation| profile.invert_page_buttons(rotation as u8)),
     }
 }
 

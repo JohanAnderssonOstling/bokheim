@@ -18,7 +18,7 @@ final class AllFilesAccess {
     private AllFilesAccess() {}
 
     static boolean isGranted() {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager();
+        return !BuildConfig.PLAY_STORE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager();
     }
 
     static AlertDialog promptForLaunch(Activity activity, Intent intent) {
@@ -26,7 +26,7 @@ final class AllFilesAccess {
     }
 
     static AlertDialog promptIfNeeded(Activity activity) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || isGranted()) {
+        if (BuildConfig.PLAY_STORE || Build.VERSION.SDK_INT < Build.VERSION_CODES.R || isGranted()) {
             return null;
         }
         SharedPreferences preferences = activity.getSharedPreferences(PREFERENCES, Activity.MODE_PRIVATE);
@@ -47,6 +47,7 @@ final class AllFilesAccess {
     }
 
     static void openSettings(Activity activity) {
+        if (BuildConfig.PLAY_STORE) return;
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             Toast.makeText(activity, "Use the file picker to select folders on this Android version.", Toast.LENGTH_LONG).show();
             return;

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, OnceLock};
 
-mod archive;
+pub(crate) mod archive;
 use archive::{Archive, ArchiveMetadata, ArchiveReader};
 pub(crate) use inspection::EpubSession;
 mod inspection;

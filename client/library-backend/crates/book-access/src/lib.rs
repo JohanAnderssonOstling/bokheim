@@ -1,7 +1,7 @@
 //! Bounded, revision-pinned book reads. Callers supply authenticated fetches.
 
 use std::io::{Read, Seek};
-pub use sync_common::ContentHash;
+pub use sync_common::BookId;
 mod async_source;
 #[cfg(feature = "pdf")]
 pub mod pdf_bundle;

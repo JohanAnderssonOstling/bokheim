@@ -12,11 +12,11 @@ pub(crate) use rusqlite::OptionalExtension;
 
 pub(crate) use crate::{Database, DatabaseError};
 pub(crate) use include_sqlite_sql::include_sql;
-pub(crate) use sync_common::{ContentHash, DirId};
+pub(crate) use sync_common::{BookId, DirId};
 
 #[derive(Clone, Debug)]
 pub struct NativeBookSnapshot {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub directory: DirId,
     pub name: String,
     pub relative_path: library_model::RelativeBookPath,
@@ -77,7 +77,7 @@ impl Database {
             completion.publication.fingerprint.as_deref(),
             observations::Revision::Remote { size: i64::try_from(completion.size_bytes).map_err(DatabaseError::operation)? },
         )?;
-        connection.native_record_remote_book(&completion.snapshot.content_hash)?;
+        if !completion.snapshot.content_hash.is_external() { connection.native_record_remote_book(&completion.snapshot.content_hash)?; }
         connection.shared_transfer_complete_download(&completion.snapshot.content_hash)?;
         connection.native_queue_book_work(&completion.snapshot.content_hash)?;
         if !thumbnail_set_exists {
@@ -98,7 +98,7 @@ include_sql!("src/native/sql/native_file_work.sql");
 pub struct NativeFileWork {
     pub id: i64,
     pub operation: String,
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub original_path: library_model::RelativeBookPath,
 }
 
@@ -124,7 +124,7 @@ pub struct NativeFileWorkCompletion {
 #[derive(Clone, Debug)]
 pub struct PurgeBookSnapshot {
     pub(crate) work_id: i64,
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub remove_bytes: bool,
 }
 
@@ -140,7 +140,7 @@ impl Database {
     pub fn native_file_work(&self) -> Result<Vec<NativeFileWork>, DatabaseError> {
         let mut rows = Vec::new();
         self.connection.native_file_work_rows(|row| {
-            rows.push((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, ContentHash>(2)?, row.get::<_, String>(3)?));
+            rows.push((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, BookId>(2)?, row.get::<_, String>(3)?));
             Ok(())
         })?;
         rows.into_iter().map(|(id, operation, content_hash, path)| Ok(NativeFileWork { id, operation, content_hash, original_path: stored_book_path(&path)? })).collect()
@@ -232,16 +232,16 @@ impl Database {
         })
     }
 
-    pub fn requested_purge_books(&self, after: Option<&ContentHash>) -> Result<Vec<ContentHash>, DatabaseError> {
+    pub fn requested_purge_books(&self, after: Option<&BookId>) -> Result<Vec<BookId>, DatabaseError> {
         let mut hashes = Vec::new();
         self.connection.requested_purge_books(after, |row| {
-            hashes.push(row.get::<_, ContentHash>(0)?);
+            hashes.push(row.get::<_, BookId>(0)?);
             Ok(())
         })?;
         Ok(hashes)
     }
 
-    pub fn purge_book_snapshot(&self, hash: &ContentHash) -> Result<Option<PurgeBookSnapshot>, DatabaseError> {
+    pub fn purge_book_snapshot(&self, hash: &BookId) -> Result<Option<PurgeBookSnapshot>, DatabaseError> {
         let work_id: Option<i64> = self.connection.observations_purge_work(&(&hash), |r| r.get(0)).optional()?;
         let Some(work_id) = work_id else { return Ok(None) };
         let retired = self.connection.purge_book_is_retired(hash, |row| row.get::<_, bool>(0)).map_err(DatabaseError::operation)?;
@@ -309,18 +309,19 @@ impl Database {
     }
 
     /// Content hashes with queued follow-up file reconciliation.
-    pub fn local_book_work_hashes(&self) -> Result<Vec<ContentHash>, DatabaseError> {
+    pub fn local_book_work_hashes(&self) -> Result<Vec<BookId>, DatabaseError> {
         let mut hashes = Vec::new();
         self.connection.local_book_work_hashes(|row| {
-            hashes.push(row.get::<_, ContentHash>(0)?);
+            hashes.push(row.get::<_, BookId>(0)?);
             Ok(())
         })?;
         Ok(hashes)
     }
 
     /// Drops every queued directory reconciliation without performing it.
-    pub fn clear_local_directory_work(&self) {
-        self.connection.clear_local_directory_work().expect("clear local directory work");
+    pub fn clear_local_directory_work(&self) -> Result<(), DatabaseError> {
+        self.connection.clear_local_directory_work()?;
+        Ok(())
     }
 
     pub fn native_book_work_directory_ids(&self) -> Result<Vec<DirId>, DatabaseError> {
@@ -471,3 +472,24 @@ fn native_directory_record(connection: &rusqlite::Connection, id: &DirId) -> Res
 }
 
 use crate::native::observations::ObservationsSql;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clearing_directory_work_returns_write_errors_and_preserves_pending_work() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        let dir = DirId::from_u128(1);
+        db.create_directory_with_id(&dir, &sync_common::ROOT_DIR_ID, &"Pending".into()).unwrap();
+        let pending = db.native_directory_work_ids().unwrap();
+        assert!(!pending.is_empty());
+        db.connection.pragma_update(None, "query_only", true).unwrap();
+        assert!(db.clear_local_directory_work().is_err());
+        assert_eq!(db.native_directory_work_ids().unwrap(), pending);
+        db.connection.pragma_update(None, "query_only", false).unwrap();
+        db.clear_local_directory_work().unwrap();
+        assert!(db.native_directory_work_ids().unwrap().is_empty());
+    }
+}

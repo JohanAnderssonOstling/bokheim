@@ -1,8 +1,12 @@
 //! Complete Windows application packages. Authenticate the ZIP against the pinned
 //! manifest before calling these functions; extraction never changes installed files.
 
-use crate::native_files::sync_dir;
-use std::{collections::BTreeMap, fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}};
+use crate::native_files::{parent_directory, sync_dir};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug)]
 pub struct Package {
@@ -13,13 +17,13 @@ pub struct Package {
 
 fn safe_name(raw: &str) -> Result<String, String> {
     let name = raw.strip_suffix('/').unwrap_or(raw);
-    if name.is_empty() || !name.is_ascii() { return Err("invalid Windows package path".into()); }
+    if name.is_empty() || !name.is_ascii() {
+        return Err("invalid Windows package path".into());
+    }
     for part in name.split('/') {
-        let stem = part.split('.').next().unwrap().to_ascii_uppercase();
-        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
-        if part.is_empty() || part == "." || part == ".." || part.len() > 255 || part.ends_with(['.', ' '])
-            || reserved || part.bytes().any(|b| b < 32 || b == 127 || b"\\:<>\"|?*".contains(&b)) {
+        let stem = part.split_once('.').map_or(part, |(stem, _)| stem).to_ascii_uppercase();
+        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        if part.is_empty() || part == "." || part == ".." || part.len() > 255 || part.ends_with(['.', ' ']) || reserved || part.bytes().any(|b| b < 32 || b == 127 || b"\\:<>\"|?*".contains(&b)) {
             return Err(format!("unsafe Windows package path: {raw}"));
         }
     }
@@ -27,7 +31,9 @@ fn safe_name(raw: &str) -> Result<String, String> {
 }
 
 fn inspect_archive(archive: &mut zip::ZipArchive<File>) -> Result<Package, String> {
-    if archive.len() > 4096 { return Err("too many Windows package entries".into()); }
+    if archive.len() > 4096 {
+        return Err("too many Windows package entries".into());
+    }
     let mut names = BTreeMap::new();
     let mut files = Vec::new();
     let mut expanded_bytes = 0u64;
@@ -55,7 +61,9 @@ fn inspect_archive(archive: &mut zip::ZipArchive<File>) -> Result<Package, Strin
         }
     }
     for required in ["bokheim.exe"] {
-        if names.get(required) != Some(&false) { return Err(format!("Windows package lacks {required}")); }
+        if names.get(required) != Some(&false) {
+            return Err(format!("Windows package lacks {required}"));
+        }
     }
     Ok(Package { expanded_bytes, files })
 }
@@ -77,25 +85,33 @@ pub fn unpack(source: &Path, destination: &Path, available_bytes: u64) -> Result
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|e| e.to_string())?;
         let path = destination.join(safe_name(file.name())?);
-        if file.is_dir() { fs::create_dir_all(&path).map_err(|e| e.to_string())?; continue; }
-        fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        if file.is_dir() {
+            fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+            continue;
+        }
+        fs::create_dir_all(parent_directory(&path)?).map_err(|e| e.to_string())?;
         let mut output = OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| e.to_string())?;
         let size = file.size();
-        let mut remaining = size;
-        let mut buffer = [0u8; 65536];
-        loop {
-            let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if n == 0 { break; }
-            remaining = remaining.checked_sub(n as u64).ok_or("package entry exceeds declared size")?;
-            output.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+        let copied = update_files::copy_observed(
+            &mut file,
+            &mut output,
+            |_, total| {
+                if total > size { Err(std::io::Error::other("package entry exceeds declared size")) } else { Ok(()) }
+            },
+            |_, _| {},
+        )
+        .map_err(|e| e.to_string())?;
+        if copied != size {
+            return Err("truncated Windows package entry".into());
         }
-        if remaining != 0 { return Err("truncated Windows package entry".into()); }
         output.sync_all().map_err(|e| e.to_string())?;
     }
     // Flush nested directory entries before the host writes its activation journal.
     for path in &package.files {
         for parent in destination.join(path).ancestors().skip(1) {
-            if parent.starts_with(destination) { sync_dir(parent)?; }
+            if parent.starts_with(destination) {
+                sync_dir(parent)?;
+            }
         }
     }
     sync_dir(destination.parent().ok_or("package directory has no parent")?)?;
@@ -105,6 +121,7 @@ pub fn unpack(source: &Path, destination: &Path, available_bytes: u64) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     fn package(path: &Path, names: &[&str]) {
         let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
         for name in names {
@@ -115,11 +132,13 @@ mod tests {
     }
     #[test]
     fn expands_complete_package_into_fresh_directory_with_exact_size() {
-        let temp = tempfile::tempdir().unwrap(); let source = temp.path().join("app.zip");
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("app.zip");
         package(&source, &["Bokheim.exe", "Bokheim.ico"]);
         assert_eq!(inspect(&source).unwrap().expanded_bytes, 14);
         let dest = temp.path().join("candidate");
-        assert!(unpack(&source, &dest, 13).is_err()); assert!(!dest.exists());
+        assert!(unpack(&source, &dest, 13).is_err());
+        assert!(!dest.exists());
         unpack(&source, &dest, 14).unwrap();
         assert_eq!(fs::read(dest.join("Bokheim.ico")).unwrap(), b"payload");
         assert!(unpack(&source, &dest, 14).is_err());
@@ -129,9 +148,11 @@ mod tests {
         for name in ["../Bokheim.exe", "/app", "C:/app", "pdfium\\file", "file:stream", "NUL.txt", "com1", "x/LPT9.log", "app.", "app ", "x//y", "x/./y"] {
             assert!(safe_name(name).is_err(), "{name}");
         }
-        let temp = tempfile::tempdir().unwrap(); let source = temp.path().join("app.zip");
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("app.zip");
         for names in [vec!["Bokheim.ico"], vec!["Bokheim.exe", "bokheim.EXE", "Bokheim.ico"], vec!["Bokheim.exe", "assets", "assets/icon"]] {
-            package(&source, &names); assert!(inspect(&source).is_err());
+            package(&source, &names);
+            assert!(inspect(&source).is_err());
         }
     }
 }

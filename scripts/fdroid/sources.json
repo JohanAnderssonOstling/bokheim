@@ -1,0 +1,34 @@
+{
+  "sources": [
+    {
+      "name": "GPUI-Fork",
+      "repository": "https://github.com/JohanAnderssonOstling/GPUI-Fork",
+      "commit": "c186a827d40ba6b3f85789138dabe55554e2a4c0",
+      "url": "https://codeload.github.com/JohanAnderssonOstling/GPUI-Fork/tar.gz/c186a827d40ba6b3f85789138dabe55554e2a4c0",
+      "sha256": "da56ee822cf1defa81d903d734ac0f30d7073ed216d69447fd2037cc471fe280"
+    },
+    {
+      "name": "HtmlEngine",
+      "repository": "https://github.com/JohanAnderssonOstling/HtmlEngine",
+      "commit": "fbdc9748d7ddb339d23b8f3cd65e54c16f371fad",
+      "url": "https://codeload.github.com/JohanAnderssonOstling/HtmlEngine/tar.gz/fbdc9748d7ddb339d23b8f3cd65e54c16f371fad",
+      "sha256": "d9bbe7f9aaacbcc27601430bfe63abb3335ed7c5c207923a71cb89f844f3041d"
+    },
+    {
+      "name": "HtmlViewCore",
+      "repository": "https://github.com/JohanAnderssonOstling/HtmlViewCore",
+      "commit": "e34aba1f7d91f5e4ce95d5d9141f97c74d42f6a9",
+      "url": "https://codeload.github.com/JohanAnderssonOstling/HtmlViewCore/tar.gz/e34aba1f7d91f5e4ce95d5d9141f97c74d42f6a9",
+      "sha256": "f6cf36e386eb7d233dd7aea18ec5205b784cb15cb1ef48ff1774ca0e82c8a8ea",
+      "patches": [
+        {
+          "path": "scripts/fdroid/patches/html-view-core-reading-lines.patch",
+          "sha256": "899146edbb00407f2000ba5989dc5aa06aa84bfae95ce10b4ebe0b5012854b08",
+          "files": {
+            "crates/html-view-core/src/session.rs": "c0ee7161d10e1ab5a1922545e3c601e2b953d44a3767eb23c1250dc110eadcaf"
+          }
+        }
+      ]
+    }
+  ]
+}

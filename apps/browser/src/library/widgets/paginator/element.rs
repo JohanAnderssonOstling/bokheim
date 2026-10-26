@@ -21,6 +21,14 @@ const NEXT_PAGE_PEEK_PX: f32 = 8.0;
 /// The band is drawn over the items it selects, so it has to be see-through.
 const MARQUEE_FILL_OPACITY: f32 = 0.35;
 
+pub(super) struct PaginatorPage {
+    pub reported_visible_page: Option<VisiblePage>,
+    pub child_offset: usize,
+    pub direction: AssignmentDirection,
+    pub prefetched: Option<PrefetchKey>,
+    pub forced_page: Option<VisiblePage>,
+}
+
 pub(super) struct PaginatorElement {
     id: ElementId,
     paginator: WeakEntity<Paginator>,
@@ -39,6 +47,7 @@ pub(super) struct PaginatorElement {
     forced_page: Option<VisiblePage>,
     rem_size: Pixels,
     flow_axis: PaginatorAxis,
+    show_next_page_preview: bool,
     state: Rc<PaginatorState>,
     active: bool,
     horizontal_offset: f32,
@@ -57,27 +66,25 @@ pub(super) struct PaginatorElement {
 }
 
 impl PaginatorElement {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        id: ElementId, paginator: WeakEntity<Paginator>, reported_visible_page: Option<VisiblePage>, children_revision: usize, data: Rc<PaginatorData>, maximum_rows: Option<usize>, child_offset: usize, direction: AssignmentDirection,
-        prefetched: Option<PrefetchKey>, forced_page: Option<VisiblePage>, rem_size: Pixels, flow_axis: PaginatorAxis, state: Rc<PaginatorState>,
-    ) -> Self {
+    pub(super) fn new(id: ElementId, paginator: WeakEntity<Paginator>, source: &Paginator, page: PaginatorPage, rem_size: Pixels, state: Rc<PaginatorState>) -> Self {
+        let PaginatorPage { reported_visible_page, child_offset, direction, prefetched, forced_page } = page;
         Self {
             id,
             paginator,
             reported_visible_page,
-            children_revision,
-            data,
+            children_revision: source.children_revision,
+            data: source.data.clone(),
             widths: Rc::default(),
             layout_cache: Rc::default(),
             warm_direction: None,
-            maximum_rows,
+            maximum_rows: source.maximum_rows,
             child_offset,
             direction,
             prefetched,
             forced_page,
             rem_size,
-            flow_axis,
+            flow_axis: source.flow_axis,
+            show_next_page_preview: source.show_next_page_preview,
             state,
             active: true,
             horizontal_offset: 0.0,
@@ -324,7 +331,7 @@ impl PaginatorElement {
     }
 
     fn minimum_next_page_peek(&self, available_extent: Pixels) -> Pixels {
-        if (self.flow_axis == PaginatorAxis::Vertical && self.maximum_rows.is_some()) || self.reported_visible_page.is_none_or(|page| page.last_child.saturating_add(1) >= self.data.children.len()) {
+        if !self.show_next_page_preview || (self.flow_axis == PaginatorAxis::Vertical && self.maximum_rows.is_some()) || self.reported_visible_page.is_none_or(|page| page.last_child.saturating_add(1) >= self.data.children.len()) {
             return Pixels::ZERO;
         }
         px(NEXT_PAGE_PEEK_PX.min(f32::from(available_extent)))
@@ -484,7 +491,8 @@ impl Element for PaginatorElement {
             row_top += row.height;
         }
 
-        if let Some(visible_page) = visible_page
+        if self.show_next_page_preview
+            && let Some(visible_page) = visible_page
             && let Some(mut preview) = self.measure_next_preview(visible_page, &geometries, bounds.size.height, window, cx)
         {
             match self.flow_axis {
@@ -666,10 +674,10 @@ mod tests {
             PaginatorChild::new(|_, _, _| panic!("prefetch must not render offscreen children")).with_prepare(move |_, _| prepared.borrow_mut().push(index))
         });
         let paginator = cx.new(|_| Paginator::new("prefetch-test", [PaginatorGroup::new(policy, children)]));
-        let data = cx.update(|cx| paginator.read(cx).data.clone());
         let window = cx.add_empty_window();
         window.update(|window, cx| {
-            let mut element = PaginatorElement::new("prefetch-test".into(), paginator.downgrade(), None, 0, data, None, 4, AssignmentDirection::Forward, None, None, px(16.0), PaginatorAxis::Vertical, Rc::default());
+            let page = PaginatorPage { reported_visible_page: None, child_offset: 4, direction: AssignmentDirection::Forward, prefetched: None, forced_page: None };
+            let mut element = PaginatorElement::new("prefetch-test".into(), paginator.downgrade(), paginator.read(cx), page, px(16.0), Rc::default());
             element.widths = Rc::new(vec![Pixels::ZERO; element.data.children.len()]);
             element.prepare_adjacent_pages(VisiblePage { first_child: 4, last_child: 7 }, Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(200.0))), window, cx);
         });

@@ -3,15 +3,15 @@ use crate::query_methods::query_rows;
 use crate::{Database, sync::apply};
 use library_replica::{BookDetails, BookLifecycleState, DirectoryLifecycleState, LibraryStateEntry, ReadingPositionState};
 use rusqlite::OptionalExtension;
-use sync_common::{ContentHash, LibraryRevision, PullStateResponse, ROOT_DIR_ID, ReplicaId, ReplicaSeq, StateDelivery, SyncCursor, SyncGeneration};
+use sync_common::{BookId, LibraryRevision, PullStateResponse, ROOT_DIR_ID, ReplicaId, ReplicaSeq, StateDelivery, SyncCursor, SyncGeneration};
 
 pub(super) fn db() -> Database {
     let db = Database::open(":memory:").unwrap();
     db.initialize_library().unwrap();
     db
 }
-pub(super) fn hash() -> ContentHash {
-    ContentHash::new(&"a".repeat(64))
+pub(super) fn hash() -> BookId {
+    BookId::new(&"a".repeat(64))
 }
 fn book_snapshot(db: &Database) -> (Option<String>, Option<String>, Vec<String>, bool) {
     let row = db.connection.fixtures_read_book_title_read_pos(&(hash()), |r| Ok((r.get(0)?, r.get(1)?))).optional().unwrap();

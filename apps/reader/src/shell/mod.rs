@@ -11,6 +11,7 @@ pub(crate) mod brightness;
 pub(crate) mod chrome;
 pub(crate) mod context_sheet;
 pub(crate) mod input;
+pub(crate) mod keyboard_settings;
 mod layout;
 pub(crate) mod marks;
 pub(crate) mod page;

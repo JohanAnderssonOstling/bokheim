@@ -1,17 +1,71 @@
 //! Filesystem durability mechanisms independent of book layout.
+use std::io::{self, Error, ErrorKind};
 use std::path::Path;
-pub fn sync_directory(path: &Path) -> std::io::Result<()> {
+use std::time::Duration;
+
+#[derive(Default)]
+struct Retry {
+    attempts: usize,
+}
+
+impl Retry {
+    fn wait(&mut self, error: &Error) -> bool {
+        let transient = matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock | ErrorKind::TimedOut);
+        #[cfg(windows)]
+        let transient = transient || matches!(error.raw_os_error(), Some(32 | 33)); // Sharing/lock violation.
+        const DELAYS: [Duration; 3] = [Duration::from_millis(10), Duration::from_millis(40), Duration::from_millis(100)];
+        if !transient || self.attempts == DELAYS.len() {
+            return false;
+        }
+        std::thread::sleep(DELAYS[self.attempts]);
+        self.attempts += 1;
+        true
+    }
+}
+
+/// Retry a synchronous filesystem operation after a transient failure, with a
+/// bounded delay. The operation must be safe to repeat after returning an error;
+/// do not use this to restart writes that may have made partial progress.
+pub fn retry_transient<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut retry = Retry::default();
+    loop {
+        match operation() {
+            Err(error) if retry.wait(&error) => {}
+            result => return result,
+        }
+    }
+}
+
+pub fn parent_directory(path: &Path) -> io::Result<&Path> {
+    path.parent().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("path has no parent directory: {}", path.display())))
+}
+
+pub fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    std::fs::File::open(path)?.sync_all()?;
+    retry_transient(|| std::fs::File::open(path)?.sync_all())?;
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
 }
 pub fn persist_noclobber(temporary: tempfile::TempPath, destination: &Path) -> Result<(), tempfile::PathPersistError> {
-    temporary.persist_noclobber(destination)
+    persist_with_retry(temporary, |temporary| temporary.persist_noclobber(destination))
+}
+
+fn persist_with_retry(mut temporary: tempfile::TempPath, mut persist: impl FnMut(tempfile::TempPath) -> Result<(), tempfile::PathPersistError>) -> Result<(), tempfile::PathPersistError> {
+    let mut retry = Retry::default();
+    loop {
+        match persist(temporary) {
+            Err(error) if retry.wait(&error.error) => temporary = error.path,
+            result => return result,
+        }
+    }
 }
 /// Rename a file or directory without replacing an existing destination.
-pub fn rename_noclobber(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub fn rename_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
+    retry_transient(|| rename_noclobber_once(source, destination))
+}
+
+fn rename_noclobber_once(source: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     {
         use std::ffi::CString;
@@ -23,17 +77,20 @@ pub fn rename_noclobber(source: &Path, destination: &Path) -> std::io::Result<()
         let result = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, source.as_ptr(), libc::AT_FDCWD, destination.as_ptr(), libc::RENAME_NOREPLACE) };
         #[cfg(target_os = "macos")]
         let result = unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
-        if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(Error::last_os_error())
+        }
     }
     #[cfg(windows)]
     {
-        use std::io::{Error, ErrorKind};
         use std::os::windows::ffi::OsStrExt as _;
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
         }
-        let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
+        let wide = |path: &Path| -> io::Result<Vec<u16>> {
             let mut path: Vec<_> = path.as_os_str().encode_wide().collect();
             if path.contains(&0) {
                 return Err(Error::new(ErrorKind::InvalidInput, "path contains a NUL character"));
@@ -45,12 +102,16 @@ pub fn rename_noclobber(source: &Path, destination: &Path) -> std::io::Result<()
         let destination = wide(destination)?;
         // With no replacement flag, Windows rejects an existing destination
         // atomically. Both terminated strings remain alive for the call.
-        if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } != 0 { Ok(()) } else { Err(Error::last_os_error()) }
+        if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } != 0 {
+            Ok(())
+        } else {
+            Err(Error::last_os_error())
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
     {
         let _ = (source, destination);
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "exclusive rename is unavailable on this platform"))
+        Err(Error::new(ErrorKind::Unsupported, "exclusive rename is unavailable on this platform"))
     }
 }
 
@@ -58,6 +119,99 @@ pub fn rename_noclobber(source: &Path, destination: &Path) -> std::io::Result<()
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn transient_failures_recover_without_restarting_the_caller() {
+        let mut failures = [ErrorKind::Interrupted, ErrorKind::WouldBlock, ErrorKind::TimedOut].into_iter();
+        let result = retry_transient(|| match failures.next() {
+            Some(kind) => Err(io::Error::from(kind)),
+            None => Ok(42),
+        });
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn persistent_transient_failure_stops_after_four_attempts() {
+        let mut attempts = 0;
+        let result = retry_transient(|| {
+            attempts += 1;
+            Err::<(), _>(io::Error::from(ErrorKind::WouldBlock))
+        });
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::WouldBlock);
+        assert_eq!(attempts, 4);
+    }
+
+    #[test]
+    fn permanent_errors_are_returned_without_retrying() {
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::StorageFull, ErrorKind::NotFound, ErrorKind::AlreadyExists, ErrorKind::Unsupported, ErrorKind::InvalidInput] {
+            let mut attempts = 0;
+            let result = retry_transient(|| {
+                attempts += 1;
+                Err::<(), _>(io::Error::from(kind))
+            });
+            assert_eq!(result.unwrap_err().kind(), kind);
+            assert_eq!(attempts, 1);
+        }
+    }
+
+    #[test]
+    fn transient_publication_failure_reuses_the_complete_staged_file() {
+        let root = tempfile::tempdir().unwrap();
+        let temporary = tempfile::NamedTempFile::new_in(root.path()).unwrap().into_temp_path();
+        fs::write(&temporary, b"verified book").unwrap();
+        let destination = root.path().join("book.epub");
+        let mut attempts = 0;
+        persist_with_retry(temporary, |temporary| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(tempfile::PathPersistError { error: ErrorKind::WouldBlock.into(), path: temporary })
+            } else {
+                temporary.persist_noclobber(&destination)
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(fs::read(destination).unwrap(), b"verified book");
+    }
+
+    #[test]
+    fn exhausted_publication_retries_return_the_staged_file_for_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let temporary = tempfile::NamedTempFile::new_in(root.path()).unwrap().into_temp_path();
+        fs::write(&temporary, b"verified book").unwrap();
+        let mut attempts = 0;
+        let error = persist_with_retry(temporary, |temporary| {
+            attempts += 1;
+            Err(tempfile::PathPersistError { error: ErrorKind::WouldBlock.into(), path: temporary })
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 4);
+        assert_eq!(error.error.kind(), ErrorKind::WouldBlock);
+        assert_eq!(fs::read(&error.path).unwrap(), b"verified book");
+        let destination = root.path().join("book.epub");
+        persist_noclobber(error.path, &destination).unwrap();
+        assert_eq!(fs::read(destination).unwrap(), b"verified book");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_recovers_when_a_windows_sharing_lock_is_released() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let temporary = tempfile::NamedTempFile::new_in(root.path()).unwrap().into_temp_path();
+        fs::write(&temporary, b"book").unwrap();
+        let locked = fs::OpenOptions::new().read(true).share_mode(0).open(&temporary).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(locked);
+        });
+        let destination = root.path().join("book.epub");
+        let result = persist_noclobber(temporary, &destination);
+        release.join().unwrap();
+        result.unwrap();
+        assert_eq!(fs::read(destination).unwrap(), b"book");
+    }
+
     #[test]
     fn rename_noclobber_moves_files_and_directories_to_absent_destinations() {
         let root = tempfile::tempdir().unwrap();

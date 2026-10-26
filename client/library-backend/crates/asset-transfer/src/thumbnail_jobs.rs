@@ -8,7 +8,7 @@ use library_files::asset_store::{AssetStore, AssetStoreError};
 use library_model::BlobKind;
 use std::io::SeekFrom;
 use std::sync::Arc;
-use sync_common::ContentHash;
+use sync_common::BookId;
 pub use thumbnail::ThumbnailVersions;
 
 /// The host chooses native workers or browser CPU-worker RPC.
@@ -45,7 +45,7 @@ impl ThumbnailProcessor for ThumbnailExtractor {
 /// `&LibrarySession` — need not be `Send`.
 pub trait ThumbnailObserver {
     fn completed(&mut self);
-    fn ready(&mut self, hash: ContentHash);
+    fn ready(&mut self, hash: BookId);
 }
 
 pub struct ThumbnailJobs<'a, P> {
@@ -60,7 +60,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
     }
     /// Makes covers for these books. A failure leaves the book's work pending
     /// for a later pass; the first failure is returned once all were tried.
-    pub async fn run(&self, hashes: Vec<ContentHash>, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
+    pub async fn run(&self, hashes: Vec<BookId>, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
         let mut failure = None;
         for hash in hashes {
             match self.recover(hash, observer).await {
@@ -78,7 +78,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
         failure.map_or(Ok(()), Err)
     }
 
-    pub async fn recover(&self, hash: ContentHash, observer: &mut impl ThumbnailObserver) -> Result<bool, BackendError> {
+    pub async fn recover(&self, hash: BookId, observer: &mut impl ThumbnailObserver) -> Result<bool, BackendError> {
         async {
             let lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
             let Some(format) = self.db.thumbnail_book_format(hash)? else { return Ok(false) };
@@ -187,7 +187,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
         .await
     }
 
-    async fn store(&self, hash: ContentHash, versions: &ThumbnailVersions, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
+    async fn store(&self, hash: BookId, versions: &ThumbnailVersions, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
         store_thumbnail(self.assets, hash, &versions.browse, &versions.card_high_density, &versions.high_density).await.map_err(BackendError::operation)?;
         observer.ready(hash);
         Ok(())
@@ -195,6 +195,6 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
 }
 
 /// Publish the master and both card densities before reporting a ready thumbnail.
-pub async fn store_thumbnail(assets: &AssetStore, hash: ContentHash, browse: &[u8], card_high_density: &[u8], high_density: &[u8]) -> Result<(), AssetStoreError> {
+pub async fn store_thumbnail(assets: &AssetStore, hash: BookId, browse: &[u8], card_high_density: &[u8], high_density: &[u8]) -> Result<(), AssetStoreError> {
     assets.write_thumbnail_set(&hash, high_density, browse, card_high_density).await
 }

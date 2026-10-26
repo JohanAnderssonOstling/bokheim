@@ -6,10 +6,10 @@ use crate::{Database, DatabaseError};
 use book_model::Annotation;
 use include_sqlite_sql::include_sql;
 use rusqlite::{Row, types::Type};
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 impl Database {
-    pub fn annotations(&self, content_hash: ContentHash) -> Result<Vec<Annotation>, DatabaseError> {
+    pub fn annotations(&self, content_hash: BookId) -> Result<Vec<Annotation>, DatabaseError> {
         let mut values = Vec::new();
         self.connection.get_annotations(&content_hash, |row| {
             values.push(read_annotation(row)?);

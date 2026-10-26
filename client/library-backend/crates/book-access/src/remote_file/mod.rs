@@ -1,7 +1,7 @@
 //! Format-independent, seekable remote file access. Cached fragments are never
 //! installed as a downloaded asset or treated as a verified complete file.
 
-use crate::ContentHash;
+use crate::BookId;
 use std::fmt::Formatter;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ pub use audiobook_stream::AudioStreamControl;
 /// The owning library resolves and authenticates byte reads.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteFile {
-    pub hash: ContentHash,
+    pub hash: BookId,
     pub length: u64,
 }
 
@@ -76,7 +76,7 @@ impl RemoteFileError {
 }
 
 /// Open with a bounded prefix read so discovering the length also fills the cache.
-pub async fn describe(client: &reqwest::Client, url: reqwest::Url, access_token: &str, hash: ContentHash) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
+pub async fn describe(client: &reqwest::Client, url: reqwest::Url, access_token: &str, hash: BookId) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
     let request = async {
         let response = request_range(client, url, access_token, hash, 0, BLOCK_BYTES, false).await?;
         let length = response.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit_once('/')).and_then(|(_, total)| total.parse::<u64>().ok()).filter(|&n| n > 0 && n <= 9_007_199_254_740_991);
@@ -92,7 +92,7 @@ pub async fn describe(client: &reqwest::Client, url: reqwest::Url, access_token:
 }
 
 /// One request path for prefix discovery and revision-pinned subsequent reads.
-async fn request_range(client: &reqwest::Client, url: reqwest::Url, token: &str, hash: ContentHash, offset: u64, length: usize, pin_revision: bool) -> Result<reqwest::Response, RemoteFileError> {
+async fn request_range(client: &reqwest::Client, url: reqwest::Url, token: &str, hash: BookId, offset: u64, length: usize, pin_revision: bool) -> Result<reqwest::Response, RemoteFileError> {
     let end = offset + length as u64 - 1;
     let etag = format!("\"{hash}\"");
     let mut request = client.get(url).bearer_auth(token).header(reqwest::header::RANGE, format!("bytes={offset}-{end}"));

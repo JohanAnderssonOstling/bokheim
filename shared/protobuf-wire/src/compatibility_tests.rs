@@ -169,10 +169,11 @@ fn invalid_values_are_rejected_even_in_ignored_fields() {
         };
         #[derive(Deserialize)]
         struct Name {
-            #[allow(dead_code)]
             name: String,
         }
-        assert!(decode::<Name>(&envelope.encode_to_vec(), 4096).is_err());
+        if let Ok(decoded) = decode::<Name>(&envelope.encode_to_vec(), 4096) {
+            panic!("invalid envelope accepted with name {:?}", decoded.name);
+        }
     }
 }
 
@@ -181,9 +182,11 @@ fn string_map_fast_path_preserves_unsorted_duplicate_and_compact_values() {
     use protobuf::value::Kind;
     let string = |key: &str| protobuf::Value { kind: Some(Kind::StringValue(key.into())) };
     for names in [vec![], vec!["a"], vec!["a", "b", "🦀"], vec!["🦀", "b", "a"], vec!["b", "a", "b"]] {
-        let value = protobuf::Value { kind: Some(Kind::Map(protobuf::Map { entries: names.iter().enumerate().map(|(index, name)| protobuf::MapEntry {
-            key: Some(string(name)), value: Some(protobuf::Value { kind: Some(Kind::BytesValue(vec![index as u8, 255])) }),
-        }).collect() })) };
+        let value = protobuf::Value {
+            kind: Some(Kind::Map(protobuf::Map {
+                entries: names.iter().enumerate().map(|(index, name)| protobuf::MapEntry { key: Some(string(name)), value: Some(protobuf::Value { kind: Some(Kind::BytesValue(vec![index as u8, 255])) }) }).collect(),
+            })),
+        };
         let bytes = protobuf::Envelope { version: VERSION, value: Some(value.clone()) }.encode_to_vec();
         assert_eq!(decode::<Value>(&bytes, 4096).unwrap(), domain_value(value.clone(), false).unwrap());
         assert_eq!(decode_byte_fields::<Value>(&bytes, 4096).unwrap(), domain_value(value, true).unwrap());

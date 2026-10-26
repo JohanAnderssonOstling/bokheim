@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::reading_positions::ReadingPositionPolicy;
 use crate::scheduler::SyncScheduler;
 use library_model::{BookDownloadStatus, DownloadState, LibraryUpdate};
-use sync_common::ContentHash;
+use sync_common::BookId;
 use tokio::sync::watch;
 
 #[derive(Clone, Debug)]
@@ -14,16 +14,16 @@ pub enum LibraryEvent {
     /// Book bytes are now present on the server; lifecycle metadata can publish.
     BooksUploaded,
     /// Selection is reported with the policy revision observed by the scan.
-    ReadingPositionsSelected(Vec<(ContentHash, u64)>),
+    ReadingPositionsSelected(Vec<(BookId, u64)>),
     /// Metadata acknowledgement may have made covers uploadable.
     AssetWorkAvailable,
     /// File replay finished and admitted uploads; enrichment can look again.
     FilesPrepared,
     ThumbnailGenerated {
-        content_hash: ContentHash,
+        content_hash: BookId,
     },
     DownloadStatusChanged {
-        content_hash: ContentHash,
+        content_hash: BookId,
         state: DownloadState,
     },
     ContentsChanged,
@@ -118,12 +118,12 @@ pub struct LibraryEventState {
     receiver: Receiver<LibraryEvent>,
     closed: bool,
     updates: Vec<Sender<LibraryUpdate>>,
-    latest_downloads: HashMap<ContentHash, DownloadState>,
+    latest_downloads: HashMap<BookId, DownloadState>,
     directory_imports: HashSet<uuid::Uuid>,
 }
 
 impl LibraryEventState {
-    pub fn reading_position_changed(&mut self, hash: ContentHash, router: &LibraryEventRouter) {
+    pub fn reading_position_changed(&mut self, hash: BookId, router: &LibraryEventRouter) {
         self.position_policy.changed(hash, web_time::Instant::now());
         self.position_updates.send_replace(self.position_policy.clone());
         // Every edit schedules its quiet deadline. An earlier maximum-wait
@@ -177,11 +177,11 @@ impl LibraryEventState {
         }
     }
 
-    pub fn download_state(&self, hash: &ContentHash) -> Option<&DownloadState> {
+    pub fn download_state(&self, hash: &BookId) -> Option<&DownloadState> {
         self.latest_downloads.get(hash)
     }
 
-    pub fn reset_download(&mut self, hash: &ContentHash) {
+    pub fn reset_download(&mut self, hash: &BookId) {
         if matches!(self.latest_downloads.get(hash), Some(DownloadState::Downloaded)) {
             self.latest_downloads.remove(hash);
         }
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn queued_progress_is_owned_without_subscribers_and_cannot_regress_completion() {
         let (router, mut state, _) = fixture();
-        let hash = ContentHash::from_bytes([7; 32]);
+        let hash = BookId::from_bytes([7; 32]);
         let downloading = DownloadState::Downloading(DownloadProgress::ZERO);
         router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: downloading.clone() });
         state.drain(&router);
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn sync_selection_uses_its_snapshot_revision_and_preserves_a_newer_edit() {
         let (router, mut state, _) = fixture();
-        let hash = ContentHash::from_bytes([7; 32]);
+        let hash = BookId::from_bytes([7; 32]);
         state.reading_position_changed(hash, &router);
         let scan_policy = router.reading_positions.borrow().clone();
         let selected = scan_policy.revisions([hash]);

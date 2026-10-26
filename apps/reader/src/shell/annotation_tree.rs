@@ -16,6 +16,27 @@ pub(crate) struct AnnotationTree {
     pub(crate) other: Vec<usize>,
 }
 
+impl AnnotationTree {
+    /// Prune cards and empty chapters without changing annotation indices or
+    /// publisher branch IDs, so card actions still address the original list.
+    pub(crate) fn filter(&mut self, annotations: &[Annotation], query: &str) {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return;
+        }
+        let matches: Vec<_> = annotations.iter().map(|annotation| annotation.exact_text.to_lowercase().contains(&query) || annotation.note.to_lowercase().contains(&query)).collect();
+        fn retain(branches: &mut Vec<AnnotationBranch>, matches: &[bool]) {
+            branches.retain_mut(|branch| {
+                branch.annotations.retain(|&index| matches[index]);
+                retain(&mut branch.children, matches);
+                !branch.annotations.is_empty() || !branch.children.is_empty()
+            });
+        }
+        retain(&mut self.branches, &matches);
+        self.other.retain(|&index| matches[index]);
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AnnotationBranch {
     /// Position in the full publisher tree, before pruning empty entries.
@@ -34,19 +55,35 @@ impl AnnotationBranch {
 #[derive(Default)]
 pub(crate) struct AnnotationTreeState {
     collapsed: HashSet<usize>,
+    filter: String,
+    filtered_collapsed: HashSet<usize>,
     selected_id: Option<String>,
 }
 
 impl AnnotationTreeState {
+    /// Show matches immediately, while retaining the unfiltered disclosure state.
+    pub(crate) fn set_filter(&mut self, query: &str) {
+        let query = query.trim().to_lowercase();
+        if self.filter != query {
+            self.filter = query;
+            self.filtered_collapsed.clear();
+        }
+    }
+
+    fn collapsed_mut(&mut self) -> &mut HashSet<usize> {
+        if self.filter.is_empty() { &mut self.collapsed } else { &mut self.filtered_collapsed }
+    }
+
     pub(crate) fn expanded(&self, id: usize) -> bool {
-        !self.collapsed.contains(&id)
+        let collapsed = if self.filter.is_empty() { &self.collapsed } else { &self.filtered_collapsed };
+        !collapsed.contains(&id)
     }
 
     pub(crate) fn set_expanded(&mut self, id: usize, expanded: bool) {
         if expanded {
-            self.collapsed.remove(&id);
+            self.collapsed_mut().remove(&id);
         } else {
-            self.collapsed.insert(id);
+            self.collapsed_mut().insert(id);
         }
     }
 
@@ -66,7 +103,7 @@ impl AnnotationTreeState {
                 }
             }
         }
-        reveal(&tree.branches, index, &mut self.collapsed);
+        reveal(&tree.branches, index, self.collapsed_mut());
     }
 }
 
@@ -89,7 +126,7 @@ pub(crate) fn annotation_tree_rows<C: AnnotationTreeTarget>(
             let click_target = target.clone();
             let key_target = target.clone();
             rows.push(
-                components::contents_row(("reader-annotation-branch", id), row, Some(components::contents_disclosure(("reader-annotation-disclosure", id), row, theme)), branch.title.clone(), None, theme)
+                components::contents_row(("reader-annotation-branch", id), row, Some(components::contents_disclosure(("reader-annotation-disclosure", id), row, theme)), branch.title.clone(), None, None, theme)
                     .flex_none()
                     .debug_selector(move || format!("reader-annotation-branch-{id}"))
                     .focusable()
@@ -112,7 +149,7 @@ pub(crate) fn annotation_tree_rows<C: AnnotationTreeTarget>(
             );
             if expanded {
                 for &index in &branch.annotations {
-                    rows.push(card(target, annotations, selected_id, index, depth + 1, theme));
+                    rows.push(card(target, annotations, selected_id, index, depth + 1, &state.filter, theme));
                 }
                 visit(target, &branch.children, state, annotations, selected_id, depth + 1, theme, rows);
             }
@@ -120,7 +157,7 @@ pub(crate) fn annotation_tree_rows<C: AnnotationTreeTarget>(
     }
 
     let mut rows = Vec::new();
-    if annotations.is_empty() {
+    if tree.branches.is_empty() && tree.other.is_empty() {
         rows.push(components::reader_state_note(no_annotations, theme).p(px(12.0)).into_any_element());
         return rows;
     }
@@ -128,23 +165,23 @@ pub(crate) fn annotation_tree_rows<C: AnnotationTreeTarget>(
     if !tree.other.is_empty() {
         rows.push(components::reader_annotation_group_heading("Other notes", theme).into_any_element());
         for &index in &tree.other {
-            rows.push(card(target, annotations, selected_id, index, 0, theme));
+            rows.push(card(target, annotations, selected_id, index, 0, &state.filter, theme));
         }
     }
     rows
 }
 
-fn card<C: AnnotationSidebarTarget>(target: &Entity<C>, annotations: &[Annotation], selected_id: Option<&str>, index: usize, depth: usize, theme: components::BrowserTheme) -> AnyElement {
+fn card<C: AnnotationSidebarTarget>(target: &Entity<C>, annotations: &[Annotation], selected_id: Option<&str>, index: usize, depth: usize, query: &str, theme: components::BrowserTheme) -> AnyElement {
     let annotation = &annotations[index];
     let selected = selected_id == Some(annotation.id.as_str());
-    div().w_full().min_w_0().flex_none().pl(px(components::CONTENTS_ROW_INDENT * depth.min(3) as f32)).child(reader_annotation_card(target, index, annotation, selected, theme)).into_any_element()
+    div().w_full().min_w_0().flex_none().pl(px(components::CONTENTS_ROW_INDENT * depth.min(3) as f32)).child(reader_annotation_card(target, index, annotation, selected, query, theme)).into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use book_model::{AnnotationAnchor, AnnotationStyle};
-    use content_address::ContentHash;
+    use content_address::BookId;
     use gpui::{Render, TestAppContext, VisualTestContext, Window};
 
     struct TreeTest {
@@ -190,7 +227,7 @@ mod tests {
     fn annotation(id: &str) -> Annotation {
         Annotation {
             id: id.into(),
-            content_hash: ContentHash::from_bytes([0; 32]),
+            content_hash: BookId::from_bytes([0; 32]),
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2/1:0)".to_owned()),
             exact_text: "A passage with enough text to occupy several lines in the annotation sidebar.".into(),
             style: AnnotationStyle::Highlight,
@@ -285,5 +322,74 @@ mod tests {
         state.reveal_selected(&tree, None, None);
         state.reveal_selected(&tree, Some("first"), Some(0));
         assert!(state.expanded(0));
+    }
+
+    #[gpui::test]
+    fn filtered_cards_navigate_and_delete_the_original_annotation(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| {
+            let annotations = vec![annotation("first"), Annotation { note: "Find this note".into(), ..annotation("second") }];
+            let mut tree = AnnotationTree { branches: vec![AnnotationBranch { id: 3, title: "Chapter".into(), annotations: vec![0, 1], children: vec![] }], other: vec![] };
+            tree.filter(&annotations, "find");
+            TreeTest { tree, state: AnnotationTreeState::default(), annotations, selected_id: None, navigated_id: None, deleted_id: None }
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("reader-annotation-card-0").is_none());
+        let card = cx.debug_bounds("reader-annotation-card-1").unwrap();
+        cx.simulate_click(card.origin + gpui::point(px(30.0), px(20.0)), Default::default());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.selected_id.as_deref(), Some("second"));
+            assert_eq!(view.navigated_id.as_deref(), Some("second"));
+        });
+        draw(cx);
+        let delete = cx.debug_bounds("reader-annotation-delete-1").unwrap();
+        cx.simulate_click(delete.center(), Default::default());
+        view.read_with(cx, |view, _| assert_eq!(view.deleted_id.as_deref(), Some("second")));
+    }
+
+    #[test]
+    fn filtering_matches_quotes_and_notes_and_preserves_original_indices() {
+        let annotations = vec![
+            Annotation { exact_text: "Unrelated passage".into(), note: String::new(), ..annotation("first") },
+            Annotation { exact_text: "CAFÉ society".into(), note: String::new(), ..annotation("quote") },
+            Annotation { exact_text: "Another passage".into(), note: "Visit the café".into(), ..annotation("note") },
+        ];
+        let make_tree = || AnnotationTree {
+            branches: vec![
+                AnnotationBranch { id: 0, title: "Part".into(), annotations: vec![0], children: vec![AnnotationBranch { id: 1, title: "Chapter".into(), annotations: vec![1], children: vec![] }] },
+                AnnotationBranch { id: 2, title: "Unmatched chapter".into(), annotations: vec![0], children: vec![] },
+            ],
+            other: vec![0, 2],
+        };
+        let mut tree = make_tree();
+        tree.filter(&annotations, "  Café  ");
+        assert_eq!(tree.branches.len(), 1);
+        assert_eq!(tree.branches[0].id, 0);
+        assert!(tree.branches[0].annotations.is_empty());
+        assert_eq!(tree.branches[0].children[0].id, 1);
+        assert_eq!(tree.branches[0].children[0].annotations, [1]);
+        assert_eq!(tree.other, [2]);
+
+        tree.filter(&annotations, "missing");
+        assert_eq!(tree, AnnotationTree::default());
+        let mut tree = make_tree();
+        tree.filter(&annotations, "   ");
+        assert_eq!(tree, make_tree());
+    }
+
+    #[test]
+    fn filtering_reveals_matches_and_restores_unfiltered_disclosure_state() {
+        let mut state = AnnotationTreeState::default();
+        state.set_expanded(1, false);
+        state.set_filter("passage");
+        assert!(state.expanded(1));
+        state.set_expanded(2, false);
+        state.set_filter(" PASSAGE ");
+        assert!(!state.expanded(2));
+        state.set_filter("another");
+        assert!(state.expanded(2));
+        state.set_filter("");
+        assert!(!state.expanded(1));
+        assert!(state.expanded(2));
     }
 }

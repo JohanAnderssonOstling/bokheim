@@ -12,6 +12,7 @@ gpui-component.workspace = true
 image = { version = "0.25", default-features = false }
 log = "0.4"
 pdf-reader-core = { path = "../../../../../shared/pdf-reader-core" }
+fixed-page = { path = "../../../../../shared/fixed-page", features = ["gpui"] }
 smallvec = "1"
 web-time = "1"
 

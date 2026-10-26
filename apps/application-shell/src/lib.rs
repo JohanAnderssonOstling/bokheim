@@ -1,5 +1,7 @@
 //! Per-window composition for the library and book reader.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use std::path::PathBuf;
 mod audiobook_footer;
 #[cfg(feature = "kobo")]
@@ -14,7 +16,7 @@ use gpui::prelude::*;
 use gpui::{AnyView, App, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, Modifiers, Render, SharedString, Subscription, Window};
 #[cfg(all(target_os = "linux", not(feature = "mobile")))]
 use gpui::{MouseMoveEvent, div, px};
-use gpui_component::{WindowExt, notification::Notification};
+use gpui_component::{Root, WindowExt, notification::Notification};
 use library_model::BookLocator;
 use sync_common::LibraryId;
 
@@ -119,6 +121,17 @@ impl ApplicationRoot {
                 })
                 .detach();
             }
+            SyncEvent::DeleteAccountRequested { email, password } => {
+                self.account_generation = self.account_generation.wrapping_add(1);
+                let generation = self.account_generation;
+                let backend = self.backend.clone();
+                let sender = self.sync_sender.clone();
+                cx.spawn(async move |_, _| {
+                    let result = backend.delete_account(email, password).await;
+                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: "Your account has been deleted. Books saved on this device have been kept.", reveal_password_reset_on_error: false });
+                })
+                .detach();
+            }
             SyncEvent::AssetStorageRequested { library_id, enabled } => {
                 let backend = self.backend.clone();
                 let sender = self.sync_sender.clone();
@@ -128,21 +141,14 @@ impl ApplicationRoot {
                 })
                 .detach();
             }
-            SyncEvent::Authenticate { action, email, secret, token, reply } => {
+            SyncEvent::Authenticate { request, reply } => {
                 let backend = self.backend.clone();
                 let sender = self.sync_sender.clone();
                 cx.spawn(async move |_, _| {
-                    let result = match action.as_str() {
-                        "login" => backend.login(email, secret).await.map(|_| ()),
-                        "register" => backend.request_public_registration(email, secret).await,
-                        "verify" => backend.verify_email(email, secret).await.map(|_| ()),
-                        "resend" => backend.resend_verification(email).await,
-                        "request-reset" => backend.request_password_reset(email).await,
-                        "reset" => backend.reset_password(token, secret).await,
-                        _ => Err("Unknown authentication action".into()),
-                    };
-                    let authenticated = result.is_ok() && matches!(action.as_str(), "login" | "verify");
-                    let _ = reply.try_send(result.map_err(|error| ui_components::authentication_error(&error, &action).to_owned()));
+                    let signs_in = request.signs_in();
+                    let result = request.submit(&backend).await;
+                    let authenticated = result.is_ok() && signs_in;
+                    let _ = reply.try_send(result);
                     if authenticated {
                         let _ = sender.try_send(SyncEvent::WebAuthenticated);
                     }
@@ -211,7 +217,9 @@ impl ApplicationRoot {
                     // tries the AppCell borrow and leaves the closure untouched
                     // if a browser callback is still updating the application.
                     let result = root.update_in(cx, |root, _, cx| {
-                        root.apply_sync_event(pending.take().expect("pending sync event"), cx);
+                        if let Some(event) = pending.take() {
+                            root.apply_sync_event(event, cx);
+                        }
                     });
                     if result.is_ok() {
                         break;
@@ -342,7 +350,7 @@ impl ApplicationRoot {
         self.browser.update(cx, |browser, cx| browser.import_and_open_path(name, path, window, cx));
     }
 
-    pub fn incoming_import_failed(&mut self, error: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn incoming_import_failed(&mut self, error: app::BackendError, window: &mut Window, cx: &mut Context<Self>) {
         self.browser.update(cx, |browser, cx| browser.incoming_import_failed(error, window, cx));
     }
 
@@ -447,7 +455,7 @@ impl ApplicationRoot {
             // the book the user subsequently opened.
             if let Some(surface) = root.reader.as_ref().filter(|surface| surface.view.entity_id() == reader.entity_id()) {
                 let title = surface.title.clone();
-                root.book_open_failed(&title, error.0.clone(), window, cx);
+                root.book_open_failed(&title, app::BackendError::Message(error.0.clone()), window, cx);
             }
         })
         .detach();
@@ -512,7 +520,7 @@ impl ApplicationRoot {
         cx.notify();
     }
 
-    fn book_open_failed(&mut self, title: &str, error: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn book_open_failed(&mut self, title: &str, error: app::BackendError, window: &mut Window, cx: &mut Context<Self>) {
         log::error!("could not open {title:?}: {error}");
         self.return_to_library(window, cx);
         let message = ui_components::user_facing_error(&error, "Try opening the book again. If it still won't open, download it again or try another edition.");
@@ -562,7 +570,19 @@ impl ApplicationRoot {
         let controls = cx.new(|cx| reader_ui::AudiobookDock::inline(session.clone(), cx));
         let position_session = session.clone();
         let position = std::rc::Rc::new(move |cx: &gpui::App| position_session.read(cx).listening_position());
-        cx.set_global(NowPlaying { book: Some(NowPlayingBook { locator: locator.clone(), controls: controls.into(), position }) });
+        let status_session = session.clone();
+        let chapter_read_status = std::rc::Rc::new(move |cx: &gpui::App| status_session.read(cx).chapter_read_status());
+        let reset_session = session.clone();
+        let reset_chapter_read_status = std::rc::Rc::new(move |target: Option<String>, cx: &mut gpui::App| {
+            reset_session.update(cx, |session, cx| {
+                if let Some(target) = target {
+                    session.reset_chapter_read_status_at(target, cx);
+                } else {
+                    session.reset_chapter_read_status(cx);
+                }
+            })
+        });
+        cx.set_global(NowPlaying { book: Some(NowPlayingBook { locator: locator.clone(), controls: controls.into(), position, chapter_read_status, reset_chapter_read_status }) });
         let dock = cx.new(|cx| reader_ui::AudiobookDock::new(session.clone(), cx));
         cx.subscribe_in(&dock, window, |root, _, action: &reader_ui::DockAction, window, cx| match action {
             reader_ui::DockAction::Expand => root.expand_audiobook(window, cx),
@@ -623,7 +643,7 @@ impl ApplicationRoot {
     /// Native navigation enters here directly, without key bindings or a focus
     /// path. False permits the host to exit only after Home has nothing to close.
     pub fn native_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if gpui_component::Root::dismiss_active_overlay(window, cx) {
+        if Root::dismiss_active_overlay(window, cx) {
             return true;
         }
         if self.native_back_overlay.as_ref().is_some_and(|handler| handler(window, cx)) {
@@ -771,7 +791,7 @@ impl Render for ApplicationRoot {
                 )
             }
         });
-        root
+        root.children(Root::render_sheet_layer(window, cx).map(|sheet| gpui::deferred(sheet).with_priority(2)))
     }
 }
 
@@ -784,7 +804,7 @@ mod navigation_tests {
     use library_model::BrowseLocation;
     use std::cell::Cell;
     use std::time::Duration;
-    use sync_common::{ContentHash, ROOT_DIR_ID};
+    use sync_common::{BookId, ROOT_DIR_ID};
 
     fn press_native_back(window: AnyWindowHandle, cx: &mut TestAppContext) -> bool {
         cx.update_window(window, |view, window, cx| {
@@ -1191,7 +1211,7 @@ mod navigation_tests {
         });
         let root = window.update(cx, |root, _, _| root.view().clone().downcast::<ApplicationRoot>().ok().unwrap()).unwrap();
         snapshots.try_recv().unwrap();
-        let locator = BookLocator::new(*library.library_id(), ContentHash::from_bytes([19; 32]));
+        let locator = BookLocator::new(*library.library_id(), BookId::from_bytes([19; 32]));
         window.update(cx, |_, window, cx| root.update(cx, |root, cx| root.open_book(locator, "Unavailable book".into(), None, window, cx))).unwrap();
         while snapshots.recv().await.unwrap().reader.is_none() {}
         while snapshots.recv().await.unwrap().reader.is_some() {}
@@ -1239,7 +1259,7 @@ mod navigation_tests {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);
         });
-        let reader = ReaderSession { locator: BookLocator::new(*library.library_id(), ContentHash::from_bytes([7; 32])), title: "Pending restoration".into() };
+        let reader = ReaderSession { locator: BookLocator::new(*library.library_id(), BookId::from_bytes([7; 32])), title: "Pending restoration".into() };
         let initial = NavigationSession { library_id: Some(*library.library_id()), route: Route::Library(LibraryRoute::Authors), reader: Some(reader.clone()), ..Default::default() };
         let (saved, snapshots) = async_channel::unbounded();
         let session = WindowSession { initial, save: Rc::new(move |snapshot, _| saved.try_send(snapshot).unwrap()) };

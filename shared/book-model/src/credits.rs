@@ -7,7 +7,7 @@
 
 use crate::{BookSubject, Identifier, LanguageTag, MarcRelatorCode};
 use crate::{IdentifierError, LanguageTagError, SubjectError};
-use content_address::ContentHash;
+use content_address::BookId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -186,7 +186,7 @@ pub struct AudiobookTrack {
     pub length: u64,
     /// ZIP revision whose stored byte offsets this track index describes.
     #[serde(default)]
-    pub archive_hash: Option<ContentHash>,
+    pub archive_hash: Option<BookId>,
 }
 
 impl AudiobookTrack {
@@ -200,7 +200,7 @@ impl AudiobookTrack {
     }
 }
 
-pub fn tracks_match_archive(tracks: &[AudiobookTrack], hash: ContentHash) -> bool {
+pub fn tracks_match_archive(tracks: &[AudiobookTrack], hash: BookId) -> bool {
     !tracks.is_empty() && tracks.iter().all(|track| track.valid() && track.archive_hash == Some(hash))
 }
 

@@ -1,6 +1,7 @@
 //! The platform's embedded browser, isolated from GPUI: a single browser
 //! verification attempt, or a store window that hands back what it downloads.
 use app_preferences::BrowsingPreferences;
+use client_runtime::BackendError;
 #[cfg(not(target_os = "android"))]
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,8 @@ use tokio::{
 use url::Url;
 
 pub mod address;
+#[cfg(not(target_os = "android"))]
+mod availability;
 
 #[cfg(any(target_os = "android", test))]
 pub mod android;
@@ -175,16 +178,16 @@ fn helper() -> Result<PathBuf, String> {
     }
 }
 
-/// Whether a store window can open here: the system has the webview the
-/// helper needs (WebKitGTK on Linux, WebView2 on Windows). Asked of the
-/// helper once per run.
+/// Whether stores can be offered here: the helper can load its runtime
+/// (WebKitGTK on Linux, WebView2 on Windows), and Linux has X11/XWayland.
+/// Probed once per run; opening an actual window can still fail.
 #[cfg(not(target_os = "android"))]
 pub fn stores_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
         PROFILE.get().is_some()
             && (!cfg!(target_os = "linux") || std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()))
-            && helper().ok().and_then(|helper| std::process::Command::new(helper).arg("probe").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().ok()).is_some_and(|status| status.success())
+            && helper().is_ok_and(|helper| availability::probe(&helper, Duration::from_secs(5)))
     })
 }
 
@@ -196,11 +199,11 @@ fn webkit_missing(status: std::process::ExitStatus) -> bool {
 
 /// Opens the store at `url` in a window of its own, saving what it downloads
 /// into `downloads`.
-pub async fn open_store(url: &Url, title: &str, downloads: &Path, preferences: BrowsingPreferences) -> Result<StoreWindow, String> {
+pub async fn open_store(url: &Url, title: &str, downloads: &Path, preferences: BrowsingPreferences) -> Result<StoreWindow, BackendError> {
     let profile = PROFILE.get().ok_or("stores are unavailable on this device")?;
     let request = StoreRequest { url: url.to_string(), title: title.to_owned(), data_directory: shared_profile(profile), downloads: downloads.to_owned(), history_file: Some(profile.join("browser-address-history.json")), preferences, transfer_policy_file: Some(profile.parent().unwrap_or(profile).join("transfer-policy.json")) };
     #[cfg(target_os = "android")]
-    return android::open_store(request).await;
+    return android::open_store(request).await.map_err(BackendError::from);
     #[cfg(not(target_os = "android"))]
     open_desktop_store(request).await
 }
@@ -211,11 +214,11 @@ pub fn stores_available() -> bool {
 }
 
 #[cfg(not(target_os = "android"))]
-async fn open_desktop_store(request: StoreRequest) -> Result<StoreWindow, String> {
+async fn open_desktop_store(request: StoreRequest) -> Result<StoreWindow, BackendError> {
     let mut input = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     input.push(b'\n');
     // Dropped when the window has closed, or when it failed to open.
-    let mut command = Command::new(helper()?);
+    let mut command = Command::from(availability::command(&helper()?));
     // Wry embeds into GPUI's native window on X11, including XWayland.
     // Verification still uses Tao's GTK window and supports native Wayland.
     #[cfg(target_os = "linux")]
@@ -233,9 +236,9 @@ async fn open_desktop_store(request: StoreRequest) -> Result<StoreWindow, String
     // Its stdout ended without the window opening, so it has exited.
     let status = child.wait().await.map_err(|error| error.to_string())?;
     if webkit_missing(status) {
-        return Err("Stores need WebKitGTK 4.1 (libwebkit2gtk-4.1) installed on this system.".into());
+        return Err(BackendError::classified(client_runtime::Failure::WebViewMissing, "the store helper could not load WebKitGTK 4.1 (libwebkit2gtk-4.1)"));
     }
-    Err(format!("the store window could not be opened ({status})"))
+    Err(format!("the store window could not be opened ({status})").into())
 }
 
 #[cfg(target_os = "android")]
@@ -252,7 +255,7 @@ pub(crate) async fn get(url: &Url, authorization: Option<String>, catalog: &Url)
     let request = Request { url: url.to_string(), authorization, navigation_url, data_directory: shared_profile(profile) };
     let input = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     let operation = async {
-        let mut child = Command::new(&executable).stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().map_err(|error| error.to_string())?;
+        let mut child = Command::from(availability::command(&executable)).stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().map_err(|error| error.to_string())?;
         let mut stdin = child.stdin.take().ok_or("could not send the feed to the verification browser")?;
         stdin.write_all(&input).await.map_err(|error| error.to_string())?;
         drop(stdin);

@@ -5,7 +5,7 @@
 //! independently.
 
 pub mod assets {
-    use crate::ContentHash;
+    use crate::BookId;
     use serde::{Deserialize, Serialize};
     use std::collections::HashSet;
     use std::fmt;
@@ -15,7 +15,7 @@ pub mod assets {
     pub struct PlaybackGrant {
         pub path: String,
         pub expires_in_seconds: u32,
-        pub content_hash: ContentHash,
+        pub content_hash: BookId,
         pub length: u64,
     }
     impl fmt::Debug for PlaybackGrant {
@@ -32,24 +32,24 @@ pub mod assets {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailPresenceRequest {
-        pub content_hashes: Vec<ContentHash>,
+        pub content_hashes: Vec<BookId>,
     }
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailPresenceResponse {
-        pub present: Vec<ContentHash>,
+        pub present: Vec<BookId>,
         #[serde(default)]
         pub revisions: Vec<ThumbnailRevision>,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailRevision {
-        pub content_hash: ContentHash,
-        pub revision: ContentHash,
+        pub content_hash: BookId,
+        pub revision: BookId,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct BlobManifestEntry {
-        pub content_hash: ContentHash,
+        pub content_hash: BookId,
         pub size_bytes: u64,
     }
 
@@ -69,19 +69,17 @@ pub mod assets {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct RejectedBlobManifestEntry {
-        pub content_hash: ContentHash,
+        pub content_hash: BookId,
         pub reason: BlobManifestRejectionReason,
     }
 
-    /// Every requested hash appears exactly once across these four collections.
-    /// `claimed` means a globally stored, validated blob was charged to this
-    /// account atomically; `upload` means the bytes still require the ordinary
-    /// quota-checked upload admission path.
+    /// Every requested hash appears exactly once across these three collections.
+    /// `upload` means the bytes still require the ordinary quota-checked upload
+    /// admission path, even when another account stores the same blob.
     #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
     pub struct BlobManifestResponse {
-        pub owned: Vec<ContentHash>,
-        pub claimed: Vec<ContentHash>,
-        pub upload: Vec<ContentHash>,
+        pub owned: Vec<BookId>,
+        pub upload: Vec<BookId>,
         pub rejected: Vec<RejectedBlobManifestEntry>,
     }
 
@@ -110,7 +108,7 @@ pub mod assets {
         if requested.len() != request.blobs.len() {
             return Err(BlobManifestValidationError::DuplicateRequestHash);
         }
-        let classified = response.owned.iter().chain(&response.claimed).chain(&response.upload).chain(response.rejected.iter().map(|entry| &entry.content_hash));
+        let classified = response.owned.iter().chain(&response.upload).chain(response.rejected.iter().map(|entry| &entry.content_hash));
         let mut unique = HashSet::with_capacity(requested.len());
         for hash in classified {
             if !requested.contains(hash) || !unique.insert(*hash) {
@@ -125,7 +123,7 @@ pub mod assets {
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailBatchEntry {
-        pub content_hash: ContentHash,
+        pub content_hash: BookId,
         pub bytes: Vec<u8>,
         pub browse_bytes: Vec<u8>,
     }
@@ -137,13 +135,13 @@ pub mod assets {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailBatchDownloadRequest {
-        pub content_hashes: Vec<ContentHash>,
+        pub content_hashes: Vec<BookId>,
     }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailBatchDownloadResponse {
         pub thumbnails: Vec<ThumbnailBatchDownloadEntry>,
-        pub missing: Vec<ContentHash>,
+        pub missing: Vec<BookId>,
     }
 
     pub type ThumbnailBatchDownloadEntry = ThumbnailBatchEntry;
@@ -157,12 +155,16 @@ pub mod libraries {
     pub struct LibrarySummary {
         pub library_id: LibraryId,
         pub library_name: String,
+        #[serde(default)]
+        pub storage: crate::storage::LibraryStorage,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct LibraryNameRequest {
         pub library_id: LibraryId,
         pub library_name: String,
+        #[serde(default)]
+        pub storage: crate::storage::LibraryStorage,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

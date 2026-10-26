@@ -1,7 +1,7 @@
 -- Asset transfer pages and guarded settlements. The database owns pending work.
 
 -- name: transfer_upload_intent?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT upload_id, upload_size FROM book_transfer WHERE content_hash=:content_hash AND upload_id IS NOT NULL;
 
 -- Hash-level transfer snapshot reads. Each query returns only rows for the
@@ -46,7 +46,7 @@ ORDER BY transfer.upload_id LIMIT :limit;
 -- authoritative state. The upload snapshot repeats this predicate only as a
 -- last-moment safety check before bytes are sent.
 -- name: transfer_pending_cover_uploads?
--- param: after: Option<&ContentHash>
+-- param: after: Option<&BookId>
 -- param: limit: i64
 SELECT content_hash FROM uploadable_covers
 WHERE NOT EXISTS(SELECT 1 FROM local_book_draft draft WHERE draft.content_hash=uploadable_covers.content_hash) AND content_hash > COALESCE(:after,X'')
@@ -54,12 +54,12 @@ ORDER BY content_hash LIMIT :limit;
 
 -- name: transfer_complete_upload!
 -- param: id: i64
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 UPDATE book_transfer SET upload_id=NULL=NULL, upload_size=NULL
 WHERE content_hash=:content_hash AND upload_id=:id;
 
 -- name: pending_thumbnail_downloads?
--- param: after: Option<&ContentHash>
+-- param: after: Option<&BookId>
 -- param: limit: i64
 -- Books whose cover this device should fetch: no local thumbnail and none
 -- being generated, and either the server has one or the book's bytes are not
@@ -73,17 +73,17 @@ WHERE b.content_hash > COALESCE(:after,X'') AND b.content_hash != '' AND b.delet
 ORDER BY b.content_hash LIMIT :limit;
 
 -- name: transfer_queue_materialization!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: relative_path: &str
 INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES ('materialize',:content_hash,:relative_path);
 
 -- name: transfer_download_placement?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT EXISTS(SELECT 1 FROM book b JOIN book_dir bd ON bd.book_row_id=b.row_id WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL);
 
 -- name: book_download_requests?
 -- param: after_at: i64
--- param: after_hash: Option<&ContentHash>
+-- param: after_hash: Option<&BookId>
 -- param: limit: i64
 -- Requested downloads, oldest first. Advance across failures as well as successes.
 SELECT content_hash, book_download_at FROM book_transfer
@@ -91,10 +91,14 @@ WHERE book_download IS NOT NULL
   AND (book_download_at > :after_at OR (book_download_at = :after_at AND content_hash > COALESCE(:after_hash,X'')))
 ORDER BY book_download_at, content_hash LIMIT :limit;
 
+-- name: book_download_origin?
+-- param: content_hash: &BookId
+SELECT book_download FROM book_transfer WHERE content_hash=:content_hash AND book_download IS NOT NULL;
+
 -- Durable download state in one row: bytes marked downloaded anywhere, and
 -- a live placement with a queued request. Single-row existence checks only.
 -- name: transfer_download_state?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT
     EXISTS (
         SELECT 1 FROM library_book_presence presence
@@ -111,7 +115,7 @@ SELECT
 
 -- name: record_remote_asset!
 -- param: kind: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT INTO book_transfer(content_hash, server_has_book, server_has_cover)
 SELECT content_hash, :kind = 'book', :kind = 'thumbnail' FROM book WHERE content_hash = :content_hash
 ON CONFLICT(content_hash) DO UPDATE SET
@@ -120,7 +124,7 @@ ON CONFLICT(content_hash) DO UPDATE SET
 
 -- name: forget_remote_asset!
 -- param: kind: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 UPDATE book_transfer SET
     server_has_book = server_has_book AND :kind != 'book',
     server_has_cover = server_has_cover AND :kind != 'thumbnail'

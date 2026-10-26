@@ -148,7 +148,7 @@ fn author_words_compatible(left: &[String], right: &[String]) -> bool {
         for &j in &edges[i] {
             if seen[j] { continue; }
             seen[j] = true;
-            if owners[j].is_none() || assign(owners[j].unwrap(), edges, seen, owners) {
+            if owners[j].is_none_or(|owner| assign(owner, edges, seen, owners)) {
                 owners[j] = Some(i);
                 return true;
             }

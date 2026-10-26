@@ -10,8 +10,8 @@ use std::rc::Rc;
 
 use book_model::AnnotationStyle;
 use gpui::App;
-use library_backend::LibraryClient;
 use library_backend::Annotation;
+use library_backend::LibraryClient;
 
 use crate::shell::persistence::MutationWriter;
 
@@ -126,7 +126,7 @@ impl MarkSession {
         if let Some(color) = color {
             annotation.color = color;
         }
-        annotation.modified_at = u64::try_from(now_millis()).expect("annotation timestamps must be nonnegative");
+        annotation.modified_at = now_millis();
         self.update(annotation.clone(), what);
         Some(annotation)
     }
@@ -134,7 +134,7 @@ impl MarkSession {
     /// Deletes an annotation and reports whether its editor was closed.
     pub(crate) fn delete(&mut self, id: String, what: &'static str) -> bool {
         let closed_editor = self.state.remove_annotation(&id);
-        let modified_at = now_millis();
+        let modified_at = now_millis() as i64;
         self.writes.record(what, move |library| {
             let library = library.clone();
             Box::pin(async move { library.delete_annotation(id, modified_at).await })
@@ -150,6 +150,8 @@ impl MarkSession {
     }
 }
 
-pub(crate) fn now_millis() -> i64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0)
+pub(crate) fn now_millis() -> u64 {
+    // Deletions use signed database timestamps; keep both representations in
+    // range, including on devices whose clocks have not been initialized.
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|duration| duration.as_millis().min(i64::MAX as u128) as u64).unwrap_or(0)
 }

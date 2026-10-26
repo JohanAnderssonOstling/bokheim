@@ -53,9 +53,36 @@ thread_local! {
     static STORAGE: RefCell<Option<Rc<OpfsSAHPoolUtil>>> = const { RefCell::new(None) };
 }
 
-pub async fn initialize() -> Result<(), String> {
+/// Why browser storage could not be opened.
+#[derive(Debug)]
+pub enum StorageInitError {
+    /// Another tab holds the storage's file handles.
+    Busy(String),
+    Failed(String),
+}
+
+impl From<String> for StorageInitError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for StorageInitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy(error) | Self::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
+
+pub async fn initialize() -> Result<(), StorageInitError> {
     let config = OpfsSAHPoolCfgBuilder::new().vfs_name(VFS_NAME).directory(VFS_DIRECTORY).clear_on_init(false).build();
-    let storage = install::<rusqlite::ffi::WasmOsCallback>(&config, true).await.map_err(storage_error)?;
+    let storage = install::<rusqlite::ffi::WasmOsCallback>(&config, true).await.map_err(|error| {
+        // A sync access handle cannot be created while another tab holds it.
+        let busy = matches!(error, OpfsSAHError::CreateSyncAccessHandle(_));
+        let error = storage_error(error);
+        if busy { StorageInitError::Busy(error) } else { StorageInitError::Failed(error) }
+    })?;
     // SQLite can synchronously create short-lived journal files. Keep eight
     // unused handles available without permanently growing the pool on every
     // launch, and clean up surplus handles left by older builds.
@@ -67,7 +94,10 @@ pub async fn initialize() -> Result<(), String> {
     ASSET_INDEX.with(|slot| *slot.borrow_mut() = Some(index));
     // Initialization must not wait for a library-wide object sweep.
     client_platform_runtime::executor::spawn_detached(async {
-        client_platform_runtime::executor::sleep(Duration::ZERO).await;
+        if let Err(error) = client_platform_runtime::executor::sleep(Duration::ZERO).await {
+            log::warn!("Object reclamation could not be scheduled: {error}");
+            return;
+        }
         if let Err(error) = reclaim_unreferenced_objects().await {
             log::warn!("Object reclamation will retry on next startup: {error}");
         }
@@ -90,7 +120,7 @@ async fn reclaim_unreferenced_objects() -> Result<(), String> {
         if !pinned && !published {
             remove_asset(&name).await.map_err(js_error)?;
         }
-        client_platform_runtime::executor::sleep(Duration::ZERO).await;
+        client_platform_runtime::executor::sleep(Duration::ZERO).await.map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -214,9 +244,9 @@ impl FileReader {
         Self::new(self.physical.clone(), self.length)
     }
 
-    pub fn content_hash(&self) -> Result<Option<sync_common::ContentHash>, String> {
+    pub fn content_hash(&self) -> Result<Option<sync_common::BookId>, String> {
         use rusqlite::OptionalExtension;
-        let value: Option<sync_common::ContentHash> = with_index(|index| index.query_row(include_str!("sql/web_storage/content_hash_select.sql"), [&self.physical], |row| row.get(0)).optional())?;
+        let value: Option<sync_common::BookId> = with_index(|index| index.query_row(include_str!("sql/web_storage/content_hash_select.sql"), [&self.physical], |row| row.get(0)).optional())?;
         Ok(value)
     }
 
@@ -249,8 +279,15 @@ impl Drop for FileReader {
     fn drop(&mut self) {
         let finished = READERS.with(|readers| {
             let mut readers = readers.borrow_mut();
-            let state = readers.get_mut(&self.physical).expect("reader generation was registered");
-            state.count -= 1;
+            let Some(state) = readers.get_mut(&self.physical) else {
+                log::warn!("book reader cleanup found no registered generation: {}", self.physical);
+                return None;
+            };
+            let Some(count) = state.count.checked_sub(1) else {
+                log::warn!("book reader cleanup found an empty generation: {}", self.physical);
+                return readers.remove(&self.physical);
+            };
+            state.count = count;
             if state.count == 0 {
                 readers.remove(&self.physical)
             } else {
@@ -326,17 +363,17 @@ impl FileWriter {
         Ok(())
     }
 
-    pub fn publish_verified_as(mut self, name: String, content_hash: sync_common::ContentHash) -> Result<(), String> {
+    pub fn publish_verified_as(mut self, name: String, content_hash: sync_common::BookId) -> Result<(), String> {
         self.name = name;
         self.commit_verified(content_hash)
     }
     pub fn commit(self) -> Result<(), String> {
         self.commit_revision(None)
     }
-    pub fn commit_verified(self, content_hash: sync_common::ContentHash) -> Result<(), String> {
+    pub fn commit_verified(self, content_hash: sync_common::BookId) -> Result<(), String> {
         self.commit_revision(Some(content_hash))
     }
-    fn commit_revision(mut self, content_hash: Option<sync_common::ContentHash>) -> Result<(), String> {
+    fn commit_revision(mut self, content_hash: Option<sync_common::BookId>) -> Result<(), String> {
         let previous = physical_name(&self.name)?;
         flush_staged(&self.physical).map_err(js_error)?;
         with_index(|index| {

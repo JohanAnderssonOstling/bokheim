@@ -42,9 +42,17 @@ default toolchain. All builds/tests use optimized release profiles.
   `SYNC_E2E_DATABASE_URL` is absent.
 - Linux: native GPUI libraries, linuxdeploy and appimagetool in PATH (or set
   `LINUXDEPLOY` and `APPIMAGETOOL`). Release tooling pins remain in the Windows
-  workflow environment. Build in a local Ubuntu 22.04 environment/container for
-  the GLIBC 2.35 baseline. Newer host builds are accepted only if both the
-  AppImage runtime and all packaged ELF files pass the same compatibility check.
+  workflow environment. The desktop build automatically uses the checksum-pinned
+  glibc 2.17 SDK in `scripts/linux/toolchain.json`, including Zig, native link
+  libraries and matching GNU C++ headers/runtime. Install `cpio`, `zstd`,
+  `pkg-config`, `file` and `binutils` on the build host. SDK files are cached in
+  `.linux-toolchain/` (override with `BOKHEIM_LINUX_SDK`). The AppImage runtime
+  and every bundled core library must pass the 2.17 audit. The Linux Kobo
+  installer workflow uses the same SDK and checks. Only the optional browser executable has a separate
+  GLIBC 2.39 ceiling and can be built on Ubuntu 24.04. Set `OPDS_BROWSER` to that
+  separately built executable to skip its local build and include it in the
+  AppImage. Set `BOKHEIM_BROWSER=disabled` to skip both building and packaging
+  the browser, or `BOKHEIM_BROWSER=required` to require it during packaging.
 - Android: Java 21, Gradle 8.14.3, Android SDK 36/build-tools 36.0.0, NDK
   29.0.13599879 and Rust target `aarch64-linux-android`. Configure production
   signing in private Gradle user properties or `BOKHEIM_ANDROID_*` environment

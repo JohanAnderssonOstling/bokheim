@@ -6,7 +6,7 @@ use book_model::BookFormat;
 use client_runtime::BackendError;
 use library_files::asset_store::CopiedBook;
 use library_replica::filenames;
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 
 use crate::LibraryImport;
 
@@ -26,13 +26,12 @@ pub(crate) fn validate_import_destination(db: &library_database::Database, paren
 impl LibraryImport {
     pub(crate) fn validate_import(&self, parent_id: &DirId, file_name: &str) -> Result<ValidatedImport, BackendError> {
         let file_name = filenames::validate_component(file_name)?;
-        let extension = file_name.rsplit_once('.').map(|(_, extension)| extension).unwrap_or_default();
-        let format = BookFormat::from_import_extension(extension).ok_or("only EPUB, PDF, DRM-free MOBI/AZW/AZW3, and M4B files can be added to a library")?;
+        let format = BookFormat::from_file_name(&file_name).ok_or("only EPUB, PDF, DRM-free MOBI/AZW/AZW3, FB2, CBZ, and M4B files can be added to a library")?;
         validate_import_destination(&self.database, parent_id)?;
         Ok(ValidatedImport { parent_id: *parent_id, file_name, format })
     }
 
-    pub(crate) async fn finish_import(&self, import: ValidatedImport, staged: CopiedBook) -> Result<ContentHash, BackendError> {
+    pub(crate) async fn finish_import(&self, import: ValidatedImport, staged: CopiedBook) -> Result<BookId, BackendError> {
         #[cfg(not(target_arch = "wasm32"))]
         let (staged, inspection) = {
             let ingested = filesystem_scanner::ingestion::ingest_file(staged.path().to_owned(), import.file_name.clone(), &*self.cpu)
@@ -55,6 +54,14 @@ impl LibraryImport {
                 )
             }
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.database.storage_policy().map_err(BackendError::operation)?.external().is_some() {
+            return self.finish_provider_import(import, staged, inspection.expect("native import inspection")).await;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.database.storage_policy().map_err(BackendError::operation)?.external().is_some() {
+            return Err(BackendError::message("cloud provider imports are not configured for this platform yet"));
+        }
         let content_hash = staged.content_hash();
         let size_bytes = staged.size_bytes();
         // Inspection may overlap a delete/move. Do not publish into a folder
@@ -79,19 +86,19 @@ impl LibraryImport {
     /// Placement rows whose remembered path disagrees with storage, resolved
     /// from a snapshot so no filesystem check holds the writer.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn import_restore_paths(&self, content_hash: &ContentHash) -> Result<Vec<String>, BackendError> {
+    pub(crate) fn import_restore_paths(&self, content_hash: &BookId) -> Result<Vec<String>, BackendError> {
         let candidates = self.database.import_restore_candidates(content_hash).map_err(BackendError::operation)?;
         Ok(candidates.into_iter().filter(|(path, materialized)| materialized.as_deref() != Some(path.as_str()) || !self.assets.placement_file_exists(path)).map(|(path, _)| path.to_string()).collect())
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn import_restore_paths(&self, _content_hash: &ContentHash) -> Result<Vec<String>, BackendError> {
+    pub(crate) fn import_restore_paths(&self, _content_hash: &BookId) -> Result<Vec<String>, BackendError> {
         Ok(Vec::new())
     }
 
     /// Committing the metadata transaction is the import's success point.
     /// Resolve all fallible result data before it, and notify before optional work.
-    pub(crate) fn commit_import(&self, import: ValidatedImport, content_hash: ContentHash, size_bytes: u64, inspection: Option<book_inspection::InspectedBook>, published: library_model::PublishedStagedBook) -> Result<(), BackendError> {
+    pub(crate) fn commit_import(&self, import: ValidatedImport, content_hash: BookId, size_bytes: u64, inspection: Option<book_inspection::InspectedBook>, published: library_model::PublishedStagedBook) -> Result<(), BackendError> {
         let request_thumbnail = !self.assets.thumbnail_set_exists(&content_hash).map_err(BackendError::operation)?;
         let restore_paths = self.import_restore_paths(&content_hash)?;
         let ValidatedImport { parent_id, file_name, format } = import;

@@ -25,43 +25,42 @@ fn metadata_from_raw(path: &Path, raw: &MobiMetadata) -> MetadataResult<BookReco
 pub fn inspect_mobi_pages_reader(path: &Path, reader: impl Read) -> MetadataResult<BookRecord> {
     let (metadata, text) = book_content::mobi::inspect_text(reader)?;
     let mut book = metadata_from_declared(path, metadata)?;
-    static TAGS: OnceLock<Regex> = OnceLock::new();
-    static BLOCKS: OnceLock<Regex> = OnceLock::new();
-    static PAGES: OnceLock<Regex> = OnceLock::new();
-    static HIDDEN: OnceLock<Regex> = OnceLock::new();
-    static ENTITIES: OnceLock<Regex> = OnceLock::new();
-    static CIP: OnceLock<Regex> = OnceLock::new();
+    static TAGS: OnceLock<Result<Regex, String>> = OnceLock::new();
+    static BLOCKS: OnceLock<Result<Regex, String>> = OnceLock::new();
+    static PAGES: OnceLock<Result<Regex, String>> = OnceLock::new();
+    static HIDDEN: OnceLock<Result<Regex, String>> = OnceLock::new();
+    static ENTITIES: OnceLock<Result<Regex, String>> = OnceLock::new();
+    static CIP: OnceLock<Result<Regex, String>> = OnceLock::new();
     let markup = text.as_str();
     let end = markup.char_indices().nth(128 * 1024).map_or(markup.len(), |(i, _)| i);
     let markup = &markup[..end];
-    let visible = HIDDEN.get_or_init(|| Regex::new(r"(?is)<(script|style|head)\b[^>]*>.*?</(?:script|style|head)>").unwrap()).replace_all(markup, "");
-    let pages = PAGES.get_or_init(|| Regex::new(r"(?is)<mbp:pagebreak\b[^>]*>").unwrap()).replace_all(&visible, "\x0c");
-    let blocks = BLOCKS.get_or_init(|| Regex::new(r"(?is)</?(?:p|div|br|h[1-6])\b[^>]*>").unwrap()).replace_all(&pages, "\n");
+    let visible = cached_regex(&HIDDEN, r"(?is)<(script|style|head)\b[^>]*>.*?</(?:script|style|head)>")?.replace_all(markup, "");
+    let pages = cached_regex(&PAGES, r"(?is)<mbp:pagebreak\b[^>]*>")?.replace_all(&visible, "\x0c");
+    let blocks = cached_regex(&BLOCKS, r"(?is)</?(?:p|div|br|h[1-6])\b[^>]*>")?.replace_all(&pages, "\n");
     // Inline tags must not split digits or cutters in a printed code.
-    let plain = TAGS.get_or_init(|| Regex::new(r"(?s)<[^>]*>").unwrap()).replace_all(&blocks, "");
+    let plain = cached_regex(&TAGS, r"(?s)<[^>]*>")?.replace_all(&blocks, "");
     let plain = plain.replace("&nbsp;", " ").replace("&copy;", "©").replace("&#x00A9;", "©");
     // One malformed/unknown entity must not prevent numeric entities elsewhere
     // (including ISBN hyphens) from being decoded.
-    let plain = ENTITIES
-        .get_or_init(|| Regex::new(r"&(?:#[0-9]+|#x[0-9a-fA-F]+|amp|lt|gt|quot|apos);").unwrap())
+    let plain = cached_regex(&ENTITIES, r"&(?:#[0-9]+|#x[0-9a-fA-F]+|amp|lt|gt|quot|apos);")?
         .replace_all(&plain, |captures: &regex::Captures<'_>| quick_xml::escape::unescape(&captures[0]).map(|value| value.into_owned()).unwrap_or_else(|_| captures[0].to_owned()));
     let mut sections = Vec::new();
     for (i, page) in plain.split('\x0c').take(64).enumerate() {
         if page.len() <= 16_384 {
-            let section = evidence::inspect_section(&book, &format!("mobi:frontmatter:{i}"), page);
+            let section = evidence::try_inspect_section(&book, &format!("mobi:frontmatter:{i}"), page)?;
             if section.accepted {
                 sections.push(section);
             }
         }
         // Some files omit a page break between a series list and its CIP block.
         // Anchor an additional bounded section to the printed CIP heading.
-        for marker in CIP.get_or_init(|| Regex::new(r"(?i)library of congress catalog(?:uing|ing)[ -]in[ -]book").unwrap()).find_iter(page).take(2) {
+        for marker in cached_regex(&CIP, r"(?i)library of congress catalog(?:uing|ing)[ -]in[ -]book")?.find_iter(page).take(2) {
             if marker.start() < 2048 {
                 continue;
             }
             let tail = &page[marker.start()..];
             let end = tail.char_indices().nth(6500).map_or(tail.len(), |(i, _)| i);
-            let section = evidence::inspect_section(&book, &format!("mobi:frontmatter:{i}:cip"), &tail[..end]);
+            let section = evidence::try_inspect_section(&book, &format!("mobi:frontmatter:{i}:cip"), &tail[..end])?;
             if section.accepted {
                 sections.push(section);
             }

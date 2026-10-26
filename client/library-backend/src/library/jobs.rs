@@ -1,7 +1,7 @@
 //! Explicit file-operation and thumbnail jobs, also available while signed out.
 pub(crate) use super::LibrarySession;
 pub(crate) use crate::BackendError;
-pub(crate) use crate::ContentHash;
+pub(crate) use crate::BookId;
 pub(crate) use crate::library::events::LibraryEvent;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -26,6 +26,9 @@ impl LibrarySession {
             }
         }
         result.map_err(BackendError::operation)?;
+        // Provider cover generation and publication has its own revision-aware
+        // worker. Ordinary thumbnail jobs cannot overwrite that cache.
+        if self.db.storage_policy()?.external().is_some() { return Ok(()); }
         let snapshot = self.db.upload_preparation_snapshot()?;
         let scope = self.db.prepared_upload_batch(&snapshot.hashes())?.hashes();
         let sync = self.sync.clone();
@@ -48,7 +51,7 @@ impl LibrarySession {
 
     /// Refresh approved catalog artwork for existing audiobooks once per
     /// library session, even when their old thumbnail work is already ready.
-    async fn refresh_catalog_audiobook_covers(&self, hashes: &HashSet<ContentHash>) -> Result<(), BackendError> {
+    async fn refresh_catalog_audiobook_covers(&self, hashes: &HashSet<BookId>) -> Result<(), BackendError> {
         use book_model::{AUTHOR_MARC_RELATOR_CODE, BookFormat};
         use metadata_contract::matching::{author_credits, matching_author_count};
         for hash in hashes {
@@ -83,7 +86,7 @@ impl LibrarySession {
         Ok(())
     }
 
-    pub(crate) async fn run_thumbnail_members(&self, hashes: Vec<ContentHash>) -> Result<(), BackendError> {
+    pub(crate) async fn run_thumbnail_members(&self, hashes: Vec<BookId>) -> Result<(), BackendError> {
         use asset_transfer::thumbnail_jobs::{ThumbnailExtractor, ThumbnailJobs};
         if hashes.is_empty() {
             return Ok(());
@@ -102,7 +105,7 @@ impl asset_transfer::thumbnail_jobs::ThumbnailObserver for ThumbnailEvents<'_> {
     fn completed(&mut self) {
         self.library.events.sync.wake();
     }
-    fn ready(&mut self, content_hash: ContentHash) {
+    fn ready(&mut self, content_hash: BookId) {
         self.library.emit(LibraryEvent::ThumbnailGenerated { content_hash });
     }
 }

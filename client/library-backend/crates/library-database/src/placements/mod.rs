@@ -22,7 +22,7 @@ pub(crate) use library_model::{Dir, LibraryFolderDestination, LibraryTrashView, 
 pub(crate) use library_replica::{DirectoryLifecycleState, LibraryStateEntry};
 pub(crate) use rusqlite::OptionalExtension;
 pub(crate) use std::collections::HashSet;
-pub(crate) use sync_common::{ContentHash, DirId, FileName};
+pub(crate) use sync_common::{BookId, DirId, FileName};
 
 pub(crate) fn unix_millis() -> Result<i64, DatabaseError> {
     web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).map_err(DatabaseError::operation)
@@ -54,7 +54,7 @@ pub(crate) fn canonical_directory(connection: &rusqlite::Connection, id: &DirId)
     Ok(state)
 }
 
-pub(crate) fn book_is_trashed(connection: &rusqlite::Connection, content_hash: &ContentHash) -> Result<bool, DatabaseError> {
+pub(crate) fn book_is_trashed(connection: &rusqlite::Connection, content_hash: &BookId) -> Result<bool, DatabaseError> {
     let mut trashed = false;
     connection.placements_book_is_trashed(content_hash, |row| {
         trashed = row.get(0)?;
@@ -63,7 +63,7 @@ pub(crate) fn book_is_trashed(connection: &rusqlite::Connection, content_hash: &
     Ok(trashed)
 }
 
-pub(crate) fn restore_placement_candidates(connection: &rusqlite::Connection, content_hash: &ContentHash) -> Result<Vec<(String, String)>, DatabaseError> {
+pub(crate) fn restore_placement_candidates(connection: &rusqlite::Connection, content_hash: &BookId) -> Result<Vec<(String, String)>, DatabaseError> {
     let mut placements = Vec::new();
     connection.restore_book_record_with_parent_select_2(content_hash, |row| {
         placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
@@ -200,7 +200,7 @@ pub(crate) fn trashed_subtree(connection: &rusqlite::Connection, roots: Vec<Stri
 }
 
 /// Materialized paths first, then the book's live placements.
-pub(crate) fn book_paths_in(connection: &rusqlite::Connection, hash: &ContentHash) -> Result<Vec<RelativeBookPath>, DatabaseError> {
+pub(crate) fn book_paths_in(connection: &rusqlite::Connection, hash: &BookId) -> Result<Vec<RelativeBookPath>, DatabaseError> {
     let mut projected = Vec::new();
     connection.book_projection_paths(hash, |row| {
         projected.push(row.get::<_, String>(0)?);
@@ -243,13 +243,13 @@ pub(crate) fn resolve_placement_path(connection: &rusqlite::Connection, relative
 
 /// The live book at a placement path, with the folder and file name the path
 /// resolved to.
-pub(crate) fn book_at_path(connection: &rusqlite::Connection, relative_path: &str) -> Result<Option<(ContentHash, DirId, String)>, DatabaseError> {
+pub(crate) fn book_at_path(connection: &rusqlite::Connection, relative_path: &str) -> Result<Option<(BookId, DirId, String)>, DatabaseError> {
     let Some((dir_id, file_name)) = resolve_placement_path(connection, relative_path)? else {
         return Ok(None);
     };
     let mut hash = None;
     connection.book_at_placement(&dir_id, &file_name, |row| {
-        hash = Some(row.get::<_, ContentHash>(0)?);
+        hash = Some(row.get::<_, BookId>(0)?);
         Ok(())
     })?;
     let Some(hash) = hash else { return Ok(None) };
@@ -303,7 +303,7 @@ pub(crate) fn occupied_file_names_in(connection: &rusqlite::Connection, destinat
 }
 
 /// The filename of a live placement, or `None` when it is absent.
-pub(crate) fn live_file_name(connection: &rusqlite::Connection, directory: &DirId, hash: &ContentHash) -> Result<Option<String>, DatabaseError> {
+pub(crate) fn live_file_name(connection: &rusqlite::Connection, directory: &DirId, hash: &BookId) -> Result<Option<String>, DatabaseError> {
     let mut name = None;
     connection.placements_live_file_name(&directory.to_string(), hash, |row| {
         name = Some(row.get(0)?);
@@ -376,7 +376,7 @@ pub(crate) fn queue_directory_work(transaction: &rusqlite::Transaction<'_>, dir:
 
 /// Publishes a book's queued local file operation. A no-op on wasm, which has
 /// no separate physical file store to reconcile.
-pub(crate) fn queue_file_work(transaction: &rusqlite::Transaction<'_>, operation: &str, hash: &ContentHash, path: &RelativeBookPath) -> Result<(), DatabaseError> {
+pub(crate) fn queue_file_work(transaction: &rusqlite::Transaction<'_>, operation: &str, hash: &BookId, path: &RelativeBookPath) -> Result<(), DatabaseError> {
     #[cfg(target_arch = "wasm32")]
     let _ = (transaction, operation, hash, path);
     #[cfg(not(target_arch = "wasm32"))]
@@ -391,7 +391,7 @@ pub(crate) fn placement_path(connection: &rusqlite::Connection, dir: &DirId, nam
 }
 
 /// Preserves upload provenance across a metadata-only copy/move. No upload work.
-pub(crate) fn copy_book_baseline(transaction: &rusqlite::Transaction<'_>, source: &DirId, destination: &DirId, hash: &ContentHash) -> Result<(), DatabaseError> {
+pub(crate) fn copy_book_baseline(transaction: &rusqlite::Transaction<'_>, source: &DirId, destination: &DirId, hash: &BookId) -> Result<(), DatabaseError> {
     transaction.placements_copy_book_baseline(&source.to_string(), &destination.to_string(), hash)?;
     Ok(())
 }
@@ -409,7 +409,7 @@ impl Database {
     /// Whether a placement still addresses these bytes through live
     /// directories. A move, rename, or deletion that landed mid-transfer
     /// makes the finished bytes belong to a stale path.
-    pub fn book_placement_expects_hash(&self, placement: &BookPlacement, content_hash: &ContentHash) -> Result<bool, DatabaseError> {
+    pub fn book_placement_expects_hash(&self, placement: &BookPlacement, content_hash: &BookId) -> Result<bool, DatabaseError> {
         let Some((stored_hash, dir_id, file_name)) = book_at_path(&self.connection, placement.rel_path.as_str())? else {
             return Ok(false);
         };
@@ -630,7 +630,7 @@ impl Database {
                 queue_directory_work(transaction, &copy_id)?;
                 let mut placements = Vec::new();
                 transaction.copy_directory_record_select_3(&source_id.to_string(), |row| {
-                    placements.push((row.get::<_, ContentHash>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?));
+                    placements.push((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?));
                     Ok(())
                 })?;
                 for (hash, file_name, downloaded) in placements {
@@ -665,7 +665,7 @@ impl Database {
     /// itself if that removal was what sent it to Trash. The tombstoned
     /// placement is reused where it still exists, so the book returns under
     /// the file name it had rather than a fresh unique one.
-    pub fn restore_book_placement(&self, content_hash: &ContentHash, directory_id: &DirId) -> Result<(), DatabaseError> {
+    pub fn restore_book_placement(&self, content_hash: &BookId, directory_id: &DirId) -> Result<(), DatabaseError> {
         self.write(|transaction| {
             if !directory_exists_in(transaction, &directory_id.to_string())? {
                 return Err(DatabaseError::message("folder does not exist or is in Trash"));
@@ -699,7 +699,7 @@ impl Database {
             if adding {
                 {
                     let transaction: &rusqlite::Transaction<'_> = transaction;
-                    let hash: &ContentHash = content_hash;
+                    let hash: &BookId = content_hash;
                     transaction.shared_request_book_download(hash, TransferOrigin::UserInitiated.storage(), unix_millis()?)?;
                 };
             }
@@ -709,7 +709,7 @@ impl Database {
 
     /// Copies from an explicit folder, or any live placement for a flat listing.
     /// Returns whether a new destination placement was created, for undo.
-    pub fn copy_book_to_directory(&self, content_hash: &ContentHash, source_id: Option<&DirId>, destination_id: &DirId) -> Result<bool, DatabaseError> {
+    pub fn copy_book_to_directory(&self, content_hash: &BookId, source_id: Option<&DirId>, destination_id: &DirId) -> Result<bool, DatabaseError> {
         self.write(|transaction| {
             if !directory_exists_in(transaction, &destination_id.to_string())? {
                 return Err(DatabaseError::message("destination folder does not exist"));
@@ -733,11 +733,11 @@ impl Database {
         })
     }
 
-    pub fn transfer_book_placement(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId, remove_source: bool) -> Result<String, DatabaseError> {
+    pub fn transfer_book_placement(&self, content_hash: &BookId, source_id: &DirId, destination_id: &DirId, remove_source: bool) -> Result<String, DatabaseError> {
         self.write(|transaction| transfer_book_placement_in(transaction, content_hash, source_id, destination_id, remove_source))
     }
 
-    pub fn remove_book_placement(&self, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, DatabaseError> {
+    pub fn remove_book_placement(&self, content_hash: &BookId, source_id: &DirId) -> Result<bool, DatabaseError> {
         self.write(|transaction| remove_book_placement_in(transaction, content_hash, source_id))
     }
 
@@ -745,7 +745,7 @@ impl Database {
         let mut books = Vec::new();
         self.connection.library_trash_select(|row| {
             books.push(TrashedBook {
-                content_hash: row.get::<_, ContentHash>(0)?,
+                content_hash: row.get::<_, BookId>(0)?,
                 title: row.get(1)?,
                 author: row.get(2)?,
                 format: row.get::<_, Option<i64>>(3)?.and_then(BookFormat::from_code).map(|format| format.canonical_extension().to_owned()).unwrap_or_default(),
@@ -765,7 +765,7 @@ impl Database {
         Ok(LibraryTrashView { books, folders })
     }
 
-    pub fn trash_book(&self, content_hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn trash_book(&self, content_hash: &BookId) -> Result<(), DatabaseError> {
         self.write(|transaction| {
             let live: bool = transaction.directory_live_book_exists(&(&content_hash), |row| row.get(0))?;
             if !live {
@@ -777,7 +777,7 @@ impl Database {
     }
 
     /// Restore a trashed book using only the database's directory liveness.
-    pub fn restore_book(&self, content_hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn restore_book(&self, content_hash: &BookId) -> Result<(), DatabaseError> {
         let choices = self
             .restore_book_plan(content_hash)?
             .into_iter()
@@ -789,7 +789,7 @@ impl Database {
         self.restore_book_commit(content_hash, &choices)
     }
 
-    pub(crate) fn restore_book_plan(&self, content_hash: &ContentHash) -> Result<Vec<RestorePlacement>, DatabaseError> {
+    pub(crate) fn restore_book_plan(&self, content_hash: &BookId) -> Result<Vec<RestorePlacement>, DatabaseError> {
         if !book_is_trashed(&self.connection, content_hash)? {
             return Err(DatabaseError::message("book is not in Trash"));
         }
@@ -822,7 +822,7 @@ impl Database {
         Ok(plan)
     }
 
-    pub(crate) fn restore_book_commit(&self, content_hash: &ContentHash, choices: &[(DirId, DirId)]) -> Result<(), DatabaseError> {
+    pub(crate) fn restore_book_commit(&self, content_hash: &BookId, choices: &[(DirId, DirId)]) -> Result<(), DatabaseError> {
         self.write(|transaction| {
             if !book_is_trashed(transaction, content_hash)? {
                 return Err(DatabaseError::message("book is not in Trash"));
@@ -875,7 +875,7 @@ impl Database {
 
     /// Permanently removes a book in Trash. Sync intent and retryable file
     /// cleanup survive independently of the deleted database row.
-    pub fn purge_book(&self, content_hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn purge_book(&self, content_hash: &BookId) -> Result<(), DatabaseError> {
         self.write(|transaction| purge_book_in(transaction, content_hash))
     }
 
@@ -902,11 +902,11 @@ impl Database {
             let chosen = library_replica::unique_folder_name(&name, occupied.iter().map(String::as_str));
             upsert_dir(transaction, directory_id, &parent, &chosen)?;
             let placements =
-                query_rows(|callback| transaction.directory_placements_trashed_from(&(directory_id.to_string()), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, ContentHash>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+                query_rows(|callback| transaction.directory_placements_trashed_from(&(directory_id.to_string()), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, BookId>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
             for (directory, hash) in placements {
                 record_local(transaction, LibraryStateEntry::Placement { dir_id: parse_dir_id(directory)?, content_hash: hash, present: true, origin_folder_id: None })?;
             }
-            let books = query_rows(|callback| transaction.directory_books_trashed_from(&(directory_id.to_string()), callback), |row| row.get::<_, ContentHash>(0))?.collect::<Result<Vec<_>, _>>()?;
+            let books = query_rows(|callback| transaction.directory_books_trashed_from(&(directory_id.to_string()), callback), |row| row.get::<_, BookId>(0))?.collect::<Result<Vec<_>, _>>()?;
             for hash in &books {
                 record_book_lifecycle(transaction, hash, library_replica::BookLifecycleState::Present)?;
             }
@@ -962,7 +962,7 @@ impl Database {
             }
             let mut books = Vec::new();
             transaction.empty_trash_records_select(|row| {
-                books.push(row.get::<_, ContentHash>(0)?);
+                books.push(row.get::<_, BookId>(0)?);
                 Ok(())
             })?;
             for hash in books {
@@ -973,7 +973,7 @@ impl Database {
     }
 }
 
-fn transfer_book_placement_in(transaction: &Transaction<'_>, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId, remove_source: bool) -> Result<String, DatabaseError> {
+fn transfer_book_placement_in(transaction: &Transaction<'_>, content_hash: &BookId, source_id: &DirId, destination_id: &DirId, remove_source: bool) -> Result<String, DatabaseError> {
     if source_id == destination_id {
         return Err(DatabaseError::message("source and destination folders are the same"));
     }
@@ -1050,7 +1050,7 @@ fn transfer_book_placement_in(transaction: &Transaction<'_>, content_hash: &Cont
     Ok(destination_name)
 }
 
-pub(crate) fn purge_book_in(transaction: &rusqlite::Transaction<'_>, content_hash: &ContentHash) -> Result<(), DatabaseError> {
+pub(crate) fn purge_book_in(transaction: &rusqlite::Transaction<'_>, content_hash: &BookId) -> Result<(), DatabaseError> {
     let mut book_row_id: Option<i64> = None;
     transaction.purge_book_record_select(content_hash, |row| {
         book_row_id = row.get(0)?;
@@ -1099,7 +1099,7 @@ pub struct ScanSnapshot {
 /// fingerprint is empty (for example, a freshly downloaded book).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanPlacement {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub directory: DirId,
     pub name: String,
     pub path: String,
@@ -1112,7 +1112,7 @@ pub struct ScanPlacement {
 pub(crate) fn scan_placements(connection: &rusqlite::Connection) -> Result<Vec<ScanPlacement>, DatabaseError> {
     let mut rows = Vec::new();
     connection.scanner_placements(|row| {
-        rows.push((row.get::<_, ContentHash>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get(3)?, row.get(4)?, row.get(5)?));
+        rows.push((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get(3)?, row.get(4)?, row.get(5)?));
         Ok(())
     })?;
     // A placement in a folder that is not live has no path on disk to scan.
@@ -1145,7 +1145,7 @@ pub struct ScanKnownDirectory {
 
 #[derive(Clone, Debug)]
 pub struct ScanKnownBook {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub directory: DirId,
     pub name: String,
     pub fingerprint: u64,
@@ -1190,7 +1190,7 @@ pub struct ScannedBook {
     pub name: String,
     pub path: String,
     pub fingerprint: u64,
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub size_bytes: u64,
     pub extension: String,
     /// The book's own metadata (title, authors, TOC, ...), extracted the
@@ -1248,7 +1248,7 @@ impl Database {
             let mut books = Vec::new();
             connection.scanner_known_books(|row| {
                 let Ok(fingerprint) = row.get::<_, String>(0)?.parse::<u64>() else { return Ok(()) };
-                let content_hash = row.get::<_, ContentHash>(1)?;
+                let content_hash = row.get::<_, BookId>(1)?;
                 let inspection_version = row.get::<_, Option<i64>>(4)?;
                 let format = BookFormat::from_code(row.get(5)?);
                 let cached_audiobook_format = if inspection_version.is_none() && matches!(format, Some(BookFormat::M4b | BookFormat::Mp3Folder)) {
@@ -1312,7 +1312,7 @@ impl Database {
             .books
             .iter()
             .map(|book| {
-                let format = BookFormat::from_extension(&book.extension).ok_or_else(|| DatabaseError::message(format!("unsupported scanned extension: {}", book.extension)))?;
+                let format = BookFormat::from_file_name(&format!("book.{}", book.extension)).ok_or_else(|| DatabaseError::message(format!("unsupported scanned extension: {}", book.extension)))?;
                 let prepared = crate::import::prepare_inspection(&book.inspection, &book.content_hash, format)?;
                 let catalog_record = crate::catalog::import_record(book.content_hash, format)?;
                 Ok((format, prepared, catalog_record))
@@ -1450,7 +1450,7 @@ pub struct LocalBookInfo {
 }
 
 impl Database {
-    pub fn pdf_metadata(&self, hash: &ContentHash) -> Result<Option<pdf_view_common::PdfReaderMetadata>, DatabaseError> {
+    pub fn pdf_metadata(&self, hash: &BookId) -> Result<Option<pdf_view_common::PdfReaderMetadata>, DatabaseError> {
         let connection = &self.connection;
         let mut bytes = None;
         connection.stored_pdf_metadata(hash, |row| {
@@ -1460,7 +1460,7 @@ impl Database {
         Ok(bytes.and_then(|bytes| serde_json::from_slice::<pdf_view_common::PdfReaderMetadata>(&bytes).ok()).filter(|metadata| metadata.valid_for(&hash.to_hex())))
     }
 
-    pub fn local_book_info(&self, hash: &ContentHash) -> Result<LocalBookInfo, DatabaseError> {
+    pub fn local_book_info(&self, hash: &BookId) -> Result<LocalBookInfo, DatabaseError> {
         let connection = &self.connection;
         let mut format = None;
         connection.shared_book_format(hash, |row| {
@@ -1488,7 +1488,7 @@ impl Database {
 
     /// Every remembered native path for a book, including a source
     /// retained while a move is pending.
-    pub fn book_paths(&self, hash: &ContentHash) -> Result<Vec<RelativeBookPath>, DatabaseError> {
+    pub fn book_paths(&self, hash: &BookId) -> Result<Vec<RelativeBookPath>, DatabaseError> {
         book_paths_in(&self.connection, hash)
     }
 
@@ -1516,7 +1516,7 @@ impl Database {
     }
 
     /// Load cached PDF metadata for the selected placement without checking the file.
-    pub fn local_pdf_metadata(&self, hash: &ContentHash, relative_path: &str) -> Result<Option<pdf_view_common::PdfReaderMetadata>, DatabaseError> {
+    pub fn local_pdf_metadata(&self, hash: &BookId, relative_path: &str) -> Result<Option<pdf_view_common::PdfReaderMetadata>, DatabaseError> {
         let matches = book_at_path(&self.connection, relative_path)?.is_some_and(|(current, _, _)| current == *hash);
         if !matches {
             return Ok(None);
@@ -1538,11 +1538,11 @@ impl Database {
 
 include_sql!("src/placements/sql/book_paths.sql");
 
-fn record_book_lifecycle(connection: &rusqlite::Connection, hash: &ContentHash, value: library_replica::BookLifecycleState) -> Result<(), DatabaseError> {
+fn record_book_lifecycle(connection: &rusqlite::Connection, hash: &BookId, value: library_replica::BookLifecycleState) -> Result<(), DatabaseError> {
     record_local(connection, LibraryStateEntry::BookLifecycle { content_hash: *hash, value })
 }
 
-fn remove_placement(connection: &rusqlite::Connection, directory: &DirId, hash: &ContentHash, origin_folder_id: Option<String>) -> Result<(), DatabaseError> {
+fn remove_placement(connection: &rusqlite::Connection, directory: &DirId, hash: &BookId, origin_folder_id: Option<String>) -> Result<(), DatabaseError> {
     connection.directory_clear_placement_download(&(directory.to_string()), &(&hash))?;
     record_local(connection, LibraryStateEntry::Placement { dir_id: *directory, content_hash: *hash, present: false, origin_folder_id })
 }
@@ -1550,7 +1550,7 @@ fn remove_placement(connection: &rusqlite::Connection, directory: &DirId, hash: 
 include_sqlite_sql::include_sql!("src/placements/sql/directory_operations.sql");
 
 /// Transaction-scoped source removal shared with cross-library moves.
-pub(crate) fn remove_book_placement_in(transaction: &rusqlite::Transaction<'_>, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, DatabaseError> {
+pub(crate) fn remove_book_placement_in(transaction: &rusqlite::Transaction<'_>, content_hash: &BookId, source_id: &DirId) -> Result<bool, DatabaseError> {
     let mut exists = false;
     transaction.remove_book_placement_record_select(&source_id.to_string(), content_hash, |row| {
         exists = row.get(0)?;
@@ -1592,7 +1592,7 @@ pub(crate) fn trash_directory_in(transaction: &rusqlite::Transaction<'_>, direct
     .map_err(DatabaseError::operation)?;
     let mut hashes = Vec::new();
     transaction.trash_subtree_only_books(&subtree, |row| {
-        hashes.push(row.get::<_, ContentHash>(0)?);
+        hashes.push(row.get::<_, BookId>(0)?);
         Ok(())
     })?;
     for hash in hashes {
@@ -1600,7 +1600,7 @@ pub(crate) fn trash_directory_in(transaction: &rusqlite::Transaction<'_>, direct
     }
     // Only books still present elsewhere need independent placement removals.
     project_dirty(transaction)?;
-    let removed = query_rows(|callback| transaction.directory_live_subtree_placements(&(&subtree), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, ContentHash>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+    let removed = query_rows(|callback| transaction.directory_live_subtree_placements(&(&subtree), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, BookId>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
     for (directory, hash) in removed {
         remove_placement(transaction, &parse_dir_id(directory)?, &hash, Some(directory_id.to_string()))?;
     }

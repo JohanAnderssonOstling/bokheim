@@ -65,7 +65,7 @@ fn copy_book_noclobber(source: &mut impl std::io::Read, destination: &Path) -> s
     // the destination is visible during copying. Ordinary errors clean it up.
     let file = std::fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
     let mut pending = PendingCopy { path: destination, file: Some(file), complete: false };
-    let output = pending.file.as_mut().unwrap();
+    let output = pending.file.as_mut().ok_or_else(|| Error::other("book copy output is unavailable"))?;
     // Keep this fallback to ordinary reads/writes, without filesystem-specific
     // copy acceleration that the shared-storage provider may also reject.
     let mut buffer = [0_u8; 64 * 1024];

@@ -4,10 +4,10 @@ use book_model::{AuthorId, BookMetadata, BookRecord, Scheme, Scope};
 use metadata_contract::catalog::source_evidence;
 use metadata_contract::matching::author_match_keys;
 use reqwest::Url;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use subject_projection::{project_subject_codes, project_subject_concepts, unified_taxonomy_revision_id, UNIFIED_MATCHER_VERSION};
+use subject_projection::{UNIFIED_MATCHER_VERSION, project_subject_codes, project_subject_concepts, unified_taxonomy_revision_id};
 
 mod compression;
 mod integer_keys;
@@ -96,6 +96,15 @@ fn store_evidence(db: &Connection, sources: &mut BTreeMap<String, i64>, source: 
         if let Some(key) = external {
             db.execute("UPDATE book SET format=16 WHERE row_id=?1 AND external=1 AND format=1", [book_id(db, key)?]).map_err(|error| error.to_string())?;
         }
+    }
+    if let (Some(duration), Some(book)) = (evidence.audiobook_duration_ms, external_id) {
+        let duration = i64::try_from(duration).map_err(|error| error.to_string())?;
+        db.execute(
+            "INSERT INTO book_audiobook_duration(book_row_id,duration_ms) SELECT row_id,?2 FROM book WHERE row_id=?1 AND format IN(8,16)
+             ON CONFLICT(book_row_id) DO UPDATE SET duration_ms=excluded.duration_ms",
+            params![book, duration],
+        )
+        .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -198,6 +207,8 @@ CREATE TABLE book(
  title TEXT NOT NULL,subtitle TEXT,description_id INTEGER NOT NULL REFERENCES description(row_id),year INTEGER,file_bytes INTEGER,
  source_id INTEGER REFERENCES source(id),entry_url TEXT,download_url TEXT,format INTEGER NOT NULL CHECK(format IN(1,2,4,8,16))
 ) STRICT;
+-- Optional audio metadata is additive to format 8; older clients ignore it.
+CREATE TABLE book_audiobook_duration(book_row_id INTEGER PRIMARY KEY REFERENCES book(row_id),duration_ms INTEGER NOT NULL CHECK(duration_ms>0)) STRICT;
 CREATE VIEW external_book AS SELECT book.row_id,key AS entry_key,source_id,entry_url,title,subtitle,description.text AS description,year,download_url,format
  FROM book JOIN description ON description.row_id=book.description_id WHERE external=1;
 CREATE TABLE author(row_id INTEGER PRIMARY KEY,author_id BLOB NOT NULL UNIQUE CHECK(length(author_id)=16),name TEXT NOT NULL) STRICT;
@@ -431,8 +442,8 @@ mod tests {
         assert_eq!(db.query_row("SELECT count(*) FROM book_subject", [], |row| row.get::<_, i64>(0)).unwrap(), 4);
         assert_eq!(db.query_row("SELECT count(*) FROM subject WHERE code='PR6003'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     }
-    use crate::links::{store_entry, Entry};
-    use book_model::{BookDetails, BookFormat, BookRecord, BookSubject, BookTocEntry, Contributor, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE};
+    use crate::links::{Entry, store_entry};
+    use book_model::{AUTHOR_MARC_RELATOR_CODE, BookDetails, BookFormat, BookRecord, BookSubject, BookTocEntry, Contributor, MarcRelatorCode};
 
     const EPUB: &[u8] = include_bytes!("../../../client/library-backend/crates/book-inspection/tests/fixtures/ocr-image-priority.epub");
 
@@ -466,19 +477,32 @@ mod tests {
             store_entry(
                 &db,
                 &Entry {
-                    source: "test".into(), entry_id: entry_id.into(), entry_url: format!("https://source.example/{entry_id}"),
-                    license: "source-only".into(), record: external, file_url: None, format: BookFormat::Epub,
-                    toc: Vec::new(), source_evidence: None, enriched: false,
+                    source: "test".into(),
+                    entry_id: entry_id.into(),
+                    entry_url: format!("https://source.example/{entry_id}"),
+                    license: "source-only".into(),
+                    record: external,
+                    file_url: None,
+                    format: BookFormat::Epub,
+                    toc: Vec::new(),
+                    source_evidence: None,
+                    enriched: false,
                 },
-            ).unwrap();
+            )
+            .unwrap();
         }
         let out = dir.path().join("published");
         publish(dir.path(), &db, &out, 1).unwrap();
         let snapshot = Connection::open(out.join("releases/1/catalog.sqlite3")).unwrap();
         let names = snapshot.prepare("SELECT name FROM author").unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(names, ["An Author"]);
-        let counts = snapshot.prepare("SELECT external,count(author_row_id) FROM book LEFT JOIN book_author ON book.row_id=book_author.book_row_id GROUP BY book.row_id ORDER BY external,count(author_row_id)")
-            .unwrap().query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let counts = snapshot
+            .prepare("SELECT external,count(author_row_id) FROM book LEFT JOIN book_author ON book.row_id=book_author.book_row_id GROUP BY book.row_id ORDER BY external,count(author_row_id)")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(counts, [(0, 1), (1, 0), (1, 1)]);
         assert_eq!(curation::record(&db, &hash).unwrap().unwrap().contributors, record.contributors);
     }
@@ -565,10 +589,10 @@ mod tests {
             },
         )
         .unwrap();
-        let metadata = r#"{"rating":5,"rating_count":2,"popularity":[{"rank":7}],"audiobook_delivery":"external_download"}"#;
+        let metadata = r#"{"rating":5,"rating_count":2,"popularity":[{"rank":7}],"audiobook_delivery":"external_download","audiobook_duration_ms":27789000}"#;
         db.execute("INSERT INTO source_entry(source,entry_id,entry_url,external_entry_key,metadata) VALUES('loyalbooks.com','book',?1,?2,?3)", params![page, key, metadata]).unwrap();
         for size in ["card", "detail"] {
-            std::fs::write(dir.path().join(format!("covers/{key}-{size}.jpg")), format!("retained {size} image")).unwrap();
+            image::RgbImage::from_pixel(20, 30, image::Rgb([80, 100, 120])).save(dir.path().join(format!("covers/{key}-{size}.jpg"))).unwrap();
         }
         let out = dir.path().join("published");
         publish(dir.path(), &db, &out, 1).unwrap();
@@ -580,8 +604,11 @@ mod tests {
         let format: i64 = snapshot.query_row("SELECT format FROM external_book", [], |row| row.get(0)).unwrap();
         assert_eq!(format, BookFormat::Mp3Folder as i64);
         assert_eq!(stored_score, Some(2.0 / 3.0));
+        let duration: i64 = snapshot.query_row("SELECT duration_ms FROM book_audiobook_duration JOIN external_book ON external_book.row_id=book_row_id", [], |row| row.get(0)).unwrap();
+        assert_eq!(duration, 27_789_000);
         for size in ["card", "detail"] {
-            assert_eq!(std::fs::read(out.join(format!("covers/{key}-{size}.jpg"))).unwrap(), format!("retained {size} image").as_bytes());
+            let file = format!("covers/{key}-{size}.jpg");
+            assert_eq!(std::fs::read(out.join(&file)).unwrap(), std::fs::read(dir.path().join(file)).unwrap());
         }
         assert_eq!(stored_title, record.title);
         assert_eq!(std::fs::read_dir(out.join("books")).unwrap().count(), 0);

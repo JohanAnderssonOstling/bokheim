@@ -41,7 +41,7 @@ impl library_files::hashing::HashSession for WorkerHashSession {
     fn update<'a>(&'a mut self, bytes: &'a [u8]) -> BoxedBackendFuture<'a, Result<(), AssetStoreError>> {
         Box::pin(async move { self.0.update(bytes).await.map_err(AssetStoreError::operation) })
     }
-    fn finish(self: Box<Self>) -> BoxedBackendFuture<'static, Result<sync_common::ContentHash, AssetStoreError>> {
+    fn finish(self: Box<Self>) -> BoxedBackendFuture<'static, Result<sync_common::BookId, AssetStoreError>> {
         Box::pin(async move { self.0.finish().await.map_err(AssetStoreError::operation) })
     }
 }

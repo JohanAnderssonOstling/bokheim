@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 default = []
 filesystem-libraries = []
-kobo = ["mobile", "dep:gpui_kobo", "ui-components/kobo"]
+kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-update", "ui-components/kobo"]
 mobile = ["ui-components/mobile"]
 
 [dependencies]
@@ -22,6 +22,7 @@ gpui.workspace = true
 gpui-image-eviction = { path = "../../shared/gpui-image-eviction" }
 gpui-component.workspace = true
 gpui_kobo = { workspace = true, optional = true }
+kobo-update = { path = "../../client/kobo-update", optional = true }
 image = { version = "0.25", default-features = false }
 library-model = { path = "../../client/library-model" }
 log = "0.4"

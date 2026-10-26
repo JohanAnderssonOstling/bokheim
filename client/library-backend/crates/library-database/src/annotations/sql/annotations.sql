@@ -3,7 +3,7 @@
 -- filter on. Projection writes these rows from canonical registers.
 
 -- name: get_annotations?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT annotation.body
 FROM annotation JOIN book ON book.row_id=annotation.book_row_id
 WHERE book.content_hash=:content_hash AND annotation.deleted_at IS NULL
@@ -16,7 +16,7 @@ SELECT annotation.body FROM annotation WHERE annotation.id=:id;
 
 -- name: upsert_annotation!
 -- param: id: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: toc_ordinal: Option<i64>
 -- param: progress: Option<f32>
 -- param: body: &[u8]

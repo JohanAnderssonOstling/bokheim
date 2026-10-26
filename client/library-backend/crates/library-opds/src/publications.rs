@@ -1,7 +1,8 @@
 //! The publications this session has listed, by their card key: what adding
 //! one or drawing its cover needs, which a card does not carry. Like the
 //! page table, it lives as long as the process.
-use crate::fetch::{self, Access, Failure};
+use crate::fetch::{self, Access};
+use client_runtime::{BackendError, Failure};
 use crate::{PDF, Publication};
 use library_model::{CardKey, OpdsCredentials, OpdsSource};
 use std::collections::HashMap;
@@ -48,25 +49,26 @@ fn listed<T>(key: CardKey, read: impl FnOnce(&Listed) -> T) -> Option<T> {
 
 /// The feed's description of a listed publication, as HTML: what its page
 /// shows. Read from the listing, so it costs no request.
-pub fn description(key: CardKey) -> Result<String, String> {
-    listed(key, |listed| listed.description.clone()).ok_or_else(|| "this book is no longer listed; open its page again".to_owned())
+pub fn description(key: CardKey) -> Result<String, BackendError> {
+    listed(key, |listed| listed.description.clone()).ok_or_else(unlisted)
 }
 
 /// The store page that sells a listed publication.
-pub fn buy_page(key: CardKey) -> Result<Url, String> {
-    listed(key, |listed| listed.buy.clone()).ok_or("this book is no longer listed; open its page again")?.ok_or_else(|| "this book is not offered for sale".to_owned())
+pub fn buy_page(key: CardKey) -> Result<Url, BackendError> {
+    listed(key, |listed| listed.buy.clone()).ok_or_else(unlisted)?.ok_or_else(|| BackendError::classified(Failure::NotFound, "this book is not offered for sale"))
+}
+
+fn unlisted() -> BackendError {
+    BackendError::classified(Failure::NotFound, "this book is no longer listed")
 }
 
 /// The publication's open download, with the file name to import it under.
-pub async fn download(source: &OpdsSource, credentials: Option<&OpdsCredentials>, key: CardKey) -> Result<(String, Vec<u8>), String> {
-    let (file_stem, (href, media_type)) = listed(key, |listed| Some((listed.file_stem.clone(), listed.download.clone()?))).ok_or("this book is no longer listed; open its page again")?.ok_or("this book has no open download")?;
-    let root = Url::parse(&source.url).map_err(|error| error.to_string())?;
-    let bytes = match fetch::bytes(&href, &Access::new(&root, credentials)).await {
-        Ok(bytes) => bytes,
-        Err(Failure::SignIn) => return Err("the feed asks to sign in".into()),
-        Err(Failure::Other(error)) => return Err(error),
-    };
-    let extension = if media_type == PDF { "pdf" } else { "epub" };
+/// A feed that wants credentials fails as [`Failure::Unauthorized`].
+pub async fn download(source: &OpdsSource, credentials: Option<&OpdsCredentials>, key: CardKey) -> Result<(String, Vec<u8>), BackendError> {
+    let (file_stem, (href, media_type)) = listed(key, |listed| Some((listed.file_stem.clone(), listed.download.clone()?))).ok_or_else(unlisted)?.ok_or_else(|| BackendError::classified(Failure::NotFound, "this book has no open download"))?;
+    let root = Url::parse(&source.url).map_err(|error| BackendError::classified(Failure::InvalidAddress, error.to_string()))?;
+    let bytes = fetch::download(&href, &Access::new(&root, credentials)).await?;
+    let extension = match media_type { PDF => "pdf", crate::FB2 => "fb2", crate::FB2_ZIP => "fb2.zip", crate::CBZ | crate::CBZ_LEGACY => "cbz", _ => "epub" };
     Ok((format!("{file_stem}.{extension}"), bytes))
 }
 

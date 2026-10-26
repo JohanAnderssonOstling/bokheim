@@ -7,6 +7,8 @@
 //! `.text_color()` explicitly overrides text paint while preserving CSS
 //! typography and non-text colors.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 mod fragment;
 mod fragment_selection;
 mod math_svg;

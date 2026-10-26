@@ -4,6 +4,7 @@ use crate::shell::search;
 use crate::shell::toolbar::SidebarTarget;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Window};
+use html_view_core::SearchOptions;
 use ui_components as components;
 
 use super::PdfReaderView;
@@ -30,7 +31,7 @@ impl PdfReaderView {
             }
             let selected = self.search_match.is_some_and(|(current, _)| current == index + 1);
             rows.push(
-                search::result_row(("pdf-search-hit", index), hit.excerpt().to_owned(), selected, theme)
+                search::result_row(("pdf-search-hit", index), hit.excerpt().to_owned(), &self.search_input.read(cx).value(), SearchOptions { match_diacritics: true, ..Default::default() }, selected, theme)
                     .on_click(cx.listener(move |reader, _, window, cx| {
                         reader.pdf.update(cx, |pdf, cx| pdf.go_to_search_hit(index, cx));
                         if components::uses_mobile_reader_controls(window) {

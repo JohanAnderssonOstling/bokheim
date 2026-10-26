@@ -333,8 +333,8 @@ async fn both_sync_modes_preserve_rejections_and_acknowledgements_when_pull_is_i
 #[tokio::test]
 async fn lifecycle_rejections_defer_fields_on_later_storage_pages_in_both_modes() {
     use library_replica::BookLifecycleState;
-    use sync_common::{ContentHash, DirId, MutationRejection, MutationRejectionReason, MAX_PUSH_MUTATIONS};
-    let book = ContentHash::from_bytes([7; 32]);
+    use sync_common::{BookId, DirId, MutationRejection, MutationRejectionReason, MAX_PUSH_MUTATIONS};
+    let book = BookId::from_bytes([7; 32]);
     let rejected_id = ReplicaSeq::new(MAX_PUSH_MUTATIONS as u64 + 5).unwrap();
     let field_id = ReplicaSeq::new(MAX_PUSH_MUTATIONS as u64 + 6).unwrap();
     let requests = Arc::new(Mutex::new(Vec::<SyncExchangeRequest>::new()));

@@ -1,15 +1,15 @@
 //! Register keys retain book digests as bytes while other identifiers stay text.
-use crate::ContentHash;
+use crate::BookId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateKey {
-    Book(ContentHash),
+    Book(BookId),
     Text(String),
 }
 impl StateKey {
-    pub fn book(&self) -> Option<ContentHash> {
+    pub fn book(&self) -> Option<BookId> {
         match self {
             Self::Book(hash) => Some(*hash),
             Self::Text(_) => None,
@@ -28,21 +28,16 @@ impl StateKey {
         }
     }
     pub fn from_storage(kind: &str, bytes: &[u8]) -> Result<Self, String> {
-        if book_kind(kind) {
-            ContentHash::try_from(bytes).map(Self::Book).map_err(|error| error.to_string())
-        } else {
-            String::from_utf8(bytes.to_vec()).map(Self::Text).map_err(|error| error.to_string())
-        }
+        if book_kind(kind) { BookId::try_from(bytes).map(Self::Book).map_err(|error| error.to_string()) } else { String::from_utf8(bytes.to_vec()).map(Self::Text).map_err(|error| error.to_string()) }
     }
 }
 pub(crate) fn book_kind(kind: &str) -> bool {
     // The relay can still carry opaque entries from older clients. Retaining
     // their key encoding does not make the current replica author those kinds.
-    matches!(kind, "book_add" | "enrichment" | "book_lifecycle" | "placement" | "reading_position"
-        | "book_facts" | "metadata" | "description" | "pdf_reader_metadata" | "book_toc")
+    matches!(kind, "book_add" | "external_book" | "enrichment" | "book_lifecycle" | "placement" | "reading_position" | "chapter_read_status" | "book_facts" | "metadata" | "description" | "pdf_reader_metadata" | "book_toc")
 }
-impl From<ContentHash> for StateKey {
-    fn from(value: ContentHash) -> Self {
+impl From<BookId> for StateKey {
+    fn from(value: BookId) -> Self {
         Self::Book(value)
     }
 }
@@ -66,12 +61,12 @@ impl fmt::Display for StateKey {
 }
 #[derive(Serialize)]
 enum BinaryKeyRef<'a> {
-    Book(&'a ContentHash),
+    Book(&'a BookId),
     Text(&'a str),
 }
 #[derive(Deserialize)]
 enum BinaryKey {
-    Book(ContentHash),
+    Book(BookId),
     Text(String),
 }
 impl Serialize for StateKey {
@@ -107,17 +102,15 @@ impl<'de> Deserialize<'de> for StateKey {
                 Ok(StateKey::Text(value.into()))
             }
             fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
-                ContentHash::try_from(value).map(StateKey::Book).map_err(E::custom)
+                BookId::try_from(value).map(StateKey::Book).map_err(E::custom)
             }
             fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
-                let mut bytes = [0; 32];
-                for byte in &mut bytes {
-                    *byte = sequence.next_element()?.ok_or_else(|| serde::de::Error::custom("book key needs 32 bytes"))?;
+                let mut bytes = Vec::with_capacity(33);
+                while let Some(byte) = sequence.next_element::<u8>()? {
+                    if bytes.len() == 33 { return Err(serde::de::Error::custom("book key exceeds 33 bytes")); }
+                    bytes.push(byte);
                 }
-                if sequence.next_element::<u8>()?.is_some() {
-                    return Err(serde::de::Error::custom("book key needs exactly 32 bytes"));
-                }
-                Ok(StateKey::Book(ContentHash::from_bytes(bytes)))
+                BookId::try_from(bytes.as_slice()).map(StateKey::Book).map_err(serde::de::Error::custom)
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -126,7 +119,7 @@ impl<'de> Deserialize<'de> for StateKey {
 #[cfg(feature = "sqlite")]
 mod sqlite {
     use super::StateKey;
-    use crate::ContentHash;
+    use crate::BookId;
     use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
     impl ToSql for StateKey {
         fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
@@ -139,7 +132,7 @@ mod sqlite {
     impl FromSql for StateKey {
         fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
             match value {
-                ValueRef::Blob(bytes) => ContentHash::try_from(bytes).map(StateKey::Book).map_err(|error| FromSqlError::Other(Box::new(error))),
+                ValueRef::Blob(bytes) => BookId::try_from(bytes).map(StateKey::Book).map_err(|error| FromSqlError::Other(Box::new(error))),
                 ValueRef::Text(bytes) => Ok(StateKey::Text(std::str::from_utf8(bytes).map_err(|error| FromSqlError::Other(Box::new(error)))?.into())),
                 _ => Err(FromSqlError::InvalidType),
             }
@@ -154,7 +147,7 @@ mod tests {
 
     #[test]
     fn book_addresses_keep_json_text_but_use_binary_digest_keys() {
-        let hash = ContentHash::from_bytes([0x42; 32]);
+        let hash = BookId::from_bytes([0x42; 32]);
         let address = StateAddress { kind: "book_lifecycle".into(), entity_key: hash.into(), entity_subkey: String::new() };
         let json = serde_json::to_string(&address).unwrap();
         assert_eq!(serde_json::from_str::<StateAddress>(&json).unwrap(), address);
@@ -169,7 +162,7 @@ mod tests {
 
     #[test]
     fn immutable_and_legacy_book_entries_keep_raw_hash_keys() {
-        let hash = ContentHash::from_bytes([0xff; 32]);
+        let hash = BookId::from_bytes([0xff; 32]);
         for kind in ["book_add", "enrichment", "book_facts", "metadata", "description", "pdf_reader_metadata", "book_toc"] {
             let address = StateAddress { kind: kind.into(), entity_key: hash.into(), entity_subkey: String::new() };
             assert_eq!(StateKey::from_storage(kind, hash.as_bytes()).unwrap(), StateKey::Book(hash));
@@ -195,7 +188,7 @@ mod tests {
     fn sqlite_register_keys_preserve_digest_and_text_types() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE registers(kind TEXT,key BLOB,PRIMARY KEY(kind,key))").unwrap();
-        for (kind, key) in [("book_lifecycle", StateKey::Book(ContentHash::from_bytes([0xff; 32]))), ("annotation", StateKey::Text("note".into()))] {
+        for (kind, key) in [("book_lifecycle", StateKey::Book(BookId::from_bytes([0xff; 32]))), ("annotation", StateKey::Text("note".into()))] {
             conn.execute("INSERT INTO registers VALUES(?1,?2)", rusqlite::params![kind, key]).unwrap();
             let stored: StateKey = conn.query_row("SELECT key FROM registers WHERE kind=?1 AND key=?2", rusqlite::params![kind, key], |row| row.get(0)).unwrap();
             assert_eq!(stored, key);

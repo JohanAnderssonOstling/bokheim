@@ -87,6 +87,18 @@ view/action model to one conditional row above Account in Settings. The state is
 shared across windows; changes invalidate the settings page. Space deficits are
 rounded up by at most one MB. Technical errors never enter the view model.
 
+Native adapters use `browser-ui::bind_update_worker` for deferred host ownership,
+background work, action dispatch, and UI events. Native startup configuration
+and host ownership are shared in `apps/desktop-gpui/src/update_binding.rs`;
+Android supplies its installer and permission actions. All native hosts are
+policies over `linux_update_host::NativeHost<P>`, sharing the complete coordinator
+lifecycle, migration preparation, validation, and recovery. Durable file
+operations live in `shared/update-files`, and verified atomic download staging
+lives in `shared/update-protocol`.
+Kobo uses the same worker binding and settings row, with package parsing shared
+with the USB installer in [`shared/kobo-package`](../../shared/kobo-package).
+Its firmware launcher retains installation and recovery ownership.
+
 **Linux host wiring is implemented** in `client/update-host` and
 `apps/desktop-gpui/src/linux_updates.rs`. Signing-key-configured Linux builds bind
 Settings, check at startup and stage in the background, prepare database copies with the candidate
@@ -101,20 +113,14 @@ pending; see `apps/desktop-gpui/android/README.md`.
 The shared activation journal and staging now support Windows file operations.
 `native_files` flushes writable handles and uses write-through file replacement;
 Windows CI exercises recovery and a destination held open by another process.
-Windows offers no unprivileged POSIX directory-fsync equivalent. This layer does
-not yet implement Windows application supervision or the installer/Settings adapter.
-The API choices follow Microsoft's
+Windows offers no unprivileged POSIX directory-fsync equivalent. The API choices follow Microsoft's
 [MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
 and [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
 contracts.
-
-Windows application activation, browser storage/activation, production signing
-configuration and endpoint publication are still pending.
 
 `supervisor::wait_for_trial` watches the journal's matching healthy-startup commit
 while observing the spawned process. It returns a stopped outcome only after the
 child has exited/reaped, including timeout and receipt-read failures. Callers must
 then consult the journal again: a commit racing a timeout must never be rolled
 back. Failure to prove the process stopped is an error, not permission to restore
-its files. Linux uses this shared supervisor; Windows application wiring remains
-pending. The supervisor is tested with real child processes on Linux and Wine.
+its files. Linux and Windows use this shared supervisor. The supervisor is tested with real child processes on Linux and Wine.

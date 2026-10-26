@@ -2,6 +2,7 @@
 
 use crate::epub::{EpubProvider, EpubSession};
 use crate::mobi::{MobiContainer, MobiResources};
+use crate::fb2::{Fb2Container, Fb2Resources};
 use crate::resource_path::local_resource_uri;
 use crate::resources::PreparedResources;
 use crate::source::{ReaderFactory, Source};
@@ -15,14 +16,16 @@ use std::sync::Arc;
 pub enum BookFormat {
     Epub,
     Mobi,
+    Fb2,
 }
 
 enum Container {
     Epub(EpubSession),
     Mobi(MobiContainer),
+    Fb2(Fb2Container),
 }
 
-/// Opening parses the container directory and headers. Text preparation is a
+/// Opening parses container headers or bounded FB2 XML. Text preparation is a
 /// separate, consuming step, so scans and covers never decode MOBI text.
 pub struct Book {
     container: Container,
@@ -41,6 +44,7 @@ impl Book {
         let container = match format {
             BookFormat::Epub => Container::Epub(EpubSession::open(source).await?),
             BookFormat::Mobi => Container::Mobi(MobiContainer::open(source).await?),
+            BookFormat::Fb2 => Container::Fb2(Fb2Container::open(source).await?),
         };
         Ok(Self { container })
     }
@@ -53,6 +57,7 @@ impl Book {
         match &mut self.container {
             Container::Epub(epub) => epub.metadata(),
             Container::Mobi(mobi) => Ok(mobi.metadata()),
+            Container::Fb2(fb2) => Ok(fb2.metadata()),
         }
     }
 
@@ -64,6 +69,7 @@ impl Book {
         match &mut self.container {
             Container::Epub(epub) => epub.toc().await,
             Container::Mobi(mobi) => mobi.toc().await,
+            Container::Fb2(fb2) => fb2.toc().map(Some),
         }
     }
 
@@ -72,6 +78,7 @@ impl Book {
         match &mut self.container {
             Container::Epub(epub) => Ok(epub.declared_cover_image_path()?.into_iter().collect()),
             Container::Mobi(mobi) => Ok(mobi.preferred_covers()),
+            Container::Fb2(fb2) => Ok(fb2.covers()),
         }
     }
 
@@ -81,6 +88,7 @@ impl Book {
         match &mut self.container {
             Container::Epub(epub) => epub.image_paths_in_reading_order(),
             Container::Mobi(mobi) => Ok(mobi.image_resources()),
+            Container::Fb2(fb2) => Ok(fb2.images()),
         }
     }
 
@@ -89,6 +97,7 @@ impl Book {
         match &mut self.container {
             Container::Epub(epub) => epub.read_bytes_bounded_async(&uri, limit).await,
             Container::Mobi(mobi) => mobi.read_resource(&uri, limit).await,
+            Container::Fb2(fb2) => fb2.read_resource(&uri, limit),
         }
     }
 
@@ -107,6 +116,7 @@ impl Book {
                     Ok(DocumentInspection::from_epub(epub, documents, toc))
                 }
                 Container::Mobi(mobi) => Ok(DocumentInspection::from_prepared(mobi.prepare_text().await?)),
+                Container::Fb2(fb2) => Ok(DocumentInspection::from_prepared(fb2.prepare_text()?)),
             }
         })
     }
@@ -114,6 +124,7 @@ impl Book {
     pub async fn prepare_reading(self) -> io::Result<ReadingBook> {
         let (epub, toc) = match self.container {
             Container::Mobi(mobi) => return mobi.prepare_reading().await,
+            Container::Fb2(fb2) => return fb2.prepare_reading(),
             Container::Epub(mut epub) => {
                 let toc = epub.toc().await?.unwrap_or_default();
                 (Arc::new(epub.into_provider().await?), toc)
@@ -148,6 +159,7 @@ impl PreparedText {
 pub(crate) enum ResourceSource {
     Epub(Arc<EpubProvider>),
     Mobi(Arc<MobiResources>),
+    Fb2(Arc<Fb2Resources>),
 }
 
 /// Immutable documents and CSS for synchronous consumers, with asynchronous
@@ -165,6 +177,7 @@ impl ReadingBook {
         match &self.source {
             ResourceSource::Epub(epub) => epub.languages(),
             ResourceSource::Mobi(mobi) => mobi.languages(),
+            ResourceSource::Fb2(fb2) => fb2.languages(),
         }
     }
 
@@ -183,6 +196,7 @@ impl ReadingBook {
                     match source {
                         ResourceSource::Epub(epub) => epub.read_bytes_async(&uri).await,
                         ResourceSource::Mobi(mobi) => mobi.read_bytes(&uri).await,
+                        ResourceSource::Fb2(fb2) => fb2.read_bytes(&uri, crate::resources::MAX_BINARY_RESOURCE_BYTES),
                     }
                 }
                 Err(error) => Err(error),

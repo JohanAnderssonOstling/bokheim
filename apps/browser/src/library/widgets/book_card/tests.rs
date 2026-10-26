@@ -27,7 +27,7 @@ fn draw(window: WindowHandle<CardFixture>, cx: &TestAppContext) {
 
 fn row() -> BookCardRow {
     BookCardRow {
-        source: BookSource::Library { content_hash: ContentHash::from_bytes([7; 32]) },
+        source: BookSource::Library { content_hash: BookId::from_bytes([7; 32]) },
         title: "A book title".into(),
         subtitle: Some("A subtitle".into()),
         author: "Writer".into(),

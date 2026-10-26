@@ -17,7 +17,7 @@ use library_model::BookLocator;
 
 use crate::epub::toc::TocState;
 use crate::epub::{LoadState, ProgressState, ReaderView, SearchState};
-use crate::invalidation::Component;
+use crate::invalidation::{Component, notify};
 use crate::settings::{ReaderSettings, library_interaction_palette, library_link_foreground, library_paint_palette, library_theme_adaptation};
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::ReadingPositionWriter;
@@ -66,6 +66,18 @@ impl ReaderView {
             _ => {}
         });
         let annotation_note_input = cx.new(|cx| crate::shell::annotation_editor::note_input(window, cx));
+        let font_picker = cx.new(|cx| super::font_picker::FontPicker::new(window, cx));
+        cx.subscribe_in(&font_picker, window, |this, _, event: &super::font_picker::FontSelected, window, cx| {
+            this.set_system_font_family(event.0.clone(), cx);
+            this.sidebar_focus.focus(window, cx);
+        })
+        .detach();
+        let annotation_filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter annotations"));
+        let annotation_filter_subscription = cx.subscribe(&annotation_filter_input, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                notify(cx, Component::ReaderShell, "annotation_filter_changed");
+            }
+        });
         let focus = cx.focus_handle();
         let toc_tree = cx.new(|cx| TreeState::new(cx));
         focus.focus(window, cx);
@@ -103,6 +115,7 @@ impl ReaderView {
             page_size: None,
             touch_swipe_from_edge: false,
             search_input,
+            font_picker,
             search: SearchState::default(),
             book,
             reading_position: None,
@@ -119,6 +132,7 @@ impl ReaderView {
             selection: None,
             touch_selection: Default::default(),
             annotation_note_input,
+            annotation_filter_input,
             annotation_popup_anchor: None,
             footnote: None,
             image_preview: None,
@@ -132,6 +146,7 @@ impl ReaderView {
             reading_positions,
             close_reader,
             _search_subscription: search_subscription,
+            _annotation_filter_subscription: annotation_filter_subscription,
         };
         reader.finish_load(preparation, window, cx);
         reader
@@ -171,7 +186,7 @@ impl ReaderView {
         self.focus_document(window, cx);
         self.load_reader_state(cx);
         self.load_database_toc(cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "reader_ready");
+        notify(cx, Component::ReaderShell, "reader_ready");
     }
 
     /// Installs weights obtained from container metadata. For EPUB these are

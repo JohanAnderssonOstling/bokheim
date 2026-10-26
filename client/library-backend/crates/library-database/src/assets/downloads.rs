@@ -3,16 +3,16 @@ pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::*;
 pub(crate) use library_model::BlobKind;
 pub(crate) use library_model::DownloadState;
-pub(crate) use sync_common::ContentHash;
+pub(crate) use sync_common::BookId;
 
 impl Database {
-    pub fn is_book_downloaded(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
+    pub fn is_book_downloaded(&self, hash: &BookId) -> Result<bool, DatabaseError> {
         Ok(self.download_flags(hash)?.0)
     }
 
     /// Whether the book's bytes are marked downloaded, and whether a live
     /// placement has a queued download request.
-    pub(crate) fn download_flags(&self, hash: &ContentHash) -> Result<(bool, bool), DatabaseError> {
+    pub(crate) fn download_flags(&self, hash: &BookId) -> Result<(bool, bool), DatabaseError> {
         let mut flags = (false, false);
         self.connection.transfer_download_state(hash, |row| {
             flags = (row.get(0)?, row.get(1)?);
@@ -23,7 +23,7 @@ impl Database {
 
     /// Checks eviction eligibility without changing local availability. Native
     /// callers must run this before removing any files, then commit eviction.
-    pub fn check_local_book_eviction(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
+    pub fn check_local_book_eviction(&self, hash: &BookId) -> Result<bool, DatabaseError> {
         if !self.is_book_downloaded(hash)? {
             return Ok(false);
         }
@@ -35,7 +35,7 @@ impl Database {
         Ok(true)
     }
 
-    pub fn evict_local_book(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
+    pub fn evict_local_book(&self, hash: &BookId) -> Result<bool, DatabaseError> {
         self.write(|transaction| {
             if !self.check_local_book_eviction(hash)? {
                 return Ok(false);
@@ -50,7 +50,7 @@ impl Database {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn complete_local_book_request_on(connection: &rusqlite::Connection, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn complete_local_book_request_on(connection: &rusqlite::Connection, hash: &BookId) -> Result<(), DatabaseError> {
         let mut placements = Vec::new();
         connection.shared_live_book_placements(hash, |row| {
             placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
@@ -67,7 +67,7 @@ impl Database {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn sync_request_book_downloads(&self, hashes: &[ContentHash], origin: library_model::TransferOrigin) -> Result<(), DatabaseError> {
+    pub fn sync_request_book_downloads(&self, hashes: &[BookId], origin: library_model::TransferOrigin) -> Result<(), DatabaseError> {
         let requested_at = crate::sync::unix_millis()?;
         self.write(|transaction| {
             for hash in hashes {
@@ -85,7 +85,7 @@ impl Database {
         })
     }
 
-    pub fn transfer_download_state(&self, hash: &ContentHash, bytes_present: bool) -> Result<DownloadState, DatabaseError> {
+    pub fn transfer_download_state(&self, hash: &BookId, bytes_present: bool) -> Result<DownloadState, DatabaseError> {
         Ok(match (self.download_flags(hash)?, bytes_present) {
             ((true, _), true) => DownloadState::Downloaded,
             ((_, true), _) => DownloadState::Queued,

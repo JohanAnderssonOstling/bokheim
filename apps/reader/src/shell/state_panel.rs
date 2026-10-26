@@ -6,12 +6,14 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Window};
 use gpui_component::list::ListItem;
 use gpui_component::tree::{TreeState, tree};
+use html_view_core::SearchOptions;
 use library_backend::Annotation;
 use ui_components as components;
 
 use crate::settings::ReaderSettings;
 pub(crate) use crate::settings::SidebarTab;
 use crate::shell::marks::MarkSession;
+use crate::shell::search::highlighted_text;
 
 /// Shared sidebar tab-selection state.
 ///
@@ -119,7 +121,13 @@ pub(crate) fn sidebar_tabs(contents_available: bool) -> &'static [SidebarTab] {
 
 /// Cycles only through panels available in this book, wrapping at either end.
 pub(crate) fn adjacent_sidebar_tab(active: SidebarTab, contents_available: bool, direction: i32) -> SidebarTab {
-    let tabs = sidebar_tabs(contents_available);
+    adjacent_available_tab(active, sidebar_tabs(contents_available), direction)
+}
+
+pub(crate) fn adjacent_available_tab(active: SidebarTab, tabs: &[SidebarTab], direction: i32) -> SidebarTab {
+    if tabs.is_empty() {
+        return active;
+    }
     let index = tabs.iter().position(|tab| *tab == active).unwrap_or(0) as i32;
     tabs[(index + direction).rem_euclid(tabs.len() as i32) as usize]
 }
@@ -159,15 +167,16 @@ where
         rows.push(components::reader_annotation_group_heading(title, theme).into_any_element());
         for (index, annotation) in annotations {
             let selected = marks.selected_id() == Some(annotation.id.as_str());
-            rows.push(reader_annotation_card(target, index, &annotation, selected, theme));
+            rows.push(reader_annotation_card(target, index, &annotation, selected, "", theme));
         }
     }
     rows
 }
 
 /// One annotation, shared by flat lists and the filtered TOC tree.
-pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity<C>, index: usize, annotation: &Annotation, selected: bool, theme: components::BrowserTheme) -> AnyElement {
+pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity<C>, index: usize, annotation: &Annotation, selected: bool, query: &str, theme: components::BrowserTheme) -> AnyElement {
     let note = annotation.note.clone();
+    let options = SearchOptions { match_diacritics: true, ..Default::default() };
     let editable = !annotation.is_external_pdf_annotation();
     let select_target = target.clone();
     let select_id = annotation.id.clone();
@@ -206,8 +215,8 @@ pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity
             go_target.update(cx, |this, cx| this.go_to_annotation(&annotation, cx));
         })
         .child(components::reader_annotation_color_bar(annotation.color))
-        .when(!annotation.exact_text.is_empty(), |card| card.child(components::reader_state_quote(format!("“{}”", annotation.exact_text), theme)))
-        .when(!note.is_empty(), |card| card.child(components::reader_state_note(note, theme).text_color(theme.text)))
+        .when(!annotation.exact_text.is_empty(), |card| card.child(components::reader_state_quote(highlighted_text(format!("“{}”", annotation.exact_text), query, options), theme)))
+        .when(!note.is_empty(), |card| card.child(components::reader_state_note(highlighted_text(note, query, options), theme).text_color(theme.text)))
         .children(actions.map(|actions| {
             components::action_row().id(("reader-state-annotation-actions", index)).justify_end().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(|_, _, cx| cx.stop_propagation()).child(actions)
         }))
@@ -220,16 +229,20 @@ pub(crate) enum TocActivation {
     Keyboard,
 }
 
+pub(crate) type TocReadReset = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// The table-of-contents tree. Keyboard activation keeps focus in the tree so
 /// the reader can continue navigating entries with the arrow keys.
-pub(crate) fn reader_toc_tree<C, F>(toc_tree: &Entity<TreeState>, target: &Entity<C>, active_id: Option<&str>, keyboard_visible: bool, theme: components::BrowserTheme, cx: &gpui::App, on_navigate: F) -> AnyElement
+pub(crate) fn reader_toc_tree<C, F>(
+    toc_tree: &Entity<TreeState>, target: &Entity<C>, active_id: Option<&str>, read_ids: std::collections::HashSet<String>, reset_read: Option<TocReadReset>, keyboard_visible: bool, theme: components::BrowserTheme, cx: &gpui::App,
+    on_navigate: F,
+) -> AnyElement
 where
     C: 'static,
     F: Fn(&str, TocActivation, &mut Window, &mut C, &mut Context<C>) + 'static,
 {
     let target = target.clone();
     let on_navigate = Rc::new(on_navigate);
-    let current_index = active_id.and_then(|id| toc_tree.read(cx).index_of_id(id));
     let active_id = active_id.map(str::to_owned);
     // `selected` is the entry the reader is inside: the renderer resolves the
     // position to a link and the sidebar selects it. It used to be discarded,
@@ -284,11 +297,15 @@ where
                     has_children: entry.is_folder(),
                     expanded: entry.is_expanded(),
                     marked,
-                    read: !entry.is_folder() && current_index.is_some_and(|current| index < current),
+                    read: read_ids.contains(item.id.as_ref()),
                     focused: keyboard_visible && selected,
                     number: numbers.get(index).copied(),
                     number_digits,
                 };
+                let reset = reset_read.clone().map(|reset| {
+                    let id = id.clone();
+                    Rc::new(move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| reset(&id, window, cx)) as components::ContentsReadReset
+                });
                 // The tree toggles an entry when its row is clicked, so navigation
                 // hangs on the title, which stops the click reaching the row.
                 let title = components::contents_title(("reader-toc-title", index), item.label.clone(), theme).debug_selector(move || format!("reader-toc-title-{index}")).on_click(move |_, window, cx| {
@@ -301,7 +318,7 @@ where
                 // Rows are content-sized, so a two-line title keeps the row's own
                 // padding above and below it.
                 ListItem::new(("reader-toc-item", index)).w_full().min_w_0().p_0().child(
-                    components::contents_row(("reader-toc-row", index), row, nested.then(|| components::contents_disclosure(("reader-toc-disclosure", index), row, theme)), title, None, theme)
+                    components::contents_row(("reader-toc-row", index), row, nested.then(|| components::contents_disclosure(("reader-toc-disclosure", index), row, theme)), title, None, reset, theme)
                         .debug_selector(move || format!("reader-toc-row-{index}"))
                         .min_h_0()
                         .line_height(gpui::relative(1.2)),
@@ -330,7 +347,7 @@ mod tests {
 
     impl Render for TocSpacingTest {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().debug_selector(|| "test-toc-viewport".into()).w(px(280.0)).h(px(240.0)).child(reader_toc_tree(&self.tree, &cx.entity(), None, true, ui_components::browser_theme(cx), cx, |_, _, _, _, _| {}))
+            div().debug_selector(|| "test-toc-viewport".into()).w(px(280.0)).h(px(240.0)).child(reader_toc_tree(&self.tree, &cx.entity(), None, Default::default(), None, true, ui_components::browser_theme(cx), cx, |_, _, _, _, _| {}))
         }
     }
 

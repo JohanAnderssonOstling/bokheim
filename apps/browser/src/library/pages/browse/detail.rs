@@ -20,7 +20,7 @@ use gpui::{AnyElement, App, AppContext, AvailableSpace, Context, Entity, FocusHa
 use gpui_component::{IconName, WindowExt as _};
 use gpui_image_eviction::track_image;
 use library_model::{BookCardRow, BookDetail, BookLocator, BookSource, BookTocEntry, CardKey, LibraryFileTypeFilter};
-use sync_common::ContentHash;
+use sync_common::BookId;
 use ui_components::ScrollableElement as _;
 use ui_components::{self as components, BrowserDownloadPhase, BrowserDownloadUpdate, BrowserDownloads};
 
@@ -69,6 +69,7 @@ pub(crate) struct BookDetailPage {
     cover_needs_reload: bool,
     cover_loading: bool,
     _cover_evictions: gpui::Subscription,
+    _contents_updates: gpui::Subscription,
     /// Contents open collapsed, so a book with two hundred entries does not bury
     /// everything under it. This is what the reader has opened since.
     expanded: HashSet<String>,
@@ -109,11 +110,49 @@ fn feed_detail(book: BookCardRow, description: String) -> BookDetail {
         credits: Vec::new(),
         current_entry: None,
         current_target: None,
+        chapter_read_status: Default::default(),
         toc: Vec::new(),
     }
 }
 
 impl BookDetailPage {
+    fn reset_contents_read_status(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        let locator = self.locator();
+        let playing_reset = cx.try_global::<crate::NowPlaying>().and_then(|playing| playing.book.as_ref()).filter(|playing| Some(&playing.locator) == locator.as_ref()).map(|playing| playing.reset_chapter_read_status.clone());
+        if let Some(reset) = playing_reset {
+            reset(target.clone(), cx);
+            if let Some(detail) = &mut self.detail {
+                if let Some(target) = target.as_deref() {
+                    detail.chapter_read_status.reset_chapter(&detail.toc, target);
+                } else {
+                    detail.chapter_read_status.reset();
+                }
+            }
+            cx.notify();
+            return;
+        }
+        let Some(hash) = self.book.library_file() else { return };
+        let library = self.ui.backend().clone();
+        cx.spawn(async move |page, cx| {
+            let result = match target {
+                Some(target) => library.reset_chapter_read_status_at(hash, target).await,
+                None => library.reset_chapter_read_status(hash).await,
+            };
+            let _ = page.update(cx, |page, cx| {
+                match result {
+                    Ok(status) => {
+                        if let Some(detail) = &mut page.detail {
+                            detail.chapter_read_status = status;
+                        }
+                    }
+                    Err(error) => page.error = Some(user_facing_error(&error, "Could not reset read status. Please try again.").into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// The page of a library, catalog or feed book.
     pub(crate) fn create(book: BookCardRow, cover: Option<LoadedCover>, ui: LibraryContext, cx: &mut impl AppContext) -> Entity<Self> {
         cx.new(|cx| {
@@ -121,6 +160,11 @@ impl BookDetailPage {
                 track_image(&cover.image, cx);
             }
             let download_updates = Self::download_subscription(&book, &ui, cx);
+            let contents_updates = cx.subscribe(&ui.updates(), |page: &mut Self, _, _: &crate::library::services::LibraryContentsChanged, cx| {
+                let Some(hash) = page.book.library_file() else { return };
+                let library = page.ui.backend().clone();
+                page.finish_load(async move { library.book_detail(hash).await }, cx);
+            });
             let cover_evictions = cx.observe_global::<CoversEvicted>(|page: &mut Self, cx| {
                 page._cover_task.take();
                 page.cover.take();
@@ -139,6 +183,7 @@ impl BookDetailPage {
                 cover_needs_reload: false,
                 cover_loading: false,
                 _cover_evictions: cover_evictions,
+                _contents_updates: contents_updates,
                 expanded: HashSet::new(),
                 contents_open: true,
                 description_open: true,
@@ -193,7 +238,7 @@ impl BookDetailPage {
         cx.notify();
     }
 
-    fn load_library(&mut self, content_hash: ContentHash, cx: &mut Context<Self>) {
+    fn load_library(&mut self, content_hash: BookId, cx: &mut Context<Self>) {
         #[cfg(not(target_arch = "wasm32"))]
         self.load_torrents(content_hash, cx);
         let library = self.ui.backend().clone();
@@ -201,7 +246,7 @@ impl BookDetailPage {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn load_torrents(&mut self, hash: ContentHash, cx: &mut Context<Self>) {
+    fn load_torrents(&mut self, hash: BookId, cx: &mut Context<Self>) {
         let library = self.ui.backend().clone();
         self.torrents_loading = true;
         self.torrent_task = Some(cx.spawn(async move |page, cx| {
@@ -249,7 +294,7 @@ impl BookDetailPage {
         Some(ui.subscribe_download(hash, cx, |_: &mut Self, _, cx| cx.notify()))
     }
 
-    fn finish_load(&mut self, load: impl std::future::Future<Output = Result<BookDetail, String>> + 'static, cx: &mut Context<Self>) {
+    fn finish_load(&mut self, load: impl std::future::Future<Output = Result<BookDetail, library_backend::BackendError>> + 'static, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             cx.wait_for_update_slot().await;
@@ -309,14 +354,14 @@ impl BookDetailPage {
                         if matches!(source, BookSource::Opds { .. } | BookSource::ExternalCatalog { .. }) {
                             mark_feed_book_added(key, cx);
                         }
-                        (BrowserDownloadPhase::Completed, "Added to library".to_owned())
+                        (BrowserDownloadPhase::Completed, Some("Added to library".to_owned()))
                     }
                     Err(error) => {
                         log::warn!("Could not add catalog/feed book {key:?} to library: {error}");
-                        (BrowserDownloadPhase::Failed, book_transfer_error_message(error).to_owned())
+                        (BrowserDownloadPhase::Failed(error.failure()), None)
                     }
                 };
-                downloads.apply(BrowserDownloadUpdate { download, replaces: None, name: title.to_string(), phase, percent: None, message: Some(message) }, window, cx);
+                downloads.apply(BrowserDownloadUpdate { download, replaces: None, name: title.to_string(), phase, percent: None, message }, window, cx);
             });
             let _ = page.update_in(cx, |page, _, cx| {
                 page.adding = false;
@@ -371,7 +416,7 @@ impl BookDetailPage {
         let decoder = cx.background_executor().clone();
         self._cover_task = Some(cx.spawn(async move |page, cx| {
             let cover = match load.await {
-                Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await.map(Some).ok_or_else(|| "cover is not a readable JPEG".to_owned()),
+                Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await.map(Some).ok_or_else(|| library_backend::BackendError::message("cover is not a readable JPEG")),
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
             };
@@ -415,7 +460,7 @@ impl BookDetailPage {
                 page.download_requested_by_page = false;
                 if let Err(error) = result {
                     log::warn!("Could not download library book {content_hash}: {error}");
-                    notify_error("book-download-error", book_transfer_error_message(&error), window, cx);
+                    notify_error("book-download-error", book_transfer_error_message(error.failure()), window, cx);
                 }
                 cx.notify();
             });
@@ -573,7 +618,8 @@ impl BookDetailPage {
                 None => components::book_cover(theme, if audiobook { 1.0 } else { components::BOOK_COVER_ASPECT_RATIO }),
             })
             // Show the cover's progress bar only after the book has been started.
-            .children(components::book_cover_progress(progress, theme));
+            .children(components::book_cover_progress(progress, theme))
+            .when(audiobook, |cover| cover.child(components::book_cover_audiobook_length(book.audiobook_duration_ms, theme)));
 
         let headline = if beside_cover { components::book_detail_headline() } else { components::book_detail_sidebar_headline() };
         let mut headline = headline.child(components::book_detail_title(book.title.clone(), book.subtitle.as_deref(), large_title, theme));
@@ -715,6 +761,7 @@ impl BookDetailPage {
             actions = actions
                 .child(components::secondary_action_button(("book-torrent-forget", index), "Remove torrent", IconName::Close, false).on_click(move |_, _, cx| target.update(cx, |page, cx| page.change_torrent(hash.clone(), None, cx))));
         }
+        let actions = actions.when(layout != DetailLayout::Columns, |actions| actions.justify_start());
         // The book that is playing is controlled here rather than offered: its
         // controls stand where Listen and the reading position would. Beside
         // the cover they would get half the row, so there they go under both.
@@ -801,8 +848,8 @@ impl BookDetailPage {
         let durations = if audiobook { chapter_durations(&detail.toc, detail.book.audiobook_duration_ms) } else { HashMap::new() };
         let mut drawn = Vec::new();
         drawn_entries(&detail.toc, &self.expanded, 0, &mut drawn);
-        // Use the full TOC order, including entries hidden under collapsed
-        // parents, to decide which visible leaves precede the current entry.
+        // Number against the full TOC, including entries hidden under collapsed
+        // parents, so expanding a part does not renumber later chapters.
         let mut ordered = Vec::new();
         fn visit<'a>(entries: &'a [BookTocEntry], ordered: &mut Vec<&'a BookTocEntry>) {
             for entry in entries {
@@ -822,8 +869,13 @@ impl BookDetailPage {
             ordered.iter().filter(|entry| book_model::audiobook_toc_position(&entry.target).is_some_and(|start| start <= position)).last().map(|entry| entry.target.as_str())
         });
         let marked = playing_target.or(detail.current_target.as_deref());
-        let read_targets: HashSet<&str> =
-            ordered.iter().position(|entry| marked == Some(entry.target.as_str())).map(|current| ordered[..current].iter().filter(|entry| entry.children.is_empty()).map(|entry| entry.target.as_str()).collect()).unwrap_or_default();
+        let locator = self.locator();
+        let read_status = cx
+            .try_global::<crate::NowPlaying>()
+            .and_then(|playing| playing.book.as_ref())
+            .filter(|playing| Some(&playing.locator) == locator.as_ref())
+            .map(|playing| (playing.chapter_read_status)(cx))
+            .unwrap_or_else(|| detail.chapter_read_status.clone());
         // A closed part holding the current entry carries the mark itself, so
         // where the reader is never disappears into it.
         fn holds(entry: &BookTocEntry, target: &str) -> bool {
@@ -845,7 +897,7 @@ impl BookDetailPage {
                 has_children: !entry.children.is_empty(),
                 expanded,
                 marked: marked.is_some_and(|marked| marked == entry.target || (!expanded && holds(entry, marked))),
-                read: read_targets.contains(entry.target.as_str()),
+                read: read_status.completed.contains(&entry.target),
                 focused: false,
                 number: ordered.iter().position(|ordered| std::ptr::eq(*ordered, entry)).map(|position| position + 1),
                 number_digits,
@@ -861,8 +913,11 @@ impl BookDetailPage {
                 })
             });
             let amount = durations.get(entry.target.as_str()).cloned();
+            let reset_page = page.clone();
+            let reset_target = entry.target.clone();
+            let reset: components::ContentsReadReset = std::rc::Rc::new(move |_, _, cx| reset_page.update(cx, |page, cx| page.reset_contents_read_status(Some(reset_target.clone()), cx)));
             panel = panel.child(
-                components::contents_row(format!("book-detail-entry-{index}"), row, disclosure, components::book_detail_text(format!("book-detail-entry-title-{index}"), entry.title.clone()), amount, theme)
+                components::contents_row(format!("book-detail-entry-{index}"), row, disclosure, components::book_detail_text(format!("book-detail-entry-title-{index}"), entry.title.clone()).selectable(false), amount, Some(reset), theme)
                     .when(can_open, |row| {
                         row.on_click({
                             let page = page.clone();
@@ -894,6 +949,9 @@ impl BookDetailPage {
                     cx.notify();
                 }
             }))
+        });
+        let heading = components::row(components::SPACE_SM).child(heading.flex_1()).when(can_open, |heading| {
+            heading.child(components::topbar_action_button("reset-chapter-read-status", "Reset read status", IconName::Undo2, theme).on_click(cx.listener(|page, _, _, cx| page.reset_contents_read_status(None, cx))))
         });
         components::book_detail_section().child(heading).when(open, |section| section.child(panel)).into_any_element()
     }
@@ -938,7 +996,7 @@ mod tests {
         let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_directory, _session, library) = LibrarySession::test_context(cx).await;
         let book = BookCardRow {
-            source: BookSource::Library { content_hash: ContentHash::from_bytes([15; 32]) },
+            source: BookSource::Library { content_hash: BookId::from_bytes([15; 32]) },
             title: "Book".into(),
             subtitle: None,
             author: "Author".into(),
@@ -992,7 +1050,7 @@ mod tests {
         let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_directory, _session, library) = LibrarySession::test_context(cx).await;
         let updates = library.updates();
-        let hash = ContentHash::from_bytes([16; 32]);
+        let hash = BookId::from_bytes([16; 32]);
         let mut book = BookCardRow {
             source: BookSource::Catalog { content_hash: hash },
             title: "Catalog book".into(),

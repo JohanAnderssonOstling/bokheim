@@ -66,11 +66,15 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(verification.token.len(), account_contract::EMAIL_VERIFICATION_PIN_DIGITS);
     assert!(verification.token.bytes().all(|byte| byte.is_ascii_digit()));
     assert_ne!(stored_ciphertext, verification.token, "PostgreSQL must not contain the recoverable PIN in plaintext");
-    assert_eq!(post(&app, "/api/auth/verify-email", &EmailVerificationRequest { email: "other@example.com".to_owned(), pin: verification.token.clone() }, None).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(post(&app, "/api/auth/verify-email", &EmailVerificationRequest { email: "other@example.com".to_owned(), pin: verification.token.clone(), password: original_password.to_owned() }, None).await.status(), StatusCode::UNAUTHORIZED);
+    // The mailed PIN alone does not verify: whoever enters it must also know
+    // the pending registration's password, or they would adopt another's.
+    let foreign_password = EmailVerificationRequest { email: email.clone(), pin: verification.token.clone(), password: "someone-elses-chosen-password".to_owned() };
+    assert_eq!(post(&app, "/api/auth/verify-email", &foreign_password, None).await.status(), StatusCode::UNAUTHORIZED);
 
     // Existing account identifiers receive the same generic response and do
     // not create another pending account or leak an email.
-    let verification_request = EmailVerificationRequest { email: email.clone(), pin: verification.token };
+    let verification_request = EmailVerificationRequest { email: email.clone(), pin: verification.token, password: original_password.to_owned() };
     let verified = auth_response(post(&app, "/api/auth/verify-email", &verification_request, None).await).await;
     assert_eq!(verified.email, email);
     assert_eq!(post(&app, "/api/auth/verify-email", &verification_request, None).await.status(), StatusCode::UNAUTHORIZED);
@@ -85,13 +89,15 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(post(&app, "/api/auth/register", &locked_registration, None).await.status(), StatusCode::ACCEPTED);
     let locked_verification = accounts.claim_email("registration-test").await.unwrap().unwrap();
     let wrong_pin = if locked_verification.token == "000000" { "000001" } else { "000000" };
-    let wrong_request = EmailVerificationRequest { email: locked_email.clone(), pin: wrong_pin.to_owned() };
+    let wrong_request = EmailVerificationRequest { email: locked_email.clone(), pin: wrong_pin.to_owned(), password: original_password.to_owned() };
     for attempt in 0..5 {
         let address = format!("198.51.100.{}", attempt + 1);
         assert_eq!(post_from(&app, "/api/auth/verify-email", &wrong_request, None, &address).await.status(), StatusCode::UNAUTHORIZED);
     }
-    assert_eq!(post_from(&app, "/api/auth/verify-email", &wrong_request, None, "198.51.100.6").await.status(), StatusCode::TOO_MANY_REQUESTS);
-    let locked_correct = EmailVerificationRequest { email: locked_email, pin: locked_verification.token };
+    // A trailing-dot spelling names the same account and shares its bucket.
+    let respelled = EmailVerificationRequest { email: format!("{locked_email}."), pin: wrong_pin.to_owned(), password: original_password.to_owned() };
+    assert_eq!(post_from(&app, "/api/auth/verify-email", &respelled, None, "198.51.100.6").await.status(), StatusCode::TOO_MANY_REQUESTS);
+    let locked_correct = EmailVerificationRequest { email: locked_email, pin: locked_verification.token, password: original_password.to_owned() };
     assert_eq!(post_from(&app, "/api/auth/verify-email", &locked_correct, None, "198.51.100.7").await.status(), StatusCode::TOO_MANY_REQUESTS);
 
     assert_eq!(post(&app, "/api/auth/request-password-reset", &EmailRequest { email: "unknown@example.com".to_owned() }, None).await.status(), StatusCode::ACCEPTED);

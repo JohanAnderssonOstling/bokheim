@@ -6,7 +6,7 @@
 //! `client-platform-web` provide the hosts; callers hold explicit host
 //! handles, and launchers may override the process-wide default.
 
-use content_address::ContentHash;
+use content_address::BookId;
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -45,7 +45,7 @@ pub fn as_cpu_reader<R: Read + Seek + Send + Sync + 'static>(reader: R) -> Boxed
 /// Metadata and cover parsers request ranges from the storage owner.
 #[derive(Serialize, Deserialize)]
 pub enum BookTask {
-    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<ContentHash> },
+    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<BookId> },
     Thumbnail { extension: String },
 }
 
@@ -53,7 +53,7 @@ pub enum BookTask {
 pub enum CpuResponse {
     Done,
     Inspection(book_inspection::InspectedBook),
-    Hash(ContentHash),
+    Hash(BookId),
     Thumbnail(Option<ThumbnailBytes>),
     Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
 }
@@ -93,7 +93,7 @@ pub fn execute(request: CpuRequest) -> Result<CpuResponse, BackendError> {
         }),
         CpuRequest::HashFinish { key } => HASHERS.with(|hashers| {
             let hasher = hashers.borrow_mut().remove(&key).ok_or("hash session was lost; retry the job")?;
-            Ok(CpuResponse::Hash(ContentHash::from(hasher.finalize())))
+            Ok(CpuResponse::Hash(BookId::from(hasher.finalize())))
         }),
         CpuRequest::HashAbort { key } => {
             HASHERS.with(|hashers| hashers.borrow_mut().remove(&key));
@@ -194,7 +194,7 @@ macro_rules! operations {
 operations! {
     HashStart { key: String } => (), CpuResponse::Done => ();
     HashUpdate { key: String, #[serde(with = "serde_bytes")] bytes: Vec<u8> } => (), CpuResponse::Done => ();
-    HashFinish { key: String } => ContentHash, CpuResponse::Hash(hash) => hash;
+    HashFinish { key: String } => BookId, CpuResponse::Hash(hash) => hash;
     HashAbort { key: String } => (), CpuResponse::Done => ();
     Resize { width: u32, #[serde(with = "serde_bytes")] bytes: Vec<u8> } => Vec<u8>, CpuResponse::Bytes(bytes) => bytes;
     Cover { #[serde(with = "serde_bytes")] bytes: Vec<u8> } => ThumbnailBytes, CpuResponse::Thumbnail(Some(versions)) => versions;
@@ -215,7 +215,7 @@ macro_rules! book_operations {
     )*};
 }
 book_operations! {
-    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<ContentHash> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
+    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<BookId> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     Thumbnail { extension: String } => Option<ThumbnailBytes>, CpuResponse::Thumbnail(versions) => versions;
 }
 
@@ -274,7 +274,7 @@ impl RemoteHashSession {
         }
         Ok(())
     }
-    pub async fn finish(mut self) -> Result<ContentHash, BackendError> {
+    pub async fn finish(mut self) -> Result<BookId, BackendError> {
         let key = self.key.clone().ok_or("hash session finished")?;
         let result = submit(&*self.host, HashFinish { key }).await;
         self.key = None;
@@ -310,7 +310,7 @@ mod tests {
         roundtrip(CpuRequest::HashUpdate { key: key.clone(), bytes: b"book bytes".to_vec() });
         let response = roundtrip(CpuRequest::HashFinish { key });
         let CpuResponse::Hash(hash) = &response else { panic!("expected hash") };
-        assert_eq!(*hash, ContentHash::from(blake3::hash(b"book bytes")));
+        assert_eq!(*hash, BookId::from(blake3::hash(b"book bytes")));
         let encoded = rmp_serde::to_vec_named(&response).unwrap();
         assert!(encoded.windows(32).any(|bytes| bytes == hash.as_bytes()));
         assert!(!encoded.windows(64).any(|bytes| bytes == hash.to_hex().as_bytes()));

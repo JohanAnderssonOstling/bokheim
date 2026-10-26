@@ -39,7 +39,7 @@ WHERE bd.deleted_at IS NULL AND bd.size_bytes > 0
 ORDER BY b.content_hash, bd.dir_id;
 
 -- name: owner_queue_book_upload!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: size_bytes: i64
 INSERT INTO book_transfer(content_hash, upload_id, upload_size)
 SELECT content_hash, (SELECT COALESCE(MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))), 0) + 1 FROM book_transfer), :size_bytes FROM book WHERE content_hash = :content_hash

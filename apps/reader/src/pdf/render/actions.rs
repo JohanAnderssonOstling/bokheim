@@ -8,8 +8,15 @@ use gpui::{Context, Focusable, Window};
 use crate::invalidation::Component;
 use crate::shell::state_panel::{self, SidebarTab};
 use crate::shell::toolbar::SidebarTarget;
+use crate::shell::{chrome::ChromeState, input::ReaderSidebarCommands, state_panel::SidebarState};
 
 use super::PdfReaderView;
+
+impl ReaderSidebarCommands for PdfReaderView {
+    fn sidebar_controls(&mut self) -> (&mut SidebarState, &mut ChromeState) {
+        (&mut self.sidebar, &mut self.chrome)
+    }
+}
 
 impl PdfReaderView {
     pub(super) fn open_search(&mut self, cx: &mut Context<Self>) {
@@ -33,14 +40,7 @@ impl SidebarTarget for PdfReaderView {
     }
 
     fn hide_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if ui_components::uses_mobile_reader_controls(window) {
-            if self.sidebar.close(cx) {
-                notify(cx, Component::PdfShell, "sidebar_closed");
-            }
-        } else {
-            self.chrome.hide(cx);
-        }
-        self.focus_document(window, cx);
+        self.hide_sidebar_controls(window, cx);
     }
 
     fn sidebar_focus(&self) -> gpui::FocusHandle {

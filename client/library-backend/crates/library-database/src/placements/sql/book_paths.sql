@@ -1,13 +1,13 @@
 -- Local book-path resolution and cached PDF metadata.
 
 -- name: stored_pdf_metadata?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT metadata
 FROM pdf_reader_metadata
 WHERE content_hash = :content_hash;
 
 -- name: readable_placements?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- A book can have more than one live placement (filed in two folders, or a
 -- remote mutation adding a second one); only some may have local bytes.
 -- Placements survive Trash, so a trashed book is still readable.
@@ -17,7 +17,7 @@ WHERE bd.book_row_id = (SELECT row_id FROM book WHERE content_hash = :content_ha
   AND bd.deleted_at IS NULL;
 
 -- name: book_projection_paths?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- Where the book's bytes were last materialized on disk.
 SELECT relative_path FROM local_file_projection WHERE content_hash = :content_hash;
 

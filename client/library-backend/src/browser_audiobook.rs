@@ -3,18 +3,18 @@
 pub use crate::library::{PlaybackLocation, PlaybackSource};
 use library_model::PlaybackMetadata;
 use crate::BackendError;
-use crate::{ContentHash, LibrarySession};
+use crate::{BookId, LibrarySession};
 pub type PlaybackLease = client_platform_web::audiobook::PlaybackLease;
 pub type BrowserAudiobook = client_platform_web::audiobook::BrowserAudiobook<PlaybackMetadata, crate::library::DirectPlayback>;
 
-pub(crate) async fn prepare(library: &LibrarySession, hash: ContentHash) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
+pub(crate) async fn prepare(library: &LibrarySession, hash: BookId) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
     let file = library.assets.playback_reader(&hash).await.map_err(BackendError::operation)?;
     prepare_with_file(library, hash, file).await
 }
 
 /// Browser-host command used when a local audiobook is absent.  The format
 /// check and storage probe remain inside the owning library module.
-pub async fn open_remote_audio(library: &LibrarySession, hash: ContentHash) -> Result<Option<PlaybackSource>, BackendError> {
+pub async fn open_remote_audio(library: &LibrarySession, hash: BookId) -> Result<Option<PlaybackSource>, BackendError> {
     let format = library.db.book_format(&hash).map_err(BackendError::operation)?;
     if !matches!(format, Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder)) || library.assets.playback_reader(&hash).await.map_err(BackendError::operation)?.is_some() {
         return Ok(None);
@@ -23,7 +23,7 @@ pub async fn open_remote_audio(library: &LibrarySession, hash: ContentHash) -> R
     Ok(Some(source))
 }
 
-pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: ContentHash, file: Option<client_platform_web::web_storage::FileReader>) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
+pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: BookId, file: Option<client_platform_web::web_storage::FileReader>) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
     let format = library.db.book_format(&hash).map_err(BackendError::operation)?;
     if !matches!(format, Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder)) {
         return Err("book is not an audiobook".into());

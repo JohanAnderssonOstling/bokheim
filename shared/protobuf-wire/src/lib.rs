@@ -18,12 +18,12 @@ mod legacy_serializer;
 #[cfg(test)]
 mod compatibility_tests;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=29";
+pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=30";
 pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+protobuf";
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-const VERSION: u32 = 29;
+const VERSION: u32 = 30;
 
 /// The protobuf protocol version written into every envelope.
 pub const fn version() -> u32 {
@@ -105,11 +105,12 @@ pub fn decode_byte_fields<T: DeserializeOwned>(body: &[u8], decoded_limit: usize
     decode_versions(body, decoded_limit, &[VERSION], true)
 }
 
-/// Reads opaque domain values retained by the sync relay. Protocol 29 changes
-/// cursors, not domain payloads, so version 28 values remain readable. HTTP and
+/// Reads opaque domain values retained by the sync relay. Historical content
+/// identities retain their encodings in protocol 30. Versions 28 and 29 remain
+/// readable. HTTP and
 /// WebSocket envelopes must still use the strict current-version `decode`.
 pub fn decode_state<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
-    decode_versions(body, decoded_limit, &[28, VERSION], false)
+    decode_versions(body, decoded_limit, &[28, 29, VERSION], false)
 }
 
 fn decode_versions<T: DeserializeOwned>(body: &[u8], decoded_limit: usize, versions: &[u32], byte_fields: bool) -> Result<T, WireError> {
@@ -232,7 +233,7 @@ mod tests {
 
     #[test]
     fn version_and_decoded_size_are_bounded() {
-        assert_eq!(version(), 29);
+        assert_eq!(version(), 30);
         let mut unsupported = encode(&example(1)).unwrap();
         unsupported[1] = (VERSION + 1) as u8;
         assert!(matches!(decode::<Example>(&unsupported, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));

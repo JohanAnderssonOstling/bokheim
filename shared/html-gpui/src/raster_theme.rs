@@ -25,8 +25,9 @@ pub(crate) struct RasterClassifier {
 
 impl RasterClassifier {
     pub(crate) fn classify(&mut self, hash: &[u8], pixels: &[u8], width: u32, height: u32) -> RasterKind {
-        if let Some(index) = self.entries.iter().position(|(key, _)| key == hash) {
-            let entry = self.entries.remove(index).unwrap();
+        if let Some(index) = self.entries.iter().position(|(key, _)| key == hash)
+            && let Some(entry) = self.entries.remove(index)
+        {
             let kind = entry.1;
             self.entries.push_back(entry);
             return kind;

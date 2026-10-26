@@ -7,6 +7,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use book_model::{BookTocEntry, ChapterReadStatus};
 use html::document::{MarkupSyntax, decode_html_bytes, parse_document};
 use html::resources::ResourceProvider;
 use html_view_core::cfi::parse_source_position;
@@ -28,6 +29,8 @@ pub(crate) struct ResolvedTocEntry {
 #[derive(Default)]
 pub(crate) struct TocState {
     entries: Arc<Vec<TocEntry>>,
+    read_entries: Vec<BookTocEntry>,
+    pub(crate) read_status: ChapterReadStatus,
     resolutions: Vec<ResolvedTocEntry>,
     /// The link the reader is currently inside, if any.
     active_link: Option<String>,
@@ -38,6 +41,10 @@ pub(crate) struct TocState {
 
 impl TocState {
     pub(crate) fn set(&mut self, entries: Vec<TocEntry>, resolutions: Vec<ResolvedTocEntry>) {
+        fn convert(entries: &[TocEntry]) -> Vec<BookTocEntry> {
+            entries.iter().map(|entry| BookTocEntry { title: entry.title.clone(), target: entry.link.clone(), children: convert(&entry.children) }).collect()
+        }
+        self.read_entries = convert(&entries);
         self.entries = Arc::new(entries);
         self.resolutions = resolutions;
         self.source_positions.clear();
@@ -49,6 +56,14 @@ impl TocState {
     pub(crate) fn update_position(&mut self, position: &SourcePosition) -> bool {
         self.position = Some(position.clone());
         self.refresh_position()
+    }
+
+    pub(crate) fn update_read_status(&mut self, at_end: bool) {
+        self.read_status.update(&self.read_entries, self.active_link.as_deref(), at_end);
+    }
+
+    pub(crate) fn reset_chapter_read_status(&mut self, target: &str) {
+        self.read_status.reset_chapter(&self.read_entries, target);
     }
 
     fn refresh_position(&mut self) -> bool {

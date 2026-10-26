@@ -1,0 +1,12 @@
+[package]
+name = "fixed-page"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+gpui = ["dep:gpui", "dep:image"]
+
+[dependencies]
+gpui = { workspace = true, optional = true }
+image = { version = "0.25", default-features = false, optional = true }

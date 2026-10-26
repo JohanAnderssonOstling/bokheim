@@ -50,12 +50,13 @@ const READER_SETTINGS_ICONS: [(&str, &[u8]); 24] = [
     ("icons/reader-settings/pdf-margins-show.svg", include_bytes!("../../ui/design-tokens/assets/reader-settings/pdf-margins-show.svg")),
     ("icons/reader-settings/pdf-margins-crop.svg", include_bytes!("../../ui/design-tokens/assets/reader-settings/pdf-margins-crop.svg")),
 ];
-const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 69] = [
+const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 73] = [
     ("icons/alarm.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/alarm.svg")),
     ("icons/arrow-down.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-down.svg")),
     ("icons/arrow-left.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-left.svg")),
     ("icons/arrow-clockwise.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-clockwise.svg")),
     ("icons/arrow-right.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-right.svg")),
+    ("icons/arrow-up.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-up.svg")),
     ("icons/book-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/book-open.svg")),
     ("icons/battery-charging.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-charging.svg")),
     ("icons/battery-full.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-full.svg")),
@@ -85,10 +86,13 @@ const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 69] = [
     ("icons/hard-drive.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/hard-drive.svg")),
     ("icons/headphones.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/headphones.svg")),
     ("icons/hourglass.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/hourglass-medium.svg")),
+    ("icons/info.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/info.svg")),
+    ("icons/layout-dashboard.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/squares-four.svg")),
     ("icons/loader-circle.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/circle-notch.svg")),
     ("icons/lock.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/lock.svg")),
     ("icons/lock-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/lock-open.svg")),
     ("icons/menu.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/list.svg")),
+    ("icons/network.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/graph.svg")),
     ("icons/panel-left.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/sidebar-simple.svg")),
     ("icons/panel-left-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/sidebar-simple.svg")),
     ("icons/panel-right-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/sidebar-simple-right.svg")),

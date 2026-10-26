@@ -1,3 +1,6 @@
+mod ruler;
+pub use ruler::ReadingRulerStyle;
+
 use core::panic::Location;
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -160,6 +163,7 @@ struct HtmlDocumentElement {
 struct HtmlDocumentPrepaint {
     hitbox: Hitbox,
     paint: PreparedPaint,
+    ruler: Vec<(kurbo::Rect, gpui::Hsla)>,
 }
 
 enum HostMessage {
@@ -303,6 +307,7 @@ pub struct HtmlView {
     pointer_active: bool,
     pointer_tap_start: Option<(GpuiPoint<Pixels>, Instant, bool)>,
     wheel_scroll_enabled: bool,
+    ruler: ruler::ReadingRuler,
 }
 
 #[derive(Clone)]
@@ -317,6 +322,7 @@ struct PreparedPaint {
 #[derive(Clone)]
 pub struct HtmlPageSnapshot {
     paint: PreparedPaint,
+    ruler: Vec<(kurbo::Rect, gpui::Hsla)>,
 }
 
 impl IntoElement for HtmlPageSnapshot {
@@ -349,6 +355,7 @@ impl Element for HtmlPageSnapshot {
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
         paint_page(&self.paint, bounds, window, cx);
+        ruler::paint_ruler(&self.ruler, bounds, window);
     }
 }
 
@@ -445,12 +452,16 @@ impl Element for HtmlDocumentElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
         window.set_focus_handle(&self.focus, cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let paint = self.view.update(cx, |view, cx| view.prepared_paint_for_bounds(bounds, cx));
-        HtmlDocumentPrepaint { hitbox, paint }
+        let (paint, ruler) = self.view.update(cx, |view, cx| {
+            let paint = view.prepared_paint_for_bounds(bounds, cx);
+            (paint, view.prepare_ruler())
+        });
+        HtmlDocumentPrepaint { hitbox, paint, ruler }
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
         paint_page(&prepaint.paint, bounds, window, cx);
+        ruler::paint_ruler(&prepaint.ruler, bounds, window);
 
         if self.link_hovered {
             window.set_cursor_style(CursorStyle::PointingHand, &prepaint.hitbox);
@@ -533,7 +544,11 @@ impl HtmlView {
     pub fn from_provider(
         provider: std::sync::Arc<dyn html_view_core::ResourceProvider>, document_uris: Vec<String>, start_index: usize, nav_state: Option<&str>, config: html_view_core::RendererInitialConfig, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_renderer(window, cx, move |host, shaper| Ok(RendererSession::from_provider_with_nav(host, shaper, provider, document_uris, start_index, nav_state, config))).expect("initial renderer construction should succeed")
+        let (messages, receiver) = async_channel::unbounded();
+        let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone()));
+        let shaper = GpuiTextCache::new(window.text_system().clone());
+        let renderer = RendererSession::from_provider_with_nav(host.clone(), shaper, provider, document_uris, start_index, nav_state, config);
+        Self::from_renderer(host, receiver, renderer, window, cx)
     }
 
     pub fn from_preparation(prepared: html_view_core::RendererPreparation, window: &mut Window, cx: &mut Context<Self>) -> Result<Self, String> {
@@ -585,6 +600,7 @@ impl HtmlView {
             pointer_active: false,
             pointer_tap_start: None,
             wheel_scroll_enabled: true,
+            ruler: ruler::ReadingRuler::default(),
         }
     }
 
@@ -674,13 +690,15 @@ impl HtmlView {
             self.prepared_paint = Some(self.compose_viewport_display_list(viewport));
             self.display_dirty = false;
         }
+        let moved = before != self.renderer.current_cfi() || self.renderer.reading_document().is_none();
+        self.ruler_page_turn_completed(forward, moved);
         cx.notify();
-        before != self.renderer.current_cfi() || self.renderer.reading_document().is_none()
+        moved
     }
 
     /// Retain the displayed command buffers and glyphs without copying pixels.
-    pub fn page_snapshot(&self) -> Option<HtmlPageSnapshot> {
-        Some(HtmlPageSnapshot { paint: self.prepared_paint.clone()? })
+    pub fn page_snapshot(&mut self) -> Option<HtmlPageSnapshot> {
+        Some(HtmlPageSnapshot { paint: self.prepared_paint.clone()?, ruler: self.prepare_ruler() })
     }
 
     pub fn next_line(&mut self, _cx: &mut Context<Self>) {
@@ -936,17 +954,25 @@ impl HtmlView {
         self.host.note_width.set(Some((f32::from(bounds.size.width) as f64 - FOOTNOTE_PANEL_PADDING * 2.0).max(1.0)));
         let viewport = Size::new(f32::from(bounds.size.width) as f64, f32::from(bounds.size.height) as f64);
         let viewport_ready = self.prepared_viewport == Some(viewport);
-        if !viewport_ready || self.display_dirty {
-            let previous_geometry = self.layout_geometry;
-            let paint = self.compose_viewport_display_list(viewport);
-            self.prepared_viewport = Some(viewport);
-            self.prepared_paint = Some(paint);
-            self.display_dirty = false;
-            if self.layout_geometry != previous_geometry {
-                cx.notify();
-            }
+        // Commands invalidate geometry synchronously, but their repaint event
+        // reaches this view asynchronously. A parent redraw in that interval
+        // must compose the new page before querying its ruler/selection bounds.
+        if viewport_ready
+            && !self.display_dirty
+            && !self.host.repaint_pending.get()
+            && let Some(paint) = &self.prepared_paint
+        {
+            return paint.clone();
         }
-        self.prepared_paint.clone().expect("post-layout viewport composition must install a display list")
+        let previous_geometry = self.layout_geometry;
+        let paint = self.compose_viewport_display_list(viewport);
+        self.prepared_viewport = Some(viewport);
+        self.prepared_paint = Some(paint.clone());
+        self.display_dirty = false;
+        if self.layout_geometry != previous_geometry {
+            cx.notify();
+        }
+        paint
     }
 
     /// Composes pagination and GPUI commands from retained document state.

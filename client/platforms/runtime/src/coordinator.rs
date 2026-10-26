@@ -91,10 +91,13 @@ impl<T> CpuJobs<T> {
         self.active.as_mut().map(|(id, job)| (*id, job))
     }
     pub fn complete(&mut self, id: u32) -> Result<T, String> {
-        if self.active.as_ref().map(|(active, _)| *active) != Some(id) {
-            return Err("Unexpected CPU worker response".into());
+        match self.active.take() {
+            Some((active, job)) if active == id => Ok(job),
+            other => {
+                self.active = other;
+                Err("Unexpected CPU worker response".into())
+            }
         }
-        Ok(self.active.take().unwrap().1)
     }
     pub fn fail(&mut self) -> Vec<T> {
         self.ready = false;

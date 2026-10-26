@@ -8,7 +8,7 @@ use client_platform_runtime::executor::BoxedBackendFuture;
 use cpu_host::{BackendError, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, ThumbnailBytes};
 use library_database::{Database, ScanSnapshot};
 use library_files::{asset_store::ImportOptions, AssetStore};
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 
 struct InspectHost;
 
@@ -19,7 +19,7 @@ impl CpuHost for InspectHost {
             let BookTask::Inspect { content_hash, .. } = &task else { panic!("unexpected task") };
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).unwrap();
-            assert_eq!(*content_hash, Some(ContentHash::from(blake3::hash(&bytes))));
+            assert_eq!(*content_hash, Some(BookId::from(blake3::hash(&bytes))));
             reader.rewind().unwrap();
             cpu_host::execute_book_with_mobi(task, reader, |_, _| Err("subject page inspection is not supported for this format".into()))
         })
@@ -95,7 +95,7 @@ async fn copied_imports_and_scanned_files_have_identical_ingestion_results() {
             let staged = copied.into_staged(expected_hash, expected_size);
             let published = asset_workflow::publish_import(&store, &db, ROOT_DIR_ID, &name, staged, false).await.unwrap();
             let published_bytes = std::fs::read(root.path().join(published.relative_path.trim_start_matches('/'))).unwrap();
-            assert_eq!(expected_hash, ContentHash::from(blake3::hash(&published_bytes)));
+            assert_eq!(expected_hash, BookId::from(blake3::hash(&published_bytes)));
             assert_eq!(expected_size, published_bytes.len() as u64);
             let snapshot = empty_snapshot();
             let scan = filesystem_scanner::filesystem_scan::discover(root.path(), &snapshot);

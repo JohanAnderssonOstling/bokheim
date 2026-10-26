@@ -218,7 +218,7 @@ pub fn repack_zip<R: Read + Seek>(reader: R, cover: Option<&[u8]>) -> io::Result
         if !names.insert(name.to_lowercase()) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "the download has duplicate sidecar names"));
         }
-        let maximum = sidecar_limit(sidecar_kind(&name).expect("validated source sidecar"));
+        let maximum = sidecar_limit(sidecar_kind(&name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported audiobook sidecar"))?);
         let entry = source.by_index(index).map_err(io::Error::other)?;
         if entry.size() > maximum {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized audiobook sidecar"));

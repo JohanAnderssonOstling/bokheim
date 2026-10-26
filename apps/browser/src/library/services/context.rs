@@ -6,7 +6,7 @@ use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, WeakEntity
 use library_backend::{DownloadState, LibraryClient};
 use library_model::BookLocator;
 use std::rc::Rc;
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 
 use super::{DownloadSubscription, LibraryUpdateBridge, UndoEntry};
 use crate::navigation::LibrarySession;
@@ -53,7 +53,7 @@ impl LibraryContext {
         self.updates.clone()
     }
 
-    pub(crate) fn subscribe_download<T: 'static>(&self, content_hash: ContentHash, cx: &mut Context<T>, callback: impl FnMut(&mut T, &DownloadState, &mut Context<T>) + 'static) -> DownloadSubscription {
+    pub(crate) fn subscribe_download<T: 'static>(&self, content_hash: BookId, cx: &mut Context<T>, callback: impl FnMut(&mut T, &DownloadState, &mut Context<T>) + 'static) -> DownloadSubscription {
         let source = self.updates.update(cx, |updates, cx| updates.download_source(content_hash, cx));
         LibraryUpdateBridge::subscribe_download(source, cx, callback)
     }
@@ -75,21 +75,22 @@ impl LibraryContext {
                             let mut source = file.source;
                             source.path = vec![file.name.clone()];
                             let directory = crate::directory_import(gpui::SelectedDirectory { local_path: None, name: file.name, directories: Vec::new(), files: vec![source] });
-                            library.import_directory(parent_id, directory, false).await.and_then(|failures| if failures.is_empty() { Ok(()) } else { Err(failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n")) })
+                            library.import_directory(parent_id, directory, false).await.map(|failures| failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"))
                         };
-                        result.map(|_| ())
+                        result
                     }
                     None => return,
                 },
                 Ok(Ok(None)) => return,
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(Err(error)) => Err(library_backend::BackendError::message(error.to_string())),
+                Err(error) => Err(library_backend::BackendError::message(error.to_string())),
             };
-            if let Err(error) = result {
-                let _ = view.update_in(cx, |_, window, cx| {
-                    crate::services::notify_error("add-book-error", format!("Could not add book. {}", user_facing_error(&error, "Please try again.")), window, cx);
-                });
-            }
+            let _ = view.update_in(cx, |_, window, cx| match result {
+                // Import failures already carry their own wording.
+                Ok(failures) if !failures.is_empty() => crate::services::notify_error("add-book-error", failures, window, cx),
+                Ok(_) => {}
+                Err(error) => crate::services::notify_error("add-book-error", format!("Could not add book. {}", user_facing_error(&error, "Please try again.")), window, cx),
+            });
         })
         .detach();
     }
@@ -121,8 +122,8 @@ impl LibraryContext {
                     None => return,
                 },
                 Ok(Ok(None)) => return,
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(Err(error)) => Err(library_backend::BackendError::message(error.to_string())),
+                Err(error) => Err(library_backend::BackendError::message(error.to_string())),
             };
             let _ = view.update_in(cx, |_, window, cx| match result {
                 Ok(failures) if !failures.is_empty() => crate::services::notify_warning("add-folder-warning", failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),
@@ -154,7 +155,7 @@ impl LibraryContext {
     /// Opens the book where the reader asked for it — a contents entry rather
     /// than wherever they left off. The target is the book's own, so the
     /// reader that receives it is the one that knows how to resolve it.
-    pub(crate) fn open_book_at(&self, content_hash: ContentHash, title: String, target: Option<String>, window: &mut Window, cx: &mut App) {
+    pub(crate) fn open_book_at(&self, content_hash: BookId, title: String, target: Option<String>, window: &mut Window, cx: &mut App) {
         let locator = BookLocator::new(*self.backend.id(), content_hash);
         (self.open_book)(locator, title, target, window, cx);
     }

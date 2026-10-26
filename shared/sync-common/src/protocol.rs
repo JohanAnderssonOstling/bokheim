@@ -1,6 +1,6 @@
 //! Transport-independent validation for synchronization pages.
 
-use crate::ContentHash;
+use crate::BookId;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use crate::transport::encoded_len;
@@ -73,7 +73,7 @@ impl PushBatcher {
     /// Leave fields of failed creations in the durable outbox for a later
     /// exchange. Sending them in a later page would look like standalone
     /// absent-book edits, which the server correctly acknowledges as no-ops.
-    pub fn defer_book_fields(&mut self, books: &[ContentHash]) {
+    pub fn defer_book_fields(&mut self, books: &[BookId]) {
         if books.is_empty() {
             return;
         }
@@ -94,8 +94,9 @@ impl PushBatcher {
             if !batch.is_empty() && bytes.saturating_add(next.bytes) > MAX_PUSH_BATCH_BYTES {
                 break;
             }
-            bytes = bytes.saturating_add(next.bytes);
-            batch.push(self.ready.pop_front().expect("the inspected mutation is still queued").publication);
+            let Some(mutation) = self.ready.pop_front() else { break };
+            bytes = bytes.saturating_add(mutation.bytes);
+            batch.push(mutation.publication);
         }
         self.ready_bytes -= bytes;
         batch

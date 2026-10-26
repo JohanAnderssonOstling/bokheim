@@ -117,7 +117,18 @@ pub fn book_cover_play_button(id: impl Into<ElementId>, theme: BrowserTheme) -> 
 }
 
 /// A compact length mark that also identifies an audiobook by its headphones.
-pub fn book_cover_audiobook_length(length: Option<impl Into<SharedString>>, theme: BrowserTheme) -> Div {
+pub fn book_cover_audiobook_length(duration_ms: Option<u64>, theme: BrowserTheme) -> Div {
+    let length = match duration_ms.filter(|duration| *duration > 0) {
+        Some(duration) => {
+            let total_minutes = (duration / 60_000).max(1);
+            match (total_minutes / 60, total_minutes % 60) {
+                (0, minutes) => format!("{minutes} m"),
+                (hours, 0) => format!("{hours} h"),
+                (hours, minutes) => format!("{hours} h {minutes} m"),
+            }
+        }
+        None => "Unknown".to_owned(),
+    };
     div()
         .absolute()
         .left(px(8.0))
@@ -134,7 +145,7 @@ pub fn book_cover_audiobook_length(length: Option<impl Into<SharedString>>, them
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .child(Icon::new(crate::Headphones).size(px(11.0)))
-        .children(length.map(|length| length.into()))
+        .child(length)
 }
 
 /// Cover art scaled to fit its frame without cropping.
@@ -300,14 +311,9 @@ pub fn section_card_band_index(kind: NavigationIcon, key: &str) -> usize {
     (hash % LIBRARY_GRADIENTS.len() as u64) as usize
 }
 
-#[cfg_attr(feature = "kobo", allow(dead_code))]
+#[cfg(not(feature = "kobo"))]
 fn section_card_band_colors(index: usize) -> (gpui::Hsla, gpui::Hsla) {
-    #[cfg(feature = "kobo")]
-    let (from, to) = (0x000000, 0x333333);
-    #[cfg(not(feature = "kobo"))]
     let (from, to) = LIBRARY_GRADIENTS[index % LIBRARY_GRADIENTS.len()];
-    #[cfg(feature = "kobo")]
-    let _ = index;
     (gpui::rgb(from).into(), gpui::rgb(to).into())
 }
 
@@ -1096,7 +1102,7 @@ pub fn section_card_content(theme: BrowserTheme) -> Div {
 ///
 /// A heading that `opens` nothing — a shelf of Home — neither points nor
 /// underlines.
-pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedString>, count: Option<usize>, pager: AnyElement, opens: bool, focused: bool, marquee: bool, theme: BrowserTheme) -> Stateful<Div> {
+pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedString>, count: Option<usize>, pager: Option<AnyElement>, opens: bool, focused: bool, marquee: bool, theme: BrowserTheme) -> Stateful<Div> {
     div()
         .id(id)
         .group("section-card-heading")
@@ -1124,7 +1130,7 @@ pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedStr
                 .child(title.into()),
         )
         .children(count.map(|count| div().flex_none().child(count.to_string())))
-        .child(pager)
+        .children(pager)
 }
 
 /// One child in a section card's list, with its navigation icon and a quiet
@@ -1148,19 +1154,19 @@ pub fn section_card_subject(id: impl Into<ElementId>, icon: NavigationIcon, labe
         .children(count.map(|count| div().flex_none().min_w(gpui::rems(1.6)).px(px(SPACE_XS)).text_center().text_size(gpui::rems(0.8)).text_color(theme.text_muted).bg(theme.hover).child(count.to_string())))
 }
 
-/// A section card's contents, side by side: its child entries, then its covers.
+/// The body shared by container cards and book shelves.
 pub fn section_card_body() -> Div {
     // Cells provide the full vertical inset. Offset the content border so it
     // does not add another pixel above or below their padding.
     div().flex_1().min_h_0().min_w_0().my(px(-1.0)).flex().gap(px(crate::SECTION_CARD_COLUMN_GAP))
 }
 
-/// A section card's child entries fill one paginator cell.
+/// One column of a container card's child entries.
 pub fn section_card_subject_rows(rows: Vec<AnyElement>) -> Div {
     div().flex_none().h_full().w_full().min_w_0().py(px(crate::BOOK_CARD_PADDING)).flex().flex_col().children(rows)
 }
 
-/// Paging control for a mixed strip of entry columns and covers, in its heading.
+/// Paging control in a container or book shelf heading.
 pub fn section_card_cover_arrow(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool) -> Stateful<Div> {
     let label = label.into();
     div()

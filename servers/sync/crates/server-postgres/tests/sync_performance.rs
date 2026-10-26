@@ -25,7 +25,7 @@ async fn postgres_sync_performance() {
     for (name, cells, payload_bytes) in [("small", 2_000, 128), ("large", 96, 128 * 1024)] {
         let library = LibraryId::new_v4();
         let replica = ReplicaId::new_v4();
-        repository.create_library("performance-user", &LibraryNameRequest { library_id: library, library_name: name.into() }).await.unwrap();
+        repository.create_library("performance-user", &LibraryNameRequest { library_id: library, library_name: name.into(), storage: Default::default() }).await.unwrap();
         let batch = MAX_PUSH_MUTATIONS.min(MAX_PUSH_BATCH_BYTES / (payload_bytes + 1024));
         for start in (0..cells).step_by(batch) {
             let mutations = (start..(start + batch).min(cells)).map(|index| {

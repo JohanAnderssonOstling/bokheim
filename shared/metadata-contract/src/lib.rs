@@ -215,7 +215,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         authors: authors.into_values().collect(),
         // Ambiguous ISBNs can point at unrelated works. Only expose a
         // description when all available Open Library evidence agrees.
-        description: (descriptions.len() == 1).then(|| descriptions.into_iter().next().expect("one description exists")),
+        description: if descriptions.len() == 1 { descriptions.into_iter().next() } else { None },
         subjects: subjects.into_iter().collect(),
         popularity,
     }

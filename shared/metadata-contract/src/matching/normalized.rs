@@ -37,8 +37,10 @@ impl NormalizedAuthor {
             .into_iter()
             .map(|key| {
                 let mut words = key.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
-                if let Some(suffix) = words.last().and_then(|s| author_suffix(s)) {
-                    *words.last_mut().unwrap() = suffix.to_owned();
+                if let Some(last) = words.last_mut() {
+                    if let Some(suffix) = author_suffix(last) {
+                        *last = suffix.to_owned();
+                    }
                 }
                 words.join(" ")
             })
@@ -102,7 +104,7 @@ fn matching_author_count_using(local: &[String], remote: &[String], compatible: 
                 continue;
             }
             seen[j] = true;
-            if owners[j].is_none() || assign(owners[j].unwrap(), edges, seen, owners) {
+            if owners[j].is_none_or(|owner| assign(owner, edges, seen, owners)) {
                 owners[j] = Some(i);
                 return true;
             }

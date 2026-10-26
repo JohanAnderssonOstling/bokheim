@@ -73,6 +73,7 @@ struct Evidence {
     epub_import_error: Option<String>,
     audiobook_download_url: Option<String>,
     audiobook_delivery: Option<&'static str>,
+    audiobook_duration_ms: Option<u64>,
     observed_at_unix_seconds: u64,
 }
 
@@ -87,6 +88,7 @@ struct Page {
     advertised_epub: Option<Url>,
     epub_import_error: Option<String>,
     audio: Option<Url>,
+    audio_duration_ms: Option<u64>,
     cover: Option<Url>,
 }
 
@@ -186,7 +188,24 @@ fn page(url: Url, raw: &str) -> Result<Option<Page>, String> {
         }
     }
     let cover = html.select(&selector("[itemprop=image][src]")).next().and_then(|element| element.value().attr("src")).map(|href| download_url(&url, href)).transpose()?;
-    Ok(Some(Page { id: url.path().trim_start_matches("/book/").to_owned(), url, record, rating, rating_count, advertised_epub: epub.clone(), epub, fallback_epub, epub_import_error: None, audio, cover }))
+    let audio_duration_ms = audio.as_ref().and_then(|_| audio_duration(&html));
+    Ok(Some(Page { audio_duration_ms, id: url.path().trim_start_matches("/book/").to_owned(), url, record, rating, rating_count, advertised_epub: epub.clone(), epub, fallback_epub, epub_import_error: None, audio, cover }))
+}
+
+/// The source advertises the recording's total as `(HH:MM:SS long)`.
+fn audio_duration(html: &Html) -> Option<u64> {
+    let body = text(html.root_element());
+    body.split(" long)").find_map(|prefix| {
+        let clock = prefix.rsplit_once('(')?.1;
+        let mut parts = clock.split(':');
+        let hours = parts.next()?.parse::<u64>().ok()?;
+        let minutes = parts.next()?.parse::<u64>().ok()?;
+        let seconds = parts.next()?.parse::<u64>().ok()?;
+        if parts.next().is_some() || minutes >= 60 || seconds >= 60 {
+            return None;
+        }
+        hours.checked_mul(3600)?.checked_add(minutes * 60 + seconds)?.checked_mul(1000).filter(|duration| *duration > 0)
+    })
 }
 
 fn gutenberg_epub(base: &Url, href: &str) -> Option<Url> {
@@ -470,6 +489,7 @@ fn persist(db: &Connection, page: &Page, hash: Option<&str>, mut popularity: Vec
         epub_import_error: page.epub_import_error.clone(),
         audiobook_download_url: page.audio.as_ref().map(Url::to_string),
         audiobook_delivery: page.audio.as_ref().map(|_| "external_download"),
+        audiobook_duration_ms: page.audio_duration_ms,
         observed_at_unix_seconds: now(),
     };
     let metadata = to_string(&evidence).map_err(|e| e.to_string())?;
@@ -542,6 +562,23 @@ mod tests {
         assert_eq!(link, "https://archive.org/download/recording/audio.zip");
         assert_eq!(read_dir(dir.path().join("books")).unwrap().count(), 0);
         assert_eq!(read_dir(dir.path()).unwrap().count(), 4); // DB plus empty books/covers/inbox.
+    }
+
+    #[test]
+    fn advertised_audio_duration_is_parsed_and_retained_as_source_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = curation::open(dir.path()).unwrap();
+        let url = source_url("https://www.loyalbooks.com/book/book", "/book/").unwrap();
+        let raw = format!("{}<span>(07:43:09 long)</span>", html("5", 2));
+        let page = page(url, &raw).unwrap().unwrap();
+        assert_eq!(page.audio_duration_ms, Some(27_789_000));
+        persist(&db, &page, None, Vec::new(), None).unwrap();
+        let metadata: String = db.query_row("SELECT metadata FROM source_entry", [], |row| row.get(0)).unwrap();
+        assert_eq!(from_str::<Value>(&metadata).unwrap()["audiobook_duration_ms"], 27_789_000);
+        for clock in ["00:00:00", "01:60:00", "01:00:60", "1:2", "1:2:3:4", "18446744073709551615:00:00"] {
+            assert_eq!(audio_duration(&Html::parse_document(&format!("({clock} long)"))), None, "{clock}");
+        }
+        assert_eq!(audio_duration(&Html::parse_document("no running time")), None);
     }
 
     #[test]

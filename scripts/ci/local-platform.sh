@@ -11,7 +11,11 @@ case "$platform" in
     python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu
     cargo test --release -p client-platform-native -p client-platform-desktop --features client-platform-native/websocket
     cargo test --release -p linux-update-host
-    python3 apps/desktop-gpui/scripts/build.py
+    build_options=()
+    if [[ "${BOKHEIM_BROWSER:-auto}" == disabled || -n "${OPDS_BROWSER:-}" ]]; then
+      build_options+=(--without-browser)
+    fi
+    python3 apps/desktop-gpui/scripts/build.py "${build_options[@]}"
     export APPIMAGE_EXTRACT_AND_RUN=1
     RELEASE_DIRECTORY="$output" DESKTOP_BINARY="${CARGO_TARGET_DIR:-$root/target}/release/bokheim" \
       bash apps/desktop-gpui/linux/appimage/build-appimage.sh
@@ -26,8 +30,8 @@ case "$platform" in
     test -e "$scratch/squashfs-root/se.bokheim.Bokheim.svg" -o -e "$scratch/squashfs-root/se.bokheim.Bokheim.png"
     ldd "$scratch/squashfs-root/usr/bin/bokheim" > "$scratch/ldd.txt"
     if grep -F 'not found' "$scratch/ldd.txt"; then exit 1; fi
-    bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$output/Bokheim-x86_64.AppImage" 2.35
-    bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$scratch/squashfs-root" 2.35
+    bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$output/Bokheim-x86_64.AppImage" 2.17
+    bash apps/desktop-gpui/linux/appimage/verify-appdir-compatibility.sh "$scratch/squashfs-root"
     ;;
   android)
     : "${ANDROID_CERT_SHA256:?Production certificate SHA-256 is required}"
@@ -60,7 +64,7 @@ case "$platform" in
     cargo check --release -p client-platform-web --target wasm32-unknown-unknown
     cargo check --release -p web-backend-worker --example cpu_worker --example sync_coordinator --target wasm32-unknown-unknown
     cargo check --release -p web-backend-worker -p web-gpui --target wasm32-unknown-unknown
-    node --test client/platforms/web/tests/signal.mjs
+    node --test client/platforms/web/tests/signal.mjs apps/web-gpui/compatibility.test.mjs
     python3 -m unittest discover -s apps/web-gpui/scripts/tests
     BOKHEIM_WEB_OUTPUT_DIR="$output" bash apps/web-gpui/scripts/build.sh
     ;;

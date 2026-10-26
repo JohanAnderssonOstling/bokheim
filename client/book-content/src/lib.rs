@@ -1,8 +1,11 @@
-//! Parsed EPUB and MOBI containers, metadata, resources, and reading preparation.
+//! Parsed EPUB, MOBI and FB2 text containers, and CBZ page archives.
 //! The crate has no renderer dependency; consumers adapt its prepared resources.
 
 mod book;
 mod epub;
+mod fb2;
+pub mod comic;
+mod xml;
 mod inspection;
 mod metadata;
 pub mod mobi;
@@ -10,6 +13,8 @@ mod resource_path;
 mod resources;
 mod source;
 mod toc;
+#[cfg(test)]
+mod format_tests;
 
 pub use book::{Book, BookFormat, ReadingBook};
 pub use inspection::DocumentInspection;

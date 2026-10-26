@@ -5,7 +5,7 @@ use library_model::{BrowseBookSort, BrowseChipSort, BrowseLocation, HomeShelf, L
 use library_replica::{EnrichmentResult, LibraryStateEntry};
 use metadata_contract::WorkPopularity;
 use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
-use sync_common::{ContentHash, Delivery, DirId, LibraryRevision, PullStateResponse, ROOT_DIR_ID, ReplicaId, ReplicaSeq, SyncCursor};
+use sync_common::{BookId, Delivery, DirId, LibraryRevision, PullStateResponse, ROOT_DIR_ID, ReplicaId, ReplicaSeq, SyncCursor};
 
 fn database() -> Database {
     let db = Database::open(":memory:").unwrap();
@@ -17,8 +17,8 @@ fn query(location: BrowseLocation) -> LibraryBrowseQuery {
     LibraryBrowseQuery { location, search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::Popularity, book_sort: BrowseBookSort::Popularity, hide_finished: false, include_direct_child_books: false }
 }
 
-fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>, authors: &[&str], language: &str) -> ContentHash {
-    let hash = ContentHash::from_bytes([number; 32]);
+fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>, authors: &[&str], language: &str) -> BookId {
+    let hash = BookId::from_bytes([number; 32]);
     let name = format!("book{number}.epub");
     let contributors = authors.iter().map(|name| Contributor::with_id(book_model::agent_id_from_migration_seed(name.as_bytes()), name, AUTHOR_MARC_RELATOR_CODE).unwrap()).collect();
     let record =
@@ -71,7 +71,7 @@ fn leaf_popularity_orders_known_scores_before_unknowns_and_keeps_answers_immutab
     assert_eq!(db.enrichment_popularity(&beta).unwrap().unwrap().rating_count, 30);
 }
 
-fn stored_count(db: &Database, hash: &ContentHash) -> Option<f64> {
+fn stored_count(db: &Database, hash: &BookId) -> Option<f64> {
     db.connection.query_row("SELECT popularity_rating_count FROM book WHERE content_hash=?1", [hash], |row| row.get(0)).unwrap()
 }
 
@@ -110,7 +110,7 @@ fn version_38_backfills_popularity_once_and_preserves_authored_state() {
     let unknown = add(&db, ROOT_DIR_ID, 1, "Unknown", None, &["Writer"], "en");
     let zero = add(&db, ROOT_DIR_ID, 2, "Zero", Some(0), &["Writer"], "en");
     let known = add(&db, ROOT_DIR_ID, 3, "Known", Some(42), &["Writer"], "en");
-    let unobserved = ContentHash::from_bytes([4; 32]);
+    let unobserved = BookId::from_bytes([4; 32]);
     db.connection.fixtures_insert_book(&unobserved).unwrap();
     let publications = db.sync_publishable_mutations().unwrap();
     crate::browse::revision::remove(&db.connection).unwrap();
@@ -181,7 +181,7 @@ fn author_popularity_sums_coauthored_books_once_and_recomputes_after_filters() {
     assert_eq!(page.sections[0].books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Shared", "Additional"]);
     query.languages = vec!["en".into()];
     assert_eq!(db.browse(&query, false).unwrap().contents.children.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["A author", "Z author"]);
-    let shared = ContentHash::from_bytes([1; 32]);
+    let shared = BookId::from_bytes([1; 32]);
     db.update_reading_position(&shared, "epubcfi(/6/2)", Some(100.0), None).unwrap();
     query.hide_finished = true;
     query.languages.clear();

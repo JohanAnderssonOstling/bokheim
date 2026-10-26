@@ -1,5 +1,22 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
+
+/// Device-local shortcut overrides, with one combination per action.
+/// Missing actions retain their defaults; an empty list disables the shortcut.
+/// Lists remain in the saved format for compatibility with older profiles.
+pub type KeyboardShortcuts = BTreeMap<String, Vec<String>>;
+
+fn normalize_keyboard_shortcuts(mut shortcuts: KeyboardShortcuts) -> KeyboardShortcuts {
+    for keys in shortcuts.values_mut() {
+        keys.truncate(1);
+    }
+    shortcuts
+}
+
+fn deserialize_keyboard_shortcuts<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<KeyboardShortcuts, D::Error> {
+    KeyboardShortcuts::deserialize(deserializer).map(normalize_keyboard_shortcuts)
+}
 
 pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 64.0;
@@ -40,7 +57,7 @@ pub enum ApplicationTheme {
     /// Cream surfaces, green accent.
     #[default]
     Warm,
-    /// Neutral greys and true-white cards, navy accent. Not a tinted paper —
+    /// Neutral greys and true-white cards, muted slate accent. Not a tinted paper —
     /// the absence of a tint, for people who want the application to disappear
     /// behind the covers.
     Cool,
@@ -77,7 +94,7 @@ impl ApplicationTheme {
     pub const fn description(self) -> &'static str {
         match self {
             Self::Warm => "Cream surfaces with a muted green accent.",
-            Self::Cool => "Neutral greys and white cards with a navy accent.",
+            Self::Cool => "Neutral greys and white cards with a muted slate accent.",
         }
     }
 }
@@ -109,6 +126,8 @@ impl UiFontFamily {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowsingPreferences {
+    #[serde(default, deserialize_with = "deserialize_keyboard_shortcuts")]
+    keyboard_shortcuts: KeyboardShortcuts,
     #[serde(default)]
     allow_metered_transfers: bool,
     theme: ApplicationTheme,
@@ -140,6 +159,7 @@ fn default_keyboard_layouts() -> Vec<String> {
 impl Default for BrowsingPreferences {
     fn default() -> Self {
         Self {
+            keyboard_shortcuts: KeyboardShortcuts::new(),
             allow_metered_transfers: false,
             theme: ApplicationTheme::default(),
             appearance_override: None,
@@ -155,7 +175,12 @@ impl Default for BrowsingPreferences {
 }
 
 impl BrowsingPreferences {
-    pub fn allow_metered_transfers(&self) -> bool { self.allow_metered_transfers }
+    pub fn keyboard_shortcuts(&self) -> &KeyboardShortcuts {
+        &self.keyboard_shortcuts
+    }
+    pub fn allow_metered_transfers(&self) -> bool {
+        self.allow_metered_transfers
+    }
     pub fn theme(&self) -> ApplicationTheme {
         self.theme
     }
@@ -243,6 +268,7 @@ impl CoverText {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "preference", content = "value", rename_all = "snake_case")]
 pub enum BrowsingPreferencePatch {
+    KeyboardShortcuts(KeyboardShortcuts),
     AllowMeteredTransfers(bool),
     Theme(ApplicationTheme),
     Palette(ApplicationTheme, ResolvedAppearance),
@@ -258,6 +284,7 @@ pub enum BrowsingPreferencePatch {
 impl BrowsingPreferencePatch {
     pub fn apply(self, preferences: &mut BrowsingPreferences) -> Result<(), PreferenceValueError> {
         match self {
+            Self::KeyboardShortcuts(value) => preferences.keyboard_shortcuts = normalize_keyboard_shortcuts(value),
             Self::AllowMeteredTransfers(value) => preferences.allow_metered_transfers = value,
             Self::Theme(value) => preferences.theme = value,
             Self::Palette(theme, appearance) => {
@@ -300,6 +327,25 @@ pub enum PdfZoomMode {
     Fixed,
     /// A page's height fills the viewport, and the page count follows.
     FitHeight,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfReadingDirection {
+    #[default]
+    Document,
+    LeftToRight,
+    RightToLeft,
+}
+
+impl PdfReadingDirection {
+    pub fn override_right_to_left(self) -> Option<bool> {
+        match self {
+            Self::Document => None,
+            Self::LeftToRight => Some(false),
+            Self::RightToLeft => Some(true),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +398,9 @@ pub struct ReaderPreferences {
     pdf_zoom: PdfZoom,
     /// Automatically removes uniform outer margins from rendered PDF pages.
     pdf_trim_margins: bool,
+    /// Follow the document declaration unless the user explicitly overrides it.
+    #[serde(default)]
+    pdf_reading_direction: PdfReadingDirection,
     /// How fast narration is played back. Defaulted rather than required, so a
     /// preferences file written before audiobooks still loads.
     #[serde(default = "default_audiobook_speed")]
@@ -527,6 +576,7 @@ impl Default for ReaderPreferences {
             pdf_page_count: PdfPageCount(1),
             pdf_zoom: PdfZoom(1.0),
             pdf_trim_margins: true,
+            pdf_reading_direction: PdfReadingDirection::default(),
             audiobook_speed: default_audiobook_speed(),
         }
     }
@@ -589,6 +639,10 @@ impl ReaderPreferences {
     }
     pub fn pdf_trim_margins(self) -> bool {
         self.pdf_trim_margins
+    }
+
+    pub fn pdf_reading_direction(self) -> PdfReadingDirection {
+        self.pdf_reading_direction
     }
 
     pub fn set_font_size_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
@@ -669,6 +723,10 @@ impl ReaderPreferences {
     pub fn set_pdf_trim_margins(&mut self, value: bool) {
         self.pdf_trim_margins = value;
     }
+
+    pub fn set_pdf_reading_direction(&mut self, value: PdfReadingDirection) {
+        self.pdf_reading_direction = value;
+    }
     pub fn set_audiobook_speed(&mut self, value: f64) -> Result<(), PreferenceValueError> {
         self.audiobook_speed = AudiobookSpeed::new(value)?;
         Ok(())
@@ -696,6 +754,7 @@ pub enum ReaderPreferencePatch {
     PdfPageCount(u8),
     PdfZoom(f32),
     PdfTrimMargins(bool),
+    PdfReadingDirection(PdfReadingDirection),
     AudiobookSpeed(f64),
 }
 
@@ -738,6 +797,10 @@ impl ReaderPreferencePatch {
                 preferences.set_pdf_trim_margins(value);
                 Ok(())
             }
+            Self::PdfReadingDirection(value) => {
+                preferences.set_pdf_reading_direction(value);
+                Ok(())
+            }
             Self::AudiobookSpeed(value) => preferences.set_audiobook_speed(value),
         }
     }
@@ -746,6 +809,37 @@ impl ReaderPreferencePatch {
 #[cfg(test)]
 mod tests {
     use super::{BrowsingPreferencePatch, BrowsingPreferences, CoverText, ReaderPreferences, UiFontFamily, DEFAULT_READER_MARGIN_PX};
+
+    #[test]
+    fn pdf_direction_follows_documents_for_legacy_profiles_and_persists_overrides() {
+        let mut legacy = serde_json::to_value(ReaderPreferences::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("pdf_reading_direction");
+        legacy["pdf_right_to_left"] = serde_json::json!(false);
+        let mut preferences: ReaderPreferences = serde_json::from_value(legacy).unwrap();
+        assert_eq!(preferences.pdf_reading_direction(), super::PdfReadingDirection::Document);
+        assert_eq!(preferences.pdf_reading_direction().override_right_to_left(), None);
+        for (value, expected) in [("right_to_left", Some(true)), ("left_to_right", Some(false)), ("document", None)] {
+            let patch: super::ReaderPreferencePatch = serde_json::from_value(serde_json::json!({"preference":"pdf_reading_direction","value":value})).unwrap();
+            patch.apply(&mut preferences).unwrap();
+            let reloaded: ReaderPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
+            assert_eq!(reloaded.pdf_reading_direction().override_right_to_left(), expected);
+            assert_eq!(reloaded, preferences);
+        }
+    }
+
+    #[test]
+    fn keyboard_shortcuts_preserve_legacy_profiles_and_disabled_actions() {
+        let mut legacy = serde_json::to_value(BrowsingPreferences::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("keyboard_shortcuts");
+        let mut preferences: BrowsingPreferences = serde_json::from_value(legacy).unwrap();
+        assert!(preferences.keyboard_shortcuts().is_empty());
+        let shortcuts = super::KeyboardShortcuts::from([("reader.search".into(), vec!["ctrl-shift-f".into(), "alt-f".into()]), ("browse.undo".into(), vec![])]);
+        BrowsingPreferencePatch::KeyboardShortcuts(shortcuts.clone()).apply(&mut preferences).unwrap();
+        let restored: BrowsingPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
+        assert_eq!(restored.keyboard_shortcuts(), &super::normalize_keyboard_shortcuts(shortcuts));
+        BrowsingPreferencePatch::KeyboardShortcuts(Default::default()).apply(&mut preferences).unwrap();
+        assert!(preferences.keyboard_shortcuts().is_empty());
+    }
 
     #[test]
     fn metered_transfer_preference_defaults_off_and_round_trips() {

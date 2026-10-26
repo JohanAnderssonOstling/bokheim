@@ -10,7 +10,7 @@ impl Scope {
     }
     /// Retained by the worker global for its lifetime; replacement releases the JS callback.
     pub fn receive(&self, mut callback: impl FnMut(JsValue) + 'static) {
-        let handler = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| callback(event.data())).into_js_value();
+        let handler = Closure::<dyn FnMut(web_sys::MessageEvent)>::own_aborting(move |event: web_sys::MessageEvent| callback(event.data())).into_js_value();
         self.0.set_onmessage(Some(handler.unchecked_ref()));
     }
 }
@@ -26,7 +26,7 @@ pub fn shared_connections(failed: impl Fn(String) + 'static, mut connect: impl F
     let failed = std::rc::Rc::new(failed);
     for event_name in ["error", "unhandledrejection"] {
         let failed = failed.clone();
-        let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let handler = Closure::<dyn FnMut(web_sys::Event)>::own_aborting(move |event: web_sys::Event| {
             event.prevent_default();
             let message = js_sys::Reflect::get(&event, &"message".into())
                 .ok()
@@ -38,7 +38,7 @@ pub fn shared_connections(failed: impl Fn(String) + 'static, mut connect: impl F
         .into_js_value();
         js_sys::global().unchecked_into::<web_sys::EventTarget>().add_event_listener_with_callback(event_name, handler.unchecked_ref())?;
     }
-    let handler = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+    let handler = Closure::<dyn FnMut(web_sys::MessageEvent)>::own_aborting(move |event: web_sys::MessageEvent| {
         if let Ok(port) = event.ports().get(0).dyn_into::<web_sys::MessagePort>() {
             connect(port);
         }

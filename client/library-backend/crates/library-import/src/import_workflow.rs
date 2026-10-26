@@ -44,5 +44,5 @@ impl Destinations {
 }
 
 pub fn supported(path: &[String]) -> bool {
-    path.last().is_some_and(|name| book_model::BookFormat::from_import_extension(name.rsplit_once('.').map(|(_, extension)| extension).unwrap_or_default()).is_some())
+    path.last().is_some_and(|name| book_model::BookFormat::from_file_name(name).is_some())
 }

@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use sync_common::ContentHash;
+use sync_common::BookId;
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse};
 
 pub struct AssetApplication {
@@ -61,7 +61,7 @@ impl AssetApplication {
         Self { pool: database.pool().clone(), store }
     }
 
-    pub async fn thumbnail_presence(&self, user_id: &str, library_id: &sync_common::LibraryId, hashes: &[ContentHash]) -> Result<Vec<sync_common::api::assets::ThumbnailRevision>, AssetError> {
+    pub async fn thumbnail_presence(&self, user_id: &str, library_id: &sync_common::LibraryId, hashes: &[BookId]) -> Result<Vec<sync_common::api::assets::ThumbnailRevision>, AssetError> {
         self.require_library(user_id, library_id).await?;
         let mut present = Vec::new();
         for hash in hashes {
@@ -72,39 +72,30 @@ impl AssetApplication {
         Ok(present)
     }
 
-    pub async fn remove_thumbnail(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash) -> Result<(), AssetError> {
+    pub async fn remove_thumbnail(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &BookId) -> Result<(), AssetError> {
+        self.require_library(user_id, library_id).await?;
         assets::validate_thumbnail(&self.pool, user_id, library_id, hash, 0).await?;
         self.store.remove_thumbnail(user_id, hash).await
     }
 
     async fn require_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<(), AssetError> {
         let owned = sync_store::owns_library(&self.pool, user_id, library_id).await.map_err(|error| AssetError::Storage(error.to_string()))?;
-        if owned { Ok(()) } else { Err(AssetError::Forbidden) }
+        if !owned { return Err(AssetError::Forbidden); }
+        let external: bool = sqlx::query_scalar("SELECT storage_configuration ? 'external' FROM libraries WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL")
+            .bind(library_id.to_string()).bind(user_id).fetch_one(&self.pool).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        if external { Err(AssetError::Forbidden) } else { Ok(()) }
     }
 
-    async fn has_book_entitlement(&self, user_id: &str, hash: &ContentHash) -> Result<bool, AssetError> {
-        sqlx::query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM user_blob_charge
-                 WHERE user_id=$1 AND content_hash=$2
-                 UNION ALL
-                 SELECT 1 FROM user_blob_reference
-                 WHERE user_id=$1 AND content_hash=$2 AND reference_count > 0
-             )",
-        )
-        .bind(user_id)
-        .bind(hash.as_bytes().as_slice())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| AssetError::Storage(error.to_string()))
-    }
-
-    async fn claim_existing_book(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash) -> Result<Option<u64>, AssetError> {
-        let Some(size) = self.store.size(user_id, AssetKind::Book, hash).await? else {
-            return Ok(None);
-        };
-        assets::claim_existing_book(&self.pool, user_id, library_id, hash, size).await?;
-        Ok(Some(size))
+    /// A book is readable only once this account has uploaded its bytes. A
+    /// synchronized lifecycle reference is client-declared and grants nothing.
+    async fn has_book_charge(&self, user_id: &str, hash: &BookId) -> Result<bool, AssetError> {
+        if hash.is_external() { return Ok(false); }
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_blob_charge WHERE user_id=$1 AND content_hash=$2)")
+            .bind(user_id)
+            .bind(hash.as_bytes())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| AssetError::Storage(error.to_string()))
     }
 
     pub async fn negotiate_books(&self, user_id: &str, library_id: &sync_common::LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, AssetError> {
@@ -112,6 +103,7 @@ impl AssetApplication {
         if blobs.len() > sync_common::api::assets::MAX_BLOB_MANIFEST_ENTRIES {
             return Err(AssetError::InvalidInput("book manifest is too large".into()));
         }
+        if blobs.iter().any(|blob| blob.content_hash.is_external()) { return Err(AssetError::Forbidden); }
         let mut hashes = HashSet::new();
         if blobs.iter().any(|blob| !hashes.insert(blob.content_hash)) {
             return Err(AssetError::InvalidInput("book manifest contains duplicate content hashes".into()));
@@ -139,16 +131,11 @@ impl AssetApplication {
         assets::library_storage_usage(&self.pool, user_id).await
     }
 
-    pub async fn open_from(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
+    pub async fn open_from(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &BookId, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
         self.require_library(user_id, library_id).await?;
         if kind == AssetKind::Book {
-            if !self.has_book_entitlement(user_id, hash).await? {
+            if !self.has_book_charge(user_id, hash).await? {
                 return Ok(None);
-            }
-            match self.claim_existing_book(user_id, library_id, hash).await {
-                Ok(Some(_)) => {}
-                Ok(None) | Err(AssetError::Forbidden) => return Ok(None),
-                Err(error) => return Err(error),
             }
         } else {
             let Some(size) = self.store.size(user_id, kind, hash).await? else {
@@ -159,14 +146,15 @@ impl AssetApplication {
         self.store.open_from(user_id, kind, hash, offset).await
     }
 
-    pub async fn audiobook_track(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash, index: usize) -> Result<Option<(StoredAsset, audiobook_archive::ArchivedTrack)>, AssetError> {
+    pub async fn audiobook_track(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &BookId, index: usize) -> Result<Option<(StoredAsset, audiobook_archive::ArchivedTrack)>, AssetError> {
         let Some(asset) = self.open_from(user_id, library_id, AssetKind::Book, hash, 0).await? else { return Ok(None) };
         let track = self.store.book_tracks(&asset.content_hash).await?.into_iter().nth(index);
         Ok(track.map(|track| (asset, track)))
     }
 
-    pub async fn put_book(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash, length: u64, reader: AssetReader) -> Result<(), AssetError> {
+    pub async fn put_book(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &BookId, length: u64, reader: AssetReader) -> Result<(), AssetError> {
         self.require_library(user_id, library_id).await?;
+        if hash.is_external() { return Err(AssetError::Forbidden); }
         // Reserve and verify actual bytes even when an object is already owned.
         let phase_started = Instant::now();
         let admission = assets::reserve_book_upload(&self.pool, user_id, library_id, hash, length).await?;
@@ -194,7 +182,7 @@ impl AssetApplication {
         result
     }
 
-    pub async fn put_thumbnail_pair(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash, bytes: &[u8], browse_bytes: &[u8]) -> Result<(), AssetError> {
+    pub async fn put_thumbnail_pair(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &BookId, bytes: &[u8], browse_bytes: &[u8]) -> Result<(), AssetError> {
         self.require_library(user_id, library_id).await?;
         for variant in [bytes, browse_bytes] {
             assets::validate_thumbnail_upload(&self.pool, user_id, library_id, hash, variant.len() as u64).await?;
@@ -204,14 +192,14 @@ impl AssetApplication {
         assets::validate_thumbnail_upload(&self.pool, user_id, library_id, hash, bytes.len() as u64).await
     }
 
-    pub async fn thumbnail_pair(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash) -> Result<Option<(Vec<u8>, Vec<u8>)>, AssetError> {
+    pub async fn thumbnail_pair(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &BookId) -> Result<Option<(Vec<u8>, Vec<u8>)>, AssetError> {
         self.require_library(user_id, library_id).await?;
         let Some(pair) = self.store.thumbnail_pair(user_id, hash).await? else { return Ok(None) };
         assets::validate_thumbnail(&self.pool, user_id, library_id, hash, pair.0.len() as u64).await?;
         Ok(Some(pair))
     }
 
-    pub async fn put(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &ContentHash, expected_len: Option<u64>, reader: AssetReader) -> Result<(), AssetError> {
+    pub async fn put(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &BookId, expected_len: Option<u64>, reader: AssetReader) -> Result<(), AssetError> {
         self.require_library(user_id, library_id).await?;
         let expected_len = expected_len.ok_or(AssetError::LengthRequired)?;
         if kind.max_bytes().is_some_and(|limit| expected_len > limit) {

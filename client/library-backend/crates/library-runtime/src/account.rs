@@ -4,6 +4,7 @@ use std::{fmt, ops::Deref, sync::Arc};
 
 use account_client::{AccountSession, Session, SessionFuture, SessionPersistence};
 use sync_common::LibraryId;
+use sync_common::storage::LibraryStorage;
 use sync_transport::{CredentialsSource, SyncCredentials};
 use tokio::sync::watch::Receiver;
 
@@ -19,7 +20,7 @@ trait AccountService: CredentialsSource {
     fn subscribe(&self) -> Receiver<u64>;
     fn refresh_if_needed(self: Arc<Self>) -> SessionFuture<'static, Result<Option<Session>, AccountSessionError>>;
     fn refresh_after_unauthorized(self: Arc<Self>, token: String) -> SessionFuture<'static, Result<Option<Session>, AccountSessionError>>;
-    fn create_library(self: Arc<Self>, library_id: LibraryId, name: String) -> SessionFuture<'static, Result<(), AccountSessionError>>;
+    fn create_library(self: Arc<Self>, library_id: LibraryId, name: String, storage: LibraryStorage) -> SessionFuture<'static, Result<(), AccountSessionError>>;
 }
 
 #[derive(Clone)]
@@ -49,8 +50,8 @@ impl LibraryAccount {
     pub fn refresh_after_unauthorized(&self, token: impl Into<String>) -> SessionFuture<'static, Result<Option<Session>, AccountSessionError>> {
         self.service.clone().refresh_after_unauthorized(token.into())
     }
-    pub fn create_library(&self, library_id: LibraryId, name: String) -> SessionFuture<'static, Result<(), AccountSessionError>> {
-        self.service.clone().create_library(library_id, name)
+    pub fn create_library(&self, library_id: LibraryId, name: String, storage: LibraryStorage) -> SessionFuture<'static, Result<(), AccountSessionError>> {
+        self.service.clone().create_library(library_id, name, storage)
     }
     pub fn credentials(&self) -> SharedSyncCredentials {
         self.service.clone()
@@ -94,8 +95,8 @@ where
     fn refresh_after_unauthorized(self: Arc<Self>, token: String) -> SessionFuture<'static, Result<Option<Session>, AccountSessionError>> {
         Box::pin(async move { self.0.refresh_after_unauthorized(&token).await })
     }
-    fn create_library(self: Arc<Self>, library_id: LibraryId, name: String) -> SessionFuture<'static, Result<(), AccountSessionError>> {
-        Box::pin(async move { self.0.request(|session| Box::pin(account_client::create_library(session, library_id, name.clone()))).await.map(|_| ()) })
+    fn create_library(self: Arc<Self>, library_id: LibraryId, name: String, storage: LibraryStorage) -> SessionFuture<'static, Result<(), AccountSessionError>> {
+        Box::pin(async move { self.0.request(|session| Box::pin(account_client::create_library_with_storage(session, library_id, name.clone(), storage.clone()))).await.map(|_| ()) })
     }
 }
 

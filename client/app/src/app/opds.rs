@@ -93,7 +93,7 @@ impl AppBackend {
                 }
             }
         }
-        let remote = self.state.account.request(|session| Box::pin(account_client::opds_feeds(session))).await.map_err(BackendError::operation)?;
+        let remote = self.state.account.request(|session| Box::pin(account_client::opds_feeds(session))).await.map_err(super::account::account_error)?;
         let settled = changes[..settled].to_vec();
         self.with_storage(move |this| {
             let mut pending: Vec<FeedChange> = this.read_registry_json(CHANGES)?;
@@ -125,7 +125,7 @@ impl AppBackend {
     /// feed is fetched once first, so an address that is not a feed, or
     /// credentials it refuses, are refused here.
     pub(crate) async fn add_opds_feed(&self, url: String, name: Option<String>, credentials: Option<OpdsCredentials>) -> Result<AddOpdsFeedResult, BackendError> {
-        let Some(title) = library_opds::feed_title(&url, credentials.as_ref()).await.map_err(BackendError::message)? else {
+        let Some(title) = library_opds::feed_title(&url, credentials.as_ref()).await? else {
             return Ok(AddOpdsFeedResult::SignInRequired);
         };
         let name = name.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).unwrap_or(title);
@@ -157,7 +157,7 @@ impl AppBackend {
     /// A feed this device knows, with its credentials here.
     fn opds_access(&self, id: OpdsFeedId) -> Result<(OpdsSource, Option<OpdsCredentials>), BackendError> {
         let feeds: Vec<OpdsFeed> = self.read_registry_json(FEEDS)?;
-        let feed = feeds.into_iter().find(|feed| feed.id == id).ok_or("this feed is no longer one of the account's")?;
+        let feed = feeds.into_iter().find(|feed| feed.id == id).ok_or_else(|| BackendError::classified(Failure::NotFound, "this feed is no longer one of the account's"))?;
         let credentials = self.state.registry.read_value(&credentials_key(id)).map_err(BackendError::operation)?.map(|bytes| serde_json::from_slice(&bytes)).transpose().map_err(BackendError::operation)?;
         Ok((OpdsSource { id: feed.id, name: feed.name, url: feed.url }, credentials))
     }
@@ -166,7 +166,7 @@ impl AppBackend {
     pub(crate) async fn browse_opds(&self, query: LibraryBrowseQuery) -> Result<LibraryBrowseData, BackendError> {
         let library_model::BrowseLocation::Opds { source, page } = query.location else { return Err("not an OPDS feed page".into()) };
         let (source, credentials) = self.opds_access(source)?;
-        let (contents, feed) = library_opds::browse(&source, credentials.as_ref(), page, &query.search).await.map_err(BackendError::message)?;
+        let (contents, feed) = library_opds::browse(&source, credentials.as_ref(), page, &query.search).await?;
         Ok(LibraryBrowseData { sections: Vec::new(), contents, path: Vec::new(), ancestors: Vec::new(), language_counts: Vec::new(), format_counts: Vec::new(), feed: Some(feed), page: None })
     }
 
@@ -179,6 +179,6 @@ impl AppBackend {
     /// A listed feed book's file and the name to import it under.
     pub(crate) async fn download_opds_book(&self, source: OpdsFeedId, entry: CardKey) -> Result<(String, Vec<u8>), BackendError> {
         let (source, credentials) = self.opds_access(source)?;
-        library_opds::download(&source, credentials.as_ref(), entry).await.map_err(BackendError::message)
+        library_opds::download(&source, credentials.as_ref(), entry).await
     }
 }

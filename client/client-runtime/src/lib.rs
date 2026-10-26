@@ -2,4 +2,4 @@
 mod error;
 pub mod reply;
 pub mod wire;
-pub use error::{BackendError, ErrorCause, ErrorReport};
+pub use error::{BackendError, Classified, ErrorCause, ErrorReport, Failure, WifiFailure};

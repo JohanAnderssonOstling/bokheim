@@ -14,6 +14,10 @@ use std::time::Instant;
 
 pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn cached_regex(cache: &'static OnceLock<Result<Regex, String>>, pattern: &str) -> std::io::Result<&'static Regex> {
+    cache.get_or_init(|| Regex::new(pattern).map_err(|error| error.to_string())).as_ref().map_err(|error| std::io::Error::other(error.clone()))
+}
+
 mod book;
 pub use book::{AudiobookMetadata, InspectedBook, inspect_book_reader, inspect_book_reader_with_hash};
 pub mod evidence;
@@ -118,7 +122,8 @@ fn book_toc_entry(entry: TocEntry, depth: usize, count: &mut usize) -> Option<Bo
 
 /// Reads all metadata relevant to indexing. Formats without useful embedded
 fn fallback_metadata(path: &Path) -> BookRecord {
-    let title = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("Untitled").to_owned();
+    let title = path.file_name().and_then(|name| name.to_str()).filter(|name| name.to_ascii_lowercase().ends_with(".fb2.zip")).map(|name| &name[..name.len() - 8])
+        .or_else(|| path.file_stem().and_then(|stem| stem.to_str())).unwrap_or("Untitled").to_owned();
     BookRecord { metadata: book_model::BookDetails { title, subtitle: None, contributors: Vec::new(), book: Default::default() }, description: String::new() }
 }
 
@@ -307,6 +312,7 @@ fn metadata_from_declared(path: &Path, metadata: DeclaredMetadata) -> MetadataRe
         metadata.contributors.into_iter().chain(metadata.creators.into_iter().filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) != AUTHOR_MARC_RELATOR_CODE)).filter_map(contributor).collect::<Vec<_>>();
     let long_description = long_description(&metadata.properties);
     for property in &metadata.properties {
+        if property.property.starts_with("fb2:print:") { continue; }
         if let Some(isbn) = from_metadata_value(&property.value) {
             book_model::push_isbn(&mut identifiers, isbn, Scope::Book)?;
         }

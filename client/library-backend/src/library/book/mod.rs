@@ -3,7 +3,7 @@
 
 use crate::BackendError;
 use crate::BoxedBookReader;
-use crate::{ContentHash, LibrarySession};
+use crate::{BookId, LibrarySession};
 use book_model::BookFormat;
 
 #[cfg(target_arch = "wasm32")]
@@ -53,7 +53,7 @@ impl DocumentBook {
     }
 }
 
-/// EPUB and MOBI share asynchronous sources; PDF retains its seekable input.
+/// Text books and comics share asynchronous sources; PDF retains its seekable input.
 pub enum DocumentSource {
     Reader(BoxedBookReader),
     Async(book_access::AsyncBookSource),
@@ -78,7 +78,7 @@ struct BookInfo {
     format: BookFormat,
     path: Option<library_model::RelativeBookPath>,
 }
-async fn book_info(library: &LibrarySession, hash: ContentHash) -> Result<BookInfo, BackendError> {
+async fn book_info(library: &LibrarySession, hash: BookId) -> Result<BookInfo, BackendError> {
     let info = library.db.local_book_info(&hash)?;
     Ok(BookInfo { format: info.format, path: info.path })
 }
@@ -88,17 +88,17 @@ struct RemoteDocument {
     prefix: Vec<u8>,
     pdf_metadata: Option<pdf_view_common::PdfReaderMetadata>,
 }
-async fn pdf_metadata(library: &LibrarySession, hash: ContentHash) -> Result<Option<pdf_view_common::PdfReaderMetadata>, BackendError> {
+async fn pdf_metadata(library: &LibrarySession, hash: BookId) -> Result<Option<pdf_view_common::PdfReaderMetadata>, BackendError> {
     library.db.pdf_metadata(&hash).map_err(Into::into)
 }
-async fn remote_document(library: &LibrarySession, hash: ContentHash) -> Result<RemoteDocument, BackendError> {
+async fn remote_document(library: &LibrarySession, hash: BookId) -> Result<RemoteDocument, BackendError> {
     let (source, prefix) = library.describe_remote_file(hash).await.map_err(BackendError::operation)?;
     let pdf_metadata = pdf_metadata(library, hash).await?;
     Ok(RemoteDocument { source, prefix, pdf_metadata })
 }
 
 impl LibrarySession {
-    pub(crate) async fn prepare_book_for_reader(&self, hash: ContentHash) -> Result<Opened, BackendError> {
+    pub(crate) async fn prepare_book_for_reader(&self, hash: BookId) -> Result<Opened, BackendError> {
         let info = book_info(self, hash).await?;
         if let Some(book) = host::local(self, hash, &info).await? {
             return Ok(book);

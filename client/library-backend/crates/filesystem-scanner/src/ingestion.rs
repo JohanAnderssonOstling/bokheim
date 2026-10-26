@@ -4,10 +4,10 @@ use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 
 use book_model::BookFormat;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 pub struct IngestedFile {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub size_bytes: u64,
     pub fingerprint: u64,
     pub format: BookFormat,
@@ -16,10 +16,7 @@ pub struct IngestedFile {
 
 /// Hash and inspect the same file bytes, rejecting concurrent changes.
 pub async fn ingest_file(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
-    let format = Path::new(&name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .and_then(|extension| BookFormat::from_import_extension(&extension.to_ascii_lowercase()))
+    let format = BookFormat::from_file_name(&name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported book format"))?;
     let (content_hash, size_bytes, fingerprint, reader) = client_platform_runtime::executor::run_blocking({
         let path = path.clone();
@@ -43,7 +40,7 @@ pub async fn ingest_file(path: PathBuf, name: String, host: &dyn cpu_host::CpuHo
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "empty book"));
             }
             require_unchanged(&path, fingerprint)?;
-            let content_hash = ContentHash::from(hasher.finalize());
+            let content_hash = BookId::from(hasher.finalize());
             reader.rewind()?;
             Ok((content_hash, size_bytes, fingerprint, reader))
         }
@@ -85,7 +82,7 @@ pub async fn ingest_audiobook_folder(path: PathBuf, name: String, host: &dyn cpu
                 hasher.update(&bytes[..read]);
             }
             archive.rewind()?;
-            Ok((ContentHash::from(hasher.finalize()), hasher.count(), fingerprint, archive))
+            Ok((BookId::from(hasher.finalize()), hasher.count(), fingerprint, archive))
         }
     })
     .await
@@ -122,5 +119,6 @@ pub(crate) fn fingerprint(path: &Path) -> std::io::Result<u64> {
         hasher.update(cover.name.as_bytes());
         hasher.update(&library_files::filesystem::fingerprint(cover.path)?.to_le_bytes());
     }
-    Ok(u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap()))
+    let [a, b, c, d, e, f, g, h, ..] = *hasher.finalize().as_bytes();
+    Ok(u64::from_le_bytes([a, b, c, d, e, f, g, h]))
 }

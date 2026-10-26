@@ -36,6 +36,12 @@ struct FontsRegistered;
 
 impl Global for FontsRegistered {}
 
+/// A host-provided catalog of installed families, without GPUI's synthetic
+/// fallback aliases. Android supplies this after registering device fonts.
+pub struct SystemFontFamilies(pub Vec<String>);
+
+impl Global for SystemFontFamilies {}
+
 /// Registers the interface, book and serif display faces once per application.
 pub fn register_fonts(cx: &mut App) -> Result<()> {
     if cx.has_global::<FontsRegistered>() {

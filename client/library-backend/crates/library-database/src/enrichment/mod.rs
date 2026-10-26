@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 pub(crate) use crate::{Database, DatabaseError};
 pub(crate) use include_sqlite_sql::include_sql;
-pub(crate) use sync_common::ContentHash;
+pub(crate) use sync_common::BookId;
 
 pub mod facts;
 pub use facts::EnrichmentCandidate;
@@ -18,7 +18,7 @@ impl Database {
         Ok(connection.thumbnail_pending_job_count(|row| row.get::<_, i64>(0))?.max(0) as u64)
     }
 
-    pub fn thumbnail_book_format(&self, hash: ContentHash) -> Result<Option<book_model::BookFormat>, DatabaseError> {
+    pub fn thumbnail_book_format(&self, hash: BookId) -> Result<Option<book_model::BookFormat>, DatabaseError> {
         let connection = &self.connection;
         let mut format = None;
         connection.thumbnail_local_format(&hash, |row| {
@@ -29,34 +29,34 @@ impl Database {
     }
 
     /// Records a cover made on this device, or that the book has none.
-    pub fn complete_thumbnail_work(&self, hash: &ContentHash, has_cover: bool) -> Result<(), DatabaseError> {
+    pub fn complete_thumbnail_work(&self, hash: &BookId, has_cover: bool) -> Result<(), DatabaseError> {
         self.connection.thumbnail_set_result(hash, if has_cover { "ready" } else { "no_cover" })?;
         Ok(())
     }
 
     /// Whether the server holds this book's cover.
-    pub fn server_has_cover(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
+    pub fn server_has_cover(&self, hash: &BookId) -> Result<bool, DatabaseError> {
         Ok(self.connection.thumbnail_has_remote(hash, |row| row.get(0))?)
     }
 
     /// Ends cover work without a cover made here.
-    pub fn discard_thumbnail_work(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn discard_thumbnail_work(&self, hash: &BookId) -> Result<(), DatabaseError> {
         self.connection.thumbnail_discard(hash)?;
         Ok(())
     }
 
     /// The next page of books with a live placement after `after`, whose
     /// cover presence on the server can be checked.
-    pub fn thumbnail_remote_presence_candidates(&self, after: Option<&ContentHash>) -> Result<Vec<ContentHash>, DatabaseError> {
+    pub fn thumbnail_remote_presence_candidates(&self, after: Option<&BookId>) -> Result<Vec<BookId>, DatabaseError> {
         let mut hashes = Vec::new();
         self.connection.thumbnail_remote_presence_candidates(after, |row| {
-            hashes.push(row.get::<_, ContentHash>(0)?);
+            hashes.push(row.get::<_, BookId>(0)?);
             Ok(())
         })?;
         Ok(hashes)
     }
 
-    pub fn request_missing_thumbnail(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn request_missing_thumbnail(&self, hash: &BookId) -> Result<(), DatabaseError> {
         let connection = &self.connection;
         connection.thumbnail_request_missing(hash)?;
         Ok(())
@@ -65,13 +65,13 @@ impl Database {
     /// Queues thumbnail recovery unconditionally.
     /// Unlike [`Database::request_missing_thumbnail`], which only revives
     /// finished work, this also covers books that never had a work row.
-    pub fn shared_request_thumbnail(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn shared_request_thumbnail(&self, hash: &BookId) -> Result<(), DatabaseError> {
         self.connection.shared_request_thumbnail(hash)?;
         Ok(())
     }
 
     /// Current thumbnail work state, if any row exists.
-    pub fn thumbnail_work_state(&self, hash: &ContentHash) -> Result<Option<String>, DatabaseError> {
+    pub fn thumbnail_work_state(&self, hash: &BookId) -> Result<Option<String>, DatabaseError> {
         let mut state = None;
         self.connection.thumbnail_work_state(hash, |row| {
             state = Some(row.get::<_, String>(0)?);
@@ -88,11 +88,11 @@ include_sql!("src/enrichment/sql/enrichment.sql");
 
 #[derive(Clone, Debug)]
 pub struct UploadPreparationBatch {
-    pub members: Vec<(ContentHash, Option<i64>)>,
+    pub members: Vec<(BookId, Option<i64>)>,
 }
 
 impl UploadPreparationBatch {
-    pub fn hashes(&self) -> HashSet<ContentHash> {
+    pub fn hashes(&self) -> HashSet<BookId> {
         self.members.iter().map(|(hash, _)| *hash).collect()
     }
 }
@@ -101,18 +101,18 @@ impl Database {
     pub fn upload_preparation_snapshot(&self) -> Result<UploadPreparationBatch, DatabaseError> {
         let mut members = Vec::new();
         self.connection.upload_preparation_snapshot(|row| {
-            members.push((row.get::<_, ContentHash>(0)?, row.get::<_, Option<i64>>(1)?));
+            members.push((row.get::<_, BookId>(0)?, row.get::<_, Option<i64>>(1)?));
             Ok(())
         })?;
         Ok(UploadPreparationBatch { members })
     }
 
-    pub fn prepared_upload_batch(&self, scope: &HashSet<ContentHash>) -> Result<UploadPreparationBatch, DatabaseError> {
+    pub fn prepared_upload_batch(&self, scope: &HashSet<BookId>) -> Result<UploadPreparationBatch, DatabaseError> {
         let scope_json = serde_json::to_string(scope).map_err(DatabaseError::operation)?;
         let affected_dirs = serde_json::to_string(&crate::placements::pending_work_directories(&self.connection)?).map_err(DatabaseError::operation)?;
         let mut members = Vec::new();
         self.connection.prepared_upload_batch(scope_json.as_str(), &affected_dirs, |row| {
-            members.push((row.get::<_, ContentHash>(0)?, row.get::<_, Option<i64>>(1)?));
+            members.push((row.get::<_, BookId>(0)?, row.get::<_, Option<i64>>(1)?));
             Ok(())
         })?;
         Ok(UploadPreparationBatch { members })
@@ -125,11 +125,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn upload_thumbnail_candidates(&self, members: &HashSet<ContentHash>) -> Result<Vec<ContentHash>, DatabaseError> {
+    pub fn upload_thumbnail_candidates(&self, members: &HashSet<BookId>) -> Result<Vec<BookId>, DatabaseError> {
         let scope_json = serde_json::to_string(members).map_err(DatabaseError::operation)?;
         let mut hashes = Vec::new();
         self.connection.upload_thumbnail_candidates(scope_json.as_str(), |row| {
-            hashes.push(row.get::<_, ContentHash>(0)?);
+            hashes.push(row.get::<_, BookId>(0)?);
             Ok(())
         })?;
         Ok(hashes)
@@ -151,7 +151,7 @@ mod schema_tests {
     #[test]
     fn obsolete_retry_policy_is_reset_once_and_current_work_survives_reopening() {
         let (db, path) = open_test_database();
-        let hash = ContentHash::new(&"c".repeat(64));
+        let hash = BookId::new(&"c".repeat(64));
         db.connection.fixtures_insert_book_5(&(&hash)).unwrap();
         db.connection.fixtures_seed_draft_retry(&(&hash)).unwrap();
         db.connection.fixtures_seed_cover_check(&(&hash)).unwrap();

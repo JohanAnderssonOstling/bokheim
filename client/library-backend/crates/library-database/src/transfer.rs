@@ -7,17 +7,17 @@ use library_replica::{BookAddition, LibraryStateEntry};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use sync_common::{ContentHash, DirId, ROOT_DIR_ID, StateKey};
+use sync_common::{BookId, DirId, ROOT_DIR_ID, StateKey};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferSelection {
     pub folders: Vec<DirId>,
-    pub books: Vec<ContentHash>,
+    pub books: Vec<BookId>,
     pub source: Option<DirId>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferBook {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub directory: DirId,
     pub file_name: String,
     /// Direct selections go into the destination itself; tree placements keep their parent.
@@ -33,14 +33,14 @@ pub struct TransferPlan {
 }
 #[derive(Clone, Debug)]
 pub struct BookTransferState {
-    pub content_hash: ContentHash,
+    pub content_hash: BookId,
     pub addition: BookAddition,
     pub reading: Option<LibraryStateEntry>,
     pub annotations: Vec<Annotation>,
 }
 impl Database {
     /// Retain an existing destination placement's name when the same hash is imported again.
-    pub fn transfer_destination_name(&self, hash: &ContentHash, directory: &DirId) -> Result<Option<String>, DatabaseError> {
+    pub fn transfer_destination_name(&self, hash: &BookId, directory: &DirId) -> Result<Option<String>, DatabaseError> {
         Ok(self
             .connection
             .query_row(
@@ -133,7 +133,7 @@ impl Database {
             Ok(())
         })
     }
-    pub fn book_transfer_state(&self, hash: ContentHash) -> Result<BookTransferState, DatabaseError> {
+    pub fn book_transfer_state(&self, hash: BookId) -> Result<BookTransferState, DatabaseError> {
         self.with_browse_snapshot(|| {
             let bytes = match canonical_body(&self.connection, "book_add", &StateKey::Book(hash), "")? {
                 Some((body, _)) => body,

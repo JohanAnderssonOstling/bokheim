@@ -80,7 +80,6 @@ impl PdfReaderView {
         let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
         let anchor = AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(selection.page_index as u32, rects, None));
         let now = crate::shell::marks::now_millis();
-        let now = u64::try_from(now).expect("annotation timestamps must be nonnegative");
         let annotation = Annotation {
             id: uuid::Uuid::new_v4().to_string(),
             content_hash: self.locator.content_hash(),

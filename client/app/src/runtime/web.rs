@@ -2,7 +2,7 @@ use crate::BackendError;
 use crate::executor::spawn_detached;
 use crate::web::WebConnection;
 use async_channel::{Receiver, Sender, WeakSender, bounded, unbounded};
-use library_backend::{ContentHash, DirId, DirectoryImport, ImportFailure, LibraryCommand, LibraryId, ResolvedBookData};
+use library_backend::{BookId, DirId, DirectoryImport, ImportFailure, LibraryCommand, LibraryId, ResolvedBookData};
 use std::cell::Cell;
 use std::rc::Rc;
 use tokio::sync::watch;
@@ -87,7 +87,8 @@ async fn serve_connection(connection: WebConnection, commands: Receiver<Command>
                 }
             }
             Command::Message(SessionMessage::Reconnecting) => state.reconnect(),
-            Command::Message(SessionMessage::Failed(error)) => state.fail(error.into()),
+            Command::Message(SessionMessage::Failed { error, storage_busy: true }) => state.fail(BackendError::classified(crate::Failure::StorageBusy, error)),
+            Command::Message(SessionMessage::Failed { error, storage_busy: false }) => state.fail(error.into()),
             Command::Message(SessionMessage::Bytes(bytes)) => match decode_worker_message(&bytes) {
                 Ok(message) => state.receive(message, |bytes| port.send(bytes)),
                 Err(error) => state.fail(error.context("invalid backend response")),
@@ -120,7 +121,7 @@ impl Transport {
 
     /// `files` are picked browser files sent beside the request under a token.
     fn send_web_request(&self, command: WorkerCommand, events: Option<Sender<WorkerPayload>>, files: Option<(&str, &js_sys::Array)>) -> Result<(u64, oneshot::Receiver<Result<WorkerPayload, BackendError>>), BackendError> {
-        let id = self.remote.next.get().checked_add(1).expect("browser request IDs exhausted");
+        let id = self.remote.next.get().checked_add(1).ok_or_else(|| BackendError::message("browser request IDs exhausted"))?;
         self.remote.next.set(id);
         let restore = !command.is_book_subscription();
         let bytes = encode_worker_message(&AppWorkerClientMessage::Request(AppWorkerRequest { id, command }))?;
@@ -164,7 +165,7 @@ impl Transport {
         self.worker_typed_subscription(WorkerCommand::LibrarySubscription { library_id, subscription: LibrarySubscription::Updates }).await
     }
 
-    pub(crate) async fn book_subscription(&self, library_id: LibraryId, content_hash: ContentHash) -> Result<(Receiver<()>, ResolvedBookData), BackendError> {
+    pub(crate) async fn book_subscription(&self, library_id: LibraryId, content_hash: BookId) -> Result<(Receiver<()>, ResolvedBookData), BackendError> {
         self.worker_typed_subscription(WorkerCommand::LibrarySubscription { library_id, subscription: LibrarySubscription::Book { content_hash } }).await
     }
 

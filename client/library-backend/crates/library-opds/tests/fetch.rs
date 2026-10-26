@@ -2,6 +2,7 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use library_model::OpdsCredentials;
+use client_runtime::Failure;
 use library_opds::{browser::{self, Request, Response}, feed_title};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -59,7 +60,7 @@ async fn challenges_try_browser_once_then_report_friendly_errors_and_only_401_re
     std::fs::write(&response_file, serde_json::to_vec(&success).unwrap()).unwrap();
     assert_eq!(feed_title(&format!("{root}/public"), None).await.unwrap().as_deref(), Some("Verified feed"));
     assert_eq!(feed_title(&format!("{root}/private"), None).await.unwrap(), None);
-    assert!(feed_title(&format!("{root}/denied"), None).await.unwrap_err().contains("blocking access from Bokheim"));
+    assert_eq!(feed_title(&format!("{root}/denied"), None).await.unwrap_err().failure(), Some(Failure::Forbidden));
     assert!(!calls.exists());
     assert_eq!(feed_title(&format!("{root}/challenge"), None).await.unwrap().as_deref(), Some("Verified feed"));
     let anonymous: Request = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
@@ -77,16 +78,16 @@ async fn challenges_try_browser_once_then_report_friendly_errors_and_only_401_re
     assert_eq!(redirected.url, format!("{other_url}/challenge"));
     assert_eq!(redirected.data_directory, anonymous.data_directory, "verification reuses the browser profile across origins");
     assert_eq!(anonymous.data_directory, browser::shared_profile(&temp.path().join("profile")));
-    let expected = "Browser verification could not be completed for this catalog. Please try another catalog.";
+    let expected = Some(Failure::Forbidden);
     std::fs::write(&response_file, serde_json::to_vec(&Response::Error { message: "verification was rejected".into() }).unwrap()).unwrap();
-    assert_eq!(feed_title(&format!("{root}/challenge"), None).await.unwrap_err(), expected);
+    assert_eq!(feed_title(&format!("{root}/challenge"), None).await.unwrap_err().failure(), expected);
     assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 4, "a failed browser attempt must not launch another helper");
     for status in [403, 401] {
         let response = Response::Fetched { status, content_type: None, url: format!("{root}/challenge"), body: String::new() };
         std::fs::write(&response_file, serde_json::to_vec(&response).unwrap()).unwrap();
         let result = feed_title(&format!("{root}/challenge"), None).await;
         if status == 401 { assert_eq!(result.unwrap(), None); }
-        else { assert_eq!(result.unwrap_err(), expected); }
+        else { assert_eq!(result.unwrap_err().failure(), expected); }
     }
     assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 6);
     server_thread.join().unwrap();

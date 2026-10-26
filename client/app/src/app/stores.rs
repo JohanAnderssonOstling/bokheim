@@ -32,9 +32,9 @@ impl AppBackend {
 
     /// Adds the store at `url`, named `name` or else by its host.
     pub(crate) fn add_store(&self, url: String, name: Option<String>) -> Result<(), BackendError> {
-        let url = Url::parse(url.trim()).map_err(|error| BackendError::message(format!("not a web address: {error}")))?;
+        let url = Url::parse(url.trim()).map_err(|error| BackendError::classified(Failure::InvalidAddress, format!("not a web address: {error}")))?;
         if !matches!(url.scheme(), "http" | "https") {
-            return Err("a store needs a web address starting with https://".into());
+            return Err(BackendError::classified(Failure::InvalidAddress, "a store address must use https:// or http://"));
         }
         let name = name.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).unwrap_or_else(|| url.host_str().unwrap_or("Store").to_owned());
         let store = Store { id: uuid::Uuid::new_v4(), name, url: url.to_string() };
@@ -67,7 +67,7 @@ impl AppBackend {
 
     /// Opens the store page that sells a listed feed book.
     pub(crate) async fn buy_opds_book(&self, entry: CardKey, library_id: LibraryId) -> Result<(), BackendError> {
-        let url = library_opds::buy_page(entry).map_err(BackendError::message)?;
+        let url = library_opds::buy_page(entry)?;
         let title = url.host_str().unwrap_or("Store").to_owned();
         self.open_store_window(&url, &title, library_id).await
     }
@@ -78,20 +78,20 @@ impl AppBackend {
     async fn open_store_window(&self, url: &Url, title: &str, library_id: LibraryId) -> Result<(), BackendError> {
         let root = PathBuf::from(self.library_entry(&library_id)?.storage_locator());
         if !root.is_dir() {
-            return Err("this library's folder is unavailable".into());
+            return Err(BackendError::classified(Failure::LibraryFolderUnavailable, "this library's folder is unavailable"));
         }
         let downloads = tempfile::Builder::new().prefix(".bokheim-store-").tempdir_in(&root).map_err(BackendError::operation)?;
         let preferences = self.browsing_preferences()?;
         let library = self.state.library_directory.get(&library_id)?;
         let library = LibraryClient::new(library_id, library);
-        let mut window = library_opds::browser::open_store(url, title, downloads.path(), preferences).await.map_err(BackendError::message)?;
+        let mut window = library_opds::browser::open_store(url, title, downloads.path(), preferences).await?;
         // Snapshot jobs already downloading before accepting this window's
         // events. New requests enter the progress list after their hash resolves.
         let initial = library.torrent_transfers().await.unwrap_or_default();
         spawn_detached(async move {
             let feedback = window.feedback_sender();
             let mut polling = tokio::time::interval(Duration::from_secs(1));
-            let (added, mut accepted) = tokio::sync::mpsc::unbounded_channel::<(String, String, Result<String, String>)>();
+            let (added, mut accepted) = tokio::sync::mpsc::unbounded_channel::<(String, String, Result<String, BackendError>)>();
             let mut tracked: HashMap<String, String> = initial.into_iter().filter(|transfer| !transfer.imported).map(|transfer| (transfer.info_hash.clone(), format!("torrent:{}", transfer.info_hash))).collect();
             let mut pending: HashMap<String, String> = HashMap::new();
             let mut pending_requests: HashMap<String, String> = HashMap::new();
@@ -123,7 +123,10 @@ impl AppBackend {
                                     report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download: previous, name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }).await;
                                 }
                             }
-                            Err(error) => report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed, percent: None, message: Some(format!("Could not start download: {error}")) }).await,
+                            Err(error) => {
+                                log::warn!("a store torrent could not start: {error}");
+                                report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed(error.failure()), percent: None, message: None }).await
+                            }
                         }
                         continue;
                     }
@@ -148,14 +151,17 @@ impl AppBackend {
                     StoreEvent::CancelDownload { download } => {
                         let hash = tracked.iter().find(|(_, id)| **id == download).map(|(hash, _)| hash.clone())
                             .or_else(|| sources.get(&download).cloned());
-                        let pending_hash = if pending.remove(&download).is_some() {
-                            let request = pending_requests.remove(&download).expect("pending torrent has a request");
+                        let was_pending = pending.remove(&download).is_some();
+                        let pending_hash = if let Some(request) = pending_requests.remove(&download) {
                             cancelled.insert(request.clone());
                             match library.cancel_torrent_request(request).await {
                                 Ok(hash) => hash,
                                 Err(error) => { log::warn!("Could not cancel torrent request: {error}"); None }
                             }
-                        } else { None };
+                        } else {
+                            if was_pending { log::warn!("No torrent request was recorded for pending download {download}"); }
+                            None
+                        };
                         if let Some(hash) = hash.or(pending_hash) {
                             tracked.remove(&hash);
                             handovers.remove(&hash);
@@ -172,18 +178,14 @@ impl AppBackend {
                         // Read before the browser's temporary directory closes;
                         // the library owns the durable payload staging.
                         if tokio::fs::metadata(&path).await.is_ok_and(|metadata| metadata.len() > 16 * 1024 * 1024) {
-                            report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed, percent: None, message: Some("Torrent metadata is too large".into()) }).await;
+                            report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed(Some(Failure::UnreadableBook)), percent: None, message: None }).await;
                             continue;
                         }
                         match tokio::fs::read(&path).await {
                             Ok(bytes) => (TorrentInput::File(bytes.into()), download, name),
                             Err(error) => {
-                                report_feedback(
-                                    &feedback,
-                                    &mut reported,
-                                    BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed, percent: None, message: Some(format!("Could not read torrent metadata: {error}")) },
-                                )
-                                .await;
+                                log::warn!("could not read torrent metadata: {error}");
+                                report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed(Failure::from_io(error.kind())), percent: None, message: None }).await;
                                 continue;
                             }
                         }
@@ -195,20 +197,21 @@ impl AppBackend {
                         // Register the book immediately on both desktop and
                         // mobile, and report the actual import result.
                         let (phase, message) = match import_browser_download(&library, path).await {
-                            Ok(()) => (BrowserDownloadPhase::Completed, "Added to library".into()),
+                            Ok(()) => (BrowserDownloadPhase::Completed, Some("Added to library".into())),
                             Err(error) => {
                                 log::warn!("a store download was not added to the library: {error}");
-                                (BrowserDownloadPhase::Failed, format!("Could not add the book to the library: {error}"))
+                                (BrowserDownloadPhase::Failed(error.failure()), None)
                             }
                         };
-                        let _ = feedback.send(BrowserFeedback { replaces: None, download, name, phase, percent: None, message: Some(message) }).await;
+                        let _ = feedback.send(BrowserFeedback { replaces: None, download, name, phase, percent: None, message }).await;
                         continue;
                     }
                     StoreEvent::Opened => continue,
                 };
                 let request = uuid::Uuid::new_v4().to_string();
                 if let Err(error) = library.prepare_torrent_request(request.clone()).await {
-                    report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed, percent: None, message: Some(error) }).await;
+                    log::warn!("a store torrent could not be prepared: {error}");
+                    report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed(error.failure()), percent: None, message: None }).await;
                     continue;
                 }
                 reported.remove(&download);
@@ -225,7 +228,7 @@ impl AppBackend {
             // The library owns running torrents. Clear their browser bars when
             // this view stops polling, without leaving a frozen progress toast.
             for download in pending.keys().chain(tracked.values()).chain(handovers.values()) {
-                if reported.get(download).is_none_or(|update| !matches!(update.phase, BrowserDownloadPhase::Completed | BrowserDownloadPhase::Failed)) {
+                if reported.get(download).is_none_or(|update| !matches!(update.phase, BrowserDownloadPhase::Completed | BrowserDownloadPhase::Failed(_))) {
                     let _ = feedback.send(BrowserFeedback { replaces: None, download: download.clone(), name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }).await;
                 }
             }
@@ -235,30 +238,30 @@ impl AppBackend {
     }
 }
 
-async fn import_browser_download(library: &LibraryClient, path: PathBuf) -> Result<(), String> {
+async fn import_browser_download(library: &LibraryClient, path: PathBuf) -> Result<(), BackendError> {
     let failures = library.import_paths(ROOT_DIR_ID, vec![path], true).await?;
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(failures.into_iter().map(|failure| failure.diagnostic.unwrap_or_else(|| "Book import failed".into())).collect::<Vec<_>>().join("; "))
+        Err(BackendError::message(failures.into_iter().map(|failure| failure.diagnostic.unwrap_or_else(|| "book import failed".into())).collect::<Vec<_>>().join("; ")))
     }
 }
 
 fn preparing_feedback(download: String, name: String) -> BrowserFeedback {
-    let allowed = transfers::allowed();
     BrowserFeedback {
         replaces: None,
         download,
         name,
-        phase: if allowed { BrowserDownloadPhase::Preparing } else { BrowserDownloadPhase::Waiting },
+        phase: BrowserDownloadPhase::Preparing,
         percent: None,
-        message: Some(if allowed { "Resolving torrent metadata" } else { "Waiting for an unmetered connection" }.into()),
+        message: Some("Resolving torrent metadata".into()),
     }
 }
 
 fn torrent_feedback(download: String, torrent: TorrentStatus, allowed: bool) -> BrowserFeedback {
-    let (phase, percent, message) = if let Some(error) = torrent.error {
-        (BrowserDownloadPhase::Failed, None, Some(error))
+    // The torrent engine reports failures only as text; they stay unclassified.
+    let (phase, percent, message) = if torrent.error.is_some() {
+        (BrowserDownloadPhase::Failed(None), None, None)
     } else if torrent.imported {
         (
             BrowserDownloadPhase::Completed,
@@ -274,8 +277,6 @@ fn torrent_feedback(download: String, torrent: TorrentStatus, allowed: bool) -> 
                 .into(),
             ),
         )
-    } else if !allowed {
-        (BrowserDownloadPhase::Waiting, None, Some("Waiting for an unmetered connection".into()))
     } else if torrent.total_bytes > 0 {
         (BrowserDownloadPhase::Downloading, Some((torrent.progress_bytes.saturating_mul(100) / torrent.total_bytes).min(100) as u8), None)
     } else {
@@ -340,9 +341,9 @@ mod progress_tests {
         assert_eq!(update.download, "metadata-download");
         assert_eq!(update.phase, BrowserDownloadPhase::Downloading);
         assert_eq!(update.percent, Some(42));
-        let waiting = torrent_feedback("metadata-download".into(), torrent(), false);
-        assert_eq!(waiting.phase, BrowserDownloadPhase::Waiting);
-        assert_eq!(waiting.percent, None);
+        let metered = torrent_feedback("metadata-download".into(), torrent(), false);
+        assert_eq!(metered.phase, BrowserDownloadPhase::Downloading);
+        assert_eq!(metered.percent, Some(42));
         let mut checking = torrent();
         checking.total_bytes = 0;
         assert_eq!(torrent_feedback("second".into(), checking, true).phase, BrowserDownloadPhase::Preparing);
@@ -366,7 +367,7 @@ mod progress_tests {
         assert_eq!(torrent_feedback("first".into(), complete.clone(), true).message.as_deref(), Some("Added to library"));
         complete.error = Some("payload missing".into());
         let failed = torrent_feedback("first".into(), complete, true);
-        assert_eq!(failed.phase, BrowserDownloadPhase::Failed);
-        assert_eq!(failed.message.as_deref(), Some("payload missing"));
+        assert_eq!(failed.phase, BrowserDownloadPhase::Failed(None));
+        assert_eq!(failed.message, None);
     }
 }

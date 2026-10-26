@@ -20,10 +20,13 @@ use gpui::{
 use ui_components::{HierarchyItemWidth, SwipePreview};
 use web_time::Instant;
 
-use element::PaginatorElement;
+use element::{PaginatorElement, PaginatorPage};
 use identity::ItemPosition;
 pub(crate) use identity::PaginatorPosition;
-pub(crate) use policy::{PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, book_card_policy, browse_section_card_policy, browse_section_item_policy, browse_section_subject_rows, browse_shelf_card_policy, graph_cover_policy};
+pub(crate) use policy::{
+    PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, book_card_policy, browse_folder_card_policy, browse_folder_item_policy, browse_section_card_policy, browse_section_item_policy, browse_section_subject_rows,
+    browse_shelf_card_policy, graph_cover_policy,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaginatorAxis {
@@ -298,6 +301,7 @@ pub(crate) struct Paginator {
     animate_page_transitions: bool,
     flow_axis: PaginatorAxis,
     allow_vertical_navigation: bool,
+    show_next_page_preview: bool,
     transition_sequence: usize,
     transition: Option<PageTransition>,
     swipe_preview: SwipePreview,
@@ -372,6 +376,7 @@ impl Paginator {
             animate_page_transitions: !cfg!(feature = "kobo"),
             flow_axis: PaginatorAxis::Vertical,
             allow_vertical_navigation: true,
+            show_next_page_preview: true,
             transition_sequence: 0,
             transition: None,
             swipe_preview: SwipePreview::default(),
@@ -430,6 +435,11 @@ impl Paginator {
 
     pub(crate) fn horizontal_only(mut self) -> Self {
         self.allow_vertical_navigation = false;
+        self
+    }
+
+    pub(crate) fn next_page_preview(mut self, show: bool) -> Self {
+        self.show_next_page_preview = show;
         self
     }
 
@@ -944,11 +954,13 @@ impl Paginator {
         if self.children_revision != children_revision {
             return false;
         }
-        let consumed_backward = matches!(self.direction, AssignmentDirection::Backward) && visible_page.is_some();
-        if consumed_backward {
-            self.child_offset = visible_page.expect("checked above").first_child;
+        let consumed_backward = if let (AssignmentDirection::Backward, Some(page)) = (self.direction, visible_page) {
+            self.child_offset = page.first_child;
             self.direction = AssignmentDirection::Forward;
-        }
+            true
+        } else {
+            false
+        };
         if self.visible_page == visible_page && !consumed_backward {
             return false;
         }
@@ -1174,16 +1186,9 @@ impl Render for Paginator {
         let incoming = PaginatorElement::new(
             ElementId::named_usize(format!("{id}-layout"), self.children_revision),
             cx.entity().downgrade(),
-            self.visible_page,
-            self.children_revision,
-            self.data.clone(),
-            self.maximum_rows,
-            child_offset,
-            self.direction,
-            self.prefetched.clone(),
-            None,
+            self,
+            PaginatorPage { reported_visible_page: self.visible_page, child_offset, direction: self.direction, prefetched: self.prefetched.clone(), forced_page: None },
             window.rem_size(),
-            self.flow_axis,
             state.clone(),
         )
         .with_warm_direction(warm_direction)
@@ -1201,16 +1206,15 @@ impl Render for Paginator {
             let outgoing = PaginatorElement::new(
                 ElementId::named_usize(format!("{id}-outgoing-layout"), transition.sequence),
                 cx.entity().downgrade(),
-                Some(transition.outgoing_page),
-                self.children_revision,
-                self.data.clone(),
-                self.maximum_rows,
-                transition.outgoing_page.first_child,
-                AssignmentDirection::Forward,
-                None,
-                Some(transition.outgoing_page),
+                self,
+                PaginatorPage {
+                    reported_visible_page: Some(transition.outgoing_page),
+                    child_offset: transition.outgoing_page.first_child,
+                    direction: AssignmentDirection::Forward,
+                    prefetched: None,
+                    forced_page: Some(transition.outgoing_page),
+                },
                 window.rem_size(),
-                self.flow_axis,
                 state,
             )
             .passive()

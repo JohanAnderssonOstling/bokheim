@@ -1,4 +1,28 @@
-# Linux application updates
+# Native application updates
+
+Linux, Windows, and Android are policies over the same `NativeHost<P>` in
+`src/host.rs`. Host construction, coordinator ownership, locking/reloading,
+approval, discovery, download preparation, trial validation, healthy commits,
+acknowledgement, recovery, and generation cleanup each have one implementation.
+Public `Host`, `windows::WindowsHost`, and `android::AndroidHost` names are aliases
+for the corresponding policy.
+
+`src/migration.rs` owns database backup/candidate copies, taxonomy staging, the
+preparation job and result, candidate validation, taxonomy pointer replacement,
+application backup entries, and journal promotion. Desktop candidates must match
+the approved release; Android candidates must match the installed APK and meet
+the approved schema requirement. Platform code supplies package extraction and
+the subprocess or Android service that runs the preparation job.
+
+`src/databases.rs` owns database discovery and SQLite workspace sizing.
+`shared/update-files` owns durable filesystem operations and
+`shared/update-protocol` owns verified download staging. The GPUI adapter in
+`apps/desktop-gpui/src/update_binding.rs` owns startup configuration, host
+ownership until healthy startup, and binding to the shared browser UI worker.
+
+Linux-specific startup below retains AppImage relaunch supervision. Windows
+retains its external executable helper, and Android retains APK installation
+and permission handling through the OS bridge.
 
 This host connects the signed update coordinator to the GPUI desktop launcher.
 It is enabled only in builds with a configured signing public key. Application
@@ -69,11 +93,9 @@ preservation. The fixture package is an executable test wrapper, not a packaged
 GPUI AppImage. GitHub's Linux job runs this test; the AppImage packaging job also
 executes `--bokheim-update-info` to verify the package exposes its actual versions.
 
-No production public key, signed application release or endpoint was provisioned
-by this implementation. A packaged GUI update trial on the release machine is
-still a rollout check before offering production updates. Windows, Android and
-browser activation use separate hosts and are not enabled here.
-
+Packaged AppImage, native Windows GUI, and physical Android installation trials
+remain rollout checks. The shared Rust host does not replace each platform's
+application ownership and OS installation requirements.
 
 ## Windows host
 

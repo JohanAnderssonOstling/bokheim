@@ -19,7 +19,7 @@ use crate::library::widgets::{BookCardEvents, BookCardView};
 /// commands that go with them; subjects and authors are queries over the
 /// library, Books is the flat library, and Home is its shelves of recent activity.
 /// Catalog is the public-domain catalog's subject tree: books not in the library.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BrowseKind {
     Home,
     Books,
@@ -303,8 +303,13 @@ impl BrowseListing {
             }
             None => BookCardView::create_in_grid(book, self.ui.clone(), self.book_events.clone(), self.folder_commands, self.kind == BrowseKind::Books, cx),
         };
-        let sections =
-            sections.into_iter().map(|section| BrowseSection { parent: section.parent, children: section.children, books: section.books.into_iter().map(|book| card_for(book, cx)).collect(), book_count: section.book_count }).collect();
+        let sections = sections
+            .into_iter()
+            .map(|section| {
+                let books = if section_shows_books(section.parent.id, section.children.is_empty()) { section.books.into_iter().map(|book| card_for(book, cx)).collect() } else { Vec::new() };
+                BrowseSection { parent: section.parent, children: section.children, books, book_count: section.book_count }
+            })
+            .collect();
         let books: Rc<Vec<_>> = Rc::new(books.into_iter().map(|book| card_for(book, cx)).collect());
         self.book_indices = self.page.as_ref().map(|page| (page.book_offset..).zip(books.iter().cloned()).collect()).unwrap_or_default();
         self.sections = sections;
@@ -421,6 +426,10 @@ pub(super) fn is_author_heading(location: BrowseLocation) -> bool {
     matches!(location, BrowseLocation::Author(Some(_)) | BrowseLocation::CatalogAuthor(Some(_)))
 }
 
+pub(super) fn section_shows_books(location: BrowseLocation, no_children: bool) -> bool {
+    matches!(location, BrowseLocation::Home(_)) || is_author_heading(location) || (matches!(location, BrowseLocation::Folder(_)) && no_children)
+}
+
 fn compatible_pages(current: &BrowsePageState, next: &BrowsePageState) -> bool {
     current.result_revision == next.result_revision
         && current.book_total == next.book_total
@@ -445,6 +454,15 @@ fn page_request_for_slots(slots: Range<usize>, compact: usize, sections: usize, 
 
 #[cfg(test)]
 mod paging_tests {
+    #[test]
+    fn leaf_folders_preview_books_while_parent_folders_preview_children() {
+        let folder = BrowseLocation::Folder(DirId::from_u128(1));
+        assert!(super::section_shows_books(folder, true));
+        assert!(!super::section_shows_books(folder, false));
+        assert!(!super::section_shows_books(BrowseLocation::Subject(0), true));
+        assert!(super::section_shows_books(BrowseLocation::Home(None), true));
+    }
+
     #[test]
     fn folder_placements_have_distinct_selection_and_cursor_ids() {
         let key = CardKey([1; 32]);

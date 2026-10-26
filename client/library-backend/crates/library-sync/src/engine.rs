@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fmt::Display;
 use std::future::Future;
 use std::pin::Pin;
-use sync_common::{ContentHash, LibraryId, MutationIssue, OpaquePublication, PullStateResponse, PushBatcher, PushMutationsResponse, ReplicaId, ReplicaSeq, SyncCursor};
+use sync_common::{BookId, LibraryId, MutationIssue, OpaquePublication, PullStateResponse, PushBatcher, PushMutationsResponse, ReplicaId, ReplicaSeq, SyncCursor};
 
 pub type StoreError = Box<dyn Error + Send + Sync>;
 
@@ -79,7 +79,7 @@ struct Acknowledgements {
 
 struct SubmittedBatch {
     ids: Vec<ReplicaSeq>,
-    creations: Vec<(ReplicaSeq, ContentHash)>,
+    creations: Vec<(ReplicaSeq, BookId)>,
 }
 
 impl SubmittedBatch {
@@ -105,7 +105,7 @@ struct Outgoing<T> {
     scan: Option<T>,
     page: std::vec::IntoIter<StatePublication>,
     batches: PushBatcher,
-    deferred: HashSet<ContentHash>,
+    deferred: HashSet<BookId>,
 }
 
 impl<T> Outgoing<T> {

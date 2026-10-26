@@ -132,7 +132,7 @@ impl PostgresSyncRepository {
             .await
             .map_err(internal)?;
         let cloud_enabled: bool = sqlx::query_scalar(include_str!("sql/cloud_storage/enabled.sql")).bind(&library_id).fetch_one(&mut *transaction).await.map_err(internal)?;
-        assets::apply_lifecycle_reference_deltas(&mut transaction, user_id, lifecycle_hashes.into_iter().filter(|_| cloud_enabled).map(|hash| sync_common::ContentHash::try_from(hash.as_slice()).map(|hash| (hash, -1))).collect::<Result<Vec<_>, _>>().map_err(internal)?).await.map_err(internal)?;
+        assets::apply_lifecycle_reference_deltas(&mut transaction, user_id, lifecycle_hashes.into_iter().filter(|_| cloud_enabled).map(|hash| sync_common::BookId::try_from(hash.as_slice()).map(|hash| (hash, -1))).collect::<Result<Vec<_>, _>>().map_err(internal)?).await.map_err(internal)?;
         sqlx::query(include_str!("sql/cloud_storage/release_unreferenced.sql")).bind(user_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM book_upload_reservation WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_state WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;

@@ -4,6 +4,7 @@ mod annotations;
 mod audiobook;
 mod book_format;
 mod canonical;
+mod chapter_read;
 mod credits;
 mod identifier;
 mod language;
@@ -14,6 +15,7 @@ mod search_text;
 mod subject;
 mod titles;
 mod toc_target;
+pub use toc_target::{cbz_toc_page, cbz_toc_target};
 mod validation;
 mod year;
 
@@ -21,7 +23,8 @@ pub use annotations::{Annotation, AnnotationAnchor, AnnotationStyle, PdfAnnotati
 pub use audiobook::{AudiobookChapter, ChapterOrigin};
 pub use book_format::BookFormat;
 pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid, from_content_candidate, from_text};
-pub use content_address::ContentHash;
+pub use chapter_read::ChapterReadStatus;
+pub use content_address::BookId;
 pub use credits::{agent_id_from_migration_seed, tracks_match_archive, AgentId, AudiobookTrack, AuthorId, BookDetails, BookMetadata, BookMetadataError, BookRecord, BookTocDocument, BookTocEntry, Contributor, ContributorId};
 pub use identifier::{from_metadata_value, push_isbn, Identifier, IdentifierError, Scheme, Scope};
 pub use language::{LanguageTag, LanguageTagError};

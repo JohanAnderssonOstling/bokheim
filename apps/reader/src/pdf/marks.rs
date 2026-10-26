@@ -29,7 +29,7 @@ fn overlay_color(rgb: u32, style: PdfAnnotationStyle) -> u32 {
 }
 
 
-pub(super) fn imported_annotations(content_hash: content_address::ContentHash, metadata: Option<&pdf_reader_core::PdfReaderMetadata>) -> Vec<Annotation> {
+pub(super) fn imported_annotations(content_hash: content_address::BookId, metadata: Option<&pdf_reader_core::PdfReaderMetadata>) -> Vec<Annotation> {
     use book_model::{AnnotationAnchor, PdfAnnotationAnchor, PdfAnnotationRect};
     use pdf_reader_core::PdfStoredAnnotationKind as Kind;
     let Some(metadata) = metadata.filter(|m| m.valid_for(&m.content_hash)) else { return Vec::new() };

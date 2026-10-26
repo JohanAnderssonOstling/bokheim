@@ -114,10 +114,8 @@ impl Autofill {
                 if !self.guard.borrow().as_ref().is_some_and(|(nonce, origin)| *nonce == message.nonce && *origin == message.origin) {
                     return;
                 }
-                if !self.pending.as_ref().is_some_and(|pending| pending.attempt == attempt && pending.login.site.origin == message.origin) {
-                    return;
-                }
-                Command::Save(self.pending.take().unwrap().login)
+                let Some(pending) = self.pending.take_if(|pending| pending.attempt == attempt && pending.login.site.origin == message.origin) else { return };
+                Command::Save(pending.login)
             }
         };
         let _ = self.worker.send((message.nonce, command));
@@ -140,7 +138,12 @@ impl Autofill {
                     && let Some(page) = page
                     && page.url().ok().and_then(|url| passwords::origin(&url)).as_deref() == Some(login.site.origin.as_str())
                 {
-                    let _ = page.evaluate_script(&passwords::fill_script(&login, nonce));
+                    match passwords::fill_script(&login, nonce) {
+                        Ok(script) => {
+                            let _ = page.evaluate_script(&script);
+                        }
+                        Err(error) => eprintln!("Could not prepare browser autofill: {error}"),
+                    }
                 }
             }
             Err(error) => eprintln!("Browser password storage: {error}"),
