@@ -16,7 +16,7 @@ import tempfile
 import zipfile
 
 from native_build import digest, write
-from normalize import normalize
+from normalize import normalize, normalizer
 
 ROOT = Path(__file__).resolve().parents[2]
 GRADLE_VERSION = "8.14.3"
@@ -283,6 +283,7 @@ def main():
     environment["ANDROID_HOME"] = str(sdk)
     keystore, alias, signing_environment = signing_settings(ROOT / "apps/desktop-gpui/android", environment)
     certificate = signing_certificate(keystore, alias, signing_environment)
+    normalizer(args.offline)
     if args.apk:
         apk, commit = args.apk, None
     else:

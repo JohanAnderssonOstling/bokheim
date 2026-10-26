@@ -55,7 +55,9 @@ text and Cargo declarations. F-Droid maintainer review is still required.
 
 For a fresh checkout, keep the source preparation away from existing developer
 repositories. The following commands use the review branch until it is merged;
-`gradle` must be Gradle 8.14.3:
+`gradle` must be Gradle 8.14.3. Install JDK 21, Python 3 and bubblewrap
+(`bwrap`) on Linux, with unprivileged user namespaces enabled. Allow at least
+20 GiB of free space for source/tool downloads and build outputs:
 
 ```sh
 mkdir -p /path/to/isolated-fdroid-build
@@ -104,8 +106,11 @@ For a clean rebuild, use another fresh isolated checkout and fresh Cargo/Android
 outputs. Move aside the builder-owned PDFium `out/android-arm64` and speech
 `build` directories before rebuilding; keep their pinned source archives and
 toolchains. Never remove unrelated developer caches. Run the prefetch phase
-before disabling networking. The second checkout should have a different parent
-path but the same basename (`bokheim`), matching the F-Droid source layout.
+before disabling networking. The second checkout should have a different parent path. The directory name
+may differ: `build.py` mounts the app and its sibling dependencies under
+`/mnt/bokheim-build` in a private mount namespace. This is required because
+Cargo hashes absolute paths into external path dependency identities; Rust
+source-path remapping alone does not stabilize them.
 
 The build maps Rust and speech source paths to stable paths, fixes the build
 epoch, omits checkout-specific VCS metadata, and normalizes the unsigned APK with

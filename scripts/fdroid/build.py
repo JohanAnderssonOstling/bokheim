@@ -5,9 +5,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 from release import ROOT, gradle_command, java_environment, sdk_directory
 from normalize import normalize
+from canonical import CANONICAL_ROOT, command as canonical_command
 
 
 def main():
@@ -25,6 +27,14 @@ def main():
         parser.error("Run scripts/fdroid/prefetch.py in this isolated checkout before building")
     environment = java_environment(os.environ)
     sdk = sdk_directory(args.sdk, environment)
+    if ROOT != CANONICAL_ROOT:
+        arguments = [sys.executable, str(CANONICAL_ROOT / "scripts/fdroid/build.py"),
+            "--gradle", gradle_command(args.gradle), "--sdk", str(sdk),
+            "--pdfium-source-work", str(args.pdfium_source_work.resolve()),
+            "--speech-source-work", str(args.speech_source_work.resolve()),
+            "--jobs", str(args.jobs), "--native-jobs", str(args.native_jobs)]
+        subprocess.run(canonical_command(ROOT, arguments), env=environment, check=True)
+        return
     pins = json.loads((ROOT / "scripts/fdroid/toolchains.json").read_text())
     temporary = ROOT.parent / ".fdroid-tmp"
     temporary.mkdir(exist_ok=True)

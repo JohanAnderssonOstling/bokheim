@@ -1,13 +1,17 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
 import build
+import canonical
 
 
 class OfflineBuildTests(unittest.TestCase):
@@ -25,6 +29,7 @@ class OfflineBuildTests(unittest.TestCase):
         argv = ["build.py", "--pdfium-source-work", str(self.root / "pdfium"),
             "--speech-source-work", str(self.root / "speech")]
         with patch.object(build, "ROOT", self.root), patch("sys.argv", argv), \
+                patch.object(build, "CANONICAL_ROOT", self.root), \
                 patch.object(build, "java_environment", return_value={}), \
                 patch.object(build, "sdk_directory", return_value=self.root / "sdk"), \
                 patch.object(build, "gradle_command", return_value="gradle"), \
@@ -81,6 +86,27 @@ class OfflineBuildTests(unittest.TestCase):
                 patch.object(speech, "extract", return_value=self.root / "source"):
             with self.assertRaisesRegex(RuntimeError, "Cached input checksum mismatch"):
                 speech.prefetch_sources(self.root, offline=True)
+
+    @unittest.skipUnless(shutil.which("bwrap") and shutil.which("cargo"), "Requires Linux bubblewrap and Rust")
+    def test_external_dependency_type_identity_matches_across_checkout_paths(self):
+        identities = []
+        for name in ("first", "second"):
+            parent = self.root / name
+            app = parent / "arbitrary-checkout-name"
+            dependency = parent / "dependency"
+            for directory in (app / "src", app / "scripts/fdroid", dependency / "src"):
+                directory.mkdir(parents=True)
+            (app / "Cargo.toml").write_text('[package]\nname="identity-probe"\nversion="0.1.0"\nedition="2021"\n'
+                '[workspace]\n[dependencies]\nexternal={path="../dependency"}\n')
+            (app / "src/main.rs").write_text('fn main() { println!("{:?}", std::any::TypeId::of::<external::Example>()); }')
+            (dependency / "Cargo.toml").write_text('[package]\nname="external"\nversion="0.1.0"\nedition="2021"\n')
+            (dependency / "src/lib.rs").write_text("pub struct Example;")
+            (app / "scripts/fdroid/sources.json").write_text(json.dumps({"sources": [{"name": "dependency"}]}))
+            environment = dict(os.environ, RUSTC_WRAPPER="", CARGO_TARGET_DIR=str(canonical.CANONICAL_ROOT / "target"))
+            result = subprocess.run(canonical.command(app, [shutil.which("cargo"), "run", "--offline", "--quiet"]),
+                env=environment, check=True, capture_output=True, text=True)
+            identities.append(result.stdout)
+        self.assertEqual(identities[0], identities[1])
 
 
 if __name__ == "__main__":
