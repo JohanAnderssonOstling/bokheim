@@ -26,10 +26,14 @@ def main():
     environment = java_environment(os.environ)
     sdk = sdk_directory(args.sdk, environment)
     pins = json.loads((ROOT / "scripts/fdroid/toolchains.json").read_text())
+    temporary = ROOT.parent / ".fdroid-tmp"
+    temporary.mkdir(exist_ok=True)
     environment.update(ANDROID_HOME=str(sdk), RUSTUP_TOOLCHAIN=pins["rust"],
-        SOURCE_DATE_EPOCH=str(pins["source_date_epoch"]), CARGO_INCREMENTAL="0", RUSTC_WRAPPER="")
+        SOURCE_DATE_EPOCH=str(pins["source_date_epoch"]), CARGO_INCREMENTAL="0", RUSTC_WRAPPER="",
+        TMPDIR=str(temporary), SQLITE_TMPDIR=str(temporary))
     command = [gradle_command(args.gradle), "-p", str(ROOT / "apps/desktop-gpui/android"),
-        "--no-daemon", "--max-workers=1", "--no-build-cache", "--offline", "-Dorg.gradle.jvmargs=-Xmx768m",
+        "--no-daemon", "--max-workers=1", "--no-build-cache", "--offline",
+        f"-Dorg.gradle.jvmargs=-Xmx768m -Djava.io.tmpdir={temporary}",
         "-Pbokheim.fdroid=true", f"-Pbokheim.rustJobs={args.jobs}", f"-Pbokheim.nativeJobs={args.native_jobs}",
         f"-Prust.ndkHome={sdk}/ndk/{pins['ndk']}",
         f"-Pbokheim.pdfiumSourceWork={args.pdfium_source_work.resolve()}",

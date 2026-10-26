@@ -14,7 +14,8 @@ class OfflineBuildTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name) / "bokheim"
+        self.root.mkdir()
 
     def test_build_requires_prefetch_and_disables_downloads_and_binary_caches(self):
         tools = self.root / "scripts/fdroid"
