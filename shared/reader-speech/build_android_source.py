@@ -97,6 +97,9 @@ def prepare_source(destination, aar, ndk, work=None, jobs=2, offline=False):
     flags += dependency_sources(work)
     remaps = f"-ffile-prefix-map={work}=/build/speech -ffile-prefix-map={ndk}=/build/android-ndk"
     flags += [f"-DCMAKE_C_FLAGS={remaps}", f"-DCMAKE_CXX_FLAGS={remaps}"]
+    # LLD hashes debug sections into the build ID before a later llvm-strip.
+    # Discard them while linking so checkout paths cannot change the runtime ID.
+    flags.append("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--strip-debug")
     run(["cmake", "-S", source, "-B", build, "-G", "Ninja", *flags], env=env)
     run(["cmake", "--build", build, "--target", "sherpa-onnx-c-api", "--parallel", str(jobs)], env=env)
     built = list(build.glob("**/libsherpa-onnx-c-api.so"))
