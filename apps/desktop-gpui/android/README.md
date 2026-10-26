@@ -57,7 +57,9 @@ For a fresh checkout, keep the source preparation away from existing developer
 repositories. The following commands use the review branch until it is merged;
 `gradle` must be Gradle 8.14.3. Install JDK 21, Python 3 and bubblewrap
 (`bwrap`) on Linux, with unprivileged user namespaces enabled. Allow at least
-20 GiB of free space for source/tool downloads and build outputs:
+30 GiB of free space for downloads and build outputs, in addition to the
+installed Android SDK. The native work directories can live on a larger mounted
+filesystem; use the same paths for prefetch and build:
 
 ```sh
 mkdir -p /path/to/isolated-fdroid-build

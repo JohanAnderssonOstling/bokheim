@@ -13,7 +13,7 @@ Repo: https://github.com/JohanAnderssonOstling/bokheim.git
 
 Builds:
   - versionName: 0.1.10
-    versionCode: 10
+    versionCode: 1010
     disable: Waiting for the first developer-signed F-Droid release
     commit: f22b419566ec1db68b297e82b039e794cf4c2f9f
     subdir: apps/desktop-gpui/android
@@ -59,4 +59,4 @@ MaintainerNotes: |-
 AutoUpdateMode: None
 UpdateCheckMode: None
 CurrentVersion: 0.1.10
-CurrentVersionCode: 10
+CurrentVersionCode: 1010
