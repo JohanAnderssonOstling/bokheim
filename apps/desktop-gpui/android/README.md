@@ -43,9 +43,58 @@ architecture, 16 KiB page support, and packaged license notices.
 Install `fdroidserver` separately and use `scripts/fdroid/scan.py` for source and
 APK scanning. Scan the prepared sources before building, or use a separate source
 snapshot, so generated libraries are not mistaken for bundled source inputs.
-Device PDF/speech tests and F-Droid maintainer review are still required.
-The pinned HtmlEngine and HtmlViewCore revisions have no explicit published
-license declaration; their licensing must be settled before official inclusion.
+Android device testing was confirmed complete by the maintainer on 2026-10-26.
+The pinned HtmlEngine and HtmlViewCore sources include GPL-3.0-or-later license
+text and Cargo declarations. F-Droid maintainer review is still required.
+
+For a fresh checkout, keep the source preparation away from existing developer
+repositories. The following commands use the review branch until it is merged;
+`gradle` must be Gradle 8.14.3:
+
+```sh
+mkdir -p /path/to/isolated-fdroid-build
+cd /path/to/isolated-fdroid-build
+git clone --branch fdroid/android-source-build-20261026 \
+  https://github.com/JohanAnderssonOstling/bokheim.git bokheim
+cd bokheim
+export ANDROID_HOME="$HOME/Android/Sdk"
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+rustup target add aarch64-linux-android
+python3 scripts/fdroid/prepare_checkout.py
+gradle -p apps/desktop-gpui/android --no-daemon --max-workers=2 \
+  -Pbokheim.fdroid=true -Pbokheim.rustJobs=2 assembleRelease
+```
+
+The unsigned output is
+`apps/desktop-gpui/android/build/outputs/apk/release/BokheimGpui-release-unsigned.apk`.
+The preparation step changes this isolated checkout's settings and removes the
+non-Android files described above; do not run it in your development checkout.
+
+F-Droid can either sign the app with its own per-app key, or distribute an APK
+signed with the existing developer key after verifying a reproducible build.
+The latter preserves update compatibility with direct APKs using that key, an
+unchanged application ID, and increasing version codes. The F-Droid-mode APK may
+have different features from direct releases; the F-Droid rebuild must match
+the developer-signed **F-Droid-mode** APK exactly, apart from signing data.
+Reproducibility has not yet been demonstrated. See F-Droid's
+[signing and reproducibility documentation](https://f-droid.org/docs/Reproducible_Builds/).
+
+To sign the unsigned F-Droid-mode APK yourself, use the existing production
+keystore and Android SDK `apksigner`; do not enable Gradle's local test signing.
+The following prompts for passwords rather than putting them in shell history:
+
+```sh
+"$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+  --ks "$BOKHEIM_ANDROID_KEYSTORE" \
+  --ks-key-alias "$BOKHEIM_ANDROID_KEY_ALIAS" \
+  --out Bokheim-fdroid-signed.apk \
+  apps/desktop-gpui/android/build/outputs/apk/release/BokheimGpui-release-unsigned.apk
+"$ANDROID_HOME/build-tools/36.0.0/apksigner" verify \
+  --verbose --print-certs Bokheim-fdroid-signed.apk
+```
+
+F-Droid needs the public APK and certificate fingerprint for verification; the
+private signing key stays with the developer.
 
 Build an optimized ARM64 release APK with a JDK supported by Gradle (for example JDK 21),
 Android SDK 36, the configured Android NDK, and Rust's `aarch64-linux-android`

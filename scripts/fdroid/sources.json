@@ -10,16 +10,16 @@
     {
       "name": "HtmlEngine",
       "repository": "https://github.com/JohanAnderssonOstling/HtmlEngine",
-      "commit": "fbdc9748d7ddb339d23b8f3cd65e54c16f371fad",
-      "url": "https://codeload.github.com/JohanAnderssonOstling/HtmlEngine/tar.gz/fbdc9748d7ddb339d23b8f3cd65e54c16f371fad",
-      "sha256": "d9bbe7f9aaacbcc27601430bfe63abb3335ed7c5c207923a71cb89f844f3041d"
+      "commit": "2ae01835c33a2bc59b48afa2bf2a15ad67957356",
+      "url": "https://codeload.github.com/JohanAnderssonOstling/HtmlEngine/tar.gz/2ae01835c33a2bc59b48afa2bf2a15ad67957356",
+      "sha256": "faaf98533b285eb9898bec270b22d612b5e7e1aca8436b32f8f21301a6c8bde1"
     },
     {
       "name": "HtmlViewCore",
       "repository": "https://github.com/JohanAnderssonOstling/HtmlViewCore",
-      "commit": "e34aba1f7d91f5e4ce95d5d9141f97c74d42f6a9",
-      "url": "https://codeload.github.com/JohanAnderssonOstling/HtmlViewCore/tar.gz/e34aba1f7d91f5e4ce95d5d9141f97c74d42f6a9",
-      "sha256": "f6cf36e386eb7d233dd7aea18ec5205b784cb15cb1ef48ff1774ca0e82c8a8ea",
+      "commit": "1fcaef303b37869c62b7a9cf13f994785a4447ec",
+      "url": "https://codeload.github.com/JohanAnderssonOstling/HtmlViewCore/tar.gz/1fcaef303b37869c62b7a9cf13f994785a4447ec",
+      "sha256": "bda5c9214329c2899b029c537c8e693d4e3ed53be722451e246e9cacbd1f7796",
       "patches": [
         {
           "path": "scripts/fdroid/patches/html-view-core-reading-lines.patch",
