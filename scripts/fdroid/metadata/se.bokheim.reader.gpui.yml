@@ -21,15 +21,14 @@ Builds:
       - apt-get update
       - apt-get install -y build-essential cmake ninja-build pkg-config python3 curl
         openjdk-21-jdk-headless bubblewrap
-    init:
-      - bash $$rustup$$/rustup-init.sh -y --default-toolchain 1.99.1 --profile minimal
-        --no-modify-path
-      - sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+    init: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
     output: build/outputs/apk/release/BokheimGpui-release-unsigned.apk
     binary: https://github.com/JohanAnderssonOstling/bokheim/releases/download/v%v/Bokheim-fdroid-arm64.apk
     srclibs:
       - rustup@d8c92c6765f85625b20482e165066bf1e98e7297
     prebuild:
+      - bash $$rustup$$/rustup-init.sh -y --default-toolchain 1.99.1 --profile minimal
+        --no-modify-path
       - export PATH="$HOME/.cargo/bin:$PATH"
       - python3 ../../../scripts/fdroid/prefetch.py --gradle gradle --sdk $$SDK$$
         --pdfium-source-work ../../../../.bokheim-native/pdfium --speech-source-work
