@@ -159,6 +159,9 @@ android {
 tasks.register("prefetchFdroidDependencies") {
     doLast {
         check(fdroidBuild) { "Dependency prefetch requires -Pbokheim.fdroid=true" }
+        // AAPT2 uses a detached configuration created only when its executable
+        // is requested, so the configuration loop alone cannot prefetch it.
+        check(androidComponents.sdkComponents.aapt2.get().executable.get().asFile.isFile)
         rootProject.allprojects.forEach { project ->
             project.configurations.filter { configuration -> configuration.isCanBeResolved &&
                 listOf("test", "debug", "play").none { configuration.name.contains(it, ignoreCase = true) } }
