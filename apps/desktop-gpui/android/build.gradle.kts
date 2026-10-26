@@ -1,5 +1,5 @@
 import groovy.json.JsonSlurper
-import org.gradle.api.artifacts.ProjectDependency
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 
 plugins {
     id("com.android.application") version "8.11.0"
@@ -162,7 +162,13 @@ tasks.register("prefetchFdroidDependencies") {
         rootProject.allprojects.forEach { project ->
             project.configurations.filter { configuration -> configuration.isCanBeResolved &&
                 listOf("test", "debug", "play").none { configuration.name.contains(it, ignoreCase = true) } }
-                .forEach { configuration -> configuration.copyRecursive { it !is ProjectDependency }.resolve() }
+                .forEach { configuration ->
+                    // Keep project dependency edges for version selection, while
+                    // fetching only external artifacts without compiling projects.
+                    configuration.incoming.artifactView {
+                        componentFilter { it is ModuleComponentIdentifier }
+                    }.files.files
+                }
         }
     }
 }
