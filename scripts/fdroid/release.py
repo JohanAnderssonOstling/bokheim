@@ -17,6 +17,7 @@ import zipfile
 
 from native_build import digest, write
 from normalize import normalize, normalizer
+from prepare_checkout import UNUSED_INPUTS
 
 ROOT = Path(__file__).resolve().parents[2]
 GRADLE_VERSION = "8.14.3"
@@ -160,7 +161,11 @@ def checkout_snapshot(ref, work):
         archive = staging / "source.tar"
         subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", "--output", str(archive), commit], check=True)
         with tarfile.open(archive) as stream:
-            stream.extractall(staging / "bokheim", filter="data")
+            def source_filter(member, destination):
+                if member.name in UNUSED_INPUTS:
+                    return None
+                return tarfile.data_filter(member, destination)
+            stream.extractall(staging / "bokheim", filter=source_filter)
         archive.unlink()
         if not (staging / "bokheim/scripts/fdroid/prepare_checkout.py").is_file():
             raise RuntimeError("Selected commit has no F-Droid build support; pass --ref with the F-Droid review branch")

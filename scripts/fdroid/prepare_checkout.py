@@ -8,6 +8,18 @@ import subprocess
 
 from native_build import apply_source_patch, digest, extract, fetch, write
 
+UNUSED_INPUTS = (
+    "shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication-reviewed/releases/248/catalog.sqlite3.gz",
+    "shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication/releases/248/catalog.sqlite3.gz",
+    "shared/book-model/tests/fixtures/annotation_pdf.bin",
+    "shared/book-model/tests/fixtures/annotation_epub.bin",
+    "apps/desktop-gpui/kobo/nickelmenu-install/KoboRoot.tgz",
+    "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz",
+    "shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication-input/books",
+    "shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication-reviewed/books",
+    "shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication/books",
+)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -45,18 +57,11 @@ def main():
     # repositories; no unused custom Maven repository is left for the scanner.
     write(android / "settings.gradle.kts", (android / "settings.fdroid.gradle.kts").read_bytes())
     removed = []
-    for relative in (
-        "shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication-reviewed/releases/248/catalog.sqlite3.gz",
-        "shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication/releases/248/catalog.sqlite3.gz",
-        "shared/book-model/tests/fixtures/annotation_pdf.bin",
-        "shared/book-model/tests/fixtures/annotation_epub.bin",
-        "apps/desktop-gpui/kobo/nickelmenu-install/KoboRoot.tgz",
-        "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz",
-    ):
+    for relative in UNUSED_INPUTS:
         # Historical report databases, test fixtures and Kobo packages are not
         # Android build inputs. Remove them only in this prepared checkout.
         path = root / relative
-        if path.is_file():
+        if path.is_symlink() or path.is_file():
             path.unlink()
             removed.append(relative)
     write(root / "FDROID-PREPARED.json", json.dumps({"sources_sha256": digest(pins_path),

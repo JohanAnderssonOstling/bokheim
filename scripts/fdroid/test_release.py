@@ -73,6 +73,9 @@ class FdroidReleaseTests(unittest.TestCase):
         script.write_text("# source preparation\n")
         source = repository / "code.rs"
         source.write_text("committed source\n")
+        archived_books = repository / "shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication-input/books"
+        archived_books.parent.mkdir(parents=True)
+        archived_books.symlink_to(self.root / "private-books")
         subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
         subprocess.run(["git", "-C", str(repository), "-c", "user.name=Release Test",
             "-c", "user.email=test@example.invalid", "commit", "-qm", "Source snapshot"], check=True)
@@ -82,6 +85,8 @@ class FdroidReleaseTests(unittest.TestCase):
             snapshot, commit = release.checkout_snapshot("HEAD", self.root / "work")
         self.assertEqual((snapshot / "code.rs").read_text(), "committed source\n")
         self.assertFalse((snapshot / "private-untracked-file").exists())
+        self.assertFalse((snapshot / archived_books.relative_to(repository)).is_symlink())
+        self.assertTrue(archived_books.is_symlink())
         self.assertEqual(source.read_text(), "uncommitted source\n")
         self.assertEqual(len(commit), 40)
 
