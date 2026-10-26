@@ -114,10 +114,18 @@ may differ: `build.py` mounts the app and its sibling dependencies under
 Cargo hashes absolute paths into external path dependency identities; Rust
 source-path remapping alone does not stabilize them.
 
+Prefetch includes Cargo's host dependencies, project dependency version
+constraints, AAPT2 and the pinned lint runtime. If other Gradle builds are active,
+use a separate `GRADLE_USER_HOME` for both prefetch and offline compilation to
+avoid shared cache locks. Signing settings must be available in that home's
+`gradle.properties` or through the `BOKHEIM_ANDROID_*` environment settings below.
+
 The build maps Rust and speech source paths to stable paths, fixes the build
 epoch, omits checkout-specific VCS metadata, and normalizes the unsigned APK with
 the SHA-pinned upstream `reproducible-apk-tools` alignment script. Developer
 signing preserves alignment and uses v2/v3 signatures (minimum Android API 26).
+Speech debug data is stripped during linking so its ELF build ID does not retain
+differences from debug paths that would survive a later strip operation.
 
 After building the independent unsigned APK, install the verification tools in
 a separate environment and compare it with the developer-signed reference:
