@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from native_build import fetch, write
+from normalize import normalizer
 from release import ROOT, gradle_command, java_environment, sdk_directory
 
 
@@ -32,7 +33,7 @@ def main():
     subprocess.run(prepare, env=environment, check=True)
     if not args.offline:
         subprocess.run(["rustup", "toolchain", "install", pins["rust"], "--profile", "minimal",
-            "--component", "rust-src", "--target", "aarch64-linux-android"], env=environment, check=True)
+            "--component", "rust-src", "--target", "aarch64-linux-android", "--no-self-update"], env=environment, check=True)
     cargo = ["cargo", "fetch", "--locked", "--target", "aarch64-linux-android"]
     if args.offline:
         cargo.append("--offline")
@@ -42,7 +43,7 @@ def main():
         "prefetchFdroidDependencies"]
     if args.offline:
         gradle.append("--offline")
-    subprocess.run(gradle, env=environment, check=True)
+    subprocess.run(gradle, cwd=ROOT / "apps/desktop-gpui/android", env=environment, check=True)
     # Do not generate objects or runtime libraries in the source-fetch phase.
     pdfium = runpy.run_path(str(ROOT / "shared/pdfium/build_android_source.py"))
     pdfium["prepare_source"](ROOT / ".pdfium/fdroid/aarch64-linux-android", args.pdfium_source_work.resolve(),
@@ -52,6 +53,7 @@ def main():
     voice = runpy.run_path(str(ROOT / "shared/reader-speech/prepare.py"))
     cache = Path(environment.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "bokheim/tts"
     fetch(voice["URL"], voice["SHA256"], cache / "vits-piper-en_GB-alba-medium.tar.bz2", args.offline)
+    normalizer(args.offline)
     write(ROOT / "FDROID-PREFETCHED.json", json.dumps({"schema": 1, "toolchains": pins,
         "application_binaries_built": False}, indent=2) + "\n")
     print("F-Droid source, toolchain and dependency inputs are ready for an offline build.")

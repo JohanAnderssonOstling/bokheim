@@ -131,6 +131,7 @@ class FdroidReleaseTests(unittest.TestCase):
             with zipfile.ZipFile(destination, "w") as archive:
                 archive.writestr("classes.dex", b"replaced bytecode")
         with patch.object(release.runpy, "run_path", return_value={"verify": lambda *a, **kw: {}}), \
+                patch.object(release, "normalize"), \
                 patch.object(release.subprocess, "run", side_effect=corrupt):
             with self.assertRaisesRegex(RuntimeError, "changed APK contents"):
                 release.release(apk, output, self.root / "sdk", self.root / "private.jks", "production", {}, "ab" * 32)

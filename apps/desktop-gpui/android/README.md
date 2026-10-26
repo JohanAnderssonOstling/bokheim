@@ -3,12 +3,18 @@
 ## F-Droid build mode
 
 Use a fresh, isolated checkout with the committed `Cargo.lock`, Python, CMake,
-Ninja, Git, Gradle 8.14.3, JDK 21, Android SDK 36, NDK 29.0.14206865, and Rust's
-`aarch64-linux-android` target. From the repository root:
+Ninja, Git, Gradle 8.14.3, JDK 21, Android SDK 36, build-tools 36.0.0,
+NDK 29.0.14206865, and Rust 1.99.1 with the `aarch64-linux-android` target.
+The exact toolchain and APK normalization pins are in
+`scripts/fdroid/toolchains.json`. From the isolated repository root:
 
 ```sh
-python3 scripts/fdroid/prepare_checkout.py
-gradle -p apps/desktop-gpui/android assembleRelease -Pbokheim.fdroid=true
+python3 scripts/fdroid/prefetch.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
+python3 scripts/fdroid/build.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
 ```
 
 The preparation script downloads the pinned public companion sources to sibling
@@ -59,16 +65,69 @@ git clone --branch fdroid/android-source-build-20261026 \
 cd bokheim
 export ANDROID_HOME="$HOME/Android/Sdk"
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
-rustup target add aarch64-linux-android
-python3 scripts/fdroid/prepare_checkout.py
-gradle -p apps/desktop-gpui/android --no-daemon --max-workers=2 \
-  -Pbokheim.fdroid=true -Pbokheim.rustJobs=2 assembleRelease
+python3 scripts/fdroid/prefetch.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
+python3 scripts/fdroid/build.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
 ```
 
 The unsigned output is
 `apps/desktop-gpui/android/build/outputs/apk/release/BokheimGpui-release-unsigned.apk`.
 The preparation step changes this isolated checkout's settings and removes the
 non-Android files described above; do not run it in your development checkout.
+
+### Offline recipe and clean rebuild verification
+
+`scripts/fdroid/metadata/se.bokheim.reader.gpui.yml` is the fdroiddata recipe.
+It pins the application commit, Rustup source, Rust version, Android NDK and
+upstream signing certificate. Its prebuild phase fetches dependencies; its build
+phase runs the unsigned build with Gradle/Cargo downloads disabled and compiler
+caches disabled. Native source archives are SHA-verified before compilation.
+The draft is disabled until a developer-signed F-Droid APK is published at its
+versioned `binary` URL. Publishing a release and submitting fdroiddata remain
+separate steps.
+
+For a network-enforced local check on Linux, run the build inside the provided
+user/network namespace wrapper. It allows loopback for Gradle, rejects external
+interfaces, probes the external network, and records the command result:
+
+```sh
+python3 scripts/fdroid/offline.py --report offline-network.json -- \
+  python3 scripts/fdroid/build.py \
+  --pdfium-source-work ../.bokheim-native/pdfium \
+  --speech-source-work ../.bokheim-native/speech
+```
+
+For a clean rebuild, use another fresh isolated checkout and fresh Cargo/Android
+outputs. Move aside the builder-owned PDFium `out/android-arm64` and speech
+`build` directories before rebuilding; keep their pinned source archives and
+toolchains. Never remove unrelated developer caches. Run the prefetch phase
+before disabling networking. The second checkout should have a different parent
+path but the same basename (`bokheim`), matching the F-Droid source layout.
+
+The build maps Rust and speech source paths to stable paths, fixes the build
+epoch, omits checkout-specific VCS metadata, and normalizes the unsigned APK with
+the SHA-pinned upstream `reproducible-apk-tools` alignment script. Developer
+signing preserves alignment and uses v2/v3 signatures (minimum Android API 26).
+
+After building the independent unsigned APK, install the verification tools in
+a separate environment and compare it with the developer-signed reference:
+
+```sh
+python3 -m venv /path/to/fdroid-tools
+/path/to/fdroid-tools/bin/pip install -r scripts/fdroid/requirements.txt
+/path/to/fdroid-tools/bin/python scripts/fdroid/compare.py \
+  --signed-apk /path/to/developer-signed.apk \
+  --rebuilt-apk /path/to/clean-rebuilt-unsigned.apk \
+  --output reproducibility.json
+```
+
+The comparison verifies the reference signature, copies that signature onto the
+independent rebuild using `apksigcopier`, and verifies the result. Matching ZIP
+entry contents alone is insufficient; the signature-copy check must pass.
+F-Droid still needs to repeat this validation on its build infrastructure.
 
 ### Automated developer-signed releases
 
@@ -125,7 +184,7 @@ The latter preserves update compatibility with direct APKs using that key, an
 unchanged application ID, and increasing version codes. The F-Droid-mode APK may
 have different features from direct releases; the F-Droid rebuild must match
 the developer-signed **F-Droid-mode** APK exactly, apart from signing data.
-Reproducibility has not yet been demonstrated. See F-Droid's
+Use the clean-rebuild comparison above to verify reproducibility. See F-Droid's
 [signing and reproducibility documentation](https://f-droid.org/docs/Reproducible_Builds/).
 
 To sign the unsigned F-Droid-mode APK yourself, use the existing production
@@ -136,6 +195,8 @@ The following prompts for passwords rather than putting them in shell history:
 "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
   --ks "$BOKHEIM_ANDROID_KEYSTORE" \
   --ks-key-alias "$BOKHEIM_ANDROID_KEY_ALIAS" \
+  --alignment-preserved true --v1-signing-enabled false \
+  --v2-signing-enabled true --v3-signing-enabled true \
   --out Bokheim-fdroid-signed.apk \
   apps/desktop-gpui/android/build/outputs/apk/release/BokheimGpui-release-unsigned.apk
 "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify \

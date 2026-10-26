@@ -16,11 +16,12 @@ import tempfile
 import zipfile
 
 from native_build import digest, write
+from normalize import normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 GRADLE_VERSION = "8.14.3"
 BUILD_TOOLS = "36.0.0"
-SIGNING_TOOLS = "34.0.0"
+SIGNING_TOOLS = "36.0.0"
 APK_PATH = Path("apps/desktop-gpui/android/build/outputs/apk/release/BokheimGpui-release-unsigned.apk")
 
 
@@ -226,8 +227,12 @@ def release(apk, output, sdk, keystore, alias, environment, certificate, commit=
             if name not in {"BOKHEIM_FDROID_STORE_PASSWORD", "BOKHEIM_FDROID_KEY_PASSWORD"}}
         unsigned_report = verifier(unsigned, tools / "aapt", environment=verification_environment)
         expected_payload = payloads(unsigned)
+        normalize(unsigned)
+        unsigned_report = verifier(unsigned, tools / "aapt", environment=verification_environment)
         subprocess.run([str(sdk / "build-tools" / SIGNING_TOOLS / "apksigner"), "sign", "--ks", str(keystore), "--ks-key-alias", alias,
             "--ks-pass", "env:BOKHEIM_FDROID_STORE_PASSWORD", "--key-pass", "env:BOKHEIM_FDROID_KEY_PASSWORD",
+            "--alignment-preserved", "true",
+            "--v1-signing-enabled", "false", "--v2-signing-enabled", "true", "--v3-signing-enabled", "true",
             "--v4-signing-enabled", "false", "--out", str(signed), str(unsigned)],
             env=environment, stdin=subprocess.DEVNULL, check=True)
         signed_report = verifier(signed, tools / "aapt", certificate, environment=verification_environment)

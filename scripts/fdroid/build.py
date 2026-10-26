@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 
 from release import ROOT, gradle_command, java_environment, sdk_directory
+from normalize import normalize
 
 
 def main():
@@ -33,7 +34,8 @@ def main():
         f"-Prust.ndkHome={sdk}/ndk/{pins['ndk']}",
         f"-Pbokheim.pdfiumSourceWork={args.pdfium_source_work.resolve()}",
         f"-Pbokheim.speechSourceWork={args.speech_source_work.resolve()}", "assembleRelease"]
-    subprocess.run(command, cwd=ROOT, env=environment, check=True)
+    subprocess.run(command, cwd=ROOT / "apps/desktop-gpui/android", env=environment, check=True)
+    normalize(ROOT / "apps/desktop-gpui/android/build/outputs/apk/release/BokheimGpui-release-unsigned.apk")
 
 
 if __name__ == "__main__":
