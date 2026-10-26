@@ -3,6 +3,7 @@
   "gradle": "8.14.3",
   "jdk": 21,
   "build_tools": "36.0.0",
+  "lint": "31.11.0",
   "signing_tools": "36.0.0",
   "ndk": "29.0.14206865",
   "source_date_epoch": 1793023253,

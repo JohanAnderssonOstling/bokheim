@@ -162,6 +162,10 @@ tasks.register("prefetchFdroidDependencies") {
         // AAPT2 uses a detached configuration created only when its executable
         // is requested, so the configuration loop alone cannot prefetch it.
         check(androidComponents.sdkComponents.aapt2.get().executable.get().asFile.isFile)
+        // AGP also creates its lint runtime configuration lazily during tasks.
+        configurations.detachedConfiguration(dependencies.create(
+            "com.android.tools.lint:lint-gradle:${fdroidToolchains["lint"]}"
+        )).resolve()
         rootProject.allprojects.forEach { project ->
             project.configurations.filter { configuration -> configuration.isCanBeResolved &&
                 listOf("test", "debug", "play").none { configuration.name.contains(it, ignoreCase = true) } }
