@@ -15,7 +15,7 @@ Builds:
   - versionName: 0.1.10
     versionCode: 1010
     disable: Waiting for the first developer-signed F-Droid release
-    commit: 4a7e7fee4ecd4cd12a560bc4458817e762f323a0
+    commit: 441e92a6b198b2cbee05192c4ce00166cac5be7e
     subdir: apps/desktop-gpui/android
     sudo:
       - apt-get update
