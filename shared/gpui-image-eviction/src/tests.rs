@@ -174,6 +174,90 @@ fn the_newest_prefetched_image_survives_until_it_can_be_painted() {
 }
 
 #[gpui::test]
+fn explicit_trim_releases_unused_images_below_budget_and_protects_visible_owners(cx: &mut TestAppContext) {
+    let mut first = cx.add_empty_window().clone();
+    let mut second = cx.add_empty_window().clone();
+    let current = image(2);
+    let weak = Arc::downgrade(&current);
+    let mut probe = RenderImage::new(vec![Frame::new(RgbaImage::new(2, 2)); 2]);
+    probe.id = current.id;
+    paint(&mut first, &current);
+    paint(&mut second, &current);
+    cx.update(trim_unused_images);
+    cx.run_until_parked();
+    assert!(weak.upgrade().is_some(), "a reader or visible frame still owns this image");
+    drop(current);
+    clear(&mut first);
+    clear(&mut second);
+    cx.update(trim_unused_images);
+    cx.run_until_parked();
+    assert!(weak.upgrade().is_none(), "explicit trim must reclaim even the newest image below budget");
+    assert!(!first.update(|window, _| window.has_image_atlas_entry(&probe)));
+    assert!(!second.update(|window, _| window.has_image_atlas_entry(&probe)));
+    cx.update(|cx| assert_eq!(cx.global::<PaintedImages>().bytes, 0));
+}
+
+#[gpui::test]
+fn closing_one_reader_reclaims_its_images_and_preserves_another_windows_images(cx: &mut TestAppContext) {
+    let mut first = cx.add_empty_window().clone();
+    let mut second = cx.add_empty_window().clone();
+    let first_reader = image(2);
+    let second_reader = first_reader.clone();
+    let shared_weak = Arc::downgrade(&first_reader);
+    let first_only = image(1);
+    let first_only_weak = Arc::downgrade(&first_only);
+    cx.update(|cx| track_image(&first_only, cx));
+    let mut probe = RenderImage::new(vec![Frame::new(RgbaImage::new(2, 2)); 2]);
+    probe.id = first_reader.id;
+    paint(&mut first, &first_reader);
+    paint(&mut second, &second_reader);
+
+    drop(first_only);
+    drop(first_reader);
+    first.update(|window, _| trim_unused_images_after_transition(window));
+    first.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(first_only_weak.upgrade().is_some(), "cleanup must wait for the outgoing frame to be replaced");
+    clear(&mut first);
+    first.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(first_only_weak.upgrade().is_none(), "closing a reader must release its unused images below budget");
+    assert!(shared_weak.upgrade().is_some());
+    assert!(second.update(|window, _| window.has_image_atlas_entry(&probe)), "the other window must keep its shared atlas image");
+
+    drop(second_reader);
+    second.update(|window, _| trim_unused_images_after_transition(window));
+    second.update(|window, cx| window.simulate_next_frame(cx));
+    clear(&mut second);
+    second.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(shared_weak.upgrade().is_none(), "the last reader closing must release the shared pixels");
+    assert!(!first.update(|window, _| window.has_image_atlas_entry(&probe)));
+    assert!(!second.update(|window, _| window.has_image_atlas_entry(&probe)));
+    cx.update(|cx| assert_eq!(cx.global::<PaintedImages>().bytes, 0));
+}
+
+#[gpui::test]
+fn explicit_trim_overrides_an_already_scheduled_pressure_sweep(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(PaintedImages::new(16, 0)));
+    let first = image(1);
+    let second = image(1);
+    let weak = Arc::downgrade(&second);
+    cx.update(move |cx| {
+        track_image(&first, cx);
+        track_image(&second, cx);
+        assert!(cx.global::<PaintedImages>().cleanup_scheduled);
+        trim_unused_images(cx);
+        assert!(cx.global::<PaintedImages>().trim_requested);
+        drop(first);
+        drop(second);
+    });
+    cx.run_until_parked();
+    assert!(weak.upgrade().is_none());
+    cx.update(|cx| assert_eq!(cx.global::<PaintedImages>().bytes, 0));
+}
+
+#[gpui::test]
 fn page_turns_keep_reusable_pixels_within_the_budget(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(PaintedImages::new(48, 32)));
     let mut window = cx.add_empty_window().clone();

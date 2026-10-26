@@ -7,7 +7,6 @@ use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, CursorStyle, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Size, Style, Window, fill, px, relative, size,
 };
-use html::layout::LaidOutDocument;
 use html::render::{FragmentImagePolicy, FragmentRenderOptions, FragmentRenderer};
 
 use crate::fragment_selection::FragmentSelection;
@@ -74,12 +73,11 @@ struct FragmentState {
     height: f32,
     selection: Option<FragmentSelection>,
     selection_key: Option<FragmentKey>,
-    document: Option<LaidOutDocument>,
 }
 
 impl FragmentState {
     fn new(window: &Window) -> Self {
-        Self { renderer: FragmentRenderer::new(), shaper: GpuiTextCache::new(window.text_system().clone()), key: None, commands: Arc::default(), height: 0.0, selection: None, selection_key: None, document: None }
+        Self { renderer: FragmentRenderer::new(), shaper: GpuiTextCache::new(window.text_system().clone()), key: None, commands: Arc::default(), height: 0.0, selection: None, selection_key: None }
     }
 
     fn layout(&mut self, key: FragmentKey) -> Result<Size<Pixels>, String> {
@@ -95,7 +93,6 @@ impl FragmentState {
             rendered.scene().paint(&mut painter);
             self.commands = Arc::new(painter.into_commands());
             self.height = rendered.scene().content_height() as f32;
-            self.document = Some(rendered.into_parts().0);
             self.key = Some(key);
         }
         Ok(size(px(width), px(self.height)))
@@ -105,7 +102,7 @@ impl FragmentState {
         // Flex layout can measure several widths before returning to the same
         // final width. Those probes must not clear an ongoing selection.
         if self.selection_key != self.key {
-            if let (Some(selection), Some(document)) = (&mut self.selection, &self.document) {
+            if let (Some(selection), Some(document)) = (&mut self.selection, self.renderer.document()) {
                 selection.install(document, &self.shaper);
                 self.selection_key = self.key.clone();
             }
@@ -159,7 +156,6 @@ impl Element for HtmlFragmentElement {
                 state.layout(key).unwrap_or_else(|error| {
                     state.commands = Arc::default();
                     state.key = None;
-                    state.document = None;
                     state.selection_key = None;
                     if let Some(selection) = &mut state.selection {
                         selection.clear();
@@ -302,8 +298,6 @@ impl Element for HtmlFragmentElement {
 mod tests {
     use super::*;
     use gpui::{Context, EmptyView, Modifiers, ParentElement, Render, Styled, TestAppContext, div, point, rgba};
-    use html::layout::LayoutConstraints;
-    use std::time::Duration;
 
     fn description() -> SharedString {
         format!(
@@ -411,7 +405,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn justified_fragments_use_knuth_plass_without_height_clipping(cx: &mut TestAppContext) {
+    fn justified_fragments_distribute_word_spacing_without_height_clipping(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| EmptyView);
         window
             .update(cx, |_, window, _| {
@@ -421,9 +415,8 @@ mod tests {
                 let rendered = state.renderer.render(&source, &options, &mut state.shaper).unwrap();
                 assert!(!rendered.scene().is_clipped());
                 assert_eq!(rendered.scene().size().height, rendered.scene().content_height());
-                let (mut document, _) = rendered.into_parts();
-                let timings = document.relayout_with_timings(LayoutConstraints::new(240.0, 24.0).unwrap());
-                assert!(timings.break_lines_knuth > Duration::ZERO, "the fragment must run the Knuth–Plass algorithm");
+                let (document, _) = rendered.into_parts();
+                assert!(document.render_view().text().lines().iter().any(|line| line.word_spacing() != 0.0), "justified paragraphs must distribute spacing between words");
                 assert!(document.render_view().text().lines().len() > 2);
             })
             .unwrap();

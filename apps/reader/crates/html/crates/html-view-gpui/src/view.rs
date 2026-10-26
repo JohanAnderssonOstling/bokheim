@@ -1,9 +1,11 @@
+#[cfg(test)]
+mod font_tests;
 mod ruler;
 pub use ruler::ReadingRulerStyle;
 
 use core::panic::Location;
-use std::cell::Cell;
-use std::collections::VecDeque;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -13,15 +15,18 @@ use web_time::Instant;
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity, EventEmitter, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, ImageFormat, InspectorElementId, IntoElement, KeyContext,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollWheelEvent, Style, Window, relative,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollWheelEvent, Style, Window, WindowTextSystem, relative,
 };
-use html_view_core::{BlockingJob, BlockingJobSpawner, DisplayCacheKey, InteractionPalette, PointerDownOptions, ReadingFragment, ReadingTarget, RendererCommand, RendererEvent, RendererHost, RendererSession, SelectionMode, TocEntry};
+use html_view_core::{
+    BlockingJob, BlockingJobSpawner, DisplayCacheKey, FontFace, InteractionPalette, PointerDownOptions, ReaderStyleOverrides, ReadingFragment, ReadingTarget, RendererCommand, RendererEvent, RendererHost, RendererSession, ResourceProvider,
+    SelectionMode, TocEntry,
+};
 use image::RgbaImage;
 use kurbo::{Point, Size};
 
 use gpui::AppContext;
 use html_gpui::TextShapeCacheStats;
-use html_gpui::backend::{GlyphStore, GpuiCommandPainter, GpuiTextCache, ImageCache, PaintCommand, paint_commands};
+use html_gpui::backend::{GlyphStore, GpuiCommandPainter, GpuiTextCache, ImageCache, LoadedFontFace, PaintCommand, PublicationFonts, SharedPublicationFonts, face_key, load_font_face, paint_commands, publication_faces_for_overrides};
 
 /// A window point in the note's own coordinates, which is where its geometry
 /// and therefore its hit testing live.
@@ -169,6 +174,8 @@ struct HtmlDocumentPrepaint {
 enum HostMessage {
     Repaint,
     ResourceReady,
+    FontReady(LoadedFontFace),
+    FontSelectionChanged,
     Event(RendererEvent),
     ClipboardText(String),
     ClipboardImage { width: usize, height: usize, rgba: Vec<u8> },
@@ -176,6 +183,12 @@ enum HostMessage {
 }
 
 struct GpuiHost {
+    fonts: SharedPublicationFonts,
+    text_system: Arc<WindowTextSystem>,
+    font_requests: RefCell<HashSet<String>>,
+    font_overrides: RefCell<ReaderStyleOverrides>,
+    document_fonts: RefCell<HashMap<usize, Vec<FontFace>>>,
+    glyph_document: Cell<usize>,
     repaint_pending: Cell<bool>,
     messages: async_channel::Sender<HostMessage>,
     executor: gpui::BackgroundExecutor,
@@ -205,8 +218,21 @@ impl BlockingJobSpawner for GpuiBlockingJobSpawner {
 }
 
 impl GpuiHost {
-    fn new(messages: async_channel::Sender<HostMessage>, executor: gpui::BackgroundExecutor) -> Self {
-        Self { repaint_pending: Cell::new(false), messages, executor, scheduled_repaint: Arc::new(AtomicBool::new(false)), resource_repaint_pending: Arc::new(AtomicBool::new(false)), note_width: Cell::new(None) }
+    fn new(messages: async_channel::Sender<HostMessage>, executor: gpui::BackgroundExecutor, text_system: Arc<WindowTextSystem>) -> Self {
+        Self {
+            fonts: Rc::new(RefCell::new(PublicationFonts::default())),
+            text_system,
+            font_requests: RefCell::default(),
+            font_overrides: RefCell::default(),
+            document_fonts: RefCell::default(),
+            glyph_document: Cell::new(0),
+            repaint_pending: Cell::new(false),
+            messages,
+            executor,
+            scheduled_repaint: Arc::new(AtomicBool::new(false)),
+            resource_repaint_pending: Arc::new(AtomicBool::new(false)),
+            note_width: Cell::new(None),
+        }
     }
 
     fn send(&self, message: HostMessage) {
@@ -215,6 +241,61 @@ impl GpuiHost {
 }
 
 impl RendererHost for GpuiHost {
+    fn set_font_overrides(&self, overrides: &ReaderStyleOverrides) {
+        *self.font_overrides.borrow_mut() = overrides.clone();
+        let declarations = self.document_fonts.borrow();
+        let faces = publication_faces_for_overrides(declarations.get(&self.glyph_document.get()).map_or(&[], Vec::as_slice), overrides);
+        let mut fonts = self.fonts.borrow_mut();
+        fonts.set_reader_overrides(overrides);
+        fonts.set_active(&faces);
+    }
+
+    fn set_glyph_document(&self, document: usize) {
+        self.glyph_document.set(document);
+        let declarations = self.document_fonts.borrow();
+        let faces = publication_faces_for_overrides(declarations.get(&document).map_or(&[], Vec::as_slice), &self.font_overrides.borrow());
+        self.fonts.borrow_mut().set_active(&faces);
+    }
+
+    fn prepare_font_faces(&self, faces: &[FontFace], provider: Arc<dyn ResourceProvider>) {
+        self.document_fonts.borrow_mut().insert(self.glyph_document.get(), faces.to_vec());
+        let faces = publication_faces_for_overrides(faces, &self.font_overrides.borrow());
+        let selection_changed = {
+            let mut fonts = self.fonts.borrow_mut();
+            let had_loaded_faces = fonts.has_loaded_active_faces();
+            let changed = fonts.set_active(&faces);
+            changed && (had_loaded_faces || fonts.has_loaded_active_faces())
+        };
+        if selection_changed {
+            self.send(HostMessage::FontSelectionChanged);
+        }
+        let pending = {
+            let mut requested = self.font_requests.borrow_mut();
+            faces.iter().filter(|face| requested.insert(face_key(face))).cloned().collect::<Vec<_>>()
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let installed = self.text_system.all_font_names();
+        for face in pending {
+            let provider = provider.clone();
+            let installed = installed.clone();
+            let messages = self.messages.clone();
+            let work = async move {
+                match load_font_face(face, provider, &installed).await {
+                    Ok(loaded) => {
+                        let _ = messages.send(HostMessage::FontReady(loaded)).await;
+                    }
+                    Err(error) => eprintln!("publication font unavailable: {error}"),
+                }
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            self.executor.spawn(work).detach();
+            #[cfg(target_arch = "wasm32")]
+            wasm_bindgen_futures::spawn_local(work);
+        }
+    }
+
     fn note_popup_width(&self) -> Option<f64> {
         self.note_width.get()
     }
@@ -541,12 +622,10 @@ impl EventEmitter<RendererEvent> for HtmlView {}
 impl EventEmitter<DocumentTap> for HtmlView {}
 
 impl HtmlView {
-    pub fn from_provider(
-        provider: std::sync::Arc<dyn html_view_core::ResourceProvider>, document_uris: Vec<String>, start_index: usize, nav_state: Option<&str>, config: html_view_core::RendererInitialConfig, window: &mut Window, cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn from_provider(provider: Arc<dyn ResourceProvider>, document_uris: Vec<String>, start_index: usize, nav_state: Option<&str>, config: html_view_core::RendererInitialConfig, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (messages, receiver) = async_channel::unbounded();
-        let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone()));
-        let shaper = GpuiTextCache::new(window.text_system().clone());
+        let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone(), window.text_system().clone()));
+        let shaper = GpuiTextCache::new(window.text_system().clone()).with_publication_fonts(host.fonts.clone());
         let renderer = RendererSession::from_provider_with_nav(host.clone(), shaper, provider, document_uris, start_index, nav_state, config);
         Self::from_renderer(host, receiver, renderer, window, cx)
     }
@@ -558,16 +637,16 @@ impl HtmlView {
     /// Complete fallible shaping before registering the GPUI entity.
     pub fn create_from_preparation(prepared: html_view_core::RendererPreparation, window: &mut Window, cx: &mut App) -> Result<Entity<Self>, String> {
         let (messages, receiver) = async_channel::unbounded();
-        let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone()));
-        let shaper = GpuiTextCache::new(window.text_system().clone());
+        let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone(), window.text_system().clone()));
+        let shaper = GpuiTextCache::new(window.text_system().clone()).with_publication_fonts(host.fonts.clone());
         let renderer = RendererSession::from_preparation(host.clone(), shaper, prepared)?;
         Ok(cx.new(|cx| Self::from_renderer(host, receiver, renderer, window, cx)))
     }
 
     fn new_with_renderer(window: &mut Window, cx: &mut Context<Self>, make_renderer: impl FnOnce(Rc<GpuiHost>, GpuiTextCache) -> Result<RendererSession<GpuiTextCache>, String>) -> Result<Self, String> {
         let (messages, receiver) = async_channel::unbounded();
-        let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone()));
-        let shaper = GpuiTextCache::new(window.text_system().clone());
+        let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone(), window.text_system().clone()));
+        let shaper = GpuiTextCache::new(window.text_system().clone()).with_publication_fonts(host.fonts.clone());
         let renderer = make_renderer(host.clone(), shaper)?;
         Ok(Self::from_renderer(host, receiver, renderer, window, cx))
     }
@@ -632,7 +711,9 @@ impl HtmlView {
     }
 
     pub fn follow_reading_target(&mut self, target: ReadingTarget, _cx: &mut Context<Self>) {
-        self.renderer.follow_reading_target(target);
+        if self.renderer.follow_reading_target(target) {
+            self.reset_ruler(true);
+        }
     }
 
     /// Reflows to the width supplied by the containing GPUI layout without
@@ -965,7 +1046,11 @@ impl HtmlView {
             return paint.clone();
         }
         let previous_geometry = self.layout_geometry;
-        let paint = self.compose_viewport_display_list(viewport);
+        self.sync_ruler_navigation();
+        let mut paint = self.compose_viewport_display_list(viewport);
+        if self.preserve_ruler_after_reflow(!viewport_ready || self.layout_geometry != previous_geometry) {
+            paint = self.compose_viewport_display_list(viewport);
+        }
         self.prepared_viewport = Some(viewport);
         self.prepared_paint = Some(paint.clone());
         self.display_dirty = false;
@@ -1059,6 +1144,23 @@ impl HtmlView {
                 self.renderer.update_resources();
                 self.display_dirty = true;
                 cx.notify();
+            }
+            HostMessage::FontSelectionChanged => {
+                self.renderer.apply(RendererCommand::RefreshFonts);
+                self.display_dirty = true;
+                cx.notify();
+            }
+            HostMessage::FontReady(loaded) => {
+                let result = self.host.fonts.borrow_mut().register(loaded, &self.host.text_system);
+                match result {
+                    Ok(true) => {
+                        self.renderer.apply(RendererCommand::RefreshFonts);
+                        self.display_dirty = true;
+                        cx.notify();
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!("could not register publication font: {error}"),
+                }
             }
             HostMessage::Event(event) => cx.emit(event),
             HostMessage::ClipboardText(text) => {
