@@ -350,7 +350,16 @@ pub(super) fn detail(hash: &BookId) -> Result<Option<BookDetail>, DatabaseError>
 impl Database {
     pub fn external_catalog_detail(&self, entry: CardKey) -> Result<BookDetail, DatabaseError> {
         let book = crate::catalog::entry(entry)?.filter(|book| book.hash.is_none()).ok_or_else(|| DatabaseError::message("the entry is not in the catalog"))?;
-        Ok(book_detail(&book))
+        self.with_catalog_subjects(book_detail(&book))
+    }
+
+    /// A catalog book's detail with the subjects the catalog's subject pages
+    /// list it under.
+    pub(super) fn with_catalog_subjects(&self, mut detail: BookDetail) -> Result<BookDetail, DatabaseError> {
+        if let Some(row) = crate::catalog::browse_row(detail.book.key())? {
+            detail.subjects = self.book_subjects(super::subjects::Books::Catalog, row)?;
+        }
+        Ok(detail)
     }
 }
 
@@ -360,6 +369,7 @@ fn book_detail(book: &CatalogBook) -> BookDetail {
         external_url: book.external_url.clone(),
         audiobook_chapter_count: None,
         description: book.record.description.clone(),
+        subjects: Vec::new(),
         year: book.record.book.year,
         source_directory_id: None,
         path: Vec::new(),

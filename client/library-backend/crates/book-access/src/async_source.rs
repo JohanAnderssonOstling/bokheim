@@ -9,19 +9,32 @@ use futures_util::io::{AsyncBufRead, AsyncSeek, BufReader};
 
 use crate::range_reader::{validate_prefix, RangeReader};
 use crate::RemoteFileError;
+use crate::SparseBookSource;
 
 pub trait AsyncBookReader: AsyncBufRead + AsyncSeek + Unpin + Send {}
 impl<T: AsyncBufRead + AsyncSeek + Unpin + Send> AsyncBookReader for T {}
 pub type BoxedAsyncBookReader = Box<dyn AsyncBookReader>;
-type RangeFetch = Arc<dyn Fn(u64, usize) -> BoxFuture<'static, io::Result<Vec<u8>>> + Send + Sync>;
+pub(crate) type RangeFetch = Arc<dyn Fn(u64, usize) -> BoxFuture<'static, io::Result<Vec<u8>>> + Send + Sync>;
 
-/// A cheap, cloneable source. Each reader has its own position, read-ahead, and
-/// bounded cache. Fetches must refer to the same revision for the source lifetime.
+/// A cheap, cloneable source with independent cursor positions. Range sources
+/// keep per-reader block caches; prewarmed sparse sources share exact intervals.
+/// Fetches must refer to the same revision for the source lifetime.
 #[derive(Clone)]
 pub struct AsyncBookSource {
     length: u64,
-    prefix: Arc<Vec<u8>>,
-    fetch: RangeFetch,
+    mode: ReaderMode,
+}
+
+#[derive(Clone)]
+enum ReaderMode {
+    Range { prefix: Arc<Vec<u8>>, fetch: RangeFetch },
+    Sparse(SparseBookSource),
+}
+
+impl From<SparseBookSource> for AsyncBookSource {
+    fn from(source: SparseBookSource) -> Self {
+        Self { length: source.length(), mode: ReaderMode::Sparse(source) }
+    }
 }
 
 impl AsyncBookSource {
@@ -32,16 +45,34 @@ impl AsyncBookSource {
         if !prefix.is_empty() {
             validate_prefix(length, &prefix)?;
         }
-        Ok(Self { length, prefix: Arc::new(prefix), fetch: Arc::new(fetch) })
+        Ok(Self { length, mode: ReaderMode::Range { prefix: Arc::new(prefix), fetch: Arc::new(fetch) } })
     }
 
     pub fn length(&self) -> u64 {
         self.length
     }
 
+    pub fn supports_prefetch(&self) -> bool {
+        matches!(&self.mode, ReaderMode::Sparse(source) if source.supports_prefetch())
+    }
+
+    /// Warm exact ranges when the source supports batching; ordinary local and
+    /// external range readers keep their existing demand-read behavior.
+    pub async fn prefetch(&self, ranges: Vec<(u64, usize)>) -> io::Result<()> {
+        match &self.mode {
+            ReaderMode::Sparse(source) => source.prefetch_cached(&ranges).await,
+            ReaderMode::Range { .. } => Ok(()),
+        }
+    }
+
     pub fn reader(&self) -> BoxedAsyncBookReader {
-        let fetch = self.fetch.clone();
-        Box::new(BufReader::new(RangeReader::new(self.length, self.prefix.as_ref().clone(), Box::new(move |offset, length| fetch(offset, length)))))
+        match &self.mode {
+            ReaderMode::Range { prefix, fetch } => {
+                let fetch = fetch.clone();
+                Box::new(BufReader::new(RangeReader::new(self.length, prefix.as_ref().clone(), Box::new(move |offset, length| fetch(offset, length)))))
+            }
+            ReaderMode::Sparse(source) => source.reader(),
+        }
     }
 }
 
@@ -71,6 +102,22 @@ mod native {
     use std::os::windows::fs::FileExt;
     use tokio::runtime::Handle;
 
+    pub(crate) fn remote_fetch<F>(fetch: F) -> io::Result<RangeFetch>
+    where
+        F: Fn(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, RemoteFileError>> + Send + Sync + 'static,
+    {
+        let handle = Handle::try_current().map_err(io::Error::other)?;
+        let fetch = Arc::new(fetch);
+        Ok(Arc::new(move |offset, length| {
+            let fetch = fetch.clone();
+            let (reply, response) = oneshot::channel();
+            handle.spawn(async move {
+                send_response(fetch(offset, length), reply).await;
+            });
+            Box::pin(async move { response.await.map_err(|_| io::Error::other("book range request canceled"))? })
+        }))
+    }
+
     impl AsyncBookSource {
         /// Reuse the caller's I/O runtime. Polling the resulting reader does not
         /// require a Tokio context and never creates a runtime of its own.
@@ -78,16 +125,8 @@ mod native {
         where
             F: Fn(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, RemoteFileError>> + Send + Sync + 'static,
         {
-            let handle = Handle::try_current().map_err(io::Error::other)?;
-            let fetch = Arc::new(fetch);
-            Self::from_ranges(length, prefix, move |offset, length| {
-                let fetch = fetch.clone();
-                let (reply, response) = oneshot::channel();
-                handle.spawn(async move {
-                    send_response(fetch(offset, length), reply).await;
-                });
-                Box::pin(async move { response.await.map_err(|_| io::Error::other("book range request canceled"))? })
-            })
+            let fetch = remote_fetch(fetch)?;
+            Self::from_ranges(length, prefix, move |offset, count| fetch(offset, count))
         }
 
         /// Positional reads on a pinned file handle, using the existing blocking
@@ -132,32 +171,45 @@ mod browser {
         reply: oneshot::Sender<io::Result<Vec<u8>>>,
     }
 
+    pub(crate) fn browser_fetch<F>(mut fetch: F) -> RangeFetch
+    where
+        F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
+    {
+        let (sender, receiver) = async_channel::unbounded::<Request>();
+        let dispatcher: RangeFetch = Arc::new(move |offset, length| {
+            let (reply, response) = oneshot::channel();
+            let result = sender.try_send(Request { offset, length, reply });
+            Box::pin(async move {
+                result.map_err(|_| io::Error::other("book source service stopped"))?;
+                response.await.map_err(|_| io::Error::other("book range request canceled"))?
+            })
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            while let Ok(request) = receiver.recv().await {
+                if request.reply.is_canceled() {
+                    continue;
+                }
+                let response = fetch(request.offset, request.length);
+                wasm_bindgen_futures::spawn_local(send_response(response, request.reply));
+            }
+        });
+        dispatcher
+    }
+
     impl AsyncBookSource {
         /// Keep JS futures on the owning event loop. Readers on background
         /// workers await channel replies; they never block or poll a JS future.
-        pub fn browser<F>(length: u64, prefix: Vec<u8>, mut fetch: F) -> io::Result<Self>
+        pub fn browser<F>(length: u64, prefix: Vec<u8>, fetch: F) -> io::Result<Self>
         where
             F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
         {
-            let (sender, receiver) = async_channel::unbounded::<Request>();
-            let source = Self::from_ranges(length, prefix, move |offset, length| {
-                let (reply, response) = oneshot::channel();
-                let result = sender.try_send(Request { offset, length, reply });
-                Box::pin(async move {
-                    result.map_err(|_| io::Error::other("book source service stopped"))?;
-                    response.await.map_err(|_| io::Error::other("book range request canceled"))?
-                })
-            })?;
-            wasm_bindgen_futures::spawn_local(async move {
-                while let Ok(request) = receiver.recv().await {
-                    if request.reply.is_canceled() {
-                        continue;
-                    }
-                    let response = fetch(request.offset, request.length);
-                    wasm_bindgen_futures::spawn_local(send_response(response, request.reply));
-                }
-            });
-            Ok(source)
+            let fetch = browser_fetch(fetch);
+            Self::from_ranges(length, prefix, move |offset, count| fetch(offset, count))
         }
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) use browser::browser_fetch;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use native::remote_fetch;

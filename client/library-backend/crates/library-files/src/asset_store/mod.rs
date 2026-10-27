@@ -6,6 +6,8 @@
 
 use book_access::BoxedBookReader;
 #[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::startup_profile::StartupProfile;
+#[cfg(not(target_arch = "wasm32"))]
 use client_platform_native::file_fingerprint::file_fingerprint;
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_native::filesystem::parent_directory;
@@ -21,6 +23,10 @@ use std::time::Duration;
 pub(crate) use sync_common::BookId;
 
 mod import;
+#[cfg(target_arch = "wasm32")]
+mod browser_provider;
+#[cfg(target_arch = "wasm32")]
+mod browser_uploads;
 #[cfg(not(target_arch = "wasm32"))]
 mod provider_uploads;
 pub use import::ImportOptions;
@@ -101,7 +107,10 @@ impl AssetStore {
             if !self.local_access_enabled() {
                 return Ok(false);
             }
-            Ok(paths.iter().any(|relative| self.placement_file_exists(relative)))
+            let present = paths.iter().any(|relative| self.placement_file_exists(relative));
+            // Mount replacement can make the same relative path readable on
+            // another storage instance. Validate it as part of this access.
+            Ok(self.root_available() && present)
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -189,7 +198,8 @@ impl AssetStore {
                         hasher.update(&buffer[..read]);
                     }
                     let actual = BookId::from(hasher.finalize());
-                    if actual != hash {
+                    let expected = if hash.is_external() { imp::current_provider_checksum(&store.0, &hash)? } else { hash.content_hash() };
+                    if actual.content_hash() != expected {
                         continue;
                     }
                     reader.seek(SeekFrom::Start(0))?;
@@ -250,18 +260,28 @@ impl AssetStore {
     /// Opens a pinned file for independent asynchronous document cursors.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_async_book_at_path(&self, relative_path: RelativeBookPath) -> Result<Option<book_access::AsyncBookSource>, AssetStoreError> {
+        let mut profile = StartupProfile::new("book_lookup_file");
         let store = self.clone();
-        let file = client_platform_runtime::executor::run_blocking(move || {
+        let (file, mut profile) = client_platform_runtime::executor::run_blocking(move || {
+            profile.mark("worker_dispatch");
             let path = imp::placement_path(&store.0, &relative_path);
-            match File::open(path) {
+            profile.mark("placement_path");
+            let file = match File::open(path) {
                 Ok(file) => Ok(Some(file)),
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(AssetStoreError::from(error)),
-            }
+                Err(error) => {
+                    store.root_available();
+                    if error.kind() == ErrorKind::NotFound { Ok(None) } else { Err(AssetStoreError::from(error)) }
+                },
+            };
+            profile.mark("file_open");
+            (file, profile)
         })
         .await
-        .map_err(AssetStoreError::operation)??;
-        file.map(book_access::AsyncBookSource::from_file).transpose().map_err(Into::into)
+        .map_err(AssetStoreError::operation)?;
+        profile.mark("worker_return");
+        let source = file?.map(book_access::AsyncBookSource::from_file).transpose().map_err(Into::into);
+        profile.mark("source_metadata");
+        source
     }
 
     pub async fn write(&self, kind: BlobKind, content_hash: &BookId, bytes: &[u8]) -> Result<(), AssetStoreError> {
@@ -474,6 +494,12 @@ impl std::io::Seek for VerifiedBook {
 #[cfg(not(target_arch = "wasm32"))]
 impl CopiedBook {
     pub async fn verify_transfer(self, expected: BookId) -> Result<StagedBook, AssetStoreError> {
+        if expected.is_external() { return Err(AssetStoreError::operation("provider transfers need a byte checksum or a pinned file length")); }
+        self.verify_transfer_bytes(expected.content_hash(), None).await
+    }
+
+    pub async fn verify_transfer_bytes(self, expected: Option<content_address::ContentHash>, expected_size: Option<u64>) -> Result<StagedBook, AssetStoreError> {
+        if expected.is_none() && expected_size.is_none() { return Err(AssetStoreError::operation("transfer has no verified byte source")); }
         client_platform_runtime::executor::run_blocking(move || {
             use std::io::Read;
             let mut file = File::open(self.path())?;
@@ -489,7 +515,7 @@ impl CopiedBook {
                 size = size.checked_add(count as u64).ok_or_else(|| AssetStoreError::operation("book length overflow"))?;
             }
             let actual = BookId::from(hasher.finalize());
-            if actual != expected {
+            if expected.is_some_and(|digest| actual.content_hash() != Some(digest)) || expected_size.is_some_and(|length| length != size) {
                 return Err(AssetStoreError::operation("transferred book failed content verification"));
             }
             Ok(self.into_staged(actual, size))
@@ -636,7 +662,8 @@ impl StagedBook {
                 if destination.exists() {
                     if destination.is_dir() {
                         let tracks = audiobook_folder::discover(&destination)?;
-                        if !tracks.is_empty() && BookId::from(audiobook_folder::folder_hash(&destination)?) == hash {
+                        if !tracks.is_empty() && BookId::from(audiobook_folder::folder_hash(&destination)?) == verification_hash {
+                            if hash.is_external() { imp::remember_provider_checksum(&store.0, &hash, &verification_hash)?; }
                             temporary_path.close()?;
                             return Ok(PublishedStagedBook { name, relative_path: relative.to_string(), published: false, fingerprint: None });
                         }
@@ -646,7 +673,7 @@ impl StagedBook {
                 }
                 let staged = tempfile::Builder::new().prefix(".bokheim-audio-").tempdir_in(parent_directory(&destination)?)?;
                 audiobook_folder::extract_download(File::open(&temporary_path)?, staged.path(), track_titles)?;
-                if BookId::from(audiobook_folder::folder_hash(staged.path())?) != hash {
+                if BookId::from(audiobook_folder::folder_hash(staged.path())?) != verification_hash {
                     return Err(AssetStoreError::operation("downloaded audiobook cannot be reconstructed with its original content identity"));
                 }
                 let tracks = audiobook_folder::discover(staged.path())?;
@@ -654,6 +681,7 @@ impl StagedBook {
                 std::fs::rename(staged.path(), &destination)?;
                 temporary_path.close()?;
                 imp::sync_parent(&destination)?;
+                if hash.is_external() { imp::remember_provider_checksum(&store.0, &hash, &verification_hash)?; }
                 return Ok(PublishedStagedBook { name, relative_path: relative.to_string(), published: true, fingerprint: Some(fingerprint) });
             }
         }

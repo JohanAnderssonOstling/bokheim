@@ -18,6 +18,7 @@ members = [
     "shared/pdf-reader-core",
     "shared/gpui-image-eviction",
     "shared/html-gpui",
+    "shared/html-fonts",
     "shared/reader-speech",
     "shared/book-model",
     "shared/audiobook-archive",
@@ -31,6 +32,7 @@ members = [
     "client/library-backend/crates/library-opds",
     "client/library-backend/crates/cpu-host",
     "shared/wire",
+    "shared/wasm-callback",
     "shared/protobuf-wire",
     "shared/metadata-contract",
     "shared/update-protocol",
@@ -53,6 +55,9 @@ members = [
 ]
 exclude = ["servers/sync", "vendor/segment-parser"]
 
+[workspace.package]
+license = "GPL-3.0-or-later"
+
 [workspace.lints]
 
 [profile.web-release]
@@ -64,8 +69,9 @@ strip = true
 
 [workspace.dependencies]
 blake3 = "1"
-html = { package = "html-engine", git = "https://github.com/JohanAnderssonOstling/HtmlEngine", rev = "b57416f7c0774851e08ff988fdd42e6ed634cc37" }
-html-view-core = { git = "https://github.com/JohanAnderssonOstling/HtmlViewCore", rev = "d33fe55fb431b7af8107a8aca3cef4250e3a25a9" }
+# The renderer and reader share the current sibling engine/view workspaces.
+html = { package = "html-engine", path = "../HtmlEngine/crates/html" }
+html-view-core = { path = "../HtmlViewCore/crates/html-view-core" }
 html-gpui = { path = "shared/html-gpui" }
 kurbo = "0.11.3"
 peniko = "0.2.0"
@@ -89,9 +95,11 @@ encoding_rs = "0.8"
 reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "system-proxy"] }
 
 [patch.crates-io]
+sqlite-wasm-vfs = { path = "vendor/sqlite-wasm-vfs" }
 # Callback boundaries retain abort behavior while Rust operations can unwind.
 wgpu = { path = "vendor/wgpu" }
 indexed_db_futures = { path = "vendor/indexed_db_futures" }
+wasm-streams = { path = "vendor/wasm-streams" }
 mobi = { path = "vendor/mobi" }
 async_zip = { path = "vendor/async_zip" }
 zip = { path = "vendor/zip" }
@@ -117,9 +125,3 @@ gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform" }
 [patch."https://github.com/longbridge/gpui-component"]
 gpui-component = { path = "vendor/gpui-component/crates/ui" }
 gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
-
-[patch."https://github.com/JohanAnderssonOstling/HtmlViewCore"]
-html-view-core = { path = "../HtmlViewCore/crates/html-view-core" }
-
-[patch."https://github.com/JohanAnderssonOstling/HtmlEngine"]
-html-engine = { path = "../HtmlEngine/crates/html" }

@@ -2,13 +2,13 @@
 
 use gpui::prelude::*;
 use gpui::{Div, ElementId, SharedString, div, px};
-use gpui_component::button::{Button, ButtonVariants};
+use crate::Button;
 use gpui_component::{Disableable, Sizable};
 
 use crate::{BrowserTheme, RADIUS_SM, SETTINGS_STEPPER_VALUE_WIDTH_REM, SPACE_XXS, TEXT_SM, base_button, settings_control_size_rem};
 
 /// A borderless nudge button inside the stepper's single outer outline.
-pub fn settings_stepper_button(id: impl Into<ElementId>, label: impl Into<SharedString>, disabled: bool, theme: BrowserTheme) -> Button {
+pub fn settings_stepper_button(id: impl Into<ElementId>, label: impl Into<SharedString>, disabled: bool, _theme: BrowserTheme) -> Button {
     base_button(id)
         .label(label)
         .with_size(gpui_component::Size::Small)
@@ -19,7 +19,6 @@ pub fn settings_stepper_button(id: impl Into<ElementId>, label: impl Into<Shared
         .px_0()
         .rounded(px(0.0))
         .text_size(gpui::rems(TEXT_SM))
-        .text_color(theme.text)
 }
 
 /// A single square outline around decrement, value, and increment.

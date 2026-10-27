@@ -10,6 +10,8 @@ use client_platform_runtime::startup_profile::StartupProfile;
 use crate::library::discovery::LibraryScanner;
 use crate::notification_interest::NotificationInterest;
 use library_database::Database;
+#[cfg(not(target_arch = "wasm32"))]
+use library_model::{BookDownloadStatus, DownloadState, LibraryUpdate};
 use library_sync::{LibrarySync, LibrarySyncConfig};
 use std::sync::Arc;
 use std::{cell::Cell, rc::Rc};
@@ -21,9 +23,20 @@ pub struct LibraryRuntimeSpec {
     pub account: crate::integration::LibraryAccount,
     pub notification_interest: NotificationInterest,
     pub cloud: cloud_storage::connections::CloudConnections,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub root_failures: Option<async_channel::Sender<sync_common::LibraryId>>,
 }
 
 impl LibrarySession {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn recover(spec: LibraryRuntimeSpec) -> Result<Self, BackendError> {
+        let session = Self::open(spec)?;
+        for hash in session.db.reset_local_storage()? {
+            session.events.publish_update(LibraryUpdate::Download(BookDownloadStatus::new(hash, DownloadState::NotDownloaded)));
+        }
+        Ok(session)
+    }
+
     pub(crate) fn open(spec: LibraryRuntimeSpec) -> Result<Self, BackendError> {
         let mut profile = StartupProfile::for_library("library_resources", spec.config.id);
         let default_sync_server_url = spec.config.default_sync_server_url.clone();
@@ -49,6 +62,11 @@ impl LibrarySession {
         };
         profile.mark("cpu_host");
         let assets = open_assets(&spec.config.root, &spec.config.database_locator, &cpu)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(failures) = spec.root_failures.clone() {
+            let id = spec.config.id;
+            assets.on_root_unavailable(move || { let _ = failures.try_send(id); });
+        }
         profile.mark("asset_store");
         // `Database::open` already configured the connection (pragmas, sync
         // functions) internally.
@@ -103,7 +121,6 @@ impl LibrarySession {
         let import = library_import::LibraryImport {
             library_id: spec.config.id,
             cloud: spec.cloud.clone(),
-            #[cfg(not(target_arch = "wasm32"))]
             provider_upload_lock: Default::default(),
             database: database.clone(),
             assets: assets.clone(),
@@ -128,9 +145,11 @@ impl LibrarySession {
             runtime: Rc::new(crate::library::session::LibraryRuntime::default()),
             account: spec.account,
             cloud: spec.cloud,
+            #[cfg(not(target_arch = "wasm32"))]
+            root_failures: spec.root_failures,
             _scanner: Arc::new(scanner),
             cpu,
-            filesystem_scanning: std::cell::Cell::new(false),
+            scanning: Cell::new(false),
             #[cfg(not(target_arch = "wasm32"))]
             torrents: super::torrents::TorrentService::default(),
         };

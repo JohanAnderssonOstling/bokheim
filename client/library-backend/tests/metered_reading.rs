@@ -65,6 +65,7 @@ fn open_library(root: &Path, server: &str, executor: &BackendExecutor) -> (Libra
             account: account.library_account(),
             cloud: Default::default(),
             notification_interest: Default::default(),
+            root_failures: None,
         },
         executor,
     )
@@ -160,7 +161,7 @@ async fn explicit_reading_and_downloads_bypass_metering_while_automatic_download
     timeout(Duration::from_secs(5), reader.read_exact(&mut page)).await.expect("subsequent page reads must also bypass metering").unwrap();
     assert_eq!(page, bytes[192 * 1024..193 * 1024]);
 
-    let source = RemoteFile { hash, length: bytes.len() as u64 };
+    let source = RemoteFile { hash, length: bytes.len() as u64, revision: None };
     let bundle: serde_bytes::ByteBuf =
         timeout(Duration::from_secs(5), client.request(LibraryCommand::Pending(PendingCommand::ReadFileBundle { source, ranges: vec![(32, 128), (96 * 1024, 256)] }))).await.expect("PDF range bundles must bypass metering").unwrap();
     assert_eq!(bundle.as_ref(), [bytes[32..160].to_vec(), bytes[96 * 1024..96 * 1024 + 256].to_vec()].concat());

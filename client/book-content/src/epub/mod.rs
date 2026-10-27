@@ -1,14 +1,17 @@
+use crate::profile::{PreparationProfile, ResourcePreparation};
 use crate::resource_path::resolve_resource_href;
 use crate::resource_path::{is_container_resource, normalize_path as normalize_epub_path};
 use crate::resources::{MAX_BINARY_RESOURCE_BYTES, MAX_PREPARED_TEXT_BYTES};
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 pub(crate) mod archive;
 use archive::{Archive, ArchiveMetadata, ArchiveReader};
 pub(crate) use inspection::EpubSession;
 mod inspection;
+pub(crate) mod opening;
 
 const MAX_CONTAINER_XML_BYTES: u64 = 1024 * 1024;
 const MAX_PACKAGE_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
@@ -243,7 +246,8 @@ impl EpubProvider {
         self.archive.read(uri, MAX_BINARY_RESOURCE_BYTES).await
     }
 
-    pub(crate) async fn prepare_text_resources_async(&self, documents: &[String]) -> io::Result<HashMap<String, Vec<u8>>> {
+    pub(crate) async fn prepare_text_resources_async<const PROFILE: bool>(&self, documents: &[String], profile: &mut PreparationProfile) -> io::Result<HashMap<String, Vec<u8>>> {
+        let started = PROFILE.then(Instant::now);
         let mut paths = HashMap::new();
         for item in &self.package.get_or_parse_manifest().items {
             if !is_container_resource(&item.href) {
@@ -262,12 +266,16 @@ impl EpubProvider {
             }
             paths.entry(normalize_epub_path(uri)).or_insert(MAX_BINARY_RESOURCE_BYTES);
         }
+        profile.record_sync("resource_plan", started);
         let mut resources = HashMap::new();
         let mut total = 0;
         let mut reader = self.archive.reader();
         for (path, limit) in paths {
-            let bytes = reader.read(&path, limit.min(MAX_PREPARED_TEXT_BYTES - total)).await?;
+            let (bytes, timing) = reader.read_measured::<PROFILE>(&path, limit.min(MAX_PREPARED_TEXT_BYTES - total)).await?;
             total += bytes.len() as u64;
+            if PROFILE {
+                profile.resources.push(ResourcePreparation { uri: path.clone(), timing });
+            }
             resources.insert(path, bytes);
         }
         Ok(resources)

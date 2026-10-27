@@ -1,14 +1,14 @@
 use gpui::prelude::*;
 use gpui::{ElementId, SharedString, px};
-use gpui_component::button::{Button, ButtonVariants};
+use crate::Button;
 use gpui_component::{Disableable, Icon, IconName, Sizable};
 
 use crate::{BrowserTheme, SPACE_MD, TEXT_SM, topbar_action_height_rem};
 
 /// Common entry point for interactive controls.
 ///
-/// This is the shared base for all button-like controls, so pointer behavior
-/// stays consistent even when call sites use different variants.
+/// The application button component owns hover styling; this shared entry
+/// point also gives every control the same pointer behavior.
 pub fn base_button(id: impl Into<ElementId>) -> Button {
     base_button_impl(id.into())
 }
@@ -33,8 +33,8 @@ fn outlined_button_impl(id: ElementId, theme: BrowserTheme) -> Button {
 }
 
 /// A borderless square icon action, `topbar_action_height_rem()` on a side (2rem,
-/// or the touch target on phones), on the page background, with a
-/// 1rem icon and ink text rather than an accent — the standard size and
+/// or the touch target on phones), with a transparent background and
+/// a 1rem icon and normal text — the standard size and
 /// shape shared by every square icon button in the app (square corners, to
 /// match every other native surface and control). Semantic wrappers own any
 /// contextual state colour (hover, selection) on top of this baseline.
@@ -42,8 +42,8 @@ pub fn outlined_icon_button(id: impl Into<ElementId>, label: impl Into<SharedStr
     outlined_icon_button_impl(id.into(), label.into(), icon.into(), theme)
 }
 
-fn outlined_icon_button_impl(id: ElementId, label: SharedString, icon: Icon, theme: BrowserTheme) -> Button {
-    base_button_impl(id).ghost().text_color(theme.text).bg(theme.page_bg).icon(icon).size(gpui::rems(topbar_action_height_rem())).tooltip(label)
+fn outlined_icon_button_impl(id: ElementId, label: SharedString, icon: Icon, _theme: BrowserTheme) -> Button {
+    base_button_impl(id).ghost().icon(icon).size(gpui::rems(topbar_action_height_rem())).tooltip(label)
 }
 
 /// A compact neutral outlined text button.
@@ -106,6 +106,67 @@ pub fn link_button(id: impl Into<ElementId>, label: impl Into<SharedString>, the
     link_button_impl(id.into(), label.into(), theme, disabled)
 }
 
-fn link_button_impl(id: ElementId, label: SharedString, theme: BrowserTheme, disabled: bool) -> Button {
-    base_button_impl(id).label(label).ghost().with_size(gpui_component::Size::Small).px(px(0.0)).text_color(theme.text).text_size(gpui::rems(TEXT_SM)).disabled(disabled)
+fn link_button_impl(id: ElementId, label: SharedString, _theme: BrowserTheme, disabled: bool) -> Button {
+    base_button_impl(id).label(label).ghost().with_size(gpui_component::Size::Small).px(px(0.0)).text_size(gpui::rems(TEXT_SM)).disabled(disabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, Hsla, Render, TestAppContext, Window, canvas, div, rgb};
+    use std::{cell::Cell, rc::Rc};
+
+    struct DisabledButtonTest {
+        disabled_ink: Rc<Cell<Option<Hsla>>>,
+        enabled_ink: Rc<Cell<Option<Hsla>>>,
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for DisabledButtonTest {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().children([true, false].map(|disabled| {
+                let ink = if disabled { self.disabled_ink.clone() } else { self.enabled_ink.clone() };
+                let clicks = self.clicks.clone();
+                let id = if disabled { "disabled-custom-button" } else { "enabled-custom-button" };
+                base_button(id)
+                    .ghost()
+                    .size(px(40.0))
+                    .text_color(rgb(0xcc0000))
+                    .bg(rgb(0x00cc00))
+                    .disabled(disabled)
+                    .debug_selector(move || id.to_owned())
+                    .child(canvas(move |_, window, _| ink.set(Some(window.text_style().color)), |_, _, _, _| {}).size(px(16.0)))
+                    .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+            }))
+        }
+    }
+
+    #[gpui::test]
+    fn disabled_buttons_override_custom_ink_and_do_not_activate(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let disabled_ink = Rc::new(Cell::new(None));
+        let enabled_ink = Rc::new(Cell::new(None));
+        let clicks = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let disabled_ink = disabled_ink.clone();
+            let enabled_ink = enabled_ink.clone();
+            let clicks = clicks.clone();
+            move |_, _| DisabledButtonTest { disabled_ink, enabled_ink, clicks }
+        });
+        cx.run_until_parked();
+        let disabled_color = cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            crate::browser_theme(cx).text_muted.opacity(0.5)
+        });
+        assert_eq!(disabled_ink.get(), Some(disabled_color), "caller colors must not override the disabled foreground");
+        assert_eq!(enabled_ink.get(), Some(rgb(0xcc0000).into()), "enabled controls keep their custom colors");
+        let disabled = cx.debug_bounds("disabled-custom-button").unwrap();
+        cx.simulate_click(disabled.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(clicks.get(), 0);
+        let enabled = cx.debug_bounds("enabled-custom-button").unwrap();
+        cx.simulate_click(enabled.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(clicks.get(), 1);
+    }
 }

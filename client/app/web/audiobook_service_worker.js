@@ -51,12 +51,13 @@ async function audioResponse(event, id) {
     try {
         const initial = next();
         client.postMessage({type: 'audiobook-range', id}, [channel.port2]);
-        const {length: size} = await initial;
+        const {length: size, contentType = 'audio/mp4'} = await initial;
         if (!Number.isSafeInteger(size) || size <= 0) throw Error('Invalid audiobook length');
+        if (!['audio/mp4', 'audio/mpeg'].includes(contentType)) throw Error('Invalid audiobook media type');
         const bounds = range(event.request.headers.get('Range'), size);
         if (!bounds) { close(); return new Response(null, {status: 416, headers: {'Content-Range': `bytes */${size}`}}); }
         let [position, end, partial] = bounds;
-        const headers = {'Content-Type': 'audio/mp4', 'Accept-Ranges': 'bytes', 'Content-Length': String(end - position + 1), 'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'same-origin'};
+        const headers = {'Content-Type': contentType, 'Accept-Ranges': 'bytes', 'Content-Length': String(end - position + 1), 'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'same-origin'};
         if (partial) headers['Content-Range'] = `bytes ${position}-${end}/${size}`;
         if (event.request.method === 'HEAD') { close(); return new Response(null, {status: partial ? 206 : 200, headers}); }
         const body = new ReadableStream({

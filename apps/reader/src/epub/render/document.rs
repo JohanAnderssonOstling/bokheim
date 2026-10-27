@@ -1,7 +1,7 @@
 //! EPUB document surface, direct annotation creation, and table/image context menu.
 
 use gpui::prelude::*;
-use gpui::{px, AnyElement, App, Context, Entity, IntoElement, LongPressEvent, MouseButton, MouseDownEvent, Pixels, Point, Window};
+use gpui::{AnyElement, App, Context, Entity, IntoElement, LongPressEvent, MouseButton, MouseDownEvent, Pixels, Point, Window, px};
 use gpui_component::menu::{ContextMenuExt, OpenContextMenu};
 use ui_components as components;
 
@@ -36,9 +36,11 @@ impl ReaderView {
 
         let context_target = entity.clone();
         let keyboard_target = entity.clone();
+        let horizontal_inset = horizontal_margin + if cfg!(feature = "kobo") { KOBO_READER_EDGE_INSET } else { 0.0 };
+        renderer.update(cx, |view, cx| view.set_reading_ruler_margins(horizontal_inset, vertical_margin, cx));
         let document = components::reader_content()
             .id("epub-reader-document")
-            .px(px(horizontal_margin + if cfg!(feature = "kobo") { KOBO_READER_EDGE_INSET } else { 0.0 }))
+            .px(px(horizontal_inset))
             .py(px(vertical_margin))
             .child(renderer.clone())
             .on_click(cx.listener(|reader, event, window, cx| {
@@ -49,6 +51,10 @@ impl ReaderView {
             // Handle the selection before the context-menu wrapper sees the
             // event, so it cannot open a menu over the annotation editor.
             .capture_any_mouse_down(cx.listener(|reader, event: &MouseDownEvent, window, cx| {
+                if event.button == MouseButton::Left {
+                    reader.dismiss_selection(cx);
+                    return;
+                }
                 if event.button != MouseButton::Right {
                     return;
                 }

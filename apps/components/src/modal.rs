@@ -1,6 +1,7 @@
 use gpui::prelude::*;
 use gpui::{App, Div, ElementId, FontWeight, KeyDownEvent, MouseButton, SharedString, Stateful, Window, div, px, rems};
 
+use gpui_component::menu::{ChoiceRowColors, choice_row, choice_row_checkmark};
 use gpui_component::{Icon, IconName, tooltip::Tooltip};
 
 use crate::{BrowserTheme, RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XXS, TEXT_MD, TEXT_XS};
@@ -48,6 +49,47 @@ pub fn modal_surface(theme: BrowserTheme) -> Div {
     div().relative().min_h_0().min_w_0().occlude().rounded(px(RADIUS_MD)).border_1().border_color(theme.rule).bg(theme.page_bg).shadow(crate::overlay_shadow(theme))
 }
 
+/// Font selection uses the same centered surface on the reader and browse
+/// settings. Its list fills the available height instead of sizing to results.
+pub fn font_picker_surface(window: &Window, theme: BrowserTheme) -> Div {
+    let viewport = window.viewport_size();
+    let insets = window.insets().effective();
+    let width = (f32::from(viewport.width - insets.left - insets.right) - 2.0 * SPACE_MD).clamp(1.0, 640.0);
+    let height = ((f32::from(viewport.height - insets.top - insets.bottom) - 2.0 * SPACE_MD) * 0.9).clamp(1.0, 720.0);
+    modal_surface(theme).w(px(width)).h(px(height)).p(px(SPACE_MD)).flex().flex_col().gap(px(SPACE_SM)).overflow_hidden()
+}
+
+/// A font sample is a choice row, with the name set in its own family.
+/// Shared by application and reader font pickers so selection and hover agree.
+pub fn font_picker_row(id: impl Into<ElementId>, family: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
+    let family = family.into();
+    let sample = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(family.clone()).text_size(rems(TEXT_MD)).line_height(gpui::relative(1.4)).child(family);
+    bottom_sheet_row(id, sample, selected, theme).w_full().flex_none().min_h(rems(crate::settings_control_size_rem()))
+}
+
+/// A viewport-centered font selector with backdrop and Escape dismissal.
+pub fn font_picker_overlay(content: impl IntoElement, window: &Window, theme: BrowserTheme, on_dismiss: impl Fn(&mut Window, &mut App) + 'static) -> gpui::Deferred {
+    let dismiss = std::rc::Rc::new(on_dismiss);
+    let scrim_dismiss = dismiss.clone();
+    gpui::deferred(anchor_to_window(
+        modal_overlay()
+            .occlude()
+            .on_key_down(move |event, window, cx| {
+                if event.keystroke.key == "escape" {
+                    dismiss(window, cx);
+                    cx.stop_propagation();
+                }
+            })
+            .child(modal_scrim("font-picker-scrim", theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, window, cx| {
+                scrim_dismiss(window, cx);
+                cx.stop_propagation();
+            }))
+            .child(content),
+        window,
+    ))
+    .with_priority(3)
+}
+
 /// The widest a confirmation dialog grows.
 const CONFIRMATION_DIALOG_MAX_WIDTH: f32 = 448.0;
 
@@ -68,7 +110,7 @@ pub fn confirmation_dialog(dialog: gpui_component::dialog::AlertDialog, window: 
 /// minimum height and the gap it keeps between a header and a footer would
 /// otherwise leave an empty band over the row, so both are cleared.
 pub fn confirmation_dialog_row(
-    dialog: gpui_component::dialog::AlertDialog, question: impl Into<SharedString>, cancel: gpui_component::button::Button, confirm: gpui_component::button::Button, theme: BrowserTheme,
+    dialog: gpui_component::dialog::AlertDialog, question: impl Into<SharedString>, cancel: crate::Button, confirm: crate::Button, theme: BrowserTheme,
 ) -> gpui_component::dialog::AlertDialog {
     dialog.min_h_0().gap_0().footer(
         div()
@@ -139,8 +181,9 @@ pub fn bottom_sheet_divider(theme: BrowserTheme) -> Div {
 
 /// One full-width, touch-sized choice in a bottom sheet; `checked` marks the
 /// current one.
-pub fn bottom_sheet_row(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool, theme: BrowserTheme) -> Stateful<Div> {
-    div()
+pub fn bottom_sheet_row(id: impl Into<ElementId>, label: impl IntoElement, checked: bool, theme: BrowserTheme) -> Stateful<Div> {
+    let colors = theme.into();
+    choice_row(checked, false, false, colors)
         .id(id)
         .flex_none()
         .min_w_0()
@@ -153,10 +196,13 @@ pub fn bottom_sheet_row(id: impl Into<ElementId>, label: impl Into<SharedString>
         .px(px(SPACE_MD))
         .py(px(SPACE_SM))
         .text_size(rems(TEXT_MD))
-        .hover(move |style| style.bg(theme.hover))
-        .when(checked, |row| row.bg(theme.accent).text_color(theme.accent_text))
-        .child(div().flex_1().min_w_0().whitespace_normal().child(label.into()))
-        .when(checked, |row| row.child(Icon::new(IconName::Check).size(px(15.0))))
+        .child(div().flex_1().min_w_0().whitespace_normal().child(label))
+        .when(checked, |row| row.child(choice_row_checkmark(colors)))
+}
+
+/// Descriptive text follows the same selected foreground as the row label.
+pub fn bottom_sheet_row_caption(label: impl Into<SharedString>, checked: bool, theme: BrowserTheme) -> Div {
+    crate::caption_line(label, theme).when(checked, |caption| caption.text_color(ChoiceRowColors::from(theme).selected_foreground))
 }
 
 #[cfg(test)]

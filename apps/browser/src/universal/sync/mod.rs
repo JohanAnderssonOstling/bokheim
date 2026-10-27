@@ -8,27 +8,27 @@
 use std::collections::HashSet;
 use ui_components::user_facing_error;
 mod account;
-mod deletion;
 #[cfg(target_os = "android")]
 mod android_authentication;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod authentication;
 mod authentication_request;
+mod deletion;
+mod storage;
 mod view;
 #[cfg(target_arch = "wasm32")]
 mod web_authentication;
 
 use account_contract::StorageUsageResponse;
 use app::{AccountStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
+use gpui::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use gpui::Task;
-use gpui::prelude::*;
-use gpui::{Context, Div, Entity, IntoElement, Render, SharedString, Subscription, Window, div, px};
-use gpui_component::IconName;
+use gpui::{div, px, Context, Div, Entity, IntoElement, Render, SharedString, Subscription, Window};
 use gpui_component::alert::Alert;
-use gpui_component::button::ButtonVariants;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use gpui_component::input::{Input, InputState, OtpInput};
+use gpui_component::IconName;
 use gpui_component::{Sizable, Size};
 use library_backend::{LibrarySyncState, LibrarySyncStatus};
 use ui_components as components;
@@ -95,6 +95,8 @@ pub enum SyncEvent {
     AccountOperation { generation: u64, result: Result<app::AccountSnapshot, app::BackendError>, success: &'static str, reveal_password_reset_on_error: bool },
     AssetStorageRequested { library_id: sync_common::LibraryId, enabled: bool },
     AssetStorageChanged { library_id: sync_common::LibraryId, enabled: bool, result: Result<(), app::BackendError> },
+    StorageCopyRequested { library_id: sync_common::LibraryId, bokheim: bool },
+    StorageCopyFinished { library_id: sync_common::LibraryId, bokheim: bool, result: Result<app::LibraryEntry, app::BackendError> },
     Authenticate { request: AuthenticationRequest, reply: async_channel::Sender<Result<(), &'static str>> },
     WebAuthenticated,
 }
@@ -117,6 +119,7 @@ pub(crate) struct SyncPage {
     identity: Entity<view::AccountIdentityView>,
     deletion: Option<deletion::DeleteAccountForm>,
     asset_storage_pending: HashSet<sync_common::LibraryId>,
+    storage_copy_pending: HashSet<sync_common::LibraryId>,
     /// Where a new library is created. It belongs to the library list rather
     /// than to a storage group of its own: it is the setting that decides where
     /// the next row in that list will live. `None` until the backend answers,
@@ -212,6 +215,7 @@ impl SyncPage {
             identity,
             deletion: None,
             asset_storage_pending: HashSet::new(),
+            storage_copy_pending: HashSet::new(),
             #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
             default_library_location: None,
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -295,7 +299,15 @@ impl SyncPage {
                 cx.notify();
             }
             SyncEvent::WebAuthenticated => self.schedule_refresh(cx),
-            SyncEvent::AccountRefreshRequested | SyncEvent::LocalStorageUsageRequested | SyncEvent::LocalStorageUsage { .. } | SyncEvent::LogoutRequested | SyncEvent::DeleteAccountRequested { .. } | SyncEvent::AssetStorageRequested { .. } | SyncEvent::Authenticate { .. } => {
+            SyncEvent::StorageCopyFinished { library_id, bokheim, result } => self.finish_storage_copy(library_id, bokheim, result, cx),
+            SyncEvent::StorageCopyRequested { .. } => unreachable!("storage copies are handled by ApplicationRoot"),
+            SyncEvent::AccountRefreshRequested
+            | SyncEvent::LocalStorageUsageRequested
+            | SyncEvent::LocalStorageUsage { .. }
+            | SyncEvent::LogoutRequested
+            | SyncEvent::DeleteAccountRequested { .. }
+            | SyncEvent::AssetStorageRequested { .. }
+            | SyncEvent::Authenticate { .. } => {
                 unreachable!("sync commands are handled by ApplicationRoot")
             }
         }

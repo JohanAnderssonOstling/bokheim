@@ -5,7 +5,6 @@ use ui_components::user_facing_error;
 use gpui::prelude::*;
 use gpui::{Context, Entity, KeyDownEvent, MouseButton, PathPromptOptions, SharedString, Window};
 use gpui::{Focusable, Subscription};
-use gpui_component::button::ButtonVariants;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenu;

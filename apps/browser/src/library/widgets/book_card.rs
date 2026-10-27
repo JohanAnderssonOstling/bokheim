@@ -18,11 +18,12 @@ use web_time::Instant;
 const COVER_FADE_DURATION: Duration = Duration::from_millis(180);
 
 use gpui::prelude::*;
-use gpui::{App, AppContext, Context, DismissEvent, Entity, Focusable as _, IntoElement, Pixels, Point, Render, RenderImage, StyleRefinement, Subscription, Task, Window, div, px};
-use gpui_component::IconName;
+use gpui::{AnyElement, App, AppContext, Context, DismissEvent, Div, Entity, FocusHandle, Focusable as _, IntoElement, Pixels, Point, Render, RenderImage, SharedString, StyleRefinement, Subscription, Task, Window, deferred, div, px};
 use gpui_component::menu::PopupMenu;
-use library_model::{BookCardRow, BookSource, CardKey};
+use gpui_component::{Icon, IconName};
+use library_model::{BookCardRow, BookDetail, BookLocator, BookSource, CardKey, FINISHED_PROGRESS_THRESHOLD};
 use ui_components as components;
+use ui_components::Button;
 
 use crate::library::services::{DownloadSubscription, LibraryContext, LibraryCoversChanged};
 use sync_common::{BookId, DirId};
@@ -32,17 +33,20 @@ use zune_core::colorspace::ColorSpace;
 use zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
 
+use super::SelectionAction;
 use super::cover_cache::CoverCache;
-use super::cover_frame::retain_visible_cover;
 use super::mobile_context_menu;
-use gpui_image_eviction::track_image;
+use gpui_image_eviction::{track_image, trim_unused_images_after_transition};
+
+mod cache_scope;
+use cache_scope::CacheScope;
 
 #[derive(Clone)]
 pub(crate) struct LoadedCover {
     pub image: Arc<RenderImage>,
 }
 
-/// Book lookups are weak; the shared 64 MiB image cache retains the pixels.
+/// Book lookups are weak; the shared budgeted image cache retains the pixels.
 #[derive(Default)]
 struct BrowseCovers {
     cache: CoverCache<(Uuid, CardKey)>,
@@ -63,8 +67,14 @@ pub(crate) fn evict_covers(cx: &mut App) {
     let generation = cover_generation(cx).wrapping_add(1);
     cx.set_global(CoversEvicted(generation));
     // Drop lookup state and cancel hidden cover work through CoversEvicted.
-    // Pixels stay in the shared budget until pressure makes them evictable.
     cx.default_global::<BrowseCovers>().cache.clear();
+    cx.defer(|cx| {
+        for handle in cx.windows() {
+            let _ = handle.update(cx, |_, window, _| {
+                trim_unused_images_after_transition(window);
+            });
+        }
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -170,7 +180,7 @@ impl Render for BookCardElement {
         {
             self.renders += 1;
         }
-        self.card.update(cx, |card, cx| card.render_card(self.presentation, self.interaction, window, cx))
+        self.card.update(cx, |card, cx| card.render_card(self.presentation, self.interaction, false, window, cx))
     }
 }
 
@@ -224,8 +234,11 @@ pub(crate) struct BookCardView {
     download_task: Option<Task<()>>,
     /// Adding catalog books to the library, while it runs.
     add_task: Option<Task<()>>,
+    /// The menu over several selected books.
     context_menu: Option<BookCardContextMenu>,
     context_menu_subscription: Option<Subscription>,
+    /// The book's overlay, which one book opens in place of a context menu.
+    overlay: Option<BookOverlay>,
     /// Repaints the card when the "cover text" setting changes, so an
     /// already-visible card hides or shows its title without waiting for
     /// some unrelated event to trigger a redraw.
@@ -241,6 +254,44 @@ pub(crate) struct BookCardView {
 struct BookCardContextMenu {
     menu: Entity<PopupMenu>,
     position: Point<Pixels>,
+}
+
+/// What a book is, then what can be done with it: opened from a card where a
+/// context menu used to be. The card's row draws the header at once; the
+/// blurb, the subjects and the linked byline arrive with the book's detail.
+struct BookOverlay {
+    detail: Option<BookDetail>,
+    focus: FocusHandle,
+    /// Where the keyboard was, to hand it back on close.
+    previous_focus: Option<FocusHandle>,
+    _load: Task<()>,
+}
+
+/// The overlay's commands, in the order it shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayCommand {
+    Open,
+    NewWindow,
+    Add,
+    CopyToFolder,
+    MoveToFolder,
+    /// Read, or unread again; where the reader is stays put.
+    ToggleRead,
+    RemoveDownload,
+    /// Out of the folder the book is listed in, and to Trash with its last
+    /// folder — or straight to Trash where no folder is in view.
+    Remove,
+}
+
+impl OverlayCommand {
+    /// Opening the book sits beside its title; the rest share a row below.
+    fn opens(self) -> bool {
+        matches!(self, Self::Open | Self::NewWindow | Self::Add)
+    }
+
+    fn about_folder(self) -> bool {
+        matches!(self, Self::CopyToFolder | Self::MoveToFolder)
+    }
 }
 
 impl BookCardView {
@@ -293,6 +344,7 @@ impl BookCardView {
             add_task: None,
             context_menu: None,
             context_menu_subscription: None,
+            overlay: None,
             _cover_text_updates: cover_text_updates,
             _generated_covers_updates: generated_covers_updates,
             _cover_evictions: cover_evictions,
@@ -303,6 +355,10 @@ impl BookCardView {
     /// The book's file, when it has one.
     pub(crate) fn content_hash(&self) -> Option<BookId> {
         self.book.content_hash()
+    }
+
+    pub(crate) fn can_drag(&self) -> bool {
+        matches!(self.book.source, BookSource::Library { .. })
     }
 
     /// The card's identity in a listing.
@@ -339,7 +395,11 @@ impl BookCardView {
         let interaction_key = usize::from(interaction.focused) | (usize::from(interaction.selected) << 1) | (usize::from(interaction.marquee) << 2);
         // rem and display density can change while a cell keeps its bounds.
         let key = format!("card-presentation-{interaction_key}-{}-{}", f32::from(window.rem_size()).to_bits(), window.scale_factor().to_bits());
-        div().id(key).size_full().child(view.cached(StyleRefinement::default().size_full()))
+        CacheScope::new(key.into(), view.cached(StyleRefinement::default().size_full()).into_any_element())
+    }
+
+    pub(crate) fn preview(card: &Entity<Self>, presentation: BookCardPresentation, interaction: BookCardInteraction, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+        card.update(cx, |card, cx| card.render_card(presentation, interaction, true, window, cx))
     }
 
     pub(crate) fn replace_row(&mut self, row: BookCardRow, cx: &mut Context<Self>) {
@@ -700,164 +760,332 @@ impl BookCardView {
         });
     }
 
-    fn open_context_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_books_menu(vec![self.book.clone()], position, window, cx);
-    }
-
-    /// Mouse selections and keyboard menus use the card's ordinary book actions.
+    /// Mouse selections and keyboard menus: one book opens its overlay, several
+    /// the menu of what can be done to all of them at once.
     pub(crate) fn open_items_menu(cards: &[Entity<Self>], position: Point<Pixels>, window: &mut Window, cx: &mut App) {
         let Some(target) = cards.first() else { return };
         let mut seen = HashSet::new();
+        let books = cards.iter().map(|card| card.read(cx).book.clone()).filter(|book| seen.insert(book.key())).collect::<Vec<_>>();
+        if books.len() == 1 {
+            target.update(cx, |card, cx| card.open_overlay(window, cx));
+        } else {
+            target.update(cx, |card, cx| card.open_books_menu(books, position, window, cx));
+        }
+    }
+
+    /// Opens the overlay over this card. The header draws from the card's row
+    /// at once; the blurb, subjects and linked names follow with the detail.
+    fn open_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = cx.focus_handle();
+        let previous_focus = window.focused(cx);
+        focus.focus(window, cx);
+        let load = self.load_overlay_detail(cx);
+        self.overlay = Some(BookOverlay { detail: None, focus, previous_focus, _load: load });
+        cx.notify();
+    }
+
+    /// Closes the overlay, handing the keyboard back to where it was if the
+    /// overlay still has it — a click elsewhere has already moved it on.
+    fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(overlay) = self.overlay.take() else { return };
+        if overlay.focus.contains_focused(window, cx)
+            && let Some(previous) = overlay.previous_focus
+        {
+            previous.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The same detail the book's page loads, by where the book comes from.
+    fn load_overlay_detail(&self, cx: &mut Context<Self>) -> Task<()> {
+        let book = self.book.clone();
+        let (library, app) = (self.ui.backend().clone(), self.ui.app().clone());
+        cx.spawn(async move |card, cx| {
+            let result = match book.source {
+                BookSource::Library { content_hash } | BookSource::Catalog { content_hash } => library.book_detail(content_hash).await,
+                BookSource::ExternalCatalog { entry, .. } => library.external_catalog_detail(entry).await,
+                BookSource::Opds { entry, .. } => app.opds_description(entry).await.map(|description| crate::library::pages::browse::feed_detail(book.clone(), description)),
+            };
+            let _ = card.update(cx, |card, cx| {
+                match result {
+                    Ok(detail) => {
+                        if let Some(overlay) = &mut card.overlay {
+                            overlay.detail = Some(detail);
+                        }
+                    }
+                    Err(error) => log::warn!("Could not load the overlay of {:?}: {error}", card.book.title),
+                }
+                cx.notify();
+            });
+        })
+    }
+
+    /// The commands this book has, in the overlay's order: opening it, then
+    /// those about the folder it is listed in, then those about the book.
+    fn overlay_commands(&self, cx: &App) -> Vec<OverlayCommand> {
+        let book = &self.book;
+        let Some(content_hash) = book.library_file() else {
+            let offered = !matches!(book.source, BookSource::Opds { downloadable: false, .. } | BookSource::ExternalCatalog { downloadable: false, .. });
+            return if offered && !held(book, cx) { vec![OverlayCommand::Add] } else { Vec::new() };
+        };
+        let in_folder = self.folder_commands && book.source_directory.is_some();
+        let mut commands = vec![OverlayCommand::Open];
+        if crate::native_windows_available() {
+            commands.push(OverlayCommand::NewWindow);
+        }
+        if in_folder || self.copy_from_library {
+            commands.push(OverlayCommand::CopyToFolder);
+        }
+        if in_folder {
+            commands.push(OverlayCommand::MoveToFolder);
+        }
+        commands.push(OverlayCommand::ToggleRead);
+        if matches!(self.ui.updates().read(cx).download_state(content_hash), Some(DownloadState::Downloaded)) {
+            commands.push(OverlayCommand::RemoveDownload);
+        }
+        commands.push(OverlayCommand::Remove);
+        commands
+    }
+
+    /// A command's button, without what it does: the overlay measures these
+    /// as well as drawing them, and `suffix` keeps the measured ones apart.
+    fn overlay_button(&self, command: OverlayCommand, suffix: &str, theme: components::BrowserTheme) -> Button {
+        let id = SharedString::from(format!("book-overlay-{command:?}-{}{suffix}", self.book.key()));
+        let audiobook = self.book.format_category == library_model::LibraryFileTypeFilter::Audiobook;
+        match command {
+            OverlayCommand::Open => {
+                let icon: Icon = if audiobook { components::Headphones.into() } else { IconName::BookOpen.into() };
+                components::primary_action_button(id, if audiobook { "Listen" } else { "Read" }, icon, false)
+            }
+            OverlayCommand::Add => components::primary_action_button(id, if self.add_task.is_some() { "Adding…" } else { "Add to library" }, components::download_glyph(), self.add_task.is_some()),
+            OverlayCommand::NewWindow => components::book_overlay_command(id, "New window", IconName::ExternalLink, theme),
+            OverlayCommand::CopyToFolder => components::book_overlay_command(id, "Copy to folder", IconName::Copy, theme),
+            OverlayCommand::MoveToFolder => components::book_overlay_command(id, "Move to folder", IconName::FolderOpen, theme),
+            // Finished is what the cover's bar calls finished.
+            OverlayCommand::ToggleRead if self.book.progress >= FINISHED_PROGRESS_THRESHOLD => components::book_overlay_command(id, "Mark unread", IconName::Undo2, theme),
+            OverlayCommand::ToggleRead => components::book_overlay_command(id, "Mark read", IconName::Check, theme),
+            OverlayCommand::RemoveDownload => components::book_overlay_command(id, "Remove download", IconName::HardDrive, theme),
+            OverlayCommand::Remove => {
+                let tooltip = if self.book.source_directory.is_some() { "Remove from this folder, and to Trash if it is in no other" } else { "Move to Trash" };
+                components::book_overlay_command(id, "Remove", components::navigation_icon(components::NavigationIcon::Trash2), theme).tooltip(tooltip)
+            }
+        }
+    }
+
+    fn overlay_command_button(&self, command: OverlayCommand, card: &Entity<Self>, theme: components::BrowserTheme) -> Button {
+        let card = card.clone();
+        self.overlay_button(command, "", theme).on_click(move |_, window, cx| Self::run_overlay_command(&card, command, window, cx))
+    }
+
+    /// Closes the overlay, then acts. Lets go of the card before acting, as
+    /// `activate` does: opening a book or a folder dialog touches the grid.
+    fn run_overlay_command(card: &Entity<Self>, command: OverlayCommand, window: &mut Window, cx: &mut App) {
+        card.update(cx, |card, cx| card.close_overlay(window, cx));
+        let (book, events, backend, folder_commands) = {
+            let card = card.read(cx);
+            (card.book.clone(), card.events.clone(), card.ui.backend().clone(), card.folder_commands)
+        };
+        let content_hash = book.library_file();
+        let folder = book.source_directory;
+        match (command, content_hash) {
+            (OverlayCommand::Open, _) => Self::play(card, window, cx),
+            (OverlayCommand::Add, _) => card.update(cx, |card, cx| card.add(vec![card.book.clone()], cx)),
+            (OverlayCommand::NewWindow, Some(content_hash)) => {
+                let target = crate::NewWindowTarget::Book { locator: BookLocator::new(*backend.id(), content_hash), title: book.title.clone() };
+                window.dispatch_action(Box::new(crate::OpenInNewWindow(target)), cx);
+            }
+            (OverlayCommand::CopyToFolder, Some(content_hash)) => match folder.filter(|_| folder_commands) {
+                Some(folder) => events(BookCardEvent::Place(content_hash, folder, BookPlacement::Copy), window, cx),
+                None => events(BookCardEvent::CopyToFolder(vec![content_hash]), window, cx),
+            },
+            (OverlayCommand::MoveToFolder, Some(content_hash)) => {
+                if let Some(folder) = folder {
+                    events(BookCardEvent::Place(content_hash, folder, BookPlacement::Move), window, cx);
+                }
+            }
+            (OverlayCommand::ToggleRead, Some(content_hash)) => {
+                let read = book.progress < FINISHED_PROGRESS_THRESHOLD;
+                card.update(cx, |_, cx| {
+                    cx.spawn(async move |card, cx| {
+                        if let Err(error) = backend.set_book_read(content_hash, read).await {
+                            let what = if read { "mark the book read" } else { "mark the book unread" };
+                            let _ = card.update_in(cx, |_, window, cx| notify_error("book-read-error", format!("Could not {what}. {}", user_facing_error(&error, "Please try again.")), window, cx));
+                        }
+                    })
+                    .detach();
+                })
+            }
+            (OverlayCommand::RemoveDownload, Some(content_hash)) => card.update(cx, |_, cx| {
+                cx.spawn(async move |card, cx| {
+                    if let Err(error) = backend.remove_local_book_copy(content_hash).await {
+                        let _ = card.update_in(cx, |_, window, cx| notify_error("book-evict-error", format!("Could not remove download. {}", user_facing_error(&error, "Please try again.")), window, cx));
+                    }
+                })
+                .detach();
+            }),
+            // The backend trashes a book whose last folder it leaves.
+            (OverlayCommand::Remove, Some(content_hash)) => match folder {
+                Some(folder) if folder_commands => events(BookCardEvent::Remove(content_hash, folder), window, cx),
+                Some(folder) => Self::run_menu_action(card.clone(), BookCommand::RemoveFromFolder, async move { backend.remove_book_from_directory(content_hash, folder).await.map(|_| ()) }, cx),
+                None => Self::run_menu_action(card.clone(), BookCommand::TrashBook, async move { backend.move_book_to_trash(content_hash).await.map(|_| ()) }, cx),
+            },
+            (_, None) => {}
+        }
+    }
+
+    pub(crate) fn selection_actions(cards: &[Entity<Self>], cx: &App) -> Vec<SelectionAction> {
+        let Some(target) = cards.first() else { return Vec::new() };
+        let mut seen = HashSet::new();
         let books = cards.iter().map(|card| card.read(cx).book.clone()).filter(|book| seen.insert(book.key())).collect();
-        target.update(cx, |card, cx| card.open_books_menu(books, position, window, cx));
+        target.read(cx).book_selection_actions(books, target.clone(), cx)
+    }
+
+    pub(crate) fn download_selection_action(cards: &[Entity<Self>], cx: &App) -> Option<SelectionAction> {
+        let target = cards.iter().find(|card| card.read(cx).book.library_file().is_some())?;
+        let books = cards.iter().map(|card| card.read(cx).book.clone()).collect::<Vec<_>>();
+        target.read(cx).library_download_action(&books, target.clone(), cx)
+    }
+
+    fn library_download_action(&self, books: &[BookCardRow], target: Entity<Self>, cx: &App) -> Option<SelectionAction> {
+        let updates = self.ui.updates().read(cx);
+        let mut seen = HashSet::new();
+        let mut pending = false;
+        let mut downloads = Vec::new();
+        for book in books {
+            let Some(hash) = book.library_file().filter(|hash| seen.insert(*hash)) else { continue };
+            let state = updates.download_state(hash).unwrap_or_else(|| {
+                if book.downloaded {
+                    DownloadState::Downloaded
+                } else if book.download_requested {
+                    DownloadState::Queued
+                } else {
+                    DownloadState::NotDownloaded
+                }
+            });
+            match state {
+                DownloadState::NotDownloaded => downloads.push((hash, book.title.clone())),
+                DownloadState::Queued | DownloadState::Downloading(_) => pending = true,
+                DownloadState::Downloaded => {}
+            }
+        }
+        if seen.is_empty() {
+            return None;
+        }
+        let disabled = downloads.is_empty();
+        let label = if !disabled {
+            "Download selected books"
+        } else if pending {
+            "Downloading…"
+        } else {
+            "Downloaded"
+        };
+        let library = self.ui.backend().clone();
+        Some(
+            SelectionAction::new("download", label, components::download_glyph(), move |_, cx| {
+                let (library, downloads) = (library.clone(), downloads.clone());
+                target.update(cx, |_, cx| {
+                    // Queue the whole selection even if its first card leaves the
+                    // page while the requests are being sent.
+                    cx.spawn(async move |card, cx| {
+                        for (book, title) in downloads {
+                            if let Err(error) = library.download_book(book).await {
+                                let _ = card.update_in(cx, |_, window, cx| notify_error("book-download-error", format!("“{title}”: {}", book_transfer_error_message(error.failure())), window, cx));
+                            }
+                        }
+                    })
+                    .detach();
+                });
+            })
+            .disabled(disabled),
+        )
+    }
+
+    fn book_selection_actions(&self, books: Vec<BookCardRow>, target: Entity<Self>, cx: &App) -> Vec<SelectionAction> {
+        if books.iter().any(|book| book.library_file().is_none()) {
+            let multiple = books.len() > 1;
+            let not_offered = |book: &BookCardRow| matches!(book.source, BookSource::Opds { downloadable: false, .. } | BookSource::ExternalCatalog { downloadable: false, .. });
+            let nothing_offered = books.iter().all(not_offered);
+            let missing = books.into_iter().filter(|book| !held(book, cx) && !not_offered(book)).collect::<Vec<_>>();
+            if missing.is_empty() {
+                let label = if nothing_offered { "Not offered for download" } else { "In your library" };
+                return vec![SelectionAction::new("download", label, IconName::Info, |_, _| {}).disabled(true)];
+            }
+            let label = if self.add_task.is_some() {
+                "Downloading…"
+            } else if multiple {
+                "Download selected books"
+            } else {
+                "Add to library"
+            };
+            return vec![
+                SelectionAction::new("download", label, components::download_glyph(), move |_, cx| {
+                    target.update(cx, |card, cx| card.add(missing.clone(), cx));
+                })
+                .disabled(self.add_task.is_some()),
+            ];
+        }
+        let hashes = books.iter().filter_map(BookCardRow::library_file).collect::<Vec<_>>();
+        let mut actions = Vec::new();
+        actions.extend(self.library_download_action(&books, target.clone(), cx));
+        if crate::native_windows_available() {
+            let new_windows = books.iter().zip(&hashes).map(|(book, hash)| crate::OpenInNewWindow(crate::NewWindowTarget::Book { locator: BookLocator::new(*self.ui.backend().id(), *hash), title: book.title.clone() })).collect::<Vec<_>>();
+            actions.push(SelectionAction::new("new-window", "Open in New Window", IconName::ExternalLink, move |window, cx| {
+                for action in &new_windows {
+                    window.dispatch_action(Box::new(action.clone()), cx);
+                }
+            }));
+        }
+        if self.copy_from_library {
+            let (events, hashes) = (self.events.clone(), hashes.clone());
+            actions.push(SelectionAction::new("copy", "Copy to folder…", IconName::Copy, move |window, cx| events(BookCardEvent::CopyToFolder(hashes.clone()), window, cx)));
+        }
+        let downloaded = hashes.iter().copied().filter(|hash| matches!(self.ui.updates().read(cx).download_state(*hash), Some(DownloadState::Downloaded))).collect::<Vec<_>>();
+        if !downloaded.is_empty() {
+            let (library, target) = (self.ui.backend().clone(), target.clone());
+            actions.push(SelectionAction::new("remove-download", "Remove download", IconName::HardDrive, move |_, cx| {
+                let (library, downloads) = (library.clone(), downloaded.clone());
+                target.update(cx, |_, cx| {
+                    cx.spawn(async move |card, cx| {
+                        for book in downloads {
+                            if let Err(error) = library.remove_local_book_copy(book).await {
+                                let _ = card.update_in(cx, |_, window, cx| notify_error("book-evict-error", format!("Could not remove download. {}", user_facing_error(&error, "Please try again.")), window, cx));
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                });
+            }));
+        }
+        let library = self.ui.backend().clone();
+        actions.push(SelectionAction::new("trash", "Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, cx| {
+            let (library, hashes) = (library.clone(), hashes.clone());
+            Self::run_menu_action(
+                target.clone(),
+                BookCommand::TrashBooks,
+                async move {
+                    for book in hashes {
+                        library.move_book_to_trash(book).await?;
+                    }
+                    Ok(())
+                },
+                cx,
+            );
+        }));
+        actions
     }
 
     fn open_books_menu(&mut self, books: Vec<BookCardRow>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        if books.iter().any(|book| book.library_file().is_none()) {
-            self.open_catalog_menu(books, position, window, cx);
-            return;
-        }
-        // Library books only from here, so every book has its file's hash.
-        let hashes = books.iter().filter_map(BookCardRow::library_file).collect::<Vec<_>>();
+        let actions = self.book_selection_actions(books, cx.entity(), cx);
         let mobile_size = mobile_context_menu::size(window);
-        let new_windows =
-            books.iter().zip(&hashes).map(|(book, hash)| crate::OpenInNewWindow(crate::NewWindowTarget::Book { locator: library_model::BookLocator::new(*self.ui.backend().id(), *hash), title: book.title.clone() })).collect::<Vec<_>>();
-        let source_directory = (books.len() == 1).then_some(books[0].source_directory).flatten();
-        let content_hash = hashes[0];
-        let removal_target = cx.entity();
-        let backend = self.ui.backend().clone();
-        let downloaded = hashes.iter().copied().filter(|hash| matches!(self.ui.updates().read(cx).download_state(*hash), Some(DownloadState::Downloaded))).collect::<Vec<_>>();
-        let events = self.events.clone();
-        let folder_commands = self.folder_commands;
-        let copy_from_library = self.copy_from_library;
         let previous_focus = window.focused(cx);
         let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
             if let Some(focus) = previous_focus {
                 menu = menu.action_context(focus);
             }
-            if crate::native_windows_available() {
-                let actions = new_windows.clone();
-                menu = menu
-                    .item(components::menu_item("Open in New Window", move |_, window, cx| {
-                        for action in &actions {
-                            window.dispatch_action(Box::new(action.clone()), cx);
-                        }
-                    }))
-                    .separator();
+            for action in &actions {
+                menu = action.menu_item(menu);
             }
-            if copy_from_library {
-                let copy_events = events.clone();
-                let hashes = hashes.clone();
-                menu = menu.item(components::menu_item_with_icon("Copy to folder…", IconName::Copy, move |_, window, cx| copy_events(BookCardEvent::CopyToFolder(hashes.clone()), window, cx))).separator();
-            }
-            if let Some(source_directory) = source_directory.filter(|_| folder_commands) {
-                let (copy_events, move_events) = (events.clone(), events.clone());
-                menu = menu
-                    .item(components::menu_item_with_icon("Copy to folder…", IconName::Copy, move |_, window, cx| copy_events(BookCardEvent::Place(content_hash, source_directory, BookPlacement::Copy), window, cx)))
-                    .item(components::menu_item_with_icon("Move to folder…", IconName::FolderOpen, move |_, window, cx| move_events(BookCardEvent::Place(content_hash, source_directory, BookPlacement::Move), window, cx)))
-                    .separator();
-            }
-            if !downloaded.is_empty() {
-                let library = backend.clone();
-                let evict_target = removal_target.clone();
-                let downloads = downloaded.clone();
-                menu = menu
-                    .item(components::menu_item_with_icon("Remove download", IconName::HardDrive, move |_, _window, cx| {
-                        let library = library.clone();
-                        let downloads = downloads.clone();
-                        let operation = async move {
-                            for book in downloads {
-                                library.remove_local_book_copy(book).await?;
-                            }
-                            Ok::<_, library_backend::BackendError>(())
-                        };
-                        evict_target.update(cx, |_, cx| {
-                            cx.spawn(async move |card, cx| {
-                                if let Err(error) = operation.await {
-                                    let _ = card.update_in(cx, |_, window, cx| {
-                                        notify_error("book-evict-error", format!("Could not remove download. {}", user_facing_error(&error, "Please try again.")), window, cx);
-                                    });
-                                }
-                            })
-                            .detach();
-                        });
-                    }))
-                    .separator();
-            }
-            // Leaving a folder and leaving the library are separate commands:
-            // the first keeps the book in its other folders, the second moves
-            // it to Trash outright.
-            if source_directory.is_some() {
-                if let Some(source_directory) = source_directory.filter(|_| folder_commands) {
-                    let events = events.clone();
-                    menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, window, cx| {
-                        events(BookCardEvent::Remove(content_hash, source_directory), window, cx);
-                    }));
-                } else if let Some(source_id) = source_directory {
-                    let library = backend.clone();
-                    let direct_target = removal_target.clone();
-                    menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, _, cx| {
-                        let library = library.clone();
-                        let operation = async move { library.remove_book_from_directory(content_hash, source_id).await.map(|_| ()) };
-                        Self::run_menu_action(direct_target.clone(), BookCommand::RemoveFromFolder, operation, cx);
-                    }));
-                }
-            }
-            let library = backend.clone();
-            let trash_target = removal_target.clone();
-            let command = if books.len() == 1 { BookCommand::TrashBook } else { BookCommand::TrashBooks };
-            let hashes = hashes.clone();
-            menu = menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, _, cx| {
-                let library = library.clone();
-                let hashes = hashes.clone();
-                let operation = async move {
-                    for book in hashes {
-                        library.move_book_to_trash(book).await?;
-                    }
-                    Ok(())
-                };
-                Self::run_menu_action(trash_target.clone(), command, operation, cx);
-            }));
-            mobile_context_menu::configure(menu, mobile_size)
-        });
-        let subscription = cx.subscribe(&menu, |card, _, _: &DismissEvent, cx| {
-            card.context_menu = None;
-            card.context_menu_subscription = None;
-            cx.notify();
-        });
-        menu.focus_handle(cx).focus(window, cx);
-        self.context_menu = Some(BookCardContextMenu { menu, position });
-        self.context_menu_subscription = Some(subscription);
-        cx.notify();
-    }
-
-    /// Catalog and feed books offer one command: adding those the library
-    /// does not hold yet and that can be downloaded.
-    fn open_catalog_menu(&mut self, books: Vec<BookCardRow>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let mobile_size = mobile_context_menu::size(window);
-        let external = (books.len() == 1).then(|| books.first().cloned()).flatten().filter(|book| matches!(book.source, BookSource::ExternalCatalog { downloadable: false, .. }));
-        let events = self.events.clone();
-        let not_offered = |book: &BookCardRow| matches!(book.source, BookSource::Opds { downloadable: false, .. } | BookSource::ExternalCatalog { downloadable: false, .. });
-        let nothing_offered = books.iter().all(not_offered);
-        let missing = books.into_iter().filter(|book| !held(book, cx) && !not_offered(book)).collect::<Vec<_>>();
-        let target = cx.entity();
-        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
-            let menu = if let Some(book) = &external {
-                let (book, events) = (book.clone(), events.clone());
-                menu.item(components::menu_item_with_icon("Book details", IconName::ExternalLink, move |_, window, cx| {
-                    events(BookCardEvent::OpenDetail(book.clone(), None), window, cx);
-                }))
-            } else if missing.is_empty() && nothing_offered {
-                menu.item(components::menu_item_with_icon("Not offered for download", IconName::Info, |_, _, _| {}).disabled(true))
-            } else if missing.is_empty() {
-                menu.item(components::menu_item_with_icon("In your library", IconName::Check, |_, _, _| {}).disabled(true))
-            } else {
-                let (target, missing) = (target.clone(), missing.clone());
-                menu.item(components::menu_item_with_icon("Add to library", IconName::Plus, move |_, _, cx| {
-                    let missing = missing.clone();
-                    target.update(cx, |card, cx| card.add(missing, cx));
-                }))
-            };
             mobile_context_menu::configure(menu, mobile_size)
         });
         let subscription = cx.subscribe(&menu, |card, _, _: &DismissEvent, cx| {
@@ -873,8 +1101,10 @@ impl BookCardView {
 }
 
 impl BookCardView {
-    fn render_card(&mut self, presentation: BookCardPresentation, interaction: BookCardInteraction, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        self.prepare(Self::thumbnail_resolution(window), cx);
+    fn render_card(&mut self, presentation: BookCardPresentation, interaction: BookCardInteraction, preview: bool, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !preview {
+            self.prepare(Self::thumbnail_resolution(window), cx);
+        }
         let theme = components::browser_theme(cx);
         let grid_cover = presentation == BookCardPresentation::Grid;
         let cover_opacity = match self.cover_loaded_at {
@@ -945,8 +1175,8 @@ impl BookCardView {
                 DownloadState::Downloaded => None,
                 DownloadState::Queued => Some(components::book_cover_queued_badge(format!("book-download-{key}"), theme).tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Queued for download").build(window, cx))),
                 DownloadState::Downloading(_) => Some(components::book_cover_download_badge(format!("book-download-{key}"), true, theme)),
-                // The browser streams books it does not hold instead of downloading them.
-                DownloadState::NotDownloaded if cfg!(target_arch = "wasm32") => None,
+                // Provider libraries can also retain browser offline copies.
+                DownloadState::NotDownloaded if cfg!(target_arch = "wasm32") && !content_hash.is_external() => None,
                 DownloadState::NotDownloaded => {
                     let download_target = cx.entity();
                     Some(
@@ -971,18 +1201,27 @@ impl BookCardView {
                     Self::play(&play_target, window, cx);
                 })
         });
-        let cover_frame = components::book_cover_frame(theme, cover_ratio)
+        let progress = (grid_cover || book.progress >= FINISHED_PROGRESS_THRESHOLD).then_some(book.progress);
+        let cover_frame = match cover {
+            Some(cover) => components::book_cover_with_image(cover.image, cover_ratio, cover_opacity, progress, theme),
+            None => {
+                let frame = if matches!(self.cover, CoverState::Missing) {
+                    components::book_cover_with_generated_art(book.title.clone(), book.subtitle.as_deref(), &book.author, generated_cover_variant(key), theme)
+                } else {
+                    // Leave the slot empty until absence is confirmed.
+                    components::book_cover_frame(theme, cover_ratio)
+                };
+                frame.children(progress.and_then(|progress| components::book_cover_progress(progress, theme)))
+            }
+        };
+        let cover_frame = cover_frame
             .id(cover_id)
             .when(presentation == BookCardPresentation::Section, |frame| frame.flex_none())
-            .on_click(move |_, window, cx| Self::activate(&open_target, window, cx))
-            .child(match cover {
-                Some(cover) => components::book_cover(theme, cover_ratio).child(retain_visible_cover(cover.image.clone())).child(components::book_cover_image(format!("book-cover-art-{key}"), cover.image, cover_opacity, false, theme)),
-                None if matches!(self.cover, CoverState::Missing) => components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), &book.author, generated_cover_variant(key), theme),
-                // Keep the slot empty until absence is confirmed, including
-                // reloads after eviction and failed cover requests.
-                None => components::book_cover(theme, cover_ratio),
+            .on_click(move |_, window, cx| {
+                if !interaction.marquee {
+                    Self::activate(&open_target, window, cx);
+                }
             })
-            .when(grid_cover, |frame| frame.children(components::book_cover_progress(book.progress, theme)))
             .children(play_button)
             // The cover's action — add, download, or the held mark — is on every
             // cover, including those in section cards and the graph.
@@ -1003,13 +1242,13 @@ impl BookCardView {
                 // A card inside a selection is not the subject of its own menu:
                 // the page opens one over everything the band picked up.
                 if event.is_secondary() && !interaction.selected {
-                    context_menu_target.update(cx, |card, cx| card.open_context_menu(event.position(), window, cx));
+                    context_menu_target.update(cx, |card, cx| card.open_overlay(window, cx));
                     cx.stop_propagation();
                 }
             })
-            .on_long_press(move |event, window, cx| {
+            .on_long_press(move |_, window, cx| {
                 if !interaction.selected {
-                    long_press_target.update(cx, |card, cx| card.open_context_menu(event.position, window, cx));
+                    long_press_target.update(cx, |card, cx| card.open_overlay(window, cx));
                     cx.stop_propagation();
                 }
             });
@@ -1019,17 +1258,166 @@ impl BookCardView {
         // child would still hold the cover-to-text gap open under a cover that
         // has nothing under it. The download mark is on the cover, so it stays.
         let card = match cover_text {
-            CoverText::Always => card.child(components::book_card_text_title_only().child(components::book_card_title_row(book.title, book.subtitle.as_deref()))),
+            CoverText::Always => card.child(components::book_card_title_row(book.title, book.subtitle.as_deref())),
             CoverText::CoverOnly => card,
         };
 
-        components::book_card_cell().when(presentation == BookCardPresentation::GraphCover, |cell| cell.justify_start()).child(card.children(context_menu)).into_any_element()
+        // A drag preview draws the card alone.
+        let overlay = if preview { None } else { self.render_overlay(window, cx) };
+        components::book_card_cell().when(presentation == BookCardPresentation::GraphCover, |cell| cell.justify_start()).child(card.children(context_menu).children(overlay)).into_any_element()
+    }
+
+    /// The overlay: beside the card where the window has room — right, else
+    /// left, else over the grid — and a bottom sheet on a phone.
+    ///
+    /// Its width is its commands'. Opening the book and the book's own
+    /// commands, measured as though in one row, set it, so that moving the
+    /// first two up beside the title costs the title nothing; the row under
+    /// it can widen it further. The text wraps to what that leaves.
+    fn render_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let overlay = self.overlay.as_ref()?;
+        let theme = components::browser_theme(cx);
+        let key = self.book.key();
+        let card = cx.entity();
+        let mobile = components::uses_mobile_navigation(window);
+        let commands = self.overlay_commands(cx);
+        let opening = commands.iter().copied().filter(|command| command.opens()).collect::<Vec<_>>();
+        let row = commands.iter().copied().filter(|command| !command.opens()).collect::<Vec<_>>();
+        let viewport = window.viewport_size();
+        let margin = px(components::SPACE_MD);
+        let width = if mobile {
+            viewport.width
+        } else {
+            let sizing = commands.iter().copied().filter(|command| !command.about_folder()).collect::<Vec<_>>();
+            let sizing = components::book_overlay_row_width(sizing.iter().map(|command| self.overlay_button(*command, "-measure", theme)).collect(), window, cx);
+            let row = components::book_overlay_row_width(row.iter().map(|command| self.overlay_button(*command, "-measure", theme)).collect(), window, cx);
+            components::book_overlay_width(&[sizing, row], viewport.width - margin * 2.0, window)
+        };
+
+        let mut header = components::book_overlay_header().child(self.overlay_headline(overlay.detail.as_ref(), &card, theme, cx));
+        if !opening.is_empty() {
+            header = header.child(components::book_overlay_actions().children(opening.iter().map(|command| self.overlay_command_button(*command, &card, theme))));
+        }
+        let body = self.overlay_body(overlay.detail.as_ref(), &card, theme);
+        let commands = (!row.is_empty()).then(|| components::book_overlay_commands(mobile, theme).children(row.iter().map(|command| self.overlay_command_button(*command, &card, theme))));
+        let escape_card = card.clone();
+        let on_key_down = move |event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut App| {
+            if event.keystroke.key == "escape" {
+                escape_card.update(cx, |card, cx| card.close_overlay(window, cx));
+                cx.stop_propagation();
+            }
+        };
+
+        if mobile {
+            let scrim_card = card.clone();
+            let sheet = components::bottom_sheet_surface(theme).id(format!("book-overlay-{key}")).track_focus(&overlay.focus).on_key_down(on_key_down).child(header).child(body).children(commands);
+            let layer =
+                components::bottom_sheet_overlay().child(components::modal_scrim(format!("book-overlay-scrim-{key}"), theme).on_click(move |_, window, cx| scrim_card.update(cx, |card, cx| card.close_overlay(window, cx)))).child(sheet);
+            return Some(deferred(components::anchor_to_window(layer, window)).with_priority(1).into_any_element());
+        }
+
+        let outside_card = card.clone();
+        let surface = components::book_overlay_surface(format!("book-overlay-{key}"), width, theme)
+            .track_focus(&overlay.focus)
+            .on_key_down(on_key_down)
+            .on_mouse_down_out(move |_, window, cx| outside_card.update(cx, |card, cx| card.close_overlay(window, cx)))
+            .child(header)
+            .child(body)
+            .children(commands);
+        Some(deferred(components::book_overlay_beside(surface, px(components::SPACE_XS), margin)).with_priority(1).into_any_element())
+    }
+
+    /// Title, byline, and the facts worth a glance: an audiobook's length, or
+    /// whether a catalog book is held or can be had at all.
+    fn overlay_headline(&self, detail: Option<&BookDetail>, card: &Entity<Self>, theme: components::BrowserTheme, cx: &App) -> Div {
+        let book = &self.book;
+        let mut headline = components::book_overlay_headline().child(components::book_overlay_title(book.title.clone(), book.subtitle.as_deref(), theme));
+        // The card knows one author line; the detail knows who each name is.
+        // Until it lands the line is stated rather than linked.
+        let mut byline = components::book_overlay_byline(theme);
+        match detail.filter(|detail| !detail.authors.is_empty()) {
+            Some(detail) => {
+                byline = byline.child(components::book_overlay_byline_text("by"));
+                let names = detail.authors.iter().map(|author| (author.id, author.name.clone()));
+                byline = self.overlay_name_links(byline, names, "author", card, theme);
+                if !detail.credits.is_empty() {
+                    byline = byline.child(components::book_overlay_byline_text("read by"));
+                    let names = detail.credits.iter().map(|credit| (credit.id, credit.name.clone()));
+                    byline = self.overlay_name_links(byline, names, "narrator", card, theme);
+                }
+            }
+            None if !book.author.trim().is_empty() => byline = byline.child(components::book_overlay_byline_text("by")).child(components::book_overlay_byline_text(book.author.clone())),
+            None => {}
+        }
+        headline = headline.child(byline);
+
+        let mut facts = Vec::new();
+        if let Some(duration) = book.audiobook_duration_ms {
+            facts.push(SharedString::from(crate::library::pages::browse::spoken_duration(duration)));
+        }
+        if book.library_file().is_none() {
+            if matches!(book.source, BookSource::Opds { downloadable: false, .. } | BookSource::ExternalCatalog { downloadable: false, .. }) {
+                facts.push("Not offered for download".into());
+            } else if held(book, cx) {
+                facts.push("In your library".into());
+            }
+        }
+        if !facts.is_empty() {
+            headline = headline.child(components::book_overlay_facts(facts, theme));
+        }
+        headline
+    }
+
+    /// Names that open their author's page, a comma after each but the last.
+    fn overlay_name_links(&self, mut byline: Div, names: impl Iterator<Item = (book_model::AuthorId, String)>, role: &str, card: &Entity<Self>, theme: components::BrowserTheme) -> Div {
+        let key = self.book.key();
+        let names = names.collect::<Vec<_>>();
+        let last = names.len().saturating_sub(1);
+        for (index, (author, name)) in names.into_iter().enumerate() {
+            let open = crate::OpenAuthor { author, name: name.clone() };
+            let card = card.clone();
+            let link = components::book_overlay_name_link(format!("book-overlay-{role}-{key}-{author}"), name, theme).on_click(move |_, window, cx| {
+                card.update(cx, |card, cx| card.close_overlay(window, cx));
+                window.dispatch_action(Box::new(open.clone()), cx);
+            });
+            byline = byline.child(div().flex().min_w_0().child(link).when(index < last, |name| name.child(",")));
+        }
+        byline
+    }
+
+    /// The blurb, the subjects, and the way to the book's page.
+    fn overlay_body(&self, detail: Option<&BookDetail>, card: &Entity<Self>, theme: components::BrowserTheme) -> Div {
+        let key = self.book.key();
+        let mut body = components::book_overlay_body();
+        if let Some(detail) = detail {
+            body = body.children(components::book_overlay_description(&detail.description, theme));
+            if !detail.subjects.is_empty() {
+                let mut subjects = components::book_overlay_subjects();
+                for (index, path) in detail.subjects.iter().enumerate() {
+                    let labels = path.iter().map(|segment| SharedString::from(segment.name.clone())).collect::<Vec<_>>();
+                    let (path, card) = (path.clone(), card.clone());
+                    subjects = subjects.child(components::book_overlay_subject(format!("book-overlay-subject-{key}-{index}"), &labels, theme, move |crumb, element| {
+                        let (open, card) = (crate::OpenSubject { path: path[..=crumb].to_vec() }, card.clone());
+                        element.on_click(move |_, window, cx| {
+                            card.update(cx, |card, cx| card.close_overlay(window, cx));
+                            window.dispatch_action(Box::new(open.clone()), cx);
+                        })
+                    }));
+                }
+                body = body.child(subjects);
+            }
+        }
+        let card = card.clone();
+        body.child(components::book_overlay_more_details(format!("book-overlay-details-{key}"), theme).on_click(move |_, window, cx| {
+            card.update(cx, |card, cx| card.close_overlay(window, cx));
+            Self::activate(&card, window, cx);
+        }))
     }
 }
 
 impl Render for BookCardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_card(BookCardPresentation::Grid, BookCardInteraction::default(), window, cx)
+        self.render_card(BookCardPresentation::Grid, BookCardInteraction::default(), false, window, cx)
     }
 }
 

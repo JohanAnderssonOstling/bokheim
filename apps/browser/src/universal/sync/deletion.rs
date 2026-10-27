@@ -1,7 +1,6 @@
 use super::{AccountActivity, SyncPage};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Div, Entity, Focusable, Window};
-use gpui_component::button::ButtonVariants;
 use gpui_component::input::{Input, InputState};
 use ui_components as components;
 

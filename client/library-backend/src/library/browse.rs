@@ -26,7 +26,6 @@ impl LibrarySession {
 }
 
 impl LibrarySession {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn queue_browse_downloads(&self, query: library_model::LibraryBrowseQuery) -> Result<(), String> {
         let mut query = query;
         let mut locations = vec![query.location];

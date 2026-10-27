@@ -8,7 +8,6 @@ use ui_components::user_facing_error;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, Focusable, MouseButton, SharedString, Subscription, Window, div, px, rems};
-use gpui_component::button::ButtonVariants;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Disableable, IconName};
 use library_model::{AddOpdsFeedResult, OpdsCredentials, OpdsSourceId, StoreId};

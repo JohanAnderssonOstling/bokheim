@@ -10,9 +10,12 @@ Only the UI, assets, and macros crates are included; workspace members are narro
 - Switches skip the animation and its completion timer under reduced motion.
 - Scrollbars bypass timer-driven fading under reduced motion, including per-widget auto-hide overrides.
 - `Button`'s `Ghost` variant reads the themed `button_hover`/`button_active` tokens for its hover and pressed fills, the same tokens `Default` already reads, instead of deriving an untheme-able tint from `secondary`. Every other variant already honored a theme's hover colors; `Ghost` silently didn't.
+- Disabled button colors and the default cursor apply after caller styling, so custom foregrounds, fills, and pointer cursors cannot make unavailable controls look enabled. Disabled selected controls retain their selection at half opacity. Caller geometry and enabled styling remain intact.
 - Context menus share an `OpenContextMenu` action bound to Ctrl+Enter, Shift+F10, and the Menu key. Generic menus and input clipboard menus reuse their right-click implementations and restore focus after dismissal; keyboard input menus keep the text selection.
 - Popup menus can keep multi-select filter choices open after selection; Escape and outside clicks still dismiss them. Ordinary action menus retain their default dismissal behavior.
+- Popup menus and application bottom sheets share `menu::choice_row` and its selection indicator: a solid accent fill with contrasting text and a trailing checkmark. Hover and keyboard focus use a soft highlight; disabled rows are dimmed, and checked rows retain their solid fill when hovered. Popup checks default to the right so leading action icons remain visible; explicit check-side overrides remain available.
 - Dialog backdrops retain their window dimensions when rendered from a narrow pane. Centered surfaces participate in flex layout; explicit top offsets use absolute positioning. The shared dialog layer paints at deferred priority 4, above the library switcher and its menus, so confirmations and update prompts remain visible and receive clicks.
+- Root text and compact widget labels use the local GPUI fork's `line_height_auto()` to measure font metrics and glyph ink, including descenders and fallback fonts. Checkbox labels keep intrinsic height instead of filling their wrapper. Text buttons retain their normal minimum height and use spare vertical space before growing; explicit paragraph line heights still override intrinsic sizing.
 
 Kobo forces reduced motion through its GPUI platform capability. Other platforms retain the existing policy.
 

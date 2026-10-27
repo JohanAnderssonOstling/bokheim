@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use gpui::{Bounds, FocusHandle, Pixels, Point, point, px};
-use html::layout::LaidOutDocument;
+use html::layout::RenderView;
 
 use crate::text::GpuiTextCache;
 
@@ -34,11 +34,11 @@ impl FragmentSelection {
         Self { focus, text: String::new(), runs: Vec::new(), range: 0..0, dragging: false, anchor: 0 }
     }
 
-    pub fn install(&mut self, document: &LaidOutDocument, shaper: &GpuiTextCache) {
+    pub fn install(&mut self, document: RenderView<'_>, shaper: &GpuiTextCache) {
         self.clear();
         self.text.clear();
         self.runs.clear();
-        let text = document.render_view().text();
+        let text = document.text();
         let native_runs = shaper.run_store();
         let mut clusters = BTreeMap::new();
         for line in text.lines().iter() {

@@ -3,8 +3,8 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use book_content::{Book, BookFormat as BookSourceFormat};
 use book_content::comic::{ComicBook, ComicReader};
+use book_content::{Book, BookFormat as BookSourceFormat};
 use book_model::ReadingPosition;
 use gpui::prelude::*;
 use gpui::{AnyView, App, AppContext, BackgroundExecutor, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, SharedString, Task, Window};
@@ -13,6 +13,7 @@ use library_backend::{BackendError, BookFormat, BoxedBookReader, DocumentSource,
 use library_model::BookLocator;
 
 use crate::book::NativeBook;
+use crate::cjk::CjkFont;
 use crate::comic::ComicReaderView;
 use crate::epub::ReaderView as EpubReaderView;
 use crate::pdf::PdfReaderView;
@@ -25,7 +26,7 @@ pub struct BookOpenFailed(pub String);
 pub struct AudiobookOpened(pub gpui::Entity<audiobook_player::PlaybackSession>);
 
 enum PreparedBook {
-    Book { book: Arc<NativeBook>, preparation: Box<RendererPreparation> },
+    Book { book: Arc<NativeBook>, cjk_font: Option<CjkFont>, preparation: Box<RendererPreparation> },
     Pdf { page_source: Option<Arc<dyn pdf_reader_core::PdfPageSource>>, metadata: Option<pdf_reader_core::PdfReaderMetadata>, reader: BoxedBookReader, initial_page: usize, initial_full_page_position: f32 },
     Audiobook { resolved: ResolvedBook, initial_target: Option<String> },
     Comic { reader: ComicReader, initial_page: usize, offset: f32 },
@@ -70,7 +71,7 @@ async fn prepare_pdf(locator: &BookLocator, content: ResolvedBook, library: &Lib
 }
 
 async fn prepare_book(
-    locator: &BookLocator, content: ResolvedBook, format: BookFormat, library: &LibraryClient, executor: &BackgroundExecutor, renderer_config: RendererInitialConfig, initial_target: Option<String>,
+    locator: &BookLocator, content: ResolvedBook, format: BookFormat, library: &LibraryClient, executor: &BackgroundExecutor, mut renderer_config: RendererInitialConfig, preferences: &ReaderPreferences, initial_target: Option<String>,
 ) -> Result<PreparedBook, BackendError> {
     let book_format = match format {
         BookFormat::Epub => BookSourceFormat::Epub,
@@ -79,7 +80,7 @@ async fn prepare_book(
         _ => return Err(format!("stage=prepare: {} is not a book format", format.canonical_extension()).into()),
     };
     let content = content.into_document()?;
-    let book = executor
+    let (book, cjk_font) = executor
         .spawn(async move {
             match content.source {
                 DocumentSource::Async(source) => match Book::open(book_format, move || source.reader()).await {
@@ -88,12 +89,16 @@ async fn prepare_book(
                 },
                 DocumentSource::Reader(reader) => NativeBook::from_reader(book_format, reader),
             }
+            .map(|book| {
+                let cjk_font = CjkFont::for_book(&book);
+                (Arc::new(book), cjk_font)
+            })
             .map_err(|error| format!("stage=book_open: {error}"))
         })
         .await?;
+    preferences.apply_cjk_font(&mut renderer_config.style_overrides, cjk_font);
     let content_hash = locator.content_hash();
     let nav_state = library.reading_position(content_hash).await.map_err(|error| error.context("stage=reading_position"))?;
-    let book = Arc::new(book);
     let image_executor = executor.clone();
     let image_loader = book.image_loader(move |task| {
         image_executor.spawn(task).detach();
@@ -106,16 +111,18 @@ async fn prepare_book(
                 .map_err(|error| format!("stage=document_prepare: {error}"))
         })
         .await?;
-    Ok(PreparedBook::Book { book, preparation: Box::new(preparation) })
+    Ok(PreparedBook::Book { book, cjk_font, preparation: Box::new(preparation) })
 }
 
-async fn load_book(locator: &BookLocator, library: &LibraryClient, executor: &BackgroundExecutor, renderer_config: RendererInitialConfig, initial_target: Option<String>) -> Result<PreparedBook, BackendError> {
+async fn load_book(
+    locator: &BookLocator, library: &LibraryClient, executor: &BackgroundExecutor, renderer_config: RendererInitialConfig, preferences: &ReaderPreferences, initial_target: Option<String>,
+) -> Result<PreparedBook, BackendError> {
     let content = library.resolve_book(locator.content_hash()).await.map_err(|error| error.context("stage=book_resolve"))?;
     let format = content.format();
     match format {
         BookFormat::Pdf => prepare_pdf(locator, content, library, initial_target).await,
         BookFormat::M4b | BookFormat::Mp3Folder => Ok(PreparedBook::Audiobook { resolved: content, initial_target }),
-        BookFormat::Epub | BookFormat::Mobi | BookFormat::Fb2 => prepare_book(locator, content, format, library, executor, renderer_config, initial_target).await,
+        BookFormat::Epub | BookFormat::Mobi | BookFormat::Fb2 => prepare_book(locator, content, format, library, executor, renderer_config, preferences, initial_target).await,
         BookFormat::Cbz => {
             let stored = library.reading_position(locator.content_hash()).await?;
             let (initial_page, offset) = match stored.as_deref().and_then(|value| ReadingPosition::parse(value).ok()) {
@@ -124,13 +131,28 @@ async fn load_book(locator: &BookLocator, library: &LibraryClient, executor: &Ba
             };
             let (initial_page, offset) = initial_target.as_deref().and_then(book_model::cbz_toc_page).map(|page| (page, 0.0)).unwrap_or((initial_page, offset));
             let source = content.into_document()?.source;
-            let reader = executor.spawn(async move {
-                let book = match source {
-                    DocumentSource::Async(source) => ComicBook::open(move || source.reader()).await?,
-                    DocumentSource::Reader(reader) => ComicBook::open_reader(reader)?,
-                };
-                book.into_reader().await
-            }).await.map_err(BackendError::operation)?;
+            let reader = executor
+                .spawn(async move {
+                    let book = match source {
+                        DocumentSource::Async(source) if source.supports_prefetch() => {
+                            let prefetch = source.clone();
+                            ComicBook::open_with_prefetch(
+                                move || source.reader(),
+                                initial_page,
+                                move |ranges| {
+                                    let source = prefetch.clone();
+                                    async move { source.prefetch(ranges).await }
+                                },
+                            )
+                            .await?
+                        }
+                        DocumentSource::Async(source) => ComicBook::open(move || source.reader()).await?,
+                        DocumentSource::Reader(reader) => ComicBook::open_reader(reader)?,
+                    };
+                    book.into_reader().await
+                })
+                .await
+                .map_err(BackendError::operation)?;
             Ok(PreparedBook::Comic { reader, initial_page, offset })
         }
     }
@@ -144,12 +166,14 @@ impl ReaderView {
             // Release its current lease before running that transition.
             window.defer(cx, move |window, cx| match view.downcast::<EpubReaderView>() {
                 Ok(reader) => reader.update(cx, |reader, cx| reader.native_back(window, cx)),
-                Err(view) => {
-                    match view.downcast::<PdfReaderView>() {
-                        Ok(reader) => reader.update(cx, |reader, cx| reader.native_back(window, cx)),
-                        Err(view) => if let Ok(reader) = view.downcast::<ComicReaderView>() { reader.update(cx, |reader, cx| reader.native_back(window, cx)); },
+                Err(view) => match view.downcast::<PdfReaderView>() {
+                    Ok(reader) => reader.update(cx, |reader, cx| reader.native_back(window, cx)),
+                    Err(view) => {
+                        if let Ok(reader) = view.downcast::<ComicReaderView>() {
+                            reader.update(cx, |reader, cx| reader.native_back(window, cx));
+                        }
                     }
-                }
+                },
             });
         } else {
             self.request_close(cx);
@@ -186,8 +210,20 @@ impl ReaderView {
         let reader_title = title.clone().into();
         let executor = cx.background_executor().clone();
         let renderer_config = crate::epub::state::renderer_initial_config(cx);
+        let preferences = ReaderSettings::preferences(cx).clone();
+        let fonts_ready = cx.try_global::<crate::SystemFontsLoading>().map(|loading| loading.0.clone());
         let load_task = cx.spawn(async move |reader_view, cx| {
-            let result = load_book(&locator, &library, &executor, renderer_config, initial_target).await;
+            let result = load_book(&locator, &library, &executor, renderer_config, &preferences, initial_target).await;
+            // Preparing book data can run alongside font registration. Only
+            // attaching its GPUI shaper needs the completed font catalog.
+            if matches!(&result, Ok(PreparedBook::Book { .. })) {
+                if let Some(fonts_ready) = fonts_ready {
+                    let _ = fonts_ready.recv().await;
+                }
+                if let Err(error) = ui_components::ensure_cjk_fonts(cx).await {
+                    log::error!("failed to install CJK glyph fallback: {error}");
+                }
+            }
             match result {
                 Ok(book) => {
                     let _ = reader_view.update_in(cx, move |reader_view, window, cx| {
@@ -197,8 +233,8 @@ impl ReaderView {
                                 reader_view.watch_open_failure(&reader, cx);
                                 reader.into()
                             }
-                            PreparedBook::Book { book, preparation } => {
-                                let reader = cx.new(|cx| EpubReaderView::new(locator, title, app, library, book, *preparation, close_reader, window, cx));
+                            PreparedBook::Book { book, cjk_font, preparation } => {
+                                let reader = cx.new(|cx| EpubReaderView::new(locator, title, app, library, book, cjk_font, *preparation, close_reader, window, cx));
                                 reader_view.watch_open_failure(&reader, cx);
                                 reader.into()
                             }
@@ -207,9 +243,7 @@ impl ReaderView {
                                 cx.emit(AudiobookOpened(session));
                                 return;
                             }
-                            PreparedBook::Comic { reader, initial_page, offset } => {
-                                cx.new(|cx| ComicReaderView::new(locator, title, reader, initial_page, offset, app, library, close_reader, window, cx)).into()
-                            }
+                            PreparedBook::Comic { reader, initial_page, offset } => cx.new(|cx| ComicReaderView::new(locator, title, reader, initial_page, offset, app, library, close_reader, window, cx)).into(),
                         };
                         reader_view.state = ReaderState::Ready(view);
                         cx.notify();

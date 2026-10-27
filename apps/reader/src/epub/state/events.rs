@@ -32,7 +32,7 @@ impl ReaderView {
                     self.sync_toc_position(cx);
                 }
                 self.record_current_reading_position(cx);
-                #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
                 self.tts_navigation_changed(cx);
                 notify(cx, Component::ReaderShell, "reading_position_changed");
             }
@@ -46,7 +46,7 @@ impl ReaderView {
                     notify(cx, Component::ReaderShell, "title_changed");
                 }
             }
-            RendererEvent::TocChanged(_) | RendererEvent::HistoryAvailability { .. } => {}
+            RendererEvent::HistoryAvailability { .. } => {}
             RendererEvent::SearchActiveChanged(active) => {
                 if self.search.query.is_some() != *active {
                     if *active {
@@ -132,7 +132,7 @@ impl ReaderView {
                     self.swipe_preview.clear();
                     cx.notify();
                 }
-                #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
                 if *operation == html_view_core::RendererOperation::UpdateDocument {
                     self.tts_document_failed(message, cx);
                 }

@@ -8,7 +8,7 @@ pub(crate) mod search;
 pub(crate) mod state;
 pub(crate) mod toc;
 pub(crate) mod toolbar;
-#[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+#[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
 mod tts;
 
 use std::rc::Rc;
@@ -104,11 +104,11 @@ pub(crate) struct ReaderView {
     annotation_tree: crate::shell::annotation_tree::AnnotationTreeState,
     sidebar: SidebarState,
     chrome: crate::shell::chrome::ChromeState,
-    /// A wheel or trackpad burst is one gesture: every event postpones the turn,
+    /// A wheel burst is one gesture: every event postpones the turn,
     /// and once input goes quiet the net direction advances exactly one page.
-    /// Same shape as the browse paginator, so both surfaces feel alike.
     wheel_delta: f32,
     wheel_debounce: Option<gpui::Task<()>>,
+    touchpad: ui_components::TouchpadNavigation,
     /// How far the finger has travelled on both axes, while a touch swipe is
     /// in progress.
     touch_swipe: Option<gpui::Point<f32>>,
@@ -120,16 +120,18 @@ pub(crate) struct ReaderView {
     touch_swipe_from_edge: bool,
     search_input: Entity<InputState>,
     font_picker: Entity<font_picker::FontPicker>,
+    cjk_font_picker: Entity<font_picker::FontPicker>,
     search: SearchState,
     book: Arc<crate::book::NativeBook>,
+    cjk_font: Option<crate::cjk::CjkFont>,
     reading_position: Option<ReadingPosition>,
-    #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+    #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
     tts: crate::shell::tts::Narration,
-    #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+    #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
     tts_fragments: Vec<html::layout::ReadingTarget>,
-    #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+    #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
     tts_doc: usize,
-    #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+    #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
     tts_navigation_revision: u64,
     progress: ProgressState,
     marks: MarkSession,

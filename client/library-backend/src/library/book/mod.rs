@@ -5,6 +5,7 @@ use crate::BackendError;
 use crate::BoxedBookReader;
 use crate::{BookId, LibrarySession};
 use book_model::BookFormat;
+use client_platform_runtime::startup_profile::StartupProfile;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod browser;
@@ -15,6 +16,8 @@ mod host;
 #[cfg(target_arch = "wasm32")]
 #[path = "web.rs"]
 mod host;
+mod remote_archive;
+mod remote_pdf;
 pub use host::AudiobookBook;
 pub(crate) use host::Opened;
 
@@ -94,13 +97,17 @@ async fn pdf_metadata(library: &LibrarySession, hash: BookId) -> Result<Option<p
 async fn remote_document(library: &LibrarySession, hash: BookId) -> Result<RemoteDocument, BackendError> {
     let (source, prefix) = library.describe_remote_file(hash).await.map_err(BackendError::operation)?;
     let pdf_metadata = pdf_metadata(library, hash).await?;
+    library.remote_book_access(&source)?;
     Ok(RemoteDocument { source, prefix, pdf_metadata })
 }
 
 impl LibrarySession {
     pub(crate) async fn prepare_book_for_reader(&self, hash: BookId) -> Result<Opened, BackendError> {
+        let mut profile = StartupProfile::new("book_lookup_resolve");
         let info = book_info(self, hash).await?;
+        profile.mark("local_book_info");
         if let Some(book) = host::local(self, hash, &info).await? {
+            profile.mark("local_source");
             return Ok(book);
         }
         host::remote(self, hash, &info).await

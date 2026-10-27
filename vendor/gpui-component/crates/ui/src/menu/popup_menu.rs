@@ -1,6 +1,7 @@
 use crate::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use crate::actions::{SelectLeft, SelectRight};
 use crate::menu::menu_item::MenuItemElement;
+use crate::menu::{ChoiceRowColors, choice_row_checkmark};
 use crate::scroll::ScrollableElement;
 use crate::{ActiveTheme, ElementExt, Icon, IconName, Sizable as _, h_flex, v_flex};
 use crate::{Side, Size, StyledExt, kbd::Kbd};
@@ -369,7 +370,7 @@ impl PopupMenu {
             min_width: None,
             max_width: None,
             max_height: None,
-            check_side: Side::Left,
+            check_side: Side::Right,
             bounds: Bounds::default(),
             scrollable: false,
             dismiss_on_select: true,
@@ -473,7 +474,7 @@ impl PopupMenu {
         self
     }
 
-    /// Set the side to show check icon, default is `Side::Left`.
+    /// Set the side to show check icon, default is `Side::Right`.
     pub fn check_side(mut self, side: Side) -> Self {
         self.check_side = side;
         self
@@ -1232,7 +1233,7 @@ impl PopupMenu {
         let has_left_icon = options.has_left_icon;
         let is_left_check = options.check_side.is_left() && item.is_checked();
         let right_check_icon = if options.check_side.is_right() && item.is_checked() {
-            Some(Icon::new(IconName::Check).xsmall())
+            Some(choice_row_checkmark(ChoiceRowColors::from(cx.theme())))
         } else {
             None
         };
@@ -1259,6 +1260,7 @@ impl PopupMenu {
             .rounded(radius)
             .items_center()
             .selected(selected)
+            .checked(item.is_checked())
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if *hovered {
                     this.selected_index = Some(ix);

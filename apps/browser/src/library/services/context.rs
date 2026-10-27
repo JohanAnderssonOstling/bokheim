@@ -25,11 +25,16 @@ pub(crate) struct LibraryContext {
     open_book: OpenBook,
     updates: Entity<LibraryUpdateBridge>,
     session: WeakEntity<LibrarySession>,
+    now_playing: Entity<crate::NowPlaying>,
 }
 
 impl LibraryContext {
-    pub(crate) fn new(app: Rc<app::AppClient>, backend: Rc<LibraryClient>, open_book: OpenBook, updates: Entity<LibraryUpdateBridge>, session: WeakEntity<LibrarySession>) -> Self {
-        Self { app, backend, open_book, updates, session }
+    pub(crate) fn new(app: Rc<app::AppClient>, backend: Rc<LibraryClient>, open_book: OpenBook, updates: Entity<LibraryUpdateBridge>, session: WeakEntity<LibrarySession>, now_playing: Entity<crate::NowPlaying>) -> Self {
+        Self { app, backend, open_book, updates, session, now_playing }
+    }
+
+    pub(crate) fn now_playing(&self) -> &Entity<crate::NowPlaying> {
+        &self.now_playing
     }
 
     pub(crate) fn app(&self) -> &app::AppClient {

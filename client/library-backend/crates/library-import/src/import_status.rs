@@ -15,9 +15,11 @@ pub struct ImportFailure {
     pub kind: ImportFailureKind,
     pub path: Vec<String>,
     pub diagnostic: Option<String>,
+    #[serde(default)]
+    pub failure: Option<client_runtime::Failure>,
 }
 impl ImportFailure {
     pub fn operation(kind: ImportFailureKind, path: &[String], diagnostic: impl Into<String>) -> Self {
-        Self { kind, path: path.to_vec(), diagnostic: Some(diagnostic.into()) }
+        Self { kind, path: path.to_vec(), diagnostic: Some(diagnostic.into()), failure: None }
     }
 }

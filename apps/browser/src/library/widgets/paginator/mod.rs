@@ -1,10 +1,12 @@
 //! Group-aware paginator with declared child sizes.
 
+mod drag_preview;
 mod element;
 mod geometry;
 mod identity;
 mod layout_cache;
 mod policy;
+mod slots;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -17,11 +19,15 @@ use gpui::{
     AnyElement, App, Bounds, Context, ElementId, Font, PAGE_SCROLL_DURATION, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, TouchPhase, Window, div, ease_in_out, point, touch_page_settle_duration,
     touch_page_settle_easing,
 };
-use ui_components::{HierarchyItemWidth, SwipePreview};
+use ui_components::{HierarchyItemWidth, SwipePreview, TouchpadNavigation};
 use web_time::Instant;
 
+pub(crate) use drag_preview::PaginatorDragPreview;
 use element::{PaginatorElement, PaginatorPage};
 use identity::ItemPosition;
+pub(crate) use slots::Slots as PaginatorSlots;
+use slots::Slots;
+pub(crate) type PaginatorChildren = Slots<PaginatorChild>;
 pub(crate) use identity::PaginatorPosition;
 pub(crate) use policy::{
     PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, book_card_policy, browse_folder_card_policy, browse_folder_item_policy, browse_section_card_policy, browse_section_item_policy, browse_section_subject_rows,
@@ -118,12 +124,14 @@ impl PaginatorSwipe {
 /// What the paginator knows about its children this frame, handed to each child
 /// as it is drawn. The paginator owns the cursor, the selection and the drag
 /// state; a child only has to look.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct PaginatorState {
     pub(crate) cursor: Option<usize>,
     pub(crate) selection: BTreeSet<usize>,
     /// Whether a rubber band is sweeping; children suppress hover during it.
     pub(crate) marquee: bool,
+    pub(crate) preview: bool,
+    bounds: Rc<Vec<(usize, Bounds<Pixels>)>>,
     data: Rc<PaginatorData>,
 }
 
@@ -144,11 +152,11 @@ struct MeasuredWidths {
     children_revision: usize,
     rem_size: Pixels,
     font: Font,
-    widths: Rc<Vec<Pixels>>,
+    widths: Rc<Slots<Pixels>>,
 }
 
-fn measure_widths(data: &PaginatorData, window: &mut Window, cx: &mut App) -> Rc<Vec<Pixels>> {
-    Rc::new(data.children.iter().map(|child| child.intrinsic_width.as_ref().map_or(Pixels::ZERO, |content| content.measure(window, cx))).collect())
+fn measure_widths(data: &PaginatorData, window: &mut Window, cx: &mut App) -> Rc<Slots<Pixels>> {
+    Rc::new(data.children.map(|child| child.intrinsic_width.as_ref().map_or(Pixels::ZERO, |content| content.measure(window, cx))))
 }
 
 #[derive(Clone)]
@@ -157,12 +165,34 @@ pub(crate) struct PaginatorChild {
     pub(super) activate: Option<Rc<ActivateChild>>,
     pub(super) prepare: Option<Rc<PrepareChild>>,
     pub(super) render: Rc<RenderChild>,
+    pub(super) owns_cell: bool,
     intrinsic_width: Option<Rc<HierarchyItemWidth>>,
+    pub(super) selection_start: bool,
+    pub(super) hit_bounds: Option<Rc<Cell<Bounds<Pixels>>>>,
 }
 
 impl PaginatorChild {
     pub(crate) fn new(render: impl Fn(&PaginatorState, &mut Window, &mut App) -> AnyElement + 'static) -> Self {
-        Self { id: None, activate: None, prepare: None, render: Rc::new(render), intrinsic_width: None }
+        Self { id: None, activate: None, prepare: None, render: Rc::new(render), owns_cell: false, intrinsic_width: None, selection_start: true, hit_bounds: None }
+    }
+
+    /// The rendered root fills its definite cell and clips its own contents.
+    /// Keep the paginator's outer wrapper only when the group needs a shadow.
+    pub(crate) fn with_own_cell(mut self) -> Self {
+        self.owns_cell = true;
+        self
+    }
+
+    /// Hit-test and select the painted entry, leaving its cell padding empty.
+    pub(crate) fn with_hit_bounds(mut self, bounds: Rc<Cell<Bounds<Pixels>>>) -> Self {
+        self.hit_bounds = Some(bounds);
+        self
+    }
+
+    /// The item can be selected by a band started elsewhere, but cannot start one.
+    pub(crate) fn prevent_selection_start(mut self) -> Self {
+        self.selection_start = false;
+        self
     }
 
     /// Stable identity used to retain selection and focus when results reorder.
@@ -192,12 +222,16 @@ impl PaginatorChild {
 
 pub(crate) struct PaginatorGroup {
     policy: PaginatorGroupPolicy,
-    children: Vec<PaginatorChild>,
+    children: PaginatorChildren,
 }
 
 impl PaginatorGroup {
     pub(crate) fn new(policy: PaginatorGroupPolicy, children: impl IntoIterator<Item = PaginatorChild>) -> Self {
         Self { policy, children: children.into_iter().collect() }
+    }
+
+    pub(crate) fn from_slots(policy: PaginatorGroupPolicy, children: PaginatorChildren) -> Self {
+        Self { policy, children }
     }
 }
 
@@ -218,7 +252,7 @@ impl GroupSpan {
 pub(super) struct PaginatorData {
     indices: HashMap<SharedString, usize>,
     pub(super) groups: Vec<GroupSpan>,
-    pub(super) children: Vec<PaginatorChild>,
+    pub(super) children: PaginatorChildren,
 }
 
 impl PaginatorData {
@@ -238,16 +272,16 @@ impl PaginatorData {
 
     fn new(groups: impl IntoIterator<Item = PaginatorGroup>) -> Self {
         let mut spans = Vec::new();
-        let mut children = Vec::new();
+        let mut children = Slots::default();
         for group in groups {
             if group.children.is_empty() {
                 continue;
             }
             let start = children.len();
-            children.extend(group.children);
+            children.append(group.children);
             spans.push(GroupSpan { policy: group.policy, start, end: children.len() });
         }
-        let indices = children.iter().enumerate().filter_map(|(index, child)| child.id.clone().map(|id| (id, index))).collect();
+        let indices = children.stored().filter_map(|(index, child)| child.id.clone().map(|id| (id, index))).collect();
         Self { indices, groups: spans, children }
     }
 
@@ -308,6 +342,8 @@ pub(crate) struct Paginator {
     /// Opt-in: pages that have nothing to do with a selection should not grow
     /// mouse handlers for one.
     selectable: bool,
+    /// Start a selection band on unselected children as well as empty space.
+    select_on_drag: bool,
     /// Answers a secondary click on the selection, or on the space between
     /// children. The paginator knows where its children are; what they mean,
     /// and what a menu should offer, is the page's.
@@ -325,6 +361,7 @@ pub(crate) struct Paginator {
     /// keyboard cursor.
     child_bounds: Rc<Vec<(usize, Bounds<Pixels>)>>,
     swipe: Option<PaginatorSwipe>,
+    touchpad: TouchpadNavigation,
     /// Times a page turn until its frame is drawn, when browse profiling is on.
     profile_turn: Option<crate::library::pages::browse::profile::Stage>,
 }
@@ -349,7 +386,7 @@ struct PageWarmup {
 
 struct WarmedPage {
     source: PrefetchKey,
-    widths: Rc<Vec<Pixels>>,
+    widths: Rc<Slots<Pixels>>,
     direction: AssignmentDirection,
     page: VisiblePage,
     content_height: Pixels,
@@ -381,19 +418,21 @@ impl Paginator {
             transition: None,
             swipe_preview: SwipePreview::default(),
             selectable: false,
+            select_on_drag: false,
             on_context_menu: None,
             marquee: None,
             selection: BTreeSet::new(),
             keyboard_selection_active: false,
             child_bounds: Rc::new(Vec::new()),
             swipe: None,
+            touchpad: TouchpadNavigation::default(),
             profile_turn: None,
         }
     }
 
     /// Called at layout time, where inherited font and rem size are available.
     /// Elements and keyboard geometry only receive immutable width snapshots.
-    pub(super) fn measure_widths(&mut self, children_revision: usize, data: &PaginatorData, window: &mut Window, cx: &mut App) -> Rc<Vec<Pixels>> {
+    pub(super) fn measure_widths(&mut self, children_revision: usize, data: &PaginatorData, window: &mut Window, cx: &mut App) -> Rc<Slots<Pixels>> {
         let rem_size = window.rem_size();
         let font = window.text_style().font();
         if let Some(measured) = &self.measurements
@@ -413,6 +452,12 @@ impl Paginator {
     /// Enables rubber-band and keyboard selection over the children.
     pub(crate) fn selectable(mut self) -> Self {
         self.selectable = true;
+        self
+    }
+
+    pub(crate) fn select_on_drag(mut self) -> Self {
+        self.selectable = true;
+        self.select_on_drag = true;
         self
     }
 
@@ -916,6 +961,27 @@ impl Paginator {
 
     #[cfg(not(feature = "mobile"))]
     fn handle_mouse_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(event.delta, ScrollDelta::Pixels(_)) || self.touchpad.is_active() || matches!(event.delta, ScrollDelta::Lines(delta) if delta.x.abs() > delta.y.abs()) {
+            let vertical = match event.delta {
+                ScrollDelta::Pixels(delta) => delta.y.abs() >= delta.x.abs(),
+                ScrollDelta::Lines(delta) | ScrollDelta::Pages(delta) => delta.y.abs() >= delta.x.abs(),
+            };
+            if !self.allow_vertical_navigation && vertical {
+                return;
+            }
+            if let Some(travel) = self.touchpad.update(event) {
+                let (axis, delta) = if travel.x != 0.0 { (PaginatorAxis::Horizontal, travel.x) } else { (PaginatorAxis::Vertical, travel.y) };
+                if self.allows_axis(axis) {
+                    if delta < 0.0 {
+                        self.next_with_axis(axis, cx);
+                    } else {
+                        self.previous_with_axis(axis, cx);
+                    }
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.flow_axis != PaginatorAxis::Vertical || !self.allows_axis(PaginatorAxis::Vertical) {
             return;
         }
@@ -1177,7 +1243,7 @@ impl Render for Paginator {
             None => rendered_transition.as_ref().and_then(|(transition, progress)| progress.map(|progress| page_transition_vector(transition.axis, page_transition_offsets(transition.direction, progress).1))).unwrap_or((0.0, 0.0)),
         };
         let drag_offset = rendered_transition.as_ref().map_or_else(|| self.swipe_preview.offset(window, cx), |(transition, progress)| transition.drag_offset * (1.0 - progress.unwrap_or(0.0)));
-        let state = Rc::new(PaginatorState { cursor: self.cursor, selection: self.selection.clone(), marquee: self.marquee_active(), data: self.data.clone() });
+        let state = Rc::new(PaginatorState { cursor: self.cursor, selection: self.selection.clone(), marquee: self.marquee_active(), preview: false, bounds: self.child_bounds.clone(), data: self.data.clone() });
         let warm_direction = self.swipe.as_ref().and_then(|swipe| {
             let axis = swipe.axis.paginator_axis().filter(|axis| self.allows_axis(*axis))?;
             let travel = if axis == PaginatorAxis::Horizontal { swipe.x } else { swipe.y };
@@ -1312,6 +1378,119 @@ mod tests {
     use gpui::{SharedString, px};
     use std::collections::{BTreeSet, HashMap};
     use std::rc::Rc;
+
+    #[gpui::test]
+    fn sparse_book_slots_page_to_distant_loaded_items_without_materializing_placeholders(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        use std::cell::Cell;
+
+        cx.update(gpui_component::init);
+        let renders = Rc::new(Cell::new(0));
+        let rendered = renders.clone();
+        let placeholder = PaginatorChild::new(move |_, _, _| {
+            rendered.set(rendered.get() + 1);
+            gpui::div().into_any_element()
+        });
+        let children = super::PaginatorChildren::sparse(1_000_000, placeholder.clone(), [(999_999, placeholder.clone().with_id("last-book"))].into_iter().collect());
+        let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(40.0)), px(0.0));
+        let groups = [PaginatorGroup::new(policy, [placeholder.with_id("prefix")]), PaginatorGroup::from_slots(policy, children)];
+        let (paginator, visual) = cx.add_window_view(|_, _| Paginator::new("sparse-books", groups).max_rows(2).next_page_preview(false));
+        visual.run_until_parked();
+        paginator.read_with(visual, |paginator, _| {
+            assert_eq!(paginator.data.children.len(), 1_000_001);
+            assert_eq!(paginator.data.children.stored().count(), 2);
+            assert_eq!(paginator.data.indices.len(), 2);
+            assert_eq!(paginator.measurements.as_ref().unwrap().widths.stored().count(), 2);
+            assert_eq!(paginator.child_id(1_000_000).map(SharedString::as_str), Some("last-book"));
+        });
+        assert!(renders.get() < 100);
+        renders.set(0);
+        paginator.update(visual, |paginator, cx| {
+            paginator.child_offset = 999_990;
+            cx.notify();
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        paginator.read_with(visual, |paginator, _| assert!(paginator.visible_child_range().unwrap().contains(&1_000_000)));
+        assert!(renders.get() < 100, "a distant page must not create or measure the intervening placeholders");
+    }
+
+    #[cfg(not(feature = "mobile"))]
+    #[gpui::test]
+    fn touchpad_turns_horizontal_pages_once_and_filters_small_movements(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, div, point};
+
+        cx.update(gpui_component::init);
+        let (paginator, visual) = cx.add_window_view(|_, _| Paginator::new("touchpad", []).flow_axis(super::PaginatorAxis::Horizontal));
+        visual.update(|window, cx| {
+            paginator.update(cx, |paginator, cx| {
+                paginator.data = Rc::new(PaginatorData { indices: Default::default(), children: (0..12).map(|_| PaginatorChild::new(|_, _, _| div().into_any_element())).collect(), groups: Vec::new() });
+                paginator.visible_page = Some(VisiblePage { first_child: 0, last_child: 3 });
+                paginator.animate_page_transitions = false;
+                let scroll = |x, touch_phase| ScrollWheelEvent { delta: ScrollDelta::Pixels(point(px(x), px(0.0))), touch_phase, ..Default::default() };
+                paginator.handle_mouse_wheel(&scroll(-10.0, TouchPhase::Started), window, cx);
+                assert_eq!(paginator.child_offset, 0);
+                paginator.handle_mouse_wheel(&scroll(-60.0, TouchPhase::Moved), window, cx);
+                assert_eq!(paginator.child_offset, 0, "phased gestures wait for release so cancellation can discard them");
+                paginator.handle_mouse_wheel(&scroll(0.0, TouchPhase::Ended), window, cx);
+                assert_eq!(paginator.child_offset, 4);
+                paginator.visible_page = Some(VisiblePage { first_child: 4, last_child: 7 });
+                paginator.handle_mouse_wheel(&scroll(0.0, TouchPhase::Ended), window, cx);
+                paginator.handle_mouse_wheel(&scroll(-160.0, TouchPhase::Moved), window, cx);
+                assert_eq!(paginator.child_offset, 4, "momentum must not skip another page");
+                paginator.flow_axis = super::PaginatorAxis::Vertical;
+                let drift = ScrollWheelEvent { delta: ScrollDelta::Lines(point(0.0, -3.0)), ..Default::default() };
+                paginator.handle_mouse_wheel(&drift, window, cx);
+                assert_eq!(paginator.child_offset, 4, "cross-axis drift must not become a separate wheel turn");
+                paginator.handle_mouse_wheel(&scroll(60.0, TouchPhase::Started), window, cx);
+                paginator.handle_mouse_wheel(&scroll(0.0, TouchPhase::Ended), window, cx);
+                assert_eq!(paginator.child_offset, 3, "a fresh rightward gesture navigates backward");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn book_previews_only_join_selection_started_in_empty_space(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, div, point};
+
+        cx.update(gpui_component::init);
+        let (paginator, visual) = cx.add_window_view(|_, _| {
+            let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(150.0)), px(20.0))
+                .with_gap(px(20.0))
+                .with_edge_inset(px(20.0))
+                .with_maximum_width(PaginatorWidthPolicy::pixels(px(100.0)))
+                .pack_start();
+            let children = (0..2).map(|index| PaginatorChild::new(|_, _, _| div().size_full().into_any_element()).with_id(index.to_string()).prevent_selection_start());
+            Paginator::new("book-previews", [PaginatorGroup::new(policy, children)]).select_on_drag()
+        });
+        visual.run_until_parked();
+        let (first, second) = visual.update(|_, cx| {
+            let paginator = paginator.read(cx);
+            (paginator.child_bounds(0).unwrap().center(), paginator.child_bounds(1).unwrap().center())
+        });
+        visual.simulate_event(MouseDownEvent { position: first, button: MouseButton::Left, ..Default::default() });
+        visual.simulate_event(MouseMoveEvent { position: second, pressed_button: Some(MouseButton::Left), ..Default::default() });
+        visual.run_until_parked();
+        assert!(visual.update(|_, cx| paginator.read(cx).selection().is_empty()));
+        assert!(!visual.update(|_, cx| paginator.read(cx).marquee_active()));
+        visual.simulate_event(MouseUpEvent { position: second, button: MouseButton::Left, ..Default::default() });
+
+        visual.simulate_event(MouseDownEvent { position: point(px(5.0), px(5.0)), button: MouseButton::Left, ..Default::default() });
+        visual.simulate_event(MouseMoveEvent { position: second, pressed_button: Some(MouseButton::Left), ..Default::default() });
+        visual.run_until_parked();
+        visual.simulate_event(MouseUpEvent { position: second, button: MouseButton::Left, ..Default::default() });
+        visual.run_until_parked();
+        assert_eq!(visual.update(|_, cx| paginator.read(cx).selection().clone()), BTreeSet::from([0, 1]));
+
+        visual.simulate_event(MouseDownEvent { position: first, button: MouseButton::Left, ..Default::default() });
+        visual.simulate_event(MouseMoveEvent { position: first + point(px(10.0), px(0.0)), pressed_button: Some(MouseButton::Left), ..Default::default() });
+        visual.run_until_parked();
+        assert!(!visual.update(|_, cx| paginator.read(cx).marquee_active()));
+        assert_eq!(visual.update(|_, cx| paginator.read(cx).selection().clone()), BTreeSet::from([0, 1]));
+    }
 
     #[gpui::test]
     fn recording_settled_layout_and_prefetch_does_not_request_another_repaint(cx: &mut gpui::TestAppContext) {
@@ -1450,13 +1629,13 @@ mod tests {
     #[test]
     fn loading_placeholders_preserves_positions_and_loaded_books_follow_their_identity() {
         let placeholder = PaginatorChild::new(|_, _, _| unreachable!());
-        let before = PaginatorData { indices: HashMap::new(), children: vec![placeholder.clone(); 3], groups: Vec::new() };
+        let before = PaginatorData { indices: HashMap::new(), children: vec![placeholder.clone(); 3].into(), groups: Vec::new() };
         let waiting = before.position(2).unwrap();
         let ids = ["book-a", "book-b", "book-c"].map(SharedString::from);
         let loaded = PaginatorData { indices: ids.iter().cloned().enumerate().map(|(index, id)| (id, index)).collect(), children: ids.iter().cloned().map(|id| placeholder.clone().with_id(id)).collect(), groups: Vec::new() };
         assert_eq!(loaded.resolve(&waiting), Some(2));
         let known = loaded.position(0).unwrap();
-        let reordered = PaginatorData { indices: [(ids[0].clone(), 2), (ids[1].clone(), 1)].into_iter().collect(), children: vec![placeholder.clone(); 3], groups: Vec::new() };
+        let reordered = PaginatorData { indices: [(ids[0].clone(), 2), (ids[1].clone(), 1)].into_iter().collect(), children: vec![placeholder.clone(); 3].into(), groups: Vec::new() };
         assert_eq!(reordered.resolve(&known), Some(2));
         assert_eq!(reordered.resolve(&loaded.position(2).unwrap()), None);
     }

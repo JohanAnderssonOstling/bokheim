@@ -57,6 +57,7 @@ pub(crate) fn search_bar(input: &Entity<InputState>, theme: components::BrowserT
 }
 
 /// The query stays visible while the excerpts scroll below it.
+#[cfg(test)]
 pub(crate) fn panel(bar: AnyElement, rows: Vec<AnyElement>, theme: components::BrowserTheme) -> AnyElement {
     div().size_full().min_h_0().min_w_0().flex().flex_col().child(bar).child(components::reader_state_panel(theme).children(rows)).into_any_element()
 }

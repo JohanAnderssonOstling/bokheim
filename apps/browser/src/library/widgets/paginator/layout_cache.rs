@@ -1,6 +1,7 @@
 //! Small cache of immutable page assignments. Moving a page does not change
 //! its packing; data, typography and viewport changes do.
 
+use super::slots::Slots;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -14,7 +15,7 @@ const CAPACITY: usize = 6;
 #[derive(Clone)]
 pub(super) struct LayoutKey {
     pub data: Rc<PaginatorData>,
-    pub widths: Rc<Vec<Pixels>>,
+    pub widths: Rc<Slots<Pixels>>,
     pub width: Pixels,
     pub height: Pixels,
     pub rem_size: Pixels,
@@ -92,7 +93,7 @@ mod tests {
     fn key() -> LayoutKey {
         let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(40.0)), px(0.0)).with_gap(px(0.0)).flush_edges();
         let data = Rc::new(PaginatorData::new([PaginatorGroup::new(policy, (0..100).map(|_| PaginatorChild::new(|_, _, _| unreachable!())))]));
-        LayoutKey { data, widths: Rc::new(vec![Pixels::ZERO; 100]), width: px(400.0), height: px(80.0), rem_size: px(16.0), maximum_rows: None, child_offset: 0, direction: AssignmentDirection::Forward, forced_page: None }
+        LayoutKey { data, widths: Rc::new(vec![Pixels::ZERO; 100].into()), width: px(400.0), height: px(80.0), rem_size: px(16.0), maximum_rows: None, child_offset: 0, direction: AssignmentDirection::Forward, forced_page: None }
     }
 
     #[test]
@@ -107,7 +108,7 @@ mod tests {
         assert_eq!(cache.misses, 1);
         let resized = cache.resolve(LayoutKey { width: px(200.0), ..key.clone() });
         assert_eq!(resized.page, Some(VisiblePage { first_child: 0, last_child: 3 }));
-        let remeasured = cache.resolve(LayoutKey { widths: Rc::new(vec![Pixels::ZERO; 100]), ..key.clone() });
+        let remeasured = cache.resolve(LayoutKey { widths: Rc::new(vec![Pixels::ZERO; 100].into()), ..key.clone() });
         assert!(!Rc::ptr_eq(&original, &remeasured));
         assert_eq!(cache.misses, 3);
         for child_offset in 0..100 {

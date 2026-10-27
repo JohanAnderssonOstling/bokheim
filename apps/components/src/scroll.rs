@@ -214,7 +214,6 @@ where
 pub fn measured_bounds(bounds: Rc<Cell<Bounds<Pixels>>>) -> impl IntoElement {
     canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _: (), _, _| {}).absolute().size_full()
 }
-
 /// Scrolls `handle` the shortest distance that brings `target` inside the
 /// viewport, with `margin` of room left around it. Returns whether the offset
 /// moved.

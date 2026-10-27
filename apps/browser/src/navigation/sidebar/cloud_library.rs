@@ -6,7 +6,6 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable, MouseButton, SharedString, Subscription, Window, div, px};
 use gpui_component::{
     Disableable,
-    button::ButtonVariants,
     input::{Input, InputEvent, InputState},
 };
 use ui_components as components;
@@ -14,6 +13,10 @@ use uuid::Uuid;
 
 pub(super) struct CloudLibraryDialog {
     id: Uuid,
+    #[cfg(target_arch = "wasm32")]
+    login: Option<app::host::web::GoogleCloudLogin>,
+    #[cfg(target_arch = "wasm32")]
+    login_attempt: Option<app::host::web::GoogleLoginCancellation>,
     accounts: Vec<GoogleAccount>,
     account: Option<GoogleAccount>,
     breadcrumbs: Vec<CloudFolder>,
@@ -39,6 +42,9 @@ impl CloudLibraryDialog {
 
 impl Sidebar {
     pub(super) fn open_cloud_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !app::google_drive_available() {
+            return;
+        }
         self.switcher_open = false;
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Library name"));
         let folder_name = cx.new(|cx| InputState::new(window, cx).placeholder("New folder name"));
@@ -57,6 +63,10 @@ impl Sidebar {
         let id = Uuid::new_v4();
         self.cloud_library_dialog = Some(CloudLibraryDialog {
             id,
+            #[cfg(target_arch = "wasm32")]
+            login: None,
+            #[cfg(target_arch = "wasm32")]
+            login_attempt: None,
             accounts: Vec::new(),
             account: None,
             breadcrumbs: Vec::new(),
@@ -77,11 +87,18 @@ impl Sidebar {
         let backend = self.libraries.read(cx).folder_creation_backend();
         cx.spawn(async move |sidebar, cx| {
             let accounts = backend.google_cloud_accounts().await;
+            #[cfg(target_arch = "wasm32")]
+            let login = app::host::web::GoogleCloudLogin::prepare(&backend).await;
             let _ = sidebar.update_in(cx, |sidebar, _, cx| {
                 let Some(dialog) = sidebar.cloud_library_dialog.as_mut().filter(|dialog| dialog.id == id) else { return };
                 dialog.busy = false;
                 match accounts {
                     Ok(accounts) => dialog.accounts = accounts,
+                    Err(error) => dialog.error = Some(error.to_string().into()),
+                }
+                #[cfg(target_arch = "wasm32")]
+                match login {
+                    Ok(login) => dialog.login = Some(login),
                     Err(error) => dialog.error = Some(error.to_string().into()),
                 }
                 cx.notify();
@@ -105,18 +122,35 @@ impl Sidebar {
         if dialog.busy {
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        let attempt = match dialog.login.as_ref().ok_or_else(|| app::BackendError::message("Google Drive browser sign-in is not configured")).and_then(|login| login.begin()) {
+            Ok(attempt) => {
+                dialog.login_attempt = Some(attempt.cancellation());
+                attempt
+            }
+            Err(error) => {
+                dialog.error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
         dialog.busy = true;
         dialog.connecting = true;
         dialog.error = None;
         let id = dialog.id;
         let backend = self.libraries.read(cx).folder_creation_backend();
         cx.spawn(async move |sidebar, cx| {
+            #[cfg(target_arch = "wasm32")]
+            let result = attempt.finish(&backend).await;
+            #[cfg(not(target_arch = "wasm32"))]
             let result = async {
                 let login = backend.begin_google_cloud_login().await?;
                 let opened = sidebar
                     .update_in(cx, |sidebar, _, cx| {
                         if sidebar.cloud_library_dialog.as_ref().is_some_and(|dialog| dialog.id == id) {
-                            cx.open_url(&login.authorization_url);
+                            if let Some(url) = &login.authorization_url {
+                                cx.open_url(url);
+                            }
                             true
                         } else {
                             false
@@ -131,6 +165,10 @@ impl Sidebar {
             .await;
             let _ = sidebar.update_in(cx, |sidebar, _, cx| {
                 let Some(dialog) = sidebar.cloud_library_dialog.as_mut().filter(|dialog| dialog.id == id) else { return };
+                #[cfg(target_arch = "wasm32")]
+                {
+                    dialog.login_attempt = None;
+                }
                 dialog.busy = false;
                 dialog.connecting = false;
                 let connected = match result {
@@ -311,18 +349,21 @@ impl Sidebar {
                     })
                 }),
             ));
-            let mut breadcrumbs = div().flex().flex_wrap().gap(px(components::SPACE_XS));
+            let mut breadcrumbs = Vec::with_capacity(dialog.breadcrumbs.len());
+            let mut breadcrumb_labels = Vec::with_capacity(dialog.breadcrumbs.len());
             for (index, folder) in dialog.breadcrumbs.iter().enumerate() {
-                let select = emitter.clone();
-                let folder_id = folder.id.clone();
-                breadcrumbs = breadcrumbs.child(
-                    components::base_button(("cloud-breadcrumb", index))
-                        .label(folder.name.clone())
-                        .disabled(dialog.busy)
-                        .on_click(move |_, _, cx| select.update(cx, |sidebar, cx| sidebar.open_cloud_folder(Some(folder_id.clone()), false, cx))),
-                );
+                let current = index + 1 == dialog.breadcrumbs.len();
+                let label = SharedString::from(folder.name.clone());
+                let mut crumb = components::folder_breadcrumb_item(index, label.clone(), current, theme).when(dialog.busy, |crumb| crumb.cursor_default());
+                if !current && !dialog.busy {
+                    let select = emitter.clone();
+                    let folder_id = folder.id.clone();
+                    crumb = crumb.on_click(move |_, _, cx| select.update(cx, |sidebar, cx| sidebar.open_cloud_folder(Some(folder_id.clone()), false, cx)));
+                }
+                breadcrumbs.push(crumb);
+                breadcrumb_labels.push(label);
             }
-            panel = panel.child(breadcrumbs);
+            panel = panel.child(components::folder_breadcrumb(breadcrumbs, breadcrumb_labels, theme));
             let mut folders = div().id("cloud-folder-list").flex().flex_col().max_h(px(260.0)).overflow_y_scroll().gap(px(components::SPACE_XS));
             for (index, folder) in dialog.children.iter().enumerate() {
                 let select = emitter.clone();

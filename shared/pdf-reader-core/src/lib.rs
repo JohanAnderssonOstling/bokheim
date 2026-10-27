@@ -30,11 +30,12 @@ mod annotations;
 mod metadata;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+mod prefetch;
 mod runtime;
-pub use metadata::inspect_reader_metadata;
+pub use metadata::{inspect_reader_metadata, inspect_reader_metadata_with_identity};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::PdfDocumentSession;
-pub use pdf_view_common::PdfPageSource;
+pub use pdf_view_common::{PdfPageSource, PdfPrefetchCancellation};
 pub use pdf_view_common::{PdfReaderMetadata, PdfStoredAnnotationKind};
 #[cfg(not(target_arch = "wasm32"))]
 const PDFIUM_THIRD_PARTY_NOTICES: &str = include_str!(env!("PDFIUM_NOTICES_PATH"));
@@ -399,6 +400,18 @@ impl LocalDocumentSession {
         Ok(analysis)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn prefetch_pages(&self, pages: &[usize]) -> PdfResult<()> {
+        self.prefetch_pages_cancellable(pages, &PdfPrefetchCancellation::default())
+    }
+
+    pub fn prefetch_pages_cancellable(&self, pages: &[usize], cancellation: &PdfPrefetchCancellation) -> PdfResult<()> {
+        if let Some(source) = &self.page_source {
+            source.prefetch_pages_cancellable(pages, cancellation).map_err(PdfError::new)?;
+        }
+        Ok(())
+    }
+
     /// Logical page analysis is independent of raster resolution and theme.
     pub fn page_geometry(&self, page_index: usize, trim_margins: bool) -> PdfResult<PdfPageGeometry> {
         if let Some(source) = &self.page_source {
@@ -558,6 +571,48 @@ impl PdfDocumentInfo {
 
     pub fn skippable_pages(&self) -> &[usize] {
         &self.skippable_pages
+    }
+
+    /// Twice the configured visible-page count, including visible pages.
+    /// Prefer forward reading while retaining a previous page when space allows.
+    pub fn prefetch_window(&self, current: usize, visible: &[usize], configured_pages: usize) -> Vec<usize> {
+        if current >= self.page_count() {
+            return Vec::new();
+        }
+        let budget = configured_pages.max(1).saturating_mul(2).min(self.page_count());
+        let mut pages = Vec::new();
+        for page in std::iter::once(current).chain(visible.iter().copied()) {
+            if page < self.page_count() && !pages.contains(&page) {
+                pages.push(page);
+                if pages.len() == budget {
+                    return pages;
+                }
+            }
+        }
+        let readable = |page: &usize| self.skippable_pages.binary_search(page).is_err();
+        let mut forward = (current + 1..self.page_count()).filter(readable);
+        let mut backward = (0..current).rev().filter(readable);
+        let previous = if budget - pages.len() > 1 { backward.find(|page| !pages.contains(page)) } else { None };
+        let forward_limit = budget - usize::from(previous.is_some());
+        while pages.len() < forward_limit {
+            let Some(page) = forward.next() else { break };
+            if !pages.contains(&page) {
+                pages.push(page);
+            }
+        }
+        if let Some(page) = previous {
+            pages.push(page);
+        }
+        // At either document edge, use the other side to fill available slots.
+        for page in forward.chain(backward) {
+            if pages.len() == budget {
+                break;
+            }
+            if !pages.contains(&page) {
+                pages.push(page);
+            }
+        }
+        pages
     }
 
     /// The document's `/ViewerPreferences /Direction`, defaulting to L2R.

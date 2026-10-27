@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod fonts;
 mod fragment;
 mod fragment_selection;
 mod math_svg;
@@ -22,6 +23,10 @@ pub use text::TextShapeCacheStats;
 
 /// Shaping and painting shared with adapters that own document navigation.
 pub mod backend {
+    pub use crate::fonts::{PublicationFonts, SharedPublicationFonts, publication_faces_for_overrides};
+    pub use html_fonts::{LoadedFontFace, face_key, load_font_face, load_remote_font};
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use html_fonts::configure_cache_directory;
     pub use crate::paint::{GpuiCommandPainter, ImageCache, PaintCommand, paint_commands};
     pub use crate::text::{GlyphStorage, GlyphStore, GpuiTextCache};
 }

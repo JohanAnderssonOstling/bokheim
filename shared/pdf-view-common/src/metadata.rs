@@ -101,6 +101,20 @@ impl PdfDependencyIndex {
 pub trait PdfPageSource: Send + Sync {
     fn prepare_startup(&self) -> Result<(), String>;
     fn prepare_page(&self, page: usize) -> Result<(), String>;
+    /// Warm startup and the requested first page together when supported.
+    fn prepare_opening(&self, page: usize) -> Result<(), String> {
+        self.prepare_startup()?;
+        self.prepare_page(page)
+    }
+    /// Optional pages in priority order. Implementations may warm fewer pages
+    /// to respect their byte budget; normal page reads remain authoritative.
+    fn prefetch_pages(&self, _pages: &[usize]) -> Result<(), String> {
+        Ok(())
+    }
+    /// Stop obsolete optional work, including in-flight I/O when supported.
+    fn prefetch_pages_cancellable(&self, pages: &[usize], cancellation: &crate::PdfPrefetchCancellation) -> Result<(), String> {
+        if cancellation.is_cancelled() { Ok(()) } else { self.prefetch_pages(pages) }
+    }
 }
 
 impl PdfReaderMetadata {

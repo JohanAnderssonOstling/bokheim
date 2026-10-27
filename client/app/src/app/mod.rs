@@ -5,6 +5,9 @@ mod catalog;
 mod core;
 pub(crate) mod data;
 mod libraries;
+#[cfg(not(target_arch = "wasm32"))]
+mod root_recovery;
+mod storage_copy;
 mod cloud;
 pub use cloud::{CloudFolderListing, CloudLoginRequest};
 #[cfg(not(target_arch = "wasm32"))]

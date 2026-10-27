@@ -42,6 +42,25 @@ fn row() -> BookCardRow {
 }
 
 #[gpui::test]
+async fn library_selection_download_only_enables_for_missing_books(cx: &mut TestAppContext) {
+    let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+    let available = cx.new(|cx| BookCardView::new(row(), library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
+    let missing_hash = BookId::from_bytes([8; 32]);
+    let missing = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Library { content_hash: missing_hash }, downloaded: false, ..row() }, library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
+    let selected = [available, missing];
+    assert!(!cx.update(|cx| BookCardView::download_selection_action(&selected, cx).unwrap().is_disabled()), "a mixed selection must offer Download");
+    for state in [DownloadState::Queued, DownloadState::Downloading(DownloadProgress::ZERO), DownloadState::Downloaded] {
+        library.updates().update(cx, |updates, cx| updates.set_download_state_for_test(missing_hash, state, cx));
+        assert!(cx.update(|cx| BookCardView::download_selection_action(&selected, cx).unwrap().is_disabled()), "queued and complete books must not be queued again");
+    }
+    library.updates().update(cx, |updates, cx| updates.set_download_state_for_test(missing_hash, DownloadState::NotDownloaded, cx));
+    assert!(!cx.update(|cx| BookCardView::download_selection_action(&selected, cx).unwrap().is_disabled()), "a removed or failed download must be available again");
+    let catalog = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Catalog { content_hash: BookId::from_bytes([9; 32]) }, ..row() }, library, Rc::new(|_, _, _| {}), false, false, cx));
+    assert!(cx.update(|cx| BookCardView::download_selection_action(&[catalog], cx).is_none()), "catalog imports use their own download operation");
+}
+
+#[gpui::test]
 async fn play_opens_books_directly_and_shows_audiobook_detail_before_playback(cx: &mut TestAppContext) {
     let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_directory, _session, library) = LibrarySession::test_context(cx).await;
@@ -62,6 +81,7 @@ async fn play_opens_books_directly_and_shows_audiobook_detail_before_playback(cx
         }),
         library.updates(),
         library.session(),
+        library.now_playing().clone(),
     );
     for format_category in [LibraryFileTypeFilter::Book, LibraryFileTypeFilter::Audiobook] {
         actions.borrow_mut().clear();
@@ -114,12 +134,18 @@ async fn cached_placements_reuse_neighbors_and_invalidate_interaction_rows_and_t
     draw(window, cx);
     assert_eq!(counts(cx), [initial[0] + 1, initial[1]]);
 
-    for selected in [true, false] {
+    for interaction in [
+        BookCardInteraction { selected: true, ..BookCardInteraction::default() },
+        BookCardInteraction::default(),
+        BookCardInteraction { focused: true, ..BookCardInteraction::default() },
+        BookCardInteraction::default(),
+        BookCardInteraction { marquee: true, ..BookCardInteraction::default() },
+        BookCardInteraction::default(),
+    ] {
         let before = counts(cx);
         window
             .update(cx, |fixture, _, cx| {
-                fixture.first.selected = selected;
-                fixture.first.focused = selected;
+                fixture.first = interaction;
                 cx.notify();
             })
             .unwrap();
@@ -171,4 +197,85 @@ async fn progress_percentages_do_not_invalidate_cards_but_phase_changes_do(cx: &
         updates.update(cx, |updates, cx| updates.set_download_state_for_test(hash, state, cx));
     }
     assert_eq!(notifications.get(), 3);
+}
+
+/// Measure presentation entities separately from book data, images and the
+/// window's frame arena. Run alone with LD_PRELOAD=/usr/lib/libtcmalloc.so.
+#[cfg(target_os = "linux")]
+#[gpui::test]
+#[ignore = "live-heap profiling; requires tcmalloc and PROFILE_CARD_COUNT"]
+async fn profile_offscreen_presentation_views(cx: &mut TestAppContext) {
+    use std::{
+        ffi::{CStr, c_char, c_void},
+        mem::size_of,
+    };
+
+    #[link(name = "dl")]
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    let symbol = unsafe { dlsym(std::ptr::null_mut(), c"MallocExtension_GetNumericProperty".as_ptr()) };
+    assert!(!symbol.is_null(), "preload libtcmalloc.so for live allocation counters");
+    let property: unsafe extern "C" fn(*const c_char, *mut usize) -> i32 = unsafe { std::mem::transmute(symbol) };
+    let allocated = || {
+        let mut bytes = 0;
+        assert_ne!(unsafe { property(c"generic.current_allocated_bytes".as_ptr(), &mut bytes) }, 0);
+        bytes
+    };
+    let heap_checkpoint = |label: &CStr| {
+        if std::env::var_os("HEAPPROFILE").is_some() {
+            let symbol = unsafe { dlsym(std::ptr::null_mut(), c"HeapProfilerDump".as_ptr()) };
+            assert!(!symbol.is_null());
+            let dump: unsafe extern "C" fn(*const c_char) = unsafe { std::mem::transmute(symbol) };
+            unsafe { dump(label.as_ptr()) };
+        }
+    };
+    let count: usize = std::env::var("PROFILE_CARD_COUNT").expect("set PROFILE_CARD_COUNT").parse().unwrap();
+    assert!(count >= 2);
+    let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+    cx.update(|cx| cx.set_global(crate::stores::GeneratedCoversOnly(true)));
+    let books: Vec<_> = (0..count)
+        .map(|index| {
+            let mut hash = [0; 32];
+            hash[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            cx.new(|cx| {
+                BookCardView::new(BookCardRow { source: BookSource::Library { content_hash: BookId::from_bytes(hash) }, downloaded: false, download_requested: true, ..row() }, library.clone(), Rc::new(|_, _, _| {}), false, false, cx)
+            })
+        })
+        .collect();
+    // Warm the factory before taking the baseline. The same books stay alive
+    // throughout; only their presentation entities are created and released.
+    drop(cx.update(|cx| BookCardView::presentation(books[0].clone(), BookCardPresentation::Grid, cx)));
+    cx.update(|_| {});
+    let baseline = allocated();
+    heap_checkpoint(c"book data only");
+    let mut views: Vec<_> = cx.update(|cx| books.iter().map(|book| BookCardView::presentation(book.clone(), BookCardPresentation::Grid, cx)).collect());
+    let created = allocated();
+    heap_checkpoint(c"presentation views before rendering");
+    assert!(cx.update(|cx| views.iter().all(|view| view.read(cx).renders == 0)));
+    let visible = [views[0].clone(), views[1].clone()];
+    let window = cx.open_window(size(px(500.0), px(400.0)), |_, _| CardFixture { views: visible, first: BookCardInteraction::default(), width: px(180.0) });
+    draw(window, cx);
+    let rendered = cx.update(|cx| views.iter().filter(|view| view.read(cx).renders > 0).count());
+    assert_eq!(rendered, 2);
+    let before_release = allocated();
+    heap_checkpoint(c"two visible views before releasing offscreen views");
+    views.truncate(2);
+    cx.update(|_| {});
+    let after_release = allocated();
+    heap_checkpoint(c"offscreen views released; all book data retained");
+    eprintln!(
+        "PRESENTATION_PROFILE {}",
+        serde_json::json!({
+            "loaded_books": books.len(), "presentation_views_created": count,
+            "rendered_views": rendered, "offscreen_views_released": count - rendered,
+            "baseline_live_bytes": baseline, "with_presentations_live_bytes": created,
+            "presentation_creation_delta_bytes": created as i64 - baseline as i64,
+            "before_offscreen_release_live_bytes": before_release, "after_offscreen_release_live_bytes": after_release,
+            "offscreen_release_delta_bytes": before_release as i64 - after_release as i64,
+            "presentation_struct_bytes": size_of::<BookCardElement>(),
+            "test_render_counter_bytes_per_view": size_of::<usize>(),
+        })
+    );
 }

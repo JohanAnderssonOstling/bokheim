@@ -24,6 +24,7 @@ pub(crate) struct Libraries {
     backend: Rc<AppClient>,
     open_book: OpenBook,
     sessions: HashMap<LibraryId, Entity<LibrarySession>>,
+    now_playing: Entity<crate::NowPlaying>,
     entries: Vec<LibrarySummary>,
     selected_id: Option<LibraryId>,
     creating_libraries: usize,
@@ -40,6 +41,7 @@ fn selected_library_id(libraries: &[LibrarySummary], current: Option<LibraryId>,
 
 impl Libraries {
     pub(super) fn new(backend: Rc<AppClient>, open_book: OpenBook, entries: Vec<LibrarySummary>, library_id: Option<LibraryId>, cx: &mut Context<Self>) -> Self {
+        let now_playing = cx.new(|_| crate::NowPlaying::default());
         let selection_epoch = Rc::new(Cell::new(0));
         let list_epoch = selection_epoch.clone();
         let list_backend = backend.clone();
@@ -71,9 +73,17 @@ impl Libraries {
         });
         // The shared backend scheduler owns startup reconciliation. Each tab
         // uses the initial local list and subscribes to discovery updates.
-        let sessions = library_id.into_iter().filter(|id| entries.iter().any(|entry| entry.library_id() == id)).map(|id| (id, cx.new(|cx| LibrarySession::new(backend.clone(), open_book.clone(), id, cx)))).collect();
-        let libraries = Self { backend, open_book, sessions, entries, selected_id: library_id, creating_libraries: 0, selection_epoch, _list_updates: list_updates };
+        let sessions =
+            library_id.into_iter().filter(|id| entries.iter().any(|entry| entry.library_id() == id)).map(|id| (id, cx.new(|cx| LibrarySession::with_now_playing(backend.clone(), open_book.clone(), id, now_playing.clone(), cx)))).collect();
+        let libraries = Self { backend, open_book, sessions, now_playing, entries, selected_id: library_id, creating_libraries: 0, selection_epoch, _list_updates: list_updates };
         libraries
+    }
+
+    pub(crate) fn set_now_playing(&self, book: Option<crate::NowPlayingBook>, cx: &mut App) {
+        self.now_playing.update(cx, |playing, cx| {
+            playing.book = book;
+            cx.notify();
+        });
     }
 
     pub(crate) fn creating_libraries(&self) -> bool {
@@ -202,7 +212,7 @@ impl Libraries {
                     }
                     let backend = sessions.backend.clone();
                     let open_book = sessions.open_book.clone();
-                    let session = sessions.sessions.entry(*id).or_insert_with(|| cx.new(|cx| LibrarySession::new(backend, open_book, *id, cx)));
+                    let session = sessions.sessions.entry(*id).or_insert_with(|| cx.new(|cx| LibrarySession::with_now_playing(backend, open_book, *id, sessions.now_playing.clone(), cx)));
                     session.update(cx, |session, cx| session.set_importing(true, cx));
                 }
                 cx.notify();
@@ -273,7 +283,7 @@ impl Libraries {
         let backend = self.backend.clone();
         let open_book = self.open_book.clone();
         if self.entries.iter().any(|entry| *entry.library_id() == library_id) {
-            self.sessions.entry(library_id).or_insert_with(|| cx.new(|cx| LibrarySession::new(backend, open_book, library_id, cx)));
+            self.sessions.entry(library_id).or_insert_with(|| cx.new(|cx| LibrarySession::with_now_playing(backend, open_book, library_id, self.now_playing.clone(), cx)));
         }
         self.selected_id = Some(library_id);
         cx.notify();

@@ -1,4 +1,4 @@
-use super::{ComicReaderView, Zoom};
+use super::{ComicReaderView, MAX_COLUMNS, Zoom};
 use crate::shell::{
     chrome::ChromeState,
     input::{CommandTarget, ReaderSidebarCommands},
@@ -43,35 +43,28 @@ impl ComicReaderView {
                     view.zoom = Zoom::FitPage;
                     view.offset = 0.0;
                     view.pan_x = 0.0;
+                    view.clamp_position();
                     view.record_position();
+                    view.request_pages(cx);
                     cx.notify();
                 })),
                 components::reader_choice_button("comic-fit-width", "Fit width", self.zoom == Zoom::FitWidth, theme).on_click(cx.listener(|view, _, _, cx| {
                     view.zoom = Zoom::FitWidth;
                     view.pan_x = 0.0;
-                    cx.notify();
-                })),
-            ],
-            theme,
-        );
-        let columns = components::reader_choice_button_group(
-            "comic-columns",
-            [
-                components::reader_choice_button("comic-single", "One", self.columns == 1, theme).on_click(cx.listener(|view, _, _, cx| {
-                    view.columns = 1;
-                    view.pan_x = 0.0;
-                    view.request_pages(cx);
-                    cx.notify();
-                })),
-                components::reader_choice_button("comic-spread", "Two", self.columns == 2, theme).on_click(cx.listener(|view, _, _, cx| {
-                    view.columns = 2;
-                    view.pan_x = 0.0;
+                    view.clamp_position();
+                    view.record_position();
                     view.request_pages(cx);
                     cx.notify();
                 })),
             ],
             theme,
         );
+        let columns = components::reader_setting_row("Pages").child(components::settings_stepper(
+            components::settings_stepper_button("comic-pages-decrease", "−", self.columns == 1, theme).debug_selector(|| "comic-pages-decrease".into()).on_click(cx.listener(|view, _, _, cx| view.adjust_columns(-1, cx))),
+            self.columns.to_string(),
+            components::settings_stepper_button("comic-pages-increase", "+", self.columns == MAX_COLUMNS, theme).debug_selector(|| "comic-pages-increase".into()).on_click(cx.listener(|view, _, _, cx| view.adjust_columns(1, cx))),
+            theme,
+        ));
         let direction = components::reader_choice_button_group(
             "comic-direction",
             [
@@ -97,7 +90,7 @@ impl ComicReaderView {
         let fullscreen = if window.is_fullscreen() { "Exit full screen" } else { "Enter full screen" };
         components::reader_settings_tab_body(theme)
             .child(components::reader_settings_section("Page display", theme).child(fit))
-            .child(components::reader_settings_section("Pages", theme).child(columns))
+            .child(components::reader_settings_group(theme).child(columns))
             .child(components::reader_settings_section("Reading direction", theme).child(direction))
             .child(components::reader_settings_section("Zoom", theme).child(zoom))
             .when(super::super::shell::settings_navigation::DESKTOP_FULLSCREEN, |panel| {
@@ -200,10 +193,10 @@ command!(NextPage, view, window, cx, {
     view.chrome.hide_for_motion(window, cx);
 });
 command!(PreviousLine, view, _window, cx, {
-    view.scroll(0.0, 32.0, true, cx);
+    view.scroll(0.0, 32.0, cx);
 });
 command!(NextLine, view, _window, cx, {
-    view.scroll(0.0, -32.0, true, cx);
+    view.scroll(0.0, -32.0, cx);
 });
 command!(IncreaseScale, view, _window, cx, {
     view.adjust_zoom(1.2, cx);

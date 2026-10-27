@@ -3,8 +3,8 @@ mod session;
 use fixed_page::{DISPLAY_CACHE_BUDGET, PageCache, PageImage, PageSwipe, PageZoom};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, Pixels, Point, Render,
-    ScrollDelta, ScrollHandle, Style, Task, TouchPhase, Window, div, fill, point, px, rgba, size,
+    AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, PinchEvent, Pixels, Point,
+    Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, Style, Task, TouchPhase, Window, div, fill, point, px, rgba, size,
 };
 use gpui_component::ElementExt;
 use gpui_image_eviction::track_image;
@@ -186,6 +186,8 @@ pub struct PdfView {
     source_position: PdfSourcePosition,
     page_geometry: HashMap<PageGeometryKey, PdfPageGeometry>,
     geometry_loading: bool,
+    prefetched_pages: Vec<usize>,
+    prefetch_task: Option<Task<()>>,
     fit_width_plan: FitWidthPlan,
     /// Viewport-local fit-width pagination. The plan above is always the
     /// pager's current window, whose display index zero is `start_anchor`.
@@ -200,7 +202,6 @@ pub struct PdfView {
     revealed_page: Option<usize>,
     zoom_mode: PdfZoomMode,
     right_to_left: bool,
-    direction_override: Option<bool>,
     /// Device pixels per logical pixel, sampled from the window each frame so
     /// pages are rastered at the resolution they are actually painted at.
     device_pixel_ratio: f32,
@@ -236,6 +237,7 @@ pub struct PdfView {
     flow_offset: f32,
     wheel_delta: f32,
     wheel_debounce: Option<Task<()>>,
+    touchpad: components::TouchpadNavigation,
     /// How far the finger has travelled on both axes, while a touch swipe is
     /// in progress.
     touch_swipe: PageSwipe,
@@ -388,7 +390,7 @@ impl PdfView {
         view.start_load(
             move || {
                 let content_hash = metadata.as_ref().map(|m| m.content_hash.clone()).unwrap_or_default();
-                PdfDocumentSession::from_reader_with_page_source(source_name, reader, &content_hash, metadata, page_source)
+                PdfDocumentSession::from_reader_with_opening_page(source_name, reader, &content_hash, metadata, page_source, Some(initial_page))
             },
             cx,
         );
@@ -408,6 +410,8 @@ impl PdfView {
             source_position: PdfSourcePosition::new(initial_page, 0.0),
             page_geometry: HashMap::new(),
             geometry_loading: false,
+            prefetched_pages: Vec::new(),
+            prefetch_task: None,
             fit_width_plan: FitWidthPlan::default(),
             viewport_pager: None,
             plan_key: None,
@@ -418,7 +422,6 @@ impl PdfView {
             revealed_page: None,
             zoom_mode: PdfZoomMode::default(),
             right_to_left: false,
-            direction_override: None,
             device_pixel_ratio: 1.0,
             available_width: DEFAULT_AVAILABLE_WIDTH,
             available_height: DEFAULT_AVAILABLE_HEIGHT,
@@ -450,6 +453,7 @@ impl PdfView {
             flow_offset: 0.0,
             wheel_delta: 0.0,
             wheel_debounce: None,
+            touchpad: components::TouchpadNavigation::default(),
             touch_swipe: PageSwipe::default(),
             swipe_preview: components::SwipePreview::default(),
             page_turn: None,
@@ -569,38 +573,6 @@ impl PdfView {
 
     pub fn right_to_left(&self) -> bool {
         self.right_to_left
-    }
-
-    /// Overrides the document's reading direction.
-    pub fn set_right_to_left(&mut self, right_to_left: bool, cx: &mut Context<Self>) {
-        self.set_direction_override(Some(right_to_left), cx);
-    }
-
-    /// `None` follows the PDF's viewer preference (including after async load).
-    pub fn set_direction_override(&mut self, direction: Option<bool>, cx: &mut Context<Self>) {
-        self.direction_override = direction;
-        self.apply_reading_direction(cx);
-    }
-
-    /// Changes presentation without changing source positions or reading history.
-    fn apply_reading_direction(&mut self, cx: &mut Context<Self>) {
-        let right_to_left = self.direction_override.unwrap_or_else(|| self.info.as_ref().is_some_and(PdfDocumentInfo::right_to_left));
-        if self.right_to_left == right_to_left {
-            return;
-        }
-        self.right_to_left = right_to_left;
-        self.touch_swipe.cancel();
-        self.swipe_preview.clear();
-        self.page_turn = None;
-        self.scroll_animation = None;
-        self.wheel_delta = 0.0;
-        self.wheel_debounce.take();
-        self.tap_start = None;
-        self.selection_anchor = None;
-        self.selection_anchor_source_index = None;
-        self.selection_active = None;
-        self.passage_bounds.set(None);
-        cx.notify();
     }
 
     /// `towards_right` describes a physical control, such as the right arrow.
@@ -775,6 +747,31 @@ impl PdfView {
             return;
         }
         self.set_zoom(self.zoom() + delta, cx);
+    }
+
+    fn handle_pinch(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
+        self.wheel_debounce.take();
+        self.wheel_delta = 0.0;
+        self.touch_swipe.cancel();
+        self.touchpad.consume();
+        self.swipe_preview.settle();
+        let factor = 1.0 + event.delta;
+        if event.phase != TouchPhase::Cancelled && factor.is_finite() && factor > 0.0 && factor != 1.0 {
+            self.set_zoom(self.zoom() * factor, cx);
+        }
+    }
+
+    fn handle_touchpad_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        self.wheel_debounce.take();
+        self.wheel_delta = 0.0;
+        if let Some(travel) = self.touchpad.update(event) {
+            let forward = if travel.x != 0.0 { (travel.x < 0.0) != self.right_to_left } else { travel.y < 0.0 };
+            if forward {
+                self.next_page(cx);
+            } else {
+                self.previous_page(cx);
+            }
+        }
     }
 
     pub fn set_interaction_style(&mut self, style: ReaderInteractionStyle, cx: &mut Context<Self>) {
@@ -965,7 +962,6 @@ impl PdfView {
         cx.notify();
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn reading_request(&self, page: usize) -> Option<impl std::future::Future<Output = PdfResult<Vec<pdf_reader_core::PdfReadingFragment>>> + 'static> {
         let session = self.session.clone()?;
         Some(async move { session.reading_fragments(page).await })
@@ -1037,8 +1033,8 @@ impl PdfView {
                 }
                 match result {
                     Ok(session) => {
+                        this.right_to_left = session.info().right_to_left();
                         this.info = Some(session.info().clone());
-                        this.apply_reading_direction(cx);
                         this.session = Some(session);
                         let mut page_index = this.source_position.page_index().min(this.page_count().saturating_sub(1));
                         if let Some(info) = &this.info
@@ -1071,9 +1067,39 @@ impl PdfView {
         .detach();
     }
 
+    fn byte_prefetch_window(&self) -> Vec<usize> {
+        let PdfZoomMode::FitWidth { columns } = self.zoom_mode else { return Vec::new() };
+        let Some(info) = &self.info else { return Vec::new() };
+        let visible = self.visible_columns().iter().map(|column| column.page_index()).collect::<Vec<_>>();
+        info.prefetch_window(self.current_page(), &visible, columns.clamp(MIN_VISIBLE_PAGE_COUNT, MAX_VISIBLE_PAGE_COUNT))
+    }
+
+    fn start_prefetch(&mut self, cx: &mut Context<Self>) {
+        let pages = self.byte_prefetch_window();
+        if self.prefetched_pages == pages {
+            return;
+        }
+        self.prefetch_task.take();
+        self.prefetched_pages = pages.clone();
+        if pages.is_empty() {
+            return;
+        }
+        let Some(session) = self.session.clone() else { return };
+        // Rendering finishes before optional network warming begins. The byte
+        // source chooses how many of these priority-ordered pages fit in cache.
+        self.prefetch_task = Some(cx.spawn(async move |_, _| {
+            let _ = session.prefetch_pages(pages).await;
+        }));
+    }
+
     fn request_current_pages(&mut self, cx: &mut Context<Self>) {
         if self.info.is_some() {
             self.rebuild_fit_width_plan();
+        }
+        let window = self.byte_prefetch_window();
+        if self.prefetched_pages != window {
+            self.prefetch_task.take();
+            self.prefetched_pages.clear();
         }
         self.render_generation = self.render_generation.wrapping_add(1);
         let generation = self.render_generation;
@@ -1090,7 +1116,10 @@ impl PdfView {
             self.request_current_pages(cx);
             return;
         }
-        let keys = self.visible_render_keys();
+        let mut keys = self.visible_render_keys();
+        if !window.is_empty() {
+            keys.sort_by_key(|key| window.iter().position(|page| *page == key.page_index()).unwrap_or(usize::MAX));
+        }
         if keys.is_empty() {
             self.pages.clear();
             self.emit_position_changed(cx);
@@ -1101,6 +1130,7 @@ impl PdfView {
         let missing_keys = keys.into_iter().filter(|key| !self.display_cache.contains(*key)).collect::<Vec<_>>();
         if missing_keys.is_empty() {
             self.pending_render = None;
+            self.start_prefetch(cx);
         } else if self.rendering {
             self.pending_render = Some((generation, missing_keys));
         } else {
@@ -1113,16 +1143,25 @@ impl PdfView {
 
     fn start_geometry(&mut self, mut keys: Vec<PageGeometryKey>, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else { return };
-        keys.sort_unstable_by_key(|key| key.page_index);
+        let window = self.byte_prefetch_window();
+        keys.sort_by_key(|key| (window.iter().position(|page| *page == key.page_index).unwrap_or(usize::MAX), key.page_index));
         keys.dedup();
         self.geometry_loading = true;
-        let generation = self.load_generation;
+        let load_generation = self.load_generation;
+        let generation = self.render_generation;
         cx.spawn(async move |this, cx| {
+            let mut completed = true;
             for key in keys {
+                // Do not enqueue another page from a window that navigation or
+                // settings have already replaced.
+                if !this.update(cx, |this, _| this.load_generation == load_generation && this.render_generation == generation).unwrap_or(false) {
+                    completed = false;
+                    break;
+                }
                 let result = session.page_geometry(key.page_index, key.trim_margins).await;
                 let proceed = this
                     .update(cx, |this, cx| {
-                        if this.load_generation != generation {
+                        if this.load_generation != load_generation {
                             return false;
                         }
                         match result {
@@ -1130,24 +1169,31 @@ impl PdfView {
                                 this.page_geometry.insert(key, geometry);
                                 this.geometry_revision = this.geometry_revision.wrapping_add(1);
                                 this.rebuild_fit_width_plan();
-                                true
+                                this.render_generation == generation
                             }
                             Err(error) => {
-                                this.error = Some(components::user_facing_error(&error.to_string(), "Could not analyze this PDF page. Try reopening the book.").to_owned());
-                                cx.notify();
+                                if this.render_generation == generation {
+                                    this.error = Some(components::user_facing_error(&error.to_string(), "Could not analyze this PDF page. Try reopening the book.").to_owned());
+                                    cx.notify();
+                                }
                                 false
                             }
                         }
                     })
                     .unwrap_or(false);
                 if !proceed {
-                    let _ = this.update(cx, |this, _| this.geometry_loading = false);
-                    return;
+                    completed = false;
+                    break;
                 }
             }
             let _ = this.update(cx, |this, cx| {
+                if this.load_generation != load_generation {
+                    return;
+                }
                 this.geometry_loading = false;
-                this.request_current_pages(cx);
+                if completed || this.render_generation != generation {
+                    this.request_current_pages(cx);
+                }
             });
         })
         .detach();
@@ -1235,6 +1281,9 @@ impl PdfView {
                     this.request_current_pages(cx);
                 }
                 if this.render_generation == generation {
+                    if this.error.is_none() {
+                        this.start_prefetch(cx);
+                    }
                     cx.notify();
                 }
             });
@@ -1450,7 +1499,7 @@ impl PdfView {
     }
 
     fn flow_scroll_delta(&self, travel: Point<f32>) -> f32 {
-        if travel.y != 0.0 {
+        if travel.y.abs() >= travel.x.abs() {
             travel.y
         } else if self.right_to_left {
             -travel.x
@@ -2402,6 +2451,7 @@ impl Render for PdfView {
         let mouse_up_target = view.clone();
         let mouse_up_out_target = view.clone();
         let key_target = view.clone();
+        let pinch_target = view.clone();
         let wheel_target = view;
         components::reader_pdf_scroll_surface(&self.scroll_handle, theme, cx)
             .track_focus(&self.focus)
@@ -2514,6 +2564,11 @@ impl Render for PdfView {
                     return;
                 }
                 if wheel_target.read(cx).zoom_mode == PdfZoomMode::FitHeight {
+                    if matches!(event.delta, ScrollDelta::Pixels(_)) || wheel_target.read(cx).touchpad.is_active() || matches!(event.delta, ScrollDelta::Lines(delta) if delta.x.abs() > delta.y.abs()) {
+                        wheel_target.update(cx, |view, cx| view.handle_touchpad_scroll(event, cx));
+                        cx.stop_propagation();
+                        return;
+                    }
                     let from_edge = components::in_bottom_gesture_edge(event.position, window);
                     wheel_target.update(cx, |view, cx| {
                         view.handle_page_scroll(gpui::point(horizontal, vertical), event.touch_phase, from_edge, window, cx);
@@ -2528,6 +2583,10 @@ impl Render for PdfView {
                     });
                     cx.stop_propagation();
                 }
+            })
+            .on_pinch(move |event, _, cx| {
+                pinch_target.update(cx, |view, cx| view.handle_pinch(event, cx));
+                cx.stop_propagation();
             })
             .child(document)
             .into_any_element()
@@ -2576,6 +2635,11 @@ mod tests {
     use super::*;
     use gpui::{Entity, TestAppContext, VisualTestContext};
 
+    #[cfg(not(target_arch = "wasm32"))]
+    mod navigation {
+        include!("navigation_tests.rs");
+    }
+
     fn setup(cx: &mut TestAppContext) -> (Entity<PdfView>, &mut VisualTestContext) {
         cx.update(gpui_component::init);
         cx.add_window_view(|window, cx| {
@@ -2623,6 +2687,68 @@ mod tests {
     fn install_test_pages(view: &mut PdfView) {
         let page = Arc::new(DisplayPage { raster: PageImage::from_bgra(RgbaImage::new(1, 1)), text_layout: Arc::new(PdfPageTextLayout::default()), raster_crop: PixelCrop::full(1, 1), page_crop: NormalizedRect::new(0.0, 0.0, 1.0, 1.0) });
         view.pages = (0..5).map(|index| (index, page.clone())).collect();
+    }
+
+    #[gpui::test]
+    fn pinch_zooms_from_fit_height_and_rejects_invalid_deltas(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        view.update(cx, |view, cx| {
+            let initial = view.zoom();
+            let source = view.source_position;
+            let pinch = |delta, phase| PinchEvent { delta, phase, ..Default::default() };
+            view.handle_pinch(&pinch(0.0, TouchPhase::Started), cx);
+            assert_eq!(view.zoom_mode, PdfZoomMode::FitHeight, "finger down alone must not change the fit mode");
+            view.handle_pinch(&pinch(-0.25, TouchPhase::Moved), cx);
+            assert!((view.zoom() - initial * 0.75).abs() < 0.001);
+            assert!(matches!(view.zoom_mode, PdfZoomMode::Fixed { .. }));
+            let zoom = view.zoom();
+            for (delta, phase) in [(f32::NAN, TouchPhase::Moved), (f32::INFINITY, TouchPhase::Moved), (-1.0, TouchPhase::Moved), (0.5, TouchPhase::Cancelled)] {
+                view.handle_pinch(&pinch(delta, phase), cx);
+                assert_eq!(view.zoom(), zoom);
+            }
+            view.handle_pinch(&pinch(0.25, TouchPhase::Moved), cx);
+            assert!((view.zoom() - zoom * 1.25).abs() < 0.001);
+            view.handle_pinch(&pinch(1000.0, TouchPhase::Moved), cx);
+            assert_eq!(view.zoom(), view.width_fit_zoom(MIN_VISIBLE_PAGE_COUNT));
+            view.handle_pinch(&pinch(-0.9999, TouchPhase::Moved), cx);
+            assert_eq!(view.zoom(), MIN_ZOOM);
+            assert_eq!(view.source_position, source, "zoom preserves the document position");
+        });
+    }
+
+    #[gpui::test]
+    fn touchpad_turns_once_per_burst_and_respects_reading_direction(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        view.update(cx, |view, cx| {
+            let scroll = |x, y, touch_phase| ScrollWheelEvent { delta: ScrollDelta::Pixels(point(px(x), px(y))), touch_phase, ..Default::default() };
+            install_test_pages(view);
+            view.handle_touchpad_scroll(&scroll(-20.0, 0.0, TouchPhase::Started), cx);
+            assert_eq!(view.flow_offset, 0.0);
+            view.handle_touchpad_scroll(&scroll(-60.0, 0.0, TouchPhase::Moved), cx);
+            assert_eq!(view.flow_offset, 0.0, "phased gestures wait for release");
+            view.handle_touchpad_scroll(&scroll(0.0, 0.0, TouchPhase::Ended), cx);
+            assert_eq!(view.flow_offset, 800.0);
+            view.handle_touchpad_scroll(&scroll(-160.0, 0.0, TouchPhase::Moved), cx);
+            assert_eq!(view.flow_offset, 800.0, "momentum cannot skip another page");
+            install_test_pages(view);
+            view.handle_touchpad_scroll(&scroll(60.0, 0.0, TouchPhase::Started), cx);
+            view.handle_touchpad_scroll(&scroll(0.0, 0.0, TouchPhase::Ended), cx);
+            assert_eq!(view.flow_offset, 0.0);
+            view.right_to_left = true;
+            assert_eq!(view.flow_scroll_delta(point(60.0, -2.0)), -60.0, "minor vertical drift must not reverse a horizontal RTL gesture");
+            install_test_pages(view);
+            view.handle_touchpad_scroll(&scroll(60.0, 0.0, TouchPhase::Started), cx);
+            view.handle_touchpad_scroll(&scroll(0.0, 0.0, TouchPhase::Ended), cx);
+            assert_eq!(view.flow_offset, 800.0, "horizontal navigation follows RTL");
+            install_test_pages(view);
+            view.handle_touchpad_scroll(&scroll(0.0, -60.0, TouchPhase::Started), cx);
+            view.handle_touchpad_scroll(&scroll(0.0, 0.0, TouchPhase::Ended), cx);
+            assert_eq!(view.flow_offset, 1600.0, "vertical navigation keeps document order");
+            view.handle_touchpad_scroll(&scroll(10.0, 0.0, TouchPhase::Started), cx);
+            view.handle_touchpad_scroll(&scroll(60.0, 0.0, TouchPhase::Cancelled), cx);
+            view.handle_touchpad_scroll(&scroll(60.0, 0.0, TouchPhase::Ended), cx);
+            assert_eq!(view.flow_offset, 1600.0);
+        });
     }
 
     #[gpui::test]
@@ -2753,7 +2879,7 @@ mod tests {
     #[gpui::test]
     fn rtl_spreads_mirror_hit_targets_and_keep_source_positions_and_page_numbers(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
-        view.update(cx, |view, cx| {
+        view.update(cx, |view, _| {
             let source = view.source_position;
             let position = view.current_page_position();
             let range = view.visible_page_range();
@@ -2761,7 +2887,7 @@ mod tests {
             assert!(widths.len() >= 2);
             assert_ne!(widths[0], widths[1], "include mixed page widths");
             let ltr = evenly_spaced_page_slots(view.available_width, &widths, false);
-            view.set_right_to_left(true, cx);
+            view.right_to_left = true;
             let rtl = evenly_spaced_page_slots(view.available_width, &widths, view.right_to_left());
             assert!(rtl[0].0 > rtl[1].0);
             assert!(view.flow_snapshot(false).right_to_left);
@@ -2776,7 +2902,7 @@ mod tests {
             assert_eq!(view.source_position, source);
             assert_eq!(view.current_page_position(), position);
             assert_eq!(view.visible_page_range(), range);
-            view.set_right_to_left(false, cx);
+            view.right_to_left = false;
             assert_eq!(view.source_position, source);
         });
     }
@@ -2786,7 +2912,7 @@ mod tests {
         let (view, cx) = setup(cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.set_right_to_left(true, cx);
+                view.right_to_left = true;
                 view.horizontal_page(false, cx);
                 assert_eq!(view.flow_offset, 800.0, "left advances in RTL");
                 view.horizontal_page(true, cx);
@@ -2812,26 +2938,6 @@ mod tests {
                 view.finish_fit_height_scroll(cx);
                 assert_eq!(view.flow_offset, 1600.0, "vertical wheel remains forward");
             })
-        });
-    }
-
-    #[gpui::test]
-    fn changing_direction_preserves_fit_width_anchor_and_cancels_old_motion(cx: &mut TestAppContext) {
-        let (view, cx) = setup_fit_width(cx);
-        view.update(cx, |view, cx| {
-            view.set_full_page_position(0.3, cx);
-            let source = view.source_position;
-            let plan = view.fit_width_plan.clone();
-            view.touch_swipe.begin(false);
-            view.touch_swipe.push(-100.0, 0.0);
-            view.wheel_delta = -100.0;
-            view.set_right_to_left(true, cx);
-            assert_eq!(view.source_position, source);
-            assert_eq!(view.fit_width_plan, plan);
-            assert!(!view.touch_swipe.is_active());
-            assert_eq!(view.wheel_delta, 0.0);
-            assert_eq!(view.page_drag(point(180.0, 0.0)), point(0.0, -180.0));
-            assert_eq!(view.page_drag(point(0.0, -180.0)), point(0.0, -180.0));
         });
     }
 
@@ -3078,7 +3184,7 @@ mod tests {
 
     #[gpui::test]
     #[cfg(not(target_arch = "wasm32"))]
-    async fn loading_follows_each_pdf_direction_and_preserves_explicit_overrides(cx: &mut TestAppContext) {
+    async fn loading_follows_each_pdf_direction_and_preserves_the_reading_position(cx: &mut TestAppContext) {
         struct DirectionLoadTest(Entity<PdfView>);
         impl Render for DirectionLoadTest {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -3089,7 +3195,7 @@ mod tests {
         cx.executor().allow_parking();
         cx.update(gpui_component::init);
         let fixture = String::from_utf8(include_bytes!("../../../../../../shared/pdf-reader-core/tests/fixtures/rtl-viewer-preferences.pdf").to_vec()).unwrap();
-        for (name, direction_override, expected) in [("/R2L", None, true), ("/R2L", Some(false), false), ("/L2R", None, false), ("/L2R", Some(true), true)] {
+        for (name, expected) in [("/R2L", true), ("/L2R", false), ("/Foo", false)] {
             let bytes = fixture.replace("/R2L", name).into_bytes();
             let (holder, visual) = cx.add_window_view(|window, cx| {
                 // Metadata loading is independent of painting a full viewport.
@@ -3097,8 +3203,7 @@ mod tests {
                     let mut view = PdfView::from_bytes("document-direction".into(), bytes, 0, window, cx);
                     view.set_available_size(64.0, 64.0, cx);
                     view.set_trim_margins(false, cx);
-                    view.set_direction_override(direction_override, cx);
-                    assert_eq!(view.right_to_left(), direction_override.unwrap_or(false));
+                    assert!(!view.right_to_left());
                     view.set_full_page_position(0.3, cx);
                     view
                 }))
@@ -3110,13 +3215,9 @@ mod tests {
                     view.session.is_some()
                 })
                 .await;
-            view.update(visual, |view, cx| {
-                assert_eq!(view.right_to_left(), expected, "{name}, override {direction_override:?}");
+            view.read_with(visual, |view, _| {
+                assert_eq!(view.right_to_left(), expected, "{name}");
                 assert_eq!(view.source_position.page_y(), 0.3);
-                let position = view.source_position;
-                view.set_direction_override(None, cx);
-                assert_eq!(view.right_to_left(), name == "/R2L", "From PDF restores the declaration");
-                assert_eq!(view.source_position, position);
             });
             visual.update(|window, _| window.remove_window());
         }

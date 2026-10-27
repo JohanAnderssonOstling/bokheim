@@ -24,10 +24,12 @@ impl Database {
             })?;
             // A book the library does not hold may be in the catalog.
             let Some((id, audiobook_chapter_count, record)) = found else {
-                return super::catalog::detail(content_hash)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into());
+                let detail: Result<BookDetail, DatabaseError> = super::catalog::detail(content_hash)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into());
+                return self.with_catalog_subjects(detail?);
             };
             let year = year_from_record(record)?;
             let book = self.load_cards(&[id])?.pop().ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            let subjects = self.book_subjects(super::subjects::Books::Library, id)?;
 
             // Empty when the book has no stored blurb.
             let mut description = String::new();
@@ -113,7 +115,7 @@ impl Database {
 
             let mut chapter_read_status = self.chapter_read_status(content_hash)?;
             chapter_read_status.update_parents(&toc);
-            Ok(BookDetail { book, external_url: None, audiobook_chapter_count, description, year, source_directory_id, path, authors, credits, current_entry, current_target, toc, chapter_read_status })
+            Ok(BookDetail { book, external_url: None, audiobook_chapter_count, description, subjects, year, source_directory_id, path, authors, credits, current_entry, current_target, toc, chapter_read_status })
         })
     }
 }

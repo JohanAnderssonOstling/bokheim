@@ -80,7 +80,8 @@ pub(crate) fn finish_staged_write(handle: &Handle, writer: client_platform_web::
 pub(crate) async fn stage_book(handle: &Handle, source: &mut (dyn std::io::Read + Send)) -> Result<StagedBook, AssetStoreError> {
     let mut writer = client_platform_web::web_storage::begin_write(&name(handle, "book/staged".into())).await.map_err(AssetStoreError::operation)?;
     let mut hasher = handle.hash_service.start().await.map_err(AssetStoreError::operation)?;
-    let mut buffer = [0_u8; 64 * 1024];
+    // Keep chunk storage out of nested async frames on the WASM stack.
+    let mut buffer = vec![0_u8; 64 * 1024];
     let mut length = 0_u64;
     loop {
         let read = source.read(&mut buffer)?;

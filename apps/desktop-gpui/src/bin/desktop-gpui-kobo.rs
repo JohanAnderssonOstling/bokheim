@@ -153,7 +153,7 @@ fn main() -> Result<(), String> {
         // browse lists and reader content.
         page_buttons: PageButtonBehavior::Scroll,
         power_button_handler: Some(kobo_power::suspend_kernel),
-        power_button_opens_menu: true,
+        power_button_opens_menu: false,
         power: KoboPowerOptions {
             prepare_sleep: Some(kobo_power::prepare_sleep),
             finish_sleep: Some(kobo_power::finish_sleep),
@@ -161,8 +161,8 @@ fn main() -> Result<(), String> {
             power_off: Some(kobo_power::power_off),
             prepare_delay: Duration::from_secs(3),
             settle_delay: Duration::from_secs(15),
-            wake_confirmation_timeout: Duration::from_secs(15),
-            idle_timeout: Some(Duration::from_secs(30 * 60)),
+            wake_confirmation_timeout: Duration::from_secs(2),
+            idle_timeout: kobo_device::settings::idle_timeout(),
             sleep_cover: true,
         },
         wake_ui_ready_handler: Some(kobo_device::wifi::resume_after_ui),

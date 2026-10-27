@@ -119,7 +119,7 @@ pub(in crate::epub) fn search_groups(toc: &TocState, results: &[BookSearchMatch]
     for (index, result) in results.iter().enumerate() {
         let ordinal = match &result.target {
             BookSearchTarget::SourceCfi(cfi) => toc.ordinal_for_cfi(cfi),
-            BookSearchTarget::LocalOccurrence(_) => toc.ordinal_for_cfi(&format!("epubcfi(/6/{}!/0)", (result.doc + 1) * 2)),
+            BookSearchTarget::LocalOccurrence(_) => toc.ordinal_for_document(result.doc),
         };
         let chapter = ordinal.and_then(|ordinal| chapters.iter().rev().find(|&&chapter| chapter <= ordinal).copied());
         let key = (chapter, if chapter.is_some() { 0 } else { result.doc });

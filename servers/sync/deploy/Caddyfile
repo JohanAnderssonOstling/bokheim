@@ -24,10 +24,19 @@
 {$BOKHEIM_APP_DOMAIN:app.bokheim.se} {
 	header {
 		Strict-Transport-Security "max-age=31536000"
-		Cross-Origin-Opener-Policy "same-origin"
-		Cross-Origin-Embedder-Policy "require-corp"
 		X-Content-Type-Options "nosniff"
 		-Server
+	}
+	@reader not path /google_cloud_login.html
+	header @reader {
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
+	}
+	@google_login path /google_cloud_login.html
+	header @google_login {
+		Cross-Origin-Opener-Policy "same-origin-allow-popups"
+		Cross-Origin-Embedder-Policy "unsafe-none"
+		Referrer-Policy "no-referrer"
 	}
 
 	# Compress the GPUI JavaScript and WebAssembly bundle in transit.

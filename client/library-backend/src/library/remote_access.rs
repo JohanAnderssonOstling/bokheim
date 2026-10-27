@@ -5,8 +5,8 @@ pub(crate) use crate::BackendError;
 pub(crate) use crate::BookId;
 use crate::LibraryId;
 use book_access::RemoteFileError;
-use std::future::Future;
 use cloud_storage::connections::ConnectedDrive;
+use std::future::Future;
 use sync_common::storage::ProviderFile;
 
 #[derive(Clone)]
@@ -16,6 +16,29 @@ pub(crate) enum RemoteBookAccess {
 }
 
 impl RemoteBookAccess {
+    /// A logical range batch. Only the Bokheim transport uses multipart HTTP;
+    /// external providers retain their existing revision-pinned reads.
+    pub(crate) async fn read_ranges(&self, ranges: Vec<(u64, usize)>) -> Result<Vec<u8>, RemoteFileError> {
+        match self {
+            Self::Bokheim { client, account, library, source } => {
+                authenticated_file_request(account, |session| {
+                    let ranges = ranges.clone();
+                    async move {
+                        let url = sync_transport::blob_endpoint(session.server_url(), library, &source.hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
+                        book_access::remote_file::fetch_ranges(client, url, source, session.token(), ranges).await
+                    }
+                })
+                .await
+            }
+            Self::GoogleDrive { .. } => {
+                let mut bytes = Vec::new();
+                for (offset, count) in ranges {
+                    bytes.extend(self.read(offset, count).await?);
+                }
+                Ok(bytes)
+            }
+        }
+    }
     pub(crate) async fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, RemoteFileError> {
         match self {
             Self::Bokheim { client, account, library, source } => read_remote_file(client, account, *library, source, offset, length).await,
@@ -28,7 +51,17 @@ fn cloud_read_error(error: cloud_storage::CloudError) -> RemoteFileError {
     match error {
         cloud_storage::CloudError::AuthenticationRequired => RemoteFileError::Unauthorized,
         cloud_storage::CloudError::Retryable(message) => RemoteFileError::Retryable(message),
+        cloud_storage::CloudError::Transport { message, .. } => RemoteFileError::Retryable(message),
+        cloud_storage::CloudError::RateLimited => RemoteFileError::Retryable(error.to_string()),
         error => RemoteFileError::Failed(error.to_string()),
+    }
+}
+
+pub(crate) fn range_backend_error(error: RemoteFileError) -> BackendError {
+    match error {
+        RemoteFileError::Unauthorized => BackendError::classified(client_runtime::Failure::SignInRequired, "reconnect the storage account before retrying"),
+        RemoteFileError::Retryable(message) => BackendError::classified(client_runtime::Failure::ServiceUnavailable, message),
+        error => BackendError::operation(error),
     }
 }
 
@@ -41,14 +74,17 @@ impl LibrarySession {
     }
 
     pub(crate) fn downloaded_books_only(&self) -> Result<bool, BackendError> {
-        if self.db.storage_policy()?.external().is_some() { return Ok(false); }
-        Ok(self.account()?.current().map_err(BackendError::operation)?.is_none())
+        let storage = self.db.storage_policy()?;
+        if storage.external().is_some() {
+            return Ok(false);
+        }
+        Ok(!storage.uses_bokheim_assets() || self.account()?.current().map_err(BackendError::operation)?.is_none())
     }
 
     pub(crate) fn remote_book_access(&self, source: &RemoteFile) -> Result<RemoteBookAccess, BackendError> {
         if let Some(root) = self.db.storage_policy()?.external() {
             let file = self.db.provider_file(&source.hash)?.ok_or_else(|| BackendError::message("cloud file reference is unavailable; refresh this library"))?;
-            if file.identity.scope != root.scope || file.identity.book_id() != source.hash || file.size_bytes != source.length {
+            if file.identity.scope != root.scope || file.identity.book_id() != source.hash || file.size_bytes != source.length || source.revision.as_deref() != Some(file.revision.as_str()) {
                 return Err(BackendError::message("cloud file reference does not match this library and revision"));
             }
             let connection = self.cloud.google_drive(root.scope.clone()).map_err(BackendError::operation)?;
@@ -91,6 +127,27 @@ impl LibrarySession {
         self.remote_book_access(source).map_err(|error| RemoteFileError::Failed(error.to_string()))?.read(offset, length).await
     }
 
+    pub(crate) async fn read_file_ranges(&self, source: &RemoteFile, ranges: Vec<(u64, usize)>) -> Result<Vec<u8>, RemoteFileError> {
+        if self.db.book_format(&source.hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?.is_none() {
+            return Err("file is not in this library".into());
+        }
+        // Validate the worker command before it can reach any provider.
+        if ranges.is_empty() || ranges.len() > 128 {
+            return Err("invalid book ranges".into());
+        }
+        let mut previous_end = 0;
+        let mut total = 0_usize;
+        for &(offset, count) in &ranges {
+            let end = offset.checked_add(count as u64).filter(|&end| end <= source.length).ok_or("invalid book ranges")?;
+            total = total.checked_add(count).filter(|&total| total <= 4 * 1024 * 1024).ok_or("invalid book ranges")?;
+            if count == 0 || offset < previous_end {
+                return Err("invalid book ranges".into());
+            }
+            previous_end = end;
+        }
+        self.remote_book_access(source).map_err(|error| RemoteFileError::Failed(error.to_string()))?.read_ranges(ranges).await
+    }
+
     pub(crate) async fn read_file_bundle(&self, source: &RemoteFile, ranges: Vec<(u64, usize)>) -> Result<Vec<u8>, RemoteFileError> {
         if self.db.book_format(&source.hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?.is_none() {
             return Err("file is not in this library".into());
@@ -99,7 +156,9 @@ impl LibrarySession {
             let total = ranges.iter().try_fold(0_usize, |total, (_, length)| total.checked_add(*length)).filter(|&total| total <= 64 * 1024 * 1024).ok_or("cloud range bundle is too large")?;
             let access = self.remote_book_access(source).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
             let mut bytes = Vec::with_capacity(total);
-            for (offset, length) in ranges { bytes.extend(access.read(offset, length).await?); }
+            for (offset, length) in ranges {
+                bytes.extend(access.read(offset, length).await?);
+            }
             return Ok(bytes);
         }
         let account = self.account().map_err(|error| RemoteFileError::Failed(error.to_string()))?;
@@ -120,7 +179,7 @@ impl LibrarySession {
     pub(crate) async fn describe_remote_file(&self, hash: BookId) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
         if self.db.storage_policy().map_err(|error| RemoteFileError::Failed(error.to_string()))?.external().is_some() {
             let file = self.db.provider_file(&hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?.ok_or("cloud file reference is unavailable; refresh this library")?;
-            let source = RemoteFile { hash, length: file.size_bytes };
+            let source = RemoteFile { hash, length: file.size_bytes, revision: Some(file.revision.as_str().to_owned()) };
             let access = self.remote_book_access(&source).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
             let prefix = access.read(0, file.size_bytes.min(64 * 1024) as usize).await?;
             return Ok((source, prefix));
@@ -143,11 +202,11 @@ pub(crate) fn file_auth_error(error: library_runtime::account::AccountSessionErr
 /// Opening and reading books is interactive and always allowed on metered
 /// connections. Automatic transfer callers apply their own transfer policy.
 pub(crate) async fn authenticated_file_request<T, F: Future<Output = Result<T, RemoteFileError>>>(account: &library_runtime::account::LibraryAccount, mut request: impl FnMut(account_client::Session) -> F) -> Result<T, RemoteFileError> {
-    let session = account.refresh_if_needed().await.map_err(file_auth_error)?.ok_or("sign in to read this remote file")?;
+    let session = account.refresh_if_needed().await.map_err(file_auth_error)?.ok_or(RemoteFileError::Unauthorized)?;
     let token = session.token().to_owned();
     match request(session).await {
         Err(RemoteFileError::Unauthorized) => {
-            let refreshed = account.refresh_after_unauthorized(&token).await.map_err(file_auth_error)?.ok_or("sign in to read this remote file")?;
+            let refreshed = account.refresh_after_unauthorized(&token).await.map_err(file_auth_error)?.ok_or(RemoteFileError::Unauthorized)?;
             request(refreshed).await
         }
         result => result,

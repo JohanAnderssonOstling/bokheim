@@ -59,7 +59,7 @@ impl crate::import_workflow::Batch for DirectBatch<'_> {
         }
         .await;
         if let Err(error) = result {
-            let summary = crate::import_workflow::file_failure(&file.path, &error.to_string());
+            let summary = crate::import_workflow::file_failure(&file.path, &error);
             self.failures.push(summary);
         }
         Ok(())
@@ -105,7 +105,7 @@ impl LibraryImport {
                 Ok(directory) => {
                     imported_directories.insert(path, directory);
                 }
-                Err(error) => failures.push(crate::import_workflow::folder_failure(&path, &error.to_string())),
+                Err(error) => failures.push(crate::import_workflow::folder_failure(&path, &error)),
             }
         }
 

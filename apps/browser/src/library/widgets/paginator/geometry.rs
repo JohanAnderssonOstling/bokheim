@@ -5,6 +5,7 @@
 //! measured child widths in reading order with fixed gaps. Both use the same
 //! row-height budget for pagination.
 
+use super::slots::Slots;
 use gpui::{Pixels, px};
 
 use super::{AssignmentDirection, PaginatorData, PaginatorGroupPolicy};
@@ -87,7 +88,7 @@ pub(super) fn fallback_width(data: &PaginatorData, rem_size: Pixels) -> Pixels {
     px(data.groups.iter().map(|group| f32::from(group.policy.width.width(rem_size))).fold(1.0, f32::max))
 }
 
-pub(super) fn next_forward_row(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], next_child: &mut usize) -> Option<AssignedRow> {
+pub(super) fn next_forward_row(data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], next_child: &mut usize) -> Option<AssignedRow> {
     if *next_child >= data.children.len() {
         return None;
     }
@@ -114,7 +115,7 @@ pub(super) fn next_forward_row(data: &PaginatorData, widths: &[Pixels], geometri
 
 /// Normalizes an exact child range forward. The start remains stable and only
 /// the final row of each group can be incomplete.
-pub(super) fn forward_rows_in_range(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], start: usize, end: usize) -> Vec<AssignedRow> {
+pub(super) fn forward_rows_in_range(data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], start: usize, end: usize) -> Vec<AssignedRow> {
     let end = end.min(data.children.len());
     let mut next_child = start.min(end);
     let mut rows = Vec::new();
@@ -140,7 +141,7 @@ pub(super) fn gap_between(data: &PaginatorData, previous: &AssignedRow, next: &A
 }
 
 pub(super) fn page_rows(
-    data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], direction: AssignmentDirection, child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels,
+    data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], direction: AssignmentDirection, child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels,
 ) -> Vec<AssignedRow> {
     match direction {
         AssignmentDirection::Forward => forward_page_rows(data, widths, geometries, child_offset, maximum_rows, available_height, rem_size),
@@ -148,7 +149,7 @@ pub(super) fn page_rows(
     }
 }
 
-fn forward_page_rows(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
+fn forward_page_rows(data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
     let mut next_child = child_offset.min(data.children.len());
     let mut rows = Vec::new();
     while maximum_rows.is_none_or(|maximum_rows| rows.len() < maximum_rows) {
@@ -169,7 +170,7 @@ fn forward_page_rows(data: &PaginatorData, widths: &[Pixels], geometries: &[Grou
 ///
 /// Walks backward one group at a time. Uniform row heights determine how
 /// many rows fit; intrinsic widths determine which children those rows hold.
-fn backward_page_start(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], page_end: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> usize {
+fn backward_page_start(data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], page_end: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> usize {
     let budget = f32::from(available_height).max(1.0);
     let mut start = page_end;
     let mut used = 0.0;
@@ -243,7 +244,7 @@ fn backward_page_start(data: &PaginatorData, widths: &[Pixels], geometries: &[Gr
 /// Fixed columns use division; intrinsic groups greedily pack from the end.
 /// Packing the resulting contiguous range forward needs no more rows, and
 /// preserves reading order even when the first or last row is partial.
-fn backward_page_rows(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
+fn backward_page_rows(data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
     let page_end = child_offset.saturating_add(1).min(data.children.len());
     let start = backward_page_start(data, widths, geometries, page_end, maximum_rows, available_height, rem_size);
     forward_rows_in_range(data, widths, geometries, start, page_end)
@@ -280,8 +281,8 @@ mod tests {
     fn independent_measurement_snapshots_pack_the_same_definitions_differently() {
         let data = intrinsic_data();
         let geometry = group_geometries(&data, px(100.0), px(16.0));
-        let small = [px(60.0), px(30.0), px(60.0)];
-        let large = [px(80.0), px(70.0), px(80.0)];
+        let small = vec![px(60.0), px(30.0), px(60.0)].into();
+        let large = vec![px(80.0), px(70.0), px(80.0)].into();
         assert_eq!(child_indices(forward_rows_in_range(&data, &small, &geometry, 0, 3)), vec![vec![0, 1], vec![2]]);
         assert_eq!(child_indices(forward_rows_in_range(&data, &large, &geometry, 0, 3)), vec![vec![0], vec![1], vec![2]]);
         assert_eq!(child_indices(forward_rows_in_range(&data, &small, &geometry, 0, 3)), vec![vec![0, 1], vec![2]]);
@@ -291,7 +292,7 @@ mod tests {
     fn backward_pagination_uses_the_supplied_measurements() {
         let data = intrinsic_data();
         let geometry = group_geometries(&data, px(100.0), px(16.0));
-        let widths = [px(60.0), px(60.0), px(40.0)];
+        let widths = vec![px(60.0), px(60.0), px(40.0)].into();
         let backward = page_rows(&data, &widths, &geometry, AssignmentDirection::Backward, 2, Some(1), px(100.0), px(16.0));
         assert_eq!(child_indices(backward), vec![vec![1, 2]]);
         let forward = page_rows(&data, &widths, &geometry, AssignmentDirection::Forward, 0, Some(1), px(100.0), px(16.0));

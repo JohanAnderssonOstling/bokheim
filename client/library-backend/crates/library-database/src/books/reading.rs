@@ -54,6 +54,32 @@ impl Database {
         })
     }
 
+    /// Marks the whole book read — at 100%, every chapter read — or unread: at
+    /// 0%, no chapter read. Where the reader left off stays where it is; only a
+    /// book never opened is given a place, its start, to be read at. Returns
+    /// whether anything changed, so its owner can schedule publication.
+    pub fn set_book_read(&self, hash: &BookId, read: bool) -> Result<bool, DatabaseError> {
+        let format = self.book_format(hash)?.ok_or_else(|| DatabaseError::message("book is not in the library"))?;
+        self.write(|transaction| {
+            let previous_chapters = self.chapter_read_status(hash)?;
+            let previous_position = self.stored_reading_position(hash)?;
+            let previous: f32 = transaction.reading_progress(&(&hash), |row| row.get(0)).optional()?.flatten().unwrap_or(0.0);
+            let mut chapters = previous_chapters.clone();
+            chapters.mark_all(&self.reading_toc(hash)?, read);
+            let position = previous_position.clone().unwrap_or_else(|| ReadingPosition::start(format));
+            let progress = if read { 100.0 } else { 0.0 };
+            // An unopened book is unread already; it gets no position for it.
+            let position_changed = (read || previous_position.is_some()) && (previous_position.is_none() || previous != progress);
+            if previous_chapters != chapters {
+                record_local(transaction, LibraryStateEntry::ChapterReadStatus { content_hash: *hash, value: chapters.clone() })?;
+            }
+            if position_changed {
+                record_local(transaction, LibraryStateEntry::ReadingPosition { content_hash: *hash, value: ReadingPositionState { location: position, progress } })?;
+            }
+            Ok(position_changed || previous_chapters != chapters)
+        })
+    }
+
     fn stored_reading_position(&self, hash: &BookId) -> Result<Option<ReadingPosition>, DatabaseError> {
         let mut raw = None;
         self.connection.reading_get_position(hash, |row| {

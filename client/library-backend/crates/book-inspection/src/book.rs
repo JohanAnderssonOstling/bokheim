@@ -68,7 +68,10 @@ pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, rea
     let mut pdf = None;
     let mut pdf_toc = Vec::new();
     let reader = if format == BookFormat::Pdf {
-        let (reader, extracted, outline) = pdf_reader_core::inspect_reader_metadata(reader)?;
+        let (reader, extracted, outline) = match content_hash {
+            Some(identity) if identity.is_external() => pdf_reader_core::inspect_reader_metadata_with_identity(reader, identity.to_hex())?,
+            _ => pdf_reader_core::inspect_reader_metadata(reader)?,
+        };
         pdf = extracted.valid_for(&extracted.content_hash).then_some(extracted);
         pdf_toc = outline;
         reader

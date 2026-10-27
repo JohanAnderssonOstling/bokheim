@@ -4,21 +4,22 @@
 
 use ui_components::user_facing_error;
 
-use crate::services::notify_error;
+use crate::services::{notify_error, track_catalog_import};
 use crate::{BrowsePageSession, NewWindowTarget};
 use std::rc::Rc;
 
 use app::host::startup_profile::StartupProfile;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, DismissEvent, Entity, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window, div, px, rems};
+use gpui::{AnyElement, App, Context, DismissEvent, Div, Entity, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, Pixels, Point, Render, SharedString, Stateful, Subscription, Task, Window, div, px, rems};
 use gpui_component::IconName;
-use gpui_component::breadcrumb::BreadcrumbItem;
 use gpui_component::menu::PopupMenu;
-use library_model::BrowseLocation;
+use library_model::{BookCardRow, BookLocator, BookSource, BrowseLocation};
 use sync_common::{BookId, DirId, ROOT_DIR_ID};
 use ui_components as components;
+use ui_components::{BrowserDownloadPhase, BrowserDownloadUpdate, BrowserDownloads};
 
 use super::cards::{CardEvent, CardEvents, CardView};
+use super::clipboard::{BookClipboard, FocusedBookClipboard};
 use super::controls::{BrowseControls, BrowseOptionsEvent, BrowseOptionsSelection, browse_language_control, browse_options_control, browse_options_sheet};
 use super::detail::{BookDetailPage, CloseBookDetail};
 use super::drag_drop::{FolderDrop, folder_drop_target, import_drop_target};
@@ -31,8 +32,8 @@ use super::profile::Stage;
 use super::search::{BrowseSearch, SearchChanged};
 use crate::library::pages::with_retry_banner;
 use crate::library::services::{LibraryContext, LibraryScanChanged};
-use crate::library::widgets::{BookCardEvent, BookCardEvents, BookCardView, BookPlacement, LoadedCover, mobile_context_menu};
-use crate::{DismissSettings, OpenContextMenu, ToggleGridSelection, UndoLibraryAction};
+use crate::library::widgets::{BookCardEvent, BookCardEvents, BookCardView, BookPlacement, LoadedCover, SelectionAction, mark_feed_book_added, mobile_context_menu};
+use crate::{CopyBooks, CutBooks, DismissSettings, OpenContextMenu, PasteBooks, ToggleGridSelection, UndoLibraryAction};
 
 pub(crate) use ui_components::SplitSide as BrowseSplitSide;
 
@@ -109,12 +110,13 @@ impl BrowsePage {
         let card_events: CardEvents = Rc::new(move |event, window, cx| {
             let _ = page.update(cx, |page, cx| page.handle_card_event(event, window, cx));
         });
-        let cards = cx.new(|cx| CardView::new(navigator.clone(), folder_actions.is_some(), card_events.clone(), cx));
+        let cards = cx.new(|cx| CardView::new(navigator.clone(), folder_actions.is_some() || kind == BrowseKind::Catalog, card_events.clone(), cx));
         let graph = kind.graph_layout().map(|layout| cx.new(|cx| BrowseGraph::new(navigator.clone(), layout, cx)));
         let search = cx.new(|_| BrowseSearch::new());
         let updates = ui.updates();
         let mut subscriptions = vec![
             cx.observe(&navigator, |_, _, cx| cx.notify()),
+            cx.observe(&cards, |_, _, cx| cx.notify()),
             cx.subscribe(&navigator, |page, navigator, _: &Loaded, cx| {
                 page.session_path = navigator.read(cx).destination.path.clone();
                 StartupProfile::new("browse").mark("listing_installed");
@@ -231,6 +233,12 @@ impl BrowsePage {
 
     /// Every entry point uses the same resolved rows, placements and availability.
     fn open_items_menu(&mut self, items: Vec<BrowseItem>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // One book opens its overlay, in a folder too: its own commands
+        // include the folder's.
+        if let [BrowseItem::Book(book)] = items.as_slice() {
+            BookCardView::open_items_menu(std::slice::from_ref(book), position, window, cx);
+            return true;
+        }
         if self.navigator.read(cx).destination.location.folder().is_none() && !items.is_empty() && items.iter().all(|item| matches!(item, BrowseItem::Book(_))) {
             let books = items
                 .iter()
@@ -254,7 +262,7 @@ impl BrowsePage {
         }));
         let single_chip = single_chip.filter(|_| remove_store.is_none());
         let split_target = single_chip.filter(|_| crate::split_panes_available(window)).map(|chip| chip.id);
-        let download_targets: Vec<BrowseLocation> = items.iter().filter_map(BrowseItem::child).filter(|chip| can_download(chip)).map(|chip| chip.id).collect();
+        let download_action = self.selection_download_action(&items, cx);
         let targets = self.navigator.read(cx).destination.location.folder().and_then(|source| FolderTargets::from_items(&items, source, cx));
         let library_id = *self.ui.backend().id();
         let window_targets: Vec<NewWindowTarget> = if crate::native_windows_available() {
@@ -263,7 +271,7 @@ impl BrowsePage {
                 .filter_map(|item| match item {
                     BrowseItem::Child { row, .. } if targets.is_some() => Some(NewWindowTarget::Folder { library_id, directory_id: row.id.folder()?, title: row.name.clone() }),
                     BrowseItem::Child { row, .. } if single_chip.is_some() => Some(NewWindowTarget::Subject { library_id, location: row.id, label: row.name.clone() }),
-                    BrowseItem::Book(book) if targets.is_some() => Some(NewWindowTarget::Book { locator: library_model::BookLocator::new(library_id, book.read(cx).content_hash()?), title: book.read(cx).title().into() }),
+                    BrowseItem::Book(book) if targets.is_some() => Some(NewWindowTarget::Book { locator: BookLocator::new(library_id, book.read(cx).content_hash()?), title: book.read(cx).title().into() }),
                     _ => None,
                 })
                 .collect()
@@ -279,7 +287,7 @@ impl BrowsePage {
             BrowseLocation::Opds { source, page: None } => Some((source, chip.name.clone())),
             _ => None,
         }));
-        if window_targets.is_empty() && split_target.is_none() && download_targets.is_empty() && folder_commands.is_none() && remove_feed.is_none() && remove_store.is_none() {
+        if window_targets.is_empty() && split_target.is_none() && download_action.is_none() && folder_commands.is_none() && remove_feed.is_none() && remove_store.is_none() {
             return false;
         }
         let page = cx.entity();
@@ -301,15 +309,8 @@ impl BrowsePage {
                     })
                 }));
             }
-            if !download_targets.is_empty() {
-                let (download_page, targets) = (page.clone(), download_targets.clone());
-                menu = menu.item(components::menu_item_with_icon("Download to This Device", components::download_glyph(), move |_, _, cx| {
-                    download_page.update(cx, |page, cx| {
-                        for target in &targets {
-                            page.download_child(*target, cx);
-                        }
-                    })
-                }));
+            if let Some(action) = &download_action {
+                menu = action.menu_item(menu);
             }
             if let Some((actions, (source, name))) = remove_feed.clone() {
                 menu = menu.item(components::menu_item_with_icon("Remove feed", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
@@ -323,7 +324,7 @@ impl BrowsePage {
             }
             match folder_commands.clone() {
                 Some((actions, commands)) => {
-                    if !window_targets.is_empty() || split_target.is_some() || !download_targets.is_empty() {
+                    if !window_targets.is_empty() || split_target.is_some() || download_action.is_some() {
                         menu = menu.separator();
                     }
                     FolderActions::item_menu_items(actions, commands, menu)
@@ -369,8 +370,17 @@ impl BrowsePage {
         let _ = (ui, destination, paths, placement, cx);
     }
 
-    /// Both internal items and external files ask whether to move or copy.
+    /// Catalog books import immediately; existing items and files offer placement.
     fn drop_onto_folder(&mut self, destination: DirId, contents: FolderDrop, window: &mut Window, cx: &mut Context<Self>) {
+        let contents = match contents {
+            FolderDrop::Catalog(books) => {
+                self.dismiss_menu(cx);
+                self.import_catalog_books(destination, books, window, cx);
+                self.cards.update(cx, |cards, cx| cards.clear_selection(cx));
+                return;
+            }
+            contents => contents,
+        };
         if let FolderDrop::Items(targets) = &contents
             && (!targets.accepts(*self.ui.backend().id(), destination) || self.folder_actions.is_none())
         {
@@ -404,9 +414,51 @@ impl BrowsePage {
                         });
                     }
                 }
+                FolderDrop::Catalog(_) => unreachable!("catalog drops import before opening a placement menu"),
             })
         });
         self.cards.update(cx, |cards, cx| cards.clear_selection(cx));
+    }
+
+    fn import_catalog_books(&self, destination: DirId, books: Vec<BookCardRow>, window: &mut Window, cx: &mut Context<Self>) {
+        let library = self.ui.backend().clone();
+        let app = self.ui.app().clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let mut downloads = BrowserDownloads::default();
+            for book in books {
+                let key = book.key();
+                let download = uuid::Uuid::new_v4().to_string();
+                let _ = cx.update(|window, cx| {
+                    downloads.apply(BrowserDownloadUpdate { download: download.clone(), replaces: None, name: book.title.clone(), phase: BrowserDownloadPhase::Downloading, percent: None, message: None }, window, cx);
+                });
+                let operation = async {
+                    match book.source {
+                        BookSource::Catalog { content_hash } => library.add_catalog_book(destination, content_hash).await,
+                        BookSource::ExternalCatalog { entry, downloadable: true } => library.add_external_catalog_audiobook(destination, entry).await,
+                        BookSource::Opds { source, entry, downloadable: true, .. } => match app.download_opds_book(source, entry).await {
+                            Ok((name, bytes)) => library.import_downloaded_book(destination, name, bytes).await,
+                            Err(error) => Err(error),
+                        },
+                        _ => Err("this book cannot be imported from a catalog".into()),
+                    }
+                };
+                let result = if matches!(book.source, BookSource::Catalog { .. } | BookSource::ExternalCatalog { .. }) { track_catalog_import(&library, key, &download, &mut downloads, cx, operation).await } else { operation.await };
+                let _ = cx.update(|window, cx| {
+                    let phase = match result {
+                        Ok(_) => {
+                            mark_feed_book_added(key, cx);
+                            BrowserDownloadPhase::Completed
+                        }
+                        Err(error) => {
+                            log::warn!("Could not import dragged catalog book {key:?}: {error}");
+                            BrowserDownloadPhase::Failed(error.failure())
+                        }
+                    };
+                    downloads.apply(BrowserDownloadUpdate { download, replaces: None, name: book.title, phase, percent: None, message: None }, window, cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /// Opens the folder's own commands where the listing has no item — the
@@ -476,11 +528,90 @@ impl BrowsePage {
     }
 
     fn selection_keys_enabled(&self, cx: &App) -> bool {
-        matches!(self.navigator.read(cx).kind, BrowseKind::Folder | BrowseKind::Books) && self.menu_keys_enabled(cx)
+        matches!(self.navigator.read(cx).kind, BrowseKind::Folder | BrowseKind::Books | BrowseKind::Catalog) && self.menu_keys_enabled(cx)
     }
 
     fn menu_keys_enabled(&self, cx: &App) -> bool {
         self.detail.is_none() && self.shown_graph().is_none() && !self.has_popup(cx)
+    }
+
+    fn clipboard_keys_enabled(&self, cx: &App) -> bool {
+        self.navigator.read(cx).kind != BrowseKind::Catalog && self.menu_keys_enabled(cx)
+    }
+
+    fn on_copy_books(&mut self, _: &CopyBooks, window: &mut Window, cx: &mut Context<Self>) {
+        self.clipboard_books(false, None, window, cx);
+    }
+
+    fn on_cut_books(&mut self, _: &CutBooks, window: &mut Window, cx: &mut Context<Self>) {
+        self.clipboard_books(true, None, window, cx);
+    }
+
+    fn on_focused_book_clipboard(&mut self, action: &FocusedBookClipboard, window: &mut Window, cx: &mut Context<Self>) {
+        self.clipboard_books(action.cut, Some((action.book, action.source)), window, cx);
+    }
+
+    fn clipboard_books(&mut self, cut: bool, focused: Option<(BookId, Option<DirId>)>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.clipboard_keys_enabled(cx) || self.search.read(cx).is_focused(window, cx) {
+            cx.propagate();
+            return;
+        }
+        let cards = self.cards.read(cx);
+        let (mut source, mut items) = cards.selected_items(cx);
+        if focused.is_none()
+            && items.is_empty()
+            && let Some(CardEvent::ItemsMenu(cursor_items, _)) = cards.cursor_menu(cx)
+        {
+            items = cursor_items;
+        }
+        let mut books = items
+            .iter()
+            .filter_map(|item| match item {
+                BrowseItem::Book(book) if book.read(cx).can_drag() => book.read(cx).content_hash(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if let Some((book, directory)) = focused
+            && (!books.contains(&book) || directory != source)
+        {
+            books = vec![book];
+            source = directory;
+        }
+        if books.is_empty() {
+            cx.propagate();
+            return;
+        }
+        let clipboard = BookClipboard { library_id: *self.ui.backend().id(), books, source, cut };
+        if let Some(item) = clipboard.to_item() {
+            cx.write_to_clipboard(item);
+        }
+    }
+
+    fn on_paste_books(&mut self, _: &PasteBooks, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.clipboard_keys_enabled(cx) || self.search.read(cx).is_focused(window, cx) {
+            cx.propagate();
+            return;
+        }
+        let Some(actions) = self.folder_actions.clone() else {
+            cx.propagate();
+            return;
+        };
+        let navigator = self.navigator.read(cx);
+        let destination = navigator.destination.location.folder().unwrap_or(ROOT_DIR_ID);
+        let clipboard = cx.read_from_clipboard_async();
+        cx.spawn(async move |page, cx| {
+            let clipboard = match clipboard.await {
+                Ok(Some(item)) => BookClipboard::from_item(&item),
+                Ok(None) => None,
+                Err(error) => {
+                    let _ = page.update_in(cx, |_, window, cx| notify_error("book-paste-error", format!("Could not read the clipboard. {error}"), window, cx));
+                    None
+                }
+            };
+            let Some(clipboard) = clipboard else { return };
+            let _ = page.update_in(cx, |_, window, cx| actions.update(cx, |actions, cx| actions.paste_books(clipboard, destination, window, cx)));
+        })
+        .detach();
     }
 
     fn has_popup(&self, cx: &App) -> bool {
@@ -648,6 +779,7 @@ impl BrowsePage {
         self.set_view(if self.view == BrowseView::Cards { BrowseView::Graph } else { BrowseView::Cards }, cx);
     }
 
+    /// The root, then the path; the trail folds itself to the topbar's width.
     fn breadcrumb(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let navigator = self.navigator.read(cx);
@@ -656,10 +788,10 @@ impl BrowsePage {
         if !path.is_empty() {
             root = root.on_click(cx.listener(|page, _, _, cx| page.open_path(Vec::new(), cx)));
         }
-        let mut breadcrumb = components::folder_breadcrumb().child(self.breadcrumb_drop_target(root, ROOT_DIR_ID, root_label, theme, cx));
+        let mut crumbs = vec![self.breadcrumb_drop_target(root, ROOT_DIR_ID, root_label.clone(), theme, cx)];
         for (index, crumb) in path.iter().enumerate() {
             let current = index + 1 == path.len();
-            let mut item = components::folder_breadcrumb_item(crumb.label.clone(), current, theme);
+            let mut item = components::folder_breadcrumb_item(index + 1, crumb.label.clone(), current, theme);
             if !current {
                 let trail = path[..=index].to_vec();
                 item = item.on_click(cx.listener(move |page, _, _, cx| page.open_path(trail.clone(), cx)));
@@ -667,44 +799,45 @@ impl BrowsePage {
             if let BrowseLocation::Folder(destination) = crumb.location {
                 item = self.breadcrumb_drop_target(item, destination, crumb.label.clone().into(), theme, cx);
             }
-            breadcrumb = breadcrumb.child(item);
+            crumbs.push(item);
         }
-        components::folder_breadcrumb_trail(breadcrumb).into_any_element()
+        let labels = std::iter::once(root_label).chain(path.iter().map(|crumb| SharedString::from(crumb.label.clone()))).collect();
+        components::folder_breadcrumb(crumbs, labels, theme).into_any_element()
     }
 
     /// An ancestor folder is exactly as valid a destination for a drag as one
     /// shown in the grid below it, so each breadcrumb segment takes drops, and
     /// shows it will, the way a folder chip does.
-    fn breadcrumb_drop_target(&self, item: BreadcrumbItem, destination: DirId, name: SharedString, theme: components::BrowserTheme, cx: &App) -> BreadcrumbItem {
+    fn breadcrumb_drop_target(&self, item: Stateful<Div>, destination: DirId, name: SharedString, theme: components::BrowserTheme, cx: &App) -> Stateful<Div> {
         let events = self.card_events.clone();
-        let files_only = self.navigator.read(cx).kind == BrowseKind::Books;
         let library_id = *self.ui.backend().id();
-        item.with_interaction(
-            move |item| if files_only { import_drop_target(item, library_id, destination, "library root".into(), events.clone()) } else { folder_drop_target(item, library_id, destination, name.clone(), true, events.clone(), theme) },
-        )
+        if self.navigator.read(cx).kind == BrowseKind::Books { import_drop_target(item, library_id, destination, "library root".into(), events) } else { folder_drop_target(item, library_id, destination, name, true, events, theme) }
     }
 
-    fn navigation_heading(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn navigation_heading(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         if components::uses_mobile_navigation(window) {
             let navigator = self.navigator.read(cx);
             let theme = components::browser_theme(cx);
+            let route = match navigator.kind {
+                BrowseKind::Home => crate::LibraryRoute::Home,
+                BrowseKind::Books => crate::LibraryRoute::Books,
+                BrowseKind::Folder => crate::LibraryRoute::Folders,
+                BrowseKind::Subject => crate::LibraryRoute::Subjects,
+                BrowseKind::Author => crate::LibraryRoute::Authors,
+                BrowseKind::Catalog => crate::LibraryRoute::Catalog,
+            };
             if self.view == BrowseView::Graph {
+                if components::touch_ui() && crate::navigation::LIBRARY_VIEWS.contains(&route) {
+                    return crate::navigation::library_root_heading(route, theme);
+                }
                 return components::mobile_navigation_heading("", crate::navigation::mobile_back(true, theme), theme);
             }
             // At a page's root the heading names the page; anywhere deeper, the
             // title is the place itself.
             let Some(crumb) = navigator.destination.path.last() else {
-                let route = match navigator.kind {
-                    BrowseKind::Home => crate::LibraryRoute::Home,
-                    BrowseKind::Books => crate::LibraryRoute::Books,
-                    BrowseKind::Folder => crate::LibraryRoute::Folders,
-                    BrowseKind::Subject => crate::LibraryRoute::Subjects,
-                    BrowseKind::Author => crate::LibraryRoute::Authors,
-                    BrowseKind::Catalog => crate::LibraryRoute::Catalog,
-                };
                 return crate::navigation::library_root_heading(route, theme);
             };
-            components::mobile_navigation_heading(crumb.label.clone(), crate::navigation::mobile_back(true, theme), theme)
+            crate::navigation::library_heading(route, crumb.label.clone(), theme)
         } else {
             components::browser_topbar_left().when(self.view == BrowseView::Cards, |heading| heading.child(self.breadcrumb(cx)))
         }
@@ -719,7 +852,7 @@ impl BrowsePage {
         })
     }
 
-    fn render_topbar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let graph_shown = self.shown_graph().cloned();
         let compact_graph = graph_shown.is_some() && components::WindowWidthClass::for_window(window).is_compact();
@@ -729,7 +862,6 @@ impl BrowsePage {
         let search_button_label = if search_open { "Hide search" } else { "Search books or authors" };
         let navigator = self.navigator.read(cx);
         let (browse_controls, selection, folder, all_books) = (navigator.listing.controls.clone(), navigator.selection.clone(), navigator.destination.location.folder(), navigator.kind == BrowseKind::Books);
-        let show_split = !matches!(navigator.kind, BrowseKind::Home | BrowseKind::Books);
         let catalog_root = navigator.destination.path.is_empty();
         let add_feed = self.feed_actions.clone().filter(|_| catalog_root && !compact_graph).map(|actions| FeedActions::render_trigger(actions, cx));
         let open_browser = self.feed_actions.clone().and_then(|actions| FeedActions::render_store_trigger(actions, cx));
@@ -746,8 +878,7 @@ impl BrowsePage {
             .children(inline_search_field.map(|field| div().flex_1().min_w(rems(8.0)).child(field)))
             .when(!compact_graph, |controls| {
                 controls.child(
-                    components::outlined_icon_button("toggle-browse-search", search_button_label, IconName::Search, theme)
-                        .when(search_open || searching, |button| button.bg(theme.accent).text_color(theme.accent_text))
+                    components::selectable_button(components::outlined_icon_button("toggle-browse-search", search_button_label, IconName::Search, theme), search_open || searching, theme)
                         .on_click(cx.listener(|page, _, window, cx| page.toggle_search(window, cx))),
                 )
             })
@@ -758,16 +889,6 @@ impl BrowsePage {
             .children(add_feed)
             .children(open_browser)
             .children(self.trash_button(cx))
-            .when(show_split && !compact_graph && crate::split_panes_available(window), |controls| {
-                controls.child(
-                    components::outlined_icon_button("split-browse-page", "Open split pane", IconName::PanelLeft, theme)
-                        .debug_selector(|| "split-browse-button".into())
-                        .on_click(cx.listener(|page, _, _, cx| page.request_split(BrowseSplitSide::Right, cx))),
-                )
-            })
-            .when(!compact_graph && self.split_close_enabled && crate::split_panes_available(window), |controls| {
-                controls.child(components::outlined_icon_button("close-split-pane", "Close split pane", IconName::Close, theme).on_click(cx.listener(|_, _, _, cx| cx.emit(BrowseSplitClose))))
-            })
             .children(browse_language_control(cx.entity(), &browse_controls, &selection, compact, menu_anchor, theme))
             .child(browse_options_control(cx.entity(), browse_controls, selection, compact, menu_anchor, theme));
         if graph_shown.is_some() {
@@ -790,10 +911,6 @@ impl BrowsePage {
     pub(super) fn set_split_close_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.split_close_enabled = enabled;
         cx.notify();
-    }
-
-    pub(crate) fn request_split(&mut self, side: BrowseSplitSide, cx: &mut Context<Self>) {
-        cx.emit(BrowseSplitRequest { path: self.navigator.read(cx).destination.path.clone(), side });
     }
 
     pub(crate) fn request_split_child(&mut self, child_id: BrowseLocation, side: BrowseSplitSide, cx: &mut Context<Self>) {
@@ -902,13 +1019,13 @@ impl BrowsePage {
             _ => None,
         };
         let mut body = div().relative().size_full().min_h_0().min_w_0();
-        // Folder space imports into that folder; All books imports into the root.
+        // Folder space imports into that folder; library query pages use root.
         if let BrowseLocation::Folder(destination) = navigator.destination.location {
             // Not outlined: it holds every other target, and the one under
             // the pointer is the one to show.
             let name = navigator.destination.path.last().map_or_else(|| navigator.kind.root_label(), |crumb| crumb.label.clone().into());
             body = folder_drop_target(body, *self.ui.backend().id(), destination, name, false, self.card_events.clone(), theme);
-        } else if navigator.kind == BrowseKind::Books {
+        } else if matches!(navigator.kind, BrowseKind::Home | BrowseKind::Books | BrowseKind::Subject | BrowseKind::Author) {
             body = import_drop_target(body, *self.ui.backend().id(), ROOT_DIR_ID, "library root".into(), self.card_events.clone());
         }
         let sign_in = sign_in.map(|(actions, source, name)| FeedActions::render_sign_in(actions, source, name, cx));
@@ -922,13 +1039,109 @@ impl BrowsePage {
         with_retry_banner(body, error, "retry-section", theme, cx.listener(|page, _, _, cx| page.reload(cx)))
     }
 
+    fn selection_download_action(&self, items: &[BrowseItem], cx: &Context<Self>) -> Option<SelectionAction> {
+        let books = items
+            .iter()
+            .filter_map(|item| match item {
+                BrowseItem::Book(book) => Some(book.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let book_download = BookCardView::download_selection_action(&books, cx);
+        let folders = items.iter().filter_map(BrowseItem::child).filter(|row| can_download(row)).map(|row| row.id).collect::<Vec<_>>();
+        if folders.is_empty() {
+            return book_download;
+        }
+        let page = cx.entity();
+        Some(SelectionAction::new("download", "Download to This Device", components::download_glyph(), move |window, cx| {
+            page.update(cx, |page, cx| {
+                for &location in &folders {
+                    page.download_child(location, cx);
+                }
+            });
+            if let Some(action) = &book_download {
+                action.run(window, cx);
+            }
+        }))
+    }
+
+    fn selection_actions(&self, source: Option<DirId>, items: &[BrowseItem], cx: &Context<Self>) -> Vec<SelectionAction> {
+        if source.is_none() && items.iter().all(|item| matches!(item, BrowseItem::Book(_))) {
+            let books = items
+                .iter()
+                .filter_map(|item| match item {
+                    BrowseItem::Book(book) => Some(book.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            return BookCardView::selection_actions(&books, cx);
+        }
+        let mut commands = Vec::new();
+        if crate::native_windows_available() && source.is_some() {
+            let library_id = *self.ui.backend().id();
+            let windows = items
+                .iter()
+                .filter_map(|item| match item {
+                    BrowseItem::Child { row, .. } => Some(NewWindowTarget::Folder { library_id, directory_id: row.id.folder()?, title: row.name.clone() }),
+                    BrowseItem::Book(book) => Some(NewWindowTarget::Book { locator: BookLocator::new(library_id, book.read(cx).content_hash()?), title: book.read(cx).title().into() }),
+                })
+                .collect::<Vec<_>>();
+            if !windows.is_empty() {
+                commands.push(SelectionAction::new("new-window", "Open in New Window", IconName::ExternalLink, move |window, cx| {
+                    for target in &windows {
+                        window.dispatch_action(Box::new(crate::OpenInNewWindow(target.clone())), cx);
+                    }
+                }));
+            }
+        }
+        commands.extend(self.selection_download_action(items, cx));
+        if let Some((actions, targets)) = self.folder_actions.clone().zip(source.and_then(|source| FolderTargets::from_items(items, source, cx))) {
+            let options = actions.read(cx).item_options(targets, items, cx);
+            commands.extend(FolderActions::selection_actions(actions, options));
+        }
+        commands
+    }
+
+    fn render_selection_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.detail.is_some() || self.shown_graph().is_some() {
+            return None;
+        }
+        let (source, items) = self.cards.read(cx).selected_items(cx);
+        if items.len() < 2 {
+            return None;
+        }
+        let theme = components::browser_theme(cx);
+        let actions = self.selection_actions(source, &items, cx);
+        Some(
+            components::selection_footer(theme)
+                .debug_selector(|| "browse-selection-footer".into())
+                .child(div().flex_none().text_size(rems(components::TEXT_SM)).child(format!("{} selected", items.len())))
+                .child(div().flex_1().min_w_0().flex().flex_wrap().items_center().gap(px(components::SPACE_XS)).children(actions.iter().map(|action| {
+                    let id = action.id;
+                    div().debug_selector(move || format!("selection-action-{id}")).child(action.button(theme))
+                })))
+                .child(div().flex_none().debug_selector(|| "clear-browse-selection".into()).child(components::outlined_icon_button("clear-selection", "Clear selection", IconName::Close, theme).on_click(cx.listener(|page, _, _, cx| {
+                    page.cards.update(cx, |cards, cx| cards.clear_selection(cx));
+                }))))
+                .into_any_element(),
+        )
+    }
+
     fn render_shell(&self, topbar: AnyElement, body: AnyElement, options_sheet: Option<AnyElement>, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let folder_overlay = self.folder_actions.as_ref().and_then(|actions| FolderActions::render_overlay(actions.clone(), window, cx));
         let feed_overlay = self.feed_actions.as_ref().and_then(|actions| FeedActions::render_overlay(actions.clone(), window, cx));
         let chip_menu = self.chip_menu.as_ref().map(|active| mobile_context_menu::render(active.menu.clone(), active.position, window));
+        let selection_footer = self.render_selection_footer(cx);
+        let mut key_context = gpui::KeyContext::default();
+        if self.selection_keys_enabled(cx) {
+            key_context.add("BrowseSelection");
+        }
+        if self.clipboard_keys_enabled(cx) {
+            key_context.add("BrowseClipboard");
+        }
         components::full_size_column()
             .track_focus(&self.focus)
-            .when(self.selection_keys_enabled(cx), |view| view.key_context("BrowseSelection"))
+            .key_context(key_context)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|page, _, window, cx| {
@@ -940,10 +1153,15 @@ impl BrowsePage {
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(Self::on_open_context_menu))
             .on_action(cx.listener(Self::on_toggle_grid_selection))
+            .on_action(cx.listener(Self::on_copy_books))
+            .on_action(cx.listener(Self::on_cut_books))
+            .on_action(cx.listener(Self::on_focused_book_clipboard))
+            .on_action(cx.listener(Self::on_paste_books))
             .on_action(cx.listener(Self::on_undo))
             .on_key_down(cx.listener(Self::on_key_down))
             .child(topbar)
             .child(components::remaining_space_column().child(body))
+            .children(selection_footer)
             .children(chip_menu)
             .children(folder_overlay)
             .children(feed_overlay)
@@ -990,9 +1208,349 @@ impl gpui::Focusable for BrowsePage {
 mod tests {
     use super::*;
     use crate::navigation::LibrarySession;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{ClipboardItem, TestAppContext, VisualTestContext};
     use gpui_component::Root;
     use std::fs;
+
+    async fn import_clipboard_books(library: &LibraryContext) -> tempfile::TempDir {
+        let external = tempfile::tempdir().unwrap();
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/library-backend/crates/book-inspection/tests/fixtures");
+        let paths = ["back-matter-evidence.epub", "ocr-image-priority.epub"].map(|name| {
+            let path = external.path().join(name);
+            fs::copy(fixtures.join(name), &path).unwrap();
+            path
+        });
+        assert!(library.backend().import_paths(ROOT_DIR_ID, paths.into(), false).await.unwrap().is_empty());
+        external
+    }
+
+    #[gpui::test]
+    async fn scan_overlay_disappears_on_first_folders_or_books_while_scan_continues(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning()).await;
+        // Hold activity open independently of the local fixture's own scan.
+        updates.update(cx, |updates, cx| updates.set_importing(true, cx));
+
+        for kind in [BrowseKind::Folder, BrowseKind::Books] {
+            let page = cx.new(|cx| BrowsePage::new(kind, library.clone(), cx));
+            let navigator = page.read_with(cx, |page, _| page.navigator.clone());
+            let window = cx.add_window(|window, cx| Root::new(page.clone(), window, cx));
+            cx.condition(&navigator, |navigator, _| navigator.listing.revision > 0).await;
+            let mut visual = VisualTestContext::from_window(window.into(), cx);
+            visual.run_until_parked();
+            assert!(visual.debug_bounds("browse-loading-overlay").is_some());
+
+            let _books = if kind == BrowseKind::Folder {
+                // Drive includes remote folders before any books are inspected.
+                // Install an empty folder before any book inspection completes.
+                navigator.update(cx, |navigator, cx| {
+                    let row = library_model::BrowseRow {
+                        id: BrowseLocation::Folder(uuid::Uuid::new_v4()), name: "First discovered folder".into(),
+                        path: None, book_count: 0, downloaded_book_count: 0,
+                    };
+                    let mut data = library_backend::LibraryBrowseData::default();
+                    data.contents.children.push(row.clone());
+                    data.sections.push(library_model::BrowseSection { parent: row, children: Vec::new(), books: Vec::new(), book_count: None });
+                    navigator.listing.install(data, false, cx);
+                    cx.emit(super::super::navigator::Loaded { left: None, refresh: true });
+                    cx.notify();
+                });
+                None
+            } else {
+                let books = import_clipboard_books(&library).await;
+                navigator.update(cx, |navigator, cx| navigator.reload(cx));
+                cx.condition(&navigator, |navigator, _| !navigator.listing.books.is_empty()).await;
+                Some(books)
+            };
+            visual.run_until_parked();
+            assert!(updates.read_with(cx, |updates, _| updates.scanning()), "the remaining scan continues in the background");
+            assert!(visual.debug_bounds("browse-loading-overlay").is_none(), "the first folders or books must be usable immediately");
+        }
+        updates.update(cx, |updates, cx| updates.set_importing(false, cx));
+    }
+
+    #[gpui::test]
+    async fn book_clipboard_uses_the_book_focused_with_tab_in_a_section(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let _external = import_clipboard_books(&library).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning() && updates.book_count() == Some(2)).await;
+        cx.update(crate::bind_keys);
+        let page = cx.new(|cx| BrowsePage::new(BrowseKind::Home, library.clone(), cx));
+        let navigator = page.read_with(cx, |page, _| page.navigator.clone());
+        let window = cx.add_window(|window, cx| Root::new(page.clone(), window, cx));
+        cx.condition(&navigator, |navigator, _| navigator.listing.sections.iter().any(|section| section.books.len() == 2)).await;
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        let expected = navigator.read_with(cx, |navigator, cx| navigator.listing.sections.iter().find(|section| section.books.len() == 2).unwrap().books[1].read(cx).content_hash().unwrap());
+        visual.update(|window, cx| {
+            page.update(cx, |page, cx| {
+                page.focus.focus(window, cx);
+                page.cards.update(cx, |cards, cx| {
+                    cards.handle_key("down", window, cx);
+                });
+            });
+        });
+        let mut found = false;
+        for _ in 0..40 {
+            visual.write_to_clipboard(ClipboardItem::new_string("unrelated text".into()));
+            visual.simulate_keystrokes("tab secondary-c");
+            if visual.read_from_clipboard().as_ref().and_then(BookClipboard::from_item).is_some_and(|clipboard| clipboard.books == [expected]) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Tab-focused books must handle Copy instead of the outer folder cursor");
+        visual.simulate_keystrokes("secondary-x");
+        let clipboard = BookClipboard::from_item(&visual.read_from_clipboard().unwrap()).unwrap();
+        assert!(clipboard.cut);
+        assert_eq!(clipboard.books, [expected]);
+        visual.read_entity(&page, |page, cx| assert!(page.cards.read(cx).selected_items(cx).1.is_empty()));
+    }
+
+    #[gpui::test]
+    async fn book_clipboard_keeps_only_unfinished_moves_for_retry(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let _external = import_clipboard_books(&library).await;
+        library.backend().create_directory(ROOT_DIR_ID, "Retry destination".into()).await.unwrap();
+        let destination = library.backend().folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Retry destination").unwrap().id;
+        cx.update(crate::bind_keys);
+        let page = cx.new(|cx| BrowsePage::new(BrowseKind::Books, library.clone(), cx));
+        let navigator = page.read_with(cx, |page, _| page.navigator.clone());
+        let window = cx.add_window(|window, cx| Root::new(page.clone(), window, cx));
+        cx.condition(&navigator, |navigator, _| navigator.listing.books.len() == 2).await;
+        let books = navigator.read_with(cx, |navigator, cx| navigator.listing.books.iter().map(|book| book.read(cx).content_hash().unwrap()).collect::<Vec<_>>());
+        // Make the second source unavailable until after the first paste.
+        library.backend().remove_book_from_directory(books[1], ROOT_DIR_ID).await.unwrap();
+        let clipboard = BookClipboard { library_id: *library.backend().id(), books: books.clone(), source: Some(ROOT_DIR_ID), cut: true };
+        cx.write_to_clipboard(clipboard.to_item().unwrap());
+        let actions = page.read_with(cx, |page, _| page.folder_actions.clone().unwrap());
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| actions.update(cx, |actions, cx| actions.paste_books(clipboard, destination, window, cx)));
+        visual.condition(&actions, |_, cx| cx.read_from_clipboard().as_ref().and_then(BookClipboard::from_item).is_some_and(|clipboard| clipboard.books == [books[1]])).await;
+        let remaining = BookClipboard::from_item(&visual.read_from_clipboard().unwrap()).unwrap();
+        assert_eq!(remaining.books, [books[1]]);
+        assert_eq!(remaining.source, Some(ROOT_DIR_ID));
+        assert!(remaining.cut);
+
+        library.backend().restore_book_placement(books[1], ROOT_DIR_ID).await.unwrap();
+        visual.update(|window, cx| actions.update(cx, |actions, cx| actions.paste_books(remaining, destination, window, cx)));
+        visual.condition(&actions, |_, cx| cx.read_from_clipboard().and_then(|item| item.text()).is_none()).await;
+        assert!(visual.read_from_clipboard().and_then(|item| item.text()).is_none());
+        let query = visual.read_entity(&navigator, |navigator, _| navigator.selection.backend_query(BrowseLocation::Folder(ROOT_DIR_ID), false));
+        let root = library.backend().browse(query).await.unwrap();
+        assert!(root.contents.books.is_empty(), "both books should have moved out of the source");
+    }
+
+    #[gpui::test]
+    async fn book_copy_paste_shortcuts_work_across_windows_for_single_and_multiple_books(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning()).await;
+        let _external = import_clipboard_books(&library).await;
+        library.backend().create_directory(ROOT_DIR_ID, "Pasted books".into()).await.unwrap();
+        let destination = library.backend().folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Pasted books").unwrap();
+        cx.update(crate::bind_keys);
+        let source_page = cx.new(|cx| BrowsePage::new(BrowseKind::Books, library.clone(), cx));
+        let source_navigator = source_page.read_with(cx, |page, _| page.navigator.clone());
+        let source_window = cx.add_window(|window, cx| Root::new(source_page.clone(), window, cx));
+        cx.condition(&source_navigator, |navigator, _| navigator.listing.books.len() == 2).await;
+        let destination_page = cx.new(|cx| BrowsePage::new(BrowseKind::Folder, library.clone(), cx));
+        let destination_navigator = destination_page.read_with(cx, |page, _| page.navigator.clone());
+        let destination_window = cx.add_window(|window, cx| Root::new(destination_page.clone(), window, cx));
+        cx.condition(&destination_navigator, |navigator, _| navigator.listing.revision > 0).await;
+        destination_page.update(cx, |page, cx| page.open_path(vec![BrowseCrumb { location: BrowseLocation::Folder(destination.id), label: "Pasted books".into() }], cx));
+        let mut source = VisualTestContext::from_window(source_window.into(), cx);
+        source.update(|window, cx| source_page.read(cx).focus.clone().focus(window, cx));
+        source.run_until_parked();
+        source.simulate_keystrokes("down secondary-c");
+        let clipboard = BookClipboard::from_item(&source.read_from_clipboard().unwrap()).unwrap();
+        assert_eq!(clipboard.books.len(), 1);
+        let mut target = VisualTestContext::from_window(destination_window.into(), cx);
+        target.update(|window, cx| destination_page.read(cx).focus.clone().focus(window, cx));
+        target.run_until_parked();
+        target.simulate_keystrokes("secondary-v");
+        target.condition(&destination_navigator, |navigator, _| navigator.listing.books.len() == 1).await;
+
+        source.simulate_keystrokes("secondary-right secondary-c");
+        let clipboard = BookClipboard::from_item(&source.read_from_clipboard().unwrap()).unwrap();
+        assert_eq!(clipboard.books.len(), 2);
+        target.simulate_keystrokes("secondary-v");
+        target.condition(&destination_navigator, |navigator, _| navigator.listing.books.len() == 2).await;
+        source.read_entity(&source_page, |page, cx| assert_eq!(page.navigator.read(cx).listing.books.len(), 2));
+
+        target.update(|window, cx| destination_page.update(cx, |page, cx| page.on_undo(&UndoLibraryAction, window, cx)));
+        target.condition(&destination_navigator, |navigator, _| navigator.listing.books.len() == 1).await;
+        target.update(|window, cx| destination_page.update(cx, |page, cx| page.on_undo(&UndoLibraryAction, window, cx)));
+        target.condition(&destination_navigator, |navigator, _| navigator.listing.books.is_empty()).await;
+
+        source.update(|_, cx| source_page.update(cx, |page, cx| page.cards.update(cx, |cards, cx| cards.clear_selection(cx))));
+        source.simulate_keystrokes("secondary-x");
+        let clipboard = BookClipboard::from_item(&source.read_from_clipboard().unwrap()).unwrap();
+        assert!(clipboard.cut);
+        assert_eq!(clipboard.books.len(), 1);
+        target.simulate_keystrokes("secondary-v");
+        target.condition(&destination_navigator, |navigator, _| navigator.listing.books.len() == 1).await;
+        target.run_until_parked();
+        assert!(target.read_from_clipboard().and_then(|item| item.text()).is_none());
+
+        source.simulate_keystrokes("secondary-left secondary-x");
+        let clipboard = BookClipboard::from_item(&source.read_from_clipboard().unwrap()).unwrap();
+        assert!(clipboard.cut);
+        assert_eq!(clipboard.books.len(), 2);
+        target.simulate_keystrokes("secondary-v");
+        target.condition(&destination_navigator, |navigator, _| navigator.listing.books.len() == 2).await;
+        target.update(|window, cx| destination_page.update(cx, |page, cx| page.on_undo(&UndoLibraryAction, window, cx)));
+        target.condition(&destination_navigator, |navigator, _| navigator.listing.books.len() == 1).await;
+        target.update(|window, cx| destination_page.update(cx, |page, cx| page.on_undo(&UndoLibraryAction, window, cx)));
+        target.condition(&destination_navigator, |navigator, _| navigator.listing.books.is_empty()).await;
+
+        target.write_to_clipboard(ClipboardItem::new_string("ordinary text".into()));
+        target.simulate_keystrokes("secondary-v");
+        target.run_until_parked();
+        target.update(|_, cx| session.update(cx, |session, _| assert!(session.take_undo().is_none())));
+    }
+
+    #[gpui::test]
+    async fn catalog_multi_selection_shows_footer_and_clear_removes_it(cx: &mut TestAppContext) {
+        check_book_selection_footer(cx, true).await;
+    }
+
+    #[gpui::test]
+    async fn library_multi_selection_shows_download_in_footer(cx: &mut TestAppContext) {
+        check_book_selection_footer(cx, false).await;
+    }
+
+    async fn check_book_selection_footer(cx: &mut TestAppContext, catalog: bool) {
+        use crate::library::widgets::CursorMove;
+        use library_model::{BookCardRow, BookSource, LibraryFileTypeFilter};
+
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning()).await;
+        cx.update(|cx| {
+            cx.set_global(crate::stores::GeneratedCoversOnly(true));
+            cx.set_global(crate::stores::CoverTextSetting(app_preferences::CoverText::CoverOnly));
+        });
+        // Install book rows locally without downloading catalog data or book files.
+        let page = cx.new(|cx| BrowsePage::new(BrowseKind::Books, library.clone(), cx));
+        let navigator = page.read_with(cx, |page, _| page.navigator.clone());
+        let window = cx.add_window(|window, cx| Root::new(page.clone(), window, cx));
+        cx.condition(&navigator, |navigator, _| navigator.listing.revision > 0).await;
+        navigator.update(cx, |navigator, cx| {
+            let books = (0..3)
+                .map(|index| {
+                    BookCardView::create_in_grid(
+                        BookCardRow {
+                            source: if catalog { BookSource::Catalog { content_hash: BookId::from_bytes([index + 10; 32]) } } else { BookSource::Library { content_hash: BookId::from_bytes([index + 10; 32]) } },
+                            title: format!("Catalog book {index}"),
+                            subtitle: None,
+                            author: "Writer".into(),
+                            progress: 0.0,
+                            downloaded: false,
+                            download_requested: false,
+                            format_category: LibraryFileTypeFilter::Book,
+                            audiobook_duration_ms: None,
+                            added_at: 0,
+                            source_directory: None,
+                        },
+                        library.clone(),
+                        Rc::new(|_, _, _| {}),
+                        false,
+                        false,
+                        cx,
+                    )
+                })
+                .collect::<Vec<_>>();
+            navigator.kind = if catalog { BrowseKind::Catalog } else { BrowseKind::Books };
+            navigator.listing.items = Rc::new(books.iter().map(|book| (super::super::listing::book_id(book.read(cx).key(), None), BrowseItem::Book(book.clone()))).collect());
+            navigator.listing.books = Rc::new(books);
+            navigator.listing.page = None;
+            cx.emit(Loaded { left: None, refresh: false });
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("browse-selection-footer").is_none());
+        visual.update(|_, cx| page.update(cx, |page, cx| page.cards.update(cx, |cards, cx| cards.toggle_selection(CursorMove::Right, cx))));
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("browse-selection-footer").is_none(), "one selected book keeps its individual actions");
+        visual.update(|_, cx| page.update(cx, |page, cx| page.cards.update(cx, |cards, cx| cards.toggle_selection(CursorMove::Right, cx))));
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("browse-selection-footer").is_some());
+        assert!(visual.debug_bounds("selection-action-download").is_some());
+        visual.update(|_, cx| {
+            page.update(cx, |page, cx| {
+                let (_, items) = page.cards.read(cx).selected_items(cx);
+                assert_eq!(items.len(), 2);
+                if !catalog {
+                    let download = page.selection_download_action(&items, cx).unwrap();
+                    assert!(!download.is_disabled());
+                    assert!(page.selection_actions(Some(ROOT_DIR_ID), &items, cx).iter().any(|action| action.id == "download" && !action.is_disabled()), "folder book selections must also offer Download");
+                }
+            })
+        });
+        let clear = visual.debug_bounds("clear-browse-selection").unwrap().center();
+        visual.simulate_click(clear, Default::default());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("browse-selection-footer").is_none());
+        visual.read_entity(&page, |page, cx| assert!(page.cards.read(cx).selected_items(cx).1.is_empty()));
+    }
+
+    #[gpui::test]
+    async fn nested_folder_multi_selection_uses_its_parent_in_footer(cx: &mut TestAppContext) {
+        use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning()).await;
+        let parent = uuid::Uuid::from_u128(1);
+        let first = uuid::Uuid::from_u128(2);
+        let second = uuid::Uuid::from_u128(3);
+        let page = cx.new(|cx| BrowsePage::new(BrowseKind::Folder, library.clone(), cx));
+        let navigator = page.read_with(cx, |page, _| page.navigator.clone());
+        let window = cx.add_window(|window, cx| Root::new(page.clone(), window, cx));
+        cx.condition(&navigator, |navigator, _| navigator.listing.revision > 0).await;
+        // Install a container directly: this exercises nested selection and
+        // footer routing independently of the backend's folder promotion.
+        navigator.update(cx, |navigator, cx| {
+            use super::super::listing::{BrowseSection, chip_id};
+            use library_model::BrowseRow;
+            let row = |id, name: &str| BrowseRow { id: BrowseLocation::Folder(id), name: name.into(), path: None, book_count: 0, downloaded_book_count: 0 };
+            let parent_row = row(parent, "Parent");
+            navigator.listing.sections = vec![BrowseSection { parent: parent_row.clone(), children: vec![row(first, "First"), row(second, "Second")], books: Vec::new(), book_count: Some(0) }];
+            navigator.listing.children = Rc::new(vec![parent_row.clone()]);
+            navigator.listing.items = Rc::new(std::collections::HashMap::from([(chip_id(parent_row.id), BrowseItem::Child { row: parent_row, parent: Some(ROOT_DIR_ID) })]));
+            navigator.listing.page = None;
+            cx.emit(Loaded { left: None, refresh: false });
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        let first = visual.debug_bounds(format!("browse-section-subject-{}", BrowseLocation::Folder(first)).leak()).unwrap().center();
+        let second = visual.debug_bounds(format!("browse-section-subject-{}", BrowseLocation::Folder(second)).leak()).unwrap().center();
+        visual.simulate_event(MouseDownEvent { position: first, button: MouseButton::Left, ..Default::default() });
+        visual.simulate_event(MouseMoveEvent { position: second, pressed_button: Some(MouseButton::Left), ..Default::default() });
+        visual.run_until_parked();
+        visual.simulate_event(MouseUpEvent { position: second, button: MouseButton::Left, ..Default::default() });
+        visual.run_until_parked();
+        visual.read_entity(&page, |page, cx| {
+            let (source, items) = page.cards.read(cx).selected_items(cx);
+            assert_eq!(source, Some(parent));
+            assert_eq!(items.len(), 2);
+        });
+        assert!(visual.debug_bounds("selection-action-move").is_some());
+        assert!(visual.debug_bounds("selection-action-copy").is_some());
+        let clear = visual.debug_bounds("clear-browse-selection").unwrap().center();
+        visual.simulate_click(clear, Default::default());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("browse-selection-footer").is_none());
+    }
 
     #[gpui::test]
     async fn create_folder_from_menu_keeps_enter_in_dialog(cx: &mut TestAppContext) {

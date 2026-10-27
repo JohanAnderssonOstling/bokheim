@@ -1,14 +1,14 @@
 //! EPUB appearance preferences and matching renderer commands.
 
 use crate::invalidation::notify;
-use app_preferences::{FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFontFamily, ReaderTextAlignment};
+use app_preferences::{ReaderFirstLineIndent, PARAGRAPH_SPACING_MAX_EM, FIRST_LINE_INDENT_MAX_EM,FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFontFamily, ReaderHyphenation, ReaderTextAlignment, WORD_SPACING_MAX_PERCENT, WORD_SPACING_MIN_PERCENT};
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
 use html_view_gpui::ReadingRulerStyle;
 
 use crate::epub::ReaderView;
 use crate::invalidation::Component;
-use crate::settings::{ReaderPreferences, ReaderSettings, SidebarTab};
+use crate::settings::{CjkFontChoice, ReaderFontRole, ReaderPreferences, ReaderSettings, SidebarTab};
 use crate::shell::chrome;
 
 /// The layout engine's fallback `ch` metric is half an em. Keeping this
@@ -127,7 +127,8 @@ impl ReaderView {
         // preference.
         let theme = crate::settings::library_theme_adaptation(cx);
         let link_foreground = crate::settings::library_link_foreground(cx);
-        self.apply_appearance(cx, update, move |preferences| RendererCommand::SetReaderStyleOverrides(preferences.style_overrides(Some(theme), link_foreground)));
+        let cjk = self.cjk_font;
+        self.apply_appearance(cx, update, move |preferences| RendererCommand::SetReaderStyleOverrides(preferences.style_overrides_for_book(cjk, Some(theme), link_foreground)));
     }
 
     pub(in crate::epub) fn adjust_font_size(&self, delta: f32, cx: &mut Context<Self>) {
@@ -138,13 +139,34 @@ impl ReaderView {
     pub(in crate::epub) fn set_reader_font_family(&self, font_family: ReaderFontFamily, cx: &mut Context<Self>) {
         self.apply_style_override(cx, |preferences| {
             preferences.font_family = font_family;
-            preferences.system_font_family = None;
+            preferences.custom_fonts_enabled = Some(false);
         });
-        self.font_picker.update(cx, |_, cx| cx.notify());
+        self.font_picker.update(cx, |picker, cx| picker.hide(cx));
     }
 
-    pub(in crate::epub) fn set_system_font_family(&self, family: String, cx: &mut Context<Self>) {
-        self.apply_style_override(cx, |preferences| preferences.system_font_family = Some(family));
+    pub(in crate::epub) fn select_custom_fonts(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cjk_font_picker.update(cx, |picker, cx| picker.hide(cx));
+        self.apply_style_override(cx, |preferences| preferences.custom_fonts_enabled = Some(true));
+        self.font_picker.update(cx, |picker, cx| picker.show(window, cx));
+    }
+
+    pub(in crate::epub) fn set_cjk_font_choice(&self, choice: CjkFontChoice, cx: &mut Context<Self>) {
+        self.apply_style_override(cx, |preferences| preferences.cjk_font_choice = choice);
+        self.cjk_font_picker.update(cx, |picker, cx| picker.hide(cx));
+    }
+
+    pub(in crate::epub) fn select_cjk_custom_font(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.font_picker.update(cx, |picker, cx| picker.hide(cx));
+        self.cjk_font_picker.update(cx, |picker, cx| picker.activate_cjk(window, cx));
+    }
+
+    pub(in crate::epub) fn open_cjk_font_picker(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.font_picker.update(cx, |picker, cx| picker.hide(cx));
+        self.cjk_font_picker.update(cx, |picker, cx| picker.show_cjk(window, cx));
+    }
+
+    pub(in crate::epub) fn set_custom_font_family(&self, role: ReaderFontRole, family: String, cx: &mut Context<Self>) {
+        self.apply_style_override(cx, |preferences| preferences.set_custom_font_family(role, family));
     }
 
     pub(in crate::epub) fn set_reader_text_alignment(&self, text_alignment: ReaderTextAlignment, cx: &mut Context<Self>) {
@@ -153,7 +175,57 @@ impl ReaderView {
 
     pub(in crate::epub) fn set_line_height(&self, line_height: f32, cx: &mut Context<Self>) {
         let line_height = line_height.clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
-        self.apply_style_override(cx, |preferences| preferences.line_height = line_height);
+        self.apply_style_override(cx, |preferences| {
+            preferences.override_line_height = true;
+            preferences.line_height = line_height;
+        });
+    }
+
+    pub(in crate::epub) fn adjust_line_height(&self, delta: f32, cx: &mut Context<Self>) {
+        let line_height = ((ReaderSettings::preferences(cx).line_height + delta) * 10.0).round() / 10.0;
+        self.set_line_height(line_height, cx);
+    }
+
+    pub(in crate::epub) fn set_override_line_height(&self, enabled: bool, cx: &mut Context<Self>) {
+        self.apply_style_override(cx, |preferences| preferences.override_line_height = enabled);
+    }
+
+    pub(in crate::epub) fn set_override_paragraph_spacing(&self, enabled: bool, cx: &mut Context<Self>) {
+        self.apply_style_override(cx, |preferences| preferences.override_paragraph_spacing = enabled);
+    }
+
+    pub(in crate::epub) fn adjust_paragraph_spacing(&self, delta: f32, cx: &mut Context<Self>) {
+        let value = ((ReaderSettings::preferences(cx).paragraph_spacing_em + delta) * 10.0).round() / 10.0;
+        self.apply_style_override(cx, |preferences| {
+            preferences.override_paragraph_spacing = true;
+            preferences.paragraph_spacing_em = value.clamp(0.0, PARAGRAPH_SPACING_MAX_EM);
+        });
+    }
+
+    pub(in crate::epub) fn set_first_line_indent(&self, mode: ReaderFirstLineIndent, cx: &mut Context<Self>) {
+        self.apply_style_override(cx, |preferences| preferences.first_line_indent = mode);
+    }
+
+    pub(in crate::epub) fn adjust_first_line_indent(&self, delta: f32, cx: &mut Context<Self>) {
+        let value = ((ReaderSettings::preferences(cx).first_line_indent_em + delta) * 10.0).round() / 10.0;
+        self.apply_style_override(cx, |preferences| {
+            preferences.first_line_indent = ReaderFirstLineIndent::Custom;
+            preferences.first_line_indent_em = value.clamp(0.0, FIRST_LINE_INDENT_MAX_EM);
+        });
+    }
+
+    pub(in crate::epub) fn adjust_word_spacing(&self, delta_percent: f32, cx: &mut Context<Self>) {
+        let value = (ReaderSettings::preferences(cx).word_spacing_percent + delta_percent)
+            .clamp(WORD_SPACING_MIN_PERCENT, WORD_SPACING_MAX_PERCENT);
+        self.apply_style_override(cx, |preferences| preferences.word_spacing_percent = value);
+    }
+
+    pub(in crate::epub) fn set_hyphenation(&self, mode: ReaderHyphenation, cx: &mut Context<Self>) {
+        self.apply_style_override(cx, |preferences| preferences.hyphenation = mode);
+    }
+
+    pub(in crate::epub) fn set_font_weight(&self, weight: app_preferences::ReaderFontWeight, cx: &mut Context<Self>) {
+        self.apply_style_override(cx, |preferences| preferences.font_weight = weight);
     }
 
     pub(in crate::epub) fn adjust_column_width(&self, delta: f64, window: &Window, cx: &mut Context<Self>) {

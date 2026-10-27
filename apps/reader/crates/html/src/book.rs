@@ -14,14 +14,20 @@ pub struct BookSource {
     content: Arc<ReadingBook>,
 }
 
-struct Provider(Arc<ReadingBook>);
+struct Provider(Arc<ReadingBook>, Option<String>);
 
 impl ResourceProvider for Provider {
     fn read_bytes(&self, uri: &str) -> io::Result<Vec<u8>> {
         self.0.resources.read_bytes(uri)
     }
+    fn read_bytes_async<'a>(&'a self, uri: &'a str) -> Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(self.0.read_resource(uri.to_owned()))
+    }
     fn metadata(&self, uri: &str) -> io::Result<ResourceMetadata> {
         Ok(ResourceMetadata { media_type: self.0.resources.media_type(uri)?, charset: None })
+    }
+    fn primary_language(&self) -> Option<String> {
+        self.1.clone()
     }
     fn exists(&self, uri: &str) -> bool {
         self.0.resources.exists(uri)
@@ -66,7 +72,8 @@ impl ImageLoader for BookImageLoader {
 impl BookSource {
     pub fn new(content: ReadingBook) -> Self {
         let content = Arc::new(content);
-        Self { provider: Arc::new(Provider(content.clone())), content }
+        let language = content.languages().into_iter().map(|language| language.trim().to_owned()).find(|language| !language.is_empty());
+        Self { provider: Arc::new(Provider(content.clone(), language)), content }
     }
     pub fn languages(&self) -> Vec<String> {
         self.content.languages()
@@ -96,6 +103,45 @@ mod tests {
     use std::collections::HashSet;
     use std::io::{Cursor, Write};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn epub_primary_language_uses_metadata_order_for_multilingual_books() {
+        for languages in [vec![], vec!["sv"], vec!["fr", "en-US"], vec!["en-US", "fr"]] {
+            let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            let metadata = languages.iter().map(|language| format!("<dc:language>{language}</dc:language>")).collect::<String>();
+            let package = format!("<package xmlns:dc='http://purl.org/dc/elements/1.1/'><metadata>{metadata}</metadata><manifest><item id='chapter' href='chapter.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='chapter'/></spine></package>");
+            for (name, source) in [
+                ("META-INF/container.xml", "<container><rootfiles><rootfile full-path='book.opf'/></rootfiles></container>"),
+                ("book.opf", package.as_str()),
+                ("chapter.xhtml", "<html lang='sv'><body>Text</body></html>"),
+            ] {
+                archive.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                archive.write_all(source.as_bytes()).unwrap();
+            }
+            let book = BookSource::from_reader(BookSourceFormat::Epub, archive.finish().unwrap()).unwrap();
+            assert_eq!(book.provider.primary_language().as_deref(), languages.first().copied());
+            assert!(book.provider.read_string("chapter.xhtml").unwrap().contains("lang='sv'"), "publication fallback must not rewrite explicit content language");
+        }
+    }
+
+    #[test]
+    fn epub_publication_fonts_load_on_demand_without_eager_text_reads() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in [
+            ("META-INF/container.xml", r#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#),
+            ("OEBPS/content.opf", r#"<package><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="font" href="book.ttf" media-type="font/ttf"/></manifest><spine><itemref idref="chapter"/></spine></package>"#),
+            ("OEBPS/chapter.xhtml", "<html><body>Mixed Latin and CJK</body></html>"),
+            ("OEBPS/book.ttf", "deferred publication font bytes"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(bytes.as_bytes()).unwrap();
+        }
+        let book = BookSource::from_reader(BookSourceFormat::Epub, archive.finish().unwrap()).unwrap();
+        assert_eq!(book.provider.read_bytes("OEBPS/book.ttf").unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(block_on(book.provider.read_bytes_async("OEBPS/book.ttf")).unwrap(), b"deferred publication font bytes");
+        assert_eq!(book.provider.read_bytes("OEBPS/book.ttf").unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn epub_adapter_resolves_inline_svg_image_resources() {

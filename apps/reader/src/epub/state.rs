@@ -46,8 +46,8 @@ pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
 
 impl ReaderView {
     pub(crate) fn new(
-        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window,
-        cx: &mut Context<Self>,
+        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, cjk_font: Option<crate::cjk::CjkFont>, preparation: html_view_core::RendererPreparation,
+        close_reader: crate::CloseReader, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         let search_input = cx.new(|cx| {
             let input = InputState::new(window, cx);
@@ -67,11 +67,16 @@ impl ReaderView {
         });
         let annotation_note_input = cx.new(|cx| crate::shell::annotation_editor::note_input(window, cx));
         let font_picker = cx.new(|cx| super::font_picker::FontPicker::new(window, cx));
-        cx.subscribe_in(&font_picker, window, |this, _, event: &super::font_picker::FontSelected, window, cx| {
-            this.set_system_font_family(event.0.clone(), cx);
-            this.sidebar_focus.focus(window, cx);
-        })
-        .detach();
+        let cjk_font_picker = cx.new(|cx| {
+            let mut picker = super::font_picker::FontPicker::new(window, cx);
+            picker.set_cjk(true);
+            picker
+        });
+        for picker in [&font_picker, &cjk_font_picker] {
+            cx.subscribe_in(picker, window, |this, _, event: &super::font_picker::FontSelected, _, cx| {
+                this.set_custom_font_family(event.role, event.family.clone(), cx);
+            }).detach();
+        }
         let annotation_filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter annotations"));
         let annotation_filter_subscription = cx.subscribe(&annotation_filter_input, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -84,12 +89,13 @@ impl ReaderView {
         let reading_positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone());
         let marks = MarkSession::new(cx, library.clone());
 
-        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
         let tts = crate::shell::tts::Narration::for_languages(&book.languages())
             .with_title(title.clone())
             .with_rate(ReaderSettings::preferences(cx).audiobook_speed)
             .with_pauses(ReaderSettings::preferences(cx).narration_pauses)
-            .with_voice(ReaderSettings::preferences(cx).narration_voice);
+            .with_voice(ReaderSettings::preferences(cx).narration_voice)
+            .with_availability(cx);
 
         let mut reader = Self {
             #[cfg(feature = "kobo")]
@@ -109,6 +115,7 @@ impl ReaderView {
             chrome: crate::shell::chrome::ChromeState::from_preferences(Component::ReaderShell, cx),
             wheel_delta: 0.0,
             wheel_debounce: None,
+            touchpad: ui_components::TouchpadNavigation::default(),
             touch_swipe: None,
             swipe_preview: ui_components::SwipePreview::default(),
             page_turn: None,
@@ -116,16 +123,18 @@ impl ReaderView {
             touch_swipe_from_edge: false,
             search_input,
             font_picker,
+            cjk_font_picker,
             search: SearchState::default(),
             book,
+            cjk_font,
             reading_position: None,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_fragments: Vec::new(),
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_doc: 0,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_navigation_revision: 0,
             progress: ProgressState::default(),
             marks,
@@ -148,6 +157,8 @@ impl ReaderView {
             _search_subscription: search_subscription,
             _annotation_filter_subscription: annotation_filter_subscription,
         };
+        #[cfg(all(feature = "native-tts", target_os = "android"))]
+        crate::shell::tts::load_media_metadata(reader.library.clone(), reader.locator.clone(), cx);
         reader.finish_load(preparation, window, cx);
         reader
     }

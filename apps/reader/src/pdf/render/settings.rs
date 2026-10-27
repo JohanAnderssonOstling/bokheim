@@ -9,7 +9,7 @@ use ui_components as components;
 use super::{PdfReaderView, ZOOM_STEP};
 use crate::invalidation::Component;
 use crate::pdf::state::store_zoom_mode;
-use crate::settings::{PdfReadingDirection, PdfZoomModePreference, ReaderSettings};
+use crate::settings::{PdfZoomModePreference, ReaderSettings};
 use crate::shell::settings_navigation::{self, SettingsRow, adjacent_value};
 
 impl PdfReaderView {
@@ -21,7 +21,7 @@ impl PdfReaderView {
         if settings_navigation::DESKTOP_FULLSCREEN {
             rows.push(SettingsRow::Fullscreen);
         }
-        rows.extend([SettingsRow::PdfFit, SettingsRow::PdfMargins, SettingsRow::PdfDirection]);
+        rows.extend([SettingsRow::PdfFit, SettingsRow::PdfMargins]);
         match self.pdf.read(cx).zoom_mode() {
             PdfZoomMode::FitWidth { .. } => rows.push(SettingsRow::PdfPages),
             PdfZoomMode::Fixed { .. } => rows.push(SettingsRow::PdfZoom),
@@ -44,10 +44,6 @@ impl PdfReaderView {
                 SettingsRow::Theme => settings_navigation::adjust_theme(direction, cx),
                 SettingsRow::Fullscreen => settings_navigation::set_fullscreen(direction > 0, window),
                 SettingsRow::PdfMargins => self.set_trim_margins(direction > 0, cx),
-                SettingsRow::PdfDirection => {
-                    let current = ReaderSettings::preferences(cx).pdf_reading_direction;
-                    self.set_reading_direction(adjacent_value(&[PdfReadingDirection::Document, PdfReadingDirection::LeftToRight, PdfReadingDirection::RightToLeft], current, direction), cx);
-                }
                 SettingsRow::PdfFit => {
                     let current = self.pdf.read(cx).zoom_mode();
                     let index = match current {
@@ -110,12 +106,6 @@ impl PdfReaderView {
         notify(cx, Component::PdfShell, "trim_margins_changed");
     }
 
-    fn set_reading_direction(&self, direction: PdfReadingDirection, cx: &mut Context<Self>) {
-        ReaderSettings::update(cx, |preferences| preferences.pdf_reading_direction = direction);
-        self.pdf.update(cx, |pdf, cx| pdf.set_direction_override(direction.override_right_to_left(), cx));
-        notify(cx, Component::PdfShell, "reading_direction_changed");
-    }
-
     pub(super) fn render_settings(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let rows = self.settings_rows(cx);
@@ -123,7 +113,6 @@ impl PdfReaderView {
         let zoom_mode = self.pdf.read(cx).zoom_mode();
         let visible_page_count = self.pdf.read(cx).visible_page_count();
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
-        let direction = ReaderSettings::preferences(cx).pdf_reading_direction;
         let general = components::reader_settings_tab_body(theme)
             .when(!cfg!(feature = "kobo"), |body| body.child(components::reader_settings_group(theme).child(self.settings_navigation.row(SettingsRow::Theme, &rows, crate::shell::theme_picker::reader_theme_picker(cx, theme), theme))))
             .children(self.settings_navigation.fullscreen_group(&rows, window, theme))
@@ -150,20 +139,6 @@ impl PdfReaderView {
                                     .on_click(cx.listener(|this, _, _, cx| this.set_trim_margins(true, cx))),
                             ]),
                         ),
-                    )
-                    .child(
-                        components::reader_setting_row("Reading direction").map(|row| self.settings_navigation.row(SettingsRow::PdfDirection, &rows, row, theme)).child(components::reader_choice_button_group(
-                            "pdf-direction",
-                            [
-                                components::reader_choice_button("pdf-document-direction", "From PDF", direction == PdfReadingDirection::Document, theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_reading_direction(PdfReadingDirection::Document, cx))),
-                                components::reader_choice_button("pdf-ltr", "Left to right", direction == PdfReadingDirection::LeftToRight, theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_reading_direction(PdfReadingDirection::LeftToRight, cx))),
-                                components::reader_choice_button("pdf-rtl", "Right to left", direction == PdfReadingDirection::RightToLeft, theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_reading_direction(PdfReadingDirection::RightToLeft, cx))),
-                            ],
-                            theme,
-                        )),
                     )
                     .children(matches!(zoom_mode, PdfZoomMode::FitWidth { .. }).then(|| {
                         components::reader_setting_row("Pages").map(|row| self.settings_navigation.row(SettingsRow::PdfPages, &rows, row, theme)).child(components::settings_stepper(

@@ -10,9 +10,9 @@ use gpui_component::IconName;
 use sync_common::{LibraryId, ROOT_DIR_ID};
 
 use super::LibraryRoute;
-use crate::BrowsePageSession;
 use crate::library::BrowseCrumb;
-use crate::library::{BrowseKind, BrowseSplitPlane, LibraryContext, LibraryUpdateBridge, OpenBook, TrashPage, UndoEntry, UndoStack};
+use crate::library::{BrowseKind, BrowsePageHost, LibraryContext, LibraryUpdateBridge, OpenBook, TrashPage, UndoEntry, UndoStack};
+use crate::{BrowsePageSession, PaneRequest};
 
 #[derive(Clone, Copy)]
 enum SessionPage {
@@ -38,24 +38,34 @@ pub(crate) struct LibrarySession {
     undo: UndoStack,
     library: LibraryContext,
     route: LibraryRoute,
+    split_close_enabled: bool,
     focus: FocusHandle,
     trash: Option<Entity<TrashPage>>,
-    browse_planes: HashMap<BrowseKind, Entity<BrowseSplitPlane>>,
+    browse_planes: HashMap<BrowseKind, Entity<BrowsePageHost>>,
     _plane_subscriptions: Vec<Subscription>,
     _library_updates_subscription: Subscription,
 }
 
+impl gpui::EventEmitter<PaneRequest> for LibrarySession {}
+
 impl LibrarySession {
+    #[cfg(test)]
     pub(super) fn new(app_backend: Rc<AppClient>, open_book: OpenBook, library_id: LibraryId, cx: &mut Context<Self>) -> Self {
+        let now_playing = cx.new(|_| crate::NowPlaying::default());
+        Self::with_now_playing(app_backend, open_book, library_id, now_playing, cx)
+    }
+
+    pub(super) fn with_now_playing(app_backend: Rc<AppClient>, open_book: OpenBook, library_id: LibraryId, now_playing: Entity<crate::NowPlaying>, cx: &mut Context<Self>) -> Self {
         let library_backend = Rc::new(app_backend.library(library_id));
         let updates = LibraryUpdateBridge::create(app_backend.clone(), library_id, cx);
-        let library = LibraryContext::new(app_backend, library_backend, open_book, updates, cx.entity().downgrade());
+        let library = LibraryContext::new(app_backend, library_backend, open_book, updates, cx.entity().downgrade(), now_playing);
         let library_updates = library.updates();
         let library_updates_subscription = cx.observe(&library_updates, |_, _, cx| cx.notify());
         let mut session = Self {
             undo: Default::default(),
             library,
             route: LibraryRoute::Home,
+            split_close_enabled: false,
             focus: cx.focus_handle(),
             trash: None,
             browse_planes: HashMap::new(),
@@ -83,18 +93,20 @@ impl LibrarySession {
         self.trash.get_or_insert_with(|| cx.new(|cx| TrashPage::new(library, cx))).clone()
     }
 
-    fn browse_plane(&mut self, kind: BrowseKind, cx: &mut Context<Self>) -> Entity<BrowseSplitPlane> {
+    fn browse_plane(&mut self, kind: BrowseKind, cx: &mut Context<Self>) -> Entity<BrowsePageHost> {
         if let Some(plane) = self.browse_planes.get(&kind) {
             return plane.clone();
         }
         let library = self.library.clone();
-        let plane = cx.new(|cx| BrowseSplitPlane::new(kind, library, cx));
+        let plane = cx.new(|cx| BrowsePageHost::new(kind, library, cx));
+        plane.update(cx, |plane, cx| plane.set_split_close_enabled(self.split_close_enabled, cx));
         self._plane_subscriptions.push(cx.observe(&plane, |_, _, cx| cx.notify()));
+        self._plane_subscriptions.push(cx.subscribe(&plane, |_, _, request: &PaneRequest, cx| cx.emit(request.clone())));
         self.browse_planes.insert(kind, plane.clone());
         plane
     }
 
-    fn current_browse_plane(&self) -> Option<&Entity<BrowseSplitPlane>> {
+    fn current_browse_plane(&self) -> Option<&Entity<BrowsePageHost>> {
         match SessionPage::from(self.route) {
             SessionPage::Browse(kind) => self.browse_planes.get(&kind),
             SessionPage::Trash => None,
@@ -116,6 +128,15 @@ impl LibrarySession {
         self.route
     }
 
+    pub(super) fn set_split_close_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.split_close_enabled != enabled {
+            self.split_close_enabled = enabled;
+            for plane in self.browse_planes.values() {
+                plane.update(cx, |plane, cx| plane.set_split_close_enabled(enabled, cx));
+            }
+        }
+    }
+
     pub(super) fn dismiss_page(&mut self, cx: &mut Context<Self>) -> bool {
         self.current_browse_plane().cloned().is_some_and(|plane| plane.update(cx, |plane, cx| plane.dismiss(cx)))
     }
@@ -133,6 +154,17 @@ impl LibrarySession {
     fn open_author(&mut self, author: book_model::AuthorId, name: String, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(LibraryRoute::Authors, window, cx);
         self.browse_plane(BrowseKind::Author, cx).update(cx, |plane, cx| plane.open_location(library_model::BrowseLocation::Author(Some(author)), name, cx));
+    }
+
+    /// A catalog subject opens on the Catalog page; every other on Subjects.
+    fn open_subject_path(&mut self, path: Vec<library_model::BrowsePathSegment>, window: &mut Window, cx: &mut Context<Self>) {
+        let (route, kind) = match path.first().map(|segment| segment.id) {
+            Some(library_model::BrowseLocation::Catalog(_)) => (LibraryRoute::Catalog, BrowseKind::Catalog),
+            _ => (LibraryRoute::Subjects, BrowseKind::Subject),
+        };
+        self.navigate(route, window, cx);
+        let path = path.into_iter().map(|segment| BrowseCrumb { location: segment.id, label: segment.name }).collect();
+        self.browse_plane(kind, cx).update(cx, |plane, cx| plane.open_path(path, cx));
     }
 
     pub(super) fn shown_book_detail(&self, cx: &App) -> Option<library_model::BookLocator> {
@@ -157,7 +189,7 @@ impl LibrarySession {
 
     pub(super) fn focus_handle(&self, cx: &App) -> FocusHandle {
         let focus = match SessionPage::from(self.route) {
-            SessionPage::Browse(kind) => self.browse_planes.get(&kind).map(|plane| plane.read(cx).focus_handle()),
+            SessionPage::Browse(kind) => self.browse_planes.get(&kind).map(|plane| plane.read(cx).focus_handle(cx)),
             SessionPage::Trash => self.trash.as_ref().map(|page| page.read(cx).focus_handle(cx)),
         };
         focus.unwrap_or_else(|| self.focus.clone())
@@ -247,6 +279,7 @@ impl Render for LibrarySession {
         ui_components::library_section_content()
             .on_action(cx.listener(|session, _: &crate::OpenTrash, window, cx| session.navigate(LibraryRoute::Trash, window, cx)))
             .on_action(cx.listener(|session, open: &crate::OpenAuthor, window, cx| session.open_author(open.author, open.name.clone(), window, cx)))
+            .on_action(cx.listener(|session, open: &crate::OpenSubject, window, cx| session.open_subject_path(open.path.clone(), window, cx)))
             .child(content)
     }
 }

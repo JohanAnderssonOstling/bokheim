@@ -170,7 +170,7 @@ impl BrowseGraph {
         let page = navigator.listing.page.clone();
         let book_indices = navigator.listing.book_indices.clone();
         let covers = super::layout::direct_book_children(books, page.as_ref(), &book_indices, BookCardPresentation::GraphCover, None, cx);
-        let groups = if covers.is_empty() { Vec::new() } else { vec![PaginatorGroup::new(graph_cover_policy(), covers)] };
+        let groups = if covers.is_empty() { Vec::new() } else { vec![PaginatorGroup::from_slots(graph_cover_policy(), covers)] };
         if self.children != children {
             self.children = children;
             self.target = None;

@@ -177,7 +177,8 @@ macro_rules! operations {
         #[derive(Serialize, Deserialize)]
         pub enum CpuRequest {
             /// `taxonomy` names the snapshot a browser CPU worker loads before
-            /// inspecting; native hosts share the process taxonomy and send none.
+            /// inspecting. None selects the web app's bundled reference;
+            /// native hosts share the process taxonomy and also send none.
             Book { task: BookTask, taxonomy: Option<Artifact> },
             $($name { $($(#[$attribute])* $field: $ty),* }),*
         }

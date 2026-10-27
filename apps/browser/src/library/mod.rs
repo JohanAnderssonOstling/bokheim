@@ -8,7 +8,7 @@ mod services;
 mod widgets;
 
 pub(crate) use self::pages::browse::BrowseCrumb;
-pub(crate) use self::pages::browse::{BrowseKind, BrowseSplitPlane};
+pub(crate) use self::pages::browse::{BrowseKind, BrowsePageHost};
 pub(crate) use self::pages::trash::TrashPage;
 pub(crate) use self::services::{LibraryContext, LibraryUpdateBridge, OpenBook, UndoEntry, UndoStack};
 pub(crate) use self::widgets::CursorMove;

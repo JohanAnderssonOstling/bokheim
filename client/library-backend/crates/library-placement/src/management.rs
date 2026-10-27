@@ -29,6 +29,7 @@ impl LibraryPlacement {
     /// Duplicates a folder and its contents under another folder. The books it
     /// holds gain a second placement; their bytes are not duplicated. Returns
     /// the copy's directory ID, which is what an undo of this acts on.
+    #[cfg(target_arch = "wasm32")]
     pub fn copy_directory(&self, directory_id: &DirId, destination_parent_id: &DirId) -> Result<DirId, BackendError> {
         let copy = self.database.copy_directory(directory_id, destination_parent_id)?;
         self.events.notify_contents_changed();
@@ -36,6 +37,7 @@ impl LibraryPlacement {
     }
 
     /// Puts a book back in a folder it was removed from.
+    #[cfg(target_arch = "wasm32")]
     pub fn restore_book_placement(&self, content_hash: &BookId, directory_id: &DirId) -> Result<(), BackendError> {
         self.database.restore_book_placement(content_hash, directory_id)?;
         self.events.notify_contents_changed();
@@ -44,6 +46,7 @@ impl LibraryPlacement {
 
     /// The logical mutation is ordered; physical replay is durable background
     /// work and must not hold up later commands or reader events.
+    #[cfg(target_arch = "wasm32")]
     pub fn queue_directory_move(&self, directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> Result<String, BackendError> {
         let requested_name = requested_name.map(filenames::validate_component).transpose()?;
         let name = self.database.move_directory(directory_id, requested_parent, requested_name.as_deref())?;
@@ -52,12 +55,16 @@ impl LibraryPlacement {
     }
 
     /// Returns false for an existing assignment so callers retain it when undoing.
+    #[cfg(target_arch = "wasm32")]
     pub fn copy_book_to_directory(&self, hash: &BookId, source: Option<&DirId>, destination: &DirId) -> Result<bool, BackendError> {
         let created = self.database.copy_book_to_directory(hash, source, destination)?;
-        if created { self.events.notify_contents_changed(); }
+        if created {
+            self.events.notify_contents_changed();
+        }
         Ok(created)
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub fn transfer_book_placement(&self, hash: &BookId, source: &DirId, destination: &DirId, moving: bool) -> Result<String, BackendError> {
         let name = self.database.transfer_book_placement(hash, source, destination, moving)?;
         self.events.notify_contents_changed();

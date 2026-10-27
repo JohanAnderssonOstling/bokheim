@@ -108,6 +108,11 @@ impl TocState {
         self.ordinal_for_position(&parse_source_position(cfi)?)
     }
 
+    /// Resolve a document without inventing a CFI location inside it.
+    pub(crate) fn ordinal_for_document(&self, document: usize) -> Option<usize> {
+        self.ordinal_for_position(&SourcePosition { document, path: Vec::new(), utf16_offset: None })
+    }
+
     pub(crate) fn ordinal_for_position(&self, position: &SourcePosition) -> Option<usize> {
         let document = position.document;
         if document >= self.document_count {
@@ -139,18 +144,19 @@ impl TocState {
         result
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn chapter_for_cfi(&self, cfi: &str) -> Option<usize> {
         let ordinal = self.ordinal_for_cfi(cfi)?;
         self.chapter_ordinals().into_iter().rev().find(|chapter| *chapter <= ordinal)
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn chapter_for_document(&self, document: usize) -> Option<usize> {
-        self.chapter_for_cfi(&format!("epubcfi(/6/{}!/0)", (document + 1) * 2))
+        let ordinal = self.ordinal_for_document(document)?;
+        self.chapter_ordinals().into_iter().rev().find(|chapter| *chapter <= ordinal)
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn narration_excludes_cfi(&self, cfi: &str) -> bool {
         let Some(position) = parse_source_position(cfi) else { return false };
         let Some(ordinal) = self.ordinal_for_position(&position) else { return false };
@@ -358,6 +364,26 @@ mod tests {
         state.install_source_positions(HashMap::from([(0, positions)]), 1);
         assert_eq!(state.chapter_for_cfi(&section_cfi), Some(0));
         assert_eq!(state.chapter_for_cfi(&second_cfi), Some(2));
+    }
+
+    #[test]
+    fn document_lookup_preserves_chapter_fallbacks_without_a_source_path() {
+        let entries =
+            vec![TocEntry { title: "One".into(), link: "one".into(), children: vec![TocEntry { title: "Section".into(), link: "section".into(), children: vec![] }] }, TocEntry { title: "Two".into(), link: "two".into(), children: vec![] }];
+        let resolutions = TocState::resolve(&entries, |link| Some((1, Some(link.into()))));
+        let mut state = TocState::default();
+        state.set(entries, resolutions);
+        state.install_source_positions(HashMap::from([(1, vec![(vec![4, 2], 0), (vec![4, 6], 1), (vec![4, 10], 2)])]), 3);
+
+        // A document-only target cannot distinguish its anchors, so use the
+        // first entry; a precise CFI still selects the later chapter.
+        assert_eq!(state.ordinal_for_document(1), Some(0));
+        assert_eq!(state.chapter_for_document(1), Some(0));
+        assert_eq!(state.chapter_for_cfi("epubcfi(/6/4!/4/10/1:0)"), Some(2));
+        assert_eq!(state.chapter_for_document(0), None);
+        assert_eq!(state.chapter_for_document(2), Some(2));
+        assert_eq!(state.chapter_for_document(3), None);
+        assert_eq!(state.chapter_for_document(usize::MAX), None);
     }
 
     #[test]

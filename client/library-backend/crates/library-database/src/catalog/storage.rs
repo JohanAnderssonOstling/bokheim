@@ -525,6 +525,12 @@ pub fn entry(key: CardKey) -> Result<Option<CatalogBook>, DatabaseError> {
     read(|db| load_entry(db, key))
 }
 
+/// The entry's row in the browse projection, which is what the catalog's
+/// subject tree lists books by.
+pub(crate) fn browse_row(key: CardKey) -> Result<Option<i64>, DatabaseError> {
+    read(|db| Ok(db.query_row("SELECT row_id FROM catalog_browse_book WHERE key=?1", [&key.0[..]], |row| row.get(0)).optional()?))
+}
+
 pub(super) fn load_entry(db: &Connection, key: CardKey) -> Result<Option<CatalogBook>, DatabaseError> {
     let found = db
         .query_row("SELECT external,format,search_title,search_author,duration_ms FROM catalog_browse_book WHERE key=?1", [&key.0[..]], |row| {

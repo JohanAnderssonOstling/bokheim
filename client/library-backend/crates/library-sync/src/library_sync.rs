@@ -171,7 +171,6 @@ impl LibrarySync {
         self.request_downloads(std::slice::from_ref(&content_hash))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn request_downloads(&self, content_hashes: &[BookId]) -> SyncResult<()> {
         self.database.sync_request_book_downloads(content_hashes, TransferOrigin::UserInitiated)?;
         if let Some(tx) = &self.events {

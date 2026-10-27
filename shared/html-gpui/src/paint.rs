@@ -5,7 +5,7 @@ use web_time::Instant;
 
 use gpui::{App, Bounds, ContentMask, Corners, Edges, Hsla, PaintGlyph, Pixels, RenderImage, SvgRenderer, Window, fill, point, px, rgba, size};
 use gpui_image_eviction::track_image;
-use html::layout::{ThemeAdaptation, UsedBorderRadii};
+use html::layout::{PreparedTextRunFragment, ThemeAdaptation, UsedBorderRadii};
 use html::render::{Painter, TextRunFragment};
 use html::text::{GlyphId, TextRunId};
 use image::Frame;
@@ -321,7 +321,7 @@ impl<'a> GpuiCommandPainter<'a> {
         match native {
             Some(GpuiGlyph::Empty) => {}
             Some(GpuiGlyph::RunFragment { run, range }) => {
-                let natural_offset = run.caret_stops[range.start as usize];
+                let natural_offset = run.caret_stops[range.start as usize].min(run.caret_stops[range.end as usize]);
                 let origin = Point::new(origin.x - f64::from(natural_offset), origin.y);
                 self.push_text_fragment(GpuiTextRunFragment::new(run, range, origin, color));
             }
@@ -451,6 +451,23 @@ impl Painter for GpuiCommandPainter<'_> {
             batch.push(GpuiTextRunFragment::new(run, fragment.range(), fragment.origin(), self.text_color.or_else(|| fragment.color().map(|color| Hsla::from(rgba(color))))));
         }
         self.push_text_fragments(batch);
+    }
+
+    fn draw_prepared_text_run_batch(&mut self, fragments: &[PreparedTextRunFragment], line_origin: Point, scale: f64, color: Option<u32>) {
+        let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        for fragment in fragments {
+            let Some(run) = self.text_runs.get(fragment.run() as usize).cloned() else {
+                debug_assert!(false, "renderer referenced a missing shaped text run");
+                continue;
+            };
+            let offset = fragment.offset();
+            let ascent = f64::from(run.ascent);
+            // Snap the shared baseline, rather than each run's top edge.
+            // Fallback fonts can give adjacent runs different ascents.
+            let baseline = ((line_origin.y + offset.y + ascent) * scale).round() / scale;
+            let origin = Point::new(line_origin.x + offset.x, baseline - ascent);
+            self.push_text_fragment(GpuiTextRunFragment::new(run, fragment.range(), origin, self.text_color.or_else(|| color.or(fragment.color()).map(|color| Hsla::from(rgba(color))))));
+        }
     }
 
     fn draw_image(&mut self, image: &PenikoImage, hash: &[u8], rect: Rect) {
@@ -633,7 +650,7 @@ fn paint_commands_inner(commands: &[PaintCommand], glyphs: &GlyphStorage, bounds
                     }
                     GpuiGlyph::RunFragment { run, range } => {
                         let operation_started = profile_enabled.then(Instant::now);
-                        let natural_offset = run.caret_stops[range.start as usize];
+                        let natural_offset = run.caret_stops[range.start as usize].min(run.caret_stops[range.end as usize]);
                         let glyph_color = run.character_color(range.start);
                         let glyph_ranges = run.glyph_ranges(range.clone());
                         let baseline = point(bounds.origin.x + px(origin.x as f32), bounds.origin.y + px(origin.y as f32) + run.ascent);
@@ -664,8 +681,16 @@ fn paint_commands_inner(commands: &[PaintCommand], glyphs: &GlyphStorage, bounds
                 profile.text_run_fragments += fragments.len();
                 let operation_started = profile_enabled.then(Instant::now);
                 let mut glyph_count = 0usize;
-                let paint_glyphs = fragments
+                let visible_fragments = fragments
                     .iter()
+                    .filter(|fragment| {
+                        let Some(ink) = fragment.run.paint_bounds else { return true };
+                        let origin = point(bounds.origin.x + px(fragment.origin.x as f32) + px(ink.x0 as f32),
+                                           bounds.origin.y + px(fragment.origin.y as f32) + fragment.run.ascent + px(ink.y0 as f32));
+                        window.is_bounds_visible(Bounds::new(origin, size(px(ink.width() as f32), px(ink.height() as f32))))
+                    })
+                    .collect::<Vec<_>>();
+                let paint_glyphs = visible_fragments.into_iter()
                     .flat_map(|fragment| {
                         let baseline = point(bounds.origin.x + px(fragment.origin.x as f32), bounds.origin.y + px(fragment.origin.y as f32) + fragment.run.ascent);
                         fragment.glyph_ranges.iter().flat_map(|range| fragment.run.glyphs[range.clone()].iter()).map(move |glyph| PaintGlyph {

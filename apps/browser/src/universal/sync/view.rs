@@ -10,13 +10,14 @@
 //! as something *a library* is doing, and a list beneath the libraries made the
 //! reader match names between two lists to find that out.
 
-use ui_components::user_facing_error;
 use super::*;
 use crate::services::format_storage_bytes;
-use gpui_component::Disableable;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-use gpui_component::button::Button;
+use ui_components::Button;
 use gpui_component::checkbox::Checkbox;
+use gpui_component::Disableable;
+use gpui_component::{menu::DropdownMenu as _, Icon};
+#[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
 use std::path::Path;
 
 const LEGEND_LIBRARY_LIMIT: usize = 4;
@@ -97,7 +98,7 @@ impl Render for LibrariesView {
         let compact = components::WindowWidthClass::for_window(window).is_compact();
         let page = self.page.clone();
         let rows = page.read(cx).library_rows(cx);
-        SyncPage::libraries_section(page.read(cx), &page, &rows, compact, theme)
+        SyncPage::libraries_section(page.read(cx), &page, &rows, compact, theme, cx)
     }
 }
 
@@ -258,13 +259,7 @@ impl SyncPage {
                     .child(self.password_input(&self.authentication.registration_password, "toggle-verification-password", entity))
                     .child(components::form_hint("The password you chose for this account.", theme))
                     .child(actions)
-                    .child(self.access_link(
-                    entity,
-                    "account-restart-registration",
-                    "Wrong address? Start over",
-                    AccountFlow::Register,
-                    theme,
-                ))
+                    .child(self.access_link(entity, "account-restart-registration", "Wrong address? Start over", AccountFlow::Register, theme))
             }
             AccountFlow::RequestPasswordReset => form
                 .child(components::section_header("Reset your password", "", theme))
@@ -472,7 +467,7 @@ impl SyncPage {
     /// is about this list — it decides where the next row in it will live — and
     /// a "Library storage" group of its own separated it from the only thing it
     /// refers to.
-    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], compact: bool, theme: components::BrowserTheme) -> Div {
+    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], compact: bool, theme: components::BrowserTheme, cx: &gpui::App) -> Div {
         let mut libraries = components::browser_settings_fieldset("Libraries", theme);
         let mut has_rows = false;
 
@@ -501,21 +496,26 @@ impl SyncPage {
                 ("Some changes are too large to sync", theme.warning)
             } else if row.status.issues.retryable != 0 {
                 ("Waiting to retry changes", theme.warning)
-            } else { match row.status.state {
-                LibrarySyncState::Checking => ("Loading status…", theme.text_muted),
-                LibrarySyncState::Unavailable => ("Unavailable", theme.warning),
-                LibrarySyncState::Receiving => ("Receiving library…", theme.accent),
-                LibrarySyncState::Synced => ("Up to date", theme.accent),
-                LibrarySyncState::SyncPending if row.status.last_synced_at.is_none() => ("Sync pending", theme.warning),
-                LibrarySyncState::SyncPending => ("Changes pending", theme.warning),
-                LibrarySyncState::RemoteMissing => ("Not on server", theme.warning),
-                LibrarySyncState::LocalOnly => ("On this device", theme.text_muted),
-            }};
+            } else {
+                match row.status.state {
+                    LibrarySyncState::Checking => ("Loading status…", theme.text_muted),
+                    LibrarySyncState::Unavailable => ("Unavailable", theme.warning),
+                    LibrarySyncState::Receiving => ("Receiving library…", theme.accent),
+                    LibrarySyncState::Synced => ("Up to date", theme.accent),
+                    LibrarySyncState::SyncPending if row.status.last_synced_at.is_none() => ("Sync pending", theme.warning),
+                    LibrarySyncState::SyncPending => ("Changes pending", theme.warning),
+                    LibrarySyncState::RemoteMissing => ("Not on server", theme.warning),
+                    LibrarySyncState::LocalOnly => ("On this device", theme.text_muted),
+                }
+            };
             let (status, status_color) = if row.status.pending_provider_uploads != 0 && !row.status.issues.has_issues() {
                 let count = row.status.pending_provider_uploads;
                 (format!("{count} {} waiting for upload", if count == 1 { "book" } else { "books" }), theme.warning)
-            } else { (status.to_owned(), status_color) };
+            } else {
+                (status.to_owned(), status_color)
+            };
             let library_id = row.status.library_id;
+            let (status, status_color) = if self.storage_copy_pending.contains(&library_id) { ("Copying library…".to_owned(), theme.accent) } else { (status, status_color) };
             // The folder is the button that opens it, labelled with its path.
             #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             let path = row.local_path.as_ref().map(|path| {
@@ -532,21 +532,40 @@ impl SyncPage {
             // The column heading names the switch; stacked, with no heading,
             // the switch names itself.
             let cloud_page = page.clone();
-            let cloud = if let Some(root) = row.status.storage.external() {
-                let provider = match root.scope.provider {
-                    app::CloudProvider::GoogleDrive => "Google Drive",
-                    app::CloudProvider::Dropbox => "Dropbox",
-                    app::CloudProvider::OneDrive => "OneDrive",
-                    app::CloudProvider::WebDav => "WebDAV",
-                    app::CloudProvider::S3 => "S3",
+            let cloud = if row.status.storage.external().is_some() && !app::google_drive_available() {
+                gpui::div().into_any_element()
+            } else if row.status.storage.external().is_some() || row.status.asset_storage_enabled {
+                let provider = match row.status.storage.external().map(|root| root.scope.provider) {
+                    Some(app::CloudProvider::GoogleDrive) => "Google Drive",
+                    Some(app::CloudProvider::Dropbox) => "Dropbox",
+                    Some(app::CloudProvider::OneDrive) => "OneDrive",
+                    Some(app::CloudProvider::WebDav) => "WebDAV",
+                    Some(app::CloudProvider::S3) => "S3",
+                    None => "Bokheim cloud",
                 };
-                div().text_color(theme.text_muted).child(provider).into_any_element()
+                let bokheim = self.state.read(cx).account_status.signed_in() && row.status.storage.external().is_some();
+                let trigger = components::outlined_icon_button(SharedString::from(format!("library-storage-{library_id}")), format!("{provider} · Library storage"), Icon::empty().path("icons/cloud.svg"), theme)
+                    .disabled(self.storage_copy_pending.contains(&library_id));
+                trigger
+                    .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                        let local = cloud_page.clone();
+                        let mut menu = menu
+                            .touch_friendly(compact || components::touch_ui())
+                            .item(components::menu_item_with_icon("Copy to local storage", IconName::HardDrive, move |_, _, cx| local.update(cx, |page, cx| page.copy_storage(library_id, false, cx))));
+                        if bokheim {
+                            let cloud = cloud_page.clone();
+                            menu = menu.item(components::menu_item_with_icon("Copy to Bokheim cloud", Icon::empty().path("icons/cloud.svg"), move |_, _, cx| cloud.update(cx, |page, cx| page.copy_storage(library_id, true, cx))));
+                        }
+                        menu
+                    })
+                    .into_any_element()
             } else {
                 Checkbox::new(SharedString::from(format!("asset-storage-{library_id}")))
                     .when(compact, |checkbox| checkbox.label("Bokheim"))
-                    .checked(row.status.asset_storage_enabled)
+                    .checked(false)
                     .disabled(self.asset_storage_pending.contains(&library_id))
-                    .on_click(move |enabled, _, cx| cloud_page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx))).into_any_element()
+                    .on_click(move |enabled, _, cx| cloud_page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx)))
+                    .into_any_element()
             };
             libraries = libraries.child(components::library_table_row(row.name.clone(), path, local_bytes, (status, status_color), cloud, compact, theme).when(!has_rows, |row| row.border_t_0()));
             has_rows = true;

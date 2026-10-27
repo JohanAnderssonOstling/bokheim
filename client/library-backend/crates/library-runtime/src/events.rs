@@ -2,6 +2,7 @@
 
 use async_channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet};
+use std::mem::swap;
 
 use crate::reading_positions::ReadingPositionPolicy;
 use crate::scheduler::SyncScheduler;
@@ -123,6 +124,19 @@ pub struct LibraryEventState {
 }
 
 impl LibraryEventState {
+    /// Keep subscribers and pending reading-position policy when folder recovery
+    /// rebuilds the session's workers and storage handles.
+    pub fn restart(&mut self, mut next: Self) {
+        self.receiver.close();
+        swap(&mut self.receiver, &mut next.receiver);
+        swap(&mut self.position_updates, &mut next.position_updates);
+        self.position_updates.send_replace(self.position_policy.clone());
+        self.latest_downloads.clear();
+        self.directory_imports.clear();
+        send_update(&mut self.updates, LibraryUpdate::Scanning(false));
+        send_update(&mut self.updates, LibraryUpdate::Contents);
+    }
+
     pub fn reading_position_changed(&mut self, hash: BookId, router: &LibraryEventRouter) {
         self.position_policy.changed(hash, web_time::Instant::now());
         self.position_updates.send_replace(self.position_policy.clone());

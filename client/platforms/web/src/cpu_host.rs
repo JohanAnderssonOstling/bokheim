@@ -18,6 +18,10 @@ pub fn set_taxonomy(artifact: Artifact) {
     TAXONOMY.with(|slot| *slot.borrow_mut() = Some(artifact));
 }
 
+fn decode_response(bytes: &[u8]) -> Result<CpuResponse, BackendError> {
+    rmp_serde::from_slice(bytes).map_err(BackendError::operation)?
+}
+
 #[derive(Default)]
 pub struct WebHost;
 impl CpuHost for WebHost {
@@ -27,14 +31,14 @@ impl CpuHost for WebHost {
             let taxonomy = matches!(task, BookTask::Inspect { .. }).then(|| TAXONOMY.with(|slot| slot.borrow().clone())).flatten();
             let bytes = rmp_serde::to_vec_named(&CpuRequest::Book { task, taxonomy }).map_err(BackendError::operation)?;
             let response = cpu_client::request_with_source(bytes, server.source()).map_err(BackendError::operation)?.await.map_err(BackendError::operation)?;
-            rmp_serde::from_slice(&response).map_err(BackendError::operation)?
+            decode_response(&response)
         })
     }
     fn request(&self, request: CpuRequest) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
         Box::pin(async move {
             let bytes = rmp_serde::to_vec_named(&request).map_err(BackendError::operation)?;
             let response = cpu_client::request(bytes).map_err(BackendError::operation)?.await.map_err(BackendError::operation)?;
-            rmp_serde::from_slice(&response).map_err(BackendError::operation)?
+            decode_response(&response)
         })
     }
     fn generate_thumbnail(&self, extension: String, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailBytes>, BackendError>> {
@@ -42,7 +46,7 @@ impl CpuHost for WebHost {
             let server = serve_reader(reader).map_err(BackendError::operation)?;
             let bytes = rmp_serde::to_vec_named(&cpu_host::Thumbnail { extension }.request()).map_err(BackendError::operation)?;
             let response = cpu_client::request_with_source(bytes, server.source()).map_err(BackendError::operation)?.await.map_err(BackendError::operation)?;
-            cpu_host::Thumbnail::decode(rmp_serde::from_slice(&response).map_err(BackendError::operation)?)
+            cpu_host::Thumbnail::decode(decode_response(&response)?)
         })
     }
 }
@@ -74,7 +78,11 @@ pub async fn run_book_operation<C: BookOperation, R: Read + Seek + Send + 'stati
 }
 
 pub async fn run_book_operation_with_source<C: BookOperation>(operation: C, source: JsValue) -> Result<C::Reply, String> {
-    let bytes = rmp_serde::to_vec_named(&operation.request()).map_err(|error| error.to_string())?;
+    let mut request = operation.request();
+    if let CpuRequest::Book { task: BookTask::Inspect { .. }, taxonomy } = &mut request {
+        *taxonomy = TAXONOMY.with(|slot| slot.borrow().clone());
+    }
+    let bytes = rmp_serde::to_vec_named(&request).map_err(|error| error.to_string())?;
     let response = cpu_client::request_with_source(bytes, source).map_err(|error| error.to_string())?.await.map_err(|error| error.to_string())?;
-    C::decode(rmp_serde::from_slice(&response).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+    C::decode(decode_response(&response).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
 }

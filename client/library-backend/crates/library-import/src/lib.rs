@@ -15,13 +15,13 @@ use library_runtime::events::LibraryEventRouter;
 
 mod catalog;
 mod import;
+mod transfer;
 pub mod import_status;
 pub mod import_workflow;
 #[cfg(not(target_arch = "wasm32"))]
 mod dropped_paths;
 #[cfg(not(target_arch = "wasm32"))]
 mod import_native;
-#[cfg(not(target_arch = "wasm32"))]
 mod provider_uploads;
 #[cfg(target_arch = "wasm32")]
 mod selected;
@@ -36,7 +36,6 @@ pub use client_platform_web::transport::import_io::{ImportReader as DirectoryImp
 pub struct LibraryImport {
     pub library_id: sync_common::LibraryId,
     pub cloud: cloud_storage::connections::CloudConnections,
-    #[cfg(not(target_arch = "wasm32"))]
     pub provider_upload_lock: tokio::sync::Mutex<()>,
     pub database: Arc<Database>,
     pub assets: AssetStore,

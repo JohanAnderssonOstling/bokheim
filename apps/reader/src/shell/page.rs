@@ -6,7 +6,7 @@ use ui_components as components;
 
 use crate::shell::input::{self, CommonReaderCommands};
 use crate::shell::state_panel::SidebarTab;
-use crate::shell::toolbar::{SidebarTarget, reader_bottom_bar, reader_top_bar};
+use crate::shell::toolbar::{SidebarTarget, reader_bottom_bar, reader_rail, reader_top_bar};
 use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, NextSidebarTab, PreviousLine, PreviousPage, PreviousSidebarTab, ReturnToLibrary, ToggleSearch, ToggleSidebar, ToggleToc};
 
 /// The phone's chrome around the page.
@@ -35,6 +35,8 @@ pub(crate) struct ReaderSurface {
     pub(crate) title: String,
     pub(crate) chapter: String,
     pub(crate) progress_label: String,
+    pub(crate) progress_fraction: f32,
+    pub(crate) progress_detail: String,
     pub(crate) bottom_bar_id: &'static str,
 }
 
@@ -47,13 +49,12 @@ struct ReaderPage {
 }
 
 pub(crate) fn reader_surface<C: CommonReaderCommands + SidebarTarget>(owner: &C, surface: ReaderSurface, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>) -> Div {
-    let ReaderSurface { document, dock, sidebar, active_tab, chrome_visible, document_ready, loading_focus, title, chapter, progress_label, bottom_bar_id } = surface;
+    let ReaderSurface { document, dock, sidebar, active_tab, chrome_visible, document_ready, loading_focus, title, chapter, progress_label, progress_fraction, progress_detail, bottom_bar_id } = surface;
+    let document = if window.supports_region_capture() { super::screenshot::document(document, cx.entity_id(), theme) } else { document };
     if !components::uses_mobile_reader_controls(window) {
+        let rail = reader_rail(owner, &cx.entity(), active_tab.filter(|_| sidebar.is_some()), progress_fraction, progress_label, progress_detail, theme, window, cx);
         let document = div().size_full().min_h_0().min_w_0().flex().flex_col().child(document).children(dock).into_any_element();
-        let content = match sidebar {
-            Some(sidebar) => super::chrome::with_sidebar(sidebar, document, false, window, cx),
-            None => document,
-        };
+        let content = super::chrome::desktop_content(rail.into_any_element(), sidebar, document, window, cx);
         let no_bars = MobileChrome { top_bar: None, bottom_bar: None, dock: None, sheet: None, partial_sheet: false };
         return reader_page(ReaderPage { document_ready, loading_focus, chrome_visible, mobile_chrome: no_bars, content }, theme, window, cx);
     }
@@ -73,7 +74,7 @@ fn reader_page<C: CommonReaderCommands>(page: ReaderPage, theme: components::Bro
     let page = components::reader_app_page(window, cx, theme)
         .relative()
         .key_context("Reader")
-        .when(chrome_visible && !mobile, |page| page.pt(safe_area.top))
+        .when(!mobile, |page| page.pt(safe_area.top))
         .when(!document_ready, |page| page.track_focus(&loading_focus))
         .on_action(cx.listener(input::dispatch::<C, PreviousPage>))
         .on_action(cx.listener(input::dispatch::<C, NextPage>))

@@ -3,6 +3,7 @@
 //! Row assignment and geometry stay in `geometry`; this module is responsible
 //! only for child preparation, placement, and painting.
 
+use super::slots::Slots;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -35,7 +36,7 @@ pub(super) struct PaginatorElement {
     reported_visible_page: Option<VisiblePage>,
     children_revision: usize,
     data: Rc<PaginatorData>,
-    widths: Rc<Vec<Pixels>>,
+    widths: Rc<Slots<Pixels>>,
     layout_cache: Rc<RefCell<LayoutCache>>,
     warm_direction: Option<AssignmentDirection>,
     maximum_rows: Option<usize>,
@@ -186,6 +187,9 @@ impl PaginatorElement {
                 // Pressing something already selected begins a drag of the
                 // whole selection, so the selection has to survive the press.
                 Some(index) if paginator.selection().contains(&index) => {}
+                Some(index) if paginator.select_on_drag && paginator.data.children[index].selection_start => {
+                    paginator.begin_marquee(event.position, cx);
+                }
                 Some(_) => {
                     paginator.clear_selection(cx);
                 }
@@ -219,7 +223,7 @@ impl PaginatorElement {
     }
 
     fn prepare_page(&self, page: VisiblePage, window: &mut Window, cx: &mut App) {
-        for child in &self.data.children[page.first_child..=page.last_child] {
+        for child in self.data.children.range(page.first_child..page.last_child + 1) {
             if let Some(prepare) = &child.prepare {
                 prepare(window, cx);
             }
@@ -313,16 +317,21 @@ impl PaginatorElement {
 
         for item in &assignment.items {
             let child = &self.data.children[item.child_index];
-            let mut element = div()
-                .w(item.width)
-                .h(height)
-                .overflow_hidden()
-                .when(policy.item_shadow, |cell| {
-                    let theme = components::browser_theme(cx);
-                    cell.bg(theme.page_bg).shadow(components::section_card_shadow(theme))
-                })
-                .child((child.render)(&self.state, window, cx))
-                .into_any_element();
+            let content = (child.render)(&self.state, window, cx);
+            let mut element = if child.owns_cell && !policy.item_shadow {
+                content
+            } else {
+                div()
+                    .w(item.width)
+                    .h(height)
+                    .overflow_hidden()
+                    .when(policy.item_shadow, |cell| {
+                        let theme = components::browser_theme(cx);
+                        cell.bg(theme.page_bg).shadow(components::section_card_shadow(theme))
+                    })
+                    .child(content)
+                    .into_any_element()
+            };
             element.layout_as_root(size(AvailableSpace::Definite(item.width), AvailableSpace::Definite(height)), window, cx);
             items.push(MeasuredItem { child_index: item.child_index, x: item.x, width: item.width, element });
         }
@@ -481,11 +490,12 @@ impl Element for PaginatorElement {
             for item in row.items.drain(..) {
                 let origin = point(row_left + item.x, row_top);
                 let item_bounds = Bounds { origin, size: size(item.width, row.height) };
-                if self.selectable && self.active && item_bounds.intersects(&bounds) {
-                    child_rects.push((item.child_index, item_bounds));
-                }
                 let mut element = item.element;
                 element.prepaint_at(origin, window, cx);
+                let hit_bounds = self.data.children[item.child_index].hit_bounds.as_ref().map_or(item_bounds, |bounds| bounds.get());
+                if self.selectable && self.active && hit_bounds.intersects(&bounds) {
+                    child_rects.push((item.child_index, hit_bounds));
+                }
                 elements.push(element);
             }
             row_top += row.height;
@@ -662,8 +672,54 @@ fn set_vertical_gaps(data: &PaginatorData, rows: &mut [MeasuredRow]) {
 mod tests {
     use super::super::{PaginatorChild, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy};
     use super::*;
-    use gpui::{AppContext, TestAppContext};
-    use std::cell::RefCell;
+    use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext, rgb};
+    use std::cell::{Cell, RefCell};
+
+    #[gpui::test]
+    fn owned_cells_preserve_size_and_clip_paint_and_input(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        for owns_cell in [false, true] {
+            for item_shadow in [false, true] {
+                for width in [90.0, 200.0] {
+                    let presses = Rc::new(Cell::new(0));
+                    let pressed = presses.clone();
+                    let child = PaginatorChild::new(move |_, _, _| {
+                        let pressed = pressed.clone();
+                        div()
+                            .id("cell")
+                            .debug_selector(|| "cell".into())
+                            .size_full()
+                            .relative()
+                            .overflow_hidden()
+                            .child(div().id("overflow").absolute().left(px(60.0)).top(px(0.0)).w(px(80.0)).h(px(40.0)).bg(rgb(0xfe0102)).on_mouse_down(MouseButton::Left, move |_, _, _| pressed.set(pressed.get() + 1)))
+                            .into_any_element()
+                    });
+                    let child = if owns_cell { child.with_own_cell() } else { child };
+                    let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(80.0)), px(0.0)).with_gap(px(0.0)).with_maximum_width(PaginatorWidthPolicy::pixels(px(100.0))).pack_start();
+                    let policy = if item_shadow { policy.with_item_shadow() } else { policy };
+                    let window = cx.open_window(size(px(width), px(150.0)), |_, _| Paginator::new("cell-test", [PaginatorGroup::new(policy, [child])]).max_rows(1).next_page_preview(false));
+                    let visual = &mut VisualTestContext::from_window(window.into(), cx);
+                    visual.run_until_parked();
+                    let bounds = visual.debug_bounds("cell").expect("cell bounds");
+                    assert_eq!(bounds.size, size(px(width.min(100.0)), px(80.0)));
+                    visual.update(|window, cx| {
+                        let quads = window.painted_quads();
+                        let overflow = quads.iter().find(|quad| quad.background == rgb(0xfe0102).into()).expect("overflow paint");
+                        assert_eq!(overflow.content_mask.bounds, bounds.scale(window.scale_factor()), "paint must stay inside the cell");
+                        let background = components::browser_theme(cx).page_bg;
+                        assert_eq!(quads.iter().any(|quad| quad.background == background.into() && quad.bounds == bounds.scale(window.scale_factor())), item_shadow, "shadow cells retain their background");
+                    });
+                    visual.simulate_mouse_down(bounds.origin + point(px(70.0), px(20.0)), MouseButton::Left, Modifiers::default());
+                    visual.simulate_mouse_up(bounds.origin + point(px(70.0), px(20.0)), MouseButton::Left, Modifiers::default());
+                    assert_eq!(presses.get(), 1);
+                    let outside = point(bounds.right() + px(10.0), bounds.top() + px(20.0));
+                    visual.simulate_mouse_down(outside, MouseButton::Left, Modifiers::default());
+                    visual.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
+                    assert_eq!(presses.get(), 1, "clipped content must not receive input");
+                }
+            }
+        }
+    }
 
     #[gpui::test]
     fn adjacent_prefetch_prepares_only_the_neighbor_ranges_without_rendering(cx: &mut TestAppContext) {
@@ -678,7 +734,7 @@ mod tests {
         window.update(|window, cx| {
             let page = PaginatorPage { reported_visible_page: None, child_offset: 4, direction: AssignmentDirection::Forward, prefetched: None, forced_page: None };
             let mut element = PaginatorElement::new("prefetch-test".into(), paginator.downgrade(), paginator.read(cx), page, px(16.0), Rc::default());
-            element.widths = Rc::new(vec![Pixels::ZERO; element.data.children.len()]);
+            element.widths = Rc::new(vec![Pixels::ZERO; element.data.children.len()].into());
             element.prepare_adjacent_pages(VisiblePage { first_child: 4, last_child: 7 }, Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(200.0))), window, cx);
         });
         assert_eq!(*prepared.borrow(), [0, 1, 2, 3, 8, 9, 10, 11]);

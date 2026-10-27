@@ -3,6 +3,7 @@
 
 use crate::{ImportFailure, ImportFailureKind};
 use std::collections::BTreeMap;
+use client_runtime::Classified;
 use sync_common::DirId;
 
 pub trait Batch {
@@ -18,14 +19,18 @@ pub async fn run<B: Batch>(batch: &mut B) -> Result<(), B::Error> {
     Ok(())
 }
 
-pub fn file_failure(path: &[String], error: &str) -> ImportFailure {
+pub fn file_failure(path: &[String], error: &(impl Classified + ?Sized)) -> ImportFailure {
     log::warn!("Could not import {}: {error}", path.join("/"));
-    ImportFailure::operation(ImportFailureKind::File, path, error)
+    let mut failure = ImportFailure::operation(ImportFailureKind::File, path, error.to_string());
+    failure.failure = error.failure();
+    failure
 }
 
-pub fn folder_failure(path: &[String], error: &str) -> ImportFailure {
+pub fn folder_failure(path: &[String], error: &(impl Classified + ?Sized)) -> ImportFailure {
     log::warn!("Could not import folder {}: {error}", path.join("/"));
-    ImportFailure::operation(ImportFailureKind::Folder, path, error)
+    let mut failure = ImportFailure::operation(ImportFailureKind::Folder, path, error.to_string());
+    failure.failure = error.failure();
+    failure
 }
 
 #[derive(Default)]
@@ -45,4 +50,19 @@ impl Destinations {
 
 pub fn supported(path: &[String]) -> bool {
     path.last().is_some_and(|name| book_model::BookFormat::from_file_name(name).is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use client_runtime::{BackendError, Failure};
+
+    #[test]
+    fn import_failures_keep_actionable_causes_separate_from_diagnostics() {
+        let error = BackendError::operation(Failure::CloudStorageFull).context("retained pending provider import");
+        let failure = file_failure(&["Book.epub".into()], &error);
+        let received: ImportFailure = serde_json::from_slice(&serde_json::to_vec(&failure).unwrap()).unwrap();
+        assert_eq!(received.failure, Some(Failure::CloudStorageFull));
+        assert_eq!(received.path, vec!["Book.epub"]);
+    }
 }

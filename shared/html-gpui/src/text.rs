@@ -1,3 +1,6 @@
+use crate::fonts::{PublicationFonts, SharedPublicationFonts};
+use cssparser::{ParseError, Parser, ParserInput};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -7,15 +10,34 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use web_time::Instant;
 
-use gpui::{Font, FontStyle, FontWeight, Hsla, TextRun, font, px, rgba};
-use html::text::{FontMetricsRequest, FontRelativeMetrics, FontSlant, GlyphId, GlyphMetric, GlyphResourceStore, GlyphShaper, OpenTypeFeature, ShapeError, ShapedLine, ShapedTextRun, TextRunShapeRequest, TextShapeRequest, TextStyleSpan};
+use gpui::{Font, FontFallbacks, FontStyle, FontWeight, Hsla, LineLayout, Pixels, ShapedRun, TextRun, font, px, rgba};
+use html::style::{TextDirection, is_cjk_character};
+use html::text::{
+    FontMetricsRequest, FontRelativeMetrics, FontSlant, GlyphId, GlyphMetric, GlyphResourceGeneration, GlyphResourceStore, GlyphShaper, OpenTypeFeature, ShapeError, ShapedLine, ShapedTextRun, TextRunShapeRequest, TextShapeRequest,
+    TextStyleSpan,
+};
+use kurbo::Rect;
 use smallvec::SmallVec;
+use unicode_segmentation::UnicodeSegmentation;
+
+mod bounds;
 
 /// OpenType features that form the book renderer's quality baseline. Required
 /// composition and positioning are explicit so behavior is stable across
 /// platform backends; standard and contextual Latin ligatures remain enabled
 /// unless CSS overrides their tag with zero.
 const BOOK_QUALITY_FEATURES: [([u8; 4], u32); 9] = [(*b"ccmp", 1), (*b"rlig", 1), (*b"rclt", 1), (*b"mark", 1), (*b"mkmk", 1), (*b"kern", 1), (*b"liga", 1), (*b"clig", 1), (*b"calt", 1)];
+
+fn requested_font(family: String, weight: u16, slant: FontSlant) -> Font {
+    let mut selected = font(family);
+    selected.weight = FontWeight(f32::from(weight));
+    selected.style = match slant {
+        FontSlant::Normal => FontStyle::Normal,
+        FontSlant::Italic => FontStyle::Italic,
+        FontSlant::Oblique => FontStyle::Oblique,
+    };
+    selected
+}
 
 fn font_slant_key(slant: FontSlant) -> u8 {
     match slant {
@@ -46,6 +68,7 @@ struct GlyphKey {
     font_style: u8,
     color: u32,
     family: String,
+    fallbacks: Option<FontFallbacks>,
 }
 
 #[derive(Clone)]
@@ -115,25 +138,61 @@ impl GlyphStorage {
     }
 }
 
-#[derive(Clone)]
 pub struct GpuiTextRun {
     pub(crate) glyphs: Arc<[GpuiRunGlyph]>,
     pub(crate) ascent: gpui::Pixels,
     pub(crate) descent: gpui::Pixels,
     character_bytes: Arc<[usize]>,
     glyph_segments: Arc<[GpuiGlyphSegment]>,
-    colors: Arc<[(Range<usize>, Hsla)]>,
+    colors: Box<[(Range<usize>, Hsla)]>,
     pub(crate) caret_stops: Arc<[f32]>,
+    advances: Arc<[f32]>,
+    pub(crate) paint_bounds: Option<Rect>,
 }
 
 impl GpuiTextRun {
-    pub(crate) fn new(glyphs: Arc<[GpuiRunGlyph]>, ascent: gpui::Pixels, descent: gpui::Pixels, character_bytes: Arc<[usize]>, colors: Arc<[(Range<usize>, Hsla)]>) -> Self {
+    pub(crate) fn new(glyphs: Arc<[GpuiRunGlyph]>, ascent: gpui::Pixels, descent: gpui::Pixels, character_bytes: Arc<[usize]>, colors: Box<[(Range<usize>, Hsla)]>) -> Self {
         let glyph_segments = Arc::from(build_glyph_segments(&glyphs));
-        Self { glyphs, ascent, descent, character_bytes, glyph_segments, colors, caret_stops: Arc::default() }
+        Self { glyphs, ascent, descent, character_bytes, glyph_segments, colors, caret_stops: Arc::default(), advances: Arc::default(), paint_bounds: None }
     }
 
-    fn with_colors(&self, colors: Arc<[(Range<usize>, Hsla)]>) -> Self {
-        Self { glyphs: self.glyphs.clone(), ascent: self.ascent, descent: self.descent, character_bytes: self.character_bytes.clone(), glyph_segments: self.glyph_segments.clone(), colors, caret_stops: self.caret_stops.clone() }
+    fn with_colors(&self, colors: Box<[(Range<usize>, Hsla)]>) -> Self {
+        Self {
+            glyphs: self.glyphs.clone(),
+            ascent: self.ascent,
+            descent: self.descent,
+            character_bytes: self.character_bytes.clone(),
+            glyph_segments: self.glyph_segments.clone(),
+            colors,
+            caret_stops: self.caret_stops.clone(),
+            advances: self.advances.clone(),
+            paint_bounds: self.paint_bounds,
+        }
+    }
+
+    fn cache_paint_bounds(&mut self, text_system: &gpui::WindowTextSystem) {
+        // Use each fallback font's full glyph box, rather than line metrics or
+        // advances, so combining marks and glyph overhangs remain visible.
+        // Font boxes use different vertical conventions on different backends;
+        // symmetric extents conservatively cover both. Compute once per run,
+        // never once per viewport or individual character paint command.
+        let mut previous_font = None;
+        let mut font_bounds = Rect::ZERO;
+        for glyph in self.glyphs.iter() {
+            let key = (glyph.font_id, glyph.font_size);
+            if previous_font != Some(key) {
+                let bounds = text_system.bounding_box(glyph.font_id, glyph.font_size);
+                font_bounds = Rect::new(f64::from(f32::from(bounds.left())), f64::from(f32::from(bounds.top())), f64::from(f32::from(bounds.right())), f64::from(f32::from(bounds.bottom())));
+                previous_font = Some(key);
+            }
+            let x = f64::from(f32::from(glyph.position.x));
+            let y = f64::from(f32::from(glyph.position.y));
+            let Some(bounds) = bounds::conservative_glyph_bounds(font_bounds, (x, y)) else {
+                self.paint_bounds = None;
+                return;
+            };
+            self.paint_bounds = Some(self.paint_bounds.map_or(bounds, |previous| previous.union(bounds)));
+        }
     }
 
     /// Resolve a logical character range to slices of the visually ordered
@@ -235,15 +294,13 @@ pub(crate) struct GpuiRunGlyph {
 pub type RunStore = Rc<Vec<Arc<GpuiTextRun>>>;
 
 struct DocumentTextResources {
-    resources: GlyphResourceStore,
+    generation: GlyphResourceGeneration,
     table: HashMap<GlyphKey, GlyphId>,
     glyphs: GlyphStore,
     runs: RunStore,
 }
 
 struct AppendTextResources {
-    resources: GlyphResourceStore,
-    table: HashMap<GlyphKey, GlyphId>,
     glyphs: GlyphStore,
     runs: RunStore,
 }
@@ -260,12 +317,17 @@ struct FontStyleIdentity {
     font_weight: u16,
     font_style: u8,
     family: Option<Box<str>>,
+    cjk_family: Option<Box<str>>,
     features: Box<[OpenTypeFeature]>,
 }
 
 impl FontStyleIdentity {
     fn matches(&self, style: &TextStyleSpan<'_>) -> bool {
-        self.font_weight == style.font_weight() && self.font_style == font_slant_key(style.font_slant()) && self.family.as_deref() == style.font_family() && self.features.as_ref() == style.font_features()
+        self.font_weight == style.font_weight()
+            && self.font_style == font_slant_key(style.font_slant())
+            && self.family.as_deref() == style.font_family()
+            && self.cjk_family.as_deref() == style.cjk_font_family()
+            && self.features.as_ref() == style.font_features()
     }
 }
 
@@ -273,12 +335,14 @@ impl FontStyleIdentity {
 struct PreparedFont {
     identity: Arc<FontStyleIdentity>,
     font: Font,
+    cjk_font: Option<Font>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LineStyleIdentity {
     byte_len: usize,
     font_size: u32,
+    direction: TextDirection,
     font: Arc<FontStyleIdentity>,
 }
 
@@ -351,11 +415,10 @@ fn is_western_benchmark_text(text: &str) -> bool {
     })
 }
 
-/// Cheaply cloned cache payload. Cache identity remains borrowed in the map,
-/// so a hit only bumps these reference counts instead of cloning text, style
-/// slices, and font-family strings.
-#[derive(Clone)]
+/// Natural geometry owned by the shape cache and borrowed while creating
+/// paint resources and engine geometry views.
 struct CachedLineGeometry {
+    advances: Arc<[f32]>,
     glyphs: Arc<[GpuiRunGlyph]>,
     ascent: f32,
     descent: f32,
@@ -368,7 +431,7 @@ impl CachedLineShape {
     fn matches(&self, text: &str, styles: &[TextStyleSpan<'_>]) -> bool {
         self.text.as_ref() == text
             && self.styles.len() == styles.len()
-            && self.styles.iter().zip(styles).all(|(cached, style)| cached.byte_len == style.byte_range().len() && cached.font_size == style.font_size().to_bits() && cached.font.matches(style))
+            && self.styles.iter().zip(styles).all(|(cached, style)| cached.byte_len == style.byte_range().len() && cached.font_size == style.font_size().to_bits() && cached.direction == style.direction() && cached.font.matches(style))
     }
 }
 
@@ -398,38 +461,52 @@ const LINE_SHAPE_CACHE_CAPACITY: usize = 1024;
 const FONT_SETUP_CACHE_CAPACITY: usize = 32;
 
 /// Split fallback lists without breaking quoted installed family names.
-fn font_family_names(list: &str) -> impl Iterator<Item = (String, bool)> + '_ {
-    let mut characters = list.chars().peekable();
-    std::iter::from_fn(move || {
-        characters.peek()?;
-        let mut name = String::new();
-        let mut quote = None;
-        let mut quoted = false;
-        while let Some(character) = characters.next() {
-            match character {
-                '\\' => {
-                    if let Some(escaped) = characters.next() {
-                        name.push(escaped);
-                    }
-                }
-                '\'' | '"' if quote.is_none() => {
-                    quote = Some(character);
-                    quoted = true;
-                }
-                character if quote == Some(character) => quote = None,
-                ',' if quote.is_none() => break,
-                _ => name.push(character),
-            }
+fn font_family_names(list: &str) -> impl Iterator<Item = (String, bool)> {
+    let mut input = ParserInput::new(list);
+    let mut parser = Parser::new(&mut input);
+    let families: Result<Vec<_>, ParseError<'_, ()>> = parser.parse_comma_separated(|input| {
+        if let Ok(name) = input.try_parse(Parser::expect_string_cloned) {
+            return Ok((name.to_string(), true));
         }
-        Some((name.trim().to_owned(), quoted))
-    })
+        let mut name = input.expect_ident()?.to_string();
+        while !input.is_exhausted() {
+            name.push(' ');
+            name.push_str(input.expect_ident()?);
+        }
+        Ok((name, false))
+    });
+    families.unwrap_or_default().into_iter()
+}
+
+fn append_font_runs(runs: &mut Vec<TextRun>, text: &str, latin: Font, cjk: Option<Font>, color: Hsla) {
+    let push = |runs: &mut Vec<TextRun>, len, font| runs.push(TextRun { len, font, color, background_color: None, underline: None, strikethrough: None });
+    let Some(cjk) = cjk.filter(|_| !text.is_ascii() && text.chars().any(is_cjk_character)) else {
+        push(runs, text.len(), latin);
+        return;
+    };
+    let mut start = 0;
+    let mut previous = false;
+    for (byte, cluster) in text.grapheme_indices(true) {
+        let selected = cluster.chars().any(is_cjk_character);
+        if byte == 0 {
+            previous = selected;
+        }
+        if selected != previous {
+            push(runs, byte - start, if previous { cjk.clone() } else { latin.clone() });
+            start = byte;
+            previous = selected;
+        }
+    }
+    push(runs, text.len() - start, if previous { cjk } else { latin });
 }
 
 pub struct GpuiTextCache {
     text_system: Arc<gpui::WindowTextSystem>,
     font_families: HashMap<String, String>,
+    publication_fonts: SharedPublicationFonts,
+    font_generation: u64,
     prepared_fonts: VecDeque<PreparedFont>,
-    resources: GlyphResourceStore,
+    generation: GlyphResourceGeneration,
     table: HashMap<GlyphKey, GlyphId>,
     glyphs: GlyphStore,
     runs: RunStore,
@@ -449,8 +526,10 @@ impl GpuiTextCache {
         Self {
             text_system,
             font_families,
+            publication_fonts: Rc::new(RefCell::new(PublicationFonts::default())),
+            font_generation: 0,
             prepared_fonts: VecDeque::new(),
-            resources: GlyphResourceStore::default(),
+            generation: GlyphResourceGeneration::default(),
             table: HashMap::new(),
             glyphs: Rc::default(),
             runs: Rc::new(Vec::new()),
@@ -462,6 +541,24 @@ impl GpuiTextCache {
             line_shapes: HashMap::with_capacity(LINE_SHAPE_CACHE_CAPACITY),
             line_shape_order: VecDeque::with_capacity(LINE_SHAPE_CACHE_CAPACITY),
             western_benchmark: WesternShapingBenchmark::default(),
+        }
+    }
+
+    pub fn with_publication_fonts(mut self, fonts: SharedPublicationFonts) -> Self {
+        self.publication_fonts = fonts;
+        self
+    }
+
+    fn refresh_publication_fonts(&mut self) {
+        let generation = self.publication_fonts.borrow().generation();
+        if generation != self.font_generation {
+            self.prepared_fonts.clear();
+            self.table.clear();
+            self.shapes.clear();
+            self.shape_order.clear();
+            self.line_shapes.clear();
+            self.line_shape_order.clear();
+            self.font_generation = generation;
         }
     }
 
@@ -510,27 +607,51 @@ impl GpuiTextCache {
         candidates.iter().find_map(|candidate| self.font_families.get(&candidate.to_lowercase()).cloned())
     }
 
-    fn resolve_family(&self, family_list: Option<&str>) -> String {
-        for (family, quoted) in family_list.into_iter().flat_map(font_family_names) {
-            if family.is_empty() {
-                continue;
-            }
-            let generic = match (quoted, family.to_ascii_lowercase().as_str()) {
-                (false, "serif") => self.available_family(&["NV Garamond", "Noto Serif", "DejaVu Serif", "Times New Roman"]),
-                (false, "sans-serif") => self.available_family(&["Raleway", "Noto Sans", "DejaVu Sans", "Arial", ".SystemUIFont"]),
-                (false, "monospace" | "ui-monospace") => self.available_family(&["Noto Sans Mono", "DejaVu Sans Mono", ".ZedMono"]),
-                (false, "system-ui" | "ui-sans-serif") => Some(".SystemUIFont".to_owned()),
-                (false, "ui-serif") => self.available_family(&["NV Garamond", "Noto Serif", "DejaVu Serif"]),
-                _ => None,
-            };
-            if let Some(generic) = generic {
-                return generic;
-            }
-            if let Some(available) = self.font_families.get(&family.to_lowercase()) {
-                return available.clone();
+    fn resolve_font(&self, family_list: Option<&str>, weight: u16, slant: FontSlant) -> Font {
+        self.resolve_font_for_script(family_list, weight, slant, false)
+    }
+
+    fn resolve_font_for_script(&self, family_list: Option<&str>, weight: u16, slant: FontSlant, cjk: bool) -> Font {
+        let allow_publication = if cjk { self.publication_fonts.borrow().allows_cjk_publication_fonts() } else { self.publication_fonts.borrow().allows_publication_family_list(family_list) };
+        let mut resolved = family_list.into_iter().flat_map(font_family_names).filter_map(|(family, quoted)| self.resolve_family(&family, quoted, weight, slant, allow_publication));
+        let mut selected = resolved.next().unwrap_or_else(|| requested_font(".SystemUIFont".to_owned(), weight, slant));
+        // Keep CSS fallback families for glyphs missing from a custom face.
+        // Font setup is cached across lines; single-family requests allocate no chain.
+        let mut fallbacks = selected.fallbacks.as_ref().map(|fallbacks| fallbacks.fallback_list().to_vec()).unwrap_or_default();
+        for candidate in resolved {
+            for family in std::iter::once(candidate.family.as_ref()).chain(candidate.fallbacks.as_ref().into_iter().flat_map(|fallbacks| fallbacks.fallback_list().iter().map(String::as_str))) {
+                if family != selected.family.as_ref() && !fallbacks.iter().any(|existing| existing == family) {
+                    fallbacks.push(family.to_owned());
+                }
             }
         }
-        ".SystemUIFont".to_owned()
+        if !fallbacks.is_empty() {
+            selected.fallbacks = Some(FontFallbacks::from_fonts(fallbacks));
+        }
+        selected
+    }
+
+    fn resolve_family(&self, family: &str, quoted: bool, weight: u16, slant: FontSlant, allow_publication: bool) -> Option<Font> {
+        if family.is_empty() {
+            return None;
+        }
+        let generic_name = !quoted
+            && matches!(family.to_ascii_lowercase().as_str(), "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui" | "ui-serif" | "ui-sans-serif" | "ui-monospace" | "ui-rounded" | "emoji" | "math" | "fangsong");
+        if allow_publication
+            && !generic_name
+            && let Some(font) = self.publication_fonts.borrow().resolve(family, weight, slant)
+        {
+            return Some(font);
+        }
+        let generic = match (quoted, family.to_ascii_lowercase().as_str()) {
+            (false, "serif") => self.available_family(&["NV Garamond", "Noto Serif", "DejaVu Serif", "Times New Roman"]),
+            (false, "sans-serif") => self.available_family(&["Raleway", "Noto Sans", "DejaVu Sans", "Arial", ".SystemUIFont"]),
+            (false, "monospace" | "ui-monospace") => self.available_family(&["Noto Sans Mono", "DejaVu Sans Mono", ".ZedMono"]),
+            (false, "system-ui" | "ui-sans-serif") => Some(".SystemUIFont".to_owned()),
+            (false, "ui-serif") => self.available_family(&["NV Garamond", "Noto Serif", "DejaVu Serif"]),
+            _ => None,
+        };
+        generic.or_else(|| self.font_families.get(&family.to_lowercase()).cloned()).map(|family| requested_font(family, weight, slant))
     }
 
     /// Font selection and OpenType features do not depend on run length,
@@ -542,16 +663,22 @@ impl GpuiTextCache {
             return prepared.clone();
         }
         self.shape_cache_stats.font_setup_misses += 1;
-        let mut gpui_font = font(self.resolve_family(style.font_family()));
-        gpui_font.weight = FontWeight(style.font_weight() as f32);
-        gpui_font.style = match style.font_slant() {
-            FontSlant::Normal => FontStyle::Normal,
-            FontSlant::Italic => FontStyle::Italic,
-            FontSlant::Oblique => FontStyle::Oblique,
-        };
+        let mut gpui_font = self.resolve_font(style.font_family(), style.font_weight(), style.font_slant());
         gpui_font.features = book_quality_font_features(style.font_features());
+        let cjk_font = style.cjk_font_family().map(|family| {
+            let mut font = self.resolve_font_for_script(Some(family), style.font_weight(), style.font_slant(), true);
+            font.features = gpui_font.features.clone();
+            font
+        });
         let prepared = PreparedFont {
-            identity: Arc::new(FontStyleIdentity { font_weight: style.font_weight(), font_style: font_slant_key(style.font_slant()), family: style.font_family().map(Into::into), features: style.font_features().into() }),
+            cjk_font,
+            identity: Arc::new(FontStyleIdentity {
+                font_weight: style.font_weight(),
+                font_style: font_slant_key(style.font_slant()),
+                family: style.font_family().map(Into::into),
+                cjk_family: style.cjk_font_family().map(Into::into),
+                features: style.font_features().into(),
+            }),
             font: gpui_font,
         };
         if self.prepared_fonts.len() == FONT_SETUP_CACHE_CAPACITY {
@@ -568,12 +695,97 @@ impl GpuiTextCache {
         for style in styles {
             style.byte_range().len().hash(&mut hasher);
             style.font_size().to_bits().hash(&mut hasher);
+            style.direction().hash(&mut hasher);
             style.font_weight().hash(&mut hasher);
             font_slant_key(style.font_slant()).hash(&mut hasher);
             style.font_family().hash(&mut hasher);
+            style.cjk_font_family().hash(&mut hasher);
             style.font_features().hash(&mut hasher);
         }
         hasher.finish()
+    }
+
+    fn layout_directional_line(&self, text: &str, font_size: Pixels, runs: &[TextRun], direction: TextDirection) -> Arc<LineLayout> {
+        let inferred = self.text_system.layout_line(text, font_size, runs, None);
+        let is_rtl = direction == TextDirection::Rtl;
+        // Keep the native fast path when it already covers the whole source
+        // with the requested direction. Coverage also detects dropped leading
+        // neutrals/numerals in backends that infer a conflicting paragraph base.
+        if (direction == TextDirection::Ltr && text.is_ascii())
+            || (!inferred.clusters.is_empty() && inferred.clusters.iter().try_fold(0, |end, cluster| (cluster.bytes.start == end && cluster.is_rtl == is_rtl).then_some(cluster.bytes.end)) == Some(text.len()))
+        {
+            return inferred;
+        }
+
+        // Skrift has already resolved bidi levels. GPUI's line API infers its
+        // own direction, so supply a strong base and a directional override to
+        // preserve that resolved run, including neutrals and mirrored glyphs.
+        // Synthetic controls stay local to shaping; exported indices refer to
+        // the original logical text.
+        let prefix = match direction {
+            TextDirection::Ltr => "\u{200e}\u{202d}",
+            TextDirection::Rtl => "\u{200f}\u{202e}",
+        };
+        let mut directed = String::with_capacity(text.len() + 9);
+        directed.push_str(prefix);
+        let mut source_bytes = Vec::with_capacity(text.chars().count() + 1);
+        let mut directed_runs = runs.to_vec();
+        let mut source_start = 0;
+        for run in &mut directed_runs {
+            let source_end = source_start + run.len;
+            let directed_start = directed.len();
+            for (byte, character) in text[source_start..source_end].char_indices() {
+                source_bytes.push((directed.len(), source_start + byte));
+                // Source bidi controls have already affected Skrift's levels.
+                // Keep a zero-width source slot without applying them twice.
+                directed.push(if matches!(character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { '\u{200b}' } else { character });
+            }
+            run.len = directed.len() - directed_start;
+            source_start = source_end;
+        }
+        source_bytes.push((directed.len(), text.len()));
+        let content_end = directed.len();
+        directed.push('\u{202c}');
+        if let Some(first) = directed_runs.first_mut() {
+            first.len += prefix.len();
+        }
+        if let Some(last) = directed_runs.last_mut() {
+            last.len += '\u{202c}'.len_utf8();
+        }
+        let native = self.text_system.layout_line(&directed, font_size, &directed_runs, None);
+        let source_byte = |index| source_bytes.binary_search_by_key(&index, |&(byte, _)| byte).ok().map(|index| source_bytes[index].1);
+        let runs = native
+            .runs
+            .iter()
+            .filter_map(|run| {
+                let glyphs = run
+                    .glyphs
+                    .iter()
+                    .filter_map(|glyph| {
+                        if glyph.index >= content_end {
+                            return None;
+                        }
+                        let mut glyph = glyph.clone();
+                        glyph.index = source_byte(glyph.index)?;
+                        Some(glyph)
+                    })
+                    .collect::<Vec<_>>();
+                (!glyphs.is_empty()).then_some(ShapedRun { font_id: run.font_id, glyphs })
+            })
+            .collect();
+        let clusters = native
+            .clusters
+            .iter()
+            .filter_map(|cluster| {
+                if cluster.bytes.start < prefix.len() || cluster.bytes.end > content_end {
+                    return None;
+                }
+                let mut cluster = cluster.clone();
+                cluster.bytes = source_byte(cluster.bytes.start)?..source_byte(cluster.bytes.end)?;
+                Some(cluster)
+            })
+            .collect();
+        Arc::new(LineLayout { font_size: native.font_size, width: native.width, ascent: native.ascent, descent: native.descent, runs, clusters, len: text.len() })
     }
 
     fn shape_line_geometry(&mut self, text: &str, styles: &[TextStyleSpan<'_>], placement_request: Option<&TextShapeRequest<'_>>) -> Result<Option<ShapedLine>, ShapeError> {
@@ -581,30 +793,33 @@ impl GpuiTextCache {
         let placements_are_natural =
             placement_request.is_none_or(|request| request.placements().iter().all(|placement| placement.extra_advance() == 0.0 && placement.advance_override().is_none() && placement.baseline_shift() == 0.0 && placement.paints()));
         let mut colors = None;
-        let cached = if let Some(cached) = self.line_shapes.get(&key).filter(|cached| cached.matches(text, styles)) {
+        if self.line_shapes.get(&key).is_some_and(|cached| cached.matches(text, styles)) {
             self.shape_cache_stats.line_hits += 1;
-            cached.geometry.clone()
         } else {
             self.shape_cache_stats.line_misses += 1;
             let mut character_bytes = text.char_indices().map(|(byte, _)| byte).collect::<Vec<_>>();
             character_bytes.push(text.len());
             let mut text_runs = Vec::with_capacity(styles.len());
+            let mut font_run_boundaries = SmallVec::<[usize; 8]>::new();
             let mut miss_colors = Vec::with_capacity(styles.len());
             let mut identities = Vec::with_capacity(styles.len());
             for style in styles {
                 let prepared = self.prepared_font(style);
-                identities.push(LineStyleIdentity { byte_len: style.byte_range().len(), font_size: style.font_size().to_bits(), font: prepared.identity });
+                identities.push(LineStyleIdentity { byte_len: style.byte_range().len(), font_size: style.font_size().to_bits(), direction: style.direction(), font: prepared.identity });
                 let color = Hsla::from(rgba(style.color()));
                 let byte_range = style.byte_range();
-                text_runs.push(TextRun { len: byte_range.len(), font: prepared.font, color, background_color: None, underline: None, strikethrough: None });
+                font_run_boundaries.push(text_runs.len());
+                append_font_runs(&mut text_runs, &text[byte_range.clone()], prepared.font, prepared.cjk_font, color);
                 miss_colors.push((byte_range, color));
             }
-            let single_font_size = styles.iter().all(|style| style.font_size().to_bits() == styles[0].font_size().to_bits());
-            // A single-size run can use the native boundary allocations
-            // directly. Mixed sizes need the aggregate line-coordinate arrays.
-            let mut raw_caret_stops: Arc<[f32]> = if single_font_size { Arc::default() } else { vec![0.0; character_bytes.len()].into() };
-            let mut raw_cluster_boundaries: Arc<[bool]> = if single_font_size { Arc::default() } else { vec![false; character_bytes.len()].into() };
-            if !single_font_size {
+            font_run_boundaries.push(text_runs.len());
+            let single_group = styles.iter().all(|style| style.font_size().to_bits() == styles[0].font_size().to_bits() && style.direction() == styles[0].direction());
+            // A single size and direction can use native boundary allocations
+            // directly. Multiple groups need aggregate line-coordinate arrays.
+            let mut raw_advances = vec![0.0; character_bytes.len() - 1];
+            let mut raw_caret_stops: Arc<[f32]> = if single_group { Arc::default() } else { vec![0.0; character_bytes.len()].into() };
+            let mut raw_cluster_boundaries: Arc<[bool]> = if single_group { Arc::default() } else { vec![false; character_bytes.len()].into() };
+            if !single_group {
                 let boundaries = Arc::make_mut(&mut raw_cluster_boundaries);
                 boundaries[0] = true;
                 if let Some(last) = boundaries.last_mut() {
@@ -619,15 +834,15 @@ impl GpuiTextCache {
             while first_style < styles.len() {
                 let font_size_bits = styles[first_style].font_size().to_bits();
                 let mut end_style = first_style + 1;
-                while end_style < styles.len() && styles[end_style].font_size().to_bits() == font_size_bits {
+                while end_style < styles.len() && styles[end_style].font_size().to_bits() == font_size_bits && styles[end_style].direction() == styles[first_style].direction() {
                     end_style += 1;
                 }
                 let byte_start = styles[first_style].byte_range().start;
                 let byte_end = styles[end_style - 1].byte_range().end;
                 let group_text = &text[byte_start..byte_end];
-                let (character_start, character_end) = if single_font_size { (0, character_bytes.len() - 1) } else { (character_bytes.partition_point(|byte| *byte < byte_start), character_bytes.partition_point(|byte| *byte < byte_end)) };
+                let (character_start, character_end) = if single_group { (0, character_bytes.len() - 1) } else { (character_bytes.partition_point(|byte| *byte < byte_start), character_bytes.partition_point(|byte| *byte < byte_end)) };
                 if styles[first_style].font_size() == 0.0 {
-                    if single_font_size {
+                    if single_group {
                         raw_caret_stops = vec![0.0; character_bytes.len()].into();
                         raw_cluster_boundaries = vec![true; character_bytes.len()].into();
                     } else {
@@ -637,10 +852,17 @@ impl GpuiTextCache {
                     first_style = end_style;
                     continue;
                 }
-                let layout = self.text_system.layout_line(group_text, px(styles[first_style].font_size()), &text_runs[first_style..end_style], None);
-                let (mut local_caret_stops, local_cluster_boundaries) = build_text_boundaries_with_offsets(group_text, &layout, &character_bytes[character_start..=character_end], byte_start);
+                let layout = self.layout_directional_line(group_text, px(styles[first_style].font_size()), &text_runs[font_run_boundaries[first_style]..font_run_boundaries[end_style]], styles[first_style].direction());
+                let bytes = &character_bytes[character_start..=character_end];
+                let native = native_cluster_geometry(group_text, &layout, bytes, byte_start);
+                let (mut local_caret_stops, local_cluster_boundaries) =
+                    native.as_ref().map(|geometry| (geometry.carets.clone(), geometry.boundaries.clone())).unwrap_or_else(|| build_text_boundaries_with_offsets(group_text, &layout, bytes, byte_start));
                 let mut group_width = f32::from(layout.width);
-                if group_text.chars().last().is_some_and(char::is_whitespace) && local_caret_stops.len() >= 2 && (local_caret_stops[local_caret_stops.len() - 1] - local_caret_stops[local_caret_stops.len() - 2]).abs() <= f32::EPSILON {
+                if native.is_none()
+                    && group_text.chars().last().is_some_and(char::is_whitespace)
+                    && local_caret_stops.len() >= 2
+                    && (local_caret_stops[local_caret_stops.len() - 1] - local_caret_stops[local_caret_stops.len() - 2]).abs() <= f32::EPSILON
+                {
                     let probe_started = trailing_whitespace_profiling_enabled().then(Instant::now);
                     // Native line layout trims trailing whitespace from its
                     // caret geometry. Probe with a following printable glyph
@@ -649,11 +871,11 @@ impl GpuiTextCache {
                     let mut probe_text = String::with_capacity(group_text.len() + 1);
                     probe_text.push_str(group_text);
                     probe_text.push('x');
-                    let mut probe_runs = text_runs[first_style..end_style].to_vec();
+                    let mut probe_runs = text_runs[font_run_boundaries[first_style]..font_run_boundaries[end_style]].to_vec();
                     if let Some(last) = probe_runs.last_mut() {
                         last.len += 1;
                     }
-                    let probe_layout = self.text_system.layout_line(&probe_text, px(styles[first_style].font_size()), &probe_runs, None);
+                    let probe_layout = self.layout_directional_line(&probe_text, px(styles[first_style].font_size()), &probe_runs, styles[first_style].direction());
                     let (probe_carets, _) = build_text_boundaries(&probe_text, &probe_layout);
                     let original_character_count = character_end - character_start;
                     if let Some(&corrected_end) = probe_carets.get(original_character_count) {
@@ -666,7 +888,9 @@ impl GpuiTextCache {
                         self.shape_cache_stats.trailing_whitespace_probe_time += started.elapsed();
                     }
                 }
-                if single_font_size {
+                let local_advances = native.map(|geometry| geometry.advances).unwrap_or_else(|| advances_from_carets(&local_caret_stops, &local_cluster_boundaries));
+                raw_advances[character_start..character_end].copy_from_slice(&local_advances);
+                if single_group {
                     raw_caret_stops = local_caret_stops;
                     raw_cluster_boundaries = local_cluster_boundaries;
                 } else {
@@ -697,10 +921,20 @@ impl GpuiTextCache {
                 descent = descent.max(f32::from(layout.descent));
                 first_style = end_style;
             }
-            let geometry = CachedLineGeometry { glyphs: Arc::from(glyphs), ascent, descent, caret_stops: raw_caret_stops, cluster_boundaries: raw_cluster_boundaries, character_bytes: Arc::from(character_bytes) };
-            self.insert_line_shape(key, CachedLineShape { text: text.into(), styles: identities.into_boxed_slice(), geometry: geometry.clone(), natural_run: None });
+            let geometry =
+                CachedLineGeometry { advances: raw_advances.into(), glyphs: Arc::from(glyphs), ascent, descent, caret_stops: raw_caret_stops, cluster_boundaries: raw_cluster_boundaries, character_bytes: Arc::from(character_bytes) };
+            self.insert_line_shape(key, CachedLineShape { text: text.into(), styles: identities.into_boxed_slice(), geometry, natural_run: None });
             colors = Some(miss_colors);
-            geometry
+        }
+        let cached_shape = self.line_shapes.get(&key).expect("requested shape was cached");
+        let cached = &cached_shape.geometry;
+        let ascent = cached.ascent;
+        let cluster_boundaries = cached.cluster_boundaries.clone();
+        let (line_index, text_range) = if let Some(request) = placement_request {
+            (request.line_index(), request.text_range())
+        } else {
+            let Ok(character_count) = u32::try_from(cached.character_bytes.len() - 1) else { return Ok(None) };
+            (0, 0..character_count)
         };
 
         let (glyphs, caret_stops) = if placements_are_natural {
@@ -712,13 +946,17 @@ impl GpuiTextCache {
             (Arc::from(glyphs), caret_stops)
         };
 
-        let reusable_run = placements_are_natural.then(|| self.line_shapes.get(&key).filter(|cached| cached.matches(text, styles)).and_then(|cached| cached.natural_run.as_ref()).filter(|run| run.colors_match(styles)).cloned()).flatten();
+        let reusable_run = placements_are_natural.then(|| cached_shape.natural_run.as_ref().filter(|run| run.colors_match(styles)).cloned()).flatten();
         let run_resource = if let Some(run) = reusable_run {
             run
         } else {
-            let colors = Arc::from(colors.unwrap_or_else(|| styles.iter().map(|style| (style.byte_range(), Hsla::from(rgba(style.color())))).collect::<Vec<_>>()));
+            let colors = colors.unwrap_or_else(|| styles.iter().map(|style| (style.byte_range(), Hsla::from(rgba(style.color())))).collect::<Vec<_>>()).into_boxed_slice();
             let mut run = GpuiTextRun::new(glyphs, px(cached.ascent), px(cached.descent), cached.character_bytes.clone(), colors);
+            run.cache_paint_bounds(&self.text_system);
             run.caret_stops = caret_stops.clone();
+            if placements_are_natural {
+                run.advances = cached.advances.clone();
+            }
             let run = Arc::new(run);
             if placements_are_natural && let Some(cached) = self.line_shapes.get_mut(&key).filter(|cached| cached.matches(text, styles)) {
                 cached.natural_run = Some(run.clone());
@@ -727,19 +965,13 @@ impl GpuiTextCache {
         };
         let run = self.runs.len() as u32;
         Rc::make_mut(&mut self.runs).push(run_resource);
-        let (line_index, text_range) = if let Some(request) = placement_request {
-            (request.line_index(), request.text_range())
-        } else {
-            let Ok(character_count) = u32::try_from(cached.character_bytes.len() - 1) else { return Ok(None) };
-            (0, 0..character_count)
-        };
-        Ok(Some(ShapedLine { line_index, text_range, run, ascent: cached.ascent, caret_stops, cluster_boundaries: cached.cluster_boundaries }))
+        Ok(Some(ShapedLine { line_index, text_range, run, ascent, caret_stops, cluster_boundaries }))
     }
 
     fn set_text_run_colors(&mut self, run_id: u32, colors: &[u32]) {
         let Some(existing) = self.runs.get(run_id as usize).cloned() else { return };
         let Some(spans) = paint_color_spans(&existing.character_bytes, colors) else { return };
-        Rc::make_mut(&mut self.runs)[run_id as usize] = Arc::new(existing.with_colors(Arc::from(spans)));
+        Rc::make_mut(&mut self.runs)[run_id as usize] = Arc::new(existing.with_colors(spans.into_boxed_slice()));
     }
 }
 
@@ -764,19 +996,20 @@ fn paint_color_spans(character_bytes: &[usize], colors: &[u32]) -> Option<Vec<(R
 
 impl GlyphShaper for GpuiTextCache {
     fn reset(&mut self) {
-        self.resources.clear();
+        self.generation = GlyphResourceGeneration::default();
         self.table.clear();
         self.glyphs = Rc::default();
         self.runs = Rc::default();
     }
 
-    fn glyph_resources(&mut self) -> &mut GlyphResourceStore {
-        &mut self.resources
+    fn resource_generation(&self) -> GlyphResourceGeneration {
+        self.generation
     }
 
     fn begin_append_shaping(&mut self) -> Result<(), ShapeError> {
+        self.refresh_publication_fonts();
         debug_assert!(self.previous_append.is_none(), "append shaping transactions cannot be nested");
-        self.previous_append = Some(AppendTextResources { resources: self.resources.clone(), table: self.table.clone(), glyphs: self.glyphs.clone(), runs: self.runs.clone() });
+        self.previous_append = Some(AppendTextResources { glyphs: self.glyphs.clone(), runs: self.runs.clone() });
         Ok(())
     }
 
@@ -786,19 +1019,20 @@ impl GlyphShaper for GpuiTextCache {
 
     fn rollback_append_shaping(&mut self) {
         if let Some(previous) = self.previous_append.take() {
-            self.resources = previous.resources;
-            self.table = previous.table;
+            self.table.retain(|_, glyph| (*glyph as usize) < previous.glyphs.len());
             self.glyphs = previous.glyphs;
             self.runs = previous.runs;
         }
     }
 
     fn begin_document_shaping(&mut self) {
+        self.refresh_publication_fonts();
         if western_shaping_benchmark_enabled() {
             self.western_benchmark.reset();
         }
         debug_assert!(self.previous_document.is_none(), "document shaping transactions cannot be nested");
-        let previous = DocumentTextResources { resources: std::mem::take(&mut self.resources), table: std::mem::take(&mut self.table), glyphs: std::mem::take(&mut self.glyphs), runs: std::mem::replace(&mut self.runs, Rc::new(Vec::new())) };
+        let previous =
+            DocumentTextResources { generation: std::mem::take(&mut self.generation), table: std::mem::take(&mut self.table), glyphs: std::mem::take(&mut self.glyphs), runs: std::mem::replace(&mut self.runs, Rc::new(Vec::new())) };
         self.previous_document = Some(previous);
     }
 
@@ -811,7 +1045,7 @@ impl GlyphShaper for GpuiTextCache {
 
     fn rollback_document_shaping(&mut self) {
         if let Some(previous) = self.previous_document.take() {
-            self.resources = previous.resources;
+            self.generation = previous.generation;
             self.table = previous.table;
             self.glyphs = previous.glyphs;
             self.runs = previous.runs;
@@ -819,14 +1053,7 @@ impl GlyphShaper for GpuiTextCache {
     }
 
     fn font_relative_metrics(&mut self, request: FontMetricsRequest<'_>) -> Result<FontRelativeMetrics, ShapeError> {
-        let family = self.resolve_family(request.font_family());
-        let mut gpui_font = font(family);
-        gpui_font.weight = FontWeight(request.font_weight() as f32);
-        gpui_font.style = match request.font_slant() {
-            FontSlant::Normal => FontStyle::Normal,
-            FontSlant::Italic => FontStyle::Italic,
-            FontSlant::Oblique => FontStyle::Oblique,
-        };
+        let gpui_font = self.resolve_font(request.font_family(), request.font_weight(), request.font_slant());
         let font_id = self.text_system.resolve_font(&gpui_font);
         // CSS `ex` is the selected face's x-height, not the ink bounds of its
         // `x` glyph. Those differ for fonts such as WPT's Ahem and can also
@@ -844,19 +1071,19 @@ impl GlyphShaper for GpuiTextCache {
         Ok(FontRelativeMetrics::from_line_ratios(x_height_ratio, ch_advance_ratio, cap_height_ratio, ascent_ratio, descent_ratio).unwrap_or_else(FontRelativeMetrics::fallback))
     }
 
-    fn shape_glyph(&mut self, ch: char, font_size: f32, font_weight: u16, font_slant: FontSlant, color: u32, family: Option<&str>) -> Result<GlyphId, ShapeError> {
-        let family = self.resolve_family(family);
+    fn shape_glyph(&mut self, ch: char, font_size: f32, font_weight: u16, font_slant: FontSlant, color: u32, family: Option<&str>, resources: &mut GlyphResourceStore) -> Result<GlyphId, ShapeError> {
+        let gpui_font = self.resolve_font_for_script(family, font_weight, font_slant, is_cjk_character(ch));
         let font_style_key = font_slant_key(font_slant);
-        let key = GlyphKey { ch, font_size: font_size.to_bits(), font_weight, font_style: font_style_key, color, family: family.clone() };
+        let key = GlyphKey { ch, font_size: font_size.to_bits(), font_weight, font_style: font_style_key, color, family: gpui_font.family.to_string(), fallbacks: gpui_font.fallbacks.clone() };
         if let Some(glyph) = self.table.get(&key)
-            && self.resources.contains(*glyph)
+            && resources.contains(*glyph)
         {
             return Ok(*glyph);
         }
 
         if let Some(cached) = self.shapes.get(&key).cloned() {
             self.shape_cache_stats.glyph_hits += 1;
-            let registry_glyph = self.resources.register(cached.metric)?;
+            let registry_glyph = resources.register(cached.metric)?;
             let glyphs = Rc::make_mut(&mut self.glyphs);
             debug_assert_eq!(glyphs.len(), registry_glyph as usize);
             glyphs.push(GpuiGlyph::Layout { layout: cached.layout, color: cached.color });
@@ -870,7 +1097,7 @@ impl GlyphShaper for GpuiTextCache {
         // not send it through native shaping.
         if font_size == 0.0 {
             let metric = GlyphMetric::try_new(ch, 0.0, 0.0, 0.0, 0.0).map_err(ShapeError::rejected_metric)?;
-            let registry_glyph = self.resources.register(metric)?;
+            let registry_glyph = resources.register(metric)?;
             let glyphs = Rc::make_mut(&mut self.glyphs);
             debug_assert_eq!(glyphs.len(), registry_glyph as usize);
             glyphs.push(GpuiGlyph::Empty);
@@ -878,13 +1105,6 @@ impl GlyphShaper for GpuiTextCache {
             return Ok(registry_glyph);
         }
 
-        let mut gpui_font = font(family);
-        gpui_font.weight = FontWeight(font_weight as f32);
-        gpui_font.style = match font_slant {
-            FontSlant::Normal => FontStyle::Normal,
-            FontSlant::Italic => FontStyle::Italic,
-            FontSlant::Oblique => FontStyle::Oblique,
-        };
         let mut utf8 = [0; 4];
         let text = ch.encode_utf8(&mut utf8);
         let color = Hsla::from(rgba(color));
@@ -893,7 +1113,7 @@ impl GlyphShaper for GpuiTextCache {
         let glyphs = Rc::make_mut(&mut self.glyphs);
         let glyph = glyphs.len() as GlyphId;
         let metric = GlyphMetric::try_new(ch, f32::from(layout.width), f32::from(layout.ascent), f32::from(layout.descent), f32::from(layout.ascent)).map_err(ShapeError::rejected_metric)?;
-        let registry_glyph = self.resources.register(metric)?;
+        let registry_glyph = resources.register(metric)?;
         debug_assert_eq!(glyph, registry_glyph);
         glyphs.push(GpuiGlyph::Layout { layout: layout.clone(), color });
 
@@ -902,7 +1122,7 @@ impl GlyphShaper for GpuiTextCache {
         Ok(registry_glyph)
     }
 
-    fn shape_glyph_run(&mut self, request: TextRunShapeRequest<'_>, glyphs: &mut [GlyphId]) -> Result<Option<ShapedTextRun>, ShapeError> {
+    fn shape_glyph_run(&mut self, request: TextRunShapeRequest<'_>, glyphs: &mut [GlyphId], resources: &mut GlyphResourceStore) -> Result<Option<ShapedTextRun>, ShapeError> {
         let benchmark_enabled = western_shaping_benchmark_enabled();
         let run_text = request.text();
         let run_style = request.style().clone();
@@ -925,7 +1145,7 @@ impl GlyphShaper for GpuiTextCache {
                 *slot = if cached != GlyphId::MAX {
                     cached
                 } else {
-                    let glyph = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family())?;
+                    let glyph = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family_for_character(character), resources)?;
                     if character.is_ascii() {
                         ascii[character as usize] = glyph
                     } else {
@@ -939,7 +1159,7 @@ impl GlyphShaper for GpuiTextCache {
 
         let joined_cluster_boundaries = shaped.as_ref().ok().and_then(Option::as_ref).map_or(0, |run| run.cluster_boundaries().iter().filter(|boundary| !**boundary).count());
         let registration_started = Instant::now();
-        let fast_registered = if western || run_style.font_size() == 0.0 {
+        let fast_registered = if western || run_style.font_size() == 0.0 || (run_style.cjk_font_family().is_some() && run_text.chars().any(is_cjk_character)) {
             if let Ok(Some(native)) = &shaped
                 && let Some(run_id) = native.backend_run()
                 && native.caret_stops().is_some()
@@ -950,7 +1170,7 @@ impl GlyphShaper for GpuiTextCache {
                 let registration: Result<(), ShapeError> = (|| {
                     for (index, ((slot, character), advance)) in glyphs.iter_mut().zip(run_text.chars()).zip(native.advances()).enumerate() {
                         let metric = GlyphMetric::try_new(character, *advance, f32::from(run.ascent), f32::from(run.descent), f32::from(run.ascent)).map_err(ShapeError::rejected_metric)?;
-                        let glyph = self.resources.register(metric)?;
+                        let glyph = resources.register(metric)?;
                         debug_assert_eq!(glyph as usize, first_glyph + index);
                         *slot = glyph;
                         registered += 1;
@@ -977,7 +1197,7 @@ impl GlyphShaper for GpuiTextCache {
                 let style = &run_style;
                 for (index, (slot, character)) in glyphs.iter_mut().zip(run_text.chars()).enumerate() {
                     let color = paint_colors.get(index).copied().unwrap_or_else(|| style.color());
-                    *slot = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), color, style.font_family())?;
+                    *slot = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), color, style.font_family_for_character(character), resources)?;
                 }
             } else {
                 let mut ascii = [GlyphId::MAX; 128];
@@ -988,7 +1208,7 @@ impl GlyphShaper for GpuiTextCache {
                     *slot = if cached != GlyphId::MAX {
                         cached
                     } else {
-                        let glyph = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family())?;
+                        let glyph = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family_for_character(character), resources)?;
                         if character.is_ascii() {
                             ascii[character as usize] = glyph
                         } else {
@@ -1022,16 +1242,17 @@ impl GlyphShaper for GpuiTextCache {
         if let Some(colors) = paint_colors {
             self.set_text_run_colors(shaped.run, colors);
         }
-        Ok(shaped_text_run_from_line(&shaped))
+        Ok(shaped_text_run_from_line(&shaped, self.runs[shaped.run as usize].advances.clone()))
     }
 
     fn measure_line(&mut self, request: TextShapeRequest<'_>) -> Result<Option<ShapedTextRun>, ShapeError> {
         let retained_runs = self.runs.len();
         let shaped = self.shape_line(request);
+        let portable = shaped.and_then(|shaped| {
+            Ok(shaped.and_then(|shaped| shaped_text_run_from_line(&shaped, self.runs[shaped.run as usize].advances.clone()).and_then(|run| ShapedTextRun::new(Arc::from(run.advances()), Arc::from(run.cluster_boundaries())))))
+        });
         Rc::make_mut(&mut self.runs).truncate(retained_runs);
-        let Some(shaped) = shaped? else { return Ok(None) };
-        let portable = shaped_text_run_from_line(&shaped).and_then(|run| ShapedTextRun::new(Arc::from(run.advances()), Arc::from(run.cluster_boundaries())));
-        Ok(portable)
+        portable
     }
 
     fn shape_line(&mut self, request: TextShapeRequest<'_>) -> Result<Option<ShapedLine>, ShapeError> {
@@ -1041,21 +1262,66 @@ impl GlyphShaper for GpuiTextCache {
     fn begin_line_shaping(&mut self) {}
 }
 
-fn shaped_text_run_from_line(shaped: &ShapedLine) -> Option<ShapedTextRun> {
+fn shaped_text_run_from_line(shaped: &ShapedLine, advances: Arc<[f32]>) -> Option<ShapedTextRun> {
     let character_count = shaped.caret_stops.len().checked_sub(1)?;
+    let advances = if advances.len() == character_count { advances } else { advances_from_carets(&shaped.caret_stops, &shaped.cluster_boundaries) };
+    ShapedTextRun::with_backend_run(advances, shaped.cluster_boundaries.clone(), shaped.run, shaped.caret_stops.clone(), shaped.ascent)
+}
+
+fn advances_from_carets(carets: &[f32], boundaries: &[bool]) -> Arc<[f32]> {
+    let character_count = carets.len().saturating_sub(1);
     let mut advances = vec![0.0; character_count];
-    let mut boundary_indices = shaped.cluster_boundaries.iter().enumerate().filter_map(|(index, boundary)| boundary.then_some(index));
+    let mut boundary_indices = boundaries.iter().enumerate().filter_map(|(index, boundary)| boundary.then_some(index));
     let mut start = boundary_indices.next().unwrap_or(0);
     for end in boundary_indices {
-        if start >= end || end > character_count {
-            start = end;
-            continue;
+        if start < end && end <= character_count {
+            let width = (carets[end] - carets[start]).abs();
+            advances[start..end].fill(width / (end - start) as f32);
         }
-        let width = (shaped.caret_stops[end] - shaped.caret_stops[start]).abs();
-        advances[start..end].fill(width / (end - start) as f32);
         start = end;
     }
-    ShapedTextRun::with_backend_run(Arc::from(advances), shaped.cluster_boundaries.clone(), shaped.run, shaped.caret_stops.clone(), shaped.ascent)
+    advances.into()
+}
+
+struct NativeClusterGeometry {
+    carets: Arc<[f32]>,
+    boundaries: Arc<[bool]>,
+    advances: Arc<[f32]>,
+}
+
+fn native_cluster_geometry(text: &str, layout: &gpui::LineLayout, bytes: &[usize], byte_offset: usize) -> Option<NativeClusterGeometry> {
+    if layout.clusters.is_empty() {
+        return None;
+    }
+    let count = bytes.len().checked_sub(1)?;
+    let mut carets = vec![0.0; count + 1];
+    let mut boundaries = vec![false; count + 1];
+    let mut advances = vec![0.0; count];
+    boundaries[0] = true;
+    boundaries[count] = true;
+    for cluster in &layout.clusters {
+        if cluster.bytes.is_empty() || cluster.bytes.end > text.len() {
+            return None;
+        }
+        let start = bytes.binary_search(&(byte_offset + cluster.bytes.start)).ok()?;
+        let end = bytes.binary_search(&(byte_offset + cluster.bytes.end)).ok()?;
+        if start >= end {
+            return None;
+        }
+        let width = f32::from(cluster.advance);
+        let left = f32::from(cluster.x);
+        if !width.is_finite() || width < 0.0 || !left.is_finite() {
+            return None;
+        }
+        let (x0, x1) = if cluster.is_rtl { (left + width, left) } else { (left, left + width) };
+        boundaries[start] = true;
+        boundaries[end] = true;
+        advances[start..end].fill(width / (end - start) as f32);
+        for index in start..=end {
+            carets[index] = x0 + (x1 - x0) * (index - start) as f32 / (end - start) as f32;
+        }
+    }
+    Some(NativeClusterGeometry { carets: carets.into(), boundaries: boundaries.into(), advances: advances.into() })
 }
 
 fn apply_line_placements(request: &TextShapeRequest<'_>, character_bytes: &[usize], raw_caret_stops: &[f32], glyphs: &mut Vec<GpuiRunGlyph>) -> Option<Arc<[f32]>> {
@@ -1152,7 +1418,73 @@ fn build_text_boundaries_from_clusters(text: &str, layout: &gpui::LineLayout, ch
 #[cfg(test)]
 mod boundary_tests {
     use super::*;
-    use gpui::{FontId, LineLayout, ShapedGlyph, ShapedRun, point};
+    use gpui::{FontId, LineLayout, ShapedCluster, ShapedGlyph, ShapedRun, point};
+
+    #[test]
+    fn native_rtl_clusters_preserve_widths_and_the_left_terminal_caret() {
+        let text = "אבג.";
+        let mut native = layout(text, &[], 32.0);
+        native.clusters = vec![
+            ShapedCluster { bytes: 0..2, x: px(22.0), advance: px(10.0), is_rtl: true },
+            ShapedCluster { bytes: 2..4, x: px(13.0), advance: px(9.0), is_rtl: true },
+            ShapedCluster { bytes: 4..6, x: px(5.0), advance: px(8.0), is_rtl: true },
+            ShapedCluster { bytes: 6..7, x: px(0.0), advance: px(5.0), is_rtl: true },
+        ];
+        let geometry = native_cluster_geometry(text, &native, &[0, 2, 4, 6, 7], 0).unwrap();
+        assert_eq!(&*geometry.carets, &[32.0, 22.0, 13.0, 5.0, 0.0]);
+        assert_eq!(&*geometry.advances, &[10.0, 9.0, 8.0, 5.0]);
+        assert_eq!(geometry.advances.iter().sum::<f32>(), f32::from(native.width));
+    }
+
+    #[test]
+    fn native_clusters_do_not_turn_bidi_jumps_into_character_advances() {
+        let text = "aאב";
+        let mut native = layout(text, &[], 30.0);
+        native.clusters = vec![
+            ShapedCluster { bytes: 0..1, x: px(0.0), advance: px(10.0), is_rtl: false },
+            ShapedCluster { bytes: 1..3, x: px(20.0), advance: px(10.0), is_rtl: true },
+            ShapedCluster { bytes: 3..5, x: px(10.0), advance: px(10.0), is_rtl: true },
+        ];
+        let geometry = native_cluster_geometry(text, &native, &[4, 5, 7, 9], 4).unwrap();
+        assert_eq!(&*geometry.advances, &[10.0; 3]);
+        assert_eq!(&*geometry.boundaries, &[true; 4]);
+        // A bidi boundary has two caret positions. Its visual jump must not
+        // be counted as extra width in the preceding character.
+        assert_ne!(&*advances_from_carets(&geometry.carets, &geometry.boundaries), &*geometry.advances);
+        let shaped = ShapedLine { line_index: 0, text_range: 0..3, run: 0, ascent: 12.0, caret_stops: geometry.carets, cluster_boundaries: geometry.boundaries };
+        let converted = shaped_text_run_from_line(&shaped, geometry.advances).unwrap();
+        assert_eq!(converted.advances(), &[10.0; 3]);
+    }
+
+    #[test]
+    fn native_ligature_clusters_interpolate_carets_and_keep_trailing_spaces() {
+        let text = "لا ";
+        let mut native = layout(text, &[], 25.0);
+        native.clusters = vec![ShapedCluster { bytes: 0..4, x: px(5.0), advance: px(20.0), is_rtl: true }, ShapedCluster { bytes: 4..5, x: px(0.0), advance: px(5.0), is_rtl: true }];
+        let geometry = native_cluster_geometry(text, &native, &[0, 2, 4, 5], 0).unwrap();
+        assert_eq!(&*geometry.carets, &[25.0, 15.0, 5.0, 0.0]);
+        assert_eq!(&*geometry.advances, &[10.0, 10.0, 5.0]);
+        assert_eq!(&*geometry.boundaries, &[true, false, true, true]);
+    }
+
+    #[test]
+    fn native_cluster_metadata_is_rebased_or_dropped_when_splitting() {
+        let mut native = layout("fia", &[&[(0, 0.0), (2, 20.0)]], 30.0);
+        native.clusters = vec![ShapedCluster { bytes: 0..2, x: px(0.0), advance: px(20.0), is_rtl: false }, ShapedCluster { bytes: 2..3, x: px(20.0), advance: px(10.0), is_rtl: false }];
+        let (prefix, suffix) = native.split_at(2);
+        assert_eq!(prefix.clusters.len(), 1);
+        assert_eq!(prefix.clusters[0].bytes, 0..2);
+        assert_eq!(suffix.clusters[0].bytes, 0..1);
+        assert_eq!(suffix.clusters[0].x, px(0.0));
+        let (prefix, suffix) = native.split_at(1);
+        assert!(prefix.clusters.is_empty());
+        assert!(suffix.clusters.is_empty());
+    }
+
+    #[test]
+    fn font_family_names_decode_css_hex_escapes_and_preserve_quoted_spaces() {
+        assert_eq!(font_family_names(r#"\31 Reader, " A\20 B ", serif"#).collect::<Vec<_>>(), vec![("1Reader".into(), false), (" A B ".into(), true), ("serif".into(), false)]);
+    }
 
     #[test]
     fn installed_font_names_preserve_commas_quotes_and_backslashes() {
@@ -1249,11 +1581,121 @@ mod ownership_tests {
     use gpui::{EmptyView, TestAppContext};
     use html::render::{FragmentRenderOptions, FragmentRenderer};
 
-    fn register_run(shaper: &mut GpuiTextCache, text: &str) -> Vec<GlyphId> {
+    #[test]
+    fn mixed_fonts_keep_cjk_graphemes_and_latin_runs_separate() {
+        let text = "office 漢\u{fe00}か\u{3099}カー 한국 한。 café";
+        let mut runs = Vec::new();
+        append_font_runs(&mut runs, text, font("Latin"), Some(font("CJK")), rgba(0x000000ff).into());
+        let mut byte = 0;
+        let parts = runs
+            .iter()
+            .map(|run| {
+                let part = (&text[byte..byte + run.len], run.font.family.as_ref());
+                byte += run.len;
+                part
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(parts, [("office ", "Latin"), ("漢\u{fe00}か\u{3099}カー", "CJK"), (" ", "Latin"), ("한국", "CJK"), (" ", "Latin"), ("한。", "CJK"), (" café", "Latin")]);
+        for latin in ["Latin ASCII", "Svenska åäö — café"] {
+            let mut runs = Vec::new();
+            append_font_runs(&mut runs, latin, font("Latin"), Some(font("CJK")), rgba(0x000000ff).into());
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].font.family.as_ref(), "Latin");
+            assert_eq!(runs[0].len, latin.len());
+        }
+        let original = TextStyleSpan::new(0..text.len(), 18.0, 400, FontSlant::Normal, 0, Some("Latin")).unwrap();
+        let changed = original.clone().with_cjk_font_family(Some("CJK"));
+        assert_ne!(GpuiTextCache::line_shape_fingerprint(text, &[original]), GpuiTextCache::line_shape_fingerprint(text, &[changed]));
+    }
+
+    #[gpui::test]
+    fn book_cjk_fonts_survive_latin_overrides_and_custom_cjk_bypasses_publisher_aliases(cx: &mut TestAppContext) {
+        use html::style::{FontFace, FontFaceStyle};
+        use html_fonts::LoadedFontFace;
+        let window = cx.add_window(|_, _| EmptyView);
+        window
+            .update(cx, |_, window, _| {
+                let fonts = Rc::new(RefCell::new(PublicationFonts::default()));
+                let overrides = html::pipeline::ReaderStyleOverrides { font_family: Some("Latin".into()), cjk_font_fallback: Some("Embedded".into()), ..Default::default() };
+                fonts.borrow_mut().set_reader_overrides(&overrides);
+                let declaration = FontFace { family: "Publisher".into(), sources: vec![], weight: 400.0..=400.0, style: FontFaceStyle::Normal, stretch: 100.0..=100.0, unicode_ranges: vec![0..=0x10ffff], additional_descriptors: vec![] };
+                fonts.borrow_mut().set_active(&[declaration.clone()]);
+                fonts.borrow_mut().register(LoadedFontFace { declaration, family: "Private Book CJK".into(), bytes: None, weight: 400, slant: FontSlant::Normal, variable: false }, window.text_system()).unwrap();
+                let mut shaper = GpuiTextCache::new(window.text_system().clone()).with_publication_fonts(fonts.clone());
+                for (key, family) in [("latin", "Latin"), ("embedded", "Embedded"), ("publisher", "Installed Publisher")] {
+                    shaper.font_families.insert(key.into(), family.into());
+                }
+                let style = TextStyleSpan::new(0..4, 18.0, 400, FontSlant::Normal, 0, Some("Latin")).unwrap().with_cjk_font_family(Some("Publisher, Embedded"));
+                let selected = shaper.prepared_font(&style);
+                assert_eq!(selected.font.family.as_ref(), "Latin");
+                assert_eq!(selected.cjk_font.unwrap().family.as_ref(), "Private Book CJK");
+                fonts.borrow_mut().set_reader_overrides(&html::pipeline::ReaderStyleOverrides { cjk_font_family: Some("Publisher".into()), ..overrides });
+                shaper.refresh_publication_fonts();
+                let selected = shaper.prepared_font(&style);
+                assert_eq!(selected.font.family.as_ref(), "Latin");
+                assert_eq!(selected.cjk_font.unwrap().family.as_ref(), "Installed Publisher");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn custom_fonts_keep_explicit_cjk_fallbacks_and_cache_identity(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        window
+            .update(cx, |_, window, _| {
+                let mut shaper = GpuiTextCache::new(window.text_system().clone());
+                shaper.font_families.insert("latin".into(), "Latin".into());
+                shaper.font_families.insert("droid sans fallback".into(), "Droid Sans Fallback".into());
+                let font = shaper.resolve_font(Some("Missing, Latin, 'Droid Sans Fallback', Latin"), 400, FontSlant::Normal);
+                assert_eq!(font.family.as_ref(), "Latin");
+                assert_eq!(font.fallbacks.as_ref().unwrap().fallback_list(), &["Droid Sans Fallback"]);
+                let without_fallback = shaper.resolve_font(Some("Latin"), 400, FontSlant::Normal);
+                assert!(without_fallback.fallbacks.is_none());
+                let key = |font: Font| GlyphKey { ch: '漢', font_size: 19.0_f32.to_bits(), font_weight: 400, font_style: 0, color: 0, family: font.family.to_string(), fallbacks: font.fallbacks };
+                assert_ne!(key(font), key(without_fallback), "glyph caches must distinguish fallback chains");
+                assert_eq!(shaper.resolve_font(Some("Missing, 'Droid Sans Fallback'"), 400, FontSlant::Normal).family.as_ref(), "Droid Sans Fallback");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn publication_fonts_invalidate_cached_fallback_selection(cx: &mut TestAppContext) {
+        use html::style::{FontFace, FontFaceStyle};
+        use html_fonts::LoadedFontFace;
+        let window = cx.add_window(|_, _| EmptyView);
+        window
+            .update(cx, |_, window, _| {
+                let fonts = Rc::new(RefCell::new(PublicationFonts::default()));
+                let mut shaper = GpuiTextCache::new(window.text_system().clone()).with_publication_fonts(fonts.clone());
+                let style = TextStyleSpan::new(0..5, 19.0, 400, FontSlant::Normal, 0x000000ff, Some("Publisher")).unwrap();
+                assert_eq!(shaper.prepared_font(&style).font.family.as_ref(), ".SystemUIFont");
+                shaper.shape_line_geometry("Hello", &[style.clone()], None).unwrap();
+                assert!(!shaper.line_shapes.is_empty());
+                let declaration = FontFace { family: "Publisher".into(), sources: vec![], weight: 400.0..=400.0, style: FontFaceStyle::Normal, stretch: 100.0..=100.0, unicode_ranges: vec![0..=0x10ffff], additional_descriptors: vec![] };
+                fonts.borrow_mut().set_active(&[declaration.clone()]);
+                fonts.borrow_mut().register(LoadedFontFace { declaration, family: "LoadedFace".into(), bytes: None, weight: 400, slant: FontSlant::Normal, variable: true }, window.text_system()).unwrap();
+                shaper.begin_document_shaping();
+                assert!(shaper.line_shapes.is_empty());
+                assert_eq!(shaper.prepared_font(&style).font.family.as_ref(), "LoadedFace");
+                shaper.commit_document_shaping();
+                let overrides = html::pipeline::ReaderStyleOverrides { serif_font_family: Some("Publisher".into()), ..Default::default() };
+                fonts.borrow_mut().set_reader_overrides(&overrides);
+                shaper.begin_document_shaping();
+                assert_eq!(shaper.prepared_font(&style).font.family.as_ref(), ".SystemUIFont", "reader font choices must bypass a colliding publication alias");
+                shaper.commit_document_shaping();
+                fonts.borrow_mut().set_reader_overrides(&Default::default());
+                shaper.begin_document_shaping();
+                assert_eq!(shaper.prepared_font(&style).font.family.as_ref(), "LoadedFace");
+                shaper.commit_document_shaping();
+            })
+            .unwrap();
+    }
+
+    fn register_run(shaper: &mut GpuiTextCache, text: &str, resources: &mut GlyphResourceStore) -> Vec<GlyphId> {
         let style = TextStyleSpan::new(0..text.len(), 19.0, 400, FontSlant::Normal, 0x000000ff, None).unwrap();
         let request = TextRunShapeRequest::new(text, style).unwrap();
         let mut glyphs = vec![GlyphId::MAX; text.chars().count()];
-        assert!(shaper.shape_glyph_run(request, &mut glyphs).unwrap().is_some());
+        assert!(shaper.shape_glyph_run(request, &mut glyphs, resources).unwrap().is_some());
         glyphs
     }
 
@@ -1263,9 +1705,10 @@ mod ownership_tests {
         window
             .update(cx, |_, window, _| {
                 let mut shaper = GpuiTextCache::new(window.text_system().clone());
-                assert_eq!(register_run(&mut shaper, "office"), [0, 1, 2, 3, 4, 5]);
-                assert_eq!(shaper.shape_glyph('☃', 0.0, 400, FontSlant::Normal, 0x000000ff, None).unwrap(), 6);
-                assert_eq!(register_run(&mut shaper, "abc"), [7, 8, 9]);
+                let mut resources = GlyphResourceStore::new(shaper.resource_generation());
+                assert_eq!(register_run(&mut shaper, "office", &mut resources), [0, 1, 2, 3, 4, 5]);
+                assert_eq!(shaper.shape_glyph('☃', 0.0, 400, FontSlant::Normal, 0x000000ff, None, &mut resources).unwrap(), 6);
+                assert_eq!(register_run(&mut shaper, "abc", &mut resources), [7, 8, 9]);
                 let retained = shaper.store();
                 assert_eq!(retained.len(), 10);
                 assert_eq!(retained.records.len(), 3, "native runs must not allocate a backend record per character");
@@ -1277,14 +1720,16 @@ mod ownership_tests {
                 assert!(retained.get(10).is_none());
                 assert!(retained.get(usize::MAX).is_none());
 
+                let checkpoint = resources.checkpoint();
                 shaper.begin_append_shaping().unwrap();
-                assert_eq!(register_run(&mut shaper, "append"), [10, 11, 12, 13, 14, 15]);
+                assert_eq!(register_run(&mut shaper, "append", &mut resources), [10, 11, 12, 13, 14, 15]);
                 assert_eq!(shaper.store().records.len(), 4);
                 assert_eq!(retained.records.len(), 3);
                 assert!(retained.get(10).is_none());
                 shaper.rollback_append_shaping();
+                assert!(resources.rollback_to(checkpoint));
                 assert!(Rc::ptr_eq(&retained, &shaper.store()));
-                assert_eq!(shaper.resources.len(), retained.len());
+                assert_eq!(resources.len(), retained.len());
                 shaper.reset();
                 assert!(shaper.store().is_empty());
                 assert!(matches!(retained.get(9), Some(GpuiGlyph::RunFragment { .. })));
@@ -1300,6 +1745,8 @@ mod ownership_tests {
                 let mut shaper = GpuiTextCache::new(window.text_system().clone());
                 let mut renderer = FragmentRenderer::new();
                 let rendered = renderer.render("<p style='color:red'>Retained text</p>", &FragmentRenderOptions::new(300.0, None).unwrap(), &mut shaper).unwrap();
+                let scene = rendered.into_scene();
+                let resources = renderer.glyph_resources_mut();
                 let glyphs = shaper.store();
                 let runs = shaper.run_store();
                 assert!(!glyphs.is_empty());
@@ -1307,31 +1754,42 @@ mod ownership_tests {
                 let retained_color = runs[0].color_at(0);
                 let retained_glyph_count = glyphs.len();
                 let retained_run_count = runs.len();
+                let retained_table_count = shaper.table.len();
 
+                let checkpoint = resources.checkpoint();
                 shaper.begin_append_shaping().unwrap();
                 shaper.set_text_run_colors(0, &[0x0000ffff; 13]);
                 assert_eq!(runs[0].color_at(0), retained_color);
                 assert_ne!(shaper.run_store()[0].color_at(0), retained_color);
                 // Zero-ink glyphs allocate resources with deterministic metrics.
-                shaper.shape_glyph('☃', 0.0, 400, FontSlant::Normal, 0x000000ff, None).unwrap();
+                shaper.shape_glyph('☃', 0.0, 400, FontSlant::Normal, 0x000000ff, None, resources).unwrap();
                 let appended = shaper.store();
                 assert!(appended.len() > retained_glyph_count);
                 assert_eq!(glyphs.len(), retained_glyph_count);
                 shaper.rollback_append_shaping();
+                assert!(resources.rollback_to(checkpoint));
                 assert!(Rc::ptr_eq(&shaper.store(), &glyphs));
                 assert!(Rc::ptr_eq(&shaper.run_store(), &runs));
                 assert!(appended.len() > shaper.store().len());
+                assert_eq!(shaper.table.len(), retained_table_count);
 
                 shaper.begin_append_shaping().unwrap();
-                shaper.shape_glyph('☃', 0.0, 400, FontSlant::Normal, 0x000000ff, None).unwrap();
+                let umbrella = shaper.shape_glyph('☂', 0.0, 400, FontSlant::Normal, 0x000000ff, None, resources).unwrap();
+                let snowman = shaper.shape_glyph('☃', 0.0, 400, FontSlant::Normal, 0x000000ff, None, resources).unwrap();
+                assert_ne!(umbrella, snowman, "a rolled-back lookup must not resolve a reused dense ID");
+                assert_eq!(resources.get(umbrella).unwrap().ch(), '☂');
+                assert_eq!(resources.get(snowman).unwrap().ch(), '☃');
                 shaper.commit_append_shaping();
                 assert!(shaper.store().len() > glyphs.len());
                 shaper.begin_document_shaping();
-                shaper.shape_glyph('x', 0.0, 400, FontSlant::Normal, 0x000000ff, None).unwrap();
+                let previous_resources = std::mem::replace(resources, GlyphResourceStore::new(shaper.resource_generation()));
+                shaper.shape_glyph('x', 0.0, 400, FontSlant::Normal, 0x000000ff, None, resources).unwrap();
                 shaper.rollback_document_shaping();
+                *resources = previous_resources;
                 assert!(shaper.store().len() > glyphs.len());
                 shaper.begin_document_shaping();
-                shaper.shape_glyph('y', 0.0, 400, FontSlant::Normal, 0x000000ff, None).unwrap();
+                *resources = GlyphResourceStore::new(shaper.resource_generation());
+                shaper.shape_glyph('y', 0.0, 400, FontSlant::Normal, 0x000000ff, None, resources).unwrap();
                 shaper.commit_document_shaping();
                 assert_eq!(shaper.store().len(), 1);
                 assert_eq!(glyphs.len(), retained_glyph_count);
@@ -1339,7 +1797,7 @@ mod ownership_tests {
                 assert_eq!(runs[0].color_at(0), retained_color);
                 // The retained scene still resolves every command using its own resources.
                 let mut painter = crate::paint::GpuiCommandPainter::commands_only(glyphs, runs, Vec::new());
-                rendered.scene().paint(&mut painter);
+                scene.paint(&mut painter);
                 assert!(!painter.into_commands().is_empty());
             })
             .unwrap();
@@ -1363,7 +1821,7 @@ mod natural_run_tests {
                     let mut general = GpuiTextCache::new(window.text_system().clone());
                     let count = text.chars().count();
                     let colors = (0..count).map(|index| if index % 2 == 0 { 0xff0000ff } else { 0x0000ffff }).collect::<Vec<_>>();
-                    let style = TextStyleSpan::new(0..text.len(), size, 700, slant, 0xff0000ff, Some("serif")).unwrap().with_font_features(features.to_vec());
+                    let style = TextStyleSpan::new(0..text.len(), size, 700, slant, 0xff0000ff, Some("serif")).unwrap().with_font_features(&features);
                     let request = TextRunShapeRequest::new(text, style.clone()).unwrap().with_paint_colors(&colors).unwrap();
                     let natural = direct.shape_text_run(request).unwrap().unwrap();
                     let styles = [style];
@@ -1372,7 +1830,7 @@ mod natural_run_tests {
                     let line = general.shape_line(request).unwrap().unwrap();
                     assert_eq!(line.line_index, 7);
                     assert_eq!(line.text_range, 10..10 + count as u32);
-                    let expected = shaped_text_run_from_line(&line).unwrap();
+                    let expected = shaped_text_run_from_line(&line, general.runs[line.run as usize].advances.clone()).unwrap();
                     assert_eq!(natural.advances(), expected.advances(), "{text}");
                     assert_eq!(natural.cluster_boundaries(), expected.cluster_boundaries());
                     assert_eq!(natural.caret_stops(), expected.caret_stops());
@@ -1411,11 +1869,11 @@ mod natural_run_tests {
                     assert!(!Arc::ptr_eq(&first.identity, &distinct.identity));
                 }
                 let features = [OpenTypeFeature::new(*b"liga", 0)];
-                let disabled = shaper.prepared_font(&style.clone().with_font_features(features.to_vec()));
+                let disabled = shaper.prepared_font(&style.clone().with_font_features(&features));
                 assert!(!Arc::ptr_eq(&first.identity, &disabled.identity));
                 assert_eq!(disabled.font.features.0.iter().find(|(tag, _)| tag == "liga").unwrap().1, 0);
                 let overrides = [OpenTypeFeature::new(*b"liga", 0), OpenTypeFeature::new(*b"liga", 1)];
-                let enabled = shaper.prepared_font(&style.with_font_features(overrides.to_vec()));
+                let enabled = shaper.prepared_font(&style.with_font_features(&overrides));
                 assert_eq!(enabled.font.features.0.iter().find(|(tag, _)| tag == "liga").unwrap().1, 1);
                 for weight in 100..100 + FONT_SETUP_CACHE_CAPACITY as u16 * 10 {
                     shaper.prepared_font(&TextStyleSpan::new(0..1, 19.0, weight, FontSlant::Normal, 0xff0000ff, Some("serif")).unwrap());

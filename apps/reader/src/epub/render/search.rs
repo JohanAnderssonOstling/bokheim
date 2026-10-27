@@ -67,7 +67,7 @@ impl ReaderView {
                                 return;
                             }
                             reader.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::NavigateSearchTo(index), cx));
-                            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
                             reader.tts_navigation_changed(cx);
                             if components::uses_mobile_reader_controls(window) {
                                 reader.sidebar.close(cx);

@@ -6,8 +6,8 @@
 
 use ui_components::user_facing_error;
 
-use crate::NavigationSession;
 use crate::services::notify_error;
+use crate::{NavigationSession, PaneRequest};
 use gpui::prelude::*;
 use gpui::{App, AppContext, Context, Entity, EntityId, IntoElement, Render, Subscription, Window};
 use sync_common::LibraryId;
@@ -15,7 +15,7 @@ use sync_common::LibraryId;
 use sync_common::ROOT_DIR_ID;
 use ui_components as components;
 
-use super::sidebar::Sidebar;
+use super::sidebar::{Sidebar, SplitPane};
 use super::{GlobalRoute, Libraries, LibrarySummary, Navigate, Route};
 use crate::library::OpenBook;
 use crate::services::AppServices;
@@ -31,6 +31,9 @@ pub struct BrowserShell {
     /// The browse view the phone's Library tab returns to: the last one shown.
     library_view: super::LibraryRoute,
     content_footer: Option<gpui::AnyView>,
+    reader_surface: Option<gpui::AnyView>,
+    split_close_enabled: bool,
+    pending_navigation: Option<NavigationSession>,
     pending_folder: Option<(LibraryId, sync_common::DirId, String)>,
     pending_subject: Option<(LibraryId, library_model::BrowseLocation, String)>,
     libraries: Entity<Libraries>,
@@ -39,11 +42,39 @@ pub struct BrowserShell {
     navigation: Entity<Sidebar>,
     observed_session: Option<EntityId>,
     _session_subscription: Option<Subscription>,
+    _pane_subscription: Option<Subscription>,
     _library_subscription: Subscription,
     _navigation_subscription: Subscription,
 }
 
+impl gpui::EventEmitter<PaneRequest> for BrowserShell {}
+
 impl BrowserShell {
+    pub(crate) fn set_now_playing(&self, book: Option<crate::NowPlayingBook>, cx: &mut App) {
+        self.libraries.update(cx, |libraries, cx| libraries.set_now_playing(book, cx));
+    }
+
+    pub(crate) fn set_reader_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        if self.reader_surface.as_ref().map(|view| view.entity_id()) != surface.as_ref().map(|view| view.entity_id()) {
+            self.reader_surface = surface;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_split_close_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.split_close_enabled != enabled {
+            self.split_close_enabled = enabled;
+            cx.notify();
+        }
+    }
+
+    fn close_reader_surface(&mut self, cx: &mut Context<Self>) {
+        if self.reader_surface.take().is_some() {
+            cx.emit(PaneRequest::Browse);
+            cx.notify();
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn apply_sync_event(&mut self, event: crate::SyncEvent, cx: &mut Context<Self>) {
         self.sync_page.update(cx, |page, cx| page.apply_event(event, cx));
@@ -94,6 +125,7 @@ impl BrowserShell {
             })
         });
         let observed_session = session.as_ref().map(Entity::entity_id);
+        let pane_subscription = session.as_ref().map(|session| cx.subscribe(session, |_, _, request: &PaneRequest, cx| cx.emit(request.clone())));
         let route = if matches!(saved.route, Route::Global(_)) {
             saved.route
         } else if let Some(session) = session {
@@ -106,13 +138,22 @@ impl BrowserShell {
         // Sidebar elements are rendered by this shell rather than as an entity
         // child. Forward its state changes so menus and dialogs are repainted.
         let navigation_subscription = cx.observe(&navigation, |_, _, cx| cx.notify());
+        cx.subscribe(&navigation, |_, _, request: &PaneRequest, cx| cx.emit(request.clone())).detach();
+        cx.subscribe(&navigation, |shell, _, _: &SplitPane, cx| {
+            let session = shell.navigation_session(cx);
+            cx.emit(PaneRequest::Open { session, side: components::SplitSide::Right });
+        })
+        .detach();
         let library_subscription = cx.observe_in(&libraries, window, |shell, libraries, window, cx| {
+            shell.open_pending_navigation(window, cx);
             shell.open_pending_folder(window, cx);
             shell.open_pending_subject(window, cx);
             let session = libraries.read(cx).selected_session();
             let session_id = session.as_ref().map(Entity::entity_id);
             let selection_changed = shell.observed_session != session_id;
             if selection_changed {
+                shell.close_reader_surface(cx);
+                shell._pane_subscription = session.as_ref().map(|session| cx.subscribe(session, |_, _, request: &PaneRequest, cx| cx.emit(request.clone())));
                 shell.observed_session = session_id;
                 shell._session_subscription = session.as_ref().map(|session| {
                     cx.observe(session, |shell, session, cx| {
@@ -146,6 +187,9 @@ impl BrowserShell {
             route,
             library_view: super::LibraryRoute::Books,
             content_footer: None,
+            reader_surface: None,
+            split_close_enabled: false,
+            pending_navigation: None,
             pending_folder: None,
             pending_subject: None,
             libraries,
@@ -154,6 +198,7 @@ impl BrowserShell {
             navigation,
             observed_session,
             _session_subscription: session_subscription,
+            _pane_subscription: pane_subscription,
             _library_subscription: library_subscription,
             _navigation_subscription: navigation_subscription,
         }
@@ -163,7 +208,7 @@ impl BrowserShell {
     pub(crate) fn navigation_session(&self, cx: &App) -> NavigationSession {
         let library_id = self.libraries.read(cx).selected_id();
         let pages = if matches!(self.route, Route::Library(_)) { self.libraries.read(cx).selected_session().map(|session| session.read(cx).saved_pages(cx)).unwrap_or_default() } else { Vec::new() };
-        NavigationSession { library_id, route: self.route, pages, reader: None }
+        NavigationSession { library_id, route: self.route, pages, ..Default::default() }
     }
 
     fn empty_libraries(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -173,6 +218,27 @@ impl BrowserShell {
         }
         let actions = self.navigation.read(cx).render_add_library_control(self.navigation.clone(), components::primary_action_button("add-first-library", "Add library", gpui_component::IconName::ChevronDown, false), false);
         components::library_section_content().child(components::browser_actionable_empty_without_description("No libraries yet", actions, theme).size_full()).into_any_element()
+    }
+
+    pub(crate) fn restore_navigation(&mut self, saved: NavigationSession, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_reader_surface(cx);
+        if let Some(id) = saved.library_id {
+            self.libraries.update(cx, |libraries, cx| libraries.select_library(id, cx));
+        }
+        self.pending_navigation = Some(saved);
+        self.open_pending_navigation(window, cx);
+    }
+
+    fn open_pending_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let libraries = self.libraries.read(cx);
+        if self.pending_navigation.as_ref().is_some_and(|saved| saved.library_id == libraries.selected_id()) {
+            let Some(saved) = self.pending_navigation.take() else { return };
+            self.route = saved.route;
+            if let (Some(session), Route::Library(route)) = (libraries.selected_session(), saved.route) {
+                session.update(cx, |session, cx| session.restore(route, saved.pages, window, cx));
+            }
+            cx.notify();
+        }
     }
 
     pub(crate) fn open_folder(&mut self, library_id: LibraryId, directory_id: sync_common::DirId, title: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -270,6 +336,7 @@ impl BrowserShell {
     /// Selecting the active destination returns it to its root. Switching
     /// destinations keeps the cached page, as ordinary navigation does.
     fn select_destination(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_reader_surface(cx);
         if self.route != route {
             self.navigate(route, window, cx);
             return;
@@ -288,6 +355,7 @@ impl BrowserShell {
     }
 
     pub(crate) fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_reader_surface(cx);
         if self.route == route {
             return;
         }
@@ -363,12 +431,19 @@ impl BrowserShell {
 impl Render for BrowserShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let route = self.route;
-        let content = match route {
-            Route::Library(_) => match self.libraries.read(cx).selected_session() {
-                Some(session) => session.into_any_element(),
-                None => self.empty_libraries(cx),
-            },
-            Route::Global(GlobalRoute::Settings) => components::library_section_content().child(self.settings.clone()).into_any_element(),
+        if let Some(session) = self.libraries.read(cx).selected_session() {
+            session.update(cx, |session, cx| session.set_split_close_enabled(self.split_close_enabled, cx));
+        }
+        let content = if let Some(reader) = &self.reader_surface {
+            reader.clone().into_any_element()
+        } else {
+            match route {
+                Route::Library(_) => match self.libraries.read(cx).selected_session() {
+                    Some(session) => session.into_any_element(),
+                    None => self.empty_libraries(cx),
+                },
+                Route::Global(GlobalRoute::Settings) => components::library_section_content().child(self.settings.clone()).into_any_element(),
+            }
         };
         let compact_navigation = components::uses_mobile_navigation(window);
         let mobile_heading = components::uses_mobile_navigation(window).then(|| route).and_then(|route| match route {
@@ -387,7 +462,7 @@ impl Render for BrowserShell {
             .flex()
             .flex_col()
             .children(mobile_heading)
-            .child(gpui::div().relative().flex_1().min_h_0().w_full().flex().flex_col().child(content).children(gpui_component::Root::render_notification_layer(window, cx)));
+            .child(gpui::div().relative().flex_1().min_h_0().w_full().flex().flex_col().child(content).when(!self.split_close_enabled, |content| content.children(gpui_component::Root::render_notification_layer(window, cx))));
         let safe_area = window.insets().effective();
         let sidebar = self.navigation.clone();
         // The route reaches the shell by several paths (the rail, the session's
@@ -398,7 +473,7 @@ impl Render for BrowserShell {
         {
             self.library_view = view;
         }
-        let navigation = sidebar.read(cx).render_navigation(sidebar.clone(), route, self.library_view, compact_navigation, safe_area, cx);
+        let navigation = sidebar.read(cx).render_navigation(sidebar.clone(), route, self.library_view, compact_navigation, self.split_close_enabled, safe_area, window, cx);
         // A plain flex sibling rather than an absolute overlay, so the dock
         // takes its own space instead of painting over other content. On
         // compact windows `page` is a column, so the dock goes between
@@ -413,7 +488,7 @@ impl Render for BrowserShell {
             // button bar sits beside the page or along its bottom edge. The
             // dock clears the bottom edge when there is one.
             let bottom = if self.content_footer.is_some() { gpui::px(0.0) } else { safe_area.bottom };
-            components::browser_body().pt(safe_area.top).pl(safe_area.left).pr(safe_area.right).pb(bottom).child(navigation).child(content).into_any_element()
+            components::browser_body().when(self.split_close_enabled, |body| body.gap(gpui::px(components::SPACE_SM))).pt(safe_area.top).pl(safe_area.left).pr(safe_area.right).pb(bottom).child(navigation).child(content).into_any_element()
         };
 
         // On compact windows the bottom nav bar already reserves `safe_area.bottom`

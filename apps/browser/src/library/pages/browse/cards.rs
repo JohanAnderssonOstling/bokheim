@@ -3,6 +3,7 @@
 //! a child, a menu, a drop — goes to the page through [`CardEvents`], since
 //! only the page knows what its kind does with it.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -42,6 +43,8 @@ pub(super) struct CardView {
     /// The cards of a sectioned listing, by the id of the chip each belongs to.
     /// Kept across refreshes so a card keeps its strip's position.
     section_cards: HashMap<BrowseLocation, Entity<SectionCard>>,
+    selected_section: Option<BrowseLocation>,
+    _section_subscriptions: Vec<Subscription>,
     positions: HashMap<BrowseLocation, PaginatorPosition>,
     mobile: bool,
     _subscriptions: Vec<Subscription>,
@@ -76,10 +79,21 @@ impl CardView {
                 menu_events(event, window, cx);
             })
         });
+        let previous_selection = RefCell::new(Vec::new());
         let subscriptions = vec![
             cx.subscribe(&navigator, |cards, _, loaded: &Loaded, cx| cards.install(loaded, cx)),
             // A feed lists its next page once the grid reaches its end.
-            cx.observe(&paginator, |cards, paginator, cx| {
+            cx.observe(&paginator, move |cards, paginator, cx| {
+                let flow = paginator.read(cx);
+                let selected = flow.selection().iter().copied().collect::<Vec<_>>();
+                if *previous_selection.borrow() != selected {
+                    *previous_selection.borrow_mut() = selected.clone();
+                    if !selected.is_empty() {
+                        cards.selected_section = None;
+                        cards.clear_section_selections(None, cx);
+                    }
+                    cx.notify();
+                }
                 let flow = paginator.read(cx);
                 let range = flow.visible_child_range().map(|range| range.start..flow.adjacent_child_range(true).map_or(range.end, |next| next.end.max(range.end)));
                 cards.load_visible_page(range, cx);
@@ -89,7 +103,7 @@ impl CardView {
             }),
             cx.observe_global::<crate::stores::CoverTextSetting>(|cards, cx| cards.refresh_layout(cx)),
         ];
-        Self { navigator, events, paginator, section_cards: HashMap::new(), positions: HashMap::new(), mobile: false, _subscriptions: subscriptions }
+        Self { navigator, events, paginator, section_cards: HashMap::new(), selected_section: None, _section_subscriptions: Vec::new(), positions: HashMap::new(), mobile: false, _subscriptions: subscriptions }
     }
 
     fn install(&mut self, loaded: &Loaded, cx: &mut Context<Self>) {
@@ -162,6 +176,26 @@ impl CardView {
             cards.insert(id, card);
         }
         self.section_cards = cards;
+        self._section_subscriptions = self
+            .section_cards
+            .iter()
+            .map(|(&id, card)| {
+                let previous = RefCell::new(card.read(cx).selected_ids(cx));
+                cx.observe(card, move |cards, card, cx| {
+                    let selected = card.read(cx).selected_ids(cx);
+                    if *previous.borrow() == selected {
+                        return;
+                    }
+                    *previous.borrow_mut() = selected.clone();
+                    if !selected.is_empty() {
+                        cards.selected_section = Some(id);
+                        cards.paginator.update(cx, |flow, cx| flow.clear_selection(cx));
+                        cards.clear_section_selections(Some(id), cx);
+                    }
+                    cx.notify();
+                })
+            })
+            .collect();
         let navigator = self.navigator.read(cx);
         let page = navigator.listing.page.clone();
         let book_indices = navigator.listing.book_indices.clone();
@@ -209,7 +243,30 @@ impl CardView {
     }
 
     pub(super) fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        self.paginator.update(cx, |paginator, cx| paginator.clear_selection(cx))
+        let outer = self.paginator.update(cx, |paginator, cx| paginator.clear_selection(cx));
+        let inner = self.clear_section_selections(None, cx);
+        self.selected_section = None;
+        outer || inner
+    }
+
+    fn clear_section_selections(&self, keep: Option<BrowseLocation>, cx: &mut Context<Self>) -> bool {
+        let mut cleared = false;
+        for (&id, card) in &self.section_cards {
+            if Some(id) != keep {
+                cleared |= card.update(cx, |card, cx| card.clear_selection(cx));
+            }
+        }
+        cleared
+    }
+
+    pub(super) fn selected_items(&self, cx: &App) -> (Option<DirId>, Vec<BrowseItem>) {
+        if let Some(card) = self.selected_section.and_then(|id| self.section_cards.get(&id)) {
+            return card.read(cx).selected_items(cx);
+        }
+        let flow = self.paginator.read(cx);
+        let ids = flow.selection().iter().filter_map(|&index| flow.child_id(index).cloned()).collect::<Vec<_>>();
+        let navigator = self.navigator.read(cx);
+        (navigator.destination.location.folder(), resolve_items(&ids, &navigator.listing.items))
     }
 }
 

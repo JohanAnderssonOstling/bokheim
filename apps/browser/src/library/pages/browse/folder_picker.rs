@@ -5,7 +5,6 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div, px};
-use gpui_component::button::ButtonVariants;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, IconName, Sizable};
 use library_model::LibraryFolderDestination;

@@ -1,14 +1,17 @@
 //! Native book readers, filesystem availability, and playback resources.
 
 use super::*;
-use crate::DownloadState;
 use crate::library::DocumentBook;
 use crate::library::ResolvedBook;
+use crate::DownloadState;
 use book_access::{FetchFuture, RemoteFileError};
 pub(crate) type Opened = ResolvedBook;
 
 pub(super) async fn local(library: &LibrarySession, hash: BookId, info: &BookInfo) -> Result<Option<Opened>, BackendError> {
-    if !matches!(library.persistent_download_state(hash)?, DownloadState::Downloaded) {
+    let mut profile = StartupProfile::new("book_lookup_local");
+    let state = library.persistent_download_state(hash)?;
+    profile.mark("download_state");
+    if !matches!(state, DownloadState::Downloaded) {
         return Ok(None);
     }
     (async |library: &LibrarySession, content_hash: BookId, info: &BookInfo| -> Result<Opened, BackendError> {
@@ -21,7 +24,9 @@ pub(super) async fn local(library: &LibrarySession, hash: BookId, info: &BookInf
             return Err(format!("the {} format is no longer supported", format.canonical_extension()).into());
         }
         if matches!(format, BookFormat::Epub | BookFormat::Mobi | BookFormat::Fb2 | BookFormat::Cbz) {
+            profile.mark("format_and_path");
             let mut source = library.assets.open_async_book_at_path(path.clone()).await.map_err(BackendError::operation)?;
+            profile.mark("open_async_source");
             if source.is_none() {
                 if let Some(fresh) = refresh_local_path(library, content_hash).await? {
                     path = fresh;
@@ -77,9 +82,29 @@ pub(super) async fn remote(library: &LibrarySession, hash: BookId, info: &BookIn
         return library.prepare_audiobook_track(hash, 0).await;
     }
     let path = info.path.clone().ok_or_else(|| BackendError::message("book placement not found"))?;
+    if matches!(info.format, BookFormat::Epub | BookFormat::Cbz) && library.db.storage_policy()?.external().is_none() {
+        return super::remote_archive::open(library, hash, path.to_string(), info.format).await;
+    }
     let RemoteDocument { source, prefix, pdf_metadata } = remote_document(library, hash).await?;
     let length = source.length;
     let access = library.remote_book_access(&source)?;
+    if info.format == BookFormat::Pdf && library.db.storage_policy()?.external().is_none() {
+        let fetch = book_access::remote_file::native_bundle_fetch(move |ranges| {
+            let access = access.clone();
+            Box::pin(async move { access.read_ranges(ranges).await })
+        })
+        .map_err(BackendError::operation)?;
+        let (reader, page_source) = if let Some(index) = super::remote_pdf::index(pdf_metadata.as_ref(), hash, length) {
+            let (reader, source) = book_access::pdf_bundle::open(index, prefix, fetch).map_err(BackendError::operation)?;
+            (reader, Some(source))
+        } else {
+            (book_access::pdf_bundle::open_unindexed(length, prefix, fetch).map_err(BackendError::operation)?, None)
+        };
+        let mut book = DocumentBook::new(path.to_string(), info.format, reader);
+        book.pdf_page_source = page_source;
+        book.pdf_metadata = pdf_metadata;
+        return Ok(ResolvedBook::Document(book));
+    }
     if info.format == BookFormat::M4b {
         let fetch = move |offset, length| {
             let access = access.clone();
@@ -117,6 +142,7 @@ impl LibrarySession {
         if info.format != BookFormat::Mp3Folder {
             return Err(BackendError::message("book is not an MP3 folder"));
         }
+        let provider_file = self.db.provider_file(&hash)?;
         let track = self.db.audiobook_tracks(&hash)?.into_iter().nth(index).ok_or_else(|| BackendError::message("audiobook track is unavailable"))?;
         if !track.valid() {
             return Err(BackendError::message("audiobook track index is invalid"));
@@ -141,7 +167,10 @@ impl LibrarySession {
                 }));
             }
         }
-        let (source, _) = self.describe_remote_file(hash).await.map_err(BackendError::operation)?;
+        let source = match provider_file {
+            Some(file) => crate::library::RemoteFile { hash, length: file.size_bytes, revision: Some(file.revision.as_str().to_owned()) },
+            None => self.describe_remote_file(hash).await.map_err(BackendError::operation)?.0,
+        };
         if track.archive_hash != Some(source.hash) {
             return Err(BackendError::message("audiobook track index does not match the remote archive; sync the book metadata and retry"));
         }

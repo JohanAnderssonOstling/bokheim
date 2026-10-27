@@ -373,6 +373,7 @@ fn verified_audio_download_reuses_complete_synced_metadata_without_local_inspect
                         snapshot: NativeBookSnapshot { content_hash: hash, directory: ROOT_DIR_ID, name: name.clone(), relative_path: relative_path.clone(), occupied_names: vec![], format, audiobook_track_titles: vec![] },
                         publication: PublishedStagedBook { name, relative_path: relative_path.to_string(), published: true, fingerprint: Some("42".into()) },
                         size_bytes: 100,
+                        provider_file: None,
                     },
                     true
                 )

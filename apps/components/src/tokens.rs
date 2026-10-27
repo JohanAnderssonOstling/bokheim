@@ -1,4 +1,5 @@
 use gpui::{FontWeight, Styled};
+use crate::Button;
 
 use crate::theme::BrowserTheme;
 
@@ -14,10 +15,11 @@ use crate::theme::BrowserTheme;
 ///             correct over any surface
 ///   keyboard  `accent_wash` — the keyboard cursor and the selection, which
 ///             is transient however it was made. The value chosen in a
-///             settings control keeps this wash too, with its underline.
+///             settings control is marked separately with the current tier.
 ///   current   `accent` with `accent_text` on it — state the app holds: the
 ///             place you are, a mode that is on, a filter narrowing the
-///             content, the sort and filters chosen in the sort & filter menu
+///             content. Menu and sheet choices share this solid accent and a
+///             trailing checkmark through `gpui_component::menu::choice_row`.
 ///
 /// Nothing is drawn as an outline for hover or the cursor. The pointer on a
 /// keyboard item steps it to `accent_wash_hover`; the pointer or the cursor on
@@ -29,8 +31,8 @@ use crate::theme::BrowserTheme;
 /// site's, because only it knows where the cursor is.
 ///
 /// Do not call this on an element that already sets its own `hover`: gpui
-/// asserts a hover style is only set once. A `gpui_component` `Button` is such
-/// an element — use [`selectable_button`] for those.
+/// asserts a hover style is only set once. Use [`selectable_button`] for the
+/// application's `Button`, which owns its interaction styles.
 pub trait Interactive: Styled + gpui::InteractiveElement + Sized {
     fn selectable(self, current: bool, theme: BrowserTheme) -> Self {
         // On Kobo nothing is filled: current is a black border on the page.
@@ -49,19 +51,11 @@ pub trait Interactive: Styled + gpui::InteractiveElement + Sized {
 
 impl<T: Styled + gpui::InteractiveElement + Sized> Interactive for T {}
 
-/// [`Interactive::selectable`] for a `gpui_component` `Button`.
+/// Shared current-state styling for the application's `Button`.
 ///
-/// A `Button` hands out its inner element's interactivity, so a caller's hover
-/// and the button's own hover are the same slot — and gpui allows that slot to
-/// be written exactly once. The button writes it only while it is neither
-/// selected nor disabled, which leaves the selected state free; taking only
-/// that state is what makes this safe where [`Interactive::selectable`] is not.
-///
-/// An unselected button therefore keeps its own hover treatment rather than the
-/// `accent_wash` a plain surface gets. That is the cost of the button styling
-/// itself, and it is a smaller one than a page that cannot be opened.
-pub fn selectable_button(button: gpui_component::button::Button, selected: bool, theme: BrowserTheme) -> gpui_component::button::Button {
-    use gpui::InteractiveElement;
+/// Selected buttons keep the heavy accent and contrasting text. Unselected
+/// buttons take their light accent hover from the application button component.
+pub fn selectable_button(button: Button, selected: bool, theme: BrowserTheme) -> Button {
     use gpui_component::Selectable;
     if !selected {
         return button;
@@ -376,16 +370,17 @@ pub const COMPACT_HIERARCHY_ITEM_ROW_GAP: f32 = SPACE_SM;
 pub const COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING: f32 = CONTENT_INSET;
 pub const COMPACT_HIERARCHY_ITEM_CONTENT_GAP: f32 = SPACE_SM;
 
-/// Container cards show two columns of child entries beneath the title.
-pub const SECTION_CARD_WIDTH: f32 = 384.0;
-pub const SECTION_CARD_SUBJECT_COLUMNS: usize = 2;
+/// Container cards show one column of child entries beneath the title.
+/// Match folder cards so their width follows the cover size.
+pub const SECTION_CARD_WIDTH: f32 = FOLDER_CARD_WIDTH;
+pub const SECTION_CARD_SUBJECT_COLUMNS: usize = 1;
 pub const SECTION_CARD_HEADING_HEIGHT_REM: f32 = 2.5;
 pub const SECTION_CARD_HEADING_PADDING_REM: f32 = 0.5;
 pub const SECTION_CARD_SUBJECT_ROW_HEIGHT_REM: f32 = 1.5;
 pub const SECTION_CARD_COLUMN_GAP: f32 = SPACE_MD;
 /// The cover art in a section card's strip. The cell adds the book card's
 /// padding around it.
-pub const SECTION_CARD_COVER_WIDTH: f32 = 200.0;
+pub const SECTION_CARD_COVER_WIDTH: f32 = 150.0;
 /// Two cover cells plus the enclosing section's horizontal inset.
 pub const FOLDER_CARD_WIDTH: f32 = (SECTION_CARD_COVER_WIDTH + BOOK_CARD_PADDING * 2.0) * 2.0 + (SPACE_MD - BOOK_CARD_PADDING) * 2.0;
 

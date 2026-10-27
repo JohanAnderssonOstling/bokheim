@@ -5,9 +5,9 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{Bounds, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight, MouseButton, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage, div, img, px, rems};
-use gpui_component::button::{Button, ButtonVariants};
+use crate::Button;
 use gpui_component::input::InputState;
-use gpui_component::{Icon, IconName, Selectable};
+use gpui_component::{Icon, IconName};
 
 use crate::{
     BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TAB_UNDERLINE_HEIGHT, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM, TITLE_MD,
@@ -16,20 +16,14 @@ use crate::{
 
 /// A navigation destination, in the sidebar rail and the bottom bar alike: its
 /// glyph (`NAV_RAIL_ICON_SIZE_REM` tall) over its name. The whole tile is the
-/// button, and the current one takes the solid accent. The caller sizes the
-/// tile and sets the label's text, which the label inherits.
-// Button installs its own hover style during render. Setting a Div hover
-// override here would cause GPUI to panic when these navigation controls render.
+/// button, and the current one takes the shared selection highlight. The
+/// caller sizes the tile and sets the label's text, which the label inherits.
 pub(crate) fn navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    crate::base_button(id)
+    let button = crate::base_button(id)
         .ghost()
         .min_w_0()
         .p_0()
         .rounded(px(RADIUS_MD))
-        .text_color(theme.text)
-        // On Kobo the current tile is outlined rather than filled.
-        .when(selected && cfg!(feature = "kobo"), |button| button.border_2().border_color(theme.accent))
-        .when(selected && !cfg!(feature = "kobo"), |button| button.primary().bg(theme.accent).text_color(theme.accent_text))
         .child(
             div()
                 .size_full()
@@ -41,24 +35,37 @@ pub(crate) fn navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement,
                 .gap(px(SPACE_XXS))
                 .child(div().flex_none().child(glyph))
                 .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label.into())),
-        )
+        );
+    crate::selectable_button(button, selected, theme)
 }
 
-/// A rail destination: the current tile takes a solid accent on every platform.
+/// Keep the standard rail width until its actual interface labels need more.
+pub fn navigation_rail_width<'a>(labels: impl IntoIterator<Item = &'a str>, window: &gpui::Window, cx: &gpui::App) -> Pixels {
+    let normal = window.rem_size() * crate::NAV_RAIL_SIZE_REM;
+    let required = labels.into_iter().map(|label| crate::interface_label_width(label, NAV_RAIL_LABEL_SIZE, window, cx) + px(2.0 * SPACE_XS)).max().unwrap_or(normal);
+    normal.max(required).min((window.viewport_size().width * 0.35).max(normal))
+}
+
+/// A rail destination using the shared selected-button treatment.
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, false, theme)
+    navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, selected, theme)
         .w_full()
         .h(gpui::rems(crate::NAV_RAIL_SIZE_REM))
         .flex_none()
         .px(px(SPACE_XS))
         .text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
-        .when(selected, |button| button.selected(true).bg(theme.accent).text_color(theme.accent_text).font_weight(FontWeight::SEMIBOLD).hover(move |style| style.bg(theme.accent_hover)))
 }
 
 /// A full-width bar along the bottom of the window, ruled off from the page
 /// above: the navigation bar, and the audiobook dock.
 pub fn bottom_bar(theme: BrowserTheme) -> Div {
     div().w_full().flex_none().flex().border_t_1().border_color(theme.rule).bg(theme.page_bg).text_color(theme.text)
+}
+
+/// Contextual commands stay at the bottom of their browse pane and wrap on
+/// narrow screens without displacing the selection count or clear button.
+pub fn selection_footer(theme: BrowserTheme) -> Div {
+    bottom_bar(theme).min_w_0().items_center().px(px(SPACE_SM)).py(px(SPACE_XS)).gap(px(SPACE_SM))
 }
 
 pub fn bottom_navigation(theme: BrowserTheme) -> Div {
@@ -238,7 +245,15 @@ pub fn mobile_back_button(theme: BrowserTheme) -> Button {
 /// is `None` on native mobile, where the OS back button/gesture already does
 /// the same thing — see `has_native_back_button`.
 pub fn mobile_navigation_heading(title: impl Into<SharedString>, back: Option<Button>, theme: BrowserTheme) -> Div {
-    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().truncate().font_family(theme.display_font_family()).text_size(gpui::rems(TEXT_MD)).child(title.into()))
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(SPACE_SM))
+        .pl(px(CONTENT_INSET))
+        .children(back)
+        .child(div().flex_1().min_w_0().truncate().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_MD)).child(title.into()))
 }
 
 /// A navigation heading whose title opens a menu, made by
@@ -251,13 +266,13 @@ pub fn mobile_navigation_menu_heading(title: impl IntoElement, back: Option<Butt
 /// chevron saying it can be changed. Pulled left by its own padding so the
 /// text lines up with the plain titles of other pages.
 pub fn mobile_navigation_menu_title(id: impl Into<ElementId>, title: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::base_button(id).ghost().min_w_0().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).ml(px(-SPACE_XS)).text_color(theme.text).child(
+    crate::base_button(id).ghost().min_w_0().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).ml(px(-SPACE_XS)).child(
         div()
             .min_w_0()
             .flex()
             .items_center()
             .gap(px(SPACE_XS))
-            .child(div().min_w_0().truncate().font_family(theme.display_font_family()).text_size(gpui::rems(TEXT_MD)).child(title.into()))
+            .child(div().min_w_0().truncate().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_MD)).child(title.into()))
             .child(Icon::new(IconName::ChevronDown).flex_none().text_color(theme.text_muted)),
     )
 }
@@ -313,7 +328,7 @@ fn browser_actionable_empty_parts(title: SharedString, description: Option<Share
         .justify_center()
         .gap(px(SPACE_SM))
         .text_center()
-        .child(div().font_family(theme.display_font_family()).text_size(gpui::rems(TITLE_MD)).child(title))
+        .child(div().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TITLE_MD)).child(title))
         .children(description.map(|description| div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(description)))
         .child(div().mt(px(SPACE_XS)).child(actions))
 }
@@ -402,10 +417,8 @@ pub fn library_switcher_header(title: impl Into<SharedString>, theme: BrowserThe
     div().h(gpui::rems(navigation_modal_row_height_rem())).w_full().flex().items_center().justify_between().pl(px(SPACE_SM)).pb(px(SPACE_XS)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child(title.into())
 }
 
-/// `cursor` is the keyboard's transient position — the same tier `contents_row`
-/// uses for its own cursor, `accent_wash` — not a place the app considers
-/// itself "in", which is what the solid accent is reserved for. Shared by
-/// every square icon action in the library switcher list.
+/// The keyboard cursor uses the light accent, shared by every square icon
+/// action in the library switcher list.
 fn library_switcher_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, cursor: bool, theme: BrowserTheme) -> Button {
     crate::outlined_icon_button(id, crate::shortcut_tooltip(label, "enter"), icon, theme).flex_none().when(cursor, |button| button.bg(theme.accent_wash))
 }
@@ -414,19 +427,13 @@ pub fn library_switcher_add_button(cursor: bool, theme: BrowserTheme) -> Button 
     library_switcher_action_button("library-switcher-add", "Add library", IconName::Plus, cursor, theme)
 }
 
-/// `selected` is the library actually in use, so it carries the solid accent —
-/// the same weight nav uses for "where you are now". `cursor` is only the
-/// keyboard's transient position, so it takes `accent_wash` instead, the same
-/// tier `contents_row` uses for its own cursor. On the library in use, where a
-/// wash would be invisible, the cursor steps the accent to `accent_hover`.
+/// The library in use shares the selected-button highlight. The keyboard
+/// cursor adds a light highlight and deepens it on the selected library.
 pub fn library_switcher_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, cursor: bool, theme: BrowserTheme) -> Button {
     let label = label.into();
-    crate::base_button(id)
+    let button = crate::base_button(id)
         .ghost()
         .when(cursor && !selected, |button| button.bg(theme.accent_wash))
-        // On Kobo the library in use is outlined rather than filled.
-        .when(selected && cfg!(feature = "kobo"), |button| button.border_2().border_color(theme.accent))
-        .when(selected && !cfg!(feature = "kobo"), |button| button.bg(if cursor { theme.accent_hover } else { theme.accent }).text_color(theme.accent_text))
         .flex_1()
         .min_w_0()
         .h(gpui::rems(navigation_modal_row_height_rem()))
@@ -434,7 +441,8 @@ pub fn library_switcher_item(id: impl Into<ElementId>, label: impl Into<SharedSt
         .justify_start()
         .overflow_hidden()
         .text_size(gpui::rems(TEXT_SM))
-        .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+        .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label));
+    crate::selectable_button(button, selected, theme).when(selected && cursor && !cfg!(feature = "kobo"), |button| button.bg(theme.accent_hover))
 }
 
 pub fn library_switcher_row(library: impl IntoElement, actions: impl IntoElement) -> Div {
@@ -449,7 +457,6 @@ pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedStr
     crate::outlined_button(id, theme)
         .label(label)
         .icon(icon)
-        .text_color(theme.text)
         .text_size(gpui::rems(TEXT_SM))
         .font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
         .h(gpui::rems(topbar_action_height_rem()))
@@ -572,10 +579,10 @@ fn browser_settings_header(title: impl Into<SharedString>, theme: BrowserTheme) 
 /// An action in a settings group's header.
 ///
 /// The same size as the controls in the rows below it, because it is read as
-/// one of them; `primary` fills it, for the one of a pair a returning user
+/// one of them; `primary` highlights it, for the one of a pair a returning user
 /// almost always wants.
 pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into<SharedString>, primary: bool, theme: BrowserTheme) -> Button {
-    crate::base_button(id)
+    let button = crate::base_button(id)
         .label(label)
         .ghost()
         .h(gpui::rems(settings_control_size_rem()))
@@ -583,10 +590,8 @@ pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into
         .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(if primary { theme.accent } else { theme.border })
-        // On Kobo the primary one is marked by its black border, not a fill.
-        .bg(if primary && !cfg!(feature = "kobo") { theme.accent } else { theme.page_bg })
-        .text_color(if primary && !cfg!(feature = "kobo") { theme.accent_text } else { theme.text })
-        .text_size(gpui::rems(TEXT_XS))
+        .text_size(gpui::rems(TEXT_XS));
+    crate::selectable_button(button, primary, theme).when(primary && cfg!(feature = "kobo"), |button| button.border_1())
 }
 
 /// The name a settings group is read by: a section heading in the display
@@ -594,7 +599,7 @@ pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into
 /// controls under it, so the eye reached the controls before it knew which
 /// section it was in.
 fn browser_settings_legend(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().font_family(theme.display_font_family()).text_size(gpui::rems(TEXT_LG)).text_color(theme.text).child(title.into())
+    div().w_full().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_LG)).text_color(theme.text).child(title.into())
 }
 
 /// What went wrong, said inside the group it went wrong in.
@@ -653,7 +658,7 @@ pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into
 /// that identifies it — rather than the root, which is the same for every path
 /// a user is choosing between.
 pub fn browser_settings_path_button(id: impl Into<ElementId>, path: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::outlined_text_button(id, path).h(gpui::rems(settings_control_size_rem())).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border).text_color(theme.text).text_size(gpui::rems(TEXT_XS))
+    crate::outlined_text_button(id, path).h(gpui::rems(settings_control_size_rem())).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border).text_size(gpui::rems(TEXT_XS))
 }
 
 /// Show normal Windows paths and abbreviate Unix home-directory prefixes;
