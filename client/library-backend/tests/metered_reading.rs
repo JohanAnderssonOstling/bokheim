@@ -124,7 +124,9 @@ async fn explicit_reading_and_downloads_bypass_metering_while_automatic_download
                     let lower = line.to_ascii_lowercase();
                     if let Some(value) = lower.strip_prefix("range: bytes=") {
                         let (start, end) = value.trim().split_once('-').unwrap();
-                        range = Some((start.parse::<usize>().unwrap(), end.parse::<usize>().unwrap()));
+                        let start = start.parse::<usize>().unwrap();
+                        let end = if end.is_empty() { bytes.len() - 1 } else { end.parse::<usize>().unwrap() };
+                        range = Some((start, end));
                     }
                     if lower.trim() == format!("authorization: bearer {}", "a".repeat(43)) {
                         authenticated = true;
