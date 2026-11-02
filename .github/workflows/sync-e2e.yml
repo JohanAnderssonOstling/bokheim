@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlEngine
-          ref: ead6ccf0233595b8bdd960d7b61e0f4e4625dff9
+          ref: 1eebab307be0afd126f9421f61a7f40b1a8d9557
           path: HtmlEngine
       - uses: actions/checkout@v6
         with:
