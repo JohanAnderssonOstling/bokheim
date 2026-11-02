@@ -121,13 +121,12 @@ impl LibraryImport {
         };
         // Staging is on the destination filesystem: this publishes by rename,
         // without copying again, before book inspection starts.
-        failures.extend(self.import_paths(parent, paths, true).await?);
+        failures.extend(self.place_and_import_paths(parent, paths, true, Vec::new()).await?);
         Ok(failures)
     }
 
     pub async fn import_paths(&self, parent: DirId, paths: Vec<PathBuf>, moving: bool) -> Result<Vec<ImportFailure>, BackendError> {
         let destination = self.import_destination(parent).await?;
-        let root = PathBuf::from(&self.root).canonicalize()?;
         // Loose native files use the same claimed-source move as metadata
         // adapters. Folder imports continue through the tree inventory below.
         let mut remaining = Vec::new();
@@ -146,6 +145,14 @@ impl LibraryImport {
         if paths.is_empty() {
             return Ok(move_failures);
         }
+        self.place_and_import_paths(parent, paths, moving, move_failures).await
+    }
+
+    /// Publish completed picker copies before inspection so failed books remain
+    /// available for retry, while external file moves keep their rollback path.
+    async fn place_and_import_paths(&self, parent: DirId, paths: Vec<PathBuf>, moving: bool, prior_failures: Vec<ImportFailure>) -> Result<Vec<ImportFailure>, BackendError> {
+        let destination = self.import_destination(parent).await?;
+        let root = PathBuf::from(&self.root).canonicalize()?;
         let destination_relative = destination.strip_prefix(&root).map_err(BackendError::operation)?.to_owned();
         let occupied = self.database.shared_occupied_file_names(&parent)?;
         // Place the complete selection on disk before inspecting any books.
@@ -163,7 +170,7 @@ impl LibraryImport {
         })
         .await
         .map_err(BackendError::operation)?;
-        failures.extend(move_failures);
+        failures.extend(prior_failures);
         let inventory = run_blocking({
             let root = root.clone();
             move || inventory(&root, &placed)

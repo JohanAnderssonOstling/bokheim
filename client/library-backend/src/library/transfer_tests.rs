@@ -60,13 +60,15 @@ async fn cross_library_copy_preserves_nested_empty_folders_bytes_and_reader_stat
         let folders = dst.db.folder_destinations().unwrap();
         assert_eq!(folders.len(), 4);
         assert!(folders.iter().any(|folder| folder.label == "Empty"));
-        let transferred = dst.db.book_transfer_state(hash).unwrap();
-        assert_eq!(transferred.addition, original.addition);
-        assert_eq!(transferred.reading, original.reading);
-        assert_eq!(transferred.annotations, original.annotations);
+        let destination_hash = dst.db.book_for_local_content(blake3::hash(EPUB).into()).unwrap().unwrap();
+        let expected = original.retarget(destination_hash).unwrap();
+        let transferred = dst.db.book_transfer_state(destination_hash).unwrap();
+        assert_eq!(transferred.addition, expected.addition);
+        assert_eq!(transferred.reading, expected.reading);
+        assert_eq!(transferred.annotations, expected.annotations);
         let copied = dst.db.transfer_plan(selection(outcome.created_folders.clone(), vec![], None)).unwrap();
         assert_eq!(copied.books.len(), 2, "repeated placements must survive");
-        for path in dst.db.book_paths(&hash).unwrap() {
+        for path in dst.db.book_paths(&destination_hash).unwrap() {
             assert_eq!(std::fs::read(second.path().join(path.as_str().trim_start_matches('/'))).unwrap(), EPUB);
         }
         assert!(src.db.is_live_destination(&shelf).unwrap());
@@ -92,11 +94,12 @@ async fn cross_library_failed_copy_preserves_the_entire_source_selection_and_rep
     let exercise = async {
         let outcome = to.transfer_from(&from, selection(vec![], vec![good, broken], Some(ROOT_DIR_ID)), ROOT_DIR_ID, true).await;
         assert!(outcome.error.is_some());
-        assert_eq!(outcome.created_placements, vec![(good, ROOT_DIR_ID)]);
+        let destination_hash = dst.db.book_for_local_content(blake3::hash(EPUB).into()).unwrap().unwrap();
+        assert_eq!(outcome.created_placements, vec![(destination_hash, ROOT_DIR_ID)]);
         assert!(outcome.removed_placements.is_empty());
         assert!(src.db.library_trash().unwrap().books.is_empty());
         assert!(src.db.transfer_plan(selection(vec![], vec![good, broken], Some(ROOT_DIR_ID))).is_ok());
-        assert!(dst.db.book_paths(&broken).unwrap().is_empty());
+        assert_eq!(dst.db.book_count().unwrap(), 1);
         source.shutdown();
         destination.shutdown();
     };
@@ -125,19 +128,19 @@ async fn cross_library_move_to_existing_book_preserves_destination_state_and_oth
     let src = source_actor.session.clone();
     let dst = destination_actor.session.clone();
     let hash = seed(&src, ROOT_DIR_ID, "Novel.epub", EPUB).await;
-    seed(&dst, ROOT_DIR_ID, "Existing.epub", EPUB).await;
+    let destination_hash = seed(&dst, ROOT_DIR_ID, "Existing.epub", EPUB).await;
     let retained = src.placement.create_directory(&ROOT_DIR_ID, "Retained").unwrap().id;
     src.placement.copy_book_to_directory(&hash, Some(&ROOT_DIR_ID), &retained).await.unwrap();
     src.db.update_reading_position(&hash, "epubcfi(/6/2)", Some(20.0), None).unwrap();
-    dst.db.update_reading_position(&hash, "epubcfi(/6/4)", Some(60.0), None).unwrap();
-    let original = dst.db.book_transfer_state(hash).unwrap();
+    dst.db.update_reading_position(&destination_hash, "epubcfi(/6/4)", Some(60.0), None).unwrap();
+    let original = dst.db.book_transfer_state(destination_hash).unwrap();
     let (from, to) = clients(&source, &destination);
     let exercise = async {
         let outcome = to.transfer_from(&from, selection(vec![], vec![hash], None), ROOT_DIR_ID, true).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert!(outcome.created_placements.is_empty(), "existing destination placement is excluded from undo");
         assert_eq!(outcome.removed_placements, vec![(hash, ROOT_DIR_ID)]);
-        let after = dst.db.book_transfer_state(hash).unwrap();
+        let after = dst.db.book_transfer_state(destination_hash).unwrap();
         assert_eq!(after.addition, original.addition);
         assert_eq!(after.reading, original.reading);
         assert!(second.path().join("Existing.epub").is_file());

@@ -456,13 +456,13 @@ async fn browser_download_import_appears_on_home_before_enrichment() {
     let source = downloads.path().join("download.epub");
     let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
     std::fs::write(&source, bytes).unwrap();
-    let hash = BookId::from(blake3::hash(bytes));
     let (mut actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
     let updates = actor.coordination.subscribe_updates();
     let started = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
 
     let failures = actor.session.import_paths(ROOT_DIR_ID, vec![source.clone()], true).await.unwrap();
     assert!(failures.is_empty(), "{failures:?}");
+    let hash = actor.session.db.book_for_local_content(blake3::hash(bytes).into()).unwrap().unwrap();
     assert!(!source.exists());
     assert_eq!(std::fs::read(library.path().join("download.epub")).unwrap(), bytes);
     actor.coordination.drain(&actor.session.events);
@@ -492,7 +492,7 @@ async fn browser_download_import_appears_on_home_before_enrichment() {
 }
 
 #[tokio::test]
-async fn external_import_leaves_failed_imports_on_disk_for_retry() {
+async fn failed_external_imports_preserve_copies_or_restore_move_sources() {
     for moving in [false, true] {
         let library = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
@@ -502,12 +502,14 @@ async fn external_import_leaves_failed_imports_on_disk_for_retry() {
         let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
         let failures = actor.session.import_paths(shelf.id, vec![source.clone()], moving).await.unwrap();
         assert_eq!(failures.len(), 1);
-        assert_eq!(source.exists(), !moving);
+        assert!(source.exists());
         let moved = library.path().join("Shelf/broken.epub");
-        assert_eq!(std::fs::read(&moved).unwrap(), b"invalid EPUB");
-        let failures = actor.session.import_paths(shelf.id, vec![moved.clone()], true).await.unwrap();
+        assert_eq!(moved.exists(), !moving);
+        let retry = if moving { source } else { moved };
+        assert_eq!(std::fs::read(&retry).unwrap(), b"invalid EPUB");
+        let failures = actor.session.import_paths(shelf.id, vec![retry.clone()], true).await.unwrap();
         assert_eq!(failures.len(), 1);
-        assert_eq!(std::fs::read(&moved).unwrap(), b"invalid EPUB");
+        assert_eq!(std::fs::read(&retry).unwrap(), b"invalid EPUB");
         assert!(!library.path().join("Shelf/broken 2.epub").exists());
     }
 }
@@ -529,7 +531,7 @@ async fn external_import_places_nested_books_before_registration() {
         assert_eq!(source.exists(), !moving);
         assert_eq!(std::fs::read(library.path().join("Shelf/Books/Nested/book.epub")).unwrap(), bytes);
         assert_eq!(std::fs::read(library.path().join("Shelf/Books/notes.txt")).unwrap(), b"sidecar");
-        let hash = BookId::from(blake3::hash(bytes));
+        let hash = actor.session.db.book_for_local_content(blake3::hash(bytes).into()).unwrap().unwrap();
         let mut paths: Vec<_> = actor.session.db.book_paths(&hash).unwrap().iter().map(|path| path.to_string()).collect();
         paths.sort();
         paths.dedup();
@@ -585,7 +587,7 @@ async fn selected_import_copies_all_files_before_shared_inspection() {
     assert_eq!(std::fs::read(library.path().join("Shelf/broken.epub")).unwrap(), b"invalid EPUB");
     assert_eq!(std::fs::read(library.path().join("Shelf/book.epub")).unwrap(), bytes);
     assert!(!library.path().join("Shelf/interrupted.epub").exists());
-    let hash = BookId::from(blake3::hash(bytes));
+    let hash = actor.session.db.book_for_local_content(blake3::hash(bytes).into()).unwrap().unwrap();
     let paths = actor.session.db.book_paths(&hash).unwrap();
     assert!(!paths.is_empty());
     assert!(paths.iter().all(|path| path.as_str() == "/Shelf/book.epub"));
@@ -602,7 +604,7 @@ async fn selected_folder_import_survives_source_removal_and_library_reopen() {
     let source = provider.path().join("book.epub");
     let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
     fs::write(&source, bytes).unwrap();
-    let hash = BookId::from(blake3::hash(bytes));
+    let hash;
     {
         let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
         let directory = DirectoryImport {
@@ -615,6 +617,7 @@ async fn selected_folder_import_survives_source_removal_and_library_reopen() {
         };
         let failures = actor.session.import_selected_directory(sync_common::ROOT_DIR_ID, directory, false, &|| false).await.unwrap();
         assert!(failures.is_empty(), "{failures:?}");
+        hash = actor.session.db.book_for_local_content(blake3::hash(bytes).into()).unwrap().unwrap();
         assert_eq!(fs::read(provider.path().join("book.epub")).unwrap(), bytes, "importing must leave the selected source untouched");
     }
     // A completed picker import must need neither the provider nor its URI
@@ -647,7 +650,7 @@ async fn selected_folder_import_uses_shared_folder_collision_handling() {
     assert!(library.path().join("Shelf/Books 2/Empty").is_dir());
     assert_eq!(std::fs::read(library.path().join("Shelf/Books 2/Nested/book.epub")).unwrap(), bytes);
     assert_eq!(actor.session.db.child_directory(&shelf.id, "Books").unwrap(), Some(existing.id));
-    let hash = BookId::from(blake3::hash(bytes));
+    let hash = actor.session.db.book_for_local_content(blake3::hash(bytes).into()).unwrap().unwrap();
     let paths = actor.session.db.book_paths(&hash).unwrap();
     assert!(!paths.is_empty());
     assert!(paths.iter().all(|path| path.as_str() == "/Shelf/Books 2/Nested/book.epub"));

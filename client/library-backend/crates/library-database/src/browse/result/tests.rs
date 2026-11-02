@@ -348,7 +348,7 @@ fn continuation_pages_omit_unchanged_navigation_and_facets() {
 }
 
 #[test]
-fn growing_lazy_orders_are_evicted_when_the_result_budget_is_exceeded() {
+fn growing_lazy_orders_retain_the_last_result_for_continuation() {
     let db = fixture();
     let query = query(BrowseLocation::Author(None));
     let first = db.browse_page(&query, false, BrowsePageRequest { section_limit: 1, ..Default::default() }).unwrap();
@@ -356,13 +356,14 @@ fn growing_lazy_orders_are_evicted_when_the_result_budget_is_exceeded() {
     let section = first.sections[0].parent.id;
     let cache = db.browse_results.borrow();
     let result = &cache.entries.back().unwrap().result;
-    let book = result.section_orders.lock().unwrap()[&section][0].clone();
-    // Model a large lazily prepared ordering without an enormous SQL fixture.
-    result.section_orders.lock().unwrap().insert(section, Arc::new(vec![book; MAX_CACHED_BYTES / size_of::<Item>() + 1]));
+    let mut order = result.section_orders.lock().unwrap()[&section].as_ref().clone();
+    // Model retained ordering capacity without changing the selected books.
+    order.reserve(MAX_CACHED_BYTES / size_of::<Item>() + 1);
+    result.section_orders.lock().unwrap().insert(section, Arc::new(order));
     assert!(result.estimated_bytes() > MAX_CACHED_BYTES);
     drop(cache);
     db.browse_result_page(&query, false, &revision, BrowsePageRequest { section_limit: 0, book_limit: 0, ..Default::default() }).unwrap().unwrap();
-    assert!(db.browse_results.borrow().entries.is_empty());
+    assert_eq!(db.browse_results.borrow().entries.len(), 1);
     let resumed = db.browse_result_page(&query, false, &revision, BrowsePageRequest { section_limit: 1, ..Default::default() }).unwrap().unwrap();
     assert_eq!(resumed.sections, first.sections);
 }
