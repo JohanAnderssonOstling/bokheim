@@ -1,9 +1,6 @@
 //! Materialize only the PDF objects needed for bibliographic inspection. Large
 //! image and attachment streams are never copied into the metadata document.
 
-mod dependencies;
-pub use dependencies::dependency_index;
-
 pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 use lopdf::xref::{Xref, XrefEntry, XrefType};
 use lopdf::{Dictionary, Document, Object, ObjectId, ObjectStream, Reader, Stream};
@@ -18,39 +15,6 @@ const MAX_OBJECTS: usize = 100_000;
 const OFFSET_RECOVERY_RADIUS: u64 = 65536;
 const MAX_OFFSET_SEARCHES: usize = 64;
 
-pub fn load(reader: impl Read + Seek, pages: usize) -> MetadataResult<Document> {
-    load_windows(reader, pages, false)
-}
-
-pub fn load_edges(reader: impl Read + Seek, pages: usize) -> MetadataResult<Document> {
-    load_windows(reader, pages, true)
-}
-
-fn load_windows(reader: impl Read + Seek, pages: usize, both_ends: bool) -> MetadataResult<Document> {
-    let mut source = open(reader)?;
-    if let Ok(info) = source.document.trailer.get(b"Info").cloned() {
-        // Bibliographic Info is optional. A malformed producer dictionary
-        // must not prevent importing otherwise readable pages.
-        let _ = source.graph(info, 0);
-    }
-    let root = source.document.trailer.get(b"Root")?.as_reference()?;
-    let root_dict = source.object(root)?.as_dict()?.clone();
-    if let Ok(metadata) = root_dict.get(b"Metadata").cloned() {
-        source.graph(metadata, 0)?;
-    }
-    let page_root = root_dict.get(b"Pages")?.as_reference()?;
-    let mut remaining = pages;
-    let mut number = 0;
-    source.pages(page_root, &mut remaining, &mut HashSet::new(), 0, false, &mut number)?;
-    if both_ends {
-        let mut remaining = pages;
-        let count = source.object(page_root)?.as_dict()?.get(b"Count")?.as_i64()?;
-        let mut number = u32::try_from(count)?.checked_add(1).ok_or("PDF page count overflow")?;
-        source.pages(page_root, &mut remaining, &mut HashSet::new(), 0, true, &mut number)?;
-    }
-    Ok(source.document)
-}
-
 /// Materialize first-page resources for conservative embedded-cover extraction.
 /// Existing object and retained-byte limits also bound image streams.
 pub fn cover(mut reader: impl Read + Seek) -> MetadataResult<Document> {
@@ -60,7 +24,7 @@ pub fn cover(mut reader: impl Read + Seek) -> MetadataResult<Document> {
     }
 }
 
-fn cover_indexed(reader: impl Read + Seek) -> MetadataResult<Document> {
+fn cover_indexed(reader: &mut dyn ReadSeek) -> MetadataResult<Document> {
     let mut source = open(reader)?;
     source.include_images = true;
     let root = source.document.trailer.get(b"Root")?.as_reference()?;
@@ -83,22 +47,8 @@ fn cover_indexed(reader: impl Read + Seek) -> MetadataResult<Document> {
 // Linearized PDFs carry an independent first-page xref and a first-page object
 // number in their header. Use those only when all inherited page properties are
 // already present on that first page; never guess missing objects.
-fn cover_linearized(reader: impl Read + Seek) -> MetadataResult<Document> {
-    let mut source = Source {
-        reader,
-        length: 0,
-        base: 0,
-        document: Document::new(),
-        loading: HashSet::new(),
-        walked: HashSet::new(),
-        retained: 0,
-        spans: BTreeMap::new(),
-        reads: Vec::new(),
-        index_only: false,
-        include_images: true,
-        offset_hint: None,
-        offset_searches: 0,
-    };
+fn cover_linearized(reader: &mut dyn ReadSeek) -> MetadataResult<Document> {
+    let mut source = Source { reader, length: 0, base: 0, document: Document::new(), loading: HashSet::new(), walked: HashSet::new(), retained: 0, include_images: true, offset_hint: None, offset_searches: 0 };
     source.length = source.reader.seek(SeekFrom::End(0))?;
     let header = source.range(0, 65536)?;
     if !header.starts_with(b"%PDF-") {
@@ -136,29 +86,19 @@ fn xref_tables(bytes: &[u8]) -> impl Iterator<Item = usize> + '_ {
 
 /// Load only the trailer and document root. Book identity must not require
 /// decoding page content, fonts, images, or attachments.
-pub fn document_root(reader: impl Read + Seek) -> MetadataResult<Document> {
+pub fn document_root(mut reader: impl Read + Seek) -> MetadataResult<Document> {
+    document_root_from_reader(&mut reader)
+}
+
+fn document_root_from_reader(reader: &mut dyn ReadSeek) -> MetadataResult<Document> {
     let mut source = open(reader)?;
     let root = source.document.trailer.get(b"Root")?.as_reference()?;
     source.object(root)?;
     Ok(source.document)
 }
 
-fn open<R: Read + Seek>(reader: R) -> MetadataResult<Source<R>> {
-    let mut source = Source {
-        reader,
-        length: 0,
-        base: 0,
-        document: Document::new(),
-        loading: HashSet::new(),
-        walked: HashSet::new(),
-        retained: 0,
-        spans: BTreeMap::new(),
-        reads: Vec::new(),
-        index_only: false,
-        include_images: false,
-        offset_hint: None,
-        offset_searches: 0,
-    };
+fn open(reader: &mut dyn ReadSeek) -> MetadataResult<Source<'_>> {
+    let mut source = Source { reader, length: 0, base: 0, document: Document::new(), loading: HashSet::new(), walked: HashSet::new(), retained: 0, include_images: false, offset_hint: None, offset_searches: 0 };
     source.length = source.reader.seek(SeekFrom::End(0))?;
     let header = source.range(0, 1024)?;
     source.base = header.windows(5).position(|bytes| bytes == b"%PDF-").ok_or("invalid PDF header")? as u64;
@@ -202,13 +142,14 @@ fn open<R: Read + Seek>(reader: R) -> MetadataResult<Source<R>> {
     Ok(source)
 }
 
-struct Source<R> {
-    reader: R,
+// Erase the caller's reader type once so the parser and graph walkers are shared.
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
+
+struct Source<'a> {
+    reader: &'a mut dyn ReadSeek,
     offset_hint: Option<i64>,
     offset_searches: usize,
-    spans: BTreeMap<ObjectId, (u64, u64)>,
-    reads: Vec<(u64, u64)>,
-    index_only: bool,
     include_images: bool,
     length: u64,
     base: u64,
@@ -217,7 +158,7 @@ struct Source<R> {
     retained: usize,
     walked: HashSet<ObjectId>,
 }
-impl<R: Read + Seek> Source<R> {
+impl Source<'_> {
     fn cover_aux(&mut self, page: &Dictionary) -> MetadataResult<()> {
         if let Ok(group) = page.get(b"Group") {
             self.graph(group.clone(), 0)?;
@@ -230,7 +171,6 @@ impl<R: Read + Seek> Source<R> {
             return Err("PDF range exceeds inspection limit".into());
         }
         let count = (count as u64).min(self.length - offset) as usize;
-        self.reads.push((self.base + offset, count as u64));
         self.reader.seek(SeekFrom::Start(self.base + offset))?;
         let mut bytes = vec![0; count];
         self.reader.read_exact(&mut bytes)?;
@@ -351,10 +291,7 @@ impl<R: Read + Seek> Source<R> {
                             length => length.as_i64()?,
                         };
                         let length = usize::try_from(length)?;
-                        let span = (start as u64).checked_add(length as u64).and_then(|n| n.checked_add(32)).ok_or("PDF span overflow")?.min(self.length - offset);
-                        self.spans.insert(id, (self.base + offset, span));
-                        let object_stream = dictionary.get(b"Type").and_then(Object::as_name).is_ok_and(|n| n == b"ObjStm" || n == b"XRef");
-                        if (!image || self.include_images) && !attachment && (!self.index_only || object_stream) {
+                        if (!image || self.include_images) && !attachment {
                             if length > MAX_OBJECT {
                                 return Err("PDF metadata stream exceeds inspection limit".into());
                             }
@@ -373,7 +310,6 @@ impl<R: Read + Seek> Source<R> {
                         continue;
                     }
                 }
-                self.spans.insert(id, (self.base + offset, bytes.len() as u64));
                 return Ok((object, bytes.len()));
             }
             if bytes.len() < count || count >= MAX_OBJECT {
@@ -699,7 +635,11 @@ fn stream_start(bytes: &[u8]) -> Option<usize> {
 }
 
 /// Read only Info/XMP and the page-tree root, never page streams or images.
-pub fn metadata(reader: impl Read + Seek) -> MetadataResult<Document> {
+pub fn metadata(mut reader: impl Read + Seek) -> MetadataResult<Document> {
+    metadata_from_reader(&mut reader)
+}
+
+fn metadata_from_reader(reader: &mut dyn ReadSeek) -> MetadataResult<Document> {
     let mut source = open(reader)?;
     if let Ok(info) = source.document.trailer.get(b"Info").cloned() {
         let _ = source.graph(info, 0);
@@ -718,8 +658,8 @@ pub fn metadata(reader: impl Read + Seek) -> MetadataResult<Document> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
     use super::*;
+    use std::io::Cursor;
     fn fixture() -> Vec<u8> {
         let mut document = Document::with_version("1.7");
         document.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
@@ -737,7 +677,8 @@ mod tests {
         let mut bytes = fixture();
         let header_end = bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
         bytes.splice(header_end..header_end, vec![b' '; 19119]);
-        let mut source = open(Cursor::new(bytes)).unwrap();
+        let mut reader = Cursor::new(bytes);
+        let mut source = open(&mut reader).unwrap();
         let root = source.document.trailer.get(b"Root").unwrap().as_reference().unwrap();
         assert_eq!(source.object(root).unwrap().as_dict().unwrap().get(b"Type").unwrap().as_name().unwrap(), b"Catalog");
         assert_eq!(source.offset_hint, Some(19119));
@@ -748,7 +689,8 @@ mod tests {
 
     #[test]
     fn validates_generation_and_original_offset_before_recovery_hint() {
-        let mut source = open(Cursor::new(fixture())).unwrap();
+        let mut reader = Cursor::new(fixture());
+        let mut source = open(&mut reader).unwrap();
         let root = source.document.trailer.get(b"Root").unwrap().as_reference().unwrap();
         let XrefEntry::Normal { offset, .. } = source.document.reference_table.get(root.0).unwrap() else { panic!() };
         let offset = u64::from(*offset);
@@ -765,9 +707,10 @@ mod tests {
     #[test]
     fn offset_recovery_is_bounded_and_rejects_duplicate_headers() {
         let mut bytes = fixture();
-        let root = open(Cursor::new(bytes.clone())).unwrap().document.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        let root = open(&mut Cursor::new(bytes.clone())).unwrap().document.trailer.get(b"Root").unwrap().as_reference().unwrap();
         bytes.extend_from_slice(format!("\n{} {} obj << /Type /Catalog >> endobj\n", root.0, root.1).as_bytes());
-        let mut source = open(Cursor::new(bytes)).unwrap();
+        let mut reader = Cursor::new(bytes);
+        let mut source = open(&mut reader).unwrap();
         assert!(source.object_at(0, root).unwrap_err().to_string().contains("no unique matching header"));
         source.offset_searches = MAX_OFFSET_SEARCHES;
         assert!(source.object_at(0, root).unwrap_err().to_string().contains("search limit"));

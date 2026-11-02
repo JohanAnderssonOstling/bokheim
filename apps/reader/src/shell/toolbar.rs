@@ -2,9 +2,8 @@
 //!
 //! On desktop the sidebar is an icon rail beside one panel. The rail leads to
 //! the library and to each panel, starts and pauses reading aloud, and carries
-//! the book's progress ring — the one place progress is shown. Rail and panel
-//! are one sidebar: `shell::chrome::ChromeState` shows and hides them together,
-//! and the rail never stays behind on its own.
+//! the book's progress ring — the one place progress is shown. The rail stays
+//! visible when the panel closes, so its buttons can open a panel again.
 //!
 //! On a phone the panels are sheets. The bar above the page opens search and
 //! shows progress; devices without native Back also get a library button. The
@@ -15,52 +14,184 @@ use std::{cell::Cell, rc::Rc};
 use super::search::{self, SearchBarTarget};
 use super::state_panel::{SidebarTab, adjacent_available_tab, sidebar_tabs};
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, FocusHandle, Window, div, px};
-use gpui_component::IconName;
+use gpui::{AnyElement, App, Context, Entity, FocusHandle, Window, div, px};
+use gpui_component::{Disableable, IconName};
 use ui_components::{self as components, ReaderDestination, ReaderRailMark};
 
 /// Operations provided by the entity that owns a reader sidebar.
 pub(crate) trait SidebarTarget: SearchBarTarget {
+    fn history_availability(&self) -> (bool, bool) {
+        (false, false)
+    }
+    fn navigate_history(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
     fn available_tabs(&self) -> &'static [SidebarTab] {
         sidebar_tabs(self.contents_available())
     }
     #[cfg(feature = "kobo")]
-    fn brightness_controls(&self) -> Entity<super::brightness::BrightnessControls>;
+    fn device_controls(&self) -> Option<gpui::AnyView>;
     fn close_reader(&mut self, window: &mut Window, cx: &mut Context<Self>);
     fn hide_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>);
     fn sidebar_focus(&self) -> FocusHandle;
     fn rail_focus(&self) -> FocusHandle;
     fn keyboard_visibility(&self) -> Rc<Cell<bool>>;
     fn sidebar_tab(&self) -> SidebarTab;
+    fn sidebar_visible(&self, window: &Window) -> bool;
     fn contents_available(&self) -> bool;
     fn select_sidebar_tab(&mut self, tab: SidebarTab, window: &mut Window, cx: &mut Context<Self>);
-    /// Mobile navigation closes the sheet when its current tab is tapped again.
-    fn toggle_sidebar_tab(&mut self, tab: SidebarTab, window: &mut Window, cx: &mut Context<Self>);
+    /// Activating an open panel closes it; other destinations open their panel.
+    fn toggle_sidebar_tab(&mut self, tab: SidebarTab, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.available_tabs().contains(&tab) {
+            return;
+        }
+        if self.sidebar_visible(window) && self.sidebar_tab() == tab { self.hide_sidebar(window, cx) } else { self.select_sidebar_tab(tab, window, cx) }
+    }
     fn focus_sidebar_body(&mut self, window: &mut Window, cx: &mut Context<Self>);
     fn settings_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool;
     /// The TTS button's state, or `None` where the reader cannot read aloud.
     fn tts_mark(&self) -> Option<ReaderRailMark> {
         None
     }
-    /// Starts reading aloud, opening the dock, or pauses and resumes it.
+    /// Opens and starts narration, or closes the narration session and dock.
     fn press_tts(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 }
 
+/// EPUB and PDF own the same sidebar fields. Keep their shared transitions
+/// together for both document readers.
+macro_rules! document_sidebar_methods {
+    () => {
+        fn sidebar_tab(&self) -> $crate::settings::SidebarTab {
+            self.sidebar.effective_or_default(self.contents_available())
+        }
+        fn select_sidebar_tab(&mut self, tab: $crate::settings::SidebarTab, window: &mut ::gpui::Window, cx: &mut ::gpui::Context<Self>) {
+            use ::gpui::Focusable;
+            use $crate::settings::SidebarTab;
+            $crate::shell::state_panel::select_tab(&mut self.sidebar, tab, cx);
+            self.chrome.show(cx);
+            if tab == SidebarTab::Search {
+                self.open_search(cx);
+                self.search_input.read(cx).focus_handle(cx).focus(window, cx);
+            }
+            // Focus the stable container until the newly selected Notes body mounts.
+            // Its first navigation key can then focus an actual note.
+            if matches!(tab, SidebarTab::Notes | SidebarTab::Bookmarks) {
+                self.sidebar_focus.focus(window, cx)
+            } else {
+                self.focus_sidebar_body(window, cx)
+            }
+            cx.notify();
+        }
+        fn sidebar_visible(&self, window: &::gpui::Window) -> bool {
+            self.chrome.is_visible() && (!ui_components::uses_mobile_reader_controls(window) || self.sidebar.is_visible())
+        }
+        fn focus_sidebar_body(&mut self, window: &mut ::gpui::Window, cx: &mut ::gpui::Context<Self>) {
+            use ::gpui::Focusable;
+            use $crate::settings::SidebarTab;
+            if self.sidebar_tab() == SidebarTab::Contents {
+                self.toc_tree.update(cx, |tree, cx| {
+                    if tree.selected_index().is_none() {
+                        tree.set_selected_index(Some(0), cx);
+                    }
+                    tree.focus(window, cx);
+                });
+            } else if self.sidebar_tab() == SidebarTab::Search {
+                self.search_input.read(cx).focus_handle(cx).focus(window, cx);
+            } else {
+                self.sidebar_focus.focus(window, cx);
+                if matches!(self.sidebar_tab(), SidebarTab::Notes | SidebarTab::Bookmarks) {
+                    window.focus_next(cx);
+                    if !self.sidebar_focus.contains_focused(window, cx) {
+                        self.sidebar_focus.focus(window, cx);
+                    }
+                }
+            }
+        }
+    };
+}
+pub(crate) use document_sidebar_methods;
+
 /// The format-specific content placed into the common sidebar structure.
 pub(crate) struct SidebarContent {
-    /// How far through the book, for the rail's ring.
-    progress_fraction: f32,
-    progress_label: String,
-    progress_detail: String,
-    document_focus: Option<FocusHandle>,
     /// The open panel's body: a TOC tree, annotation rows, search results, or
     /// the settings — whichever `SidebarTab` is selected.
     body: AnyElement,
+    header_action: Option<AnyElement>,
 }
 
 impl SidebarContent {
-    pub(crate) fn new(progress_fraction: f32, progress_label: String, progress_detail: String, document_focus: Option<FocusHandle>, body: AnyElement) -> Self {
-        Self { progress_fraction, progress_label, progress_detail, document_focus, body }
+    pub(crate) fn new(body: AnyElement) -> Self {
+        Self { body, header_action: None }
+    }
+
+    pub(crate) fn with_header_action(mut self, action: AnyElement) -> Self {
+        self.header_action = Some(action);
+        self
+    }
+}
+
+/// Commands carry intent; only this small adapter knows the reader entity type.
+#[derive(Clone, Copy)]
+pub(super) enum ChromeCommand {
+    CloseReader,
+    HideSidebar,
+    FocusSettings,
+    ToggleTab(SidebarTab),
+    History(bool),
+    Tts,
+    Search(i8),
+}
+
+#[derive(Clone)]
+pub(super) struct ChromeTarget(Rc<dyn Fn(ChromeCommand, &mut Window, &mut App)>);
+impl ChromeTarget {
+    fn new<C: SidebarTarget>(target: &Entity<C>) -> Self {
+        let target = target.downgrade();
+        Self(Rc::new(move |command, window, cx| {
+            let _ = target.update(cx, |reader, cx| match command {
+                ChromeCommand::CloseReader => reader.close_reader(window, cx),
+                ChromeCommand::HideSidebar => reader.hide_sidebar(window, cx),
+                ChromeCommand::FocusSettings => {
+                    if reader.sidebar_tab() == SidebarTab::Settings {
+                        reader.sidebar_focus().focus(window, cx);
+                        cx.notify();
+                    }
+                }
+                ChromeCommand::ToggleTab(tab) => reader.toggle_sidebar_tab(tab, window, cx),
+                ChromeCommand::History(forward) => reader.navigate_history(forward, window, cx),
+                ChromeCommand::Tts => reader.press_tts(window, cx),
+                ChromeCommand::Search(direction) => reader.search_navigate(direction, cx),
+            });
+        }))
+    }
+    pub(super) fn execute(&self, command: ChromeCommand, window: &mut Window, cx: &mut App) {
+        (self.0)(command, window, cx);
+    }
+}
+
+/// Snapshot the leased reader before rendering; callbacks access it later.
+struct ChromePresentation {
+    sidebar_focus: FocusHandle,
+    rail_focus: FocusHandle,
+    active: SidebarTab,
+    tabs: &'static [SidebarTab],
+    history: (bool, bool),
+    tts: Option<ReaderRailMark>,
+    search_position: (usize, usize),
+    #[cfg(feature = "kobo")]
+    device_controls: Option<gpui::AnyView>,
+}
+impl ChromePresentation {
+    fn new<C: SidebarTarget>(owner: &C) -> Self {
+        Self {
+            sidebar_focus: owner.sidebar_focus(),
+            rail_focus: owner.rail_focus(),
+            active: owner.sidebar_tab(),
+            tabs: owner.available_tabs(),
+            history: owner.history_availability(),
+            tts: owner.tts_mark(),
+            search_position: owner.search_position(),
+            #[cfg(feature = "kobo")]
+            device_controls: owner.device_controls(),
+        }
     }
 }
 
@@ -68,6 +199,7 @@ fn panel_destination(tab: SidebarTab) -> ReaderDestination {
     match tab {
         SidebarTab::Contents => ReaderDestination::Contents,
         SidebarTab::Notes => ReaderDestination::Notes,
+        SidebarTab::Bookmarks => ReaderDestination::Bookmarks,
         SidebarTab::Search => ReaderDestination::Search,
         SidebarTab::Settings => ReaderDestination::Settings,
     }
@@ -76,27 +208,36 @@ fn panel_destination(tab: SidebarTab) -> ReaderDestination {
 /// `owner` is already leased by GPUI during rendering. Read state through it;
 /// the entity handle is only for callbacks that run after rendering completes.
 pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, content: SidebarContent, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>) -> AnyElement {
-    install_sidebar_keyboard(owner, target, window, cx);
+    if components::uses_mobile_reader_controls(window) {
+        install_sidebar_keyboard(owner, target, window, cx);
+    }
+    render_sidebar(&ChromePresentation::new(owner), &ChromeTarget::new(target), content, theme, window)
+}
+
+fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: SidebarContent, theme: components::BrowserTheme, window: &mut Window) -> AnyElement {
+    let mobile = components::uses_mobile_reader_controls(window);
     let close_target = target.clone();
     let focus_target = target.clone();
-    let sidebar_focus = owner.sidebar_focus();
-    let active = owner.sidebar_tab();
-    let mobile = components::uses_mobile_reader_controls(window);
-    let document_focus = content.document_focus;
+    let sidebar_focus = owner.sidebar_focus.clone();
+    let active = owner.active;
 
     let header = components::reader_panel_header(panel_destination(active).label(), theme)
-        .map(|header| {
-            #[cfg(feature = "kobo")]
-            let header = header.when(components::kobo::has_frontlight(cx), |header| header.child(super::brightness::popover(owner.brightness_controls(), document_focus.as_ref(), theme, window)));
-            #[cfg(not(feature = "kobo"))]
-            let _ = &document_focus;
-            header
-        })
-        .when(active == SidebarTab::Search, |header| header.child(search::header_controls(owner, target, theme)))
-        .child(components::outlined_icon_button("reader-sidebar-close", components::shortcut_tooltip("Close sidebar", "escape"), IconName::Close, theme).on_click(move |_, window, cx| {
+        .key_context("ReaderSidebarHeader")
+        .when(active == SidebarTab::Search, |header| header.child(search::header_controls(owner.search_position, target, theme)))
+        .children(content.header_action)
+        .child(components::outlined_icon_button("reader-sidebar-close", components::shortcut_tooltip("Close sidebar", "escape"), IconName::Close).debug_selector(|| "reader-sidebar-close".into()).on_click(move |_, window, cx| {
             cx.stop_propagation();
-            close_target.update(cx, |this, cx| this.hide_sidebar(window, cx));
+            close_target.execute(ChromeCommand::HideSidebar, window, cx);
         }));
+
+    #[cfg(feature = "kobo")]
+    let header = div()
+        .flex_none()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(header)
+        .when(active == SidebarTab::Settings, |header| header.when_some(owner.device_controls.clone(), |header, controls| header.child(div().key_context("ReaderDeviceControls").border_b_1().border_color(theme.rule).child(controls))));
 
     let panel = div().flex_1().min_w_0().h_full().min_h_0().flex().flex_col().when(mobile, |panel| panel.child(components::reader_sheet_grab(theme))).child(header).child(
         div()
@@ -106,29 +247,25 @@ pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, co
             .min_h_0()
             .min_w_0()
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                focus_target.update(cx, |this, cx| {
-                    if this.sidebar_tab() == SidebarTab::Settings {
-                        this.sidebar_focus().focus(window, cx);
-                        cx.notify();
-                    }
-                });
+                focus_target.execute(ChromeCommand::FocusSettings, window, cx);
             })
             .child(content.body),
     );
 
     div()
         .key_context("ReaderSidebar")
+        .occlude()
         // Keep wheel events inside the sidebar, including at list boundaries.
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-        .on_action(window.listener_for(target, |this, _: &crate::CloseSearch, window, cx| {
-            this.hide_sidebar(window, cx);
-        }))
+        .on_action({
+            let target = target.clone();
+            move |_: &crate::CloseSearch, window, cx| target.execute(ChromeCommand::HideSidebar, window, cx)
+        })
         .size_full()
         .min_h_0()
         .min_w_0()
         .flex()
         .bg(theme.page_bg)
-        .when(!mobile, |sidebar| sidebar.child(reader_rail(owner, target, active, content.progress_fraction, content.progress_label, content.progress_detail, theme, cx)))
         .child(panel)
         .into_any_element()
 }
@@ -143,14 +280,14 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
         cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle() != window_handle
                 || !event.context_stack.iter().any(|context| context.contains("ReaderSidebar"))
-                || event.context_stack.iter().any(|context| context.contains("ShortcutSettings") || context.contains("ReaderFontPicker"))
+                || event.context_stack.iter().any(|context| context.contains("ShortcutSettings") || context.contains("ReaderFontPicker") || context.contains("ReaderDeviceControls"))
             {
                 return;
             }
             let Some(target) = target.upgrade() else { return };
             let key = &event.keystroke;
             // Reader panel shortcuts work from every tab, including inputs.
-            if components::matches_shortcut("reader.search", key, cx) || components::matches_shortcut("reader.contents", key, cx) {
+            if ["reader.back", "reader.forward", "reader.search", "reader.contents", "reader.settings", "reader.notes", "reader.tts"].iter().any(|id| components::matches_shortcut(id, key, cx)) {
                 return;
             }
             if components::matches_shortcut("reader.next_tab", key, cx) || components::matches_shortcut("reader.previous_tab", key, cx) {
@@ -174,6 +311,12 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
                 let first = !mobile && !visible.replace(true);
                 if first {
                     cx.notify();
+                }
+                // Header controls own Tab and activation keys, including the
+                // first key that reveals keyboard focus. Panel shortcuts and
+                // Escape have already been handled above.
+                if event.context_stack.iter().any(|context| context.contains("ReaderSidebarHeader")) {
+                    return;
                 }
                 let focus = this.sidebar_focus();
                 if first && navigation {
@@ -201,7 +344,7 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
                         window.defer_keystroke(key.clone(), cx);
                     }
                     cx.stop_propagation();
-                } else if navigation && this.sidebar_tab() == SidebarTab::Notes && matches!(key.key.as_str(), "up" | "down") {
+                } else if navigation && matches!(this.sidebar_tab(), SidebarTab::Notes | SidebarTab::Bookmarks) && matches!(key.key.as_str(), "up" | "down") {
                     let previous = window.focused(cx);
                     if key.key == "up" {
                         window.focus_prev(cx);
@@ -220,77 +363,112 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
     });
 }
 
-/// The desktop rail: back to the library, the panels, then settings, reading
-/// aloud and the progress ring at the foot.
-fn reader_rail<C: SidebarTarget>(owner: &C, target: &Entity<C>, active: SidebarTab, progress_fraction: f32, progress_label: String, progress_detail: String, theme: components::BrowserTheme, cx: &gpui::App) -> gpui::Div {
+fn history_button(owner: &ChromePresentation, target: &ChromeTarget, forward: bool, cx: &App) -> components::Button {
+    let (back_available, forward_available) = owner.history;
+    let (id, label, shortcut, icon, available) =
+        if forward { ("reader-history-forward", "Forward", "reader.forward", IconName::ArrowRight, forward_available) } else { ("reader-history-back", "Back", "reader.back", IconName::ArrowLeft, back_available) };
+    let target = target.clone();
+    components::outlined_icon_button(id, components::configured_shortcut_tooltip(label, shortcut, cx), icon).debug_selector(move || id.into()).disabled(!available).on_click(move |_, window, cx| {
+        cx.stop_propagation();
+        target.execute(ChromeCommand::History(forward), window, cx);
+    })
+}
+
+/// The desktop rail: library, panels and reading history, then settings,
+/// reading aloud and the progress ring at the foot.
+pub(crate) fn reader_rail<C: SidebarTarget>(
+    owner: &C, target: &Entity<C>, active: Option<SidebarTab>, progress_fraction: f32, progress_label: String, progress_detail: String, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>,
+) -> gpui::Div {
+    if !components::uses_mobile_reader_controls(window) {
+        install_sidebar_keyboard(owner, target, window, cx);
+    }
+    render_rail(&ChromePresentation::new(owner), &ChromeTarget::new(target), active, progress_fraction, progress_label, progress_detail, theme, cx)
+}
+
+fn render_rail(owner: &ChromePresentation, target: &ChromeTarget, active: Option<SidebarTab>, progress_fraction: f32, progress_label: String, progress_detail: String, theme: components::BrowserTheme, cx: &App) -> gpui::Div {
     let item = |tab: SidebarTab| {
         let index = tab as usize;
         let target = target.clone();
-        let mark = if tab == active { ReaderRailMark::Selected } else { ReaderRailMark::None };
+        let mark = if Some(tab) == active { ReaderRailMark::Selected } else { ReaderRailMark::None };
         let destination = panel_destination(tab);
         components::reader_rail_item(("reader-rail", index), destination, destination.label(), mark, theme, cx)
             .debug_selector(move || format!("reader-rail-{index}"))
-            .on_click(move |_, window, cx| target.update(cx, |this, cx| this.select_sidebar_tab(tab, window, cx)))
+            .on_click(move |_, window, cx| target.execute(ChromeCommand::ToggleTab(tab), window, cx))
     };
-    let rail_focus = owner.rail_focus();
+    let rail_focus = owner.rail_focus.clone();
     let library_target = target.clone();
     let mut rail = components::reader_rail(theme)
+        .debug_selector(|| "reader-rail".into())
+        .when(active.is_some(), |rail| rail.key_context("ReaderSidebar"))
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .track_focus(&rail_focus)
         .child(components::reader_rail_item("reader-rail-library", ReaderDestination::Library, "Return to library", ReaderRailMark::None, theme, cx).on_click(move |_, window, cx| {
-            library_target.update(cx, |this, cx| this.close_reader(window, cx));
+            library_target.execute(ChromeCommand::CloseReader, window, cx);
         }))
         .child(div().flex_none().h(px(components::SPACE_SM)));
-    for &tab in owner.available_tabs() {
-        // Settings sits apart at the rail's foot.
-        if tab == SidebarTab::Settings {
-            rail = rail.child(components::reader_rail_spacer());
+    for &tab in owner.tabs {
+        if tab != SidebarTab::Settings {
+            rail = rail.child(item(tab));
         }
-        rail = rail.child(item(tab));
     }
-    if let Some(mark) = owner.tts_mark() {
+    rail = rail.child(history_button(owner, target, false, cx)).child(history_button(owner, target, true, cx));
+    if owner.tabs.contains(&SidebarTab::Settings) {
+        rail = rail.child(components::reader_rail_spacer()).child(item(SidebarTab::Settings));
+    }
+    if let Some(mark) = owner.tts {
         let tts_target = target.clone();
-        rail = rail.child(components::reader_rail_item("reader-rail-tts", ReaderDestination::Tts, "Read aloud", mark, theme, cx).on_click(move |_, window, cx| tts_target.update(cx, |this, cx| this.press_tts(window, cx))));
+        rail = rail.child(components::reader_rail_item("reader-rail-tts", ReaderDestination::Tts, "Read aloud", mark, theme, cx).on_click(move |_, window, cx| tts_target.execute(ChromeCommand::Tts, window, cx)));
     }
     let percent = progress_label.trim_end_matches('%').to_owned();
     rail.child(components::reader_progress_ring(progress_fraction, percent, progress_detail, theme))
 }
 
-/// The phone's bar above the page: the book with its chapter, reading progress
-/// and search, plus a library button where native Back is unavailable.
-pub(crate) fn reader_top_bar<C: SidebarTarget>(target: &Entity<C>, title: String, chapter: String, progress_label: String, show_search: bool, theme: components::BrowserTheme, cx: &gpui::App) -> AnyElement {
+/// The touch reader's top bar: reading history, book and chapter, progress and
+/// search, plus a library button where native Back is unavailable.
+pub(crate) fn reader_top_bar<C: SidebarTarget>(owner: &C, target: &Entity<C>, title: String, chapter: String, progress_label: String, show_search: bool, theme: components::BrowserTheme, cx: &gpui::App) -> AnyElement {
+    render_top_bar(&ChromePresentation::new(owner), &ChromeTarget::new(target), title, chapter, progress_label, show_search, theme, cx)
+}
+
+fn render_top_bar(owner: &ChromePresentation, target: &ChromeTarget, title: String, chapter: String, progress_label: String, show_search: bool, theme: components::BrowserTheme, cx: &App) -> AnyElement {
     let library_target = target.clone();
     let search_target = target.clone();
     components::ruled_topbar(theme)
         .when(cfg!(feature = "kobo") || !components::has_native_back_button(), |bar| {
-            bar.child(components::outlined_icon_button("reader-top-library", ReaderDestination::Library.tooltip(ReaderDestination::Library.label(), cx), ReaderDestination::Library.icon(), theme).on_click(move |_, window, cx| {
-                library_target.update(cx, |this, cx| this.close_reader(window, cx));
+            bar.child(components::outlined_icon_button("reader-top-library", ReaderDestination::Library.tooltip(ReaderDestination::Library.label(), cx), ReaderDestination::Library.icon()).on_click(move |_, window, cx| {
+                library_target.execute(ChromeCommand::CloseReader, window, cx);
             }))
         })
         .child(components::reader_top_bar_progress(progress_label, theme))
         .child(components::reader_top_bar_title(title, chapter, theme))
         .when(show_search, |bar| {
-            bar.child(components::outlined_icon_button("reader-top-search", ReaderDestination::Search.tooltip(ReaderDestination::Search.label(), cx), ReaderDestination::Search.icon(), theme).on_click(move |_, window, cx| {
-                search_target.update(cx, |this, cx| this.toggle_sidebar_tab(SidebarTab::Search, window, cx));
+            bar.child(components::outlined_icon_button("reader-top-search", ReaderDestination::Search.tooltip(ReaderDestination::Search.label(), cx), ReaderDestination::Search.icon()).on_click(move |_, window, cx| {
+                search_target.execute(ChromeCommand::ToggleTab(SidebarTab::Search), window, cx);
             }))
         })
+        .child(history_button(owner, target, false, cx))
+        .child(history_button(owner, target, true, cx))
         .into_any_element()
 }
 
 /// The phone's bar below the page: Contents, Notes, Settings and reading
 /// aloud. Tapping the open sheet's action closes it.
 pub(crate) fn reader_bottom_bar<C: SidebarTarget>(id: &'static str, owner: &C, target: &Entity<C>, active: Option<SidebarTab>, theme: components::BrowserTheme, cx: &gpui::App) -> AnyElement {
+    render_bottom_bar(id, &ChromePresentation::new(owner), &ChromeTarget::new(target), active, theme, cx)
+}
+
+fn render_bottom_bar(id: &'static str, owner: &ChromePresentation, target: &ChromeTarget, active: Option<SidebarTab>, theme: components::BrowserTheme, cx: &App) -> AnyElement {
     let mut bar = components::bottom_navigation(theme).id(id);
     // Search is in the top bar.
-    for &tab in owner.available_tabs().iter().filter(|tab| **tab != SidebarTab::Search) {
+    for &tab in owner.tabs.iter().filter(|tab| **tab != SidebarTab::Search) {
         let target = target.clone();
         let mark = if active == Some(tab) { ReaderRailMark::Selected } else { ReaderRailMark::None };
         bar = bar.child(components::reader_bottom_bar_item((id, tab as usize), panel_destination(tab), mark, theme, cx).on_click(move |_, window, cx| {
-            target.update(cx, |reader, cx| reader.toggle_sidebar_tab(tab, window, cx));
+            target.execute(ChromeCommand::ToggleTab(tab), window, cx);
         }));
     }
-    if let Some(mark) = owner.tts_mark() {
+    if let Some(mark) = owner.tts {
         let target = target.clone();
-        bar = bar.child(components::reader_bottom_bar_item((id, 4usize), ReaderDestination::Tts, mark, theme, cx).on_click(move |_, window, cx| target.update(cx, |reader, cx| reader.press_tts(window, cx))));
+        bar = bar.child(components::reader_bottom_bar_item((id, 5usize), ReaderDestination::Tts, mark, theme, cx).on_click(move |_, window, cx| target.execute(ChromeCommand::Tts, window, cx)));
     }
     bar.into_any_element()
 }
@@ -329,6 +507,8 @@ mod tests {
         sidebar_hidden: bool,
         toc_tree: Entity<TreeState>,
         navigated: Vec<String>,
+        tts_presses: usize,
+        header_presses: usize,
     }
 
     impl Focusable for SettingsTest {
@@ -360,6 +540,9 @@ mod tests {
             self.tabs
         }
         fn close_reader(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+        fn press_tts(&mut self, _: &mut Window, _: &mut Context<Self>) {
+            self.tts_presses += 1;
+        }
         fn hide_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             self.sidebar_hidden = true;
             self.hide_sidebar_controls(window, cx);
@@ -376,6 +559,9 @@ mod tests {
         fn sidebar_tab(&self) -> SidebarTab {
             self.tab
         }
+        fn sidebar_visible(&self, _: &Window) -> bool {
+            !self.sidebar_hidden && self.chrome.is_visible()
+        }
         fn contents_available(&self) -> bool {
             true
         }
@@ -383,15 +569,19 @@ mod tests {
             self.sidebar_hidden = false;
             self.tab = tab;
             self.sidebar.show(tab);
+            self.chrome.show(cx);
             if tab == SidebarTab::Search {
                 self.search_open = true;
                 self.search_input.read(cx).focus_handle(cx).focus(window, cx);
             }
-            self.focus_sidebar_body(window, cx);
+            // Focus the stable container until the newly selected Notes body mounts.
+            // Its first navigation key can then focus an actual note.
+            if tab == SidebarTab::Notes {
+                self.sidebar_focus.focus(window, cx)
+            } else {
+                self.focus_sidebar_body(window, cx)
+            }
             cx.notify();
-        }
-        fn toggle_sidebar_tab(&mut self, tab: SidebarTab, window: &mut Window, cx: &mut Context<Self>) {
-            self.select_sidebar_tab(tab, window, cx);
         }
         fn focus_sidebar_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             match self.tab {
@@ -403,7 +593,7 @@ mod tests {
                 }),
                 SidebarTab::Search => self.search_input.read(cx).focus_handle(cx).focus(window, cx),
                 SidebarTab::Settings => self.sidebar_focus.focus(window, cx),
-                SidebarTab::Notes => {
+                SidebarTab::Notes | SidebarTab::Bookmarks => {
                     self.sidebar_focus.focus(window, cx);
                     window.focus_next(cx);
                     if !self.sidebar_focus.contains_focused(window, cx) {
@@ -455,11 +645,11 @@ mod tests {
                         components::reader_setting_row_smallcaps("Font size", theme).debug_selector(|| "test-font-row".into()).child(components::reader_choice_button_group(
                             "test-font-group",
                             [
-                                components::reader_choice_button("test-font-button", "Increase font", false, theme).debug_selector(|| "test-font-button".into()).on_click(cx.listener(|this, _, _, cx| {
+                                components::settings_choice_button("test-font-button", "Increase font", false, theme).debug_selector(|| "test-font-button".into()).on_click(cx.listener(|this, _, _, cx| {
                                     this.font_size += 1;
                                     cx.notify();
                                 })),
-                                components::reader_choice_button("test-font-other", "Other", false, theme).debug_selector(|| "test-font-other".into()),
+                                components::settings_choice_button("test-font-other", "Other", false, theme).debug_selector(|| "test-font-other".into()),
                             ],
                             theme,
                         )),
@@ -468,12 +658,22 @@ mod tests {
                     .child(div().flex_none().h(px(1200.0)))
                     .into_any_element()
             } else if self.tab == SidebarTab::Contents {
-                state_panel::reader_toc_tree(&self.toc_tree, &cx.entity(), None, Default::default(), None, self.navigation.keyboard_visible(), theme, cx, |id, activation, window, this: &mut Self, cx| {
-                    this.navigated.push(id.to_owned());
-                    if activation == state_panel::TocActivation::Pointer {
-                        this.document_focus.focus(window, cx);
-                    }
-                })
+                state_panel::reader_toc_tree(
+                    &self.toc_tree,
+                    None,
+                    &cx.entity(),
+                    |_, _| Default::default(),
+                    None,
+                    self.navigation.keyboard_visible(),
+                    theme,
+                    cx,
+                    |id, activation, window, this: &mut Self, cx| {
+                        this.navigated.push(id.to_owned());
+                        if activation == state_panel::TocActivation::Pointer {
+                            this.document_focus.focus(window, cx);
+                        }
+                    },
+                )
             } else if self.tab == SidebarTab::Search {
                 let rows = (0usize..40)
                     .map(|index| {
@@ -484,15 +684,26 @@ mod tests {
             } else {
                 div().children((0usize..3).map(|index| div().id(("test-note", index)).focusable().tab_stop(true).debug_selector(move || format!("test-note-{index}")).h(px(40.0)).child("A note"))).into_any_element()
             };
-            let content = SidebarContent::new(0.0, "0%".into(), "Progress".into(), Some(self.document_focus.clone()), body);
+            let content = SidebarContent::new(body);
+            let content = if self.tab == SidebarTab::Bookmarks {
+                content.with_header_action(
+                    components::outlined_icon_button("test-create-bookmark", "Create bookmark", IconName::Plus)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.header_presses += 1;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )
+            } else {
+                content
+            };
             let sidebar = reader_sidebar(self, &cx.entity(), content, theme, window, cx);
-            div()
-                .size_full()
-                .key_context("Reader")
-                .on_scroll_wheel(cx.listener(|this, _, _, _| this.document_scrolls += 1))
-                .flex()
-                .when(!self.sidebar_hidden, |row| row.child(div().w(px(372.0)).h_full().child(sidebar)))
-                .child(div().flex_1().h_full().track_focus(&self.document_focus).on_key_down(cx.listener(|this, _, _, _| this.document_keys += 1)))
+            let panel_visible = !self.sidebar_hidden && self.chrome.is_visible();
+            let rail = reader_rail(self, &cx.entity(), panel_visible.then_some(self.tab), 0.0, "0%".into(), "Progress".into(), theme, window, cx);
+            let document = div().size_full().debug_selector(|| "test-document".into()).track_focus(&self.document_focus).on_key_down(cx.listener(|this, _, _, _| this.document_keys += 1)).into_any_element();
+            let content = super::super::chrome::desktop_content(rail.into_any_element(), panel_visible.then_some(sidebar), document, window, cx);
+            div().size_full().key_context("Reader").on_scroll_wheel(cx.listener(|this, _, _, _| this.document_scrolls += 1)).child(content)
         }
     }
 
@@ -508,7 +719,7 @@ mod tests {
                     tab: SidebarTab::Contents,
                     tabs: sidebar_tabs(true),
                     sidebar: SidebarState::from_preferences(cx),
-                    chrome: ChromeState::from_preferences(crate::invalidation::Component::PdfShell, cx),
+                    chrome: ChromeState::from_preferences(crate::invalidation::Component::PdfShell, ui_components::uses_mobile_reader_controls(window), cx),
                     sidebar_focus: cx.focus_handle(),
                     rail_focus: cx.focus_handle(),
                     document_focus,
@@ -523,6 +734,8 @@ mod tests {
                     sidebar_hidden: false,
                     toc_tree: cx.new(|cx| TreeState::new(cx).items(vec![TreeItem::new("one", "Chapter one"), TreeItem::new("two", "Chapter two")])),
                     navigated: Vec::new(),
+                    tts_presses: 0,
+                    header_presses: 0,
                 }
             });
             gpui_component::Root::new(view, window, cx)
@@ -530,6 +743,35 @@ mod tests {
         let view = cx.update(|_, cx| root.read(cx).view().clone().downcast::<SettingsTest>().ok().unwrap());
         cx.run_until_parked();
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn header_actions_keep_tab_focus_and_activate_on_the_first_key(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        cx.update(|window, cx| view.update(cx, |view, cx| view.select_sidebar_tab(SidebarTab::Bookmarks, window, cx)));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |view, cx| view.focus_sidebar_body(window, cx)));
+        // Move from the first body row through Close to the header action.
+        cx.simulate_keystrokes("shift-tab shift-tab tab shift-tab");
+        let header_focus = cx.update(|window, cx| {
+            assert!(!view.read(cx).sidebar_focus.contains_focused(window, cx));
+            window.focused(cx).unwrap()
+        });
+        for (key, presses) in [("enter", 1), ("space", 2)] {
+            view.update(cx, |view, cx| {
+                view.navigation.keyboard_visibility().set(false);
+                cx.notify();
+            });
+            cx.simulate_keystrokes(key);
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.header_presses, presses);
+                assert_eq!(view.document_keys, 0);
+            });
+            cx.update(|window, _| assert!(header_focus.is_focused(window)));
+        }
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |view, _| assert!(view.sidebar_hidden));
+        cx.update(|window, cx| assert!(view.read(cx).document_focus.is_focused(window)));
     }
 
     #[gpui::test]
@@ -618,7 +860,7 @@ mod tests {
             assert_eq!(view.search_input.read(cx).value().as_str(), "remember this query");
         });
 
-        let settings = cx.debug_bounds("reader-rail-3").unwrap();
+        let settings = cx.debug_bounds("reader-rail-4").unwrap();
         cx.simulate_click(settings.center(), Default::default());
         cx.simulate_keystrokes("secondary-f");
         cx.run_until_parked();
@@ -636,7 +878,7 @@ mod tests {
         let (view, cx) = setup(cx);
         cx.simulate_keystrokes("secondary-f");
         cx.simulate_input("remember this query");
-        for keys in ["secondary-t", "escape secondary-t", "secondary-t"] {
+        for keys in ["secondary-shift-t", "escape secondary-shift-t", "secondary-shift-t"] {
             cx.simulate_keystrokes(keys);
             cx.run_until_parked();
             cx.update(|window, cx| {
@@ -679,7 +921,7 @@ mod tests {
     #[gpui::test]
     fn settings_clicks_and_arrows_keep_focus_and_edit_the_selected_row(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
-        let settings = cx.debug_bounds("reader-rail-3").unwrap();
+        let settings = cx.debug_bounds("reader-rail-4").unwrap();
         cx.simulate_click(settings.center(), Default::default());
         cx.simulate_keystrokes("down down right");
         view.update(cx, |view, _| {
@@ -718,7 +960,7 @@ mod tests {
             assert_eq!(view.tab, SidebarTab::Contents);
             assert_eq!(view.toc_tree.read(cx).selected_index(), Some(1));
         });
-        cx.simulate_keystrokes("ctrl-tab ctrl-tab ctrl-tab");
+        cx.simulate_keystrokes("ctrl-tab ctrl-tab ctrl-tab ctrl-tab");
         view.read_with(cx, |view, _| {
             assert_eq!(view.tab, SidebarTab::Settings);
             assert_eq!(view.theme_changes, 0);
@@ -743,7 +985,7 @@ mod tests {
     #[gpui::test]
     fn keyboard_marker_appears_on_first_key_without_moving_or_editing(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
-        let settings = cx.debug_bounds("reader-rail-3").unwrap();
+        let settings = cx.debug_bounds("reader-rail-4").unwrap();
         cx.simulate_click(settings.center(), Default::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("reader-settings-marker-Theme").is_none());
@@ -769,7 +1011,7 @@ mod tests {
     #[gpui::test]
     fn settings_row_and_keyboard_highlight_survive_pointer_page_switches(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
-        let settings = cx.debug_bounds("reader-rail-3").unwrap();
+        let settings = cx.debug_bounds("reader-rail-4").unwrap();
         cx.simulate_click(settings.center(), Default::default());
         cx.run_until_parked();
         let font = cx.debug_bounds("test-font-row").unwrap();
@@ -788,7 +1030,7 @@ mod tests {
             assert_eq!(view.navigation.selected(&[SettingsRow::Theme, SettingsRow::FontSize]), SettingsRow::FontSize);
             assert!(view.navigation.keyboard_visible());
         });
-        let settings = cx.debug_bounds("reader-rail-3").unwrap();
+        let settings = cx.debug_bounds("reader-rail-4").unwrap();
         cx.simulate_click(settings.center(), Default::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("reader-settings-marker-FontSize").is_some());
@@ -813,6 +1055,8 @@ mod tests {
             assert!(view.sidebar_focus.contains_focused(window, cx));
             assert_eq!(view.document_keys, 0);
         });
+        cx.simulate_keystrokes("ctrl-tab");
+        view.read_with(cx, |view, _| assert_eq!(view.tab, SidebarTab::Bookmarks));
         cx.simulate_keystrokes("ctrl-tab");
         view.read_with(cx, |view, _| assert_eq!(view.tab, SidebarTab::Search));
     }
@@ -860,6 +1104,64 @@ mod tests {
         cx.simulate_keystrokes("escape");
         view.read_with(cx, |view, _| assert!(view.sidebar_hidden));
         cx.update(|window, cx| assert!(view.read(cx).document_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn closing_panel_keeps_rail_visible_and_buttons_reopen_panels(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        let rail = cx.debug_bounds("reader-rail").unwrap();
+        let expanded_document = cx.debug_bounds("test-document").unwrap();
+        let close = cx.debug_bounds("reader-sidebar-close").unwrap();
+        cx.simulate_click(close.center(), Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("reader-sidebar-close").is_none());
+        assert_eq!(cx.debug_bounds("reader-rail").unwrap(), rail);
+        assert_eq!(cx.debug_bounds("test-document").unwrap().left(), rail.right());
+        assert!(cx.debug_bounds("test-document").unwrap().size.width > expanded_document.size.width);
+        view.read_with(cx, |view, _| assert!(!view.chrome.is_visible()));
+
+        // Pointer movement over the former activation strip leaves it closed.
+        cx.simulate_event(gpui::MouseMoveEvent { position: point(px(1.0), px(100.0)), ..Default::default() });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("reader-sidebar-close").is_none());
+
+        for selector in ["reader-rail-4", "reader-rail-1", "reader-rail-3", "reader-rail-2", "reader-rail-0"] {
+            let button = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(button.center(), Default::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("reader-sidebar-close").is_some(), "{selector} must reopen the panel");
+            assert_eq!(cx.debug_bounds("reader-rail").unwrap(), rail);
+            view.read_with(cx, |view, _| assert!(view.chrome.is_visible()));
+            cx.simulate_click(button.center(), Default::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("reader-sidebar-close").is_none());
+            assert!(cx.debug_bounds("reader-rail").is_some());
+            cx.update(|window, cx| assert!(view.read(cx).document_focus.is_focused(window)));
+        }
+    }
+
+    #[gpui::test]
+    fn notes_and_tts_shortcuts_work_from_the_document_and_search_input(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        cx.simulate_keystrokes("ctrl-n");
+        view.read_with(cx, |view, _| assert_eq!(view.tab, SidebarTab::Notes));
+        cx.simulate_keystrokes("ctrl-n");
+        view.read_with(cx, |view, _| assert!(view.sidebar_hidden));
+        cx.simulate_keystrokes("ctrl-t");
+        view.read_with(cx, |view, _| assert_eq!(view.tts_presses, 1));
+        cx.simulate_keystrokes("secondary-f");
+        cx.run_until_parked();
+        cx.simulate_input("keep this query");
+        cx.simulate_keystrokes("ctrl-t");
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.tts_presses, 2);
+            assert_eq!(view.tab, SidebarTab::Search);
+            assert_eq!(view.search_input.read(cx).value().as_str(), "keep this query");
+        });
+        cx.simulate_keystrokes("ctrl-n");
+        view.read_with(cx, |view, _| assert_eq!(view.tab, SidebarTab::Notes));
+        cx.simulate_keystrokes("secondary-shift-t");
+        view.read_with(cx, |view, _| assert_eq!(view.tab, SidebarTab::Contents));
     }
 
     #[gpui::test]

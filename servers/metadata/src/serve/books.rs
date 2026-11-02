@@ -593,7 +593,7 @@ mod tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, crate::app(reopened)).await.unwrap();
         });
-        let http = reqwest::Client::new();
+        let http = http_response::client();
         let response = http.get(format!("{origin}/v3/covers/{}", cover.id)).send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.bytes().await.unwrap().as_ref(), b"resolved artwork");

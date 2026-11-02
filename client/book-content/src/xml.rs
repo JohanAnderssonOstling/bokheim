@@ -2,8 +2,9 @@
 
 use encoding_rs::{Encoding, UTF_8};
 use quick_xml::{
-    Reader,
-    events::{BytesStart, Event},
+    Reader, XmlVersion,
+    escape::resolve_xml_entity,
+    events::{BytesRef, BytesStart, Event},
 };
 use std::{collections::HashMap, io};
 
@@ -73,7 +74,16 @@ pub(crate) fn parse(bytes: &[u8], limit: usize) -> io::Result<Node> {
     if errors || text.len() > limit {
         return Err(invalid("invalid or oversized XML text"));
     }
-    let mut reader = Reader::from_str(&text);
+    parse_str(&text, limit)
+}
+
+/// Parse text already decoded by the container. Do not apply an XML encoding
+/// declaration a second time to the UTF-8 representation.
+pub(crate) fn parse_str(text: &str, limit: usize) -> io::Result<Node> {
+    if text.len() > limit {
+        return Err(invalid("XML exceeds the size limit"));
+    }
+    let mut reader = Reader::from_str(text);
     let mut stack: Vec<Node> = Vec::new();
     let mut root = None;
     let mut count = 0;
@@ -97,14 +107,8 @@ pub(crate) fn parse(bytes: &[u8], limit: usize) -> io::Result<Node> {
                 let node = stack.pop().ok_or_else(|| invalid("unexpected XML end tag"))?;
                 append(node, &mut stack, &mut root)?;
             }
-            Event::Text(value) => {
-                let value = value.unescape().map_err(io::Error::other)?.into_owned();
-                if let Some(node) = stack.last_mut() {
-                    node.content.push(Content::Text(value));
-                } else if !value.trim().is_empty() {
-                    return Err(invalid("text outside XML root"));
-                }
-            }
+            Event::Text(value) => append_text(value.decode().map_err(io::Error::other)?.into_owned(), &mut stack)?,
+            Event::GeneralRef(value) => append_text(reference_text(&value)?, &mut stack)?,
             Event::CData(value) => {
                 let value = String::from_utf8(value.into_inner().into_owned()).map_err(io::Error::other)?;
                 stack.last_mut().ok_or_else(|| invalid("CDATA outside XML root"))?.content.push(Content::Text(value));
@@ -128,7 +132,7 @@ fn element(start: &BytesStart<'_>) -> io::Result<Node> {
         let name = String::from_utf8(attr.key.as_ref().to_vec()).map_err(io::Error::other)?;
         // Keep xmlns intact; attribute consumers use local names for xlink/xml.
         let name = if name.starts_with("xmlns") { name } else { name.rsplit(':').next().unwrap_or(&name).to_owned() };
-        attrs.insert(name, attr.unescape_value().map_err(io::Error::other)?.into_owned());
+        attrs.insert(name, attr.normalized_value_with(XmlVersion::Implicit1_0, 1, resolve_xml_entity).map_err(io::Error::other)?.into_owned());
     }
     Ok(Node { name, attrs, content: Vec::new() })
 }
@@ -138,6 +142,24 @@ fn append(node: Node, stack: &mut [Node], root: &mut Option<Node>) -> io::Result
         parent.content.push(Content::Element(node));
     } else if root.replace(node).is_some() {
         return Err(invalid("multiple XML root elements"));
+    }
+    Ok(())
+}
+
+// Keep XML entity handling independent of quick-xml's optional HTML entity feature.
+pub(crate) fn reference_text(value: &BytesRef<'_>) -> io::Result<String> {
+    if let Some(value) = value.resolve_char_ref().map_err(io::Error::other)? {
+        return Ok(value.to_string());
+    }
+    let name = value.decode().map_err(io::Error::other)?;
+    resolve_xml_entity(&name).map(str::to_owned).ok_or_else(|| invalid(format!("unknown XML entity: {name}")))
+}
+
+fn append_text(value: String, stack: &mut [Node]) -> io::Result<()> {
+    if let Some(node) = stack.last_mut() {
+        node.content.push(Content::Text(value));
+    } else if !value.trim().is_empty() {
+        return Err(invalid("text outside XML root"));
     }
     Ok(())
 }

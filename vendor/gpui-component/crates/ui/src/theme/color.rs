@@ -1,9 +1,6 @@
-use std::{collections::HashMap, fmt::Display};
+use std::fmt::Display;
 
-use gpui::{
-    Background, Hsla, LinearColorStop, SharedString, hsla, linear_color_stop, linear_gradient,
-};
-use serde::{Deserialize, Deserializer, de::Error as _};
+use gpui::{Background, Hsla, LinearColorStop, SharedString, hsla, linear_color_stop, linear_gradient};
 
 use anyhow::{Error, Result, anyhow};
 
@@ -67,21 +64,13 @@ mod oklab {
     /// Convert sRGB component to linear RGB
     #[inline]
     fn to_linear(c: f32) -> f32 {
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
     }
 
     /// Convert linear RGB component to sRGB
     #[inline]
     fn from_linear(c: f32) -> f32 {
-        if c <= 0.0031308 {
-            c * 12.92
-        } else {
-            1.055 * c.powf(1.0 / 2.4) - 0.055
-        }
+        if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
     }
 
     /// Convert RGB to Oklab color space
@@ -127,44 +116,25 @@ mod oklab {
         let lb = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
 
         // Linear RGB to sRGB
-        Rgba {
-            r: from_linear(lr).clamp(0.0, 1.0),
-            g: from_linear(lg).clamp(0.0, 1.0),
-            b: from_linear(lb).clamp(0.0, 1.0),
-            a: 1.0,
-        }
+        Rgba { r: from_linear(lr).clamp(0.0, 1.0), g: from_linear(lg).clamp(0.0, 1.0), b: from_linear(lb).clamp(0.0, 1.0), a: 1.0 }
     }
 }
 
 impl Colorize for Hsla {
     fn opacity(&self, factor: f32) -> Self {
-        Self {
-            a: self.a * factor.clamp(0.0, 1.0),
-            ..*self
-        }
+        Self { a: self.a * factor.clamp(0.0, 1.0), ..*self }
     }
 
     fn divide(&self, divisor: f32) -> Self {
-        Self {
-            a: divisor,
-            ..*self
-        }
+        Self { a: divisor, ..*self }
     }
 
     fn invert(&self) -> Self {
-        Self {
-            h: 1.0 - self.h,
-            s: 1.0 - self.s,
-            l: 1.0 - self.l,
-            a: self.a,
-        }
+        Self { h: 1.0 - self.h, s: 1.0 - self.s, l: 1.0 - self.l, a: self.a }
     }
 
     fn invert_l(&self) -> Self {
-        Self {
-            l: 1.0 - self.l,
-            ..*self
-        }
+        Self { l: 1.0 - self.l, ..*self }
     }
 
     fn lighten(&self, factor: f32) -> Self {
@@ -180,12 +150,7 @@ impl Colorize for Hsla {
     }
 
     fn apply(&self, new_color: Self) -> Self {
-        Hsla {
-            h: new_color.h,
-            s: new_color.s,
-            l: self.l,
-            a: self.a,
-        }
+        Hsla { h: new_color.h, s: new_color.s, l: self.l, a: self.a }
     }
 
     /// Reference:
@@ -200,12 +165,7 @@ impl Colorize for Hsla {
             (a + diff * t).rem_euclid(360.0)
         }
 
-        Hsla {
-            h: lerp_hue(self.h * 360., other.h * 360., factor) / 360.,
-            s: self.s * factor + other.s * inv,
-            l: self.l * factor + other.l * inv,
-            a: self.a * factor + other.a * inv,
-        }
+        Hsla { h: lerp_hue(self.h * 360., other.h * 360., factor) / 360., s: self.s * factor + other.s * inv, l: self.l * factor + other.l * inv, a: self.a * factor + other.a * inv }
     }
 
     #[allow(non_snake_case)]
@@ -218,12 +178,7 @@ impl Colorize for Hsla {
 
         // Handle the case where result alpha is zero
         if result_alpha == 0.0 {
-            return Self {
-                h: 0.0,
-                s: 0.0,
-                l: 0.0,
-                a: 0.0,
-            };
+            return Self { h: 0.0, s: 0.0, l: 0.0, a: 0.0 };
         }
 
         // Convert both colors to RGB
@@ -270,21 +225,10 @@ impl Colorize for Hsla {
         let rgb = self.to_rgb();
 
         if rgb.a < 1. {
-            return format!(
-                "#{:02X}{:02X}{:02X}{:02X}",
-                ((rgb.r * 255.) as u32),
-                ((rgb.g * 255.) as u32),
-                ((rgb.b * 255.) as u32),
-                ((self.a * 255.) as u32)
-            );
+            return format!("#{:02X}{:02X}{:02X}{:02X}", ((rgb.r * 255.) as u32), ((rgb.g * 255.) as u32), ((rgb.b * 255.) as u32), ((self.a * 255.) as u32));
         }
 
-        format!(
-            "#{:02X}{:02X}{:02X}",
-            ((rgb.r * 255.) as u32),
-            ((rgb.g * 255.) as u32),
-            ((rgb.b * 255.) as u32)
-        )
+        format!("#{:02X}{:02X}{:02X}", ((rgb.r * 255.) as u32), ((rgb.g * 255.) as u32), ((rgb.b * 255.) as u32))
     }
 
     fn parse_hex(hex: &str) -> Result<Self> {
@@ -297,11 +241,7 @@ impl Colorize for Hsla {
         let r = u8::from_str_radix(&hex[0..2], 16)? as f32 / 255.;
         let g = u8::from_str_radix(&hex[2..4], 16)? as f32 / 255.;
         let b = u8::from_str_radix(&hex[4..6], 16)? as f32 / 255.;
-        let a = if len == 8 {
-            u8::from_str_radix(&hex[6..8], 16)? as f32 / 255.
-        } else {
-            1.
-        };
+        let a = if len == 8 { u8::from_str_radix(&hex[6..8], 16)? as f32 / 255. } else { 1. };
 
         let v = gpui::Rgba { r, g, b, a };
         let color: Hsla = v.into();
@@ -327,30 +267,13 @@ impl Colorize for Hsla {
     }
 }
 
-pub(crate) static DEFAULT_COLORS: once_cell::sync::Lazy<ShadcnColors> =
-    once_cell::sync::Lazy::new(|| {
-        serde_json::from_str(include_str!("./default-colors.json"))
-            .expect("failed to parse default-colors.json")
-    });
+pub(crate) static DEFAULT_COLORS: ShadcnColors = include!(concat!(env!("OUT_DIR"), "/compiled_palette.rs"));
 
-type ColorScales = HashMap<usize, ShadcnColor>;
-
-mod color_scales {
-    use std::collections::HashMap;
-
-    use super::{ColorScales, ShadcnColor};
-
-    use serde::de::{Deserialize, Deserializer};
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<ColorScales, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let mut map = HashMap::new();
-        for color in Vec::<ShadcnColor>::deserialize(deserializer)? {
-            map.insert(color.scale, color);
-        }
-        Ok(map)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColorScales(&'static [ShadcnColor]);
+impl ColorScales {
+    fn get(&self, scale: &usize) -> Option<&ShadcnColor> {
+        self.0.binary_search_by_key(scale, |color| color.scale).ok().map(|index| &self.0[index])
     }
 }
 
@@ -485,99 +408,42 @@ impl ColorName {
             _ => unreachable!(),
         };
 
-        if let Some(color) = colors.get(&scale) {
-            color.hsla
-        } else {
-            colors.get(&500).unwrap().hsla
-        }
+        if let Some(color) = colors.get(&scale) { color.hsla } else { colors.get(&500).unwrap().hsla }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShadcnColors {
     pub(crate) black: ShadcnColor,
     pub(crate) white: ShadcnColor,
-    #[serde(with = "color_scales")]
     pub(crate) slate: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) gray: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) zinc: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) neutral: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) stone: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) red: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) orange: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) amber: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) yellow: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) lime: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) green: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) emerald: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) teal: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) cyan: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) sky: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) blue: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) indigo: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) violet: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) purple: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) fuchsia: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) pink: ColorScales,
-    #[serde(with = "color_scales")]
     pub(crate) rose: ColorScales,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ShadcnColor {
-    #[serde(default)]
     pub(crate) scale: usize,
-    #[serde(deserialize_with = "from_hsl_channel", alias = "hslChannel")]
     pub(crate) hsla: Hsla,
-}
-
-/// Deserialize Hsla from a string in the format "210 40% 98%"
-fn from_hsl_channel<'de, D>(deserializer: D) -> Result<Hsla, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer).unwrap();
-
-    let mut parts = s.split_whitespace();
-    if parts.clone().count() != 3 {
-        return Err(D::Error::custom(
-            "expected hslChannel has 3 parts, e.g: '210 40% 98%'",
-        ));
-    }
-
-    fn parse_number(s: &str) -> f32 {
-        s.trim_end_matches('%')
-            .parse()
-            .expect("failed to parse number")
-    }
-
-    let (h, s, l) = (
-        parse_number(parts.next().unwrap()),
-        parse_number(parts.next().unwrap()),
-        parse_number(parts.next().unwrap()),
-    );
-
-    Ok(hsl(h, s, l))
 }
 
 macro_rules! color_method {
@@ -722,11 +588,7 @@ pub fn try_parse_color(color: &str) -> Result<Hsla> {
         "white" => Ok(crate::white()),
         _ => {
             let color_name = ColorName::try_from(name.as_str())?;
-            if let Some(scale) = scale {
-                Ok(color_name.scale(scale))
-            } else {
-                Ok(color_name.scale(500))
-            }
+            if let Some(scale) = scale { Ok(color_name.scale(scale)) } else { Ok(color_name.scale(500)) }
         }
     }?;
 
@@ -764,14 +626,8 @@ pub(crate) fn try_parse_background_clamped(background: &str, max: f32) -> Result
     }
 
     let gradient = parse_linear_gradient(background)?;
-    let clamp = |stop: LinearColorStop| {
-        linear_color_stop(stop.color.alpha(stop.color.a.min(max)), stop.percentage)
-    };
-    Ok(linear_gradient(
-        gradient.angle,
-        clamp(gradient.from),
-        clamp(gradient.to),
-    ))
+    let clamp = |stop: LinearColorStop| linear_color_stop(stop.color.alpha(stop.color.a.min(max)), stop.percentage);
+    Ok(linear_gradient(gradient.angle, clamp(gradient.from), clamp(gradient.to)))
 }
 
 pub(crate) fn try_parse_theme_color(color: &str) -> Result<Hsla> {
@@ -799,20 +655,10 @@ fn parse_linear_gradient(background: &str) -> Result<ParsedLinearGradient> {
     let inner = &background[PREFIX.len()..background.len() - 1];
     let parts = split_top_level_commas(inner);
     let (angle, from, to) = match parts.as_slice() {
-        [from, to] => (
-            180.,
-            parse_linear_color_stop(from, 0.)?,
-            parse_linear_color_stop(to, 1.)?,
-        ),
-        [angle, from, to] => (
-            parse_linear_gradient_angle(angle)?,
-            parse_linear_color_stop(from, 0.)?,
-            parse_linear_color_stop(to, 1.)?,
-        ),
+        [from, to] => (180., parse_linear_color_stop(from, 0.)?, parse_linear_color_stop(to, 1.)?),
+        [angle, from, to] => (parse_linear_gradient_angle(angle)?, parse_linear_color_stop(from, 0.)?, parse_linear_color_stop(to, 1.)?),
         _ => {
-            return Err(anyhow!(
-                "Expected linear-gradient with two color stops, e.g. linear-gradient(135deg, #000, #fff)"
-            ));
+            return Err(anyhow!("Expected linear-gradient with two color stops, e.g. linear-gradient(135deg, #000, #fff)"));
         }
     };
 
@@ -867,9 +713,7 @@ fn parse_linear_gradient_direction(direction: &str) -> Result<f32> {
             "bottom" => bottom = true,
             "left" => left = true,
             _ => {
-                return Err(anyhow!(
-                    "Unsupported linear-gradient direction: {direction}"
-                ));
+                return Err(anyhow!("Unsupported linear-gradient direction: {direction}"));
             }
         }
     }
@@ -883,21 +727,14 @@ fn parse_linear_gradient_direction(direction: &str) -> Result<f32> {
         (false, true, true, false) => Ok(135.),
         (false, false, true, true) => Ok(225.),
         (true, false, false, true) => Ok(315.),
-        _ => Err(anyhow!(
-            "Unsupported linear-gradient direction: {direction}"
-        )),
+        _ => Err(anyhow!("Unsupported linear-gradient direction: {direction}")),
     }
 }
 
 fn parse_linear_color_stop(stop: &str, default_percentage: f32) -> Result<LinearColorStop> {
     let stop = stop.trim();
     let mut parts = stop.split_whitespace().collect::<Vec<_>>();
-    let percentage = parts
-        .last()
-        .and_then(|part| part.strip_suffix('%'))
-        .map(|part| part.parse::<f32>().map(|value| value / 100.))
-        .transpose()?
-        .unwrap_or(default_percentage);
+    let percentage = parts.last().and_then(|part| part.strip_suffix('%')).map(|part| part.parse::<f32>().map(|value| value / 100.)).transpose()?.unwrap_or(default_percentage);
 
     if stop.ends_with('%') {
         parts.pop();
@@ -908,10 +745,7 @@ fn parse_linear_color_stop(stop: &str, default_percentage: f32) -> Result<Linear
         return Err(anyhow!("Expected color in linear-gradient color stop"));
     }
 
-    Ok(linear_color_stop(
-        try_parse_color(&color)?,
-        percentage.clamp(0., 1.),
-    ))
+    Ok(linear_color_stop(try_parse_color(&color)?, percentage.clamp(0., 1.)))
 }
 
 #[cfg(test)]
@@ -997,12 +831,7 @@ mod tests {
     fn test_mix_oklab() {
         let red = Hsla::parse_hex("#FF0000").unwrap();
         let blue = Hsla::parse_hex("#0000FF").unwrap();
-        let transparent = gpui::Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.0,
-            a: 0.0,
-        };
+        let transparent = gpui::Hsla { h: 0.0, s: 0.0, l: 0.0, a: 0.0 };
 
         // Test mixing red with transparent (similar to CSS color-mix example)
         // color-mix(in oklab, red 20%, transparent) should give red with 20% opacity
@@ -1013,10 +842,7 @@ mod tests {
         let rgb_result = result.to_rgb();
         let rgb_red = red.to_rgb();
         // Allow some tolerance due to color space conversions
-        assert!(
-            (rgb_result.r - rgb_red.r).abs() < 0.05,
-            "Red channel should be preserved"
-        );
+        assert!((rgb_result.r - rgb_red.r).abs() < 0.05, "Red channel should be preserved");
         assert!(rgb_result.g < 0.05, "Green channel should be near 0");
         assert!(rgb_result.b < 0.05, "Blue channel should be near 0");
 
@@ -1070,26 +896,14 @@ mod tests {
 
     #[test]
     fn test_try_parse_color() {
-        assert_eq!(
-            try_parse_color("#F2F200").ok(),
-            Some(hsla(0.16666667, 1., 0.4745098, 1.0))
-        );
-        assert_eq!(
-            try_parse_color("#00f21888").ok(),
-            Some(hsla(0.34986225, 1.0, 0.4745098, 0.53333336))
-        );
+        assert_eq!(try_parse_color("#F2F200").ok(), Some(hsla(0.16666667, 1., 0.4745098, 1.0)));
+        assert_eq!(try_parse_color("#00f21888").ok(), Some(hsla(0.34986225, 1.0, 0.4745098, 0.53333336)));
         assert_eq!(try_parse_color("black").ok(), Some(crate::black()));
         assert_eq!(try_parse_color("white-800").ok(), Some(crate::white()));
         assert_eq!(try_parse_color("red").ok(), Some(crate::red_500()));
         assert_eq!(try_parse_color("blue-600").ok(), Some(crate::blue_600()));
-        assert_eq!(
-            try_parse_color("pink/33").ok(),
-            Some(crate::pink_500().opacity(0.33))
-        );
-        assert_eq!(
-            try_parse_color("orange-300/66").ok(),
-            Some(crate::orange_300().opacity(0.66))
-        );
+        assert_eq!(try_parse_color("pink/33").ok(), Some(crate::pink_500().opacity(0.33)));
+        assert_eq!(try_parse_color("orange-300/66").ok(), Some(crate::orange_300().opacity(0.66)));
     }
 
     #[test]
@@ -1097,25 +911,11 @@ mod tests {
         let from = try_parse_color("#4F46E5").unwrap();
         let to = try_parse_color("#06B6D4").unwrap();
 
-        assert_eq!(
-            try_parse_background("linear-gradient(135deg, #4F46E5, #06B6D4)").unwrap(),
-            gpui::linear_gradient(
-                135.,
-                gpui::linear_color_stop(from, 0.),
-                gpui::linear_color_stop(to, 1.)
-            )
-        );
+        assert_eq!(try_parse_background("linear-gradient(135deg, #4F46E5, #06B6D4)").unwrap(), gpui::linear_gradient(135., gpui::linear_color_stop(from, 0.), gpui::linear_color_stop(to, 1.)));
     }
 
     #[test]
     fn test_try_parse_background_linear_gradient_direction_and_stops() {
-        assert_eq!(
-            try_parse_background("linear-gradient(to right, red-500 25%, blue-600 75%)").unwrap(),
-            gpui::linear_gradient(
-                90.,
-                gpui::linear_color_stop(crate::red_500(), 0.25),
-                gpui::linear_color_stop(crate::blue_600(), 0.75)
-            )
-        );
+        assert_eq!(try_parse_background("linear-gradient(to right, red-500 25%, blue-600 75%)").unwrap(), gpui::linear_gradient(90., gpui::linear_color_stop(crate::red_500(), 0.25), gpui::linear_color_stop(crate::blue_600(), 0.75)));
     }
 }

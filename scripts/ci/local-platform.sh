@@ -11,7 +11,7 @@ case "$platform" in
     python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu
     cargo test --release -p client-platform-native -p client-platform-desktop --features client-platform-native/websocket
     cargo test --release -p linux-update-host
-    build_options=()
+    build_options=(--speech-from-source)
     if [[ "${BOKHEIM_BROWSER:-auto}" == disabled || -n "${OPDS_BROWSER:-}" ]]; then
       build_options+=(--without-browser)
     fi
@@ -19,6 +19,7 @@ case "$platform" in
     export APPIMAGE_EXTRACT_AND_RUN=1
     RELEASE_DIRECTORY="$output" DESKTOP_BINARY="${CARGO_TARGET_DIR:-$root/target}/release/bokheim" \
       bash apps/desktop-gpui/linux/appimage/build-appimage.sh
+    bash -n "$output/install.sh"
     "$output/Bokheim-x86_64.AppImage" --bokheim-update-info > "$output/update-info-linux-x86_64-appimage.json"
     python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["schema"] > 0 and p["target"] == "linux-x86_64-appimage"' "$output/update-info-linux-x86_64-appimage.json"
     (cd "$output" && sha256sum --check Bokheim-x86_64.AppImage.sha256)
@@ -64,7 +65,7 @@ case "$platform" in
     cargo check --release -p client-platform-web --target wasm32-unknown-unknown
     cargo check --release -p web-backend-worker --example cpu_worker --example sync_coordinator --target wasm32-unknown-unknown
     cargo check --release -p web-backend-worker -p web-gpui --target wasm32-unknown-unknown
-    node --test client/platforms/web/tests/signal.mjs apps/web-gpui/compatibility.test.mjs
+    node --test client/platforms/web/tests/signal.mjs apps/web-gpui/compatibility.test.mjs apps/web-gpui/startup.test.mjs apps/web-gpui/backend-startup.test.mjs shared/reader-speech/src/browser.test.mjs
     python3 -m unittest discover -s apps/web-gpui/scripts/tests
     BOKHEIM_WEB_OUTPUT_DIR="$output" bash apps/web-gpui/scripts/build.sh
     ;;

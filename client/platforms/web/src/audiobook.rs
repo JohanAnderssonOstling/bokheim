@@ -28,6 +28,7 @@ where
     pub fn new(metadata: M, url: String, local_tracks: Vec<String>, direct: Option<D>, lease: Option<async_channel::Receiver<()>>, renew: Option<AsyncCallback>) -> Self {
         Self { metadata, url, local_tracks, direct, renew, _lease: lease }
     }
+
     pub fn renewal(&self) -> JsValue {
         self.renew.as_ref().map(|renew| renew.value()).unwrap_or(JsValue::UNDEFINED)
     }

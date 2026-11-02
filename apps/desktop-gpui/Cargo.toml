@@ -1,7 +1,8 @@
 [package]
 name = "desktop-gpui"
-version = "0.1.10"
+version = "0.1.12"
 edition = "2024"
+license.workspace = true
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -9,11 +10,15 @@ path = "src/lib.rs"
 
 [features]
 default = ["desktop"]
+# Publishing enables this ceiling; diagnostic release builds can omit it.
+release-logging = ["log/release_max_level_info"]
 desktop = [
+    "app/linux-network-cost",
     "reader-ui/native-audio",
     "reader-ui/native-tts",
     "dep:gpui_platform",
     "dep:image",
+    "dep:tokio",
     "dep:update-client",
     "dep:linux-update-host",
     "browser-ui/filesystem-libraries",
@@ -44,30 +49,29 @@ application-shell = { path = "../application-shell", default-features = false }
 ui-components = { path = "../components" }
 browser-ui = { path = "../browser", default-features = false }
 app = { path = "../../client/app", default-features = false }
+client-platform-runtime = { path = "../../client/platforms/runtime" }
 gpui.workspace = true
 gpui_android = { workspace = true, optional = true }
 gpui-component.workspace = true
 gpui_platform = { workspace = true, optional = true }
 gpui_kobo = { workspace = true, optional = true }
 fs2 = "0.4"
-image = { version = "0.25.1", default-features = false, features = ["png"], optional = true }
+image = { workspace = true, features = ["png"], optional = true }
 kobo-device = { path = "../kobo-device", optional = true }
 kobo-update = { path = "../../client/kobo-update", optional = true }
 log = "0.4"
 reader-ui = { path = "../reader", default-features = false }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+library-model = { path = "../../client/library-model" }
+http-response = { workspace = true }
 update-client = { path = "../../client/update-client", features = ["blocking"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["net", "rt", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"], optional = true }
 tempfile = "3"
 url = "2"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
-
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-reqwest_client = { path = "../../../GPUI-Fork/crates/reqwest_client" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 subject-projection = { path = "../../shared/subject-projection" }

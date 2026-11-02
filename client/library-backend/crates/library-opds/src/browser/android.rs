@@ -22,9 +22,7 @@ static SESSIONS: LazyLock<Mutex<HashMap<u64, UnboundedSender<Event>>>> = LazyLoc
 enum Event {
     Opened,
     Downloaded { path: PathBuf, #[serde(default)] download: Option<String> },
-    Magnet { url: String },
     CancelDownload { download: String },
-    TorrentFile { path: PathBuf, #[serde(default)] download: Option<String> },
     Error { message: String },
     Closed,
 }
@@ -68,10 +66,7 @@ impl StoreWindow {
         while let Some(event) = self.events.recv().await {
             match event {
                 Event::Downloaded { path, download } => if let Some(path) = self.accepted_path(path) { return Some(StoreEvent::Downloaded { path, download }); },
-                Event::TorrentFile { path, download } => if let Some(path) = self.accepted_path(path) { return Some(StoreEvent::TorrentFile { path, download }); },
-                Event::Magnet { url } if url.starts_with("magnet:") => return Some(StoreEvent::Magnet { url }),
                 Event::CancelDownload { download } => return Some(StoreEvent::CancelDownload { download }),
-                Event::Magnet { .. } => {},
                 Event::Closed => return None,
                 Event::Opened | Event::Error { .. } => {},
             }
@@ -84,12 +79,6 @@ impl StoreWindow {
         (path.parent() == Some(self.downloads.as_path()) && path.is_file()).then_some(path)
     }
 
-    pub async fn next_download(&mut self) -> Option<PathBuf> {
-        while let Some(event) = self.next_event().await {
-            if let StoreEvent::Downloaded { path, .. } = event { return Some(path); }
-        }
-        None
-    }
 }
 
 impl Drop for StoreWindow {
@@ -161,24 +150,6 @@ mod tests {
         sender.send(Event::Downloaded { path: path.clone(), download: Some("https://example.com/book".into()) }).unwrap();
         sender.send(Event::Closed).unwrap();
         assert!(matches!(window.next_event().await, Some(StoreEvent::Downloaded { path: found, download: Some(id) }) if found == path.canonicalize().unwrap() && id == "https://example.com/book"));
-        assert_eq!(window.next_download().await, None);
-    }
-
-    #[tokio::test]
-    async fn torrent_events_validate_links_and_staging_paths() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("books.torrent");
-        fs::write(&path, b"metadata").unwrap();
-        let outside = tempfile::NamedTempFile::new().unwrap();
-        let (sender, events) = unbounded_channel();
-        let mut window = StoreWindow { id: u64::MAX - 2, downloads: directory.path().canonicalize().unwrap(), events };
-        sender.send(Event::TorrentFile { path: outside.path().to_owned(), download: None }).unwrap();
-        sender.send(Event::Magnet { url: "https://example.com".into() }).unwrap();
-        sender.send(Event::Magnet { url: "magnet:?xt=urn:btih:test".into() }).unwrap();
-        sender.send(Event::TorrentFile { path: path.clone(), download: Some("http://example.com/books.torrent".into()) }).unwrap();
-        sender.send(Event::Closed).unwrap();
-        assert!(matches!(window.next_event().await, Some(StoreEvent::Magnet { .. })));
-        assert!(matches!(window.next_event().await, Some(StoreEvent::TorrentFile { path: found, download: Some(id) }) if found == path.canonicalize().unwrap() && id == "http://example.com/books.torrent"));
         assert!(window.next_event().await.is_none());
     }
 

@@ -206,7 +206,7 @@ fn previous_classification_recipe_uses_targeted_migration() {
     let database = snapshot_from(temp.path(), &[serde_json::json!({"key":"/books/OL1M","isbn_13":["9780306406157"]})], &[], &[]);
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
-    build_answers(&database, None, None, None, &base).unwrap();
+    build_answers_with_ratings(&database, None, None, None, None, &base).unwrap();
     Connection::open(&base).unwrap().execute("UPDATE answer_build SET recipe_version=recipe_version-1", []).unwrap();
     let report = build_answers_incremental(&database, None, None, None, None, &base, &next).unwrap();
     assert_eq!(report.mode, "reclassified");
@@ -239,8 +239,8 @@ fn in_place_reclassification_preserves_rich_fields_updates_search_and_supports_l
         ], &[]);
         let base = temp.path().join("answers.sqlite");
         let fresh = temp.path().join("fresh.sqlite");
-        build_answers(&source, None, None, None, &base).unwrap();
-        build_answers(&source, None, None, None, &fresh).unwrap();
+        build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
+        build_answers_with_ratings(&source, None, None, None, None, &fresh).unwrap();
         let c = Connection::open(&base).unwrap();
         let unchanged: Vec<u8> = c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=9780131103627", [], |r| r.get(0)).unwrap();
         for isbn in [9780306406157_i64, 9781404309982, 9781324096900, 9780141439518] {
@@ -300,7 +300,7 @@ fn failed_in_place_reclassification_rolls_back_answers_indexes_and_bookkeeping()
         serde_json::json!({"key":"/works/OL20W","lc_classifications":["HB161"]}),
     ], &[]);
     let base = temp.path().join("answers.sqlite");
-    build_answers(&source,None,None,None,&base).unwrap();
+    build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
     let c = Connection::open(&base).unwrap();
     let mut q = c.prepare("SELECT isbn13,answer FROM isbn_answer ORDER BY isbn13").unwrap();
     let before = q.query_map([], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
@@ -325,7 +325,7 @@ fn legacy_in_place_update_applies_provider_and_demand_changes_and_tracks_later_d
         serde_json::json!({"key":"/books/OL2M","title":"Shared","works":[{"key":"/works/OL10W"}],"isbn_13":["9780131103627"]}),
     ], &[serde_json::json!({"key":"/works/OL10W","description":"Preserved description"})], &[]);
     let base = temp.path().join("answers.sqlite");
-    build_answers(&source,None,None,None,&base).unwrap();
+    build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
     Connection::open(&base).unwrap().execute_batch("DROP TABLE answer_build; DROP TABLE answer_classification; DROP TABLE answer_work_lcc; DROP TABLE answer_provider; DROP TABLE answer_demand;").unwrap();
     let provider_path = temp.path().join("provider.sqlite");
     let provider = crate::crawl::open_provider(&provider_path).unwrap();
@@ -340,7 +340,7 @@ fn legacy_in_place_update_applies_provider_and_demand_changes_and_tracks_later_d
         assert_eq!(report.mode,"reclassified");
         assert!(report.resolved_rows>0);
         let fresh = temp.path().join(format!("fresh-{iteration}.sqlite"));
-        build_answers(&source,Some(&provider_path),Some(&demand_path),None,&fresh).unwrap();
+        build_answers_with_ratings(&source, Some(&provider_path), Some(&demand_path), None, None, &fresh).unwrap();
         assert_answer_tables_equal(&base,&fresh);
         provider.execute_batch("DELETE FROM provider_result").unwrap();
     }
@@ -360,7 +360,7 @@ fn in_place_reclassification_rebuilds_candidates_across_work_page_boundaries() {
     }
     let source=snapshot_from(temp.path(),&editions,&works,&[]);
     let answers=temp.path().join("answers.sqlite");
-    build_answers(&source,None,None,None,&answers).unwrap();
+    build_answers_with_ratings(&source, None, None, None, None, &answers).unwrap();
     Connection::open(&answers).unwrap().execute_batch("DELETE FROM edition_title_key WHERE edition_id IN (1,501); DELETE FROM edition_candidate WHERE edition_id IN (1,501);").unwrap();
     let report=reclassify_answers(&source,None,None,None,None,&answers).unwrap();
     assert_eq!(report.reclassified_rows,0);
@@ -557,7 +557,7 @@ fn zero_isbn_in_snapshot_is_built_before_edition_indexing() {
         &[],
     );
     let answers = temp.path().join("answers.sqlite");
-    let report = build_answers(&database, None, None, None, &answers).unwrap();
+    let report = build_answers_with_ratings(&database, None, None, None, None, &answers).unwrap();
     assert_eq!(report.isbn_rows, 2);
     let resolver = Resolver::open(&database, None).unwrap();
     let server = MetadataService::open(&answers, &temp.path().join("demand.sqlite")).unwrap();
@@ -585,7 +585,7 @@ fn answers_across_query_and_commit_boundaries_match_the_original_resolver() {
     let works = (1..=2100).map(|id| serde_json::json!({"key":format!("/works/OL{id}W"),"title":"Example","description":format!("Description {id}")})).collect::<Vec<_>>();
     let database = snapshot_from(temp.path(), &editions, &works, &[serde_json::json!({"key":"/authors/OL1A","name":"Example Author"})]);
     let answers = temp.path().join("answers.sqlite");
-    let report = build_answers(&database, None, None, None, &answers).unwrap();
+    let report = build_answers_with_ratings(&database, None, None, None, None, &answers).unwrap();
     assert_eq!(report.isbn_rows, 4200);
     let resolver = Resolver::open(&database, None).unwrap();
     let server = MetadataService::open(&answers, &temp.path().join("demand.sqlite")).unwrap();
@@ -722,7 +722,7 @@ impl FixtureService {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let answers = path.with_extension(format!("answers-{n}.sqlite"));
         let demand = path.with_extension(format!("demand-{n}.sqlite"));
-        build_answers(&path, None, None, descriptions.as_deref(), &answers)?;
+        build_answers_with_ratings(&path, None, None, descriptions.as_deref(), None, &answers)?;
         Ok(Self { resolver: Resolver::open(&path, descriptions.as_deref())?, server: MetadataService::open(&answers, &demand)? })
     }
     fn enrich_rich(&self, isbns: Vec<String>) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
@@ -772,7 +772,7 @@ fn edition_index_keeps_provider_fallbacks_and_title_author_authority_candidates(
             Connection::open(&database).unwrap().execute("INSERT INTO title_author_classification VALUES(?1,'','Jane Smith',0,'',2,'E1')", [metadata_contract::matching::bibliographic_title_match_key("Authority Title")]).unwrap();
         }
         let answers = temp.path().join(format!("answers-{authority}.sqlite"));
-        build_answers(&database, Some(&provider), None, None, &answers).unwrap();
+        build_answers_with_ratings(&database, Some(&provider), None, None, None, &answers).unwrap();
         let c = Connection::open(&answers).unwrap();
         let ids = c.prepare("SELECT edition_id FROM edition_candidate ORDER BY edition_id").unwrap().query_map([], |r| r.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(ids, if authority { vec![1, 2] } else { vec![1] });
@@ -889,7 +889,7 @@ fn unchanged_incremental_inputs_reuse_the_same_snapshot_without_resolution() {
     let database = snapshot_from(temp.path(), &[serde_json::json!({"key":"/books/OL1M","isbn_13":["9780306406157"]})], &[], &[]);
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
-    build_answers(&database, None, None, None, &base).unwrap();
+    build_answers_with_ratings(&database, None, None, None, None, &base).unwrap();
     let report = build_answers_incremental(&database, None, None, None, None, &base, &next).unwrap();
     assert_eq!(report.mode, "reused");
     assert_eq!(report.resolved_rows, 0);
@@ -907,7 +907,7 @@ fn changed_source_and_legacy_base_fall_back_to_full_resolution() {
     let temp = tempfile::tempdir().unwrap();
     let database = snapshot_from(temp.path(), &[serde_json::json!({"key":"/books/OL1M","isbn_13":["9780306406157"]})], &[], &[]);
     let base = temp.path().join("base.sqlite");
-    build_answers(&database, None, None, None, &base).unwrap();
+    build_answers_with_ratings(&database, None, None, None, None, &base).unwrap();
     Connection::open(&database).unwrap().execute("INSERT INTO edition_classification VALUES(1,2,'QA76')", []).unwrap();
     let changed = temp.path().join("changed.sqlite");
     assert_eq!(build_answers_incremental(&database, None, None, None, None, &base, &changed).unwrap().mode, "full");
@@ -924,7 +924,7 @@ fn failed_incremental_resolution_preserves_the_base_and_does_not_publish() {
     let provider = crate::crawl::open_provider(&provider_path).unwrap();
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
-    build_answers(&database, Some(&provider_path), None, None, &base).unwrap();
+    build_answers_with_ratings(&database, Some(&provider_path), None, None, None, &base).unwrap();
     let original = fs::read(&base).unwrap();
     provider.execute("INSERT INTO provider_result VALUES('loc',9780306406157,1,'matched',?1,?2)", params![b"invalid JSON".as_slice(), b"[]".as_slice()]).unwrap();
     assert!(build_answers_incremental(&database, Some(&provider_path), None, None, None, &base, &next).is_err());
@@ -942,7 +942,7 @@ fn demand_priority_changes_do_not_resolve_existing_metadata() {
     demand.execute_batch("CREATE TABLE demand(isbn13 INTEGER PRIMARY KEY,requests INTEGER NOT NULL); INSERT INTO demand VALUES(9780306406157,1);").unwrap();
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
-    build_answers(&database, None, Some(&demand_path), None, &base).unwrap();
+    build_answers_with_ratings(&database, None, Some(&demand_path), None, None, &base).unwrap();
     demand.execute("UPDATE demand SET requests=100", []).unwrap();
     let report = build_answers_incremental(&database, None, Some(&demand_path), None, None, &base, &next).unwrap();
     assert_eq!(report.mode, "incremental");

@@ -226,9 +226,10 @@ mod tests {
 
     #[gpui::test]
     async fn navigation_and_reader_are_saved_without_shutdown_and_closing_reader_stays_closed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let path = session_path(directory.path());
-        let scheduler = cx.new(|cx| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new(cx.background_executor(), 1)));
+        let scheduler = cx.new(|_| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new()));
         scheduler.update(cx, |owner, cx| {
             owner.session.navigation = saved_navigation();
             owner.save_now(cx);
@@ -252,9 +253,10 @@ mod tests {
 
     #[gpui::test]
     async fn delayed_saves_coalesce_and_include_immediate_navigation_changes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let path = session_path(directory.path());
-        let owner = cx.new(|cx| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new(cx.background_executor(), 1)));
+        let owner = cx.new(|_| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new()));
         let worker = owner.read_with(cx, |owner, _| owner.blocking_worker.clone());
         owner.update(cx, |owner, cx| {
             owner.session.reader_preferences.toc_width = 300.0;

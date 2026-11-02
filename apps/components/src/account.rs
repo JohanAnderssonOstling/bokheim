@@ -98,6 +98,19 @@ pub fn storage_breakdown(rows: impl IntoIterator<Item = Div>) -> Div {
     div().w_full().flex().flex_col().gap(px(SPACE_XXS)).children(rows)
 }
 
+/// A ranked book is identified by title, with its cloud bytes alongside it.
+pub fn storage_book_row(title: impl Into<SharedString>, bytes: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div()
+        .w_full()
+        .min_h(gpui::rems(BREAKDOWN_ROW_HEIGHT_REM))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_SM))
+        .text_size(gpui::rems(TEXT_XS))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.text).child(title.into()))
+        .child(div().w(gpui::rems(BREAKDOWN_BYTES_WIDTH_REM)).flex_none().flex().justify_end().text_color(theme.text_muted).child(bytes.into()))
+}
+
 /// One line of [`storage_breakdown`]: the segment's colour, its name, its share
 /// of the quota, and its size.
 pub fn storage_breakdown_row(color: Hsla, name: impl Into<SharedString>, share: impl Into<SharedString>, bytes: impl Into<SharedString>, theme: BrowserTheme) -> Div {
@@ -163,7 +176,7 @@ pub fn library_table_row(name: impl Into<SharedString>, path: Option<AnyElement>
         .items_start()
         .gap(px(SPACE_XS))
         .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(name.into()))
-        .children(path.map(|path| div().max_w_full().min_w_0().child(path)));
+        .children(path.map(|path| div().w_full().min_w_0().flex().child(path)));
     let (status, status_color) = status;
     let status = div()
         .min_w_0()

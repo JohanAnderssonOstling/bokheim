@@ -1,10 +1,13 @@
 //! Shared book-opening policy. Hosts provide local readers and supported
 //! streaming mechanisms; metadata selection and remote access are common.
 
+use super::remote_access::RemoteBookAccess;
 use crate::BackendError;
 use crate::BoxedBookReader;
 use crate::{BookId, LibrarySession};
 use book_model::BookFormat;
+use client_platform_runtime::startup_profile::StartupProfile;
+use library_database::LocalBookInfo;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod browser;
@@ -15,6 +18,7 @@ mod host;
 #[cfg(target_arch = "wasm32")]
 #[path = "web.rs"]
 mod host;
+mod remote_archive;
 pub use host::AudiobookBook;
 pub(crate) use host::Opened;
 
@@ -41,7 +45,6 @@ impl ResolvedBook {
     }
 }
 pub struct DocumentBook {
-    pub pdf_page_source: Option<std::sync::Arc<dyn pdf_view_common::PdfPageSource>>,
     pub pdf_metadata: Option<pdf_view_common::PdfReaderMetadata>,
     pub path: String,
     pub format: BookFormat,
@@ -49,7 +52,7 @@ pub struct DocumentBook {
 }
 impl DocumentBook {
     pub fn new(path: String, format: BookFormat, reader: BoxedBookReader) -> Self {
-        Self { pdf_page_source: None, pdf_metadata: None, path, format, source: DocumentSource::Reader(reader) }
+        Self { pdf_metadata: None, path, format, source: DocumentSource::Reader(reader) }
     }
 }
 
@@ -70,39 +73,39 @@ impl DocumentSource {
 
 impl DocumentBook {
     pub fn from_async_source(path: String, format: BookFormat, source: book_access::AsyncBookSource) -> Self {
-        Self { pdf_page_source: None, pdf_metadata: None, path, format, source: DocumentSource::Async(source) }
+        Self { pdf_metadata: None, path, format, source: DocumentSource::Async(source) }
     }
-}
-
-struct BookInfo {
-    format: BookFormat,
-    path: Option<library_model::RelativeBookPath>,
-}
-async fn book_info(library: &LibrarySession, hash: BookId) -> Result<BookInfo, BackendError> {
-    let info = library.db.local_book_info(&hash)?;
-    Ok(BookInfo { format: info.format, path: info.path })
 }
 
 struct RemoteDocument {
     source: crate::library::RemoteFile,
+    access: RemoteBookAccess,
     prefix: Vec<u8>,
     pdf_metadata: Option<pdf_view_common::PdfReaderMetadata>,
 }
-async fn pdf_metadata(library: &LibrarySession, hash: BookId) -> Result<Option<pdf_view_common::PdfReaderMetadata>, BackendError> {
-    library.db.pdf_metadata(&hash).map_err(Into::into)
-}
 async fn remote_document(library: &LibrarySession, hash: BookId) -> Result<RemoteDocument, BackendError> {
     let (source, prefix) = library.describe_remote_file(hash).await.map_err(BackendError::operation)?;
-    let pdf_metadata = pdf_metadata(library, hash).await?;
-    Ok(RemoteDocument { source, prefix, pdf_metadata })
+    let pdf_metadata = library.db.pdf_metadata(&hash)?;
+    let access = library.remote_book_access(&source)?;
+    Ok(RemoteDocument { source, access, prefix, pdf_metadata })
 }
 
 impl LibrarySession {
     pub(crate) async fn prepare_book_for_reader(&self, hash: BookId) -> Result<Opened, BackendError> {
-        let info = book_info(self, hash).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.is_opds() {
+            return self.open_opds_book(hash).await;
+        }
+        let mut profile = StartupProfile::new("book_lookup_resolve");
+        let info = self.db.local_book_info(&hash)?;
+        profile.mark("local_book_info");
         if let Some(book) = host::local(self, hash, &info).await? {
+            profile.mark("local_source");
             return Ok(book);
         }
+
+        self.account()?.require().map_err(|error| BackendError::classified(client_runtime::Failure::SignInRequired, error.to_string()))?;
+
         host::remote(self, hash, &info).await
     }
 }

@@ -2,6 +2,7 @@
 //! desktop ownership and the trial acquiring it. Only that helper's child may
 //! bypass the gate; every live-file mutation additionally holds desktop ownership.
 
+use std::ffi::OsString;
 use std::io::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::{activation, windows::WindowsHost, DiscoveryConfig};
@@ -53,14 +54,14 @@ impl Entry {
 }
 
 /// None means another launcher/helper owns startup; the caller must not open
-/// library databases. A supervised child is bound to the current helper, its PID
+/// library databases. The caller forwards any activation request. A supervised
+/// child is bound to the current helper, its PID
 /// and the expected installed executable, so stale restart arguments cannot work.
 pub fn enter(data: &Path) -> Result<Option<Entry>, String> {
     let lock = gate(data)?;
     let available = try_lock(&lock)?;
     let Some(directory) = arg("--bokheim-supervised-launch") else {
         if !available {
-            fs::write(data.join("desktop-instance.activate"), []).map_err(error)?;
             return Ok(None);
         }
         return Ok(Some(Entry { _gate: Some(lock), directory: None, trial: None, data: data.into() }));
@@ -110,6 +111,11 @@ fn validate_directory(data: &Path, directory: &Path) -> Result<PathBuf, String> 
 /// opening a handle to this process and taking the launch gate. The caller must
 /// then exit; dropping the desktop lock alone does not satisfy the handoff.
 pub fn spawn_helper(data: &Path, installation: &Path) -> Result<(), String> {
+    spawn_helper_with_arguments(data, installation, &[])
+}
+
+/// Forward launch arguments through the helper and its replacement application.
+pub fn spawn_helper_with_arguments(data: &Path, installation: &Path, startup_arguments: &[String]) -> Result<(), String> {
     let helpers = data.join("updates/helpers");
     fs::create_dir_all(&helpers).map_err(error)?;
     let unique = format!("{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
@@ -121,7 +127,7 @@ pub fn spawn_helper(data: &Path, installation: &Path) -> Result<(), String> {
         activation::copy_file(&std::env::current_exe().map_err(error)?, &executable)?;
         activation::copy_file(&subject_projection::bundled::path()?, &directory.join("taxonomy.sqlite3"))?;
         activation::write_json(&directory.join("job.json"), &Job { installation: canonical(installation)?, parent: std::process::id() })?;
-        Command::new(&executable).creation_flags(0x08000000).arg("--bokheim-update-helper").arg(&directory).spawn().map_err(error)
+        Command::new(&executable).creation_flags(0x08000000).arg("--bokheim-update-helper").arg(&directory).arg("--").args(startup_arguments).spawn().map_err(error)
     })();
     let mut child = match prepared {
         Ok(child) => child,
@@ -174,15 +180,16 @@ pub fn helper_entry(data: &Path, version: &str, config: impl FnOnce() -> Result<
     let mut host = WindowsHost::open(data, &job.installation, version, config()?)?;
     let trial = host.prepare_or_recover_in_process()?;
     drop(desktop);
-    launch_and_supervise(data, &directory, &mut host, trial.as_deref())?;
+    let startup_arguments = std::env::args_os().skip_while(|argument| argument != "--").skip(1).collect::<Vec<_>>();
+    launch_and_supervise(data, &directory, &mut host, trial.as_deref(), &startup_arguments)?;
     let _ = fs::remove_file(owner(data));
     // Own EXE remains locked until exit. Future normal startup cleans helpers.
     Ok(true)
 }
 
-fn launch_and_supervise(data: &Path, directory: &Path, host: &mut WindowsHost, trial: Option<&str>) -> Result<(), String> {
+fn launch_and_supervise(data: &Path, directory: &Path, host: &mut WindowsHost, trial: Option<&str>, startup_arguments: &[OsString]) -> Result<(), String> {
     let executable = host.installation.join("Bokheim.exe");
-    let outcome = match spawn_application(directory, &executable, trial) {
+    let outcome = match spawn_application(directory, &executable, trial, startup_arguments) {
         Ok(mut child) => {
             if let Some(id) = trial {
                 update_client::supervisor::wait_for_trial(&mut child.process, &host.root, id, Duration::from_secs(120))?
@@ -202,7 +209,7 @@ fn launch_and_supervise(data: &Path, directory: &Path, host: &mut WindowsHost, t
         if !try_lock(&desktop)? { return Err("cannot acquire desktop ownership for recovery".into()); }
         host.recover_stopped_trial(reason)?;
         drop(desktop);
-        let mut stable = spawn_application(directory, &executable, None).map_err(LaunchFailure::message)?;
+        let mut stable = spawn_application(directory, &executable, None, startup_arguments).map_err(LaunchFailure::message)?;
         wait_for_acceptance(&mut stable)?;
     }
     Ok(())
@@ -216,11 +223,11 @@ impl LaunchFailure {
     fn message(self) -> String { match self { Self::NotRunning(s) | Self::Uncertain(s) => s } }
 }
 struct Started { process: Child, directory: PathBuf }
-fn spawn_application(directory: &Path, executable: &Path, trial: Option<&str>) -> Result<Started, LaunchFailure> {
+fn spawn_application(directory: &Path, executable: &Path, trial: Option<&str>, startup_arguments: &[OsString]) -> Result<Started, LaunchFailure> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let directory = directory.join(format!("launch-{nonce}"));
     fs::create_dir(&directory).map_err(|e| LaunchFailure::NotRunning(error(e)))?;
-    let mut child = Command::new(executable).creation_flags(0x08000000).arg("--bokheim-supervised-launch").arg(&directory)
+    let mut child = Command::new(executable).creation_flags(0x08000000).arg("--bokheim-supervised-launch").arg(&directory).args(startup_arguments)
         .spawn().map_err(|e| LaunchFailure::NotRunning(error(e)))?;
     if let Err(error) = activation::write_json(&directory.join(format!("permit-{}.json", child.id())), &Permit { trial: trial.map(str::to_owned) }) {
         update_client::supervisor::stop_process(&mut child).map_err(LaunchFailure::Uncertain)?;
@@ -278,7 +285,7 @@ mod tests {
     #[test]
     fn failed_creation_proves_no_trial_process_exists() {
         let dir = tempfile::tempdir().unwrap();
-        let result = spawn_application(dir.path(), &dir.path().join("missing.exe"), Some("plan"));
+        let result = spawn_application(dir.path(), &dir.path().join("missing.exe"), Some("plan"), &[]);
         assert!(matches!(result, Err(LaunchFailure::NotRunning(_))));
     }
 }

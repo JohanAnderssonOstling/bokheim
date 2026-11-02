@@ -1,10 +1,10 @@
 use crate::http::{authenticated_request, decode_response, send, with_body};
-use crate::session::{validate_email, validate_identity, AuthError, Session};
-use account_contract::{AccountSnapshotResponse, MeResponse, OtherSessionsRevocationResponse, SessionRevocationResponse, SessionSummary};
+use crate::session::{AuthError, Session, validate_email, validate_identity};
+use account_contract::{AccountSnapshotResponse, BookStorageUsage, MAX_ACCOUNT_STORAGE_BOOKS, MeResponse, OtherSessionsRevocationResponse, SessionRevocationResponse, SessionSummary};
 use reqwest::Method;
+use sync_common::LibraryId;
 use sync_common::api::libraries::{CloudStorageChange, DeleteLibraryResponse, LibraryCloudStorage, LibraryNameRequest, LibrarySummary};
 use sync_common::api::opds_feeds::{OpdsFeed, OpdsFeedId};
-use sync_common::LibraryId;
 
 pub async fn current_account(session: &Session) -> Result<MeResponse, AuthError> {
     let account: MeResponse = decode_response(authenticated_request(session, Method::GET, "api/auth/me")?).await?;
@@ -18,6 +18,15 @@ pub async fn current_account(session: &Session) -> Result<MeResponse, AuthError>
 
 pub async fn account_snapshot(session: &Session) -> Result<AccountSnapshotResponse, AuthError> {
     decode_response(authenticated_request(session, Method::GET, "api/account/snapshot")?).await
+}
+
+pub async fn book_storage_usage(session: &Session) -> Result<Vec<BookStorageUsage>, AuthError> {
+    let books: Vec<BookStorageUsage> = decode_response(authenticated_request(session, Method::GET, "api/account/storage/books")?).await?;
+    let mut seen = std::collections::HashSet::new();
+    if books.len() > MAX_ACCOUNT_STORAGE_BOOKS || books.iter().any(|book| !seen.insert(book.content_hash)) {
+        return Err(AuthError::InvalidData("invalid account book storage response".into()));
+    }
+    Ok(books)
 }
 
 pub async fn list_account_sessions(session: &Session) -> Result<Vec<SessionSummary>, AuthError> {
@@ -77,12 +86,12 @@ pub async fn set_cloud_storage(session: &Session, id: LibraryId, change: CloudSt
 mod tests {
     use super::*;
     use crate::Url;
+    use axum::Router;
     use axum::body::Bytes;
     use axum::extract::Path;
-    use axum::http::{header, HeaderMap, StatusCode};
+    use axum::http::{HeaderMap, StatusCode, header};
     use axum::response::IntoResponse;
-    use axum::routing::{delete, post};
-    use axum::Router;
+    use axum::routing::{delete, get, post};
     use sync_common::transport as wire;
 
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -91,6 +100,40 @@ mod tests {
     fn check_auth(headers: &HeaderMap) {
         assert_eq!(headers.get(header::AUTHORIZATION).unwrap(), format!("Bearer {TEST_TOKEN}").as_str());
         assert_eq!(headers.get(header::ACCEPT).unwrap(), wire::MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn account_book_storage_preserves_auth_and_server_prefix_and_rejects_duplicate_books() {
+        use account_contract::BookStorageUsage;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use sync_common::BookId;
+
+        let duplicate = Arc::new(AtomicBool::new(false));
+        let mode = duplicate.clone();
+        let expected = vec![BookStorageUsage { content_hash: BookId::from_bytes([1; 32]), used_bytes: 1234 }];
+        let response = expected.clone();
+        let app = Router::new().route(
+            "/prefix/api/account/storage/books",
+            get(move |headers: HeaderMap| {
+                check_auth(&headers);
+                let mut books = response.clone();
+                if mode.load(Ordering::SeqCst) {
+                    books.push(books[0].clone());
+                }
+                async move { wire::encode(&books).unwrap() }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Url::parse(&format!("http://{}/prefix/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session = Session::try_new(origin, "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into()).unwrap();
+        assert_eq!(book_storage_usage(&session).await.unwrap(), expected);
+        duplicate.store(true, Ordering::SeqCst);
+        assert!(matches!(book_storage_usage(&session).await, Err(AuthError::InvalidData(_))));
+        server.abort();
     }
 
     async fn write_library(method: Method, headers: HeaderMap, body: Bytes) -> Vec<u8> {

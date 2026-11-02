@@ -36,7 +36,7 @@ pub fn installation() -> Result<&'static Installation, String> {
 }
 
 fn client() -> Result<Client, String> {
-    Client::builder().https_only(true).connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(15 * 60)).user_agent("Bokheim-Kobo-Updater").build().map_err(|error| error.to_string())
+    http_response::blocking_client_builder().https_only(true).connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(15 * 60)).user_agent("Bokheim-Kobo-Updater").build().map_err(|error| error.to_string())
 }
 
 impl Installation {
@@ -46,7 +46,7 @@ impl Installation {
 
     fn lock(&self) -> Result<File, String> {
         if !self.root.join(".kobo").is_dir() || !self.root.join(APP).join("desktop-gpui-kobo").is_file() {
-            return Err("The Kobo installation could not be found. Restart Bokheim and try again.".into());
+            return Err("Couldn't find the installation. Restart the app and retry.".into());
         }
         fs::create_dir_all(self.updates()).map_err(io_error)?;
         let lock = OpenOptions::new().create(true).truncate(false).write(true).open(self.updates().join("lock")).map_err(io_error)?;
@@ -77,7 +77,7 @@ impl Installation {
         }
         let updates = self.updates();
         if updates.join("installing").exists() {
-            return Err("Restart Bokheim to recover the interrupted update first".into());
+            return Err("Restart the app to recover the interrupted update first.".into());
         }
         remove_file(&updates.join("ready.json"))?;
         remove_directory(&updates.join("staged"))?;

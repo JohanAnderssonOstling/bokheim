@@ -107,13 +107,6 @@ pub fn author_match_keys(value: &str) -> BTreeSet<String> {
     keys
 }
 
-/// Whether two credits name the same person: the names agree once accents,
-/// honorifics, life dates and surname-first comma notation are set aside.
-/// Arbitrary word permutations belong to `author_names_compatible` fallback.
-pub fn same_author(left: &str, right: &str) -> bool {
-    !author_match_keys(left).is_disjoint(&author_match_keys(right))
-}
-
 fn sorted_author_words(words: &[String]) -> Vec<&str> {
     let mut words = words.iter().map(String::as_str).collect::<Vec<_>>();
     words.sort_unstable();
@@ -183,19 +176,7 @@ pub fn author_names_with_omitted_names(left: &str, right: &str) -> bool {
 }
 
 fn compatible_author_names(left: &str, right: &str, allow_omitted_names: bool) -> bool {
-    let left = NormalizedAuthor::new(left);
-    let right = NormalizedAuthor::new(right);
-    if !left.keys.is_disjoint(&right.keys) {
-        return true;
-    }
-    left.variants.iter().any(|a| {
-        right.variants.iter().any(|b| {
-            if a.suffix.is_some() && b.suffix.is_some() && a.suffix != b.suffix {
-                return false;
-            }
-            author_words_compatible(&a.words, &b.words) || (allow_omitted_names && omitted_given_names(&a.words, &b.words))
-        })
-    })
+    NormalizedAuthor::new(left).compatible(&NormalizedAuthor::new(right), allow_omitted_names)
 }
 
 fn omitted_given_names(left: &[String], right: &[String]) -> bool {
@@ -273,11 +254,12 @@ pub fn title_qualifiers(title: &str) -> BTreeSet<String> {
 }
 
 /// Split explicit coauthor separators without confusing `Family, Given` names.
-pub fn author_credits(values: &[String]) -> Vec<String> {
+pub fn author_credits(values: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
     let mut credits = Vec::new();
     for value in values {
+        let value = value.as_ref();
         if collective_author_name(&author_name_match_key(value)) {
-            if !credits.contains(value) {
+            if !credits.iter().any(|credit| credit == value) {
                 credits.push(value.trim().to_owned());
             }
             continue;
@@ -402,25 +384,55 @@ pub fn title_without_parenthetical_segments(title: &str, keep_edition_notes: boo
 
 #[cfg(test)]
 mod tests {
-    use super::{author_name_match_key, author_names_compatible, same_author};
+    use super::{author_name_match_key, author_names_compatible, matching_author_count, matching_author_count_with_title, author_match_keys};
+
+    #[test]
+    fn author_counts_deduplicate_aliases_split_coauthors_and_assign_distinct_people() {
+        let mut local = ["John Stuart Mill and Harriet Taylor", "Mill, John Stuart", "Лев Толстой", "Leo Tolstoy", "John Smith Jr", "John Smith Sr", "unknown", ""].map(str::to_owned);
+        let mut remote = ["J. S. Mill", "Harriét Taylor", "Lev Nikolayevich Tolstoy", "Smith, John, Jr.", "John Smith Sr", "Untitled"];
+        assert_eq!(matching_author_count(&local, &remote), 5);
+        assert_eq!(matching_author_count(&remote, &local), 5);
+        local.reverse();
+        remote.reverse();
+        assert_eq!(matching_author_count(&local, &remote), 5);
+
+        // The initial can name either person; the full name must retain its vote.
+        let local = ["J. Smith", "John Smith"].map(str::to_owned);
+        let remote = ["John Smith", "James Smith"].map(str::to_owned);
+        assert_eq!(matching_author_count(&local, &remote), 2);
+        assert_eq!(matching_author_count(&remote, &local), 2);
+    }
+
+    #[test]
+    fn author_counts_allow_omitted_names_only_when_titles_agree() {
+        let local = ["George Bernard Shaw".to_owned()];
+        let remote = ["Bernard Shaw"];
+        assert_eq!(matching_author_count(&local, &remote), 0);
+        assert_eq!(matching_author_count_with_title(&local, &remote, "Pygmalion", "Pygmalion"), 1);
+        assert_eq!(matching_author_count_with_title(&local, &remote, "Pygmalion", "Pygmalion: A Romance in Five Acts"), 1);
+        assert_eq!(matching_author_count_with_title(&local, &remote, "Pygmalion", "Different Work"), 0);
+        let local = ["John Smith Jr".to_owned()];
+        let remote = ["John Smith Sr".to_owned()];
+        assert_eq!(matching_author_count_with_title(&local, &remote, "Same Work", "Same Work"), 0);
+    }
 
     #[test]
     fn same_author_ignores_order_accents_and_honorifics() {
-        assert!(same_author("Yakobson, Alexander", " ALEXANDER  YAKOBSON "));
-        assert!(same_author("García, José", "Jose Garcia"));
-        assert!(same_author("Dr John Smith", "John Smith"));
-        assert!(!same_author("Alexander Yakobson", "Alexander Smith"));
-        assert!(!same_author("John Smith", "John A. Smith"));
-        assert!(!same_author("...", "---"));
+        assert!(!author_match_keys("Yakobson, Alexander").is_disjoint(&author_match_keys(" ALEXANDER  YAKOBSON ")));
+        assert!(!author_match_keys("García, José").is_disjoint(&author_match_keys("Jose Garcia")));
+        assert!(!author_match_keys("Dr John Smith").is_disjoint(&author_match_keys("John Smith")));
+        assert!(author_match_keys("Alexander Yakobson").is_disjoint(&author_match_keys("Alexander Smith")));
+        assert!(author_match_keys("John Smith").is_disjoint(&author_match_keys("John A. Smith")));
+        assert!(author_match_keys("...").is_disjoint(&author_match_keys("---")));
     }
 
     #[test]
     fn author_keys_remove_baron_and_adjacent_repeated_name_parts() {
         let source = "Baron Thomas Babington Macaulay Macaulay";
         assert_eq!(author_name_match_key(source), "thomas babington macaulay");
-        assert!(same_author(source, "Thomas Babington Macaulay"));
-        assert!(same_author("Macaulay Macaulay, Baron Thomas Babington", "Thomas Babington Macaulay"));
-        assert!(same_author("Baron Thomas Thomas Babington Macaulay", "Thomas Babington Macaulay"));
+        assert!(!author_match_keys(source).is_disjoint(&author_match_keys("Thomas Babington Macaulay")));
+        assert!(!author_match_keys("Macaulay Macaulay, Baron Thomas Babington").is_disjoint(&author_match_keys("Thomas Babington Macaulay")));
+        assert!(!author_match_keys("Baron Thomas Thomas Babington Macaulay").is_disjoint(&author_match_keys("Thomas Babington Macaulay")));
         assert!(author_names_compatible(source, "Thomas B. Macaulay"));
         assert!(!author_names_compatible(source, "Thomas James Macaulay"));
     }
@@ -430,13 +442,13 @@ mod tests {
         assert_eq!(author_name_match_key("John Smith John"), "john smith john");
         assert_eq!(author_name_match_key("John Baron Smith"), "john smith");
         assert_eq!(author_name_match_key("John Johnson"), "john johnson");
-        assert!(!same_author("John Smith John", "John Smith"));
+        assert!(author_match_keys("John Smith John").is_disjoint(&author_match_keys("John Smith")));
     }
 
     #[test]
     fn word_order_is_a_fallback_after_strict_author_matching() {
         for (local, remote) in [("da Vinci Leonardo", "Leonardo da Vinci"), ("the Younger Pliny", "Pliny the Younger"), ("Andrew W. Young", "W. Andrew Young")] {
-            assert!(!same_author(local, remote));
+            assert!(author_match_keys(local).is_disjoint(&author_match_keys(remote)));
             assert!(author_names_compatible(local, remote));
             assert!(author_names_compatible(remote, local));
         }
@@ -452,27 +464,27 @@ mod tests {
     #[test]
     fn author_dates_preserve_names_before_and_after_the_years() {
         for name in ["John M. 1851-1929 Tyler", "John M. (1851–1929) Tyler", "Tyler, John M., 1851—1929", "John M. b. 1851 Tyler", "John M. died 1929 Tyler", "John M. 1851- Tyler"] {
-            assert!(same_author(name, "John M. Tyler"), "{name}");
+            assert!(!author_match_keys(name).is_disjoint(&author_match_keys("John M. Tyler")), "{name}");
         }
-        assert!(same_author("Lillian Moller 1878-1972 Gilbreth", "Lillian Moller Gilbreth"));
-        assert!(same_author("Reginald R. b. 1848 Sharpe", "Reginald R. Sharpe"));
+        assert!(!author_match_keys("Lillian Moller 1878-1972 Gilbreth").is_disjoint(&author_match_keys("Lillian Moller Gilbreth")));
+        assert!(!author_match_keys("Reginald R. b. 1848 Sharpe").is_disjoint(&author_match_keys("Reginald R. Sharpe")));
         assert_eq!(author_name_match_key("John D. Tyler"), "john d tyler");
-        assert!(same_author("John B. 1851-1929 Tyler", "John B. Tyler"));
-        assert!(same_author("John D. 1851-1929 Tyler", "John D. Tyler"));
+        assert!(!author_match_keys("John B. 1851-1929 Tyler").is_disjoint(&author_match_keys("John B. Tyler")));
+        assert!(!author_match_keys("John D. 1851-1929 Tyler").is_disjoint(&author_match_keys("John D. Tyler")));
         assert_eq!(author_name_match_key("John 12345 Tyler"), "john 12345 tyler");
     }
 
     #[test]
     fn honorifics_and_dated_biographies_do_not_depend_on_position() {
         for name in ["Sir Edward Shepherd Creasy", "Edward Sir Shepherd Creasy", "Edward Shepherd Creasy, Sir", "Creasy, Edward Shepherd Sir"] {
-            assert!(same_author(name, "Edward Shepherd Creasy"), "{name}");
+            assert!(!author_match_keys(name).is_disjoint(&author_match_keys("Edward Shepherd Creasy")), "{name}");
         }
         for name in ["active 6th century Jordanes", "Jordanes, active 6th century", "Jordanes (flourished ca. 550)", "Jordanes, 6th century A.D."] {
-            assert!(same_author(name, "Jordanes"), "{name}");
+            assert!(!author_match_keys(name).is_disjoint(&author_match_keys("Jordanes")), "{name}");
         }
-        assert!(same_author("active 3rd century Shao Liu", "Shao Liu"));
-        assert!(same_author("Liu, active 3rd century Shao", "Shao Liu"));
-        assert!(same_author("John C. 1851-1929 Tyler", "John C. Tyler"));
+        assert!(!author_match_keys("active 3rd century Shao Liu").is_disjoint(&author_match_keys("Shao Liu")));
+        assert!(!author_match_keys("Liu, active 3rd century Shao").is_disjoint(&author_match_keys("Shao Liu")));
+        assert!(!author_match_keys("John C. 1851-1929 Tyler").is_disjoint(&author_match_keys("John C. Tyler")));
         assert_eq!(author_name_match_key("Active Smith"), "active smith");
         assert_eq!(author_name_match_key("John 3rd Tyler"), "john 3rd tyler");
         assert!(!author_names_compatible("John Smith Jr", "John Smith Sr"));

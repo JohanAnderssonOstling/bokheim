@@ -1,7 +1,8 @@
 pub(crate) use super::TransfersSql;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::query_methods::query_rows;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::*;
-pub(crate) use library_model::BlobKind;
 pub(crate) use library_model::DownloadState;
 pub(crate) use sync_common::BookId;
 
@@ -13,12 +14,7 @@ impl Database {
     /// Whether the book's bytes are marked downloaded, and whether a live
     /// placement has a queued download request.
     pub(crate) fn download_flags(&self, hash: &BookId) -> Result<(bool, bool), DatabaseError> {
-        let mut flags = (false, false);
-        self.connection.transfer_download_state(hash, |row| {
-            flags = (row.get(0)?, row.get(1)?);
-            Ok(())
-        })?;
-        Ok(flags)
+        Ok(self.connection.transfer_download_state(hash, |row| Ok((row.get(0)?, row.get(1)?)))?)
     }
 
     /// Checks eviction eligibility without changing local availability. Native
@@ -29,7 +25,7 @@ impl Database {
         }
         // Eviction keeps the entry but drops its bytes. Without a server copy
         // those bytes are the only copy, so refusing keeps the entry recoverable.
-        if !self.remote_asset_hashes(BlobKind::Book)?.contains(hash) {
+        if !self.remote_book_available(hash)? && !(hash.is_opds() && self.opds_publication(*hash)?.is_some()) {
             return Err(DatabaseError::message("this book is only stored on this device; upload it before removing the download"));
         }
         Ok(true)
@@ -51,11 +47,7 @@ impl Database {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn complete_local_book_request_on(connection: &rusqlite::Connection, hash: &BookId) -> Result<(), DatabaseError> {
-        let mut placements = Vec::new();
-        connection.shared_live_book_placements(hash, |row| {
-            placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
-            Ok(())
-        })?;
+        let placements = query_rows(|read| connection.shared_live_book_placements(hash, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         let mut folders = crate::placements::FolderPaths::new(connection);
         for (dir_id, file_name) in placements {
             if let Some(path) = folders.placement(&dir_id, &file_name)? {
@@ -66,17 +58,11 @@ impl Database {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn sync_request_book_downloads(&self, hashes: &[BookId], origin: library_model::TransferOrigin) -> Result<(), DatabaseError> {
         let requested_at = crate::sync::unix_millis()?;
         self.write(|transaction| {
             for hash in hashes {
-                let mut placed = false;
-                transaction.transfer_download_placement(hash, |row| {
-                    placed = row.get(0)?;
-                    Ok(())
-                })?;
-                if !placed {
+                if !transaction.transfer_download_placement(hash, |row| row.get::<_, bool>(0))? {
                     return Err(DatabaseError::message("book has no live placement"));
                 }
                 transaction.shared_request_book_download(hash, origin.storage(), requested_at)?;

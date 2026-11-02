@@ -5,17 +5,24 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /** Extract once per resource revision, before native SQLite connections open.
  * Revision directories keep existing immutable readers valid across app updates.
  */
 final class TaxonomyAssets {
-    static synchronized File prepare(Context context) throws IOException {
+    private static final long LOCK_TIMEOUT_MILLIS = 30_000;
+    private static final ReentrantLock INSTALLATION_LOCK = new ReentrantLock();
+
+    static File prepare(Context context) throws IOException {
         String digest;
         try (InputStream input = context.getAssets().open("taxonomy.digest")) {
             byte[] bytes = new byte[65];
@@ -28,10 +35,29 @@ final class TaxonomyAssets {
         File directory = new File(root, digest);
         File destination = new File(directory, "taxonomy.sqlite3");
         if (destination.isFile() && destination.length() > 0) return destination;
+        long started = System.nanoTime();
+        // Keep same-process contenders from opening another channel: closing
+        // that channel can release this process's existing OS file lock.
+        try {
+            if (!INSTALLATION_LOCK.tryLock(LOCK_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                throw new IOException("Timed out waiting for taxonomy extraction lock");
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("Taxonomy extraction lock interrupted");
+        }
+        try {
+            long remaining = Math.max(0, LOCK_TIMEOUT_MILLIS - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+            return extract(context, root, directory, destination, remaining);
+        } finally { INSTALLATION_LOCK.unlock(); }
+    }
+
+    private static File extract(Context context, File root, File directory, File destination, long timeoutMillis) throws IOException {
+        if (destination.isFile() && destination.length() > 0) return destination;
         Files.createDirectories(root.toPath());
         // Startup and the isolated migration service can extract concurrently.
         try (FileOutputStream lockFile = new FileOutputStream(new File(root, "install.lock"), true);
-             FileChannel channel = lockFile.getChannel(); FileLock lock = channel.lock()) {
+             FileChannel channel = lockFile.getChannel(); FileLock lock = acquireInstallationLock(channel, timeoutMillis)) {
             Files.createDirectories(directory.toPath());
             if (destination.isFile() && destination.length() > 0) return destination;
             File staging = new File(directory, "taxonomy.staging");
@@ -48,6 +74,27 @@ final class TaxonomyAssets {
                 return destination;
             } finally {
                 Files.deleteIfExists(staging.toPath());
+            }
+        }
+    }
+
+    static FileLock acquireInstallationLock(FileChannel channel, long timeoutMillis) throws IOException {
+        long started = System.nanoTime();
+        long timeout = TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (true) {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("Taxonomy extraction lock interrupted");
+            try {
+                FileLock lock = channel.tryLock();
+                if (lock != null) return lock;
+            } catch (OverlappingFileLockException busy) {
+                // A different startup worker in this process holds the lock.
+            }
+            if (System.nanoTime() - started >= timeout) throw new IOException("Timed out waiting for taxonomy extraction lock");
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException("Taxonomy extraction lock interrupted");
             }
         }
     }

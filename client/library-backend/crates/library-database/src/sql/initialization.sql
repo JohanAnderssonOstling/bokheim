@@ -11,6 +11,11 @@ WHERE singleton=1 AND enrichment_policy IS NOT 'books_v4_direct_covers';
 -- name: initialization_replica_id ->
 SELECT replica_id FROM sync_metadata WHERE singleton=1;
 
+-- name: initialization_clear_browser_file_work &
+DELETE FROM local_file_work;
+DELETE FROM local_directory_work;
+DELETE FROM local_book_work;
+
 -- name: initialization_seed_library &
 INSERT OR IGNORE INTO sync_clock VALUES(1,0);
             INSERT OR IGNORE INTO sync_metadata(singleton) VALUES(1);

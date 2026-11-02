@@ -502,7 +502,7 @@ mod tests {
         let mut entry = json!({"page_url":"https://www.gutenberg.org/ebooks/1497", "page_file":"page.html", "file":"book.epub", "file_url":"https://www.gutenberg.org/ebooks/1497.epub.images", "downloads":28375, "listing_url":"https://www.gutenberg.org/ebooks/bookshelf/691?sort_order=downloads", "observed_at":"2026-10-12T12:00:00Z"});
         let path = dir.path().join("manifest.json");
         fs::write(&path, json!([entry.clone()]).to_string()).unwrap();
-        let http = Client::new();
+        let http = http_response::blocking_client_builder().build().unwrap();
         assert!(import(dir.path(), &db, &http, &path).is_err());
         assert_eq!(db.query_row("SELECT count(*) FROM source_entry", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         entry["file_url"] = json!("https://www.gutenberg.org/ebooks/1497.epub3.images");
@@ -586,7 +586,7 @@ mod tests {
         record.book.subjects.push(BookSubject::new(None, "Curated subject", "manual:subject", None, None).unwrap());
         curation::set_record(&db, &hash, &record).unwrap();
         let metadata = page_metadata(BIBREC).unwrap();
-        let http = Client::new();
+        let http = http_response::blocking_client_builder().build().unwrap();
         for _ in 0..2 {
             assert_eq!(store_book(dir.path(), &db, &http, bytes, "book.epub", Vec::new(), None, Some(&metadata)).unwrap(), hash);
         }

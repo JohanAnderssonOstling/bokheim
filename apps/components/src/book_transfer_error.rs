@@ -5,18 +5,20 @@ use operation_failure::Failure;
 
 pub fn book_transfer_error_message(failure: Option<Failure>) -> &'static str {
     match failure {
-        Some(Failure::DrmProtected) => "This file is not supported. Bokheim cannot read DRM-protected downloads.",
-        Some(Failure::StorageFull) => "There isn't enough free space to save this book. Free up some space on the device or drive that holds your library, then try again.",
-        Some(Failure::ReadOnlyStorage) => "Your library is read-only. Choose a writable library location or allow changes to it, then try again.",
-        Some(Failure::PermissionDenied) => "Bokheim can't save files in your library. Check the folder's permissions or choose another library location, then try again.",
-        Some(Failure::NotFound) => "This book is no longer available at its download link. Try another edition or check the source website.",
-        Some(Failure::Unauthorized | Failure::SignInRequired | Failure::CatalogCredentialsRejected) => "The source requires you to sign in. Sign in to the catalog, then try again.",
-        Some(Failure::Forbidden) => "The source is blocking this download. Try downloading from its website or choose another edition.",
-        Some(Failure::RateLimited | Failure::ServiceUnavailable) => "The download service is temporarily unavailable. Please try again later.",
-        Some(Failure::TimedOut) => "The download took too long. Check your internet connection, then try again.",
-        Some(Failure::Offline) => "The download couldn't finish. Check your internet connection, then try again.",
-        Some(Failure::UnreadableBook | Failure::NotACatalog) => "This book's file couldn't be opened. Try downloading it again or choose another edition.",
-        Some(Failure::LibraryFolderUnavailable) => "The library folder isn't available. Reconnect its drive or choose an available library, then try again.",
-        _ => "The book couldn't be downloaded or saved. Please try again. If it keeps failing, try another edition.",
+        Some(Failure::DrmProtected) => "DRM-protected downloads aren't supported.",
+        Some(Failure::StorageFull) => "Not enough storage to save this book. Free up space on the library's device or drive, then retry.",
+        Some(Failure::CloudStorageFull) => "Cloud storage is full. Free up account space and retry. Your local books are kept.",
+        Some(Failure::ReadOnlyStorage) => "Your library is read-only. Allow changes or choose a writable library folder.",
+        Some(Failure::PermissionDenied) => "Couldn't save to your library. Check its folder permissions or choose another library.",
+        Some(Failure::NotFound) => "The download link is no longer available. Try another edition or the source website.",
+        Some(Failure::Unauthorized | Failure::SignInRequired | Failure::CatalogCredentialsRejected) => "Sign in to the catalog, then retry the download.",
+        Some(Failure::Forbidden) => "The source blocked this download. Try its website or another edition.",
+        Some(Failure::RateLimited | Failure::ServiceUnavailable) => "Download service unavailable. Try again later.",
+        Some(Failure::TimedOut) => "Download timed out. Check your internet connection and retry.",
+        Some(Failure::Offline) => "Download couldn't finish. Check your internet connection and retry.",
+        Some(Failure::UnreadableBook | Failure::NotACatalog) => "Couldn't open the book file. Download it again or try another edition.",
+        Some(Failure::LibraryFolderUnavailable) => "Library folder unavailable. Reconnect its drive or choose another library.",
+        Some(Failure::ClientUpgradeRequired) => "This client and server are incompatible. Reload the web app or check for app updates, then retry. If it persists, report the problem.",
+        _ => "Couldn't download or save the book. Retry or try another edition.",
     }
 }

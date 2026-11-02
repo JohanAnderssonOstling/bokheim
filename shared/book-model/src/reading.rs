@@ -1,6 +1,10 @@
 use std::error::Error;
 use std::fmt;
 
+/// Storage envelope, never part of the interoperable CFI itself. Untagged
+/// saved locations predate publication addressing and use renderer indices.
+pub const PUBLICATION_CFI_PREFIX: &str = "epub-location-v2:";
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EpubCfi(String);
 
@@ -77,7 +81,7 @@ pub struct InvalidReadingPosition;
 
 impl ReadingPosition {
     pub fn parse(value: &str) -> Result<Self, InvalidReadingPosition> {
-        if valid_epub_cfi(value) {
+        if valid_epub_cfi(value.strip_prefix(PUBLICATION_CFI_PREFIX).unwrap_or(value)) {
             return Ok(Self::Epub(ReadingEpubCfi(value.to_owned())));
         }
         if let Some((page, full_page_position)) = parse_pdf_page_position(value) {
@@ -91,10 +95,14 @@ impl ReadingPosition {
         }
         if let Some(value) = value.strip_prefix("cbzpage(").and_then(|value| value.strip_suffix(')')) {
             let (page, offset) = value.split_once(',').unwrap_or((value, "0"));
-            if page.is_empty() || (page.len() > 1 && page.starts_with('0')) { return Err(InvalidReadingPosition); }
+            if page.is_empty() || (page.len() > 1 && page.starts_with('0')) {
+                return Err(InvalidReadingPosition);
+            }
             let page = page.parse().map_err(|_| InvalidReadingPosition)?;
             let full_page_position = offset.parse::<f32>().map_err(|_| InvalidReadingPosition)?;
-            if !full_page_position.is_finite() || !(0.0..=1.0).contains(&full_page_position) { return Err(InvalidReadingPosition); }
+            if !full_page_position.is_finite() || !(0.0..=1.0).contains(&full_page_position) {
+                return Err(InvalidReadingPosition);
+            }
             return Ok(Self::Cbz { page, full_page_position });
         }
         Err(InvalidReadingPosition)
@@ -112,8 +120,16 @@ impl ReadingPosition {
         Self::PdfAtPoint { page: page_index, full_page_position }
     }
 
-    pub const fn audiobook_millis(millis: u64) -> Self {
-        Self::Audiobook(millis)
+    /// The beginning of a book in `format`: where a book never opened is
+    /// placed when it is marked read. MOBI and FB2 open in the EPUB reader and keep its CFIs, whose
+    /// spine is the package's third child, so `/6/2` is its first item.
+    pub fn start(format: crate::BookFormat) -> Self {
+        match format {
+            crate::BookFormat::Epub | crate::BookFormat::Mobi | crate::BookFormat::Fb2 => Self::Epub(ReadingEpubCfi("epubcfi(/6/2)".to_owned())),
+            crate::BookFormat::Pdf => Self::Pdf(0),
+            crate::BookFormat::M4b | crate::BookFormat::Mp3Folder => Self::Audiobook(0),
+            crate::BookFormat::Cbz => Self::Cbz { page: 0, full_page_position: 0.0 },
+        }
     }
 
     pub fn as_str(&self) -> String {
@@ -128,7 +144,7 @@ impl ReadingPosition {
 
     pub fn epub_cfi_value(&self) -> Option<&str> {
         match self {
-            Self::Epub(cfi) => Some(&cfi.0),
+            Self::Epub(cfi) => Some(cfi.0.strip_prefix(PUBLICATION_CFI_PREFIX).unwrap_or(&cfi.0)),
             _ => None,
         }
     }
@@ -333,6 +349,20 @@ impl Error for InvalidReadProgress {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn publication_cfi_storage_version_is_separate_from_the_address() {
+        use super::{PUBLICATION_CFI_PREFIX, ReadingPosition};
+        let cfi = "epubcfi(/8[spine]/6[chapter]!/4/2/1:3)";
+        let stored = format!("{PUBLICATION_CFI_PREFIX}{cfi}");
+        let value = ReadingPosition::parse(&stored).unwrap();
+        assert_eq!(value.epub_cfi_value(), Some(cfi));
+        assert_eq!(value.as_str(), stored);
+        let bytes = wire::encode(&value).unwrap();
+        let decoded: ReadingPosition = wire::decode(&bytes, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+        assert_eq!(decoded, value);
+        assert_ne!(ReadingPosition::parse(cfi).unwrap(), value);
+        assert!(ReadingPosition::parse(&format!("{PUBLICATION_CFI_PREFIX}bad")).is_err());
+    }
     use super::*;
 
     #[test]
@@ -340,7 +370,9 @@ mod tests {
         let position = ReadingPosition::Cbz { page: 12, full_page_position: 0.375 };
         assert_eq!(ReadingPosition::parse(&position.as_str()).unwrap(), position);
         assert_eq!(ReadingPosition::parse("cbzpage(0)").unwrap().as_str(), "cbzpage(0,0)");
-        for value in ["cbzpage(-1)", "cbzpage(01)", "cbzpage(1,NaN)", "cbzpage(1,inf)", "cbzpage(1,-0.1)", "cbzpage(1,1.1)", "cbzpage(1,0,0)"] { assert!(ReadingPosition::parse(value).is_err(), "{value}"); }
+        for value in ["cbzpage(-1)", "cbzpage(01)", "cbzpage(1,NaN)", "cbzpage(1,inf)", "cbzpage(1,-0.1)", "cbzpage(1,1.1)", "cbzpage(1,0,0)"] {
+            assert!(ReadingPosition::parse(value).is_err(), "{value}");
+        }
     }
 
     #[test]
@@ -351,6 +383,4 @@ mod tests {
         assert!(EpubCfi::parse("epubcfi(/6/4[open)").is_err());
         assert!(EpubCfi::parse(" epubcfi(/6/4)").is_err());
     }
-
-
 }

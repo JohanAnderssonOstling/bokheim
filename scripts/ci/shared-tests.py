@@ -2,6 +2,7 @@
 """Run shared release tests off hosted runners; optionally attest the exact commit."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -11,20 +12,21 @@ CONTEXT = 'bokheim/shared-tests-v1'
 
 
 def commands():
-    packages = ['account-client', 'book-access', 'library-enrichment', 'book-model',
+    packages = ['account-client', 'book-access', 'dictionary-catalog', 'dictionary', 'library-enrichment', 'book-model',
                 'library-files', 'asset-transfer', 'client-platform-runtime',
                 'client-runtime', 'client-platform-android', 'client-platform-kobo', 'library-sync', 'library-database',
                 'library-replica', 'library-backend', 'subject-projection',
                 'kobo-profile', 'kobo-device', 'kobo-package', 'kobo-update']
     return [
         ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/ci/tests'],
+        ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/dictionaries'],
         ['python3', '-m', 'unittest', 'discover', '-s', 'apps/desktop-gpui/scripts/tests'],
         ['cargo', 'test', '--release', '--no-default-features', '--manifest-path', 'apps/kobo-installer/Cargo.toml', '--lib'],
         ['python3', 'shared/pdfium/prepare.py', '--target', 'x86_64-unknown-linux-gnu'],
         ['cargo', 'test', '--release', '--manifest-path', '../GPUI-Fork/crates/gpui_kobo/Cargo.toml', '--target-dir', 'target', '--lib'],
         ['cargo', 'build', '--release', '-p', 'desktop-gpui', '--no-default-features', '--features', 'kobo', '--bin', 'desktop-gpui-kobo'],
         ['python3', 'apps/desktop-gpui/scripts/test-kobo-profiles.py'],
-        ['cargo', 'test', '--release', '--no-fail-fast', *sum((['-p', p] for p in packages), [])],
+        ['cargo', 'test', '--release', '--no-fail-fast', '--features', 'dictionary/store', *sum((['-p', p] for p in packages), [])],
         ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-protocol', '-p', 'update-client', '--features', 'update-client/native-state'],
         ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-publisher'],
         ['bash', 'client/app/tests/run_sync_e2e.sh'],
@@ -68,9 +70,13 @@ def main():
         report(args.report, sha, 'pending')
     try:
         failures = []
+        environment = os.environ.copy()
+        # Integration executables use the linked PDF core without cfg(test).
+        environment.setdefault('BOKHEIM_PDFIUM_LIBRARY_PATH',
+                               str(ROOT / '.pdfium/x86_64-unknown-linux-gnu/libpdfium.so'))
         for command in commands():
             print('+ ' + ' '.join(command), flush=True)
-            result = subprocess.run(command, cwd=ROOT)
+            result = subprocess.run(command, cwd=ROOT, env=environment)
             if result.returncode:
                 if 'shared/pdfium/prepare.py' in command:
                     raise subprocess.CalledProcessError(result.returncode, command)

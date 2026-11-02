@@ -5,20 +5,21 @@ edition = "2021"
 publish = false
 
 [dependencies]
+http-response = { workspace = true }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 client-runtime = { path = "../../../client-runtime", features = ["http"] }
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 content-address = { path = "../../../../shared/content-address" }
-cpu-host = { path = "../cpu-host" }
 thumbnail = { path = "../thumbnail" }
 library-database = { path = "../library-database" }
 library-model = { path = "../../../library-model" }
-reqwest = { workspace = true, default-features = false, features = ["stream"] }
+reqwest = { workspace = true, features = ["stream"] }
 futures-util = "0.3"
+log = "0.4"
 web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.40.0", features = ["bundled"] }

@@ -7,8 +7,10 @@ use crate::annotations::{IndexSql as AnnotationsIndexSql, TablesSql as Annotatio
 use crate::assets::TablesSql as AssetsTablesSql;
 use crate::native::{IndexSql as NativeIndexSql, TablesSql as NativeTablesSql};
 use crate::placements::{IndexSql as PlacementsIndexSql, TablesSql as PlacementsTablesSql};
+use crate::query_methods::{first_column, query_rows};
 use crate::shared_sql::SharedSql;
 use crate::sync::{IndexSql as SyncIndexSql, TablesSql as SyncTablesSql};
+use book_model::BookFormat;
 use client_platform_runtime::startup_profile::StartupProfile;
 use std::cell::RefCell;
 use std::error::Error;
@@ -20,11 +22,13 @@ pub(crate) mod contributors;
 pub(crate) mod purge;
 pub mod shared_sql;
 mod taxonomy_update;
-pub mod torrents;
 mod transactions;
+mod content_identity;
+mod opds;
+mod annotation_export;
 pub mod transfer;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 42;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 50;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -97,6 +101,8 @@ fn configure_library_connection(connection: &rusqlite::Connection) -> rusqlite::
     // A scan/import touches more statements than rusqlite's default cache can
     // hold. Keep its write and reconciliation statements hot between books.
     connection.set_prepared_statement_cache_capacity(128);
+    text_search::register(connection)?;
+    description_storage::register(connection)?;
     connection.busy_timeout(std::time::Duration::from_secs(30))?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     profile.mark("foreign_keys");
@@ -107,9 +113,9 @@ fn configure_library_connection(connection: &rusqlite::Connection) -> rusqlite::
     attach_taxonomy(connection).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     profile.mark("taxonomy_attach");
     // Each schema has its own page cache. Set the KiB target after attaching
-    // or deserializing the taxonomy so every storage path gets the same policy.
+    // the taxonomy so every storage path gets the same policy.
     for schema in ["main", "curated"] {
-        connection.pragma_update(Some(schema), "cache_size", -512)?;
+        connection.pragma_update(Some(schema), "cache_size", -subject_projection::installed::PAGE_CACHE_KIB)?;
     }
     profile.mark("cache_policy");
     Ok(())
@@ -124,33 +130,9 @@ fn attach_taxonomy(connection: &rusqlite::Connection) -> Result<(), DatabaseErro
     if attached {
         return Ok(());
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let path = subject_projection::installed::active_path().map(PathBuf::from).map(Ok).unwrap_or_else(subject_projection::bundled::path).map_err(DatabaseError::message)?;
-        let path = path.to_str().ok_or_else(|| DatabaseError::message("taxonomy path is not UTF-8"))?;
-        let mut encoded = String::with_capacity(path.len());
-        const HEX: &[u8; 16] = b"0123456789ABCDEF";
-        for byte in path.bytes() {
-            if byte.is_ascii_alphanumeric() || b"/-_.".contains(&byte) {
-                encoded.push(char::from(byte));
-            } else {
-                encoded.push('%');
-                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-                encoded.push(char::from(HEX[usize::from(byte & 15)]));
-            }
-        }
-        connection.taxonomy_attach(&format!("file:{encoded}?mode=ro&immutable=1"))?;
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        // The browser host activates a downloaded image before opening libraries.
-        let image = subject_projection::installed::active_image().ok_or_else(|| DatabaseError::message("no taxonomy has been installed"))?;
-        connection.taxonomy_attach(":memory:")?;
-        // SAFETY: this non-owning wrapper is confined to connection configuration;
-        // no statement is active and it cannot outlive or close the original handle.
-        let mut borrowed = unsafe { rusqlite::Connection::from_handle(connection.handle())? };
-        borrowed.deserialize_bytes("curated", image)?;
-    }
+    let path = subject_projection::installed::path().map_err(DatabaseError::message)?;
+    let uri = subject_projection::installed::read_only_uri(&path).map_err(DatabaseError::message)?;
+    connection.taxonomy_attach(&uri)?;
     Ok(())
 }
 
@@ -160,6 +142,7 @@ pub struct Database {
     subject_trees: RefCell<browse::subjects::tree::SubjectTrees>,
     browse_results: RefCell<browse::result::BrowseResults>,
     browse_facets: RefCell<browse::facets::Facets>,
+    text_index_usage: RefCell<Option<(i64, u64)>>,
 }
 
 impl fmt::Debug for Database {
@@ -170,6 +153,20 @@ impl fmt::Debug for Database {
 
 impl Database {
     pub fn initialize_library(&self) -> Result<sync_common::ReplicaId, DatabaseError> {
+        self.initialize_library_with_scope(None, true)
+    }
+
+    pub fn initialize_library_for(&self, library: sync_common::LibraryId) -> Result<sync_common::ReplicaId, DatabaseError> {
+        self.initialize_library_with_scope(Some(library), true)
+    }
+
+    /// Open a serving session without recomputing its subject projection.
+    /// Its maintenance worker refreshes assignments after the UI is ready.
+    pub fn initialize_library_for_deferred_taxonomy(&self, library: sync_common::LibraryId) -> Result<sync_common::ReplicaId, DatabaseError> {
+        self.initialize_library_with_scope(Some(library), false)
+    }
+
+    fn initialize_library_with_scope(&self, library: Option<sync_common::LibraryId>, refresh_taxonomy: bool) -> Result<sync_common::ReplicaId, DatabaseError> {
         let mut profile = StartupProfile::new("library_database_init");
         // Database::open configured this connection before initialization.
         // Each committed schema and replica identity becomes visible with its
@@ -190,8 +187,33 @@ impl Database {
                 projection::backfill_popularity(&transaction)?;
             }
             if version < 41 { browse::revision::install(&transaction)?; }
-            transaction.execute_batch(include_str!("provider/schema.sql"))?;
-            transaction.execute_batch(include_str!("torrents.sql"))?;
+            if version < 44 {
+                transaction.execute_batch(include_str!("sync/sql/schema/contributor_names.sql"))?;
+                contributors::backfill_name_keys(&transaction)?;
+            }
+            transaction.execute_batch(include_str!("content_identity.sql"))?;
+            if version < 45 {
+                let has_checksum: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('book_transfer') WHERE name='upload_checksum')", [], |row| row.get(0))?;
+                if !has_checksum {
+                    transaction.execute_batch("ALTER TABLE book_transfer ADD COLUMN upload_checksum BLOB CHECK(upload_checksum IS NULL OR length(upload_checksum)=32)")?;
+                }
+                content_identity::backfill(&transaction)?;
+            }
+            transaction.execute_batch(include_str!("storage.sql"))?;
+            if version < 47 {
+                // Rebuild the search projection with indexed location ordering.
+                transaction.execute_batch("DROP TABLE IF EXISTS notebook_annotation")?;
+                notebook::install(&transaction)?;
+            }
+            if version < 48 {
+                transaction.execute_batch(include_str!("notebook/schema.sql"))?;
+            }
+            if version < 49 {
+                transaction.execute_batch(include_str!("sync/sql/schema/remove_torrents.sql"))?;
+            }
+            if version < 50 {
+                transaction.execute_batch(include_str!("sync/sql/schema/compress_descriptions.sql"))?;
+            }
             profile.mark("schema_and_migrations");
             // Rewriting the same version dirties the header and forces a write commit on every open.
             if version != VERSION {
@@ -204,12 +226,18 @@ impl Database {
             profile.mark("asset_views");
             transaction.initialization_reset_enrichment_policy()?;
             profile.mark("enrichment_policy");
+            // Older browser projections queued native file work that OPFS
+            // never replays. Release those gates while retaining imports,
+            // upload intents, thumbnail jobs and synchronization state.
+            #[cfg(target_arch = "wasm32")]
+            transaction.initialization_clear_browser_file_work()?;
             let raw: String = transaction.initialization_replica_id(|row| row.get(0))?;
             let replica_id = raw.parse().map_err(DatabaseError::operation)?;
+            content_identity::initialize_scope(&transaction, library, replica_id)?;
             profile.mark("replica_identity");
             transaction.commit()?;
             profile.mark("commit");
-            self.refresh_taxonomy_assignments()?;
+            if refresh_taxonomy { self.refresh_taxonomy_assignments()?; }
             profile.mark("taxonomy_refresh");
             return Ok(replica_id);
         }
@@ -224,15 +252,17 @@ impl Database {
         profile.mark("wal_initialize");
         let transaction = self.connection.unchecked_transaction()?;
         transaction.schema_sync_tables()?;
+        transaction.execute_batch(include_str!("sync/sql/schema/contributor_names.sql"))?;
         transaction.execute_batch(include_str!("sync/sql/schema/mutation_issues.sql"))?;
         transaction.schema_native_tables()?;
-        transaction.execute_batch(include_str!("torrents.sql"))?;
         transaction.schema_placements_tables()?;
         transaction.schema_placements_views()?;
         transaction.schema_assets_tables()?;
-        transaction.execute_batch(include_str!("provider/schema.sql"))?;
+        transaction.execute_batch(include_str!("content_identity.sql"))?;
+        transaction.execute_batch(include_str!("storage.sql"))?;
         transaction.schema_assets_views()?;
         transaction.schema_annotations_tables()?;
+        notebook::install(&transaction)?;
         // Initial singleton rows and the root directory belong to a new library.
         transaction.initialization_seed_library()?;
 
@@ -243,11 +273,12 @@ impl Database {
         browse::revision::install(&transaction)?;
         let replica_id = sync_common::ReplicaId::new_v4();
         transaction.owner_set_replica_id(&replica_id.to_string())?;
+        content_identity::initialize_scope(&transaction, library, replica_id)?;
         transaction.pragma_update(None, "user_version", VERSION)?;
         profile.mark("new_schema");
         transaction.commit()?;
         profile.mark("commit");
-        self.refresh_taxonomy_assignments()?;
+        if refresh_taxonomy { self.refresh_taxonomy_assignments()?; }
         profile.mark("taxonomy_refresh");
         Ok(replica_id)
     }
@@ -276,41 +307,32 @@ impl Database {
         if !self.connection.owner_sync_initialized(|row| row.get(0))? {
             return Ok(LibrarySyncDetails::default());
         }
-        let mut last_synced_at: Option<String> = None;
-        self.connection.shared_owner_last_successful_sync_at(|row| {
-            last_synced_at = row.get::<_, Option<String>>(0)?;
-            Ok(())
-        })?;
+        let last_synced_at = first_column::<Option<String>>(|read| self.connection.shared_owner_last_successful_sync_at(read))?.flatten();
         let last_synced_at = last_synced_at.map(|value| value.parse().map_err(DatabaseError::operation)).transpose()?;
         Ok(LibrarySyncDetails { has_unsynced_changes: self.connection.owner_has_unsynced_changes(|row| row.get(0))?, last_synced_at, issues: self.sync_issue_summary()? })
     }
 
     pub fn set_asset_storage_policy(&self, enabled: bool, reset_cloud_presence: bool) -> Result<(), DatabaseError> {
         use sync_common::storage::LibraryStorage;
-        let storage = match self.storage_policy()? {
-            LibraryStorage::External(root) if !enabled => LibraryStorage::External(root),
-            LibraryStorage::External(_) => return Err(DatabaseError::message("external libraries cannot use Bokheim file storage")),
-            _ => if enabled { LibraryStorage::Bokheim } else { LibraryStorage::Local },
-        };
+        let storage = if enabled { LibraryStorage::Bokheim } else { LibraryStorage::Local };
         self.set_storage_policy(&storage, reset_cloud_presence)
     }
 
     pub fn set_storage_policy(&self, storage: &sync_common::storage::LibraryStorage, reset_cloud_presence: bool) -> Result<(), DatabaseError> {
+        use rusqlite::OptionalExtension;
         let enabled = if storage.uses_bokheim_assets() { "1" } else { "0" };
         let json = serde_json::to_string(storage).map_err(DatabaseError::operation)?;
         self.write(|transaction| {
             if reset_cloud_presence {
                 transaction.owner_reset_remote_books()?;
-                let mut candidates = Vec::new();
-                transaction.owner_cloud_storage_candidates(|row| {
-                    candidates.push((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?));
-                    Ok(())
-                })?;
+                let candidates = query_rows(|read| transaction.owner_cloud_storage_candidates(read), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))?;
                 let mut folders = placements::FolderPaths::new(transaction);
                 let mut queued = std::collections::HashSet::new();
                 for (content_hash, dir_id, size_bytes) in candidates {
                     if !queued.contains(&content_hash) && folders.folder(&dir_id)?.is_some() {
                         transaction.owner_queue_book_upload(&content_hash, size_bytes)?;
+                        let checksum = content_identity::expected_hash(transaction, content_hash)?.or(transaction.query_row("SELECT byte_hash FROM local_file_content WHERE book_id=?1 AND dir_id=?2", rusqlite::params![content_hash,dir_id], |row| row.get::<_,content_address::ContentHash>(0)).optional()?).or_else(|| content_hash.content_hash());
+                        transaction.execute("UPDATE book_transfer SET upload_checksum=?2 WHERE content_hash=?1 AND upload_id IS NOT NULL", rusqlite::params![content_hash,checksum])?;
                         queued.insert(content_hash);
                     }
                 }
@@ -322,13 +344,9 @@ impl Database {
         })
     }
 
-    pub fn book_format(&self, hash: &sync_common::BookId) -> Result<Option<book_model::BookFormat>, DatabaseError> {
-        let mut format = None;
-        self.connection.shared_book_format(hash, |row| {
-            format = Some(row.get::<_, Option<i64>>(0)?);
-            Ok(())
-        })?;
-        format.map(|format| format.and_then(book_model::BookFormat::from_code).ok_or_else(|| DatabaseError::message("book has no known format"))).transpose()
+    pub fn book_format(&self, hash: &BookId) -> Result<Option<BookFormat>, DatabaseError> {
+        let format = first_column::<Option<i64>>(|read| self.connection.shared_book_format(hash, read))?;
+        format.map(|format| format.and_then(BookFormat::from_code).ok_or_else(|| DatabaseError::message("book has no known format"))).transpose()
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
@@ -338,7 +356,7 @@ impl Database {
         profile.mark("sqlite_open");
         configure_library_connection(&connection).map_err(DatabaseError::operation)?;
         profile.mark("connection_configure");
-        Ok(Self { connection, path, subject_trees: Default::default(), browse_results: Default::default(), browse_facets: Default::default() })
+        Ok(Self { connection, path, subject_trees: Default::default(), browse_results: Default::default(), browse_facets: Default::default(), text_index_usage: Default::default() })
     }
 
     /// Filesystem location of this library, so detached transfer drivers can
@@ -352,6 +370,8 @@ impl Database {
 include_sql!("src/sql/owner.sql");
 
 mod annotations;
+mod notebook;
+mod stored_document;
 pub mod assets;
 pub(crate) mod books;
 pub mod browse;
@@ -361,7 +381,7 @@ mod import;
 pub mod native;
 pub(crate) mod placements;
 mod projection;
-pub mod provider;
+mod storage;
 pub(crate) mod sync;
 pub mod sync_status;
 
@@ -437,3 +457,5 @@ mod sql_fixtures {
 }
 
 pub use query_methods::SqlParam;
+
+pub mod text_search;

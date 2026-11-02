@@ -33,14 +33,22 @@ impl CommandTarget<NextPage> for PdfReaderView {
 impl CommandTarget<PreviousLine> for PdfReaderView {
     fn execute(&mut self, _: &PreviousLine, window: &mut Window, cx: &mut Context<Self>) {
         self.chrome.hide_for_motion(window, cx);
-        self.pdf.update(cx, |pdf, cx| pdf.previous_item(cx));
+        self.pdf.update(cx, |pdf, cx| {
+            if !pdf.step_reading_ruler(false, cx) {
+                pdf.previous_item(cx);
+            }
+        });
     }
 }
 
 impl CommandTarget<NextLine> for PdfReaderView {
     fn execute(&mut self, _: &NextLine, window: &mut Window, cx: &mut Context<Self>) {
         self.chrome.hide_for_motion(window, cx);
-        self.pdf.update(cx, |pdf, cx| pdf.next_item(cx));
+        self.pdf.update(cx, |pdf, cx| {
+            if !pdf.step_reading_ruler(true, cx) {
+                pdf.next_item(cx);
+            }
+        });
     }
 }
 
@@ -93,12 +101,20 @@ impl PdfReaderView {
     }
 
     pub(crate) fn native_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dictionary.take().is_some() {
+            self.pdf.update(cx, |pdf, cx| pdf.clear_text_selection(cx));
+            self.focus_document(window, cx);
+            cx.notify();
+            return;
+        }
         if self.context_sheet.take().is_some() {
             cx.notify();
         } else if self.marks.selected().is_some() {
             self.dismiss_annotation_editor(window, cx);
         } else if self.sidebar.is_visible() && self.chrome.is_visible() {
             self.hide_sidebar(window, cx);
+        } else if self.history.availability().0 {
+            self.navigate_history(false, window, cx);
         } else {
             self.close_reader(window, cx);
         }

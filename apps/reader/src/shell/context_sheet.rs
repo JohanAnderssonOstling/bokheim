@@ -1,13 +1,23 @@
 //! Context actions shared by desktop popup menus and mobile bottom sheets.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, Window, div};
+use gpui::{AnyElement, Context, Entity, Window, div, px};
+use gpui_component::Icon;
 use gpui_component::menu::PopupMenu;
 use ui_components as components;
 
 pub(crate) struct ContextAction<A> {
     pub(crate) label: &'static str,
+    pub(crate) icon: &'static str,
     pub(crate) command: A,
+}
+
+pub(crate) struct SelectionCommands<A> {
+    pub(crate) annotate: A,
+    pub(crate) lookup: Option<A>,
+    pub(crate) translate: A,
+    pub(crate) copy: A,
+    pub(crate) copy_link: A,
 }
 
 pub(crate) trait ContextActionTarget: Sized + 'static {
@@ -28,6 +38,21 @@ impl<A> Default for ContextActions<A> {
 }
 
 impl<A: Clone + 'static> ContextActions<A> {
+    pub(crate) fn selection(commands: SelectionCommands<A>) -> Self {
+        let mut actions = Self::default();
+        let mut selection = vec![ContextAction { label: "Annotate", icon: "icons/replace.svg", command: commands.annotate }];
+        if let Some(command) = commands.lookup {
+            selection.push(ContextAction { label: "Lookup", icon: "icons/search.svg", command });
+        }
+        selection.extend([
+            ContextAction { label: "Translate", icon: "icons/translate.svg", command: commands.translate },
+            ContextAction { label: "Copy", icon: "icons/copy.svg", command: commands.copy },
+            ContextAction { label: "Copy link", icon: "icons/link-simple.svg", command: commands.copy_link },
+        ]);
+        actions.add_section(selection);
+        actions
+    }
+
     pub(crate) fn add_section(&mut self, actions: Vec<ContextAction<A>>) {
         if !actions.is_empty() {
             self.sections.push(actions);
@@ -46,7 +71,7 @@ impl<A: Clone + 'static> ContextActions<A> {
             for action in section {
                 let command = action.command.clone();
                 let target = target.clone();
-                menu = menu.item(components::menu_item(action.label, move |_, window, cx| {
+                menu = menu.item(components::menu_item_with_icon(action.label, Icon::empty().path(action.icon), move |_, window, cx| {
                     target.update(cx, |reader, cx| reader.run_context_action(command.clone(), window, cx));
                 }));
             }
@@ -63,7 +88,8 @@ impl<A: Clone + 'static> ContextActions<A> {
             for (action_index, action) in section.iter().enumerate() {
                 let command = action.command.clone();
                 let target = target.clone();
-                rows = rows.child(components::bottom_sheet_row(("reader-context-action", section_index * 10 + action_index), action.label, false, theme).on_click(move |_, window, cx| {
+                let label = div().flex().items_center().gap(px(12.0)).child(Icon::empty().path(action.icon).size(px(20.0))).child(div().flex_1().min_w_0().child(action.label));
+                rows = rows.child(components::bottom_sheet_row(("reader-context-action", section_index * 10 + action_index), label, false, theme).on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     target.update(cx, |reader, cx| {
                         reader.dismiss_context_actions(cx);
@@ -77,7 +103,7 @@ impl<A: Clone + 'static> ContextActions<A> {
             .child(components::modal_scrim("reader-context-sheet-scrim", theme).on_click(move |_, _, cx| {
                 target.update(cx, |reader, cx| reader.dismiss_context_actions(cx));
             }))
-            .child(components::bottom_sheet_surface(theme).id("reader-context-sheet").child(components::bottom_sheet_header("Actions", theme)).child(rows).pb(safe_bottom))
+            .child(components::bottom_sheet_surface(theme).id("reader-context-sheet").child(rows).pb(safe_bottom))
             .into_any_element()
     }
 }

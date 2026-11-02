@@ -11,6 +11,7 @@
 //! ```
 
 use quick_xml::events::{BytesStart, Event};
+use quick_xml::{XmlVersion, escape::resolve_xml_entity};
 use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,7 +101,7 @@ fn package_path(archive: &mut ZipArchive<File>) -> Result<String, Box<dyn Error>
     let mut container = String::new();
     archive.by_name("META-INF/container.xml")?.read_to_string(&mut container)?;
     let mut reader = quick_xml::Reader::from_str(&container);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     loop {
         match reader.read_event_into(&mut buffer)? {
@@ -118,7 +119,7 @@ fn package_path(archive: &mut ZipArchive<File>) -> Result<String, Box<dyn Error>
 
 fn parse_package_terms(package: &str) -> Result<Vec<DeclaredTerm>, Box<dyn Error>> {
     let mut reader = quick_xml::Reader::from_str(package);
-    reader.trim_text(false);
+    reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut in_metadata = false;
     let mut capture = None;
@@ -143,7 +144,12 @@ fn parse_package_terms(package: &str) -> Result<Vec<DeclaredTerm>, Box<dyn Error
             }
             Event::Text(text) => {
                 if let Some(capture) = &mut capture {
-                    append_capture(capture, &text.unescape().map(|value| value.into_owned()).unwrap_or_default());
+                    append_capture(capture, &text.decode().map(|value| value.into_owned()).unwrap_or_default());
+                }
+            }
+            Event::GeneralRef(text) => {
+                if let Some(capture) = &mut capture {
+                    append_capture(capture, &quick_xml::escape::unescape_with(&format!("&{};", text.decode().unwrap_or_default()), quick_xml::escape::resolve_xml_entity).map(|value| value.into_owned()).unwrap_or_default());
                 }
             }
             Event::CData(text) => {
@@ -278,7 +284,7 @@ fn record_terms(path: &Path, terms: Vec<DeclaredTerm>, report: &mut ProbeReport)
 }
 
 fn attribute(element: &BytesStart<'_>, wanted: &[u8]) -> Option<String> {
-    element.attributes().flatten().find(|attribute| local_name(attribute.key.as_ref()) == wanted).and_then(|attribute| attribute.unescape_value().ok().map(|value| value.into_owned()))
+    element.attributes().flatten().find(|attribute| local_name(attribute.key.as_ref()) == wanted).and_then(|attribute| attribute.normalized_value_with(XmlVersion::Implicit1_0, 1, resolve_xml_entity).ok().map(|value| value.into_owned()))
 }
 
 fn local_name(name: &[u8]) -> &[u8] {

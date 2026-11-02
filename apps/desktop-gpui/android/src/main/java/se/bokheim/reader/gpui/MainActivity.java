@@ -45,6 +45,10 @@ public final class MainActivity extends GameActivity {
         return BuildConfig.PLAY_STORE;
     }
 
+    public static boolean isSelfUpdateEnabled() {
+        return !BuildConfig.PLAY_STORE && !BuildConfig.FDROID;
+    }
+
     public static String taxonomyFile(android.content.Context context) throws IOException {
         return TaxonomyAssets.prepare(context).getAbsolutePath();
     }
@@ -124,7 +128,7 @@ public final class MainActivity extends GameActivity {
                     org.json.JSONArray palette = message.getJSONArray("colors");
                     int[] colors = new int[9];
                     for (int i = 0; i < colors.length; i++) colors[i] = (int) palette.getLong(i);
-                    accountDialog = new AccountDialog(this, id, message.getInt("minimum"), colors, (session, request) -> {
+                    accountDialog = new AccountDialog(this, id, message.getInt("minimum"), message.getInt("resendCooldownSeconds"), colors, (session, request) -> {
                         nativeAuthenticationRequest(session, request);
                         try {
                             if (new org.json.JSONObject(request).getString("action").equals("closed") && accountDialog != null && accountDialog.sessionId == session) accountDialog = null;
@@ -157,7 +161,7 @@ public final class MainActivity extends GameActivity {
      * explicit Settings action; installer return codes never prove activation.
      */
     public static String updateCommand(android.content.Context context, String encoded) throws Exception {
-        if (isPlayStoreBuild()) throw new UnsupportedOperationException("Application updates are managed by Google Play");
+        if (!isSelfUpdateEnabled()) throw new UnsupportedOperationException("Application updates are managed by the distribution channel");
         org.json.JSONObject request = new org.json.JSONObject(encoded);
         String action = request.getString("action");
         if (action.equals("prepare")) {
@@ -244,6 +248,7 @@ public final class MainActivity extends GameActivity {
     private native void nativeSelectedDirectoryLocalRoot(long requestId, String path);
     private native void nativeStorageAccessChanged(boolean granted, String documentsLibraryRoot);
     private native void nativeOpenBook(String name, int fileDescriptor);
+    private native void nativeOpenReaderLink(String url);
     static native void nativeNetworkCostChanged(int cost);
     static void startNetworkCostMonitor(android.content.Context context) { NetworkCostMonitor.start(context); }
     private native void nativeVolumeButton(boolean next);
@@ -307,6 +312,7 @@ public final class MainActivity extends GameActivity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        suppressReaderChromeReveal();
         applyKeepScreenAwake();
         boolean granted = AllFilesAccess.isGranted();
         if (publishedStorageAccess == null || publishedStorageAccess != granted) {
@@ -323,6 +329,10 @@ public final class MainActivity extends GameActivity {
         Uri uri = intent.getData();
         intent.setAction(null);
         intent.setData(null);
+        if ("bokheim".equals(uri.getScheme())) {
+            nativeOpenReaderLink(uri.toString());
+            return;
+        }
         fileExecutor.execute(() -> {
             try {
                 String name = queryDisplayName(uri);
@@ -388,6 +398,10 @@ public final class MainActivity extends GameActivity {
         promptForPlaybackBatteryAccess(command, "load");
     }
 
+    public static String localSpeechCommand(android.content.Context context, String command) {
+        return DeviceSpeech.dispatch(context.getApplicationContext(), command);
+    }
+
     public static void speechCommand(android.content.Context context, String command) {
         SpeechService.dispatch(context, command);
         promptForPlaybackBatteryAccess(command, "start");
@@ -419,8 +433,7 @@ public final class MainActivity extends GameActivity {
             // A visibility transition requested by the reader can itself
             // produce a system-bar animation. Do not interpret that animation
             // (or an immediate follow-up) as the user's edge-swipe reveal.
-            suppressReaderChromeRevealUntil = android.os.SystemClock.uptimeMillis() + 400;
-            immersiveBarsHidden = false;
+            suppressReaderChromeReveal();
         }
         systemBarsVisible = visible;
         applySystemBarsVisibility();
@@ -434,6 +447,7 @@ public final class MainActivity extends GameActivity {
     @Override
     protected void onPause() {
         resumed = false;
+        suppressReaderChromeReveal();
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         super.onPause();
     }
@@ -456,6 +470,7 @@ public final class MainActivity extends GameActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        suppressReaderChromeReveal();
         if (hasFocus) {
             applySystemBarsVisibility();
         }
@@ -507,6 +522,11 @@ public final class MainActivity extends GameActivity {
         super.onDestroy();
     }
 
+    private void suppressReaderChromeReveal() {
+        immersiveBarsHidden = false;
+        suppressReaderChromeRevealUntil = android.os.SystemClock.uptimeMillis() + 400;
+    }
+
     private void applySystemBarsVisibility() {
         WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
         controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
@@ -533,6 +553,10 @@ public final class MainActivity extends GameActivity {
                     WindowInsetsAnimationCompat animation,
                     WindowInsetsAnimationCompat.BoundsCompat bounds
                 ) {
+                    if (!resumed || !decorView.hasWindowFocus()) {
+                        suppressReaderChromeReveal();
+                        return bounds;
+                    }
                     // Showing or dismissing the keyboard can animate the
                     // navigation bar too. That is not an edge-swipe request
                     // to reveal the reader's controls.
@@ -568,7 +592,8 @@ public final class MainActivity extends GameActivity {
     }
 
     private void publishWindowInsets(WindowInsetsCompat insets) {
-        if (!systemBarsVisible && !insets.isVisible(WindowInsetsCompat.Type.systemBars())) {
+        if (resumed && getWindow().getDecorView().hasWindowFocus()
+            && !systemBarsVisible && !insets.isVisible(WindowInsetsCompat.Type.systemBars())) {
             immersiveBarsHidden = true;
         }
         Insets safeArea = insets.getInsets(

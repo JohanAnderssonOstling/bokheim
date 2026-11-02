@@ -375,10 +375,18 @@ impl<S: Store> Coordinator<S> {
         self.record.approved.as_ref().is_some_and(|p| (p.phase == Phase::Ready || p.phase == Phase::Activating) && p.ready_session.as_deref().is_some_and(|ready| ready != self.session))
     }
 
-    /// Host calls this before opening libraries. Android must first verify the
-    /// required APK is installed; returning a plan never installs anything.
+    /// Reference snapshots can be prepared after startup without replacing
+    /// application code or any open library database.
+    pub fn is_taxonomy_only(&self) -> bool {
+        self.record.approved.as_ref().is_some_and(|plan| !plan.artifacts.is_empty() && plan.artifacts.iter().all(|artifact| artifact.kind == ArtifactKind::Taxonomy))
+    }
+
+    /// Application activation waits for a later launch. Reference-only work
+    /// may publish its next-start snapshot from the current background worker.
+    /// Android must verify the required APK is installed before code activation.
     pub fn begin_activation(&mut self) -> Result<Manifest, String> {
-        if !self.activation_due() {
+        let reference_ready = self.is_taxonomy_only() && self.record.approved.as_ref().is_some_and(|plan| matches!(plan.phase, Phase::Ready | Phase::Activating));
+        if !self.activation_due() && !reference_ready {
             return Err("update activation must wait for a later launch".into());
         }
         let manifest = self.approved_manifest()?;

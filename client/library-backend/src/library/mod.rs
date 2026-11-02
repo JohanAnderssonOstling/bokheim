@@ -3,15 +3,16 @@
 pub mod discovery;
 pub(crate) use library_runtime::events;
 
-mod annotations;
 mod browse;
 pub mod commands;
 mod directory;
-mod open;
 mod notifications;
+mod open;
 pub(crate) mod session;
 pub mod subscriptions;
 mod workers;
+#[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+mod watcher;
 pub use open::LibraryOpenConfig;
 pub mod handle;
 mod io;
@@ -19,15 +20,11 @@ pub(crate) mod jobs;
 mod pending;
 mod reading;
 mod resources;
-#[cfg(not(target_arch = "wasm32"))]
-mod cloud;
-#[cfg(not(target_arch = "wasm32"))]
-mod torrents;
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod transfer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use book_access::remote_file::AudioStreamControl;
 pub use book_access::remote_file::RemoteFile;
+pub use transfer::StorageCopyProgress;
 pub(crate) mod book;
 #[cfg(target_arch = "wasm32")]
 #[path = "../browser_audiobook.rs"]
@@ -38,21 +35,36 @@ mod playback;
 pub(crate) mod preparation;
 pub(crate) mod remote_access;
 
-
 pub use book::{AudiobookBook, DocumentBook, DocumentSource, ResolvedBook};
 #[cfg(target_arch = "wasm32")]
 pub use browser_audiobook::{BrowserAudiobook, PlaybackLease};
 pub use commands::{LibraryCommand, PendingCommand, ReadyCommand};
 pub use directory::LibraryDirectory;
-pub use notifications::LibraryNotifications;
 pub use handle::{LibraryHandle, LibrarySession};
 pub use io::{BookReader, BoxedBookReader, DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, ImportSource};
 pub use library_database::sync_status::{LibrarySyncState, LibrarySyncStatus};
 pub use library_database::LibraryBrowseData;
 pub use library_model::{BookDownloadStatus, DownloadProgress, DownloadProgressError, DownloadState};
+pub use notifications::LibraryNotifications;
 pub use playback::{DirectPlayback, PlaybackLocation, PlaybackSource};
 pub use resources::LibraryRuntimeSpec;
 
-
 #[cfg(target_arch = "wasm32")]
 pub use book::web_reader;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod annotation_export;
+#[cfg(not(target_arch = "wasm32"))]
+mod automatic_annotation_export;
+#[cfg(not(target_arch = "wasm32"))]
+mod reader_import;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod job_registry;
+
+mod text_search;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod opds;
+#[cfg(not(target_arch = "wasm32"))]
+pub use opds::OpdsLibrary;

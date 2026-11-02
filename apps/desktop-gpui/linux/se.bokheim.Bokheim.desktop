@@ -2,7 +2,8 @@
 Type=Application
 Name=Bokheim
 Comment=Read and organize your books
-Exec=bokheim
+Exec=bokheim %u
+MimeType=x-scheme-handler/bokheim;
 Icon=se.bokheim.Bokheim
 Terminal=false
 Categories=Office;Viewer;

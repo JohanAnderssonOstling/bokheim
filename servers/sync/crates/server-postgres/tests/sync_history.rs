@@ -67,7 +67,7 @@ async fn restored_history_rejects_old_cursors_even_after_passing_their_revision(
     sqlx::raw_sql("DELETE FROM sync_state; DELETE FROM sync_library_revision; SELECT setval('sync_server_sequence', 800);").execute(database.pool()).await.unwrap();
     let generation = rotate_sync_generation(&database).await.unwrap();
     assert_ne!(Some(generation), old.generation);
-    // More than one pull page, including new cells below the old checkpoint.
+    // More than the old 1,000-cell pull cap, including cells below the checkpoint.
     let new_count = 1_201;
     for start in (0..new_count).step_by(MAX_PUSH_MUTATIONS) {
         request.mutations = (start..(start + MAX_PUSH_MUTATIONS).min(new_count)).map(|index| publication(replica, index as u64 + 2, format!("new-{index:04}"))).collect();
@@ -93,17 +93,20 @@ async fn restored_history_rejects_old_cursors_even_after_passing_their_revision(
     request.cursor = SyncCursor::default();
     request.mutations.clear();
     let mut delivered = Vec::new();
+    let mut pages = 0;
     loop {
         let response = repository.exchange(user, &request).await.unwrap();
         sync_common::validate_pull_batch(&response.pull, request.cursor).unwrap();
         assert_eq!(response.pull.next_cursor.generation, Some(generation));
         request.cursor = response.pull.next_cursor;
         delivered.extend(response.pull.mutations);
+        pages += 1;
         if !response.pull.has_more {
             break;
         }
     }
     assert_eq!(delivered.len(), new_count);
+    assert_eq!(pages, 1, "small states must not split at an arbitrary change count");
     assert!(delivered.iter().any(|row| row.revision.get() <= old.field_revision.unwrap().get()), "recovery must include cells hidden behind the old checkpoint");
     assert!(delivered.iter().all(|row| row.state.version.changed_at == 1 && row.state.version.replica_id == replica));
     cleanup(database, admin, schema).await;
@@ -124,6 +127,7 @@ async fn generation_survives_startup_and_upgrades_and_migrates_existing_state() 
     assert_eq!(read().await, replacement);
 
     // Version 10 predates both the history singleton and storage providers.
+    remove_stable_content_schema(&database).await;
     sqlx::raw_sql("DROP TABLE sync_history; ALTER TABLE libraries DROP COLUMN storage_configuration; ALTER TABLE bokheim_schema_version DROP CONSTRAINT bokheim_schema_version_version_check; UPDATE bokheim_schema_version SET version=10; ALTER TABLE bokheim_schema_version ADD CONSTRAINT bokheim_schema_version_version_check CHECK(version=10);").execute(database.pool()).await.unwrap();
     sqlx::query("INSERT INTO users(id) VALUES('migration-user')").execute(database.pool()).await.unwrap();
     upgrade_existing(&database).await.unwrap();
@@ -133,4 +137,49 @@ async fn generation_survives_startup_and_upgrades_and_migrates_existing_state() 
     upgrade_existing(&database).await.unwrap();
     assert_eq!(read().await, migrated);
     cleanup(database, admin, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SYNC_E2E_DATABASE_URL"]
+async fn decimal_storage_quota_applies_to_new_and_existing_default_accounts() {
+    let (database, admin, schema) = test_database().await;
+    sqlx::query("INSERT INTO users(id) VALUES('default'), ('custom'), ('over-quota'), ('after-upgrade')").execute(database.pool()).await.unwrap();
+    let initial: i64 = sqlx::query_scalar("INSERT INTO user_storage_account(user_id) VALUES('default') RETURNING quota_bytes").fetch_one(database.pool()).await.unwrap();
+    assert_eq!(initial, 5_000_000_000);
+
+    remove_stable_content_schema(&database).await;
+    // Recreate the previous default and schema version, including an account
+    // whose stored files exceed the new allowance. Migration must retain its data.
+    sqlx::raw_sql(
+        "ALTER TABLE user_storage_account ALTER COLUMN quota_bytes SET DEFAULT 5368709120;
+         UPDATE user_storage_account SET quota_bytes=5368709120, used_bytes=100, reserved_bytes=20 WHERE user_id='default';
+         INSERT INTO user_storage_account(user_id, quota_bytes, used_bytes, reserved_bytes)
+             VALUES ('custom', 10000000000, 300, 40), ('over-quota', 5368709120, 5200000000, 50);
+         ALTER TABLE bokheim_schema_version DROP CONSTRAINT bokheim_schema_version_version_check;
+         UPDATE bokheim_schema_version SET version=12;
+         ALTER TABLE bokheim_schema_version ADD CONSTRAINT bokheim_schema_version_version_check CHECK(version=12);",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    assert!(verify_schema(&database).await.is_err());
+    upgrade_existing(&database).await.unwrap();
+    verify_schema(&database).await.unwrap();
+    let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as("SELECT user_id, quota_bytes, used_bytes, reserved_bytes FROM user_storage_account ORDER BY user_id").fetch_all(database.pool()).await.unwrap();
+    assert_eq!(rows, vec![("custom".into(), 10_000_000_000, 300, 40), ("default".into(), 5_000_000_000, 100, 20), ("over-quota".into(), 5_000_000_000, 5_200_000_000, 50)]);
+    let after_upgrade: i64 = sqlx::query_scalar("INSERT INTO user_storage_account(user_id) VALUES('after-upgrade') RETURNING quota_bytes").fetch_one(database.pool()).await.unwrap();
+    assert_eq!(after_upgrade, 5_000_000_000);
+
+    // An already upgraded database must not rewrite later quota customization.
+    sqlx::query("UPDATE user_storage_account SET quota_bytes=5368709120 WHERE user_id='custom'").execute(database.pool()).await.unwrap();
+    upgrade_existing(&database).await.unwrap();
+    let custom: i64 = sqlx::query_scalar("SELECT quota_bytes FROM user_storage_account WHERE user_id='custom'").fetch_one(database.pool()).await.unwrap();
+    assert_eq!(custom, 5_368_709_120);
+    cleanup(database, admin, schema).await;
+}
+
+// Downgrade the actual schema as well as its version when testing older migrations.
+async fn remove_stable_content_schema(database: &PostgresDatabase) {
+    sqlx::raw_sql("DROP TABLE user_canonical_charge; ALTER TABLE blob_object DROP COLUMN byte_checksum; DROP TABLE canonical_blob_object")
+        .execute(database.pool()).await.unwrap();
 }

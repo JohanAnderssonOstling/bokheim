@@ -16,13 +16,14 @@ use anyhow::{Result, bail};
 use app_preferences::ResolvedAppearance;
 use gpui::prelude::*;
 use gpui::{App, AppContext, Bounds, Context, Entity, Focusable, KeyDownEvent, MouseButton, Subscription, Window, WindowBounds, WindowOptions, canvas, deferred, div, px, rems, size};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use gpui::{MouseDownEvent, NavigationDirection};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt};
 use library_opds::browser::address::{PAGE_METADATA_SCRIPT, PageMetadata};
-use library_opds::browser::{BrowserFeedback, StoreEvent, StoreRequest, torrent_download};
+use library_opds::browser::{BrowserFeedback, StoreEvent, StoreRequest};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
-use reqwest_client::ReqwestClient;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -103,7 +104,7 @@ pub(crate) fn run() -> Result<()> {
             app_closed.store(true, Ordering::Relaxed);
         }
     })?;
-    gpui_platform::application().with_assets(ui_components::Assets).with_http_client(Arc::new(ReqwestClient::new())).run(move |cx: &mut App| {
+    gpui_platform::application().with_assets(ui_components::Assets).run(move |cx: &mut App| {
         gpui_component::init(cx);
         if let Err(error) = register_fonts(cx) {
             eprintln!("Could not register browser fonts: {error}");
@@ -226,20 +227,12 @@ impl Browser {
             .with_new_window_req_handler({
                 let sender = sender.clone();
                 move |url, _| {
-                    if url.starts_with("magnet:") {
-                        report(StoreEvent::Magnet { url });
-                        return NewWindowResponse::Deny;
-                    }
                     let _ = sender.send(Action::Open(url));
                     NewWindowResponse::Deny
                 }
             })
             .with_navigation_handler({
                 move |url| match Url::parse(&url) {
-                    Ok(url) if url.scheme() == "magnet" => {
-                        report(StoreEvent::Magnet { url: url.to_string() });
-                        false
-                    }
                     Ok(url) if !matches!(url.scheme(), "http" | "https" | "about" | "data" | "blob") => {
                         open_externally(&url);
                         false
@@ -511,7 +504,6 @@ impl Browser {
                 Action::Refused(path) => {
                     self.downloads.apply(
                         BrowserFeedback {
-                            replaces: None,
                             download: path.to_string_lossy().into_owned(),
                             name: download_name(&path),
                             phase: BrowserDownloadPhase::Failed(Some(Failure::DrmProtected)),
@@ -523,7 +515,7 @@ impl Browser {
                     );
                 }
                 Action::DownloadStarted(path) => {
-                    self.downloads.apply(BrowserFeedback { replaces: None, download: path.to_string_lossy().into_owned(), name: download_name(&path), phase: BrowserDownloadPhase::Downloading, percent: None, message: None }, window, cx);
+                    self.downloads.apply(BrowserFeedback { download: path.to_string_lossy().into_owned(), name: download_name(&path), phase: BrowserDownloadPhase::Downloading, percent: None, message: None }, window, cx);
                 }
                 #[cfg(target_os = "linux")]
                 Action::DownloadProgress { path, percent } => {
@@ -532,7 +524,7 @@ impl Browser {
                 Action::DownloadFinished { path, succeeded } => {
                     let id = path.to_string_lossy().into_owned();
                     self.downloads.apply(
-                        BrowserFeedback { replaces: None, download: id, name: download_name(&path), phase: if succeeded { BrowserDownloadPhase::Completed } else { BrowserDownloadPhase::Failed(None) }, percent: None, message: None },
+                        BrowserFeedback { download: id, name: download_name(&path), phase: if succeeded { BrowserDownloadPhase::Completed } else { BrowserDownloadPhase::Failed(None) }, percent: None, message: None },
                         window,
                         cx,
                     );
@@ -756,19 +748,19 @@ impl Render for Browser {
                     .px(px(SPACE_SM))
                     .h(px(controls_height(window)))
                     .child(
-                        outlined_icon_button("back", "Back", IconName::ArrowLeft, theme)
+                        outlined_icon_button("back", "Back", IconName::ArrowLeft)
                             .disabled(!self.navigation.0)
                             .when(!self.navigation.0, |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
                             .on_click(cx.listener(|browser, _, _, _| browser.navigate_history(false))),
                     )
                     .child(
-                        outlined_icon_button("forward", "Forward", IconName::ArrowRight, theme)
+                        outlined_icon_button("forward", "Forward", IconName::ArrowRight)
                             .disabled(!self.navigation.1)
                             .when(!self.navigation.1, |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
                             .on_click(cx.listener(|browser, _, _, _| browser.navigate_history(true))),
                     )
                     .child(
-                        outlined_icon_button("reload", "Reload", Icon::empty().path("icons/arrow-clockwise.svg"), theme)
+                        outlined_icon_button("reload", "Reload", Icon::empty().path("icons/arrow-clockwise.svg"))
                             .disabled(self.webview.is_none() || self.current_url == "about:blank")
                             .when(self.webview.is_none() || self.current_url == "about:blank", |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
                             .on_click(cx.listener(|browser, _, _, _| browser.reload())),
@@ -785,7 +777,34 @@ impl Render for Browser {
             self.notification_subscription = Some(cx.observe(&notifications, |_, _, cx| cx.notify()));
         }
         let visible = !notifications.read(cx).notifications().is_empty();
-        let mut content = div().relative().size_full().flex().flex_col().bg(theme.page_bg).child(toolbar).child(div().flex_1());
+        let content = div().relative().size_full().flex().flex_col().bg(theme.page_bg);
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        let content = content
+            .child(canvas(|_, _, _| (), |_, _, window, _| {
+                window.on_mouse_event(|event: &MouseDownEvent, phase, window, cx| {
+                    if phase.capture() && event.button == MouseButton::Navigate(NavigationDirection::Back)
+                        && Root::dismiss_active_overlay(window, cx)
+                    {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                });
+            }).absolute().size_full())
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Back), cx.listener(|browser, _, window, cx| {
+                if browser.navigation.0 {
+                    browser.navigate_history(false);
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Forward), cx.listener(|browser, _, window, cx| {
+                if browser.navigation.1 {
+                    browser.navigate_history(true);
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            }));
+        let mut content = content.child(toolbar).child(div().flex_1());
         if visible {
             let mut layer = div()
                 .id("browser-download-toasts")
@@ -995,24 +1014,11 @@ fn with_downloads<'a>(builder: WebViewBuilder<'a>, downloads: PathBuf, sender: S
             let _ = sender.send(Action::DownloadFinished { path, succeeded: false });
             return;
         }
-        if torrent_download(&path) {
-            let download = path.to_string_lossy().into_owned();
-            let _ = sender.send(Action::Feedback(BrowserFeedback {
-                replaces: None,
-                download: download.clone(),
-                name: download_name(&path),
-                phase: BrowserDownloadPhase::Preparing,
-                percent: None,
-                message: Some("Resolving torrent metadata".into()),
-            }));
-            report(StoreEvent::TorrentFile { path, download: Some(download) });
-            return;
-        }
         match book(&path) {
             Some(book) => {
                 let download = path.to_string_lossy().into_owned();
                 let _ =
-                    sender.send(Action::Feedback(BrowserFeedback { replaces: None, download: download.clone(), name: download_name(&book), phase: BrowserDownloadPhase::Preparing, percent: None, message: Some("Adding to library".into()) }));
+                    sender.send(Action::Feedback(BrowserFeedback { download: download.clone(), name: download_name(&book), phase: BrowserDownloadPhase::Preparing, percent: None, message: Some("Adding to library".into()) }));
                 report(StoreEvent::Downloaded { path: book, download: Some(download) });
             }
             None => {

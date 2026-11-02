@@ -63,8 +63,33 @@ pub enum Failure {
     DrmProtected,
     /// A book file is corrupt, empty, unsupported, or not what was expected.
     UnreadableBook,
+    /// The selected book could not supply an accessible file to the reader.
+    BookFileUnavailable,
+    /// Container headers or archive structure could not be opened.
+    InvalidBookContainer,
+    /// The container opened, but its reading content could not be decoded.
+    InvalidBookContent,
+    /// A chapter could not be prepared for display.
+    BookDocumentFailed,
+    /// Prepared content could not be attached to the platform renderer.
+    BookRendererFailed,
+    /// Reading state could not be loaded; the book itself may be intact.
+    ReadingPositionUnavailable,
     Wifi(WifiFailure),
+    /// The cloud storage account has no room for more files.
+    CloudStorageFull,
+    /// The service requires a different client protocol (HTTP 426).
+    ClientUpgradeRequired,
+    /// A new password exceeds the account service's maximum length.
+    PasswordTooLong,
 }
+
+// Origins can expose a classified cause without depending on the backend.
+// Diagnostics use the variant name; user-facing wording belongs to the UI.
+impl fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { write!(formatter, "{self:?}") }
+}
+impl std::error::Error for Failure {}
 
 impl Failure {
     /// The classification a service's HTTP status implies, if any.

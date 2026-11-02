@@ -1,20 +1,9 @@
 //! Decode database rows without masking malformed values.
 
+pub(crate) use crate::query_methods::parse_uuid_column;
+pub use crate::query_methods::{invalid_integer_column, invalid_text_column};
 pub(crate) use library_model::BookCardRow;
-use std::io::{Error, ErrorKind};
 pub(crate) use sync_common::BookId;
-
-pub fn invalid_text_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
-}
-
-pub fn invalid_integer_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Integer, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
-}
-
-pub(crate) fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<uuid::Uuid> {
-    uuid::Uuid::parse_str(&value).map_err(|error| invalid_text_column(column, error.to_string()))
-}
 
 pub(crate) fn read_book_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookCardRow> {
     let raw_content_hash: BookId = row.get("content_hash")?;

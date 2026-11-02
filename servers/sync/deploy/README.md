@@ -1,5 +1,94 @@
 # Public Internet deployment
 
+## Curated dictionary files
+
+Web dictionary downloads are public static files served by Caddy at
+`https://app.bokheim.se/dictionaries/<sha256>.zip`; they do not use the sync API.
+Before deploying a web release that adds dictionary editions, publish the
+catalog's archives on the deployment host from the matching source checkout:
+
+```sh
+python3 scripts/dictionaries/publish.py \
+  --output /srv/bokheim-updates/public/dictionaries
+python3 scripts/dictionaries/publish.py \
+  --output /srv/bokheim-updates/public/dictionaries --verify-only
+```
+
+Run as an account with write access to that persistent directory. Give Caddy
+read access to the files and traversal access to their parent directories. Keep
+this directory outside the rotating web release bundles. No API cache directory
+or dictionary environment variable is needed.
+
+The publisher reads `shared/dictionary-catalog/data/curated.json`, checks exact
+size and SHA-256 before publishing each file atomically, and preserves the
+original archive and its license/attribution notices. Repeated runs reverify and
+skip existing files. Corrupt existing files cause an error; investigate and
+remove that file before retrying. Interrupted downloads are not published.
+Older archives are retained so released clients can still download their pinned
+editions. `--id ID` can limit a diagnostic run; publish and verify the full
+catalog before a web release.
+
+Install the updated Caddyfile with the existing helper:
+
+```sh
+sudo servers/sync/deploy/install-caddy-config.sh
+```
+
+The `/dictionaries/*` handler precedes the SPA fallback, so absent files return
+404 rather than HTML. Archive URLs are immutable and allow cross-origin Fetch
+for development clients; production downloads use the web app's own origin.
+The client still verifies every download before installing it into browser
+storage. Dictionary downloads always require an explicit action in Settings.
+
+## Reuse hosted catalog books
+
+After deploying a server with catalog reuse support, opt in with:
+
+```sh
+sudo bash servers/sync/deploy/provision-catalog-storage.sh
+sudo systemctl restart bokheim-sync.service
+```
+
+The setup uses `/srv/bokheim-updates/public/catalog/books` as the trusted public
+source and `/srv/bokheim-updates/catalog-sync-pins` as a private retention
+directory. The existing sync assets can stay on their separate large-disk
+mount: hard links are made entirely on the catalog filesystem, so no book bytes
+are duplicated or moved. The pin directory is outside Caddy's public root and
+has mode 0700. Never expose it, or the private sync blob directory, through a
+public file-server route.
+
+The script grants the sync service the source-inode access Linux requires for
+protected hard links, while keeping catalog directory access read-only. Its
+default ACL covers normally created future catalog files. A publisher that
+resets file permissions/ACLs must preserve the `bokheim` ACL or run the setup
+again after publication. The service never modifies catalog book contents.
+
+The setup writes `/srv/bokheim-updates/sync-catalog.env`, which the production
+unit reads optionally. This file survives ordinary server deployments. The unit
+makes the common catalog ancestor one writable mount in its otherwise read-only
+namespace. Do not replace it with separate bind mounts for the book and pin
+directories: `link` rejects links across mount boundaries, even when both mounts
+have the same backing device. Startup probes a hosted file's hard-link
+permissions and fails clearly if the storage or sandbox setup prevents reuse.
+
+No client or database schema upgrade is needed for catalog reuse. The server
+returns the existing manifest `owned` result after atomically claiming and
+charging the verified public file. Existing uploaded duplicates are consolidated
+by the background asset collector. Per-account quotas and private-book access
+checks remain in force.
+
+Sync pull pages use a decoded-byte budget of 63.5 MiB, with 512 KiB reserved
+below the 64 MiB response ceiling. There is no independent pull change-count
+cap. Native and web clients share this budget and cursor validation.
+
+The Caddy configuration enables Zstandard/gzip for protobuf responses on the
+API host, browser API proxy, and metadata API. Its explicit media-type matcher
+includes `application/vnd.bokheim+protobuf`, which is outside the
+[default compression matcher](https://caddyserver.com/docs/caddyfile/directives/encode).
+The transferred size depends on the negotiated encoding; 4 MiB is not a strict
+compressed-page limit. Install the updated Caddy configuration as well as the
+coordinated client/server release to enable compression in production.
+
 ## Remote code deployment
 
 After the host has been prepared once with `install-server.sh`, deploy a new

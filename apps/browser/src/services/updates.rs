@@ -2,9 +2,11 @@
 //! only after its preparation and startup/installer lifecycle are available.
 use gpui::prelude::FluentBuilder;
 use gpui::{App, AppContext, Context, Div, ElementId, Entity, ParentElement, Styled, div, px};
-use gpui_component::{Disableable, IconName};
+use gpui_component::IconName;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use ui_components as components;
 pub use update_client::coordinator::{UpdateAction, UpdateView};
@@ -14,8 +16,9 @@ pub type UpdateActionHandler = Rc<dyn Fn(UpdateAction, &mut App)>;
 pub struct UpdateControls {
     pub(crate) view: UpdateView,
     pub(crate) action: UpdateActionHandler,
-    pub(crate) worker_failed: bool,
-    prompt: super::update_prompt::UpdatePromptState,
+    worker_failed: bool,
+    /// One availability prompt per shared launch, including across windows.
+    prompt_shown: bool,
     message: Option<String>,
     error: Option<String>,
     update_label: &'static str,
@@ -24,16 +27,15 @@ pub struct UpdateControls {
 
 impl UpdateControls {
     pub fn new(view: UpdateView, action: UpdateActionHandler) -> Self {
-        Self { view, action, worker_failed: false, prompt: Default::default(), message: None, error: None, update_label: "Update", install_label: "Install" }
+        Self { view, action, worker_failed: false, prompt_shown: false, message: None, error: None, update_label: "Update", install_label: "Install" }
     }
 
     pub(crate) fn take_available_prompt(&mut self) -> Option<UpdateActionHandler> {
-        self.prompt.take(matches!(self.view, UpdateView::Available)).then(|| self.action.clone())
-    }
-
-    pub fn work_failed(&mut self, cx: &mut Context<Self>) {
-        self.worker_failed = true;
-        cx.notify();
+        if !matches!(self.view, UpdateView::Available) || self.prompt_shown {
+            return None;
+        }
+        self.prompt_shown = true;
+        Some(self.action.clone())
     }
 
     /// Backend notifications must enter through the platform's normal UI event
@@ -61,7 +63,8 @@ impl UpdateControls {
             }
             UpdateEvent::Failed(error) => {
                 self.error = error;
-                self.work_failed(cx);
+                self.worker_failed = true;
+                cx.notify();
             }
         }
     }
@@ -89,7 +92,7 @@ pub fn bind_worker<H: Send + 'static>(
     mut work: impl FnMut(&mut H, Option<UpdateAction>, &PublishUpdate<'_>) -> Result<UpdateView, String> + Send + 'static, view: impl Fn(&H) -> UpdateView + Send + 'static, user_error: impl Fn(&str) -> Option<String> + Send + 'static,
     cx: &mut App,
 ) -> Entity<UpdateControls> {
-    let (actions, requests) = std::sync::mpsc::channel();
+    let (actions, requests) = async_channel::unbounded();
     let (events, received) = async_channel::unbounded();
     let controls = cx.new(|_| {
         UpdateControls::new(
@@ -101,26 +104,35 @@ pub fn bind_worker<H: Send + 'static>(
                     cx.set_restart_path(path.clone());
                     cx.restart();
                 } else {
-                    let _ = actions.send(action);
+                    let _ = actions.try_send(action);
                 }
             }),
         )
     });
+    let executor = cx.background_executor().clone();
     cx.spawn(async move |_| {
         let Some(mut host) = take_host() else { return };
-        let failure = events.clone();
-        if let Err(error) = std::thread::Builder::new().name("application-updates".into()).spawn(move || {
+        executor.spawn(async move {
             let publish = |event| events.try_send(event).map_err(|_| "update UI closed".to_owned());
-            let mut action = if automatic_check {
-                None
-            } else {
-                match requests.recv() {
-                    Ok(action) => Some(action),
-                    Err(_) => return,
-                }
-            };
+            let mut automatic = automatic_check;
             loop {
-                match work(&mut host, action, &publish) {
+                let action = if std::mem::take(&mut automatic) {
+                    None
+                } else {
+                    let Ok(action) = requests.recv().await else { break };
+                    Some(action)
+                };
+                // Waiting for actions holds no OS thread. Blocking update work
+                // runs serially on the shared background pool, away from the UI.
+                let result = match catch_unwind(AssertUnwindSafe(|| work(&mut host, action, &publish))) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        log::error!("update worker panicked");
+                        let _ = publish(UpdateEvent::Failed(Some("Update failed. Restart the application to retry.".into())));
+                        break;
+                    }
+                };
+                match result {
                     Ok(view) => {
                         if publish(UpdateEvent::View(view)).is_err() {
                             break;
@@ -133,15 +145,8 @@ pub fn bind_worker<H: Send + 'static>(
                         }
                     }
                 }
-                action = match requests.recv() {
-                    Ok(action) => Some(action),
-                    Err(_) => break,
-                };
             }
-        }) {
-            log::warn!("could not start update worker: {error}");
-            let _ = failure.try_send(UpdateEvent::Failed(None));
-        }
+        }).detach();
     })
     .detach();
     let weak = controls.downgrade();
@@ -166,7 +171,7 @@ pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<Elemen
         UpdateView::WaitingForConnection => ("Check your internet connection, then retry the update.".into(), Some(("Retry", UpdateAction::Update, false))),
         UpdateView::Ready { action } => ("Update ready".into(), Some((if *action == UpdateAction::Install { controls.install_label } else { "Restart" }, action.clone(), false))),
         UpdateView::NeedsSpace { additional_bytes } => (format!("Free up {} to continue", needed_space(*additional_bytes)), Some(("Retry", UpdateAction::Update, false))),
-        UpdateView::NeedsPermission => ("Allow Bokheim to install the update to continue.".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
+        UpdateView::NeedsPermission => ("Allow the app to install the update.".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
         UpdateView::Activating => ("Updating your library…".into(), None),
         UpdateView::Current { version, checked } => (if *checked { format!("Bokheim {version} is up to date") } else { format!("Bokheim {version}") }, Some(("Check for updates", UpdateAction::Check, false))),
         UpdateView::Checking => ("Checking for updates…".into(), Some(("Checking…", UpdateAction::Check, true))),
@@ -193,7 +198,6 @@ pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<Elemen
                 components::browser_settings_header_button(id, label, true, theme)
                     .when(loading, |button| button.icon(IconName::LoaderCircle))
                     .loading(loading)
-                    .disabled(loading)
                     .on_click(move |_, _, cx| handler(action.clone(), cx)),
             );
         }
@@ -208,4 +212,92 @@ pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<Elemen
 pub(crate) fn needed_space(bytes: u64) -> String {
     // Round up by at most one decimal MB; never exaggerate a 1.1 GB deficit to 2 GB.
     if bytes >= 1_000_000 { format!("{} MB", bytes.div_ceil(1_000_000)) } else { format!("{} KB", bytes.div_ceil(1_000)) }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn availability_prompt_is_shared_and_survives_rechecks(cx: &mut TestAppContext) {
+        let controls = cx.new(|_| UpdateControls::new(UpdateView::Hidden, Rc::new(|_, _| {})));
+        let other_window = controls.clone();
+        controls.update(cx, |controls, cx| {
+            assert!(controls.take_available_prompt().is_none());
+            controls.apply(UpdateView::Available, cx);
+            assert!(controls.take_available_prompt().is_some());
+        });
+        other_window.update(cx, |controls, cx| {
+            assert!(controls.take_available_prompt().is_none());
+            controls.apply(UpdateView::Checking, cx);
+            controls.apply(UpdateView::Available, cx);
+            controls.apply_event(UpdateEvent::Failed(None), cx);
+            controls.apply(UpdateView::Available, cx);
+            assert!(controls.take_available_prompt().is_none());
+        });
+        let next_launch = cx.new(|_| UpdateControls::new(UpdateView::Available, Rc::new(|_, _| {})));
+        assert!(next_launch.update(cx, |controls, _| controls.take_available_prompt().is_some()));
+    }
+
+    struct WorkerHost {
+        view: UpdateView,
+        calls: async_channel::Sender<Option<UpdateAction>>,
+        released: async_channel::Sender<()>,
+    }
+
+    impl Drop for WorkerHost {
+        fn drop(&mut self) {
+            let _ = self.released.try_send(());
+        }
+    }
+
+    #[gpui::test]
+    async fn worker_preserves_initial_check_action_order_failure_recovery_and_shutdown(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for automatic in [false, true] {
+            let (calls, called) = async_channel::unbounded();
+            let (released, finished) = async_channel::bounded(1);
+            let host = WorkerHost { view: UpdateView::Hidden, calls, released };
+            let controls = cx.update(|cx| {
+                bind_worker(
+                    UpdateView::Hidden,
+                    None,
+                    automatic,
+                    move || Some(host),
+                    |host, action, _| {
+                        host.calls.try_send(action.clone()).unwrap();
+                        if action == Some(UpdateAction::Update) {
+                            return Err("fixture failure".into());
+                        }
+                        host.view = UpdateView::Available;
+                        Ok(host.view.clone())
+                    },
+                    |host| host.view.clone(),
+                    |error| Some(format!("Update failed: {error}")),
+                    cx,
+                )
+            });
+            let action = controls.read_with(cx, |controls, _| controls.action.clone());
+            if automatic {
+                assert_eq!(called.recv().await.unwrap(), None);
+            }
+            cx.update(|cx| {
+                action(UpdateAction::Check, cx);
+                action(UpdateAction::Update, cx);
+            });
+            assert_eq!(called.recv().await.unwrap(), Some(UpdateAction::Check));
+            assert_eq!(called.recv().await.unwrap(), Some(UpdateAction::Update));
+            cx.condition(&controls, |controls, _| controls.worker_failed).await;
+            assert_eq!(controls.read_with(cx, |controls, _| controls.error.clone()), Some("Update failed: fixture failure".into()));
+            cx.update(|cx| action(UpdateAction::Check, cx));
+            assert_eq!(called.recv().await.unwrap(), Some(UpdateAction::Check));
+            cx.condition(&controls, |controls, _| !controls.worker_failed && controls.error.is_none()).await;
+            drop(action);
+            drop(controls);
+            cx.update(|_| {});
+            cx.run_until_parked();
+            finished.recv().await.unwrap();
+        }
+    }
 }

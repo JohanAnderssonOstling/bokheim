@@ -174,7 +174,7 @@ pub(crate) use build::authority_ingestion::ingest_wikidata_authorities;
 mod build;
 mod schema;
 mod snapshot;
-pub use build::{build_answers, build_answers_incremental, build_answers_with_ratings, extend_edition_index, import_authorities, index_work_classifications, reclassify_answers, BuildReport, EditionIndexReport};
+pub use build::{ build_answers_incremental, build_answers_with_ratings, extend_edition_index, import_authorities, index_work_classifications, reclassify_answers, BuildReport, EditionIndexReport};
 mod serve;
 pub use serve::MetadataService;
 mod crawl;

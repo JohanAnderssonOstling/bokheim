@@ -1,4 +1,5 @@
 use super::TransfersSql;
+use crate::query_methods::{first_column, query_rows};
 use crate::*;
 use library_model::{BlobKind, TransferOrigin};
 use std::collections::HashSet;
@@ -17,12 +18,14 @@ impl Database {
         Ok(())
     }
 
+    /// Whether this library's remote storage still holds one book.
+    pub(crate) fn remote_book_available(&self, hash: &BookId) -> Result<bool, DatabaseError> {
+        let sql = { "SELECT EXISTS(SELECT 1 FROM book_transfer WHERE content_hash=?1 AND server_has_book)" };
+        Ok(self.connection.prepare_cached(sql)?.query_row([hash], |row| row.get(0))?)
+    }
+
     /// Hashes the server is known to hold for one asset kind.
     pub fn remote_asset_hashes(&self, kind: BlobKind) -> Result<HashSet<BookId>, DatabaseError> {
-        if self.storage_policy()?.external().is_some() {
-            let mut query = self.connection.prepare("SELECT book_id FROM provider_book WHERE available AND (?1='book' OR thumbnails IS NOT NULL)")?;
-            return query.query_map([kind.storage()], |row| row.get(0))?.collect::<Result<HashSet<_>, _>>().map_err(DatabaseError::from);
-        }
         let mut hashes = HashSet::new();
         self.connection.remote_asset_hashes(kind.storage(), |row| {
             hashes.insert(row.get::<_, BookId>(0)?);
@@ -32,24 +35,12 @@ impl Database {
     }
 
     /// Requested book downloads, oldest first.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn book_download_requests(&self, after_at: i64, after_hash: Option<&BookId>, limit: i64) -> Result<Vec<(BookId, i64)>, DatabaseError> {
-        let mut rows = Vec::new();
-        self.connection.book_download_requests(after_at, after_hash, limit, |row| {
-            rows.push((row.get::<_, BookId>(0)?, row.get(1)?));
-            Ok(())
-        })?;
-        Ok(rows)
+        Ok(query_rows(|read| self.connection.book_download_requests(after_at, after_hash, limit, read), |row| Ok((row.get::<_, BookId>(0)?, row.get(1)?)))?)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn book_download_origin(&self, hash: &BookId) -> Result<Option<TransferOrigin>, DatabaseError> {
-        let mut origin = None;
-        self.connection.book_download_origin(hash, |row| {
-            origin = TransferOrigin::parse_storage(&row.get::<_, String>(0)?);
-            Ok(())
-        })?;
-        Ok(origin)
+        Ok(first_column::<String>(|read| self.connection.book_download_origin(hash, read))?.as_deref().and_then(TransferOrigin::parse_storage))
     }
 }
 

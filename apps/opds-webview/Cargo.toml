@@ -1,15 +1,20 @@
 [package]
 name = "opds-webview"
+license.workspace = true
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+[features]
+release-logging = ["log/release_max_level_info"]
 
 [[bin]]
 name = "bokheim-opds-webview"
 path = "src/main.rs"
 
 [dependencies]
-client-platform-runtime = { path = "../../client/platforms/runtime" }
+log = "0.4"
+client-platform-runtime = { path = "../../client/platforms/runtime", features = ["linux-network-cost"] }
 anyhow = "1"
 app-preferences = { path = "../../client/preferences" }
 library-opds = { path = "../../client/library-backend/crates/library-opds" }
@@ -28,7 +33,6 @@ gpui_platform.workspace = true
 gpui-component.workspace = true
 ui-components = { path = "../components" }
 raw-window-handle = "0.6"
-reqwest_client = { path = "../../../GPUI-Fork/crates/reqwest_client" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

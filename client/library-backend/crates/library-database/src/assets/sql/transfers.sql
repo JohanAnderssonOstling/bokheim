@@ -2,7 +2,7 @@
 
 -- name: transfer_upload_intent?
 -- param: content_hash: &BookId
-SELECT upload_id, upload_size FROM book_transfer WHERE content_hash=:content_hash AND upload_id IS NOT NULL;
+SELECT upload_id, upload_size, upload_checksum FROM book_transfer WHERE content_hash=:content_hash AND upload_id IS NOT NULL;
 
 -- Hash-level transfer snapshot reads. Each query returns only rows for the
 -- requested hashes; one-to-many values are grouped by the Rust assembler.
@@ -17,7 +17,7 @@ ORDER BY b.content_hash, bd.dir_id, bd.file_name;
 
 -- name: transfer_snapshot_intents?
 -- param: hashes: &str
-SELECT transfer.content_hash, transfer.upload_id, transfer.upload_size
+SELECT transfer.content_hash, transfer.upload_id, transfer.upload_size, transfer.upload_checksum
 FROM json_each(:hashes) requested
 JOIN book_transfer transfer ON transfer.content_hash = unhex(requested.value)
 WHERE transfer.upload_id IS NOT NULL
@@ -34,7 +34,7 @@ ORDER BY requested.value;
 -- name: transfer_pending_book_uploads?
 -- param: after: i64
 -- param: limit: i64
-SELECT transfer.upload_id, transfer.content_hash, transfer.upload_size
+SELECT transfer.upload_id, transfer.content_hash, transfer.upload_size, transfer.upload_checksum
 FROM book_transfer transfer
 JOIN book b ON b.content_hash = transfer.content_hash AND b.deleted_at IS NULL
 WHERE transfer.upload_id > :after AND transfer.upload_prepared = transfer.upload_id
@@ -77,7 +77,7 @@ ORDER BY b.content_hash LIMIT :limit;
 -- param: relative_path: &str
 INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES ('materialize',:content_hash,:relative_path);
 
--- name: transfer_download_placement?
+-- name: transfer_download_placement ->
 -- param: content_hash: &BookId
 SELECT EXISTS(SELECT 1 FROM book b JOIN book_dir bd ON bd.book_row_id=b.row_id WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL);
 
@@ -97,7 +97,7 @@ SELECT book_download FROM book_transfer WHERE content_hash=:content_hash AND boo
 
 -- Durable download state in one row: bytes marked downloaded anywhere, and
 -- a live placement with a queued request. Single-row existence checks only.
--- name: transfer_download_state?
+-- name: transfer_download_state ->
 -- param: content_hash: &BookId
 SELECT
     EXISTS (

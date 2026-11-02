@@ -111,7 +111,7 @@ VALUES(:stable_id, :name);
 UPDATE book_transfer SET book_download = NULL, book_download_at = NULL WHERE content_hash = :content_hash;
 
 
--- name: shared_bytes_seen?
+-- name: shared_bytes_seen ->
 -- param: content_hash: &BookId
 SELECT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
               WHERE b.content_hash=:content_hash AND bd.size_bytes IS NOT NULL);
@@ -137,10 +137,6 @@ ON CONFLICT(content_hash) DO UPDATE SET
 -- name: shared_book_format?
 -- param: content_hash: &BookId
 SELECT format FROM book WHERE content_hash = :content_hash;
-
--- name: shared_audiobook_recording_evidence?
--- param: content_hash: &BookId
-SELECT recording_json FROM book_local_state WHERE content_hash = :content_hash AND recording_json IS NOT NULL;
 
 -- name: shared_book_name_conflict ->
 -- param: dir_id: &str

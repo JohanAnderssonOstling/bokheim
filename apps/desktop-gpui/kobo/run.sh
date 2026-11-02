@@ -25,7 +25,6 @@ rm -f "$BOKHEIM_KOBO_EXIT_ACTION_FILE"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export RUST_LOG="${RUST_LOG:-warn,book_startup=debug}"
 export BOKHEIM_KOBO_CANVAS_MODE_FILE="${BOKHEIM_KOBO_CANVAS_MODE_FILE:-$WORKDIR/data/canvas-mode}"
-export BOKHEIM_WESTERN_SHAPING_BENCHMARK=1
 NICKEL_WAS_RUNNING=${BOKHEIM_KOBO_RESTORE_NICKEL:-0}
 export BOKHEIM_KOBO_WIFI_HELPER="$WORKDIR/wifi-power.sh"
 # Read only selected hardware hints while Nickel still exists. Never eval /proc data.
@@ -220,14 +219,14 @@ Loading...'
         /bin/sh "$WORKDIR/update-recovery.sh" "$WORKDIR" || exit 1
         rm -f "$WORKDIR/.update/ready.json"
         printf 'The update could not be installed. Download it again and retry.\n' >"$WORKDIR/.update/error"
-        "$WORKDIR/fbink" -q -c -f -p -m -M -W GC16 -S 3 'Update failed. Open Bokheim to try again.' || true
+        "$WORKDIR/fbink" -q -c -f -p -m -M -W GC16 -S 3 'Update failed. Reopen the app to retry.' || true
         exit 1
     fi
     # Deployment uses SIGTERM before replacing files. A controlled stop should
     # restore Nickel without a failure screen.
     if [ "$app_status" -ne 0 ] && [ "$app_status" -ne 143 ]; then
         "$WORKDIR/fbink" -q -c -f -p -m -M -h \
-            "Bokheim Kobo failed; see desktop-gpui-kobo.log"
+            "App exited unexpectedly; see desktop-gpui-kobo.log"
         sleep 10
         exit "$app_status"
     fi

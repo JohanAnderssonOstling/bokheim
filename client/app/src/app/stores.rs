@@ -8,12 +8,9 @@
 use super::Url;
 use super::core::*;
 use crate::executor::spawn_detached;
-use client_platform_runtime::transfers;
 use library_backend::LibraryClient;
-use library_model::{BrowserDownloadPhase, CardKey, Store, StoreId, TorrentInput, TorrentStatus};
-use library_opds::browser::{BrowserFeedback, StoreEvent, StoreFeedbackSender};
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use library_model::{BrowserDownloadPhase, CardKey, Store, StoreId};
+use library_opds::browser::{BrowserFeedback, StoreEvent};
 use sync_common::ROOT_DIR_ID;
 
 const STORES: &str = "stores";
@@ -85,115 +82,14 @@ impl AppBackend {
         let library = self.state.library_directory.get(&library_id)?;
         let library = LibraryClient::new(library_id, library);
         let mut window = library_opds::browser::open_store(url, title, downloads.path(), preferences).await?;
-        // Snapshot jobs already downloading before accepting this window's
-        // events. New requests enter the progress list after their hash resolves.
-        let initial = library.torrent_transfers().await.unwrap_or_default();
         spawn_detached(async move {
             let feedback = window.feedback_sender();
-            let mut polling = tokio::time::interval(Duration::from_secs(1));
-            let (added, mut accepted) = tokio::sync::mpsc::unbounded_channel::<(String, String, Result<String, BackendError>)>();
-            let mut tracked: HashMap<String, String> = initial.into_iter().filter(|transfer| !transfer.imported).map(|transfer| (transfer.info_hash.clone(), format!("torrent:{}", transfer.info_hash))).collect();
-            let mut pending: HashMap<String, String> = HashMap::new();
-            let mut pending_requests: HashMap<String, String> = HashMap::new();
-            let mut handovers: HashMap<String, String> = HashMap::new();
-            let mut sources: HashMap<String, String> = HashMap::new();
-            let mut reported = HashMap::new();
-            let mut cancelled = HashSet::new();
-            loop {
-                let event = tokio::select! {
-                    event = window.next_event() => match event { Some(event) => event, None => break },
-                    Some((download, request, result)) = accepted.recv() => {
-                        if cancelled.remove(&request) {
-                            if let Ok(hash) = result {
-                                if let Err(error) = library.cancel_torrent(hash).await { log::warn!("Could not cancel torrent download: {error}"); }
-                            }
-                            continue;
-                        }
-                        let name = if pending_requests.get(&download) == Some(&request) {
-                            pending_requests.remove(&download);
-                            pending.remove(&download)
-                        } else { None }.unwrap_or_else(|| "Torrent download".into());
-                        match result {
-                            Ok(hash) => {
-                                sources.insert(download.clone(), hash.clone());
-                                let id = format!("torrent:{hash}");
-                                reported.remove(&id);
-                                tracked.insert(hash.clone(), id);
-                                if let Some(previous) = handovers.insert(hash, download.clone()).filter(|previous| previous != &download) {
-                                    report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download: previous, name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }).await;
-                                }
-                            }
-                            Err(error) => {
-                                log::warn!("a store torrent could not start: {error}");
-                                report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed(error.failure()), percent: None, message: None }).await
-                            }
-                        }
-                        continue;
-                    }
-                    _ = polling.tick() => {
-                        for (download, name) in &pending {
-                            report_feedback(&feedback, &mut reported, preparing_feedback(download.clone(), name.clone())).await;
-                        }
-                        if let Ok(torrents) = library.torrent_transfers().await {
-                            for torrent in torrents {
-                                if let Some(download) = tracked.get(&torrent.info_hash) {
-                                    let previous = handovers.remove(&torrent.info_hash);
-                                    let mut update = torrent_feedback(download.clone(), torrent, transfers::allowed());
-                                    update.replaces = previous;
-                                    report_feedback(&feedback, &mut reported, update).await;
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                };
-                let (input, download, name) = match event {
-                    StoreEvent::CancelDownload { download } => {
-                        let hash = tracked.iter().find(|(_, id)| **id == download).map(|(hash, _)| hash.clone())
-                            .or_else(|| sources.get(&download).cloned());
-                        let was_pending = pending.remove(&download).is_some();
-                        let pending_hash = if let Some(request) = pending_requests.remove(&download) {
-                            cancelled.insert(request.clone());
-                            match library.cancel_torrent_request(request).await {
-                                Ok(hash) => hash,
-                                Err(error) => { log::warn!("Could not cancel torrent request: {error}"); None }
-                            }
-                        } else {
-                            if was_pending { log::warn!("No torrent request was recorded for pending download {download}"); }
-                            None
-                        };
-                        if let Some(hash) = hash.or(pending_hash) {
-                            tracked.remove(&hash);
-                            handovers.remove(&hash);
-                            sources.retain(|_, source_hash| source_hash != &hash);
-                            if let Err(error) = library.cancel_torrent(hash).await { log::warn!("Could not cancel torrent download: {error}"); }
-                        }
-                        report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }).await;
-                        continue;
-                    }
-                    StoreEvent::Magnet { url } => (TorrentInput::Magnet(url), format!("torrent-request:{}", uuid::Uuid::new_v4()), "Magnet download".into()),
-                    StoreEvent::TorrentFile { path, download } => {
-                        let download = download.unwrap_or_else(|| path.to_string_lossy().into_owned());
-                        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                        // Read before the browser's temporary directory closes;
-                        // the library owns the durable payload staging.
-                        if tokio::fs::metadata(&path).await.is_ok_and(|metadata| metadata.len() > 16 * 1024 * 1024) {
-                            report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed(Some(Failure::UnreadableBook)), percent: None, message: None }).await;
-                            continue;
-                        }
-                        match tokio::fs::read(&path).await {
-                            Ok(bytes) => (TorrentInput::File(bytes.into()), download, name),
-                            Err(error) => {
-                                log::warn!("could not read torrent metadata: {error}");
-                                report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed(Failure::from_io(error.kind())), percent: None, message: None }).await;
-                                continue;
-                            }
-                        }
-                    }
+            while let Some(event) = window.next_event().await {
+                match event {
                     StoreEvent::Downloaded { path, download } => {
                         let download = download.unwrap_or_else(|| path.to_string_lossy().into_owned());
                         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                        let _ = feedback.send(BrowserFeedback { replaces: None, download: download.clone(), name: name.clone(), phase: BrowserDownloadPhase::Preparing, percent: None, message: Some("Adding to library".into()) }).await;
+                        let _ = feedback.send(BrowserFeedback { download: download.clone(), name: name.clone(), phase: BrowserDownloadPhase::Preparing, percent: None, message: Some("Adding to library".into()) }).await;
                         // Register the book immediately on both desktop and
                         // mobile, and report the actual import result.
                         let (phase, message) = match import_browser_download(&library, path).await {
@@ -203,33 +99,12 @@ impl AppBackend {
                                 (BrowserDownloadPhase::Failed(error.failure()), None)
                             }
                         };
-                        let _ = feedback.send(BrowserFeedback { replaces: None, download, name, phase, percent: None, message }).await;
-                        continue;
+                        let _ = feedback.send(BrowserFeedback { download, name, phase, percent: None, message }).await;
                     }
-                    StoreEvent::Opened => continue,
-                };
-                let request = uuid::Uuid::new_v4().to_string();
-                if let Err(error) = library.prepare_torrent_request(request.clone()).await {
-                    log::warn!("a store torrent could not be prepared: {error}");
-                    report_feedback(&feedback, &mut reported, BrowserFeedback { replaces: None, download, name, phase: BrowserDownloadPhase::Failed(error.failure()), percent: None, message: None }).await;
-                    continue;
-                }
-                reported.remove(&download);
-                pending.insert(download.clone(), name.clone());
-                pending_requests.insert(download.clone(), request.clone());
-                report_feedback(&feedback, &mut reported, preparing_feedback(download.clone(), name)).await;
-                let library = library.clone();
-                let added = added.clone();
-                spawn_detached(async move {
-                    let result = library.add_torrent_request(input, request.clone()).await;
-                    let _ = added.send((download, request, result));
-                });
-            }
-            // The library owns running torrents. Clear their browser bars when
-            // this view stops polling, without leaving a frozen progress toast.
-            for download in pending.keys().chain(tracked.values()).chain(handovers.values()) {
-                if reported.get(download).is_none_or(|update| !matches!(update.phase, BrowserDownloadPhase::Completed | BrowserDownloadPhase::Failed(_))) {
-                    let _ = feedback.send(BrowserFeedback { replaces: None, download: download.clone(), name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }).await;
+                    StoreEvent::CancelDownload { download } => {
+                        let _ = feedback.send(BrowserFeedback { download, name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }).await;
+                    }
+                    StoreEvent::Opened => {}
                 }
             }
             drop(downloads);
@@ -244,53 +119,6 @@ async fn import_browser_download(library: &LibraryClient, path: PathBuf) -> Resu
         Ok(())
     } else {
         Err(BackendError::message(failures.into_iter().map(|failure| failure.diagnostic.unwrap_or_else(|| "book import failed".into())).collect::<Vec<_>>().join("; ")))
-    }
-}
-
-fn preparing_feedback(download: String, name: String) -> BrowserFeedback {
-    BrowserFeedback {
-        replaces: None,
-        download,
-        name,
-        phase: BrowserDownloadPhase::Preparing,
-        percent: None,
-        message: Some("Resolving torrent metadata".into()),
-    }
-}
-
-fn torrent_feedback(download: String, torrent: TorrentStatus, allowed: bool) -> BrowserFeedback {
-    // The torrent engine reports failures only as text; they stay unclassified.
-    let (phase, percent, message) = if torrent.error.is_some() {
-        (BrowserDownloadPhase::Failed(None), None, None)
-    } else if torrent.imported {
-        (
-            BrowserDownloadPhase::Completed,
-            None,
-            Some(
-                if torrent.keep_seeding && !allowed {
-                    "Added to library; seeding waits for an unmetered connection"
-                } else if torrent.keep_seeding {
-                    "Added to library; seeding continues"
-                } else {
-                    "Added to library"
-                }
-                .into(),
-            ),
-        )
-    } else if torrent.total_bytes > 0 {
-        (BrowserDownloadPhase::Downloading, Some((torrent.progress_bytes.saturating_mul(100) / torrent.total_bytes).min(100) as u8), None)
-    } else {
-        (BrowserDownloadPhase::Preparing, None, None)
-    };
-    BrowserFeedback { replaces: None, download, name: torrent.name, phase, percent, message }
-}
-
-async fn report_feedback(sender: &StoreFeedbackSender, reported: &mut HashMap<String, BrowserFeedback>, update: BrowserFeedback) {
-    let mut cached = update.clone();
-    cached.replaces = None;
-    if update.replaces.is_some() || reported.get(&update.download) != Some(&cached) {
-        reported.insert(update.download.clone(), cached);
-        let _ = sender.send(update).await;
     }
 }
 
@@ -329,45 +157,5 @@ mod progress_tests {
 
         assert!(import_browser_download(&library, path).await.is_err());
         assert_eq!(library.book_count().await.unwrap(), 0);
-    }
-
-    fn torrent() -> TorrentStatus {
-        TorrentStatus { info_hash: "a".repeat(40), name: "Books".into(), progress_bytes: 42, total_bytes: 100, uploaded_bytes: 0, imported: false, keep_seeding: true, error: None }
-    }
-
-    #[test]
-    fn torrent_updates_preserve_the_transfer_id_and_use_shared_phases() {
-        let update = torrent_feedback("metadata-download".into(), torrent(), true);
-        assert_eq!(update.download, "metadata-download");
-        assert_eq!(update.phase, BrowserDownloadPhase::Downloading);
-        assert_eq!(update.percent, Some(42));
-        let metered = torrent_feedback("metadata-download".into(), torrent(), false);
-        assert_eq!(metered.phase, BrowserDownloadPhase::Downloading);
-        assert_eq!(metered.percent, Some(42));
-        let mut checking = torrent();
-        checking.total_bytes = 0;
-        assert_eq!(torrent_feedback("second".into(), checking, true).phase, BrowserDownloadPhase::Preparing);
-        let mut oversized = torrent();
-        oversized.progress_bytes = 101;
-        assert_eq!(torrent_feedback("second".into(), oversized, true).percent, Some(100));
-    }
-
-    #[test]
-    fn completion_and_errors_preserve_the_download_name_and_seeding_state() {
-        let mut complete = torrent();
-        complete.imported = true;
-        let update = torrent_feedback("first".into(), complete.clone(), true);
-        assert_eq!(update.phase, BrowserDownloadPhase::Completed);
-        assert_eq!(update.name, "Books");
-        assert!(update.message.unwrap().contains("seeding continues"));
-        let waiting = torrent_feedback("first".into(), complete.clone(), false);
-        assert_eq!(waiting.phase, BrowserDownloadPhase::Completed);
-        assert!(waiting.message.unwrap().contains("seeding waits"));
-        complete.keep_seeding = false;
-        assert_eq!(torrent_feedback("first".into(), complete.clone(), true).message.as_deref(), Some("Added to library"));
-        complete.error = Some("payload missing".into());
-        let failed = torrent_feedback("first".into(), complete, true);
-        assert_eq!(failed.phase, BrowserDownloadPhase::Failed(None));
-        assert_eq!(failed.message, None);
     }
 }

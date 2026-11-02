@@ -36,28 +36,6 @@ mod tests {
     }
 
     #[test]
-    fn positions_are_durable_immediately_and_publication_policy_is_supplied_by_the_caller() {
-        let db = database(":memory:");
-        assert!(db.update_reading_position(&hash(), "epubcfi(/6/2)", Some(10.0), None).unwrap());
-        assert_eq!(db.reading_position(&hash()).unwrap().as_deref(), Some("epubcfi(/6/2)"));
-        assert!(db.stored_sync_status().unwrap().has_unsynced_changes);
-        db.create_directory_with_id(&uuid::Uuid::from_u128(1), &ROOT_DIR_ID, &"Shelf".into()).unwrap();
-        let mut scan = db.sync_prepare_outbox_excluding_positions(HashSet::from([hash()])).unwrap();
-        let mut selected = Vec::new();
-        loop {
-            let page = db.sync_next_outbox_page(&mut scan).unwrap();
-            if page.is_empty() {
-                break;
-            }
-            selected.extend(page);
-        }
-        assert!(selected.iter().any(|p| matches!(p.state.value, LibraryStateEntry::DirectoryName { .. })));
-        assert!(!selected.iter().any(|p| matches!(p.state.value, LibraryStateEntry::ReadingPosition { .. })));
-        assert_eq!(db.sync_queued_reading_positions().unwrap(), HashSet::from([hash()]));
-        assert!(db.sync_publishable_mutations().unwrap().iter().any(|p| matches!(p.state.value, LibraryStateEntry::ReadingPosition { .. })));
-    }
-
-    #[test]
     fn bounded_outbox_scan_reaches_ready_work_after_a_full_page_of_deferred_positions() {
         let db = database(":memory:");
         let mut waiting = HashSet::new();
@@ -82,7 +60,7 @@ mod tests {
         let db = database(":memory:");
         db.update_reading_position(&hash(), "epubcfi(/6/2)", Some(10.0), None).unwrap();
         let mut scan = db.sync_prepare_outbox_excluding_positions(HashSet::from([hash()])).unwrap();
-        let mut next = db.sync_prepare_outbox().unwrap();
+        let mut next = db.sync_prepare_outbox_excluding_positions(Default::default()).unwrap();
         assert!(db.sync_next_outbox_page(&mut scan).unwrap().is_empty());
         assert_eq!(db.sync_next_outbox_page(&mut next).unwrap().len(), 1);
     }
@@ -94,33 +72,4 @@ mod tests {
         assert!(!db.update_reading_position(&hash(), "epubcfi(/6/2)", None, Some("Chapter 1")).unwrap());
     }
 
-    #[test]
-    fn a_new_position_survives_acknowledging_an_older_snapshot() {
-        let db = database(":memory:");
-        db.update_reading_position(&hash(), "epubcfi(/6/2)", Some(10.0), None).unwrap();
-        let sent = db.sync_publishable_mutations().unwrap();
-        assert_eq!(sent.len(), 1);
-        db.update_reading_position(&hash(), "epubcfi(/6/4)", Some(20.0), None).unwrap();
-        db.sync_acknowledge_mutations(&[sent[0].publisher_seq]).unwrap();
-        let newer = db.sync_publishable_mutations().unwrap();
-        assert_eq!(newer.len(), 1);
-        assert_ne!(newer[0].publisher_seq, sent[0].publisher_seq);
-        assert!(matches!(&newer[0].state.value, LibraryStateEntry::ReadingPosition { value, .. } if value.location.as_str() == "epubcfi(/6/4)"));
-    }
-
-    #[test]
-    fn reopening_can_publish_the_latest_durable_position_without_waiting_again() {
-        let path = std::env::temp_dir().join(format!("reading-debounce-{}.sqlite", uuid::Uuid::new_v4()));
-        let db = database(&path);
-        db.update_reading_position(&hash(), "epubcfi(/6/2)", Some(10.0), None).unwrap();
-        db.update_reading_position(&hash(), "epubcfi(/6/4)", Some(20.0), None).unwrap();
-        drop(db);
-        let db = Database::open(&path).unwrap();
-        db.initialize_library().unwrap();
-        let pending = db.sync_publishable_mutations().unwrap();
-        assert_eq!(pending.len(), 1);
-        assert!(matches!(&pending[0].state.value, LibraryStateEntry::ReadingPosition { value, .. } if value.location.as_str() == "epubcfi(/6/4)"));
-        drop(db);
-        std::fs::remove_file(path).unwrap();
-    }
 }

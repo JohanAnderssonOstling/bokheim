@@ -2,7 +2,11 @@ use crate::app::AppBackend;
 use crate::host::startup_profile::StartupProfile;
 use crate::BackendError;
 use client_platform_runtime::storage_queue::{self, Priority};
+use client_runtime::reply::Reply;
+use futures_util::future::LocalBoxFuture;
+use futures_util::stream::FuturesUnordered;
 use library_backend::{library::LibraryDirectory, LibraryHandle};
+#[cfg(any(test, all(feature = "kobo", target_os = "linux")))]
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -15,7 +19,7 @@ pub(crate) struct Transport {
 
 use super::*;
 use futures_util::{FutureExt, StreamExt};
-use std::panic::AssertUnwindSafe;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 fn request_panicked(_: Box<dyn std::any::Any + Send>) -> BackendError {
     log::error!("backend request panicked; request failed without stopping the worker");
@@ -69,11 +73,26 @@ mod panic_tests {
     }
 }
 
-type NativeJobFuture = std::pin::Pin<Box<dyn Future<Output = ()>>>;
+type CommandResult = Result<WorkerDispatchResult<Reply>, BackendError>;
 
 pub(crate) enum BackendJob {
-    Run(Box<dyn FnOnce(AppBackend) -> NativeJobFuture + Send>),
+    Command {
+        command: AppCommand,
+        reply: oneshot::Sender<CommandResult>,
+    },
+    // Kobo device operations also use this worker outside the shared command API.
+    #[cfg(any(test, all(feature = "kobo", target_os = "linux")))]
+    Run(Box<dyn FnOnce(AppBackend) -> LocalBoxFuture<'static, ()> + Send>),
     RunOrdered(Box<dyn FnOnce(&AppBackend) + Send>),
+}
+
+/// Keep the large dispatcher future inside the worker, independent of reply types.
+async fn execute_command(backend: AppBackend, command: AppCommand, reply: oneshot::Sender<CommandResult>) {
+    // Retain the sender outside the panic boundary, including future construction.
+    // A failed write is never retried: it may already have committed.
+    let operation = async move { super::requests::dispatch_request(backend, command).await };
+    let result = AssertUnwindSafe(operation).catch_unwind().await.map_err(request_panicked).and_then(|result| result);
+    let _ = reply.send(result);
 }
 
 pub(crate) struct AppWorker {
@@ -106,16 +125,25 @@ impl AppWorker {
                 return;
             }
         }
-        let mut running = futures_util::stream::FuturesUnordered::new();
+        let mut running: FuturesUnordered<LocalBoxFuture<'static, ()>> = FuturesUnordered::new();
         loop {
             tokio::select! {
                 job = self.jobs.recv() => match job {
+                    Ok(BackendJob::Command { command, reply }) => {
+                        if command.is_settings_update() {
+                            let result = catch_unwind(AssertUnwindSafe(|| super::requests::execute_ordered(&backend, command)))
+                                .map_err(request_panicked)
+                                .and_then(|result| result)
+                                .map(WorkerDispatchResult::Response);
+                            let _ = reply.send(result);
+                        } else {
+                            running.push(Box::pin(execute_command(backend.clone(), command, reply)));
+                        }
+                    }
                     Ok(BackendJob::RunOrdered(operation)) => operation(&backend),
+                    #[cfg(any(test, all(feature = "kobo", target_os = "linux")))]
                     Ok(BackendJob::Run(operation)) => {
-                        let backend = backend.clone();
-                        running.push(async move {
-                            operation(backend).await;
-                        });
+                        running.push(operation(backend.clone()));
                     }
                     Err(_) => break,
                 },
@@ -128,9 +156,20 @@ impl AppWorker {
 
 impl Transport {
     pub(crate) async fn library_handle(&self, library_id: LibraryId) -> Result<LibraryHandle, BackendError> {
+        let mut profile = StartupProfile::new("book_lookup_transport");
         self.wait_for_library_startup().await?;
+        profile.mark("startup_wait");
         let libraries = self.libraries.clone();
-        storage_queue::run(Priority::Interactive, move || libraries.get(&library_id)).await.map_err(BackendError::message)?
+        let (handle, mut profile) = storage_queue::run(Priority::Interactive, move || {
+            profile.mark("storage_dispatch");
+            let handle = libraries.get(&library_id);
+            profile.mark("directory_get");
+            (handle, profile)
+        })
+        .await
+        .map_err(BackendError::message)?;
+        profile.mark("storage_return");
+        handle
     }
 
     async fn wait_for_library_startup(&self) -> Result<(), BackendError> {
@@ -144,6 +183,7 @@ impl Transport {
         }
     }
 
+    #[cfg(any(test, all(feature = "kobo", target_os = "linux")))]
     pub(crate) async fn run<T, F, Fut>(&self, operation: F) -> Result<T, BackendError>
     where
         T: Send + 'static,
@@ -158,7 +198,7 @@ impl Transport {
                 // automatically: it may have committed before panicking.
                 let result = AssertUnwindSafe(async move { operation(backend).await }).catch_unwind().await.map_err(request_panicked).and_then(|result| result);
                 let _ = response.send(result);
-            }) as NativeJobFuture
+            }) as LocalBoxFuture<'static, ()>
         });
         self.jobs.send(BackendJob::Run(operation)).await.map_err(|_| "backend worker stopped during request".to_owned())?;
         result.await.map_err(|_| "backend worker stopped before replying".to_owned())?
@@ -172,7 +212,7 @@ impl Transport {
         let (response, result) = oneshot::channel();
         self.jobs
             .send(BackendJob::RunOrdered(Box::new(move |backend| {
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| operation(backend))).map_err(request_panicked).and_then(|result| result);
+                let result = catch_unwind(AssertUnwindSafe(|| operation(backend))).map_err(request_panicked).and_then(|result| result);
                 let _ = response.send(result);
             })))
             .await
@@ -182,29 +222,24 @@ impl Transport {
 }
 
 impl Transport {
+    async fn command(&self, command: AppCommand) -> CommandResult {
+        let (reply, result) = oneshot::channel();
+        self.jobs.send(BackendJob::Command { command, reply }).await.map_err(|_| "backend worker stopped during request".to_owned())?;
+        result.await.map_err(|_| "backend worker stopped before replying".to_owned())?
+    }
+
     pub(crate) async fn request<T: LibraryReply>(&self, command: AppCommand) -> Result<T, BackendError> {
-        if command.is_settings_update() {
-            return self.run_ordered(move |backend| super::requests::execute_ordered(backend, command)).await.and_then(client_runtime::reply::Reply::take);
+        match self.command(command).await? {
+            WorkerDispatchResult::Response(value) => value.take(),
+            WorkerDispatchResult::Subscription { .. } => Err("backend returned a subscription for a request".into()),
         }
-        self.run(move |backend| async move {
-            match super::requests::dispatch_request(backend, command).await? {
-                WorkerDispatchResult::Response(value) => Ok(value),
-                WorkerDispatchResult::Subscription { .. } => Err("backend returned a subscription for a request".into()),
-            }
-        })
-        .await
-        .and_then(client_runtime::reply::Reply::take)
     }
 
     async fn subscribe<T: LibraryReply>(&self, command: AppCommand) -> Result<(WorkerSubscription, T), BackendError> {
-        self.run(move |backend| async move {
-            match super::requests::dispatch_request(backend, command).await? {
-                WorkerDispatchResult::Subscription { initial, events } => Ok((events, initial)),
-                WorkerDispatchResult::Response(_) => Err("backend returned a response for a subscription".into()),
-            }
-        })
-        .await
-        .and_then(|(events, initial)| Ok((events, initial.take()?)))
+        match self.command(command).await? {
+            WorkerDispatchResult::Subscription { initial, events } => Ok((events, initial.take()?)),
+            WorkerDispatchResult::Response(_) => Err("backend returned a response for a subscription".into()),
+        }
     }
 
     pub(super) async fn unit_subscription(&self, command: AppCommand) -> Result<async_channel::Receiver<()>, BackendError> {
@@ -214,6 +249,11 @@ impl Transport {
 
     pub(crate) async fn library_list_changes_transport(&self) -> Result<watch::Receiver<()>, BackendError> {
         let (WorkerSubscription::LibraryList(events), ()) = self.subscribe::<()>(AppCommand::SubscribeLibraryList).await? else { return Err("unexpected subscription type".into()) };
+        Ok(events)
+    }
+
+    pub(crate) async fn dictionary_changes_transport(&self) -> Result<watch::Receiver<()>, BackendError> {
+        let (WorkerSubscription::Dictionary(events), ()) = self.subscribe::<()>(AppCommand::SubscribeDictionaryChanges).await? else { return Err("unexpected subscription type".into()) };
         Ok(events)
     }
 }

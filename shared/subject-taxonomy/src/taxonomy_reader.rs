@@ -1,7 +1,7 @@
 //! Read taxonomy definitions identically during artifact compilation and snapshot loading.
 use crate::runtime_index::UnifiedConceptDefinition;
 use rusqlite::Connection;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub fn read_unified_taxonomy_connection(connection: &Connection, source: &str) -> Result<Vec<UnifiedConceptDefinition>, String> {
     connection.pragma_update(None, "foreign_keys", true).map_err(|error| format!("failed to enable taxonomy database constraints {source}: {error}"))?;
@@ -51,4 +51,13 @@ pub fn read_unified_taxonomy_connection(connection: &Connection, source: &str) -
         concepts.push(UnifiedConceptDefinition::new(concept_id, preferred_label, parent_ids, selectors.remove(&concept_id).unwrap_or_default()));
     }
     Ok(concepts)
+}
+
+/// Classification metadata belongs to the selected taxonomy. Older full
+/// snapshots can derive the same class names from their selectors and ranges.
+pub fn read_lcc_subclasses(connection: &Connection) -> Result<BTreeSet<String>, String> {
+    let stored: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='lcc_subclass')", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+    let sql = if stored { "SELECT letters FROM lcc_subclass" } else { "SELECT selector FROM lcc_selector UNION SELECT start_letters FROM lcc_range UNION SELECT end_letters FROM lcc_range" };
+    let rows = connection.prepare(sql).map_err(|error| error.to_string())?.query_map([], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(rows.iter().flat_map(|selector| selector.split("..")).filter_map(crate::lcc::class_letters).collect())
 }

@@ -1,6 +1,5 @@
 //! Shared taxonomy index compiler and artifact format, used by build.rs and installed snapshots.
-use crate::compact_whitespace;
-use crate::lcc::{lcc_endpoint, lcc_match_keys, parse_lcc_call};
+use crate::lcc::{class_letters, lcc_endpoint, lcc_match_keys, parse_lcc_call};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -199,11 +198,13 @@ pub fn lcc_subject_sort_orders(concepts: &[UnifiedConceptDefinition]) -> BTreeMa
     keys.into_iter().map(|(id, key)| (id, key.map_or(i64::MAX, |key| ranks[&key]))).collect()
 }
 
-pub fn normalize_source_label(value: &str) -> String {
-    compact_whitespace(value).to_lowercase()
+pub fn build_runtime(concepts: Vec<UnifiedConceptDefinition>) -> Result<UnifiedTaxonomyRuntime, String> {
+    build_runtime_with_subclasses(concepts, BTreeSet::new())
 }
 
-pub fn build_runtime(concepts: Vec<UnifiedConceptDefinition>) -> Result<UnifiedTaxonomyRuntime, String> {
+/// Client seeds retain class names from the complete published taxonomy even
+/// when deeper concepts have been omitted from their navigation tree.
+pub fn build_runtime_with_subclasses(concepts: Vec<UnifiedConceptDefinition>, subclasses: BTreeSet<String>) -> Result<UnifiedTaxonomyRuntime, String> {
     validate(&concepts)?;
     let mut fingerprint = String::new();
     for concept in &concepts {
@@ -214,7 +215,14 @@ pub fn build_runtime(concepts: Vec<UnifiedConceptDefinition>) -> Result<UnifiedT
         writeln!(&mut fingerprint).map_err(|error| error.to_string())?;
     }
     let routes = Arc::new(RouteIndex::compile(build_routes(&concepts)?));
-    let selectors = Arc::new(build_selectors(&concepts)?);
+    let mut selectors = build_selectors(&concepts)?;
+    if !subclasses.is_empty() {
+        selectors.entry(LCC_SYSTEM_ID.to_owned()).or_default().lcc_subclasses.extend(subclasses);
+    }
+    if let Some(index) = selectors.get(LCC_SYSTEM_ID) {
+        writeln!(&mut fingerprint, "lcc-subclasses:{}", index.lcc_subclasses.iter().cloned().collect::<Vec<_>>().join("|")).map_err(|error| error.to_string())?;
+    }
+    let selectors = Arc::new(selectors);
     let parents = concepts.iter().map(|c| (c.concept_id, c.parent_ids.clone())).collect::<BTreeMap<_, _>>();
     fn ancestors_of(id: i64, parents: &BTreeMap<i64, Vec<i64>>, cache: &mut BTreeMap<i64, BTreeSet<i64>>) -> BTreeSet<i64> {
         if let Some(ancestors) = cache.get(&id) {
@@ -393,6 +401,11 @@ fn build_selectors(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<Str
             let index = indexes.entry(system_id.clone()).or_default();
             for selector in selectors {
                 let selector = selector.trim().to_ascii_uppercase();
+                if system_id == LCC_SYSTEM_ID {
+                    if let Some(letters) = class_letters(&selector) {
+                        index.lcc_subclasses.insert(letters);
+                    }
+                }
                 if let Some(prefix) = selector.strip_suffix('*') {
                     if prefix.is_empty() {
                         return Err(format!("unified concept {} has an empty prefix selector", concept.concept_id));
@@ -417,9 +430,6 @@ fn build_selectors(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<Str
                         concept_id: concept.concept_id,
                     });
                 } else {
-                    if system_id == LCC_SYSTEM_ID && selector.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-                        index.lcc_subclasses.insert(selector.clone());
-                    }
                     let selector = if system_id == LCC_SYSTEM_ID { lcc_match_keys(&selector).and_then(|keys| keys.last().cloned()).unwrap_or(selector) } else { selector };
                     index.exact.entry(selector).or_default().push(concept.concept_id);
                 }
@@ -433,11 +443,6 @@ fn build_selectors(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<Str
             ids.shrink_to_fit();
         }
         index.exact.shrink_to_fit();
-        for subclass in crate::lcc::outline_subclasses() {
-            if index.lcc_ranges.iter().any(|r| r.start_letters <= subclass && subclass <= r.end_letters) {
-                index.lcc_subclasses.insert(subclass);
-            }
-        }
         index.lcc_intervals = IntervalIndex::build(&index.lcc_ranges);
     }
     Ok(indexes)
@@ -446,4 +451,30 @@ fn build_selectors(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<Str
 // HashMap iteration is randomized. Keep build artifacts byte-for-byte deterministic.
 fn serialize_sorted_map<K: Ord + Serialize, V: Serialize, S: serde::Serializer>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error> {
     map.iter().collect::<BTreeMap<_, _>>().serialize(serializer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::taxonomy_reader::read_lcc_subclasses;
+    use rusqlite::Connection;
+
+    #[test]
+    fn subclasses_come_from_taxonomy_definitions_and_survive_pruned_seeds() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE lcc_selector(selector TEXT); CREATE TABLE lcc_range(start_letters TEXT,end_letters TEXT);
+            INSERT INTO lcc_selector VALUES('FC123'),('KJCX*'),('KD1..KZ9'); INSERT INTO lcc_range VALUES('QA','QC');",
+        )
+        .unwrap();
+        assert_eq!(read_lcc_subclasses(&db).unwrap(), ["FC", "KD", "KJCX", "KZ", "QA", "QC"].map(String::from).into());
+        // A shallow client image retains the complete published vocabulary.
+        db.execute_batch("CREATE TABLE lcc_subclass(letters TEXT); INSERT INTO lcc_subclass VALUES('QB');").unwrap();
+        let definitions = vec![UnifiedConceptDefinition::new(1, "Published topic".into(), vec![], BTreeMap::from([("lcc".into(), vec!["QA1..QC100".into(), "FC123".into(), "KJCX*".into()])]))];
+        let complete = build_runtime_with_subclasses(definitions.clone(), read_lcc_subclasses(&db).unwrap()).unwrap();
+        let derived = build_runtime(definitions).unwrap();
+        assert_eq!(complete.selectors[LCC_SYSTEM_ID].lcc_subclasses, ["FC", "KJCX", "QA", "QB", "QC"].map(String::from).into());
+        assert!(!complete.selectors[LCC_SYSTEM_ID].lcc_subclasses.contains("QAA"));
+        assert_ne!(complete.revision_id, derived.revision_id, "classification metadata changes must invalidate cached projections");
+    }
 }

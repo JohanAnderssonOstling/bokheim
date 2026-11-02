@@ -1,20 +1,12 @@
 mod document;
-mod format;
 mod inline;
-mod inline_flow;
-mod markdown_ext;
-mod node;
 pub(crate) mod selection;
 mod state;
-mod style;
 mod text_view;
-mod utils;
 mod window_selection;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
-pub use markdown_ext::*;
 pub use state::*;
-pub use style::*;
 pub use text_view::*;
 pub(crate) use window_selection::TextSelectionController;
 pub(crate) use window_selection::WindowTextSelection;
@@ -24,18 +16,11 @@ pub(crate) fn init(cx: &mut App) {
     state::init(cx);
 }
 
-/// Create a new markdown text view with code location as id.
+/// Create literal text with its source location as the element id.
 #[track_caller]
-pub fn markdown(source: impl Into<SharedString>) -> TextView {
+pub fn plain(source: impl Into<SharedString>) -> TextView {
     let id: ElementId = ElementId::CodeLocation(*std::panic::Location::caller());
-    TextView::markdown(id, source)
-}
-
-/// Create a new html text view with code location as id.
-#[track_caller]
-pub fn html(source: impl Into<SharedString>) -> TextView {
-    let id: ElementId = ElementId::CodeLocation(*std::panic::Location::caller());
-    TextView::html(id, source)
+    TextView::plain(id, source)
 }
 
 #[derive(IntoElement, Clone)]
@@ -69,16 +54,6 @@ impl From<TextView> for Text {
 }
 
 impl Text {
-    /// Set the style for [`TextView`].
-    ///
-    /// Do nothing if this is `String`.
-    pub fn style(self, style: TextViewStyle) -> Self {
-        match self {
-            Self::String(s) => Self::String(s),
-            Self::TextView(e) => Self::TextView(Box::new(e.style(style))),
-        }
-    }
-
     /// Get the text content.
     pub(crate) fn get_text(&self, cx: &App) -> SharedString {
         match self {
@@ -87,7 +62,7 @@ impl Text {
                 if let Some(state) = &view.state {
                     state.read(cx).source()
                 } else {
-                    SharedString::default()
+                    view.text.clone().unwrap_or_default()
                 }
             }
         }

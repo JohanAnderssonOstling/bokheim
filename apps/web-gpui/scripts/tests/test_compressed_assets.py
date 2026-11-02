@@ -43,6 +43,11 @@ class CompressedAssetsTests(unittest.TestCase):
         compressor.compress_asset(index)
         (root / "plain.wasm").write_bytes(cls.payload)
         (root / "reference.sqlite3.gz").write_bytes(gzip.compress(b"SQLite reference", mtime=0))
+        (root / "taxonomy.sqlite3").write_bytes(b"SQLite format 3\0" + b"prepared taxonomy" * 50)
+        compressor.compress_asset(root / "taxonomy.sqlite3")
+        cls.font_payload = b"\x00\x01\x00\x00" + b"font asset" * 50
+        (root / "fallback.ttf").write_bytes(cls.font_payload)
+        compressor.compress_asset(root / "fallback.ttf")
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=root))
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -71,6 +76,26 @@ class CompressedAssetsTests(unittest.TestCase):
         self.assertEqual(decoded, self.payload)
         self.assertEqual(headers["Vary"], "Accept-Encoding")
         self.assertEqual(headers["Cross-Origin-Embedder-Policy"], "require-corp")
+
+    def test_prepared_database_is_included_in_http_compression(self):
+        self.assertIn('.sqlite3', compressor.SUFFIXES)
+        status, headers, body = self.request('gzip', '/taxonomy.sqlite3')
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Content-Encoding'], 'gzip')
+        self.assertEqual(gzip.decompress(body), (Path(self.directory.name) / 'taxonomy.sqlite3').read_bytes())
+
+    def test_font_asset_keeps_its_mime_type_and_decoded_contents(self):
+        for encoding in ("br", "gzip"):
+            with self.subTest(encoding=encoding):
+                status, headers, body = self.request(encoding, "/fallback.ttf")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Content-Type"], "font/ttf")
+                self.assertEqual(headers["Content-Encoding"], encoding)
+                if encoding == "br":
+                    decoded = subprocess.run(["brotli", "-d", "-c"], input=body, capture_output=True, check=True).stdout
+                else:
+                    decoded = gzip.decompress(body)
+                self.assertEqual(decoded, self.font_payload)
 
     def test_gzip_fallback(self):
         _, headers, body = self.request("gzip")

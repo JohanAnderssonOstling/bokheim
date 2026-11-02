@@ -1,6 +1,6 @@
 //! Native keyboard labels shared by controls and their bindings.
 
-use gpui::{Keystroke, Modifiers, SharedString};
+use gpui::{Keystroke, SharedString};
 use gpui_component::kbd::Kbd;
 
 /// Format the same GPUI shortcut syntax used by `KeyBinding::new`.
@@ -30,26 +30,9 @@ pub fn shortcut_tooltip_with_alternatives(label: impl Into<SharedString>, shortc
     format!("{label} ({keys})").into()
 }
 
-/// Match exactly Command on macOS or Control on other platforms.
-pub fn primary_modifier_only(modifiers: Modifiers) -> bool {
-    modifiers.secondary() && modifiers.number_of_modifiers() == 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn primary_modifier_matches_native_bindings_without_extra_modifiers() {
-        let primary = Keystroke::parse("secondary-f").unwrap().modifiers;
-        assert!(primary_modifier_only(primary));
-        assert!(!primary_modifier_only(Modifiers::default()));
-        assert_eq!(primary_modifier_only(Keystroke::parse("cmd-f").unwrap().modifiers), cfg!(target_os = "macos"));
-        assert_eq!(primary_modifier_only(Keystroke::parse("ctrl-f").unwrap().modifiers), !cfg!(target_os = "macos"));
-        for modifiers in [Modifiers { shift: true, ..primary }, Modifiers { alt: true, ..primary }, Modifiers { function: true, ..primary }, Modifiers { control: true, platform: true, ..primary }] {
-            assert!(!primary_modifier_only(modifiers));
-        }
-    }
 
     #[test]
     fn tooltips_use_native_modifiers_and_key_names() {

@@ -85,13 +85,6 @@ pub fn blob_endpoint(server_url: &Url, library_id: &LibraryId, content_hash: &Bo
 pub fn thumbnail_batch_endpoint(server_url: &Url, library_id: &LibraryId) -> Result<Url, ParseError> {
     server_url.join(&format!("api/libraries/{library_id}/thumbnail-batch"))
 }
-pub fn thumbnail_presence_endpoint(server_url: &Url, library_id: &LibraryId) -> Result<Url, ParseError> {
-    server_url.join(&format!("api/libraries/{library_id}/thumbnails/presence"))
-}
-pub fn thumbnail_endpoint(server_url: &Url, library_id: &LibraryId, content_hash: &BookId) -> Result<Url, ParseError> {
-    server_url.join(&format!("api/libraries/{library_id}/thumbnails/{content_hash}"))
-}
-
 pub async fn thumbnail_presence(client: &reqwest::Client, credentials: &SyncCredentials, library_id: &LibraryId, content_hashes: Vec<BookId>) -> Result<ThumbnailPresenceResponse, SyncRequestError> {
     send(client.post(credentials.server_url().join(&format!("api/libraries/{library_id}/thumbnails/presence"))?).bearer_auth(credentials.access_token()), &ThumbnailPresenceRequest { content_hashes }).await
 }
@@ -103,19 +96,19 @@ pub async fn negotiate_blobs(client: &reqwest::Client, credentials: &SyncCredent
     Ok(response)
 }
 
-/// Upload bytes addressed and verified by their content hash.
-pub async fn upload_book_stream(
-    client: &reqwest::Client, server_url: &Url, access_token: &str, library_id: &LibraryId, identity: &BookId, content_length: u64, body: reqwest::Body,
+pub async fn upload_book_stream_with_checksum(
+    client: &reqwest::Client, server_url: &Url, access_token: &str, library_id: &LibraryId, identity: &BookId, checksum: Option<content_address::ContentHash>, content_length: u64, body: reqwest::Body,
 ) -> Result<(), AssetResponseError> {
     let mut trace = PerformanceTrace::new("book_http_upload", "send_body_wait_response");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} bytes={content_length}", trace.id(), library_id);
     let upload_started = web_time::Instant::now();
-    let response = client
+    let mut request = client
         .put(blob_endpoint(server_url, library_id, identity).map_err(AssetResponseError::Url)?)
         .bearer_auth(access_token)
         .header("x-bokheim-trace-id", trace.id())
-        .header(reqwest::header::CONTENT_LENGTH, content_length)
-        .body(body)
+        .header(reqwest::header::CONTENT_LENGTH, content_length);
+    if let Some(checksum) = checksum { request = request.header("x-bokheim-content-hash", checksum.to_hex()); }
+    let response = request.body(body)
         .send()
         .await
         .map_err(AssetResponseError::Retryable)?;
@@ -166,15 +159,13 @@ mod tests {
         let library = LibraryId::from_u128(1);
         let hash = BookId::from_bytes([0xab; 32]);
         let invalid = Url::parse("data:text/plain,invalid-origin").unwrap();
-        for endpoint in [blob_endpoint(&invalid, &library, &hash), thumbnail_batch_endpoint(&invalid, &library), thumbnail_presence_endpoint(&invalid, &library), thumbnail_endpoint(&invalid, &library, &hash)] {
+        for endpoint in [blob_endpoint(&invalid, &library, &hash), thumbnail_batch_endpoint(&invalid, &library)] {
             assert_eq!(endpoint.unwrap_err(), ParseError::RelativeUrlWithCannotBeABaseBase);
         }
         let origin = Url::parse("https://example.com/reader/").unwrap();
         for (endpoint, path) in [
             (blob_endpoint(&origin, &library, &hash), format!("blobs/{hash}")),
             (thumbnail_batch_endpoint(&origin, &library), "thumbnail-batch".into()),
-            (thumbnail_presence_endpoint(&origin, &library), "thumbnails/presence".into()),
-            (thumbnail_endpoint(&origin, &library, &hash), format!("thumbnails/{hash}")),
         ] {
             assert_eq!(endpoint.unwrap().as_str(), format!("https://example.com/reader/api/libraries/{library}/{path}"));
         }
@@ -182,11 +173,11 @@ mod tests {
 
     #[tokio::test]
     async fn asset_requests_return_url_errors_before_sending() {
-        let client = reqwest::Client::new();
+        let client = http_response::client();
         let origin = Url::parse("data:text/plain,invalid-origin").unwrap();
         let library = LibraryId::from_u128(1);
         let hash = BookId::from_bytes([0xab; 32]);
-        let upload = upload_book_stream(&client, &origin, "test-token", &library, &hash, 1, reqwest::Body::from("x")).await;
+        let upload = upload_book_stream_with_checksum(&client, &origin, "test-token", &library, &hash, hash.content_hash(), 1, reqwest::Body::from("x")).await;
         assert!(matches!(upload, Err(AssetResponseError::Url(_))));
         let upload = upload_thumbnail_batch(&client, &origin, "test-token", &library, Vec::new()).await;
         assert!(matches!(upload, Err(AssetResponseError::Url(_))));
@@ -226,7 +217,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::new();
+        let client = http_response::client();
         let library_id = LibraryId::from_u128(1);
         upload_thumbnail_batch(&client, &origin, "test-token", &library_id, vec![thumbnail()]).await.unwrap();
         let response = download_thumbnail_batch(&client, &origin, "test-token", &library_id, vec![thumbnail().content_hash]).await.unwrap();
@@ -243,7 +234,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let response = tokio::time::timeout(Duration::from_secs(2), download_thumbnail_batch(&reqwest::Client::new(), &origin, "test-token", &LibraryId::from_u128(1), Vec::new())).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), download_thumbnail_batch(&http_response::client(), &origin, "test-token", &LibraryId::from_u128(1), Vec::new())).await.unwrap();
         assert!(matches!(response, Err(AssetResponseError::Wire(WireError::TooLarge { limit })) if limit == MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES));
         server.abort();
     }

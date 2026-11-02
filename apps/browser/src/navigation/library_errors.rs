@@ -19,14 +19,14 @@ fn folder_recovery(failure: &LibraryFolderError) -> &'static str {
     let LibraryFolderError { step, error, .. } = failure;
     if *step == LibraryFolderStep::SaveLibraryInfo && matches!(error.failure(), Some(Failure::PermissionDenied | Failure::ReadOnlyStorage)) {
         log::warn!("Could not save library information: {error}");
-        return "Bokheim can read this folder, but couldn't save its library information. Allow write access to the folder and Bokheim's local storage, then try again.";
+        return "The app can read this folder, but couldn't save its library information. Allow write access to the folder and app storage, then retry.";
     }
     let fallback = match step {
-        LibraryFolderStep::CheckFolder => "Bokheim couldn't read this folder. Check that its drive is connected and that you have permission to open it.",
+        LibraryFolderStep::CheckFolder => "Couldn't read this folder. Check its drive connection and your access permissions.",
         LibraryFolderStep::NotAFolder => "The selected item is a file. Choose the folder containing your books instead.",
-        LibraryFolderStep::ReadLibraryInfo => "This folder's saved library information couldn't be read. Update Bokheim if this library was created with a newer version, or restore its library information from a backup.",
-        LibraryFolderStep::SaveLibraryInfo => "Bokheim couldn't save this folder's library information. Check that the folder and Bokheim's local storage allow changes, then try again.",
-        LibraryFolderStep::OpenLibrary => "Bokheim couldn't prepare this library's local data. Restart Bokheim and try again. If it still fails, update Bokheim.",
+        LibraryFolderStep::ReadLibraryInfo => "Couldn't read this folder's library information. If a newer app version created it, update the app; otherwise, restore that information from backup.",
+        LibraryFolderStep::SaveLibraryInfo => "Couldn't save this folder's library information. Check write access to the folder and app storage, then retry.",
+        LibraryFolderStep::OpenLibrary => "Couldn't prepare this library's local data. Restart the app; if it persists, check for app updates.",
     };
     user_facing_error(error, fallback)
 }

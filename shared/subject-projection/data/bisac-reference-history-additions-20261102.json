@@ -1,0 +1,26 @@
+{
+  "description": "Targeted reference supplement for the 17 assigned History codes missing from the 2021 base. This is not a complete 2025 BISAC refresh. Existing 2021 paths are retained for compatibility.",
+  "source": "https://www.bisg.org/history",
+  "verified_date": "2026-11-02",
+  "base_version": "2021",
+  "supplement_version": "2025-history",
+  "additions": {
+    "HIS026050": "History / Middle East / Lebanon",
+    "HIS028010": "History / Indigenous / Creation & Origins",
+    "HIS028020": "History / Indigenous / Migration",
+    "HIS028030": "History / Indigenous / Archaeological Stages & Interpretations of Oral History",
+    "HIS028040": "History / Indigenous / Contact, European Invasion & Exploration",
+    "HIS028050": "History / Indigenous / Colonial History & Interaction with Nations, Tribes, Bands & Communities",
+    "HIS028060": "History / Indigenous / Modern",
+    "HIS032010": "History / Russia / Imperial",
+    "HIS032020": "History / Russia / Soviet Era",
+    "HIS032030": "History / Russia / Post-Soviet",
+    "HIS067000": "History / Europe / Ukraine",
+    "HIS068000": "History / Hispanic & Latino",
+    "HIS069000": "History / Indigenous Peoples of Turtle Island",
+    "HIS070000": "History / Native American",
+    "HIS071000": "History / Asian American & Pacific Islander",
+    "HIS072000": "History / Disability",
+    "HIS073000": "History / Historical & Collective Memory"
+  }
+}

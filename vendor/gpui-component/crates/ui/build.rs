@@ -1,6 +1,9 @@
 use std::env;
 
+mod theme_compiler;
+
 fn main() {
+    theme_compiler::compile();
     // `gpui-component-assets` exposes the absolute path of its default
     // icons directory via cargo's `links` mechanism (see its `Cargo.toml`
     // and `build.rs`). We receive that path as

@@ -28,7 +28,7 @@ impl Host {
             }
             Some(UpdateAction::Update) => {
                 if std::env::var("BOKHEIM_KOBO_CAN_UPDATE").as_deref() != Ok("1") {
-                    return Err("Install Bokheim once with the latest USB installer to enable updates on this Kobo.".into());
+                    return Err("Use the latest USB installer once to enable updates on this Kobo.".into());
                 }
                 let release = self.release.as_ref().ok_or("Check for updates before downloading")?;
                 publish(UpdateEvent::View(UpdateView::Downloading { bytes: 0, total: 0 }))?;
@@ -43,7 +43,7 @@ impl Host {
             }
             Some(UpdateAction::Install) => {
                 if std::env::var("BOKHEIM_KOBO_CAN_UPDATE").as_deref() != Ok("1") || self.installation.pending().is_none() {
-                    return Err("Restart Bokheim with the latest Kobo launcher and download the update again.".into());
+                    return Err("Restart the app with the latest Kobo launcher, then download the update again.".into());
                 }
                 let path = std::env::var_os("BOKHEIM_KOBO_EXIT_ACTION_FILE").ok_or("The Kobo launcher is unavailable")?;
                 std::fs::write(path, "update").map_err(|error| error.to_string())?;

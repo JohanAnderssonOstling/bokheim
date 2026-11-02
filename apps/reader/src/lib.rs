@@ -3,10 +3,13 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod book;
+mod cjk;
+mod comic;
 mod epub;
 mod invalidation;
+mod opening_error;
+mod opening_recovery;
 mod pdf;
-mod comic;
 mod settings;
 mod shell;
 mod windows;
@@ -18,7 +21,7 @@ type CloseReader = std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
 pub use app_preferences::PdfZoomMode;
 pub use app_preferences::{ReaderFontFamily, ReaderTextAlignment};
 pub use audiobook_player::{ActiveAudiobook, AudiobookDock, DockAction, PlaybackSession};
-pub use settings::{ReaderPreferences, SaveReaderSettings};
+pub use settings::{CjkFontChoice, ReaderPreferences, SaveReaderSettings, SystemFontsLoading};
 pub use windows::AudiobookOpened;
 pub use windows::{BookOpenFailed, CloseRequested, ReaderView, configure};
 
@@ -40,6 +43,8 @@ pub fn restore_audiobook(record: &ActiveAudiobook, library: library_backend::Lib
 actions!(
     bokheim_reader,
     [
+        NavigateBack,
+        NavigateForward,
         PreviousPage,
         NextPage,
         PreviousLine,
@@ -47,10 +52,14 @@ actions!(
         PreviousSection,
         NextSection,
         ToggleToc,
+        RevealReaderChrome,
+        ToggleNotes,
+        ToggleTts,
         ToggleSidebar,
         NextSidebarTab,
         PreviousSidebarTab,
         FocusReaderSearch,
+        OpenReaderSettings,
         ToggleSearch,
         CloseSearch,
         IncreaseFont,
@@ -94,3 +103,6 @@ pub fn reset_performance_measurements() {
 
 #[cfg(feature = "kobo")]
 pub use shell::brightness::{BrightnessControls, popover as brightness_popover, popover_with_height as brightness_popover_with_height};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use html_view_gpui::configure_font_cache;

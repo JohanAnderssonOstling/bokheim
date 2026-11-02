@@ -6,8 +6,9 @@ mod android_fonts;
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android_updates;
 mod blocking_worker;
-#[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows")), all(feature = "android", target_os = "android")))]
-mod update_binding;
+mod reader_links;
+pub use reader_links::ReaderActivation;
+pub(crate) use reader_links::forward_reader_links;
 #[cfg(any(all(feature = "android", target_os = "android"), test))]
 mod book_browser;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
@@ -15,6 +16,8 @@ pub mod linux_updates;
 mod session;
 #[cfg(feature = "desktop")]
 mod single_instance;
+#[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows")), all(feature = "android", target_os = "android")))]
+mod update_binding;
 #[cfg(all(feature = "desktop", any(target_os = "linux", target_os = "windows")))]
 pub mod update_entry;
 #[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows")), all(feature = "android", target_os = "android")))]
@@ -118,15 +121,12 @@ fn stage_incoming_book(mut source: impl std::io::Read, path: &std::path::Path) -
 }
 
 pub fn open_ui(
-    backend_context: BackendLaunch, options: UiLaunchOptions, incoming_files: Option<async_channel::Receiver<IncomingBookResult>>, #[cfg(feature = "desktop")] instance_activations: Option<async_channel::Receiver<()>>, cx: &mut App,
+    backend_context: BackendLaunch, options: UiLaunchOptions, incoming_files: Option<async_channel::Receiver<IncomingBookResult>>, #[cfg(feature = "desktop")] instance_activations: Option<async_channel::Receiver<ReaderActivation>>,
+    cx: &mut App,
 ) -> Option<WeakEntity<ApplicationRoot>> {
     let mut profile = StartupProfile::new("open_ui");
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    http_response::initialize_tls();
     profile.mark("crypto_provider");
-    if let Err(error) = ui_components::register_fonts(cx) {
-        log::warn!("failed to install application fonts: {error}");
-    }
-    profile.mark("fonts_register");
     #[cfg(feature = "kobo")]
     if let Err(error) = cx
         .text_system()
@@ -140,6 +140,7 @@ pub fn open_ui(
     let update_controls = windows_updates::bind(cx);
     #[cfg(all(feature = "android", target_os = "android"))]
     let update_controls = android_updates::bind(cx);
+    reader_ui::configure_font_cache(backend_context.app_data_dir().join("cache/fonts/v1"));
     let session_path = session_path(backend_context.app_data_dir());
     let playback_restore_path = Some(backend_context.app_data_dir().join("active-audiobook.json"));
     let saved_session = UiSession::load(&session_path);
@@ -151,7 +152,7 @@ pub fn open_ui(
     #[cfg(all(feature = "mobile", not(target_os = "android")))]
     cx.bind_keys([gpui::KeyBinding::new("back", browser_ui::DismissSettings, Some("Application"))]);
     reader_ui::bind_keys(cx);
-    let persistence_worker = BlockingWorker::new(cx.background_executor(), 1);
+    let persistence_worker = BlockingWorker::new();
     let session_saves = cx.new(|_| SessionPersistence::new(saved_session, session_path, persistence_worker.clone()));
     #[cfg(feature = "kobo")]
     let kobo_auto_rotate = {
@@ -242,16 +243,6 @@ pub fn open_ui(
         });
     });
 
-    #[cfg(feature = "desktop")]
-    if let Some(activations) = instance_activations {
-        cx.spawn(async move |cx| {
-            while activations.recv().await.is_ok() {
-                let _ = cx.update(|cx| cx.activate(true));
-            }
-        })
-        .detach();
-    }
-
     let browser_bounds = if options.persist_window_geometry {
         let bounds = session_saves.read(cx).session.window.map(WindowGeometry::bounds).unwrap_or_else(|| Bounds::centered(None, size(px(1240.0), px(820.0)), cx));
         WindowBounds::Windowed(bounds)
@@ -290,6 +281,21 @@ pub fn open_ui(
                     let services = services.clone();
                     let backend = application_backend.clone();
                     let playback_restore_path_for_windows = playback_restore_path_for_root.clone();
+                    let reopen_services = services.clone();
+                    let reopen_backend = backend.clone();
+                    let reopen_playback_restore_path = playback_restore_path_for_windows.clone();
+                    cx.set_global(reader_links::ReaderWindowFactory(Rc::new(move |cx| {
+                        let services = reopen_services.clone();
+                        let backend = reopen_backend.clone();
+                        let playback_restore_path = reopen_playback_restore_path.clone();
+                        cx.spawn(async move |cx| {
+                            let services = services.for_new_window().await.map_err(|error| error.to_string())?;
+                            cx.update(|cx| {
+                                // Another action can open a window while services are loading.
+                                if reader_links::has_reader_window(cx) { Ok(()) } else { open_extra_window(services, backend, playback_restore_path, None, cx) }
+                            })
+                        })
+                    })));
                     cx.on_action(move |request: &browser_ui::OpenInNewWindow, cx| {
                         let services = services.clone();
                         let backend = backend.clone();
@@ -297,7 +303,9 @@ pub fn open_ui(
                         let target = request.0.clone();
                         cx.spawn(async move |cx| match services.for_new_window().await {
                             Ok(services) => {
-                                let _ = cx.update(|cx| open_extra_window(services, backend, playback_restore_path, target, cx));
+                                if let Err(error) = cx.update(|cx| open_extra_window(services, backend, playback_restore_path, Some(target), cx)) {
+                                    log::error!("could not open a new library window: {error}");
+                                }
                             }
                             Err(error) => log::error!("could not prepare a new library window: {error}"),
                         })
@@ -349,6 +357,11 @@ pub fn open_ui(
     profile.mark("window_open");
 
     #[cfg(feature = "desktop")]
+    if let (Some(activations), Some(root)) = (instance_activations, application_root.clone()) {
+        forward_reader_links(activations, root, cx);
+    }
+
+    #[cfg(feature = "desktop")]
     #[cfg(any(feature = "kobo", feature = "mobile"))]
     let _ = _browser_window;
     if let (Some(incoming_files), Some(root)) = (incoming_files, application_root.clone()) {
@@ -367,7 +380,7 @@ pub fn open_ui(
 }
 
 #[cfg(all(feature = "desktop", not(feature = "mobile")))]
-fn open_extra_window(services: AppServices, backend: AppClient, playback_restore_path: Option<PathBuf>, target: browser_ui::NewWindowTarget, cx: &mut App) {
+fn open_extra_window(services: AppServices, backend: AppClient, playback_restore_path: Option<PathBuf>, target: Option<browser_ui::NewWindowTarget>, cx: &mut App) -> Result<(), String> {
     let (app_id, icon) = desktop_window_identity();
     let bounds = Bounds::centered(None, size(px(1240.0), px(820.0)), cx);
     let result = cx.open_window(
@@ -382,17 +395,19 @@ fn open_extra_window(services: AppServices, backend: AppClient, playback_restore
         },
         move |window, cx| {
             let application = cx.new(|cx| ApplicationRoot::new(services, WindowSession::default(), backend, app::APP_NAME, playback_restore_path, window, cx));
-            let target_application = application.downgrade();
-            window.defer(cx, move |window, cx| {
-                let _ = target_application.update(cx, |application, cx| application.open_window_target(target, window, cx));
-            });
+            if let Some(target) = target {
+                let target_application = application.downgrade();
+                window.defer(cx, move |window, cx| {
+                    if let Err(error) = target_application.update(cx, |application, cx| application.open_window_target(target, window, cx)) {
+                        log::warn!("could not navigate the new library window: {error}");
+                    }
+                });
+            }
             let content = platform_content(application, cx);
             cx.new(|cx| Root::new(content, window, cx))
         },
     );
-    if let Err(error) = result {
-        log::error!("could not open a new library window: {error}");
-    }
+    result.map(|_| ()).map_err(|error| error.to_string())
 }
 
 fn forward_incoming_files(files: async_channel::Receiver<IncomingBookResult>, root: WeakEntity<ApplicationRoot>, cx: &mut App) {

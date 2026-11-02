@@ -22,9 +22,6 @@ impl LibraryClient {
     pub async fn browse_result_books(&self, query: LibraryBrowseQuery, revision: String, section: BrowseLocation, offset: usize, limit: usize) -> Result<Option<BrowseBookPage>, BackendError> {
         self.request(LibraryCommand::Ready(ReadyCommand::BrowseResultBooks { query, revision, section, offset, limit })).await
     }
-    pub async fn browse_sections(&self, query: LibraryBrowseQuery, book_limit: usize) -> Result<LibraryBrowseData, BackendError> {
-        self.request(LibraryCommand::Ready(ReadyCommand::BrowseSections { query, book_limit })).await
-    }
     pub async fn browse_section_books(&self, query: LibraryBrowseQuery, offset: usize, limit: usize) -> Result<BrowseBookPage, BackendError> {
         self.request(LibraryCommand::Ready(ReadyCommand::BrowseSectionBooks { query, offset, limit })).await
     }

@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-device="desktop">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Library notebook</title>
+  <style>
+
+    @font-face { font-family:Garamond; src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family:Garamond; font-style:italic; src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Italic.ttf'); }
+    @font-face { font-family:Garamond; font-weight:700; src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Bold.ttf'); }
+    @font-face { font-family:Raleway; src:url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf'); }
+    @font-face { font-family:Bodoni; src:url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf'); }
+    :root { --orange:#e09a57; --red:#d57868; --purple:#9d80c9; --teal:#57aaa1; color-scheme:light; --canvas:#eae5dc; --paper:#f6f2eb; --raised:#fcfaf6; --ink:#22201d; --muted:#6b675f; --rule:#c5bdac; --accent:#466853; --wash:#e2e9df; --hover:#4668530c; --yellow:#e0bb4b; --green:#94ad65; --pink:#c880b2; --blue:#6e9dcb; --danger:#a74739; }
+    [data-theme="dark"] { color-scheme:dark; --canvas:#1c1a16; --paper:#171511; --raised:#211e18; --ink:#efe6d0; --muted:#afa48d; --rule:#4e4334; --accent:#d3b271; --wash:#363020; --hover:#d3b2710d; --yellow:#e0bb4b; --green:#94ad65; --pink:#c880b2; --blue:#6e9dcb; --danger:#e59b8f; }
+    * { box-sizing:border-box; }
+    [hidden] { display:none !important; }
+    body { margin:0; background:var(--canvas); color:var(--ink); font:.8125em/1.5 Raleway,system-ui,sans-serif; }
+    button,input,textarea { font:inherit; color:inherit; }
+    button { cursor:pointer; background:transparent; border:0; }
+    button:hover { background:var(--hover); }
+    button:disabled { opacity:.3; cursor:default; }
+    button:focus-visible,input:focus-visible,textarea:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    svg { width:19px; height:19px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; }
+    h1,h2,h3,p { margin:0; }
+    .preview-bar { min-height:54px; display:flex; justify-content:space-between; align-items:center; gap:14px; padding:10px 24px; border-bottom:1px solid var(--rule); font-size:11px; }
+    .preview-title,.preview-controls { display:flex; align-items:center; gap:12px; }
+    .preview-title { color:var(--muted); }
+    .preview-title strong { font-weight:500; color:var(--ink); }
+    .sample-control { display:flex; align-items:center; gap:6px; white-space:nowrap; }
+    input[type="checkbox"],input[type="radio"] { accent-color:var(--accent); width:14px; height:14px; margin:0; }
+    .device-switch { display:flex; border:1px solid var(--rule); }
+    .device-switch button { padding:5px 12px; }
+    .device-switch button[aria-pressed="true"] { background:var(--paper); color:var(--accent); }
+    .theme-button { display:flex; align-items:center; gap:7px; padding:6px 8px; }
+    .theme-button svg { width:16px; height:16px; }
+    .app { display:grid; grid-template-columns:190px minmax(0,1fr); background:var(--paper); height:calc(100dvh - 54px); min-height:520px; margin:auto; position:relative; }
+    .main-nav { border-right:1px solid var(--rule); padding:26px 14px 18px; display:flex; flex-direction:column; }
+    .brand { font:32px Bodoni,Georgia,serif; margin:0 12px 35px; letter-spacing:-1px; }
+    .library-label,.eyebrow { font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
+    .library-label { margin:0 12px 12px; }
+    .nav-item { display:flex; align-items:center; gap:12px; padding:11px 12px; margin-bottom:3px; color:var(--muted); }
+    .nav-item.active { background:var(--wash); color:var(--accent); }
+    .nav-foot { margin-top:auto; padding:20px 12px 0; border-top:1px solid var(--rule); }
+    .library-name { font:18px Garamond,Georgia,serif; margin-bottom:4px; }
+    .subtle { color:var(--muted); font-size:11px; }
+    .notebook { --book-width:8.75em; --caption-height:3.75em; --caption-gap:.5em; --annotation-max-width:20em; --annotation-min-width:12em; font-size:1.2307692308em; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
+    .notebook-header { padding:25px 36px 24px; border-bottom:1px solid var(--rule); }
+    h1 { font:25px/1.2 Garamond,Georgia,serif; margin-bottom:19px; }
+    .toolbar { display:flex; align-items:stretch; gap:10px; }
+    .search { display:flex; align-items:center; gap:11px; padding:10px 12px; border:1px solid var(--rule); background:var(--raised); flex:1; min-width:0; }
+    .search svg { color:var(--muted); width:18px; height:18px; }
+    .search input { min-width:0; flex:1; background:transparent; border:0; outline:none; font-size:13px; }
+    input::placeholder { color:var(--muted); opacity:1; }
+    .search:focus-within { outline:2px solid var(--accent); outline-offset:2px; }
+    .search input:focus-visible { outline:0; }
+    .clear-search { padding:0 3px; color:var(--muted); }
+    .options-trigger { display:flex; align-items:center; justify-content:center; gap:8px; padding:10px 13px; border:1px solid var(--rule); white-space:nowrap; font-size:12px; }
+    .options-trigger.filtered { background:var(--accent); color:var(--paper); border-color:var(--accent); }
+    .options-trigger svg { width:18px; height:18px; }
+    .feed { overflow-y:auto; min-height:0; flex:1; padding:0 36px 30px; scrollbar-color:var(--rule) transparent; }
+    .card-size-probe { position:absolute; width:1em; height:1em; visibility:hidden; pointer-events:none; }
+    /* The preview mirrors BookCardView and the reader_state_card primitives.
+       The native notebook must use those shared controls directly. */
+    .book-result { padding:1.125em 0 1.5em; border-bottom:0.0625em solid var(--rule); }
+    .row-heading { display:flex; align-items:center; justify-content:flex-end; gap:0.625em; margin:0 0 0.625em calc(var(--book-width) + 1.125em); }
+    .book-row { --cover-height:calc((var(--book-width) - 1em) * 1.6); --book-card-height:calc(1em + var(--cover-height) + var(--caption-gap) + var(--caption-height)); display:grid; grid-template-columns:var(--book-width) minmax(0,1fr); gap:1.125em; align-items:start; }
+    .book-card { height:var(--book-card-height); padding:0.375em; border:0.125em solid transparent; min-width:0; display:flex; flex-direction:column; gap:var(--caption-gap); font:1em/1.25 Garamond,Georgia,serif; }
+    .book-card:hover { background:var(--hover); }
+    .book-cover { width:100%; height:var(--cover-height); padding:1.375em 0.75em; display:flex; flex-direction:column; align-items:center; justify-content:space-between; text-align:center; color:#eee3c7; border:0.0625em solid #0002; box-shadow:inset 0.3125em 0 #0002; outline:0.0625em solid #eee3c744; outline-offset:-0.5625em; background:var(--cover); border-radius:0 0.25em 0.25em 0; flex:none; }
+    .book-cover .cover-author { font:0.6875em/1.35 Garamond,Georgia,serif; }
+    .book-cover .cover-title { font:clamp(0.875em,calc((var(--book-width) - 2em) / 6.4),1.3125em)/1.16 Bodoni,Georgia,serif; max-width:100%; overflow-wrap:anywhere; }
+    .book-cover .cover-ornament { font:0.9375em Georgia,serif; }
+    .book-caption { height:var(--caption-height); flex:none; min-width:0; overflow:hidden; }
+    .book-title { font-weight:700; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; overflow-wrap:anywhere; }
+    .middlemarch { --cover:#385447; }
+    .room { --cover:#8d5a4f; }
+    .pride { --cover:#586378; }
+    .walden { --cover:#80734f; }
+    [data-cover-text="off"] .notebook { --caption-height:0em; --caption-gap:0em; }
+    [data-cover-text="off"] .book-caption { display:none; }
+    .pager { display:flex; align-items:center; gap:0.375em; flex-shrink:0; }
+    .pager button { width:1.875em; height:1.875em; display:grid; place-items:center; border:0.0625em solid var(--rule); }
+    .pager svg { width:0.9375em; height:0.9375em; }
+    .pager span { min-width:5.5em; font-size:0.625em; color:var(--muted); text-align:center; font-variant-numeric:tabular-nums; }
+    .card-grid { display:grid; grid-template-columns:var(--card-widths); justify-content:start; gap:0.5em; min-width:0; }
+    .annotation { position:relative; height:var(--book-card-height); padding:0.625em 0.75em 0.625em 1em; display:flex; flex-direction:column; gap:0.25em; min-width:0; border:0; border-bottom:0.0625em solid var(--rule); background:var(--paper); cursor:pointer; font:1em/1.5 Garamond,Georgia,serif; }
+    .annotation:hover { background:var(--hover); }
+    .annotation.selected { background:var(--wash); }
+    .annotation-color-bar { position:absolute; left:0.375em; top:0.75em; bottom:0.75em; width:0.1875em; background:var(--swatch); }
+    .annotation blockquote { margin:0; padding:0; border:0; color:var(--muted); font:italic 1em/1.35 Garamond,Georgia,serif; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; flex:none; }
+    .note { margin:0; padding:0; border:0; font:0.875em/1.5 Garamond,Georgia,serif; color:var(--ink); }
+    .annotation .note { min-height:0; overflow-y:auto; scrollbar-width:thin; }
+    mark { background:#d9bc6866; color:inherit; }
+    .empty { padding:40px 0; font-size:12px; color:var(--muted); }
+    .empty button { text-decoration:underline; margin-left:8px; color:var(--accent); }
+    .options-menu { margin:0; padding:8px 0; width:265px; border:1px solid var(--rule); color:var(--ink); background:var(--raised); box-shadow:0 6px 24px #0002; max-height:calc(100dvh - 30px); overflow-y:auto; }
+    .options-menu::backdrop { background:transparent; }
+    .menu-heading { font-size:10px; color:var(--muted); padding:9px 16px 6px; }
+    .menu-choice { display:flex; align-items:center; gap:10px; padding:10px 16px; font-size:12px; cursor:pointer; }
+    .menu-choice:hover { background:var(--hover); }
+    .menu-choice .choice-count { margin-left:auto; color:var(--muted); font-size:10px; }
+    .menu-divider { border:0; border-top:1px solid var(--rule); margin:8px 0; }
+    .menu-reset { font-size:12px; color:var(--accent); width:100%; text-align:left; padding:10px 16px; }
+    .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); padding:12px 18px; background:var(--ink); color:var(--paper); box-shadow:0 4px 18px #0002; z-index:10; display:flex; align-items:center; gap:18px; font-size:12px; max-width:calc(100vw - 24px); }
+    .toast button { color:inherit; text-decoration:underline; padding:3px; }
+    dialog { border:1px solid var(--rule); padding:0; background:var(--paper); color:var(--ink); width:min(550px,calc(100vw - 32px)); max-height:85dvh; }
+    dialog::backdrop { background:#1b191466; }
+    .dialog-header { display:flex; align-items:center; justify-content:space-between; padding:18px 24px; border-bottom:1px solid var(--rule); }
+    .dialog-header h2 { font:24px Bodoni,serif; }
+    .icon-button { display:grid; place-items:center; min-width:32px; min-height:32px; }
+    .dialog-body { padding:24px; }
+    .dialog-body blockquote { font-size:22px; margin-bottom:23px; }
+    .dialog-body label { display:block; font-size:12px; margin-bottom:8px; }
+    textarea { width:100%; resize:vertical; min-height:130px; background:var(--raised); border:1px solid var(--rule); padding:12px; line-height:1.6; }
+    .dialog-footer { padding:16px 24px; border-top:1px solid var(--rule); display:flex; justify-content:flex-end; gap:10px; }
+    .outlined { border:1px solid var(--rule); padding:9px 14px; font-size:12px; }
+    .solid { background:var(--accent); color:var(--paper); padding:9px 16px; font-size:12px; }
+    .passage-book { font:30px Bodoni,serif; margin:7px 0; }
+    .reader-copy { font:23px/1.6 Garamond,Georgia,serif; margin-top:25px; }
+    .reader-copy p { margin-bottom:20px; }
+    .annotation-detail { border-left:.1875em solid var(--swatch); padding-left:1em; margin-top:1.5em; }
+    .annotation-detail blockquote { margin:0 0 1em; color:var(--muted); font:italic 16px/1.35 Garamond,Georgia,serif; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .annotation-detail .note { font-size:1em; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .reader-preview { min-width:0; display:flex; flex-direction:column; overflow-y:auto; font-size:1.2307692308em; }
+    .reader-toolbar { display:flex; align-items:center; gap:1em; padding:1em 1.5em; border-bottom:.0625em solid var(--rule); }
+    .reader-toolbar button { display:flex; align-items:center; gap:.5em; padding:.5em; font-size:.875em; }
+    .reader-toolbar small { color:var(--muted); font-size:.6875em; margin-left:auto; }
+    .reader-page { width:min(100%,40em); padding:3em 2em; margin:0 auto; }
+    .reader-page h2 { font:2em/1.2 Bodoni,Georgia,serif; margin-bottom:.25em; }
+    .reader-page .reader-copy { font-size:1.5em; }
+    [data-device="mobile"] .app,[data-device="kobo"] .app { width:440px; max-width:100%; height:calc(100dvh - 94px); min-height:540px; margin:20px auto; border:1px solid var(--rule); grid-template-columns:minmax(0,1fr); }
+    [data-device="kobo"] .app { width:590px; --paper:#fff; --raised:#fff; --ink:#151515; --muted:#565656; --rule:#b5b5b5; --accent:#151515; --wash:#e9e9e9; --hover:#00000007; --yellow:#777; --green:#777; --pink:#777; --blue:#777; color-scheme:light; }
+    [data-device="kobo"] .book-cover { filter:grayscale(1); }
+    [data-device="mobile"] .main-nav,[data-device="kobo"] .main-nav { display:none; }
+    [data-device="mobile"] .notebook-header,[data-device="kobo"] .notebook-header { padding:20px 18px; }
+    [data-device="mobile"] .feed,[data-device="kobo"] .feed { padding:0 18px 25px; }
+    [data-device="mobile"] .notebook { --book-width:6.75em; }
+    [data-device="kobo"] .notebook { --book-width:7.75em; }
+    [data-device="mobile"] .book-row,[data-device="kobo"] .book-row { gap:.625em; }
+    [data-device="mobile"] .row-heading,[data-device="kobo"] .row-heading { margin-left:0; }
+    [data-device="mobile"] .book-cover,[data-device="kobo"] .book-cover { padding:1em .5em; outline-offset:-.375em; }
+    [data-device="mobile"] .book-cover .cover-title { font-size:1em; }
+    [data-device="kobo"] .annotation-color-bar { background:#000; }
+    @media(max-width:1050px) { .app { grid-template-columns:158px minmax(0,1fr); } .main-nav { padding-inline:8px; } .brand { font-size:28px; } }
+    @media(max-width:760px) { .app { grid-template-columns:minmax(0,1fr); } .main-nav { display:none; } .preview-bar { padding-inline:12px; flex-wrap:wrap; gap:8px; } .preview-controls { gap:8px; margin-left:auto; flex-wrap:wrap; } .preview-title span,.theme-button span { display:none; } .device-switch button { padding:5px 8px; } .notebook-header { padding:20px 18px; } .feed { padding:0 18px 25px; } .notebook { --book-width:6.75em; } .book-row { gap:.625em; } .row-heading { margin-left:0; } .book-cover { padding:1em .5em; outline-offset:-.375em; } .book-cover .cover-title { font-size:1em; } .options-trigger .button-label { display:none; } }
+
+    /* Mirrors reader_annotation_editor and standard_editor in the Rust reader. */
+    #editor { width:360px; max-width:calc(100vw - 24px); max-height:min(420px,calc(100dvh - 24px)); border:1px solid var(--rule); border-radius:0; box-shadow:0 14px 34px #0003; overflow-y:auto; font:16px/1.25 Garamond,Georgia,serif; }
+    #editor .reader-editor { padding:16px; display:flex; flex-direction:column; gap:8px; }
+    #editor .annotation-detail { margin:0; }
+    #editor .annotation-detail blockquote { margin:0; }
+    #editor .reader-note-row { width:100%; padding:4px; border:1px solid var(--rule); }
+    #editor textarea { display:block; width:100%; height:56px; min-height:56px; max-height:816px; resize:none; overflow:hidden; border:0; border-radius:0; padding:8px 10px; background:transparent; color:var(--ink); font:14px/20px Garamond,Georgia,serif; }
+    #editor textarea:focus-visible { outline:none; }
+    #editor .reader-styles { display:flex; gap:8px; flex-wrap:nowrap; width:100%; }
+    #editor .reader-styles button { flex:1 1 0; min-width:0; height:32px; padding:0 8px; border:1px solid var(--rule); font:14px/1 Garamond,Georgia,serif; }
+    #editor .reader-styles button[aria-pressed="true"] { background:var(--accent); color:var(--paper); }
+    #editor .reader-colors { display:flex; align-items:center; justify-content:space-between; width:100%; }
+    #editor .reader-swatch { width:32px; height:32px; min-width:20px; padding:0; flex:0 1 32px; display:grid; place-items:center; }
+    #editor .reader-swatch[aria-checked="true"] { background:var(--wash); }
+    #editor .reader-swatch span { width:16px; height:16px; border:1px solid var(--rule); border-radius:50%; background:var(--color); }
+    #editor .reader-delete { width:32px; height:32px; flex:none; padding:0; display:grid; place-items:center; color:var(--danger); }
+    #editor .reader-delete svg { width:16px; height:16px; stroke-width:2; }
+    [data-device="mobile"] #editor .reader-styles button,[data-device="kobo"] #editor .reader-styles button,[data-device="mobile"] #editor .reader-swatch,[data-device="mobile"] #editor .reader-delete,[data-device="kobo"] #editor .reader-delete { height:48px; }
+    [data-device="kobo"] #editor .reader-swatch { display:none; }
+    [data-device="kobo"] #editor .reader-colors { justify-content:flex-end; }
+    [data-device="kobo"] #editor .reader-styles button[aria-pressed="true"] { background:var(--paper); color:var(--ink); border:2px solid var(--accent); }
+  </style>
+</head>
+<body>
+  <svg hidden aria-hidden="true"><defs>
+    <symbol id="book" viewBox="0 0 24 24"><path d="M12 5C8 2 3 4 3 4v15s5-2 9 1c4-3 9-1 9-1V4s-5-2-9 1v15"/></symbol>
+    <symbol id="notebook" viewBox="0 0 24 24"><path d="M7 3h13v18H7zM4 6h6M4 10h6M4 14h6M4 18h6M13 8h4M13 12h4"/></symbol>
+    <symbol id="home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v11h-7v-7h-4v7H3z"/></symbol>
+    <symbol id="folder" viewBox="0 0 24 24"><path d="M3 6h7l2 3h9v11H3zM3 6V4h7l2 2h8v3"/></symbol>
+    <symbol id="search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></symbol>
+    <symbol id="edit" viewBox="0 0 24 24"><path d="m14 5 5 5M4 20l5-1L21 7l-5-5L4 14z"/></symbol>
+    <symbol id="copy" viewBox="0 0 24 24"><path d="M9 9h12v12H9zM5 16H3V3h13v2"/></symbol>
+    <symbol id="arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+    <symbol id="left" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
+    <symbol id="right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="moon" viewBox="0 0 24 24"><path d="M20 15A9 9 0 0 1 9 4a9 9 0 1 0 11 11Z"/></symbol>
+    <symbol id="settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></symbol>
+  </defs></svg>
+  <div class="preview-bar">
+    <div class="preview-title"><strong>Notebook concept</strong><span>Interactive preview</span></div>
+    <div class="preview-controls">
+      <label class="sample-control"><input type="checkbox" id="samples" checked>Sample results</label>
+      <label class="sample-control"><input type="checkbox" id="cover-text" checked>Cover text</label>
+      <div class="device-switch" aria-label="Preview size"><button data-device="desktop" aria-pressed="true">Desktop</button><button data-device="mobile" aria-pressed="false">Mobile</button><button data-device="kobo" aria-pressed="false">Kobo</button></div>
+      <button class="theme-button" id="theme" aria-label="Switch to dark appearance" aria-pressed="false"><svg aria-hidden="true"><use href="#moon"/></svg><span>Dark appearance</span></button>
+    </div>
+  </div>
+  <div class="app">
+    <nav class="main-nav" aria-label="Library navigation">
+      <div class="brand">Bokheim</div>
+      <div class="library-label">Your library</div>
+      <div class="nav-item nav-static"><svg aria-hidden="true"><use href="#home"/></svg>Home</div>
+      <div class="nav-item nav-static"><svg aria-hidden="true"><use href="#book"/></svg>Books</div>
+      <div class="nav-item nav-static"><svg aria-hidden="true"><use href="#folder"/></svg>Folders</div>
+      <div class="nav-item active" aria-current="page"><svg aria-hidden="true"><use href="#notebook"/></svg>Notebook</div>
+      <div class="nav-foot"><div class="library-name">Personal library</div><p class="subtle">Notes from your reading</p></div>
+    </nav>
+    <main class="notebook">
+      <span class="card-size-probe" id="card-size-probe" aria-hidden="true"></span>
+      <header class="notebook-header">
+        <h1>Notebook</h1>
+        <div class="toolbar">
+          <div class="search"><svg aria-hidden="true"><use href="#search"/></svg><input id="query" type="search" placeholder="Search annotations…" aria-label="Search annotations"><button class="clear-search" id="clear-query" aria-label="Clear search" hidden>×</button></div>
+          <button class="options-trigger" id="options-trigger" popovertarget="options" aria-label="Sort & filter"><svg aria-hidden="true"><use href="#settings"/></svg><span class="button-label">Sort & filter</span></button>
+        </div>
+      </header>
+      <div class="feed" id="feed" aria-label="Annotations"></div>
+    </main>
+    <section class="reader-preview" id="reader-preview" aria-labelledby="reader-title" hidden>
+      <div class="reader-toolbar"><button id="return-notebook"><svg aria-hidden="true"><use href="#left"/></svg>Notebook</button><small>Reader preview</small></div>
+      <article class="reader-page"><h2 id="reader-title"></h2><p class="subtle" id="reader-location"></p><div class="reader-copy"><p><mark id="reader-passage"></mark></p></div></article>
+    </section>
+  </div>
+  <div class="options-menu" id="options" popover aria-label="Sort and filter options">
+    <div class="menu-heading">Sort by</div>
+    <label class="menu-choice"><input type="radio" name="sort" value="recent" checked>Most recent annotations</label>
+    <label class="menu-choice"><input type="radio" name="sort" value="book">Book name</label>
+    <hr class="menu-divider">
+    <div class="menu-heading">Format</div>
+    <label class="menu-choice"><input type="checkbox" value="EPUB" name="format">EPUB<span class="choice-count">3</span></label>
+    <label class="menu-choice"><input type="checkbox" value="PDF" name="format">PDF<span class="choice-count">1</span></label>
+    <hr class="menu-divider">
+    <button class="menu-reset" id="reset-filters">Clear filters</button>
+  </div>
+  <dialog id="editor" aria-label="Annotation editor">
+    <form id="edit-form" class="reader-editor">
+      <div id="reader-editor-quote"></div>
+      <div class="reader-note-row"><textarea id="note-text" aria-label="Annotation note" placeholder="Add a note" rows="2"></textarea></div>
+      <div class="reader-styles" aria-label="Annotation style"><button type="button" data-style="highlight" aria-pressed="false">Highlight</button><button type="button" data-style="underline" aria-pressed="false">Underline</button><button type="button" data-style="squiggly" aria-pressed="false">Squiggly</button><button type="button" data-style="strike" aria-pressed="false">Strike</button></div>
+      <div class="reader-colors" role="radiogroup" aria-label="Annotation colour"><button type="button" class="reader-swatch" role="radio" aria-label="Yellow" title="Yellow" aria-checked="false" tabindex="-1" data-color="yellow" style="--color:#e0bb4b"><span></span></button><button type="button" class="reader-swatch" role="radio" aria-label="Orange" title="Orange" aria-checked="false" tabindex="-1" data-color="orange" style="--color:#e09a57"><span></span></button><button type="button" class="reader-swatch" role="radio" aria-label="Red" title="Red" aria-checked="false" tabindex="-1" data-color="red" style="--color:#d57868"><span></span></button><button type="button" class="reader-swatch" role="radio" aria-label="Pink" title="Pink" aria-checked="false" tabindex="-1" data-color="pink" style="--color:#c880b2"><span></span></button><button type="button" class="reader-swatch" role="radio" aria-label="Purple" title="Purple" aria-checked="false" tabindex="-1" data-color="purple" style="--color:#9d80c9"><span></span></button><button type="button" class="reader-swatch" role="radio" aria-label="Blue" title="Blue" aria-checked="false" tabindex="-1" data-color="blue" style="--color:#6e9dcb"><span></span></button><button type="button" class="reader-swatch" role="radio" aria-label="Teal" title="Teal" aria-checked="false" tabindex="-1" data-color="teal" style="--color:#57aaa1"><span></span></button><button type="button" class="reader-swatch" role="radio" aria-label="Green" title="Green" aria-checked="false" tabindex="-1" data-color="green" style="--color:#94ad65"><span></span></button>
+        <button type="button" class="reader-delete" id="reader-delete" aria-label="Delete annotation" title="Delete annotation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 5H9l-7 7 7 7h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Z"/><path d="m18 9-6 6m0-6 6 6"/></svg></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="annotation-overlay" aria-labelledby="annotation-heading">
+    <div class="dialog-header"><h2 id="annotation-heading">Annotation</h2><button class="icon-button" data-close aria-label="Close"><svg aria-hidden="true"><use href="#close"/></svg></button></div>
+    <div class="dialog-body" id="annotation-body"></div>
+    <div class="dialog-footer"><button class="outlined" id="annotation-edit">Edit note</button><button class="solid" id="annotation-open-reader">Open in reader</button></div>
+  </dialog>
+  <div class="toast" id="toast" role="status" hidden><span id="toast-text"></span></div>
+  <script>
+
+    const $ = selector => document.querySelector(selector);
+    const icon = name => `<svg aria-hidden="true"><use href="#${name}"/></svg>`;
+    const escape = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const books = [
+      {id:'middlemarch', title:'Middlemarch', author:'George Eliot', format:'EPUB'},
+      {id:'room', title:'A Room of One’s Own', author:'Virginia Woolf', format:'EPUB'},
+      {id:'pride', title:'Pride and Prejudice', author:'Jane Austen', format:'EPUB'},
+      {id:'walden', title:'Walden', author:'Henry David Thoreau', format:'PDF'}
+    ];
+    const annotations = [
+      {id:1, book:'middlemarch', colour:'yellow', quote:'What do we live for, if it is not to make life less difficult to each other?', note:'Kindness as something practical. This feels like the thread running through the whole book.', location:'Chapter LXXII · 81%', progress:81, edited:10, created:10, date:'Today'},
+      {id:2, book:'room', colour:'green', quote:'A woman must have money and a room of her own if she is to write fiction.', note:'The conditions that make creative work possible—not just talent or determination.', location:'Chapter I · 8%', progress:8, edited:9, created:9, date:'Today'},
+      {id:3, book:'walden', colour:'blue', quote:'I went to the woods because I wished to live deliberately, to front only the essential facts of life.', note:'', location:'Page 24', progress:24, edited:8, created:8, date:'Yesterday'},
+      {id:4, book:'middlemarch', colour:'pink', quote:'If we had a keen vision and feeling of all ordinary human life, it would be like hearing the grass grow and the squirrel’s heart beat.', note:'Attention has a cost. Compare this with Woolf’s descriptions of everyday life.', location:'Chapter XX · 23%', progress:23, edited:7, created:7, date:'Yesterday'},
+      {id:5, book:'pride', colour:'yellow', quote:'I declare after all there is no enjoyment like reading! How much sooner one tires of any thing than of a book!', note:'Caroline says this while trying to get Darcy’s attention. Remember the irony.', location:'Chapter XI · 12%', progress:12, edited:6, created:6, date:'27 Oct'},
+      {id:6, book:'room', colour:'blue', quote:'Lock up your libraries if you like; but there is no gate, no lock, no bolt that you can set upon the freedom of my mind.', note:'', location:'Chapter IV · 63%', progress:63, edited:5, created:5, date:'26 Oct'},
+      {id:7, book:'walden', colour:'green', quote:'Rather than love, than money, than fame, give me truth.', note:'', location:'Page 94', progress:94, edited:4, created:4, date:'25 Oct'},
+      {id:8, book:'middlemarch', colour:'yellow', quote:'Our deeds determine us, as much as we determine our deeds.', note:'Choices become habits, and habits become a life.', location:'Chapter IV · 5%', progress:5, edited:3, created:3, date:'24 Oct'},
+      {id:9, book:'pride', colour:'pink', quote:'Till this moment I never knew myself.', note:'', location:'Chapter XXXVI · 59%', progress:59, edited:2, created:2, date:'23 Oct'},
+      {id:10, book:'room', colour:'yellow', quote:'One cannot think well, love well, sleep well, if one has not dined well.', note:'An ordinary need beneath all the lofty ideas.', location:'Chapter I · 16%', progress:16, edited:1, created:1, date:'22 Oct'}
+    ];
+
+    let editing = null, selectedAnnotation = null, toastTimer, annotationClickTimer;
+    let lastAvailableEm = 0;
+    const pages = new Map();
+    function annotationSpace() {
+      const feed = $('#feed');
+      const feedStyle = getComputedStyle(feed);
+      const notebookStyle = getComputedStyle($('.notebook'));
+      const em = parseFloat(notebookStyle.fontSize);
+      const bookWidth = parseFloat(notebookStyle.getPropertyValue('--book-width')) * em;
+      const minimum = parseFloat(notebookStyle.getPropertyValue('--annotation-min-width'));
+      const maximum = parseFloat(notebookStyle.getPropertyValue('--annotation-max-width'));
+      const compact = document.documentElement.dataset.device !== 'desktop' || innerWidth <= 760;
+      const available = feed.clientWidth - parseFloat(feedStyle.paddingLeft) - parseFloat(feedStyle.paddingRight) - bookWidth - (compact ? .625 : 1.125) * em;
+      return {available:Math.max(1, available / em), minimum, maximum, gap:.5};
+    }
+    function annotationPages(annotations, space) {
+      const result = [];
+      let items = [], occupied = 0;
+      for (const annotation of annotations) {
+        const length = annotation.quote.length + annotation.note.length;
+        const width = Math.min(space.available, space.maximum, Math.max(space.minimum, 10 + length / 24));
+        const gap = items.length ? space.gap : 0;
+        if (items.length && occupied + gap + width > space.available) {
+          result.push(items); items = []; occupied = 0;
+        }
+        occupied += (items.length ? space.gap : 0) + width;
+        items.push({annotation, width});
+      }
+      if (items.length) result.push(items);
+      return result;
+    }
+    function highlighted(text) {
+      const query = $('#query').value.trim();
+      if (!query) return escape(text);
+      let result = '', start = 0, index;
+      while ((index = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase(), start)) !== -1) {
+        result += escape(text.slice(start,index)) + '<mark>' + escape(text.slice(index,index + query.length)) + '</mark>';
+        start = index + query.length;
+      }
+      return result + escape(text.slice(start));
+    }
+    // Mirrors the existing BookCardView presentation: 8px total inset,
+    // real cover aspect ratio, 8px text gap, and the shared three-line title budget.
+    function bookCard(book) {
+      return `<div class="book-card" aria-label="${escape(book.title)}">
+        <div class="book-cover ${book.id}" aria-hidden="true"><span class="cover-author">${escape(book.author)}</span><span class="cover-title">${escape(book.title)}</span><span class="cover-ornament">✦</span></div>
+        <div class="book-caption"><div class="book-title">${highlighted(book.title)}</div></div>
+      </div>`;
+    }
+    function card(a) {
+      return `<article class="annotation${selectedAnnotation === a.id ? ' selected' : ''}" style="--swatch:var(--${a.colour})" data-id="${a.id}" data-action="open" tabindex="0" aria-label="Show annotation: ${escape(a.quote)}" title="Click to view annotation; double-click to open in reader">
+        <span class="annotation-color-bar" aria-hidden="true"></span>
+        <blockquote>${highlighted('“' + a.quote + '”')}</blockquote>
+        ${a.note.trim() ? `<div class="note">${highlighted(a.note)}</div>` : ''}
+      </article>`;
+    }
+    function render(focus = null) {
+      clearTimeout(annotationClickTimer);
+      const space = annotationSpace();
+      lastAvailableEm = space.available;
+      const query = $('#query').value.trim().toLocaleLowerCase();
+      const formats = [...document.querySelectorAll('[name="format"]:checked')].map(input => input.value);
+      const sort = $('[name="sort"]:checked').value;
+      const matches = $('#samples').checked ? annotations.filter(a => {
+        const book = books.find(book => book.id === a.book);
+        return (!formats.length || formats.includes(book.format)) && (!query || (a.quote + '\n' + a.note + '\n' + book.title + '\n' + book.author).toLocaleLowerCase().includes(query));
+      }) : [];
+      const groups = books.map(book => ({...book, annotations:matches.filter(a => a.book === book.id)})).filter(book => book.annotations.length);
+      for (const book of groups) book.annotations.sort((a,b) => sort === 'recent' ? b.created - a.created || a.id - b.id : a.progress - b.progress || a.id - b.id);
+      groups.sort((a,b) => sort === 'book' ? a.title.localeCompare(b.title) : Math.max(...b.annotations.map(a => a.created)) - Math.max(...a.annotations.map(a => a.created)) || a.title.localeCompare(b.title));
+      $('#clear-query').hidden = !query;
+      $('#options-trigger').classList.toggle('filtered', formats.length > 0);
+      $('#feed').innerHTML = groups.map(book => {
+        const packed = annotationPages(book.annotations, space);
+        const last = packed.length - 1;
+        const page = Math.min(pages.get(book.id) || 0, last);
+        pages.set(book.id, page);
+        const visible = packed[page];
+        return `<section class="book-result" data-book="${book.id}" aria-label="${escape(book.title)} annotations">
+          <div class="row-heading">
+            <div class="pager" role="group" aria-label="${escape(book.title)} annotation pages">
+              <button data-page="previous" data-book="${book.id}" aria-label="Previous annotations in ${escape(book.title)}" ${page === 0 ? 'disabled' : ''}>${icon('left')}</button>
+              <span aria-live="polite" aria-label="Page ${page + 1} of ${last + 1}">${page + 1} / ${last + 1}</span>
+              <button data-page="next" data-book="${book.id}" aria-label="Next annotations in ${escape(book.title)}" ${page >= last ? 'disabled' : ''}>${icon('right')}</button>
+            </div>
+          </div>
+          <div class="book-row">${bookCard(book)}<div class="card-grid" style="--card-widths:${visible.map(item => `${item.width}em`).join(' ')}">${visible.map(item => card(item.annotation)).join('')}</div></div>
+        </section>`;
+      }).join('') || ($('#samples').checked ? `<div class="empty">No matching annotations.<button data-action="reset">Clear search and filters</button></div>` : '');
+      if (focus) {
+        const button = $(`[data-page="${focus.direction}"][data-book="${focus.book}"]`);
+        const fallback = $(`[data-page="${focus.direction === 'next' ? 'previous' : 'next'}"][data-book="${focus.book}"]`);
+        (button && !button.disabled ? button : fallback)?.focus({preventScroll:true});
+      }
+    }
+    function reset() {
+      $('#query').value = ''; document.querySelectorAll('[name="format"]').forEach(input => input.checked = false); pages.clear(); render();
+    }
+    function notify(message) {
+      clearTimeout(toastTimer); $('#toast-text').textContent = message; $('#toast').hidden = false;
+      toastTimer = setTimeout(() => { $('#toast').hidden = true; },3500);
+    }
+    function positionOptions() {
+      const bounds = $('#options-trigger').getBoundingClientRect();
+      const menu = $('#options');
+      const compact = document.documentElement.dataset.device !== 'desktop' || innerWidth < 760;
+      if (compact) {
+        const app = $('.app').getBoundingClientRect();
+        menu.style.width = `${Math.min(app.width - 24, 380)}px`;
+        menu.style.left = `${app.left + (app.width - Math.min(app.width - 24, 380)) / 2}px`;
+        menu.style.top = 'auto'; menu.style.bottom = '12px';
+      } else {
+        menu.style.width = '265px'; menu.style.left = `${Math.max(12,bounds.right - 265)}px`;
+        menu.style.top = `${Math.min(bounds.bottom + 7, innerHeight - menu.offsetHeight - 12)}px`; menu.style.bottom = 'auto';
+      }
+    }
+    $('#options').addEventListener('toggle', event => { if (event.newState === 'open') positionOptions(); });
+    $('#query').addEventListener('input',() => { pages.clear(); render(); });
+    $('#samples').addEventListener('change',() => { pages.clear(); render(); });
+    $('#cover-text').addEventListener('change',event => { document.documentElement.dataset.coverText = event.target.checked ? 'on' : 'off'; });
+    $('#options').addEventListener('change',() => { pages.clear(); render(); });
+    $('#reset-filters').addEventListener('click',() => { document.querySelectorAll('[name="format"]').forEach(input => input.checked = false); pages.clear(); render(); });
+    $('#clear-query').addEventListener('click',() => { $('#query').value = ''; pages.clear(); render(); $('#query').focus(); });
+    function selectAnnotation(annotation) {
+      selectedAnnotation = annotation.id;
+      document.querySelectorAll('.annotation').forEach(card => card.classList.toggle('selected',Number(card.dataset.id) === selectedAnnotation));
+    }
+    // Shared full-passage presentation for the view and editor overlays.
+    function annotationPassage(annotation,includeNote = false) {
+      if (!annotation.quote && !includeNote) return '';
+      return `<div class="annotation-detail" style="--swatch:var(--${annotation.colour})">${annotation.quote ? `<blockquote>“${escape(annotation.quote)}”</blockquote>` : ''}${includeNote && annotation.note ? `<div class="note">${escape(annotation.note)}</div>` : ''}</div>`;
+    }
+    function showAnnotation(annotation) {
+      selectAnnotation(annotation);
+      const book = books.find(book => book.id === annotation.book);
+      $('#annotation-body').innerHTML = `<h3 class="passage-book">${escape(book.title)}</h3><p class="subtle">${escape(book.author)} · ${escape(annotation.location)}</p>${annotationPassage(annotation,true)}`;
+      $('#annotation-overlay').showModal();
+    }
+    function openReader(annotation) {
+      clearTimeout(annotationClickTimer);
+      selectAnnotation(annotation);
+      if ($('#annotation-overlay').open) $('#annotation-overlay').close();
+      const book = books.find(book => book.id === annotation.book);
+      $('#reader-title').textContent = book.title;
+      $('#reader-location').textContent = `${book.author} · ${annotation.location}`;
+      $('#reader-passage').textContent = annotation.quote;
+      $('.notebook').hidden = true;
+      $('#reader-preview').hidden = false;
+      $('#return-notebook').focus();
+    }
+    $('#feed').addEventListener('click',event => {
+      const pagination = event.target.closest('[data-page]');
+      if (pagination && !pagination.disabled) {
+        const book = pagination.dataset.book;
+        pages.set(book,(pages.get(book) || 0) + (pagination.dataset.page === 'next' ? 1 : -1));
+        render({book,direction:pagination.dataset.page}); return;
+      }
+      const button = event.target.closest('[data-action]');
+      if (!button) return;
+      if (button.dataset.action === 'reset') { reset(); return; }
+      const annotation = annotations.find(a => a.id === Number(button.dataset.id));
+      if (!annotation) return;
+      if (button.dataset.action === 'open') {
+        clearTimeout(annotationClickTimer);
+        if (event.detail < 2) annotationClickTimer = setTimeout(() => showAnnotation(annotation),350);
+      }
+    });
+    $('#feed').addEventListener('dblclick',event => {
+      const card = event.target.closest('.annotation');
+      if (!card) return;
+      const annotation = annotations.find(a => a.id === Number(card.dataset.id));
+      if (annotation) { event.preventDefault(); openReader(annotation); }
+    });
+    $('#feed').addEventListener('keydown',event => {
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.target.matches('.annotation') && ['Enter',' '].includes(event.key)) {
+        const annotation = annotations.find(a => a.id === Number(event.target.dataset.id));
+        if (annotation) { event.preventDefault(); clearTimeout(annotationClickTimer); showAnnotation(annotation); }
+      }
+    });
+    $('#annotation-open-reader').addEventListener('click',() => {
+      const annotation = annotations.find(a => a.id === selectedAnnotation);
+      if (annotation) openReader(annotation);
+    });
+    $('#return-notebook').addEventListener('click',() => {
+      $('#reader-preview').hidden = true;
+      $('.notebook').hidden = false;
+      $(`.annotation[data-id="${selectedAnnotation}"]`)?.focus({preventScroll:true});
+    });
+    $('#annotation-edit').addEventListener('click',() => {
+      editing = annotations.find(a => a.id === selectedAnnotation);
+      if (!editing) return;
+      $('#annotation-overlay').close(); $('#note-text').value = editing.note; refreshEditorControls(); $('#editor').showModal(); growEditorNote(); $('#note-text').focus();
+    });
+    function growEditorNote() {
+      const note = $('#note-text'); note.style.height = 'auto'; note.style.height = `${Math.max(56,Math.min(816,note.scrollHeight))}px`;
+    }
+    function commitEditorNote() {
+      if (!editing) return;
+      editing.note = $('#note-text').value;
+      editing.edited = Math.max(...annotations.map(annotation => annotation.edited)) + 1;
+      editing.date = 'Just now';
+    }
+    function refreshEditorControls() {
+      $('#reader-editor-quote').innerHTML = annotationPassage(editing);
+      document.querySelectorAll('#editor [data-style]').forEach(button => button.setAttribute('aria-pressed',button.dataset.style === (editing.style || 'highlight')));
+      document.querySelectorAll('#editor [data-color]').forEach(button => {
+        const selected = button.dataset.color === editing.colour;
+        button.setAttribute('aria-checked',selected); button.tabIndex = selected ? 0 : -1;
+      });
+    }
+    $('#note-text').addEventListener('input',growEditorNote);
+    $('#editor').addEventListener('click',event => {
+      if (event.target === $('#editor')) {
+        const bounds = $('#editor').getBoundingClientRect();
+        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) $('#editor').close();
+      }
+      const style = event.target.closest('[data-style]'), color = event.target.closest('[data-color]');
+      if (!editing || (!style && !color)) return;
+      commitEditorNote();
+      if (style) editing.style = style.dataset.style;
+      if (color) editing.colour = color.dataset.color;
+      refreshEditorControls();
+    });
+    $('#editor').addEventListener('keydown',event => {
+      const current = event.target.closest('[data-color]');
+      if (!current || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const swatches = [...document.querySelectorAll('#editor [data-color]')], index = swatches.indexOf(current);
+      let next;
+      if (['ArrowLeft','ArrowUp'].includes(event.key)) next = (index + swatches.length - 1) % swatches.length;
+      else if (['ArrowRight','ArrowDown'].includes(event.key)) next = (index + 1) % swatches.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = swatches.length - 1;
+      else return;
+      event.preventDefault(); swatches[next].click(); swatches[next].focus();
+    });
+    $('#editor').addEventListener('close',() => { commitEditorNote(); editing = null; render(); });
+    $('#edit-form').addEventListener('submit',event => event.preventDefault());
+    $('#reader-delete').addEventListener('click',() => {
+      if (!editing) return;
+      const index = annotations.indexOf(editing);
+      if (index >= 0) annotations.splice(index,1);
+      editing = null; selectedAnnotation = null; $('#editor').close(); render(); notify('Annotation deleted in this preview.');
+    });
+    document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click',() => button.closest('dialog').close()));
+    document.querySelectorAll('.device-switch button').forEach(button => button.addEventListener('click',() => {
+      $('#options').hidePopover(); document.documentElement.dataset.device = button.dataset.device;
+      document.querySelectorAll('.device-switch button').forEach(item => item.setAttribute('aria-pressed',item === button));
+      pages.clear(); render();
+    }));
+    $('#theme').addEventListener('click',() => {
+      const dark = document.documentElement.dataset.theme !== 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      $('#theme').setAttribute('aria-pressed',dark); $('#theme').setAttribute('aria-label',`Switch to ${dark ? 'light' : 'dark'} appearance`); $('#theme span').textContent = dark ? 'Light appearance' : 'Dark appearance';
+    });
+    document.addEventListener('keydown',event => {
+      if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey && !document.querySelector('dialog[open]') && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) { event.preventDefault(); $('#query').focus(); }
+    });
+    const cardLayoutObserver = new ResizeObserver(() => {
+      if ($('.notebook').hidden) return;
+      const nextAvailableEm = annotationSpace().available;
+      if (Math.abs(nextAvailableEm - lastAvailableEm) > .01) { pages.clear(); render(); }
+      if ($('#options').matches(':popover-open')) positionOptions();
+    });
+    cardLayoutObserver.observe($('#feed'));
+    cardLayoutObserver.observe($('#card-size-probe'));
+    render();
+    const previewParams = new URLSearchParams(location.hash.slice(1));
+    const previewAnnotationId = previewParams.get('annotation');
+    if (previewAnnotationId !== null) {
+      const previewAnnotation = annotations.find(annotation => annotation.id === Number(previewAnnotationId));
+      if (previewAnnotation) {
+        showAnnotation(previewAnnotation);
+        if (previewParams.has('edit')) $('#annotation-edit').click();
+      }
+    }
+  </script>
+</body>
+</html>

@@ -119,12 +119,6 @@ impl GraphLayout {
         }
     }
 
-    /// A display pose of this layout, preserving the target's node identities
-    /// while moving nodes and their connectors to the supplied centres.
-    pub fn with_pose(&self, centers: &[Point<f32>], opacity: &[f32]) -> Self {
-        self.posed(|node| Some((centers.get(node.node).copied().unwrap_or(node.center), opacity.get(node.node).copied().unwrap_or(1.0))))
-    }
-
     /// Supplies a node's position and opacity together. Nodes without a pose
     /// keep their settled geometry, with connectors updated from that geometry.
     pub fn posed(&self, mut pose: impl FnMut(&PlacedNode) -> Option<(Point<f32>, f32)>) -> Self {
@@ -459,7 +453,7 @@ mod tests {
             let tree = GraphTree::new(vec![None, Some(0), Some(0)]).unwrap();
             let mut layout = graph_layout(kind, &tree, 1, &|_, _| size(20.0, 20.0), &LayoutParams::desktop()).unwrap();
             layout.retain_nodes(|node| node.node != 1);
-            let posed = layout.with_pose(&[point(0.0, 0.0), point(50.0, 50.0), point(100.0, 100.0)], &[1.0; 3]);
+            let posed = layout.posed(|node| Some(([point(0.0, 0.0), point(50.0, 50.0), point(100.0, 100.0)][node.node], 1.0)));
             assert_eq!(posed.edges.len(), 1);
             assert!(posed.edges.iter().all(|edge| posed.node(edge.from).is_some() && posed.node(edge.to).is_some()));
             assert_eq!(posed.node(2).unwrap().center, point(100.0, 100.0));

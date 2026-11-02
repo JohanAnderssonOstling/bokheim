@@ -3,25 +3,26 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Window};
+use gpui::{AnyElement, App, Context, Entity, SharedString, Window, div, px};
 use gpui_component::list::ListItem;
 use gpui_component::tree::{TreeState, tree};
-use html_view_core::SearchOptions;
 use library_backend::Annotation;
+use skrift_column_paginator::SearchOptions;
 use ui_components as components;
 
 use crate::settings::ReaderSettings;
 pub(crate) use crate::settings::SidebarTab;
-use crate::shell::marks::MarkSession;
 use crate::shell::search::highlighted_text;
+use crate::shell::toc_filter::TocIndex;
 
 /// Shared sidebar tab-selection state.
 ///
 /// The sidebar itself is always visible on desktop while chrome is shown, so
 /// `active` is normally `Some`. It only goes `None` on the mobile bottom-bar
 /// layout, where tapping the already-open tab's icon closes its sheet while
-/// the bar itself stays put. Visibility is restored from preferences; mobile
-/// and Kobo readers default to a closed sidebar.
+/// the bar itself stays put. Visibility is restored from preferences, except
+/// Settings requires an explicit request. Mobile and Kobo readers default to
+/// a closed sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SidebarState {
     active: Option<SidebarTab>,
@@ -32,7 +33,7 @@ impl SidebarState {
     pub(crate) fn from_preferences(cx: &App) -> Self {
         let preferences = ReaderSettings::preferences(cx);
         let tab = preferences.active_sidebar_tab;
-        Self { active: preferences.sidebar_open.then_some(tab), last_tab: tab }
+        Self { active: (preferences.sidebar_open && tab != SidebarTab::Settings).then_some(tab), last_tab: tab }
     }
 
     #[cfg(test)]
@@ -51,18 +52,13 @@ impl SidebarState {
 
     /// [`Self::effective`], defaulting to a sensible tab instead of `None`.
     ///
-    /// A persistent desktop split always shows some tab — there is no closed
-    /// state to fall back to once the toolbar's toggle button is gone — so
-    /// this is what the split render path reaches for instead of `effective`.
+    /// Desktop chrome owns the panel's visibility, so its split render path
+    /// uses the remembered tab even when `active` is `None`.
     pub(crate) fn effective_or_default(self, contents_available: bool) -> SidebarTab {
         match self.active.unwrap_or(self.last_tab) {
             SidebarTab::Contents if !contents_available => SidebarTab::Notes,
             tab => tab,
         }
-    }
-
-    pub(crate) fn shows(self, tab: SidebarTab) -> bool {
-        self.active == Some(tab)
     }
 
     pub(crate) fn is_visible(self) -> bool {
@@ -103,20 +99,11 @@ pub(crate) fn select_tab<C: 'static>(sidebar: &mut SidebarState, tab: SidebarTab
     state_changed || preference_changed
 }
 
-/// The phone bottom bar's self-toggling policy: tapping the action whose sheet
-/// is open closes it; tapping any other opens its sheet. Contents falls back
-/// to Notes when there is no outline, the same fallback
-/// `SidebarState::effective` applies on desktop.
-pub(crate) fn toggle_tab<C: 'static>(sidebar: &mut SidebarState, tab: SidebarTab, contents_available: bool, cx: &mut Context<C>) -> bool {
-    let tab = if tab == SidebarTab::Contents && !contents_available { SidebarTab::Notes } else { tab };
-    if sidebar.shows(tab) { sidebar.close(cx) } else { select_tab(sidebar, tab, cx) }
-}
-
 /// The panels in rail order, without Contents for a book with no outline —
 /// it is omitted rather than shown disabled, as a PDF without bookmarks never
 /// had contents to show.
 pub(crate) fn sidebar_tabs(contents_available: bool) -> &'static [SidebarTab] {
-    if contents_available { &[SidebarTab::Contents, SidebarTab::Notes, SidebarTab::Search, SidebarTab::Settings] } else { &[SidebarTab::Notes, SidebarTab::Search, SidebarTab::Settings] }
+    if contents_available { &[SidebarTab::Contents, SidebarTab::Notes, SidebarTab::Bookmarks, SidebarTab::Search, SidebarTab::Settings] } else { &[SidebarTab::Notes, SidebarTab::Bookmarks, SidebarTab::Search, SidebarTab::Settings] }
 }
 
 /// Cycles only through panels available in this book, wrapping at either end.
@@ -136,45 +123,102 @@ pub(crate) trait AnnotationSidebarTarget: Sized + 'static {
     fn select_sidebar_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>);
     fn go_to_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>);
     fn delete_sidebar_annotation(&mut self, id: String, cx: &mut Context<Self>);
+    fn copy_sidebar_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>);
 }
 
-/// The annotation rows below the panel header.
-///
-/// The caller appends these to its own panel container, because that is the
-/// one part of the sidebar the readers build differently. Element ids are not
-/// namespaced per reader: a window hosts one reader, so the two can never
-/// collide.
-pub(crate) fn reader_state_rows<C, H>(target: &Entity<C>, marks: &MarkSession, no_annotations: &'static str, theme: components::BrowserTheme, group_for_annotation: H) -> Vec<AnyElement>
+/// Compact descriptions shared by the flat PDF list and EPUB chapter tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AnnotationRow {
+    Heading(String),
+    Card { index: usize, depth: usize, id: SharedString, modified_at: u64 },
+    Empty(&'static str),
+}
+
+impl AnnotationRow {
+    pub(crate) fn card(index: usize, depth: usize, annotation: &Annotation) -> Self {
+        Self::Card { index, depth, id: annotation.id.clone().into(), modified_at: annotation.modified_at }
+    }
+
+    pub(crate) fn annotation_id(&self) -> Option<&str> {
+        match self {
+            Self::Card { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+}
+
+/// Group indices without copying quotes, notes or annotation anchors.
+pub(crate) fn reader_state_rows<H>(annotations: &[Annotation], no_annotations: &'static str, group_for_annotation: H) -> Vec<AnnotationRow>
 where
-    C: AnnotationSidebarTarget,
     H: Fn(&Annotation) -> (String, String),
 {
-    let mut rows = Vec::new();
-    if marks.annotations().is_empty() {
-        rows.push(components::reader_state_note(no_annotations, theme).p(gpui::px(12.0)).into_any_element());
-    }
-    let mut groups: Vec<(String, Vec<(usize, Annotation)>)> = Vec::new();
+    reader_state_rows_matching(annotations, no_annotations, |_| true, group_for_annotation)
+}
+
+/// Match before resolving chapter groups, keeping indices into the full list.
+pub(crate) fn reader_state_rows_matching<F, H>(annotations: &[Annotation], no_annotations: &'static str, matches: F, group_for_annotation: H) -> Vec<AnnotationRow>
+where
+    F: Fn(&Annotation) -> bool,
+    H: Fn(&Annotation) -> (String, String),
+{
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     let mut group_indices = HashMap::<String, usize>::new();
-    for (index, annotation) in marks.annotations().iter().cloned().enumerate() {
-        let (key, title) = group_for_annotation(&annotation);
+    let mut recurring = Vec::new();
+    for (index, annotation) in annotations.iter().enumerate() {
+        if !matches(annotation) {
+            continue;
+        }
+        if matches!(annotation.anchor.recurring_scope(), Some(book_model::RecurringScope::Book | book_model::RecurringScope::Library)) {
+            recurring.push(index);
+            continue;
+        }
+        let (key, title) = group_for_annotation(annotation);
         let group_index = *group_indices.entry(key).or_insert_with(|| {
             groups.push((title, Vec::new()));
             groups.len() - 1
         });
-        groups[group_index].1.push((index, annotation));
+        groups[group_index].1.push(index);
     }
-    for (title, annotations) in groups {
-        rows.push(components::reader_annotation_group_heading(title, theme).into_any_element());
-        for (index, annotation) in annotations {
-            let selected = marks.selected_id() == Some(annotation.id.as_str());
-            rows.push(reader_annotation_card(target, index, &annotation, selected, "", theme));
+    let mut rows = Vec::new();
+    if !recurring.is_empty() {
+        rows.push(AnnotationRow::Heading("Recurring notes".into()));
+        rows.extend(recurring.into_iter().map(|index| AnnotationRow::card(index, 0, &annotations[index])));
+    }
+    for (title, mut indices) in groups {
+        indices.sort_by_key(|&index| annotations[index].anchor.recurring_scope() != Some(book_model::RecurringScope::Chapter));
+        rows.push(AnnotationRow::Heading(title));
+        for index in indices {
+            rows.push(AnnotationRow::card(index, 0, &annotations[index]));
         }
+    }
+    if rows.is_empty() {
+        rows.push(AnnotationRow::Empty(no_annotations));
     }
     rows
 }
 
+pub(crate) fn render_annotation_row<C: AnnotationSidebarTarget>(target: &Entity<C>, row: &AnnotationRow, annotations: &[Annotation], selected_id: Option<&str>, query: &str, theme: components::BrowserTheme) -> AnyElement {
+    match row {
+        AnnotationRow::Heading(title) => components::reader_annotation_group_heading(title.clone(), theme).into_any_element(),
+        AnnotationRow::Empty(message) => components::reader_state_note(*message, theme).p(px(12.0)).into_any_element(),
+        AnnotationRow::Card { index, depth, id, .. } => {
+            let Some(annotation) = annotations.get(*index).filter(|annotation| annotation.id == id.as_str()) else { return div().into_any_element() };
+            div()
+                .w_full()
+                .min_w_0()
+                .flex_none()
+                .pl(px(components::CONTENTS_ROW_INDENT * (*depth).min(3) as f32))
+                .child(reader_annotation_card(target, *index, annotation, selected_id == Some(annotation.id.as_str()), query, theme))
+                .into_any_element()
+        }
+    }
+}
+
 /// One annotation, shared by flat lists and the filtered TOC tree.
 pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity<C>, index: usize, annotation: &Annotation, selected: bool, query: &str, theme: components::BrowserTheme) -> AnyElement {
+    if annotation.is_bookmark() {
+        return super::bookmarks::card(target, index, annotation, selected, theme);
+    }
     let note = annotation.note.clone();
     let options = SearchOptions { match_diacritics: true, ..Default::default() };
     let editable = !annotation.is_external_pdf_annotation();
@@ -184,6 +228,12 @@ pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity
     let go_annotation = annotation.clone();
     let keyboard_target = target.clone();
     let keyboard_annotation = annotation.clone();
+    let copy_target = target.clone();
+    let copy_annotation = annotation.clone();
+    let copy = components::outlined_text_button(("reader-annotation-copy", index), "Copy link").debug_selector(move || format!("reader-annotation-copy-{index}")).on_click(move |_, _, cx| {
+        cx.stop_propagation();
+        copy_target.update(cx, |this, cx| this.copy_sidebar_annotation(&copy_annotation, cx));
+    });
     let actions = if editable {
         let delete_target = target.clone();
         let delete_id = annotation.id.clone();
@@ -215,11 +265,19 @@ pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity
             go_target.update(cx, |this, cx| this.go_to_annotation(&annotation, cx));
         })
         .child(components::reader_annotation_color_bar(annotation.color))
+        .when_some(annotation.anchor.recurring_scope(), |card, scope| card.child(components::reader_state_note(format!("Recurring · {}", scope.label()), theme)))
         .when(!annotation.exact_text.is_empty(), |card| card.child(components::reader_state_quote(highlighted_text(format!("“{}”", annotation.exact_text), query, options), theme)))
         .when(!note.is_empty(), |card| card.child(components::reader_state_note(highlighted_text(note, query, options), theme).text_color(theme.text)))
-        .children(actions.map(|actions| {
-            components::action_row().id(("reader-state-annotation-actions", index)).justify_end().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(|_, _, cx| cx.stop_propagation()).child(actions)
-        }))
+        .child(
+            components::action_row()
+                .id(("reader-state-annotation-actions", index))
+                .flex_wrap()
+                .justify_end()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(copy)
+                .children(actions),
+        )
         .into_any_element()
 }
 
@@ -231,50 +289,37 @@ pub(crate) enum TocActivation {
 
 pub(crate) type TocReadReset = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
+#[derive(Default)]
+pub(crate) struct TocRowStatus {
+    pub(crate) active: bool,
+    pub(crate) read: bool,
+}
+
 /// The table-of-contents tree. Keyboard activation keeps focus in the tree so
 /// the reader can continue navigating entries with the arrow keys.
-pub(crate) fn reader_toc_tree<C, F>(
-    toc_tree: &Entity<TreeState>, target: &Entity<C>, active_id: Option<&str>, read_ids: std::collections::HashSet<String>, reset_read: Option<TocReadReset>, keyboard_visible: bool, theme: components::BrowserTheme, cx: &gpui::App,
-    on_navigate: F,
+pub(crate) fn reader_toc_tree<C, F, S>(
+    toc_tree: &Entity<TreeState>, index: Option<Rc<TocIndex>>, target: &Entity<C>, status: S, reset_read: Option<TocReadReset>, keyboard_visible: bool, theme: components::BrowserTheme, cx: &gpui::App, on_navigate: F,
 ) -> AnyElement
 where
     C: 'static,
     F: Fn(&str, TocActivation, &mut Window, &mut C, &mut Context<C>) + 'static,
+    S: Fn(&C, &str) -> TocRowStatus + 'static,
 {
     let target = target.clone();
     let on_navigate = Rc::new(on_navigate);
-    let active_id = active_id.map(str::to_owned);
     // `selected` is the entry the reader is inside: the renderer resolves the
     // position to a link and the sidebar selects it. It used to be discarded,
     // so the list gave no sign of where you were and the only indication was
     // the chapter name in the toolbar.
-    // Every entry is numbered in reading order, those inside a closed part
-    // counted too, so a number never changes when a part is opened. The caret
-    // column is kept only in a contents that has parts at all.
-    let (numbers, number_digits, nested) = {
-        fn descendants(item: &gpui_component::tree::TreeItem) -> usize {
-            item.children.iter().map(|child| 1 + descendants(child)).sum()
-        }
-        let entries = toc_tree.read(cx).entries();
-        let mut next = 0;
-        let numbers = entries
-            .iter()
-            .map(|entry| {
-                next += 1;
-                let number = next;
-                if entry.is_folder() && !entry.is_expanded() {
-                    next += descendants(entry.item());
-                }
-                number
-            })
-            .collect::<Vec<_>>();
-        (numbers, components::contents_digits(next), entries.iter().any(|entry| entry.is_folder()))
-    };
+    // Keep the caret column only in a contents that has parts.
+    let nested = index.as_ref().map_or_else(|| toc_tree.read(cx).entries().iter().any(|entry| entry.is_folder()), |index| index.nested);
     let keyboard_tree = toc_tree.clone();
     let keyboard_target = target.clone();
     let keyboard_navigate = on_navigate.clone();
     gpui::div()
         .size_full()
+        .min_h_0()
+        .flex_1()
         .on_key_down(move |event, window, cx| {
             if event.keystroke.key == "enter" && !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt && !event.keystroke.modifiers.platform {
                 let id = keyboard_tree.read(cx).selected_item().filter(|item| !item.is_disabled()).map(|item| item.id.to_string());
@@ -286,29 +331,21 @@ where
             }
         })
         .child(
-            tree(toc_tree, move |index, entry, selected, _window, _cx| {
+            tree(toc_tree, move |index, entry, selected, _window, cx| {
                 let item = entry.item();
                 let id = item.id.to_string();
                 let navigation_target = target.clone();
                 let on_navigate = on_navigate.clone();
-                let marked = active_id.as_deref() == Some(item.id.as_ref());
-                let row = components::ContentsRow {
-                    depth: entry.depth(),
-                    has_children: entry.is_folder(),
-                    expanded: entry.is_expanded(),
-                    marked,
-                    read: read_ids.contains(item.id.as_ref()),
-                    focused: keyboard_visible && selected,
-                    number: numbers.get(index).copied(),
-                    number_digits,
-                };
+                // Query the in-memory owner only for rows the list renders.
+                let status = status(target.read(cx), &item.id);
+                let row = components::ContentsRow { depth: entry.depth(), has_children: entry.is_folder(), expanded: entry.is_expanded(), marked: status.active, read: status.read, focused: keyboard_visible && selected };
                 let reset = reset_read.clone().map(|reset| {
                     let id = id.clone();
                     Rc::new(move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| reset(&id, window, cx)) as components::ContentsReadReset
                 });
                 // The tree toggles an entry when its row is clicked, so navigation
                 // hangs on the title, which stops the click reaching the row.
-                let title = components::contents_title(("reader-toc-title", index), item.label.clone(), theme).debug_selector(move || format!("reader-toc-title-{index}")).on_click(move |_, window, cx| {
+                let title = components::contents_title(("reader-toc-title", index), item.label.clone()).debug_selector(move || format!("reader-toc-title-{index}")).on_click(move |_, window, cx| {
                     let id = id.clone();
                     navigation_target.update(cx, |this, cx| on_navigate(&id, TocActivation::Pointer, window, this, cx));
                 });
@@ -321,7 +358,7 @@ where
                     components::contents_row(("reader-toc-row", index), row, nested.then(|| components::contents_disclosure(("reader-toc-disclosure", index), row, theme)), title, None, reset, theme)
                         .debug_selector(move || format!("reader-toc-row-{index}"))
                         .min_h_0()
-                        .line_height(gpui::relative(1.2)),
+                        .line_height_auto(),
                 )
             })
             .pr(gpui::px(components::READER_SCROLLBAR_GUTTER_PX)),
@@ -347,7 +384,17 @@ mod tests {
 
     impl Render for TocSpacingTest {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().debug_selector(|| "test-toc-viewport".into()).w(px(280.0)).h(px(240.0)).child(reader_toc_tree(&self.tree, &cx.entity(), None, Default::default(), None, true, ui_components::browser_theme(cx), cx, |_, _, _, _, _| {}))
+            div().debug_selector(|| "test-toc-viewport".into()).w(px(280.0)).h(px(240.0)).child(reader_toc_tree(
+                &self.tree,
+                None,
+                &cx.entity(),
+                |_, _| Default::default(),
+                None,
+                true,
+                ui_components::browser_theme(cx),
+                cx,
+                |_, _, _, _, _| {},
+            ))
         }
     }
 
@@ -430,13 +477,14 @@ mod tests {
         assert_eq!(adjacent_sidebar_tab(SidebarTab::Contents, true, -1), last);
         assert_eq!(adjacent_sidebar_tab(last, false, 1), SidebarTab::Notes);
         assert_eq!(adjacent_sidebar_tab(SidebarTab::Notes, false, -1), last);
-        assert_eq!(adjacent_sidebar_tab(SidebarTab::Notes, true, 1), SidebarTab::Search);
+        assert_eq!(adjacent_sidebar_tab(SidebarTab::Notes, true, 1), SidebarTab::Bookmarks);
+        assert_eq!(adjacent_sidebar_tab(SidebarTab::Bookmarks, true, 1), SidebarTab::Search);
     }
 
     #[gpui::test]
     fn closing_and_reopening_restores_saved_visibility_and_tab(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            for tab in [SidebarTab::Contents, SidebarTab::Notes, SidebarTab::Search, SidebarTab::Settings] {
+            for tab in [SidebarTab::Contents, SidebarTab::Notes, SidebarTab::Bookmarks, SidebarTab::Search, SidebarTab::Settings] {
                 let preferences = ReaderPreferences { active_sidebar_tab: tab, sidebar_open: true, ..Default::default() };
                 let saved = Rc::new(RefCell::new(preferences.clone()));
                 let save_target = saved.clone();
@@ -455,7 +503,8 @@ mod tests {
                 assert_eq!(sidebar.active(), None);
                 assert!(sidebar.reopen(cx));
                 assert!(saved.borrow().sidebar_open);
-                assert_eq!(SidebarState::from_preferences(cx).active(), Some(tab));
+                assert_eq!(SidebarState::from_preferences(cx).active(), (tab != SidebarTab::Settings).then_some(tab));
+                assert_eq!(sidebar.active(), Some(tab), "an explicit reopen still opens Settings");
                 assert!(!sidebar.reopen(cx));
             }
         });

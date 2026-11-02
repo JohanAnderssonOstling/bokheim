@@ -20,36 +20,37 @@ impl LibraryEnrichment {
     /// answers, then fills missing covers. Returns how many books changed.
     pub(crate) async fn enrich_books(&self, scope: &HashSet<BookId>) -> EnrichmentResult<usize> {
         let members = scope.iter().copied().collect::<Vec<_>>();
-        let candidates = self.database.enrichment_candidates(&members, now())?;
+        let mut candidates = self.database.enrichment_candidates(&members, now())?.into_iter();
         let mut changed = 0;
-        for chunk in candidates.chunks(MAX_BOOKS_PER_REQUEST) {
+        loop {
             // Keys are batch positions: no library identifier leaves the device.
-            let books = chunk
-                .iter()
+            let (books, targets): (Vec<_>, Vec<_>) = candidates
+                .by_ref()
+                .take(MAX_BOOKS_PER_REQUEST)
                 .enumerate()
-                .map(|(index, candidate)| BookFacts {
-                    key: index.to_string(),
-                    record: candidate.record.clone(),
-                    audiobook: candidate.audiobook,
-                    needs_cover: false,
-                    readings: book_inspection::title_readings(&candidate.record, &candidate.filenames),
-                    recording: candidate.recording.clone(),
+                .map(|(index, candidate)| {
+                    let readings = book_inspection::title_readings(&candidate.record, &candidate.filenames);
+                    let facts = BookFacts { key: index.to_string(), record: candidate.record, audiobook: candidate.audiobook, needs_cover: false, readings, recording: candidate.recording };
+                    (facts, (candidate.content_hash, candidate.request_key))
                 })
-                .collect();
-            let response = self.client.books(&BookEnrichmentRequest { books }).await;
+                .unzip();
+            if books.is_empty() {
+                break;
+            }
+            let mut response = self.client.books(&BookEnrichmentRequest { books }).await;
             if let Err(error) = &response {
                 log::warn!("metadata server lookup will retry: {error}");
             }
-            for (index, candidate) in chunk.iter().enumerate() {
+            for (index, (content_hash, request_key)) in targets.iter().enumerate() {
                 let key = index.to_string();
-                let result = match &response {
-                    Ok(response) => response.results.iter().find(|result| result.key == key).cloned().unwrap_or_else(|| failed(key, "metadata response omitted the book".to_owned())),
+                let result = match &mut response {
+                    Ok(response) => response.results.iter().position(|result| result.key == key).map(|index| response.results.remove(index)).unwrap_or_else(|| failed(key, "metadata response omitted the book".to_owned())),
                     Err(error) => failed(key, error.to_string()),
                 };
                 if result.status != BookEnrichmentStatus::Failed {
                     changed += 1;
                 }
-                self.database.record_enrichment(&candidate.content_hash, &candidate.request_key, &result, now())?;
+                self.database.record_enrichment(content_hash, request_key, result, now())?;
             }
             if response.is_ok() {
                 self.events.publish_update(library_model::LibraryUpdate::Contents);

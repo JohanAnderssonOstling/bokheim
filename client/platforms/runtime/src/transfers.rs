@@ -14,11 +14,16 @@ pub enum NetworkCost {
     Metered,
 }
 
-#[derive(Default)]
 pub struct TransferPolicy {
     allow_metered: AtomicBool,
     cost: AtomicU8,
     changes: OnceLock<watch::Sender<()>>,
+}
+
+impl Default for TransferPolicy {
+    fn default() -> Self {
+        Self { allow_metered: AtomicBool::new(false), cost: AtomicU8::new(0), changes: OnceLock::new() }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

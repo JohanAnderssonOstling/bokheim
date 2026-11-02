@@ -1,7 +1,8 @@
 //! Database policy for native file replay and interrupted directory moves.
 
-use std::collections::{HashMap, HashSet};
 use super::{AssetStore, BackendError, BookId, Database, DirId};
+use library_database::DatabaseError;
+use std::collections::{HashMap, HashSet};
 use sync_common::ROOT_DIR_ID;
 
 pub(super) fn reconcile_file_jobs(assets: &AssetStore, database: &Database, jobs: Vec<library_database::NativeFileWork>) -> Result<(), BackendError> {
@@ -22,16 +23,28 @@ pub(super) fn reconcile_file_jobs(assets: &AssetStore, database: &Database, jobs
 /// Does nothing when the job is obsolete or another operation holds the book.
 fn apply_file_work(assets: &AssetStore, database: &Database, movable: &HashMap<BookId, Vec<library_model::RelativeBookPath>>, work: library_database::NativeFileWork) -> Result<(), BackendError> {
     let Some(snapshot) = database.native_file_work_snapshot(work)? else { return Ok(()) };
+    // Keep a staged source's cleanup pending until its live placement has
+    // been restored. A failed restore must never delete the remaining bytes.
+    if snapshot.work.operation == "remove" && snapshot.placement.is_some() && snapshot.resolved_path != snapshot.work.original_path {
+        return Ok(());
+    }
     let hash = snapshot.work.content_hash;
     let Some(_lease) = assets.try_exclusive_lease(&hash)? else { return Ok(()) };
     let mut path = snapshot.resolved_path.clone();
     let mut renamed = None;
     let prepared = match snapshot.work.operation.as_str() {
-        "remove" if snapshot.live && snapshot.placement.is_some() => None,
-        "remove" => Some(assets.prepare_removal(&hash, &path)?),
+        "remove" if snapshot.placement.is_some() => None,
+        "remove" => {
+            if !snapshot.live_book_paths.is_empty() && !assets.verified_placement_exists(&hash, &snapshot.live_book_paths)? {
+                return Err(BackendError::message("destination copy is not ready; the source file has been kept"));
+            }
+            Some(assets.prepare_removal(&hash, &path)?)
+        }
         "materialize" => {
-            if let Some((dir, name)) = snapshot.placement.clone() {
-                let mut alternatives = library_replica::file_name_candidates(&name, snapshot.occupied_names.iter().map(String::as_str).chain(std::iter::once(name.as_str())));
+            if let Some((dir, name)) = &snapshot.placement {
+                let directory = DirId::parse_str(dir).map_err(BackendError::operation)?;
+                let occupied = database.shared_occupied_file_names(&directory)?;
+                let mut alternatives = library_replica::file_name_candidates(name, occupied.iter().map(String::as_str).chain(std::iter::once(name.as_str())));
                 while assets.placement_conflicts(&hash, &path)? {
                     let chosen = alternatives.next().ok_or_else(|| BackendError::message("no collision-free file name remains"))?;
                     path = path.with_file_name(&chosen).map_err(BackendError::operation)?;
@@ -75,11 +88,19 @@ fn materialize_directory(assets: &AssetStore, database: &Database, id: DirId) ->
     }
 }
 
-pub(super) async fn replay_directories(assets: &AssetStore, database: &Database, requested: Option<DirId>) -> Result<(), BackendError> {
+/// Live snapshots include both paths; hidden folders retain only their physical location.
+fn directory_paths(database: &Database, id: &DirId) -> Result<(Option<String>, Option<String>), DatabaseError> {
+    match database.native_directory_snapshot(id)? {
+        Some(snapshot) => Ok((Some(snapshot.relative_path), snapshot.projected_path)),
+        None => Ok((None, database.native_directory_projected_path(id)?)),
+    }
+}
+
+pub(super) fn replay_directories(assets: &AssetStore, database: &Database, requested: Option<&[DirId]>) -> Result<(), BackendError> {
     let work = database.native_directory_replay_work().map_err(BackendError::operation)?;
     let mut directories: Vec<_> = work.iter().map(|(_, directory)| *directory).collect();
     directories.extend(database.native_book_work_directory_ids().map_err(BackendError::operation)?);
-    directories.extend(requested);
+    directories.extend(requested.into_iter().flatten().copied());
     directories.sort();
     directories.dedup();
     if let Some(requested) = requested {
@@ -87,61 +108,50 @@ pub(super) async fn replay_directories(assets: &AssetStore, database: &Database,
         // moves. A broken move in another subtree must not block imports.
         let mut paths = HashMap::new();
         for id in &directories {
-            let desired = database.native_directory_snapshot(id).map_err(BackendError::operation)?.map(|snapshot| snapshot.relative_path);
-            let old = database.native_directory_projected_path(id).map_err(BackendError::operation)?;
-            paths.insert(*id, (desired, old));
+            paths.insert(*id, directory_paths(database, id).map_err(BackendError::operation)?);
         }
         let overlaps = |a: &str, b: &str| a == b || a.strip_prefix(b).is_some_and(|suffix| suffix.starts_with('/')) || b.strip_prefix(a).is_some_and(|suffix| suffix.starts_with('/'));
-        let mut selected = HashSet::from([requested]);
-        loop {
-            let before = selected.len();
-            for id in selected.clone() {
-                for component in database.dir_path_components(&id).map_err(BackendError::operation)? {
-                    selected.insert(component.id);
-                }
-                let Some((desired, old)) = paths.get(&id) else { continue };
-                for (candidate, (candidate_desired, candidate_old)) in &paths {
-                    if [desired, old].into_iter().flatten().any(|path| [candidate_desired, candidate_old].into_iter().flatten().any(|other| overlaps(path, other))) {
-                        selected.insert(*candidate);
-                    }
+        let mut selected = requested.iter().copied().collect::<HashSet<_>>();
+        let mut pending = requested.to_vec();
+        while let Some(id) = pending.pop() {
+            for component in database.dir_path_components(&id).map_err(BackendError::operation)? {
+                if selected.insert(component.id) {
+                    pending.push(component.id);
                 }
             }
-            if selected.len() == before {
-                break;
+            let Some((desired, old)) = paths.get(&id) else { continue };
+            for (candidate, (candidate_desired, candidate_old)) in &paths {
+                if [desired, old].into_iter().flatten().any(|path| [candidate_desired, candidate_old].into_iter().flatten().any(|other| overlaps(path, other))) && selected.insert(*candidate) {
+                    pending.push(*candidate);
+                }
             }
         }
-        directories.retain(|id| selected.contains(id));
-        directories.extend(selected);
+        directories = selected.into_iter().collect();
         directories.sort();
-        directories.dedup();
     }
     // Materialize effective parents first. In particular, lift a repaired
     // cycle root out of its old ancestor before moving that ancestor below it.
     let mut ordered = Vec::new();
+    let mut seen = HashSet::new();
     let selected: HashSet<_> = directories.iter().copied().collect();
     for directory in directories {
         for component in database.dir_path_components(&directory).map_err(BackendError::operation)? {
-            if !ordered.contains(&component.id) {
+            if seen.insert(component.id) {
                 ordered.push(component.id);
             }
         }
     }
     // Hidden directories have no live ancestry, but interrupted physical
     // staging must still be recovered before permanent removal is replayed.
-    let mut recovery = ordered.clone();
-    for (_, id) in &work {
-        if selected.contains(id) && !recovery.contains(id) {
-            recovery.push(*id);
-        }
-    }
+    let recovery = ordered.iter().copied().chain(work.iter().map(|(_, id)| *id).filter(|id| selected.contains(id) && seen.insert(*id)));
     // Stage changing managed folders first, including name swaps. Otherwise
     // a destination still occupied by its previous owner looks like a foreign
     // collision and causes a new, device-dependent synchronized rename.
-    for directory in &recovery {
-        let snapshot = database.native_directory_snapshot(directory)?;
-        let Some(old) = database.native_directory_projected_path(directory)? else { continue };
-        if let Some(staged) = assets.stage_directory(*directory, &old, snapshot.as_ref().map(|snapshot| snapshot.relative_path.as_str()))? {
-            database.acknowledge_native_directory_staging(directory, &old, &staged)?;
+    for directory in recovery {
+        let (desired, old) = directory_paths(database, &directory)?;
+        let Some(old) = old else { continue };
+        if let Some(staged) = assets.stage_directory(directory, &old, desired.as_deref())? {
+            database.acknowledge_native_directory_staging(&directory, &old, &staged)?;
         }
     }
     for directory in ordered {

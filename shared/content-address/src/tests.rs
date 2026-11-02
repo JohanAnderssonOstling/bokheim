@@ -1,5 +1,5 @@
 use super::*;
-use lopdf::{Document, Object, Stream, dictionary};
+use lopdf::{dictionary, Document, Object, Stream};
 use std::{
     fs::{self, File},
     io::Cursor,
@@ -68,6 +68,55 @@ fn identity_hashes_all_bytes_without_format_parsing() {
 }
 
 #[test]
+fn copying_and_hashing_share_one_byte_stream() {
+    let bytes = vec![42; 130_001];
+    let mut reader = HashingReader::new(Cursor::new(&bytes));
+    let mut copied = Vec::new();
+    io::copy(&mut reader, &mut copied).unwrap();
+    assert_eq!(copied, bytes);
+    assert_eq!(reader.size_bytes(), bytes.len() as u64);
+    assert_eq!(reader.checksum(), ContentHash::from(blake3::hash(&bytes)));
+    assert_eq!(hash_reader_with_size(&mut Cursor::new(&bytes)).unwrap(), (reader.checksum(), reader.size_bytes()));
+}
+
+#[test]
+fn stream_hashing_retries_interruptions_and_starts_at_the_current_position() {
+    struct Fragmented<'a> {
+        bytes: Cursor<&'a [u8]>,
+        interrupt: bool,
+    }
+    impl Read for Fragmented<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            self.interrupt = !self.interrupt;
+            if self.interrupt {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let count = output.len().min(8191);
+            self.bytes.read(&mut output[..count])
+        }
+    }
+    let bytes: Vec<_> = (0..131_091).map(|index| index as u8).collect();
+    let mut reader = Fragmented { bytes: Cursor::new(bytes.as_slice()), interrupt: false };
+    reader.bytes.set_position(17);
+    assert_eq!(hash_reader(&mut reader).unwrap(), ContentHash::from(blake3::hash(&bytes[17..])));
+    assert_eq!(reader.bytes.position(), bytes.len() as u64);
+}
+
+#[test]
+fn stream_hashing_preserves_source_errors() {
+    struct Failed;
+    impl Read for Failed {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "fixture source unreadable"))
+        }
+    }
+    let mut reader = b"partial book".as_slice().chain(Failed);
+    let error = hash_reader(&mut reader).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(error.to_string(), "fixture source unreadable");
+}
+
+#[test]
 fn raw_hash_roundtrips_without_changing_json() {
     let bytes = std::array::from_fn(|index| index as u8);
     let hash = ContentHash::from_bytes(bytes);
@@ -77,7 +126,7 @@ fn raw_hash_roundtrips_without_changing_json() {
     assert_eq!(serde_json::to_string(&hash).unwrap(), format!("\"{hash}\""));
     assert_eq!(serde_json::from_str::<ContentHash>(&format!("\"{hash}\"")).unwrap(), hash);
     let stored = wire::encode(&hash).unwrap();
-    assert_eq!(stored.len(), wire::header_bytes().len() + 1 + 32);
+    assert_eq!(stored.len(), wire::encode(&()).unwrap().len() + 1 + 32);
     assert_eq!(wire::decode::<ContentHash>(&stored, 1024).unwrap(), hash);
     let transported = protobuf_wire::encode(&vec![Some(hash)]).unwrap();
     assert!(transported.windows(32).any(|window| window == bytes));

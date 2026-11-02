@@ -86,7 +86,7 @@ async fn copied_imports_and_scanned_files_have_identical_ingestion_results() {
             db.initialize_library().unwrap();
             let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
             let host: Arc<dyn CpuHost> = Arc::new(InspectHost);
-            let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, name.into(), Box::new(Cursor::new(bytes.to_vec())), ImportOptions { direct }).await.unwrap();
+            let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, name, Box::new(Cursor::new(bytes.to_vec())), ImportOptions { direct }).await.unwrap();
             assert_eq!(std::fs::read(copied.path()).unwrap(), bytes, "copy must leave ingestion to the shared function");
             let ingested = filesystem_scanner::ingestion::ingest_file(copied.path().to_owned(), name.clone(), &*host).await.unwrap();
             let expected_hash = ingested.content_hash;
@@ -118,7 +118,7 @@ async fn failed_ingestion_cleans_up_copied_files() {
         let db = Database::open(root.path().join("library.db")).unwrap();
         db.initialize_library().unwrap();
         let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
-        let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, "invalid.epub".into(), Box::new(Cursor::new(b"invalid epub")), ImportOptions { direct }).await.unwrap();
+        let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, "invalid.epub", Box::new(Cursor::new(b"invalid epub")), ImportOptions { direct }).await.unwrap();
         let path = copied.path().to_owned();
         assert!(filesystem_scanner::ingestion::ingest_file(path.clone(), name, &InspectHost).await.is_err());
         drop(copied);

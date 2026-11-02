@@ -1,21 +1,18 @@
 use gpui::Corners;
 use gpui::Half;
+use gpui::{AnyElement, App, Bounds, Edges, Element, ElementId, ElementInputHandler, Entity, GlobalElementId};
 use gpui::{
-    AnyElement, App, Bounds, Edges, Element, ElementId, ElementInputHandler, Entity,
-    GlobalElementId,
-};
-use gpui::{
-    HighlightStyle, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, LayoutId,
-    MouseButton, MouseMoveEvent, MouseUpEvent, Path, Pixels, Point, Position, ShapedLine,
-    SharedString, Size, Style, Styled as _, TextAlign, TextRun, TextStyle, UnderlineStyle, Window,
-    fill, point, px, relative, size,
+    HighlightStyle, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, Path, Pixels, Point, Position, ShapedLine, SharedString, Size, Style, Styled as _, TextAlign, TextRun,
+    TextStyle, UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use ropey::Rope;
 use smallvec::SmallVec;
 use std::{ops::Range, rc::Rc};
 
+#[cfg(feature = "input-search")]
+use crate::Colorize;
 use crate::{
-    ActiveTheme as _, Colorize, IconName, Root, Selectable, Sizable as _,
+    ActiveTheme as _, IconName, Root, Selectable, Sizable as _,
     button::{Button, ButtonVariants as _},
     input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
     scroll::Scrollbar,
@@ -28,18 +25,12 @@ pub(super) const RIGHT_MARGIN: Pixels = px(10.);
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
-const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
 
-fn compose_decorations(
-    mut styles: Vec<(Range<usize>, HighlightStyle)>,
-    decorations: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>,
-    visible_byte_range: Range<usize>,
-) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
+fn compose_decorations(mut styles: Vec<(Range<usize>, HighlightStyle)>, decorations: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>, visible_byte_range: Range<usize>) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
     let mut visible_decorations = decorations
         .into_iter()
         .filter_map(|(range, style)| {
-            let range =
-                range.start.max(visible_byte_range.start)..range.end.min(visible_byte_range.end);
+            let range = range.start.max(visible_byte_range.start)..range.end.min(visible_byte_range.end);
             (!range.is_empty()).then_some((range, style))
         })
         .peekable();
@@ -54,20 +45,9 @@ fn compose_decorations(
     Some(gpui::combine_highlights(visible_decorations, styles).collect())
 }
 
-fn compose_decoration_collections<'a>(
-    mut styles: Vec<(Range<usize>, HighlightStyle)>,
-    collections: impl IntoIterator<Item = &'a [TextDecoration]>,
-    visible_byte_range: Range<usize>,
-) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
+fn compose_decoration_collections<'a>(mut styles: Vec<(Range<usize>, HighlightStyle)>, collections: impl IntoIterator<Item = &'a [TextDecoration]>, visible_byte_range: Range<usize>) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
     for decorations in collections {
-        styles = compose_decorations(
-            styles,
-            decorations
-                .iter()
-                .map(|decoration| (decoration.range.clone(), decoration.style)),
-            visible_byte_range.clone(),
-        )
-        .unwrap_or_default();
+        styles = compose_decorations(styles, decorations.iter().map(|decoration| (decoration.range.clone(), decoration.style)), visible_byte_range.clone()).unwrap_or_default();
     }
 
     (!styles.is_empty()).then_some(styles)
@@ -87,54 +67,18 @@ pub(super) struct EditorScrollbarSnapshot {
 }
 
 impl EditorScrollbarSnapshot {
-    fn new(
-        input_bounds: Bounds<Pixels>,
-        last_layout: &LastLayout,
-        scroll_size: Size<Pixels>,
-        cursor_scroll_offset: Point<Pixels>,
-        state: &InputState,
-    ) -> Self {
-        Self {
-            layout: EditorScrollbarLayout::new(
-                input_bounds,
-                last_layout.line_number_width,
-                scroll_size,
-                state.editor_scrollbar_paddings.get(),
-            ),
-            cursor_scroll_offset,
-            soft_wrap: state.soft_wrap,
-        }
+    fn new(input_bounds: Bounds<Pixels>, last_layout: &LastLayout, scroll_size: Size<Pixels>, cursor_scroll_offset: Point<Pixels>, state: &InputState) -> Self {
+        Self { layout: EditorScrollbarLayout::new(input_bounds, last_layout.line_number_width, scroll_size, state.editor_scrollbar_paddings.get()), cursor_scroll_offset, soft_wrap: state.soft_wrap }
     }
 }
 
 impl EditorScrollbarLayout {
-    fn new(
-        input_bounds: Bounds<Pixels>,
-        line_number_width: Pixels,
-        scroll_size: Size<Pixels>,
-        paddings: Edges<Pixels>,
-    ) -> Self {
-        let left = if line_number_width == px(0.) {
-            px(0.)
-        } else {
-            paddings.left + line_number_width - LINE_NUMBER_RIGHT_MARGIN
-        };
+    fn new(input_bounds: Bounds<Pixels>, line_number_width: Pixels, scroll_size: Size<Pixels>, paddings: Edges<Pixels>) -> Self {
+        let left = if line_number_width == px(0.) { px(0.) } else { paddings.left + line_number_width - LINE_NUMBER_RIGHT_MARGIN };
 
         Self {
-            bounds: Bounds::new(
-                point(
-                    input_bounds.origin.x + left,
-                    input_bounds.origin.y - paddings.top,
-                ),
-                size(
-                    input_bounds.size.width - left + paddings.right,
-                    input_bounds.size.height + paddings.top + paddings.bottom,
-                ),
-            ),
-            scroll_size: size(
-                scroll_size.width - left + paddings.right + RIGHT_MARGIN,
-                scroll_size.height,
-            ),
+            bounds: Bounds::new(point(input_bounds.origin.x + left, input_bounds.origin.y - paddings.top), size(input_bounds.size.width - left + paddings.right, input_bounds.size.height + paddings.top + paddings.bottom)),
+            scroll_size: size(scroll_size.width - left + paddings.right + RIGHT_MARGIN, scroll_size.height),
         }
     }
 }
@@ -169,13 +113,7 @@ impl Element for EditorScrollbar {
         None
     }
 
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.position = Position::Absolute;
         style.size.width = relative(1.).into();
@@ -184,15 +122,7 @@ impl Element for EditorScrollbar {
         (window.request_layout(style, [], cx), ())
     }
 
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, _: Bounds<Pixels>, _: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
         let state = self.state.read(cx);
         let Some(snapshot) = state.editor_scrollbar_snapshot.get() else {
             return None;
@@ -203,50 +133,21 @@ impl Element for EditorScrollbar {
             scroll_handle.set_offset(snapshot.cursor_scroll_offset);
         }
 
-        let mut scrollbar = if !snapshot.soft_wrap {
-            Scrollbar::new(&scroll_handle)
-        } else {
-            Scrollbar::vertical(&scroll_handle)
-        }
-        .scroll_size(snapshot.layout.scroll_size)
-        .into_any_element();
+        let mut scrollbar = if !snapshot.soft_wrap { Scrollbar::new(&scroll_handle) } else { Scrollbar::vertical(&scroll_handle) }.scroll_size(snapshot.layout.scroll_size).into_any_element();
 
-        scrollbar.prepaint_as_root(
-            snapshot.layout.bounds.origin,
-            snapshot.layout.bounds.size.into(),
-            window,
-            cx,
-        );
+        scrollbar.prepaint_as_root(snapshot.layout.bounds.origin, snapshot.layout.bounds.size.into(), window, cx);
         Some(scrollbar)
     }
 
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, _: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
         if let Some(scrollbar) = prepaint.as_mut() {
             scrollbar.paint(window, cx);
         }
     }
 }
 
-fn clamp_auto_grow_vertical_scroll_offset(
-    mode: &InputMode,
-    scroll_top: Pixels,
-    scroll_height: Pixels,
-    input_height: Pixels,
-) -> Pixels {
-    if mode.is_auto_grow() {
-        scroll_top.clamp((input_height - scroll_height).min(px(0.)), px(0.))
-    } else {
-        scroll_top
-    }
+fn clamp_auto_grow_vertical_scroll_offset(mode: &InputMode, scroll_top: Pixels, scroll_height: Pixels, input_height: Pixels) -> Pixels {
+    if mode.is_auto_grow() { scroll_top.clamp((input_height - scroll_height).min(px(0.)), px(0.)) } else { scroll_top }
 }
 
 use super::MASK_CHAR;
@@ -263,17 +164,9 @@ fn masked_display_offset(text: &Rope, original_offset: usize) -> usize {
 /// Move the IME marked range (tracked against the original text) into the display text
 /// coordinate space, so that a run boundary can't land inside a multi-byte `MASK_CHAR`
 /// and panic text shaping on a non-char-boundary slice.
-fn ime_marked_display_range(
-    text: &Rope,
-    marked_range: Option<Range<usize>>,
-    masked: bool,
-) -> Option<Range<usize>> {
+fn ime_marked_display_range(text: &Rope, marked_range: Option<Range<usize>>, masked: bool) -> Option<Range<usize>> {
     let marked = marked_range?;
-    if masked {
-        Some(masked_display_offset(text, marked.start)..masked_display_offset(text, marked.end))
-    } else {
-        Some(marked)
-    }
+    if masked { Some(masked_display_offset(text, marked.start)..masked_display_offset(text, marked.end)) } else { Some(marked) }
 }
 
 /// Minimum pixel padding the cursor is kept clear of the viewport's
@@ -285,12 +178,7 @@ fn ime_marked_display_range(
 /// viewports); `Some(n)` uses `n` lines. The result is saturated against
 /// half the viewport so an oversized override can't invert the
 /// top/bottom thresholds into a scroll feedback loop.
-pub(super) fn cursor_surrounding_padding(
-    is_auto_grow: bool,
-    override_lines: Option<usize>,
-    visible_lines: usize,
-    line_height: Pixels,
-) -> Pixels {
+pub(super) fn cursor_surrounding_padding(is_auto_grow: bool, override_lines: Option<usize>, visible_lines: usize, line_height: Pixels) -> Pixels {
     if is_auto_grow {
         return line_height;
     }
@@ -315,12 +203,7 @@ pub(super) fn cursor_surrounding_padding(
 /// `0` outside code-editor mode. Inside it, `None` is half the viewport
 /// (floored at [`BOTTOM_MARGIN_ROWS`] line-heights); `Some(n)` is exactly
 /// `n` line-heights.
-fn empty_bottom_height(
-    is_code_editor: bool,
-    override_rows: Option<usize>,
-    viewport_height: Pixels,
-    line_height: Pixels,
-) -> Pixels {
+fn empty_bottom_height(is_code_editor: bool, override_rows: Option<usize>, viewport_height: Pixels, line_height: Pixels) -> Pixels {
     if !is_code_editor {
         return px(0.);
     }
@@ -345,10 +228,7 @@ pub(super) struct TextElement {
 
 impl TextElement {
     pub(super) fn new(state: Entity<InputState>) -> Self {
-        Self {
-            state,
-            placeholder: SharedString::default(),
-        }
+        Self { state, placeholder: SharedString::default() }
     }
 
     /// Set the placeholder text of the input field.
@@ -393,14 +273,7 @@ impl TextElement {
     /// - current row index (No only the visible lines, but all lines)
     ///
     /// This method also will update for track scroll to cursor.
-    fn layout_cursor(
-        &self,
-        last_layout: &LastLayout,
-        bounds: &mut Bounds<Pixels>,
-        scroll_size: Size<Pixels>,
-        _: &mut Window,
-        cx: &mut App,
-    ) -> (Option<Bounds<Pixels>>, Point<Pixels>, Option<usize>) {
+    fn layout_cursor(&self, last_layout: &LastLayout, bounds: &mut Bounds<Pixels>, scroll_size: Size<Pixels>, _: &mut Window, cx: &mut App) -> (Option<Bounds<Pixels>>, Point<Pixels>, Option<usize>) {
         let state = self.state.read(cx);
 
         let line_height = last_layout.line_height;
@@ -430,12 +303,7 @@ impl TextElement {
 
         // Padding kept between the cursor and the viewport's top/bottom
         // edges, used by the auto-scroll-into-view computation below.
-        let top_bottom_margin = cursor_surrounding_padding(
-            state.mode.is_auto_grow(),
-            state.cursor_surrounding_lines,
-            visible_range.len(),
-            line_height,
-        );
+        let top_bottom_margin = cursor_surrounding_padding(state.mode.is_auto_grow(), state.cursor_surrounding_lines, visible_range.len(), line_height);
 
         // Resolve a cursor or selection endpoint to a content-space position.
         let visible_buffer_lines = &last_layout.visible_buffer_lines;
@@ -472,9 +340,7 @@ impl TextElement {
                     TextAlign::Center => CURSOR_WIDTH,
                 };
 
-                scroll_offset.x = if scroll_offset.x + cursor_pos.x
-                    > (bounds.size.width - line_number_width - safety_margin)
-                {
+                scroll_offset.x = if scroll_offset.x + cursor_pos.x > (bounds.size.width - line_number_width - safety_margin) {
                     // cursor is out of right
                     bounds.size.width - line_number_width - safety_margin - cursor_pos.x
                 } else if scroll_offset.x + cursor_pos.x < px(0.) {
@@ -489,9 +355,7 @@ impl TextElement {
                 if !auto_scrolling {
                     // If we change the scroll_offset.y, GPUI will render and trigger the next run loop.
                     // So, here we just adjust offset by `line_height` for move smooth.
-                    scroll_offset.y = if scroll_offset.y + cursor_pos.y
-                        > bounds.size.height - top_bottom_margin
-                    {
+                    scroll_offset.y = if scroll_offset.y + cursor_pos.y > bounds.size.height - top_bottom_margin {
                         // cursor is out of bottom
                         scroll_offset.y - line_height
                     } else if scroll_offset.y + cursor_pos.y < top_bottom_margin {
@@ -536,37 +400,19 @@ impl TextElement {
             // Match the caret to the deferred scroll target (applied below) that
             // the text paints at; otherwise the caret follows the cursor-scroll
             // while the text uses the deferred offset, flashing it mid-field.
-            let cursor_scroll_x = state
-                .deferred_scroll_offset
-                .map(|offset| offset.x)
-                .unwrap_or(scroll_offset.x);
+            let cursor_scroll_x = state.deferred_scroll_offset.map(|offset| offset.x).unwrap_or(scroll_offset.x);
 
             // For Right alignment, clamp cursor within the right edge of bounds so it
             // stays visible without having to shift the text via scroll_offset.
             let cursor_x = bounds.left() + cursor_pos.x + line_number_width + cursor_scroll_x;
-            let cursor_x = if last_layout.text_align == TextAlign::Right {
-                cursor_x.min(bounds.right() - CURSOR_WIDTH)
-            } else {
-                cursor_x
-            };
-            Some(Bounds::new(
-                point(
-                    cursor_x,
-                    bounds.top() + cursor_pos.y + ((line_height - cursor_height) / 2.),
-                ),
-                size(CURSOR_WIDTH, cursor_height),
-            ))
+            let cursor_x = if last_layout.text_align == TextAlign::Right { cursor_x.min(bounds.right() - CURSOR_WIDTH) } else { cursor_x };
+            Some(Bounds::new(point(cursor_x, bounds.top() + cursor_pos.y + ((line_height - cursor_height) / 2.)), size(CURSOR_WIDTH, cursor_height)))
         };
 
         if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
             scroll_offset = deferred_scroll_offset;
         }
-        scroll_offset.y = clamp_auto_grow_vertical_scroll_offset(
-            &state.mode,
-            scroll_offset.y,
-            scroll_size.height,
-            bounds.size.height,
-        );
+        scroll_offset.y = clamp_auto_grow_vertical_scroll_offset(&state.mode, scroll_offset.y, scroll_size.height, bounds.size.height);
 
         bounds.origin = bounds.origin + scroll_offset;
 
@@ -574,18 +420,12 @@ impl TextElement {
     }
 
     /// Layout the match range to a Path.
-    pub(crate) fn layout_match_range(
-        range: Range<usize>,
-        last_layout: &LastLayout,
-        bounds: &Bounds<Pixels>,
-    ) -> Option<Path<Pixels>> {
+    pub(crate) fn layout_match_range(range: Range<usize>, last_layout: &LastLayout, bounds: &Bounds<Pixels>) -> Option<Path<Pixels>> {
         if range.is_empty() {
             return None;
         }
 
-        if range.start < last_layout.visible_range_offset.start
-            || range.end > last_layout.visible_range_offset.end
-        {
+        if range.start < last_layout.visible_range_offset.start || range.end > last_layout.visible_range_offset.end {
             return None;
         }
 
@@ -602,40 +442,23 @@ impl TextElement {
         let mut line_corners = vec![];
 
         // Iterate only over visible (non-hidden) buffer lines
-        for (prev_lines_offset, line) in last_layout
-            .visible_line_byte_offsets
-            .iter()
-            .zip(lines.iter())
-        {
+        for (prev_lines_offset, line) in last_layout.visible_line_byte_offsets.iter().zip(lines.iter()) {
             let prev_lines_offset = *prev_lines_offset;
             let line_size = line.size(line_height);
             let line_wrap_width = line_size.width;
 
             let line_origin = point(px(0.), offset_y);
 
-            let line_cursor_start = line.position_for_index(
-                start_ix.saturating_sub(prev_lines_offset),
-                last_layout,
-                false,
-            );
-            let line_cursor_end = line.position_for_index(
-                end_ix.saturating_sub(prev_lines_offset),
-                last_layout,
-                false,
-            );
+            let line_cursor_start = line.position_for_index(start_ix.saturating_sub(prev_lines_offset), last_layout, false);
+            let line_cursor_end = line.position_for_index(end_ix.saturating_sub(prev_lines_offset), last_layout, false);
 
             if line_cursor_start.is_some() || line_cursor_end.is_some() {
-                let start = line_cursor_start
-                    .unwrap_or_else(|| line.position_for_index(0, last_layout, false).unwrap());
+                let start = line_cursor_start.unwrap_or_else(|| line.position_for_index(0, last_layout, false).unwrap());
 
-                let end = line_cursor_end.unwrap_or_else(|| {
-                    line.position_for_index(line.len(), last_layout, false)
-                        .unwrap()
-                });
+                let end = line_cursor_end.unwrap_or_else(|| line.position_for_index(line.len(), last_layout, false).unwrap());
 
                 // Split the selection into multiple items
-                let wrapped_lines =
-                    (end.y / line_height).ceil() as usize - (start.y / line_height).ceil() as usize;
+                let wrapped_lines = (end.y / line_height).ceil() as usize - (start.y / line_height).ceil() as usize;
 
                 let mut end_x = end.x;
                 if wrapped_lines > 0 {
@@ -718,22 +541,12 @@ impl TextElement {
         builder.build().ok()
     }
 
-    fn layout_search_matches(
-        &self,
-        last_layout: &LastLayout,
-        bounds: &Bounds<Pixels>,
-        cx: &mut App,
-    ) -> Vec<(Path<Pixels>, bool)> {
+    #[cfg(feature = "input-search")]
+    fn layout_search_matches(&self, last_layout: &LastLayout, bounds: &Bounds<Pixels>, cx: &mut App) -> Vec<(Path<Pixels>, bool)> {
         let state = self.state.read(cx);
         let search_panel = state.search_panel.clone();
 
-        let Some((ranges, current_match_ix)) = search_panel.and_then(|panel| {
-            if let Some(matcher) = panel.read(cx).matcher() {
-                Some((matcher.matched_ranges.clone(), matcher.current_match_ix))
-            } else {
-                None
-            }
-        }) else {
+        let Some((ranges, current_match_ix)) = search_panel.and_then(|panel| if let Some(matcher) = panel.read(cx).matcher() { Some((matcher.matched_ranges.clone(), matcher.current_match_ix)) } else { None }) else {
             return vec![];
         };
 
@@ -747,13 +560,7 @@ impl TextElement {
         paths
     }
 
-    fn layout_selections(
-        &self,
-        last_layout: &LastLayout,
-        bounds: &mut Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<Path<Pixels>> {
+    fn layout_selections(&self, last_layout: &LastLayout, bounds: &mut Bounds<Pixels>, window: &mut Window, cx: &mut App) -> Option<Path<Pixels>> {
         let state = self.state.read(cx);
         if !state.focus_handle.is_focused(window) {
             return None;
@@ -774,14 +581,9 @@ impl TextElement {
             selected_range.end = masked_display_offset(&state.text, selected_range.end);
         }
 
-        let (start_ix, end_ix) = if selected_range.start < selected_range.end {
-            (selected_range.start, selected_range.end)
-        } else {
-            (selected_range.end, selected_range.start)
-        };
+        let (start_ix, end_ix) = if selected_range.start < selected_range.end { (selected_range.start, selected_range.end) } else { (selected_range.end, selected_range.start) };
 
-        let range = start_ix.max(last_layout.visible_range_offset.start)
-            ..end_ix.min(last_layout.visible_range_offset.end);
+        let range = start_ix.max(last_layout.visible_range_offset.start)..end_ix.min(last_layout.visible_range_offset.end);
 
         Self::layout_match_range(range, &last_layout, bounds)
     }
@@ -793,12 +595,7 @@ impl TextElement {
     /// - visible_range: The visible range is based on unwrapped lines (Zero based).
     /// - visible_buffer_lines: Indices of non-hidden buffer lines within the visible range.
     /// - visible_top: The top position of the first visible line in the scroll viewport.
-    fn calculate_visible_range(
-        &self,
-        state: &InputState,
-        line_height: Pixels,
-        input_height: Pixels,
-    ) -> (Range<usize>, Vec<usize>, Pixels) {
+    fn calculate_visible_range(&self, state: &InputState, line_height: Pixels, input_height: Pixels) -> (Range<usize>, Vec<usize>, Pixels) {
         // Add extra rows to avoid showing empty space when scroll to bottom.
         let extra_rows = 1;
         if state.mode.is_single_line() {
@@ -812,36 +609,22 @@ impl TextElement {
             return (0..0, Vec::new(), px(0.));
         }
 
-        let mut scroll_top = if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
-            deferred_scroll_offset.y
-        } else {
-            state.scroll_handle.offset().y
-        };
-        scroll_top = clamp_auto_grow_vertical_scroll_offset(
-            &state.mode,
-            scroll_top,
-            line_height * total_lines,
-            input_height,
-        );
+        let mut scroll_top = if let Some(deferred_scroll_offset) = state.deferred_scroll_offset { deferred_scroll_offset.y } else { state.scroll_handle.offset().y };
+        scroll_top = clamp_auto_grow_vertical_scroll_offset(&state.mode, scroll_top, line_height * total_lines, input_height);
 
         // Display rows are uniformly `line_height` tall, so the visible window maps
         // directly to a display-row range.
         let viewport_top = (-scroll_top).max(px(0.));
         let viewport_bottom = viewport_top + input_height;
         let line_height_f = f32::from(line_height);
-        let first_display =
-            ((f32::from(viewport_top) / line_height_f).floor() as usize).min(display_count - 1);
-        let last_display =
-            ((f32::from(viewport_bottom) / line_height_f).ceil() as usize).min(display_count - 1);
+        let first_display = ((f32::from(viewport_top) / line_height_f).floor() as usize).min(display_count - 1);
+        let last_display = ((f32::from(viewport_bottom) / line_height_f).ceil() as usize).min(display_count - 1);
 
         let start_line = state.display_map.display_row_to_buffer_line(first_display);
         let end_line = state.display_map.display_row_to_buffer_line(last_display);
 
         // y of the top of the first visible buffer line (in content space).
-        let visible_top = match state
-            .display_map
-            .buffer_line_to_display_row_range(start_line)
-        {
+        let visible_top = match state.display_map.buffer_line_to_display_row_range(start_line) {
             Some(range) => line_height * range.start,
             None => line_height * first_display,
         };
@@ -860,13 +643,7 @@ impl TextElement {
     }
 
     /// Return (line_number_width, line_number_len)
-    fn layout_line_numbers(
-        state: &InputState,
-        text: &Rope,
-        font_size: Pixels,
-        style: &TextStyle,
-        window: &mut Window,
-    ) -> (Pixels, usize) {
+    fn layout_line_numbers(state: &InputState, text: &Rope, font_size: Pixels, style: &TextStyle, window: &mut Window) -> (Pixels, usize) {
         let total_lines = text.lines_len();
         let line_number_len = match total_lines {
             0..=9999 => 5,
@@ -879,14 +656,7 @@ impl TextElement {
             let empty_line_number = window.text_system().shape_line(
                 "+".repeat(line_number_len).into(),
                 font_size,
-                &[TextRun {
-                    len: line_number_len,
-                    font: style.font(),
-                    color: gpui::black(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
+                &[TextRun { len: line_number_len, font: style.font(), color: gpui::black(), background_color: None, underline: None, strikethrough: None }],
                 None,
             );
 
@@ -908,56 +678,21 @@ impl TextElement {
     /// Layout shaped lines for whitespace indicators (space and tab).
     ///
     /// Returns `WhitespaceIndicators` with shaped lines for space and tab characters.
-    fn layout_whitespace_indicators(
-        state: &InputState,
-        text_size: Pixels,
-        style: &TextStyle,
-        window: &mut Window,
-        cx: &App,
-    ) -> Option<WhitespaceIndicators> {
+    fn layout_whitespace_indicators(state: &InputState, text_size: Pixels, style: &TextStyle, window: &mut Window, cx: &App) -> Option<WhitespaceIndicators> {
         if !state.show_whitespaces {
             return None;
         }
 
-        let invisible_color = cx
-            .theme()
-            .highlight_theme
-            .style
-            .editor_invisible
-            .unwrap_or(cx.theme().muted_foreground);
+        let invisible_color = cx.theme().muted_foreground;
 
         let space_font_size = text_size.half();
         let tab_font_size = text_size;
 
         let space_text = SharedString::new_static("•");
-        let space = window.text_system().shape_line(
-            space_text.clone(),
-            space_font_size,
-            &[TextRun {
-                len: space_text.len(),
-                font: style.font(),
-                color: invisible_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        );
+        let space = window.text_system().shape_line(space_text.clone(), space_font_size, &[TextRun { len: space_text.len(), font: style.font(), color: invisible_color, background_color: None, underline: None, strikethrough: None }], None);
 
         let tab_text = SharedString::new_static("→");
-        let tab = window.text_system().shape_line(
-            tab_text.clone(),
-            tab_font_size,
-            &[TextRun {
-                len: tab_text.len(),
-                font: style.font(),
-                color: invisible_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        );
+        let tab = window.text_system().shape_line(tab_text.clone(), tab_font_size, &[TextRun { len: tab_text.len(), font: style.font(), color: invisible_color, background_color: None, underline: None, strikethrough: None }], None);
 
         Some(WhitespaceIndicators { space, tab })
     }
@@ -967,14 +702,7 @@ impl TextElement {
     ///
     /// This creates hitboxes for the fold icon area, positioned to the right of line numbers.
     /// Icons are created and prepainted here to avoid panics.
-    fn layout_fold_icons(
-        &self,
-        origin_x: Pixels,
-        bounds: &Bounds<Pixels>,
-        last_layout: &LastLayout,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> FoldIconLayout {
+    fn layout_fold_icons(&self, origin_x: Pixels, bounds: &Bounds<Pixels>, last_layout: &LastLayout, window: &mut Window, cx: &mut App) -> FoldIconLayout {
         // First pass: collect fold information from state
         struct FoldInfo {
             buffer_line: usize,
@@ -983,18 +711,9 @@ impl TextElement {
             offset_y: Pixels,
         }
 
-        let line_number_hitbox = window.insert_hitbox(
-            Bounds::new(
-                point(origin_x, bounds.origin.y + last_layout.visible_top),
-                size(last_layout.line_number_width, bounds.size.height),
-            ),
-            HitboxBehavior::Normal,
-        );
+        let line_number_hitbox = window.insert_hitbox(Bounds::new(point(origin_x, bounds.origin.y + last_layout.visible_top), size(last_layout.line_number_width, bounds.size.height)), HitboxBehavior::Normal);
 
-        let mut icon_layout = FoldIconLayout {
-            line_number_hitbox,
-            icons: vec![],
-        };
+        let mut icon_layout = FoldIconLayout { line_number_hitbox, icons: vec![] };
 
         let fold_infos: Vec<FoldInfo> = {
             let state = self.state.read(cx);
@@ -1005,19 +724,10 @@ impl TextElement {
             let mut infos = Vec::with_capacity(last_layout.visible_buffer_lines.len());
             let mut offset_y = last_layout.visible_top;
 
-            for (line, &buffer_line) in last_layout
-                .lines
-                .iter()
-                .zip(last_layout.visible_buffer_lines.iter())
-            {
+            for (line, &buffer_line) in last_layout.lines.iter().zip(last_layout.visible_buffer_lines.iter()) {
                 if state.display_map.is_fold_candidate(buffer_line) {
                     let is_folded = state.display_map.is_folded_at(buffer_line);
-                    infos.push(FoldInfo {
-                        buffer_line,
-                        is_folded,
-                        display_row: buffer_line,
-                        offset_y,
-                    });
+                    infos.push(FoldInfo { buffer_line, is_folded, display_row: buffer_line, offset_y });
                 }
 
                 offset_y += line.wrapped_lines.len() * last_layout.line_height;
@@ -1028,32 +738,18 @@ impl TextElement {
 
         // Second pass: create and prepaint icons
         let line_height = last_layout.line_height;
-        let line_number_width =
-            last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN - FOLD_ICON_HITBOX_WIDTH;
-        let icon_relative_pos = point(
-            (FOLD_ICON_HITBOX_WIDTH - FOLD_ICON_WIDTH).half(),
-            (line_height - FOLD_ICON_WIDTH).half(),
-        );
+        let line_number_width = last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN - FOLD_ICON_HITBOX_WIDTH;
+        let icon_relative_pos = point((FOLD_ICON_HITBOX_WIDTH - FOLD_ICON_WIDTH).half(), (line_height - FOLD_ICON_WIDTH).half());
 
         for (ix, info) in fold_infos.iter().enumerate() {
             // Position fold icon to the right of line numbers.
             // Use origin_x (unscrolled) so icons stay fixed in the gutter during horizontal scroll.
-            let fold_icon_bounds = Bounds::new(
-                point(
-                    origin_x + icon_relative_pos.x + line_number_width,
-                    bounds.origin.y + icon_relative_pos.y + info.offset_y,
-                ),
-                size(FOLD_ICON_HITBOX_WIDTH, line_height),
-            );
+            let fold_icon_bounds = Bounds::new(point(origin_x + icon_relative_pos.x + line_number_width, bounds.origin.y + icon_relative_pos.y + info.offset_y), size(FOLD_ICON_HITBOX_WIDTH, line_height));
 
             // Create and prepaint icon
             let mut icon = Button::new(("fold", ix))
                 .ghost()
-                .icon(if info.is_folded {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                })
+                .icon(if info.is_folded { IconName::ChevronRight } else { IconName::ChevronDown })
                 .xsmall()
                 .rounded_xs()
                 .size(FOLD_ICON_WIDTH)
@@ -1072,16 +768,9 @@ impl TextElement {
                 })
                 .into_any_element();
 
-            icon.prepaint_as_root(
-                fold_icon_bounds.origin,
-                fold_icon_bounds.size.into(),
-                window,
-                cx,
-            );
+            icon.prepaint_as_root(fold_icon_bounds.origin, fold_icon_bounds.size.into(), window, cx);
 
-            icon_layout
-                .icons
-                .push((info.display_row, info.is_folded, icon));
+            icon_layout.icons.push((info.display_row, info.is_folded, icon));
         }
 
         icon_layout
@@ -1094,13 +783,7 @@ impl TextElement {
     /// - Mouse click handling to toggle fold state
     /// - Cursor style changes on hover
     /// - Only show icon on hover or for current line
-    fn paint_fold_icons(
-        &mut self,
-        fold_icon_layout: &mut FoldIconLayout,
-        current_row: Option<usize>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    fn paint_fold_icons(&mut self, fold_icon_layout: &mut FoldIconLayout, current_row: Option<usize>, window: &mut Window, cx: &mut App) {
         let is_hovered = fold_icon_layout.line_number_hitbox.is_hovered(window);
         for (display_row, is_folded, icon) in fold_icon_layout.icons.iter_mut() {
             let is_current_line = current_row == Some(*display_row);
@@ -1115,28 +798,14 @@ impl TextElement {
 
     #[allow(clippy::too_many_arguments)]
     fn layout_lines(
-        state: &InputState,
-        display_text: &Rope,
-        last_layout: &LastLayout,
-        font_size: Pixels,
-        runs: &[TextRun],
-        bg_segments: &[(Range<usize>, Hsla)],
-        whitespace_indicators: Option<WhitespaceIndicators>,
-        window: &mut Window,
+        state: &InputState, display_text: &Rope, last_layout: &LastLayout, font_size: Pixels, runs: &[TextRun], bg_segments: &[(Range<usize>, Hsla)], whitespace_indicators: Option<WhitespaceIndicators>, window: &mut Window,
     ) -> Vec<LineLayout> {
         let is_single_line = state.mode.is_single_line();
 
         if is_single_line {
-            let shaped_line = window.text_system().shape_line(
-                display_text.to_string().into(),
-                font_size,
-                &runs,
-                None,
-            );
+            let shaped_line = window.text_system().shape_line(display_text.to_string().into(), font_size, &runs, None);
 
-            let line_layout = LineLayout::new()
-                .lines(smallvec::smallvec![shaped_line])
-                .with_whitespaces(whitespace_indicators);
+            let line_layout = LineLayout::new().lines(smallvec::smallvec![shaped_line]).with_whitespaces(whitespace_indicators);
             return vec![line_layout];
         }
 
@@ -1146,19 +815,12 @@ impl TextElement {
             let mut placeholder_lines = SmallVec::new();
 
             for (line, line_runs) in placeholder_line_runs(&placeholder_text, runs) {
-                let shaped_line = window.text_system().shape_line(
-                    line.to_string().into(),
-                    font_size,
-                    &line_runs,
-                    None,
-                );
+                let shaped_line = window.text_system().shape_line(line.to_string().into(), font_size, &line_runs, None);
                 placeholder_lines.push(shaped_line);
             }
 
             // Keep placeholder lines in a single layout to stay parallel with visible_* metadata.
-            let line_layout = LineLayout::new()
-                .lines(placeholder_lines)
-                .with_whitespaces(whitespace_indicators);
+            let line_layout = LineLayout::new().lines(placeholder_lines).with_whitespaces(whitespace_indicators);
             return vec![line_layout];
         }
 
@@ -1170,10 +832,7 @@ impl TextElement {
 
         for (vi, &buffer_line) in last_layout.visible_buffer_lines.iter().enumerate() {
             let line_text: String = display_text.slice_line(buffer_line).into();
-            let line_item = state
-                .display_map
-                .line(buffer_line)
-                .expect("line should exists in wrapper");
+            let line_item = state.display_map.line(buffer_line).expect("line should exists in wrapper");
 
             debug_assert_eq!(line_item.len(), line_text.len());
 
@@ -1181,27 +840,15 @@ impl TextElement {
 
             for range in &line_item.wrapped_lines {
                 let line_runs = runs_for_range(runs, run_offset, &range);
-                let line_runs = if bg_segments.is_empty() {
-                    line_runs
-                } else {
-                    split_runs_by_bg_segments(
-                        last_layout.visible_line_byte_offsets[vi] + (range.start),
-                        &line_runs,
-                        bg_segments,
-                    )
-                };
+                let line_runs = if bg_segments.is_empty() { line_runs } else { split_runs_by_bg_segments(last_layout.visible_line_byte_offsets[vi] + (range.start), &line_runs, bg_segments) };
 
                 let sub_line: SharedString = line_text[range.clone()].to_string().into();
-                let shaped_line = window
-                    .text_system()
-                    .shape_line(sub_line, font_size, &line_runs, None);
+                let shaped_line = window.text_system().shape_line(sub_line, font_size, &line_runs, None);
 
                 wrapped_lines.push(shaped_line);
             }
 
-            let line_layout = LineLayout::new()
-                .lines(wrapped_lines)
-                .with_whitespaces(whitespace_indicators.clone());
+            let line_layout = LineLayout::new().lines(wrapped_lines).with_whitespaces(whitespace_indicators.clone());
             lines.push(line_layout);
 
             // +1 for the `\n`
@@ -1211,108 +858,10 @@ impl TextElement {
         lines
     }
 
-    /// First usize is the offset of skipped.
-    fn highlight_lines(
-        &mut self,
-        visible_buffer_lines: &[usize],
-        _visible_top: Pixels,
-        visible_byte_range: Range<usize>,
-        cx: &mut App,
-    ) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
+    /// Compose explicit input decorations without syntax parsing.
+    fn highlight_lines(&mut self, _visible_buffer_lines: &[usize], _visible_top: Pixels, visible_byte_range: Range<usize>, cx: &mut App) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
         let state = self.state.read(cx);
-        let text = &state.text;
-        let is_multi_line = state.mode.is_multi_line();
-
-        let mut highlighter = match &state.mode {
-            InputMode::CodeEditor { highlighter, .. } => highlighter.borrow_mut(),
-            _ => {
-                return (!state.masked)
-                    .then(|| {
-                        compose_decoration_collections(
-                            Vec::new(),
-                            state.decorations.iter(),
-                            visible_byte_range,
-                        )
-                    })
-                    .flatten();
-            }
-        };
-        let Some(highlighter) = highlighter.as_mut() else {
-            return (!state.masked)
-                .then(|| {
-                    compose_decoration_collections(
-                        Vec::new(),
-                        state.decorations.iter(),
-                        visible_byte_range,
-                    )
-                })
-                .flatten();
-        };
-
-        let mut styles = Vec::with_capacity(visible_buffer_lines.len());
-
-        // Helper to flush a contiguous range of lines. These ranges are disjoint,
-        // so appending avoids repeatedly cloning and recombining prior styles.
-        let flush_range = |start_line: usize, end_line: usize, skip: bool, styles: &mut Vec<_>| {
-            let byte_start = text.line_start_offset(start_line);
-            let byte_end = if is_multi_line {
-                // +1 for `\n`
-                text.line_start_offset(end_line + 1)
-            } else {
-                text.line_end_offset(end_line)
-            };
-            let range_styles = if skip {
-                vec![(byte_start..byte_end, HighlightStyle::default())]
-            } else {
-                highlighter.styles(&(byte_start..byte_end), &cx.theme().highlight_theme)
-            };
-
-            styles.extend(range_styles);
-        };
-
-        // Group contiguous visible lines into ranges and call styles() once per range
-        let mut visible_iter = visible_buffer_lines.iter().peekable();
-        let mut range_start: Option<usize> = None;
-
-        while let Some(&line) = visible_iter.next() {
-            // Check if this line is too long for highlighting
-            let line_len = text.slice_line(line).len();
-            if line_len > MAX_HIGHLIGHT_LINE_LENGTH {
-                // Flush any accumulated range first
-                if let Some(start) = range_start.take() {
-                    flush_range(start, line - 1, false, &mut styles);
-                }
-
-                flush_range(line, line, true, &mut styles);
-                continue;
-            }
-
-            range_start.get_or_insert(line);
-
-            // Check if next line is contiguous, if so keep accumulating
-            if visible_iter
-                .peek()
-                .map(|&&next| next == line + 1)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-
-            // Flush the contiguous range
-            let start_line = range_start.take().unwrap();
-            flush_range(start_line, line, false, &mut styles);
-        }
-
-        if !state.masked {
-            styles = compose_decoration_collections(
-                styles,
-                state.decorations.iter(),
-                visible_byte_range.clone(),
-            )
-            .unwrap_or_default();
-        }
-
-        Some(styles)
+        (!state.masked).then(|| compose_decoration_collections(Vec::new(), state.decorations.iter(), visible_byte_range)).flatten()
     }
 }
 
@@ -1330,6 +879,7 @@ pub(super) struct PrepaintState {
     /// row index (zero based), no wrap, same line as the cursor.
     current_row: Option<usize>,
     selection_path: Option<Path<Pixels>>,
+    #[cfg(feature = "input-search")]
     search_match_paths: Vec<(Path<Pixels>, bool)>,
     indent_guides_path: Option<Path<Pixels>>,
     bounds: Bounds<Pixels>,
@@ -1357,10 +907,7 @@ impl IntoElement for TextElement {
 
 /// A debug function to print points as SVG path.
 #[allow(unused)]
-fn print_points_as_svg_path(
-    line_corners: &Vec<gpui::Corners<Pixels>>,
-    points: &Vec<Point<Pixels>>,
-) {
+fn print_points_as_svg_path(line_corners: &Vec<gpui::Corners<Pixels>>, points: &Vec<Point<Pixels>>) {
     for corners in line_corners {
         println!(
             "tl: ({}, {}), tr: ({}, {}), bl: ({}, {}), br: ({}, {})",
@@ -1376,11 +923,7 @@ fn print_points_as_svg_path(
     }
 
     if points.len() > 0 {
-        println!(
-            "M{},{}",
-            points[0].x.as_f32() as i32,
-            points[0].y.as_f32() as i32
-        );
+        println!("M{},{}", points[0].x.as_f32() as i32, points[0].y.as_f32() as i32);
         for p in points.iter().skip(1) {
             println!("L{},{}", p.x.as_f32() as i32, p.y.as_f32() as i32);
         }
@@ -1398,13 +941,7 @@ impl Element for TextElement {
         None
     }
 
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
+    fn request_layout(&mut self, _id: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
         let state = self.state.read(cx);
         let line_height = window.line_height();
 
@@ -1428,15 +965,7 @@ impl Element for TextElement {
         (window.request_layout(style, [], cx), ())
     }
 
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
+    fn prepaint(&mut self, _id: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _request_layout: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
         let style = window.text_style();
         let font = style.font();
         let text_size = style.font_size.to_pixels(window.rem_size());
@@ -1457,35 +986,20 @@ impl Element for TextElement {
         let dim = |color: Hsla| if disabled { color.opacity(0.5) } else { color };
         let fg = dim(text_style.color);
         let (display_text, text_color) = if is_empty {
-            (
-                &Rope::from(placeholder.as_str()),
-                dim(cx.theme().muted_foreground),
-            )
+            (&Rope::from(placeholder.as_str()), dim(cx.theme().muted_foreground))
         } else if state.masked {
-            (
-                &Rope::from(MASK_CHAR.to_string().repeat(text.chars().count())),
-                fg,
-            )
+            (&Rope::from(MASK_CHAR.to_string().repeat(text.chars().count())), fg)
         } else {
             (&text, fg)
         };
 
         // Calculate the width of the line numbers
-        let (line_number_width, line_number_len) =
-            Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
+        let (line_number_width, line_number_len) = Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
 
         let mut bounds = bounds;
-        let wrap_width = if multi_line && state.soft_wrap {
-            Some(bounds.size.width - line_number_width - RIGHT_MARGIN)
-        } else {
-            None
-        };
+        let wrap_width = if multi_line && state.soft_wrap { Some(bounds.size.width - line_number_width - RIGHT_MARGIN) } else { None };
 
-        let wrap_width_changed = state
-            .last_layout
-            .as_ref()
-            .map(|l| l.wrap_width != wrap_width)
-            .unwrap_or(true);
+        let wrap_width_changed = state.last_layout.as_ref().map(|l| l.wrap_width != wrap_width).unwrap_or(true);
 
         if wrap_width_changed {
             self.state.update(cx, |state, cx| {
@@ -1496,42 +1010,24 @@ impl Element for TextElement {
         let state = self.state.read(cx);
         let line_height = window.line_height();
 
-        let (visible_range, visible_buffer_lines, visible_top) =
-            self.calculate_visible_range(&state, line_height, bounds.size.height);
+        let (visible_range, visible_buffer_lines, visible_top) = self.calculate_visible_range(&state, line_height, bounds.size.height);
         let visible_start_offset = state.text.line_start_offset(visible_range.start);
-        let visible_end_offset = state
-            .text
-            .line_end_offset(visible_range.end.saturating_sub(1));
+        let visible_end_offset = state.text.line_end_offset(visible_range.end.saturating_sub(1));
 
-        let highlight_styles = self.highlight_lines(
-            &visible_buffer_lines,
-            visible_top,
-            visible_start_offset..visible_end_offset,
-            cx,
-        );
+        let highlight_styles = self.highlight_lines(&visible_buffer_lines, visible_top, visible_start_offset..visible_end_offset, cx);
 
         let state = self.state.read(cx);
 
-        let visible_line_byte_offsets: Vec<usize> = visible_buffer_lines
-            .iter()
-            .map(|&bl| state.text.line_start_offset(bl))
-            .collect();
+        let visible_line_byte_offsets: Vec<usize> = visible_buffer_lines.iter().map(|&bl| state.text.line_start_offset(bl)).collect();
 
         // For password input (masked: true), convert byte offsets to masked display byte offsets so that
         // layout_match_range and position_for_index work in the correct coordinate space.
         let (visible_line_byte_offsets, visible_range_offset) = if state.masked {
-            let offsets = visible_line_byte_offsets
-                .iter()
-                .map(|&o| masked_display_offset(&text, o))
-                .collect();
-            let range_offset = masked_display_offset(&text, visible_start_offset)
-                ..masked_display_offset(&text, visible_end_offset);
+            let offsets = visible_line_byte_offsets.iter().map(|&o| masked_display_offset(&text, o)).collect();
+            let range_offset = masked_display_offset(&text, visible_start_offset)..masked_display_offset(&text, visible_end_offset);
             (offsets, range_offset)
         } else {
-            (
-                visible_line_byte_offsets,
-                visible_start_offset..visible_end_offset,
-            )
+            (visible_line_byte_offsets, visible_start_offset..visible_end_offset)
         };
 
         let mut last_layout = LastLayout {
@@ -1549,32 +1045,10 @@ impl Element for TextElement {
             content_width: bounds.size.width,
         };
 
-        let run = TextRun {
-            len: display_text.len(),
-            font: style.font(),
-            color: text_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let marked_run = TextRun {
-            len: 0,
-            font: style.font(),
-            color: text_color,
-            background_color: None,
-            underline: Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(text_color),
-                wavy: false,
-            }),
-            strikethrough: None,
-        };
+        let run = TextRun { len: display_text.len(), font: style.font(), color: text_color, background_color: None, underline: None, strikethrough: None };
+        let marked_run = TextRun { len: 0, font: style.font(), color: text_color, background_color: None, underline: Some(UnderlineStyle { thickness: px(1.), color: Some(text_color), wavy: false }), strikethrough: None };
 
-        let ime_marked_range = ime_marked_display_range(
-            &text,
-            state.ime_marked_range.as_ref().map(|m| m.start..m.end),
-            state.masked,
-        );
+        let ime_marked_range = ime_marked_display_range(&text, state.ime_marked_range.as_ref().map(|m| m.start..m.end), state.masked);
 
         let runs = if let (false, Some(highlight_styles)) = (is_empty, highlight_styles) {
             let mut runs = Vec::with_capacity(highlight_styles.len() + 2);
@@ -1585,38 +1059,17 @@ impl Element for TextElement {
                     run.color = run.color.opacity(0.5);
                 }
 
-                runs.extend(split_run_for_ime_underline(
-                    run,
-                    range.clone(),
-                    ime_marked_range.clone(),
-                    marked_run.underline,
-                ));
+                runs.extend(split_run_for_ime_underline(run, range.clone(), ime_marked_range.clone(), marked_run.underline));
             }
             runs
         } else {
-            split_run_for_ime_underline(
-                run,
-                0..display_text.len(),
-                ime_marked_range,
-                marked_run.underline,
-            )
-            .into_vec()
+            split_run_for_ime_underline(run, 0..display_text.len(), ime_marked_range, marked_run.underline).into_vec()
         };
 
         // Create shaped lines for whitespace indicators before layout
-        let whitespace_indicators =
-            Self::layout_whitespace_indicators(&state, text_size, &text_style, window, cx);
+        let whitespace_indicators = Self::layout_whitespace_indicators(&state, text_size, &text_style, window, cx);
 
-        let lines = Self::layout_lines(
-            &state,
-            &display_text,
-            &last_layout,
-            text_size,
-            &runs,
-            &[],
-            whitespace_indicators,
-            window,
-        );
+        let lines = Self::layout_lines(&state, &display_text, &last_layout, text_size, &runs, &[], whitespace_indicators, window);
 
         let mut longest_line_width = wrap_width.unwrap_or(px(0.));
         // 1. Single line
@@ -1626,44 +1079,21 @@ impl Element for TextElement {
             let longest_line: SharedString = state.text.slice_line(longest_row).to_string().into();
             longest_line_width = window
                 .text_system()
-                .shape_line(
-                    longest_line.clone(),
-                    text_size,
-                    &[TextRun {
-                        len: longest_line.len(),
-                        font: style.font(),
-                        color: gpui::black(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    wrap_width,
-                )
+                .shape_line(longest_line.clone(), text_size, &[TextRun { len: longest_line.len(), font: style.font(), color: gpui::black(), background_color: None, underline: None, strikethrough: None }], wrap_width)
                 .width;
         }
         last_layout.lines = Rc::new(lines);
 
         let total_wrapped_lines = state.display_map.wrap_row_count();
-        let empty_bottom_height = empty_bottom_height(
-            state.mode.is_code_editor(),
-            state.scroll_beyond_last_line,
-            bounds.size.height,
-            line_height,
-        );
+        let empty_bottom_height = empty_bottom_height(state.mode.is_code_editor(), state.scroll_beyond_last_line, bounds.size.height, line_height);
 
         let mut scroll_size = size(
-            if longest_line_width + line_number_width + RIGHT_MARGIN > bounds.size.width {
-                longest_line_width + line_number_width + RIGHT_MARGIN
-            } else {
-                longest_line_width
-            },
-            (total_wrapped_lines as f32 * line_height + empty_bottom_height)
-                .max(bounds.size.height),
+            if longest_line_width + line_number_width + RIGHT_MARGIN > bounds.size.width { longest_line_width + line_number_width + RIGHT_MARGIN } else { longest_line_width },
+            (total_wrapped_lines as f32 * line_height + empty_bottom_height).max(bounds.size.height),
         );
 
         // TODO: should be add some gap to right, to convenient to focus on boundary position
-        if last_layout.text_align == TextAlign::Right || last_layout.text_align == TextAlign::Center
-        {
+        if last_layout.text_align == TextAlign::Right || last_layout.text_align == TextAlign::Center {
             scroll_size.width = longest_line_width + line_number_width;
         }
 
@@ -1704,54 +1134,27 @@ impl Element for TextElement {
         let input_bounds = bounds;
         let original_x = bounds.origin.x;
 
-        let (cursor_bounds, cursor_scroll_offset, current_row) =
-            self.layout_cursor(&last_layout, &mut bounds, scroll_size, window, cx);
+        let (cursor_bounds, cursor_scroll_offset, current_row) = self.layout_cursor(&last_layout, &mut bounds, scroll_size, window, cx);
         last_layout.cursor_bounds = cursor_bounds;
 
+        #[cfg(feature = "input-search")]
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
         let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
 
         let state = self.state.read(cx);
         let line_numbers = if state.mode.line_number() {
             let mut line_numbers = Vec::with_capacity(last_layout.visible_buffer_lines.len());
-            let other_line_runs = vec![TextRun {
-                len: line_number_len,
-                font: style.font(),
-                color: cx.theme().muted_foreground,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }];
-            let current_line_runs = vec![TextRun {
-                len: line_number_len,
-                font: style.font(),
-                color: cx.theme().foreground,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }];
+            let other_line_runs = vec![TextRun { len: line_number_len, font: style.font(), color: cx.theme().muted_foreground, background_color: None, underline: None, strikethrough: None }];
+            let current_line_runs = vec![TextRun { len: line_number_len, font: style.font(), color: cx.theme().foreground, background_color: None, underline: None, strikethrough: None }];
 
             // build line numbers
-            for (line, &buffer_line) in last_layout
-                .lines
-                .iter()
-                .zip(last_layout.visible_buffer_lines.iter())
-            {
-                let line_no: SharedString =
-                    format!("{:>width$}", buffer_line + 1, width = line_number_len).into();
+            for (line, &buffer_line) in last_layout.lines.iter().zip(last_layout.visible_buffer_lines.iter()) {
+                let line_no: SharedString = format!("{:>width$}", buffer_line + 1, width = line_number_len).into();
 
-                let runs = if current_row == Some(buffer_line) {
-                    &current_line_runs
-                } else {
-                    &other_line_runs
-                };
+                let runs = if current_row == Some(buffer_line) { &current_line_runs } else { &other_line_runs };
 
                 let mut sub_lines: SmallVec<[ShapedLine; 1]> = SmallVec::new();
-                sub_lines.push(
-                    window
-                        .text_system()
-                        .shape_line(line_no, text_size, &runs, None),
-                );
+                sub_lines.push(window.text_system().shape_line(line_no, text_size, &runs, None));
                 for _ in 0..line.wrapped_lines.len().saturating_sub(1) {
                     sub_lines.push(ShapedLine::default());
                 }
@@ -1762,19 +1165,9 @@ impl Element for TextElement {
             None
         };
 
-        let indent_guides_path =
-            self.layout_indent_guides(state, &bounds, &last_layout, &text_style, window);
-        state
-            .editor_scrollbar_snapshot
-            .set(Some(EditorScrollbarSnapshot::new(
-                input_bounds,
-                &last_layout,
-                scroll_size,
-                cursor_scroll_offset,
-                state,
-            )));
-        let fold_icon_layout =
-            self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
+        let indent_guides_path = self.layout_indent_guides(state, &bounds, &last_layout, &text_style, window);
+        state.editor_scrollbar_snapshot.set(Some(EditorScrollbarSnapshot::new(input_bounds, &last_layout, scroll_size, cursor_scroll_offset, state)));
+        let fold_icon_layout = self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
 
         PrepaintState {
             bounds,
@@ -1785,6 +1178,7 @@ impl Element for TextElement {
             cursor_scroll_offset,
             current_row,
             selection_path,
+            #[cfg(feature = "input-search")]
             search_match_paths,
             indent_guides_path,
             fold_icon_layout,
@@ -1792,33 +1186,17 @@ impl Element for TextElement {
     }
 
     fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        input_bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
+        &mut self, _id: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, input_bounds: Bounds<Pixels>, _request_layout: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App,
     ) {
-        let (focus_handle, show_cursor, disabled, selected_range) = {
+        let (focus_handle, show_cursor, selected_range) = {
             let state = self.state.read(cx);
-            (
-                state.focus_handle.clone(),
-                state.show_cursor(window, cx),
-                state.disabled,
-                state.selected_range,
-            )
+            (state.focus_handle.clone(), state.show_cursor(window, cx), state.selected_range)
         };
         let focused = focus_handle.is_focused(window);
         let bounds = prepaint.bounds;
         let text_align = prepaint.last_layout.text_align;
 
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.state.clone()),
-            cx,
-        );
+        window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.state.clone()), cx);
 
         // Set Root focused_input when self is focused
         if focused {
@@ -1849,12 +1227,7 @@ impl Element for TextElement {
         let origin = bounds.origin;
 
         let invisible_top_padding = prepaint.last_layout.visible_top;
-        let active_line_color = cx
-            .theme()
-            .highlight_theme
-            .style
-            .editor_active_line
-            .map(|color| if disabled { color.opacity(0.5) } else { color });
+        let active_line_color: Option<Hsla> = None;
 
         // Paint active line
         let mut offset_y = px(0.);
@@ -1862,20 +1235,14 @@ impl Element for TextElement {
             offset_y += invisible_top_padding;
 
             // Each item is the normal lines.
-            for (lines, &buffer_line) in line_numbers
-                .iter()
-                .zip(prepaint.last_layout.visible_buffer_lines.iter())
-            {
+            for (lines, &buffer_line) in line_numbers.iter().zip(prepaint.last_layout.visible_buffer_lines.iter()) {
                 let is_active = prepaint.current_row == Some(buffer_line);
                 let p = point(input_bounds.origin.x, origin.y + offset_y);
                 let height = line_height * lines.len() as f32;
                 // Paint the current line background
                 if is_active {
                     if let Some(bg_color) = active_line_color {
-                        window.paint_quad(fill(
-                            Bounds::new(p, size(bounds.size.width, height)),
-                            bg_color,
-                        ));
+                        window.paint_quad(fill(Bounds::new(p, size(bounds.size.width, height)), bg_color));
                     }
                 }
                 offset_y += height;
@@ -1889,7 +1256,9 @@ impl Element for TextElement {
 
         // Paint selections
         if window.is_window_active() {
+            #[cfg(feature = "input-search")]
             let secondary_selection = cx.theme().selection.saturation(0.1);
+            #[cfg(feature = "input-search")]
             for (path, is_active) in prepaint.search_match_paths.iter() {
                 window.paint_path(path.clone(), secondary_selection);
 
@@ -1910,9 +1279,7 @@ impl Element for TextElement {
         let scroll_offset = if text_align == TextAlign::Right {
             (prepaint.scroll_size.width - prepaint.bounds.size.width).max(px(0.))
         } else if text_align == TextAlign::Center {
-            (prepaint.scroll_size.width - prepaint.bounds.size.width)
-                .half()
-                .max(px(0.))
+            (prepaint.scroll_size.width - prepaint.bounds.size.width).half().max(px(0.))
         } else {
             px(0.)
         };
@@ -1921,20 +1288,10 @@ impl Element for TextElement {
 
         for line in prepaint.last_layout.lines.iter() {
             let line_y = origin.y + offset_y;
-            let p = point(
-                origin.x + prepaint.last_layout.line_number_width + (scroll_offset),
-                line_y,
-            );
+            let p = point(origin.x + prepaint.last_layout.line_number_width + (scroll_offset), line_y);
 
             // Paint the actual line
-            _ = line.paint(
-                p,
-                line_height,
-                text_align,
-                Some(prepaint.last_layout.content_width),
-                window,
-                cx,
-            );
+            _ = line.paint(p, line_height, text_align, Some(prepaint.last_layout.content_width), window, cx);
             offset_y += line.size(line_height).height;
         }
 
@@ -1950,24 +1307,8 @@ impl Element for TextElement {
         if let Some(line_numbers) = prepaint.line_numbers.as_ref() {
             offset_y += invisible_top_padding;
 
-            if let Some(gutter_bg) = cx.theme().highlight_theme.style.editor_gutter_background {
-                window.paint_quad(fill(
-                    Bounds {
-                        origin: input_bounds.origin,
-                        size: size(
-                            prepaint.last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN,
-                            input_bounds.size.height,
-                        ),
-                    },
-                    gutter_bg,
-                ));
-            }
-
             // Each item is the normal lines.
-            for (lines, &buffer_line) in line_numbers
-                .iter()
-                .zip(prepaint.last_layout.visible_buffer_lines.iter())
-            {
+            for (lines, &buffer_line) in line_numbers.iter().zip(prepaint.last_layout.visible_buffer_lines.iter()) {
                 let p = point(input_bounds.origin.x, origin.y + offset_y);
                 let is_active = prepaint.current_row == Some(buffer_line);
 
@@ -1975,17 +1316,7 @@ impl Element for TextElement {
                 // paint active line number background
                 if is_active {
                     if let Some(bg_color) = active_line_color {
-                        window.paint_quad(fill(
-                            Bounds::new(
-                                p,
-                                size(
-                                    prepaint.last_layout.line_number_width
-                                        - LINE_NUMBER_RIGHT_MARGIN,
-                                    height,
-                                ),
-                            ),
-                            bg_color,
-                        ));
+                        window.paint_quad(fill(Bounds::new(p, size(prepaint.last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN, height)), bg_color));
                     }
                 }
 
@@ -1997,12 +1328,7 @@ impl Element for TextElement {
         }
 
         // Paint fold icons (only visible on hover or for current line)
-        self.paint_fold_icons(
-            &mut prepaint.fold_icon_layout,
-            prepaint.current_row,
-            window,
-            cx,
-        );
+        self.paint_fold_icons(&mut prepaint.fold_icon_layout, prepaint.current_row, window, cx);
 
         self.state.update(cx, |state, cx| {
             state.last_layout = Some(prepaint.last_layout.clone());
@@ -2022,19 +1348,13 @@ impl Element for TextElement {
 }
 
 /// Split placeholder text into display lines and trim runs to each line.
-fn placeholder_line_runs<'a>(
-    display_text: &'a str,
-    runs: &[TextRun],
-) -> Vec<(&'a str, Vec<TextRun>)> {
+fn placeholder_line_runs<'a>(display_text: &'a str, runs: &[TextRun]) -> Vec<(&'a str, Vec<TextRun>)> {
     let mut result = Vec::new();
     let mut line_offset = 0;
 
     for line in display_text.split('\n') {
         let line_runs = runs_for_range(runs, line_offset, &(0..line.len()));
-        debug_assert_eq!(
-            line_runs.iter().map(|run| run.len).sum::<usize>(),
-            line.len()
-        );
+        debug_assert_eq!(line_runs.iter().map(|run| run.len).sum::<usize>(), line.len());
         result.push((line, line_runs));
         // Advance in the whole-placeholder coordinate space, including the separator.
         line_offset += line.len() + 1;
@@ -2046,11 +1366,7 @@ fn placeholder_line_runs<'a>(
 /// Get the runs for the given range.
 ///
 /// The range is the byte range of the wrapped line.
-pub(super) fn runs_for_range(
-    runs: &[TextRun],
-    line_offset: usize,
-    range: &Range<usize>,
-) -> Vec<TextRun> {
+pub(super) fn runs_for_range(runs: &[TextRun], line_offset: usize, range: &Range<usize>) -> Vec<TextRun> {
     let mut result = vec![];
     let range = (line_offset + range.start)..(line_offset + range.end);
     let mut cursor = 0;
@@ -2082,12 +1398,7 @@ pub(super) fn runs_for_range(
     result
 }
 
-fn split_run_for_ime_underline(
-    run: TextRun,
-    run_range: Range<usize>,
-    marked_range: Option<Range<usize>>,
-    marked_underline: Option<UnderlineStyle>,
-) -> SmallVec<[TextRun; 3]> {
+fn split_run_for_ime_underline(run: TextRun, run_range: Range<usize>, marked_range: Option<Range<usize>>, marked_underline: Option<UnderlineStyle>) -> SmallVec<[TextRun; 3]> {
     if run.len == 0 {
         return SmallVec::new();
     }
@@ -2102,31 +1413,13 @@ fn split_run_for_ime_underline(
         return [run].into_iter().collect();
     }
 
-    [
-        TextRun {
-            len: intersection_start - run_range.start,
-            ..run.clone()
-        },
-        TextRun {
-            len: intersection_end - intersection_start,
-            underline: marked_underline,
-            ..run.clone()
-        },
-        TextRun {
-            len: run_range.end - intersection_end,
-            ..run
-        },
-    ]
-    .into_iter()
-    .filter(|run| run.len > 0)
-    .collect()
+    [TextRun { len: intersection_start - run_range.start, ..run.clone() }, TextRun { len: intersection_end - intersection_start, underline: marked_underline, ..run.clone() }, TextRun { len: run_range.end - intersection_end, ..run }]
+        .into_iter()
+        .filter(|run| run.len > 0)
+        .collect()
 }
 
-fn split_runs_by_bg_segments(
-    start_offset: usize,
-    runs: &[TextRun],
-    bg_segments: &[(Range<usize>, Hsla)],
-) -> Vec<TextRun> {
+fn split_runs_by_bg_segments(start_offset: usize, runs: &[TextRun], bg_segments: &[(Range<usize>, Hsla)]) -> Vec<TextRun> {
     let mut result = vec![];
 
     let mut cursor = start_offset;
@@ -2142,28 +1435,17 @@ fn split_runs_by_bg_segments(
             // Overlap exists
             if run_start < bg_range.start {
                 // Add the part before the background range
-                result.push(TextRun {
-                    len: bg_range.start - run_start,
-                    ..run.clone()
-                });
+                result.push(TextRun { len: bg_range.start - run_start, ..run.clone() });
             }
 
             // Add the overlapping part with background color
             let overlap_start = run_start.max(bg_range.start);
             let overlap_end = run_end.min(bg_range.end);
-            let text_color = if bg_color.l >= 0.5 {
-                gpui::black()
-            } else {
-                gpui::white()
-            };
+            let text_color = if bg_color.l >= 0.5 { gpui::black() } else { gpui::white() };
 
             let run_len = overlap_end.saturating_sub(overlap_start);
             if run_len > 0 {
-                result.push(TextRun {
-                    len: run_len,
-                    color: text_color,
-                    ..run.clone()
-                });
+                result.push(TextRun { len: run_len, color: text_color, ..run.clone() });
 
                 cursor = bg_range.end;
                 run_start = cursor;
@@ -2172,10 +1454,7 @@ fn split_runs_by_bg_segments(
 
         if run_end > cursor {
             // Add the part after the background range
-            result.push(TextRun {
-                len: run_end - cursor,
-                ..run.clone()
-            });
+            result.push(TextRun { len: run_end - cursor, ..run.clone() });
         }
 
         cursor = run_end;
@@ -2190,19 +1469,10 @@ mod tests {
 
     #[test]
     fn test_plain_text_decorations_include_unstyled_gaps() {
-        let decoration = HighlightStyle {
-            background_color: Some(gpui::red()),
-            ..Default::default()
-        };
+        let decoration = HighlightStyle { background_color: Some(gpui::red()), ..Default::default() };
         let styles = compose_decorations(Vec::new(), [(2..5, decoration)], 0..10).unwrap();
 
-        assert_eq!(
-            styles
-                .iter()
-                .map(|(range, _)| range.clone())
-                .collect::<Vec<_>>(),
-            vec![0..2, 2..5, 5..10]
-        );
+        assert_eq!(styles.iter().map(|(range, _)| range.clone()).collect::<Vec<_>>(), vec![0..2, 2..5, 5..10]);
         assert_eq!(styles[0].1, HighlightStyle::default());
         assert_eq!(styles[1].1.background_color, Some(gpui::red()));
         assert_eq!(styles[2].1, HighlightStyle::default());
@@ -2210,23 +1480,10 @@ mod tests {
 
     #[test]
     fn test_first_decoration_collection_has_precedence() {
-        let first = [TextDecoration::new(
-            0..4,
-            HighlightStyle {
-                background_color: Some(gpui::red()),
-                ..Default::default()
-            },
-        )];
-        let second = [TextDecoration::new(
-            0..4,
-            HighlightStyle {
-                background_color: Some(gpui::blue()),
-                ..Default::default()
-            },
-        )];
+        let first = [TextDecoration::new(0..4, HighlightStyle { background_color: Some(gpui::red()), ..Default::default() })];
+        let second = [TextDecoration::new(0..4, HighlightStyle { background_color: Some(gpui::blue()), ..Default::default() })];
 
-        let styles =
-            compose_decoration_collections(Vec::new(), [&first[..], &second[..]], 0..4).unwrap();
+        let styles = compose_decoration_collections(Vec::new(), [&first[..], &second[..]], 0..4).unwrap();
 
         assert_eq!(styles.len(), 1);
         assert_eq!(styles[0].1.background_color, Some(gpui::red()));
@@ -2235,29 +1492,16 @@ mod tests {
     #[test]
     fn test_editor_scrollbar_layout_uses_current_scroll_size() {
         let input_bounds = Bounds::new(point(px(10.), px(20.)), size(px(300.), px(80.)));
-        let paddings = Edges {
-            top: px(2.),
-            right: px(3.),
-            bottom: px(5.),
-            left: px(7.),
-        };
+        let paddings = Edges { top: px(2.), right: px(3.), bottom: px(5.), left: px(7.) };
 
-        let layout =
-            EditorScrollbarLayout::new(input_bounds, px(40.), size(px(1000.), px(200.)), paddings);
+        let layout = EditorScrollbarLayout::new(input_bounds, px(40.), size(px(1000.), px(200.)), paddings);
 
-        assert_eq!(
-            layout.bounds,
-            Bounds::new(point(px(47.), px(18.)), size(px(266.), px(87.)))
-        );
+        assert_eq!(layout.bounds, Bounds::new(point(px(47.), px(18.)), size(px(266.), px(87.))));
         assert_eq!(layout.scroll_size, size(px(976.), px(200.)));
 
-        let layout_without_gutter =
-            EditorScrollbarLayout::new(input_bounds, px(0.), size(px(500.), px(120.)), paddings);
+        let layout_without_gutter = EditorScrollbarLayout::new(input_bounds, px(0.), size(px(500.), px(120.)), paddings);
 
-        assert_eq!(
-            layout_without_gutter.bounds,
-            Bounds::new(point(px(10.), px(18.)), size(px(303.), px(87.)))
-        );
+        assert_eq!(layout_without_gutter.bounds, Bounds::new(point(px(10.), px(18.)), size(px(303.), px(87.))));
         assert_eq!(layout_without_gutter.scroll_size, size(px(513.), px(120.)));
     }
 
@@ -2265,64 +1509,30 @@ mod tests {
     fn test_auto_grow_scroll_offset_is_clamped_to_current_viewport() {
         let mode = InputMode::auto_grow(3, 8);
 
-        assert_eq!(
-            clamp_auto_grow_vertical_scroll_offset(&mode, px(-260.), px(340.), px(160.)),
-            px(-180.)
-        );
-        assert_eq!(
-            clamp_auto_grow_vertical_scroll_offset(&mode, px(-40.), px(340.), px(160.)),
-            px(-40.)
-        );
-        assert_eq!(
-            clamp_auto_grow_vertical_scroll_offset(&mode, px(20.), px(340.), px(160.)),
-            px(0.)
-        );
+        assert_eq!(clamp_auto_grow_vertical_scroll_offset(&mode, px(-260.), px(340.), px(160.)), px(-180.));
+        assert_eq!(clamp_auto_grow_vertical_scroll_offset(&mode, px(-40.), px(340.), px(160.)), px(-40.));
+        assert_eq!(clamp_auto_grow_vertical_scroll_offset(&mode, px(20.), px(340.), px(160.)), px(0.));
 
         let plain_text = InputMode::plain_text().multi_line(true);
-        assert_eq!(
-            clamp_auto_grow_vertical_scroll_offset(&plain_text, px(-260.), px(340.), px(160.)),
-            px(-260.)
-        );
+        assert_eq!(clamp_auto_grow_vertical_scroll_offset(&plain_text, px(-260.), px(340.), px(160.)), px(-260.));
     }
 
     #[test]
     fn test_runs_for_range() {
-        let run = TextRun {
-            len: 0,
-            font: gpui::font(".SystemUIFont"),
-            color: gpui::black(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
+        let run = TextRun { len: 0, font: gpui::font(".SystemUIFont"), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
 
         // use hello this-is-test
         let runs = vec![
             // use
-            TextRun {
-                len: 3,
-                ..run.clone()
-            },
+            TextRun { len: 3, ..run.clone() },
             // \s
-            TextRun {
-                len: 1,
-                ..run.clone()
-            },
+            TextRun { len: 1, ..run.clone() },
             // hello
-            TextRun {
-                len: 5,
-                ..run.clone()
-            },
+            TextRun { len: 5, ..run.clone() },
             // \s
-            TextRun {
-                len: 1,
-                ..run.clone()
-            },
+            TextRun { len: 1, ..run.clone() },
             // this-is-test
-            TextRun {
-                len: 12,
-                ..run.clone()
-            },
+            TextRun { len: 12, ..run.clone() },
         ];
 
         #[track_caller]
@@ -2345,86 +1555,35 @@ mod tests {
 
     #[test]
     fn test_split_runs_preserve_ime_underline_across_highlight_boundaries() {
-        let underline = UnderlineStyle {
-            thickness: px(1.),
-            color: Some(gpui::black()),
-            wavy: false,
-        };
+        let underline = UnderlineStyle { thickness: px(1.), color: Some(gpui::black()), wavy: false };
 
-        let runs = [0..4, 4..10]
-            .into_iter()
-            .flat_map(|range| {
-                split_run_for_ime_underline(
-                    TextStyle::default().to_run(range.len()),
-                    range,
-                    Some(2..7),
-                    Some(underline),
-                )
-            })
-            .collect::<Vec<_>>();
+        let runs = [0..4, 4..10].into_iter().flat_map(|range| split_run_for_ime_underline(TextStyle::default().to_run(range.len()), range, Some(2..7), Some(underline))).collect::<Vec<_>>();
 
-        assert_eq!(
-            runs.iter()
-                .map(|run| (run.len, run.underline.is_some()))
-                .collect::<Vec<_>>(),
-            vec![(2, false), (2, true), (3, true), (3, false)]
-        );
+        assert_eq!(runs.iter().map(|run| (run.len, run.underline.is_some())).collect::<Vec<_>>(), vec![(2, false), (2, true), (3, true), (3, false)]);
     }
 
     #[test]
     fn test_split_run_applies_ime_underline_without_highlighting() {
-        let underline = UnderlineStyle {
-            thickness: px(1.),
-            color: Some(gpui::black()),
-            wavy: false,
-        };
+        let underline = UnderlineStyle { thickness: px(1.), color: Some(gpui::black()), wavy: false };
 
-        let runs = split_run_for_ime_underline(
-            TextStyle::default().to_run(10),
-            0..10,
-            Some(2..7),
-            Some(underline),
-        );
+        let runs = split_run_for_ime_underline(TextStyle::default().to_run(10), 0..10, Some(2..7), Some(underline));
 
-        assert_eq!(
-            runs.iter()
-                .map(|run| (run.len, run.underline.is_some()))
-                .collect::<Vec<_>>(),
-            vec![(2, false), (5, true), (3, false)]
-        );
-        assert!(
-            split_run_for_ime_underline(TextStyle::default().to_run(0), 0..0, None, None)
-                .is_empty()
-        );
+        assert_eq!(runs.iter().map(|run| (run.len, run.underline.is_some())).collect::<Vec<_>>(), vec![(2, false), (5, true), (3, false)]);
+        assert!(split_run_for_ime_underline(TextStyle::default().to_run(0), 0..0, None, None).is_empty());
     }
 
     #[test]
     fn test_masked_ime_underline_splits_on_mask_char_boundaries() {
-        let underline = UnderlineStyle {
-            thickness: px(1.),
-            color: Some(gpui::black()),
-            wavy: false,
-        };
+        let underline = UnderlineStyle { thickness: px(1.), color: Some(gpui::black()), wavy: false };
         let text = Rope::from("abcdef");
         let mask_len = MASK_CHAR.len_utf8();
 
-        assert_eq!(
-            ime_marked_display_range(&text, Some(4..6), false),
-            Some(4..6)
-        );
+        assert_eq!(ime_marked_display_range(&text, Some(4..6), false), Some(4..6));
         assert_eq!(ime_marked_display_range(&text, None, true), None);
-        assert_eq!(
-            ime_marked_display_range(&text, Some(4..6), true),
-            Some(4 * mask_len..6 * mask_len)
-        );
+        assert_eq!(ime_marked_display_range(&text, Some(4..6), true), Some(4 * mask_len..6 * mask_len));
 
         let display_text = MASK_CHAR.to_string().repeat(text.chars().count());
-        let runs = split_run_for_ime_underline(
-            TextStyle::default().to_run(display_text.len()),
-            0..display_text.len(),
-            ime_marked_display_range(&text, Some(4..6), true),
-            Some(underline),
-        );
+        let runs = split_run_for_ime_underline(TextStyle::default().to_run(display_text.len()), 0..display_text.len(), ime_marked_display_range(&text, Some(4..6), true), Some(underline));
 
         let mut offset = 0;
         for run in &runs {
@@ -2436,74 +1595,28 @@ mod tests {
 
     #[test]
     fn test_placeholder_line_runs() {
-        let run = TextRun {
-            len: 0,
-            font: gpui::font(".SystemUIFont"),
-            color: gpui::black(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
+        let run = TextRun { len: 0, font: gpui::font(".SystemUIFont"), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
 
-        let runs = vec![
-            TextRun {
-                len: 2,
-                ..run.clone()
-            },
-            TextRun {
-                len: 2,
-                ..run.clone()
-            },
-            TextRun { len: 1, ..run },
-        ];
+        let runs = vec![TextRun { len: 2, ..run.clone() }, TextRun { len: 2, ..run.clone() }, TextRun { len: 1, ..run }];
 
         let placeholder_runs = placeholder_line_runs("ab\n\nc", &runs);
 
-        let lines = placeholder_runs
-            .iter()
-            .map(|(line, _)| *line)
-            .collect::<Vec<_>>();
+        let lines = placeholder_runs.iter().map(|(line, _)| *line).collect::<Vec<_>>();
         assert_eq!(lines, vec!["ab", "", "c"]);
 
-        let run_lengths = placeholder_runs
-            .iter()
-            .map(|(_, line_runs)| line_runs.iter().map(|run| run.len).collect::<Vec<_>>())
-            .collect::<Vec<_>>();
+        let run_lengths = placeholder_runs.iter().map(|(_, line_runs)| line_runs.iter().map(|run| run.len).collect::<Vec<_>>()).collect::<Vec<_>>();
         assert_eq!(run_lengths, vec![vec![2], vec![], vec![1]]);
     }
 
     #[test]
     fn test_split_runs_by_bg_segments() {
-        let run = TextRun {
-            len: 0,
-            font: gpui::font(".SystemUIFont"),
-            color: gpui::blue(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
+        let run = TextRun { len: 0, font: gpui::font(".SystemUIFont"), color: gpui::blue(), background_color: None, underline: None, strikethrough: None };
 
-        let runs = vec![
-            TextRun {
-                len: 5,
-                ..run.clone()
-            },
-            TextRun {
-                len: 7,
-                ..run.clone()
-            },
-            TextRun {
-                len: 24,
-                ..run.clone()
-            },
-        ];
+        let runs = vec![TextRun { len: 5, ..run.clone() }, TextRun { len: 7, ..run.clone() }, TextRun { len: 24, ..run.clone() }];
 
         let bg_segments = vec![(8..12, gpui::red()), (12..18, gpui::blue())];
         let result = split_runs_by_bg_segments(5, &runs, &bg_segments);
-        assert_eq!(
-            result.iter().map(|run| run.len).collect::<Vec<_>>(),
-            vec![3, 2, 2, 5, 1, 23]
-        );
+        assert_eq!(result.iter().map(|run| run.len).collect::<Vec<_>>(), vec![3, 2, 2, 5, 1, 23]);
         assert_eq!(result[0].color, gpui::blue());
         assert_eq!(result[1].color, gpui::black());
         assert_eq!(result[2].color, gpui::black());
@@ -2517,10 +1630,7 @@ mod tests {
         // Single-line / plain-text / auto-grow modes never reserve empty
         // bottom space, regardless of any override.
         for override_rows in [None, Some(0), Some(3), Some(99)] {
-            assert_eq!(
-                empty_bottom_height(false, override_rows, px(800.), px(20.)),
-                px(0.),
-            );
+            assert_eq!(empty_bottom_height(false, override_rows, px(800.), px(20.)), px(0.),);
         }
     }
 
@@ -2532,10 +1642,7 @@ mod tests {
         let line_height = px(20.);
 
         // Viewport much taller than the floor → half-viewport wins.
-        assert_eq!(
-            empty_bottom_height(true, None, px(800.), line_height),
-            px(400.),
-        );
+        assert_eq!(empty_bottom_height(true, None, px(800.), line_height), px(400.),);
 
         // Viewport shorter than 2 × floor → floor wins.
         let floor = BOTTOM_MARGIN_ROWS * line_height;
@@ -2550,16 +1657,10 @@ mod tests {
 
         for rows in [0_usize, 1, 3, 8, 64] {
             let expected = rows as f32 * line_height;
-            assert_eq!(
-                empty_bottom_height(true, Some(rows), px(800.), line_height),
-                expected,
-            );
+            assert_eq!(empty_bottom_height(true, Some(rows), px(800.), line_height), expected,);
             // Tiny viewport: still exactly `n × line_height`, no floor
             // applied when caller supplied an explicit count.
-            assert_eq!(
-                empty_bottom_height(true, Some(rows), px(20.), line_height),
-                expected,
-            );
+            assert_eq!(empty_bottom_height(true, Some(rows), px(20.), line_height), expected,);
         }
     }
 
@@ -2570,10 +1671,7 @@ mod tests {
         let line_height = px(20.);
         for override_lines in [None, Some(0), Some(3), Some(99)] {
             for visible_lines in [0_usize, 1, 8, 64] {
-                assert_eq!(
-                    cursor_surrounding_padding(true, override_lines, visible_lines, line_height,),
-                    line_height,
-                );
+                assert_eq!(cursor_surrounding_padding(true, override_lines, visible_lines, line_height,), line_height,);
             }
         }
     }
@@ -2587,23 +1685,14 @@ mod tests {
 
         // Small viewport → 1-line fallback.
         let small = BOTTOM_MARGIN_ROWS * 8 - 1;
-        assert_eq!(
-            cursor_surrounding_padding(false, None, small, line_height),
-            line_height,
-        );
+        assert_eq!(cursor_surrounding_padding(false, None, small, line_height), line_height,);
 
         // Boundary at `BOTTOM_MARGIN_ROWS × 8` flips to the full margin.
         let boundary = BOTTOM_MARGIN_ROWS * 8;
-        assert_eq!(
-            cursor_surrounding_padding(false, None, boundary, line_height),
-            BOTTOM_MARGIN_ROWS * line_height,
-        );
+        assert_eq!(cursor_surrounding_padding(false, None, boundary, line_height), BOTTOM_MARGIN_ROWS * line_height,);
 
         // Comfortably-large viewport.
-        assert_eq!(
-            cursor_surrounding_padding(false, None, 100, line_height),
-            BOTTOM_MARGIN_ROWS * line_height,
-        );
+        assert_eq!(cursor_surrounding_padding(false, None, 100, line_height), BOTTOM_MARGIN_ROWS * line_height,);
     }
 
     #[test]
@@ -2617,10 +1706,7 @@ mod tests {
             let raw = lines as f32 * line_height;
             for visible_lines in [0_usize, 1, 8, 100] {
                 let viewport_half = (visible_lines as f32 * line_height).half();
-                assert_eq!(
-                    cursor_surrounding_padding(false, Some(lines), visible_lines, line_height,),
-                    raw.min(viewport_half),
-                );
+                assert_eq!(cursor_surrounding_padding(false, Some(lines), visible_lines, line_height,), raw.min(viewport_half),);
             }
         }
     }
@@ -2637,17 +1723,11 @@ mod tests {
         // Override much larger than viewport → clamped to half.
         let visible_lines = 10;
         let viewport_half = (visible_lines as f32 * line_height).half();
-        assert_eq!(
-            cursor_surrounding_padding(false, Some(50), visible_lines, line_height),
-            viewport_half,
-        );
+        assert_eq!(cursor_surrounding_padding(false, Some(50), visible_lines, line_height), viewport_half,);
 
         // Override that fits → returned unchanged.
         let visible_lines = 40;
-        assert_eq!(
-            cursor_surrounding_padding(false, Some(3), visible_lines, line_height),
-            3.0 * line_height,
-        );
+        assert_eq!(cursor_surrounding_padding(false, Some(3), visible_lines, line_height), 3.0 * line_height,);
 
         // Default heuristic still saturates if BOTTOM_MARGIN_ROWS would
         // exceed the half-viewport bound (only possible at extreme
@@ -2655,9 +1735,6 @@ mod tests {
         let visible_lines = BOTTOM_MARGIN_ROWS * 8;
         let half = (visible_lines as f32 * line_height).half();
         let raw = BOTTOM_MARGIN_ROWS * line_height;
-        assert_eq!(
-            cursor_surrounding_padding(false, None, visible_lines, line_height),
-            raw.min(half),
-        );
+        assert_eq!(cursor_surrounding_padding(false, None, visible_lines, line_height), raw.min(half),);
     }
 }

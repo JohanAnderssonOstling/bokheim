@@ -2,8 +2,8 @@
 
 use gpui::{App, Context, FocusHandle, Window};
 use gpui_component::tree::TreeItem;
-use html_view_core::{RendererCommand, TocEntry};
 use html_view_gpui::HtmlView;
+use skrift_column_paginator::{RendererCommand, TocEntry};
 
 use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
@@ -44,30 +44,28 @@ impl ReaderView {
     }
 
     pub(super) fn set_toc(&mut self, entries: Vec<TocEntry>, resolutions: Vec<crate::epub::toc::ResolvedTocEntry>, positions: crate::epub::toc::SourcePositions, cx: &mut Context<Self>) {
-        let tree_items = Self::toc_tree_items(&entries);
-        self.toc_tree.update(cx, |tree, cx| tree.set_items(tree_items, cx));
         self.toc.set(entries, resolutions);
+        let tree_items = self.toc.tree_items();
+        self.toc_filter.update(cx, |filter, cx| filter.set_items(tree_items, cx));
         self.toc.install_source_positions(positions, self.book.document_uris().len());
+        self.refresh_bookmark_rows(cx);
         self.toc.update_read_status(self.progress.fraction >= 1.0);
         self.search.rebuild_rows(&self.toc);
+        self.refresh_recurring_annotations(true, cx);
         self.sync_toc_position(cx);
         self.record_current_reading_position(cx);
         crate::invalidation::notify(cx, Component::ReaderShell, "toc_loaded");
     }
 
     pub(super) fn sync_toc_position(&self, cx: &mut Context<Self>) {
-        let next = self.toc.active_link();
+        let next = self.toc.active_id().map(str::to_owned);
         self.toc_tree.update(cx, |tree, cx| {
-            let selected = next.map(|link| TreeItem::new(link.clone(), link));
+            let selected = next.map(|id| TreeItem::new(id.clone(), id));
             tree.set_selected_item(selected.as_ref(), cx);
             if let Some(selected) = selected {
                 tree.reveal_item(&selected.id, gpui::ScrollStrategy::Center, cx);
             }
         });
-    }
-
-    fn toc_tree_items(entries: &[TocEntry]) -> Vec<TreeItem> {
-        entries.iter().map(|entry| TreeItem::new(entry.link.clone(), entry.title.clone()).children(Self::toc_tree_items(&entry.children))).collect()
     }
 
     /// The document's focus handle, once the book has loaded.
@@ -101,7 +99,7 @@ impl ReaderView {
         self.page_turn = None;
         self.swipe_preview.clear();
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::NavigateToHref(href), cx));
-        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
         self.tts_navigation_changed(cx);
     }
 

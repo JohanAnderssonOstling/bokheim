@@ -1,6 +1,6 @@
 -- Import commit writes.
 
--- name: has_import_inspection_select?
+-- name: has_import_inspection_select ->
 -- param: content_hash: &BookId
 -- param: format: i64
 -- param: version: i64
@@ -39,8 +39,7 @@ INSERT INTO sync_metadata(singleton, scan_seq) VALUES (1, :scan_seq) ON CONFLICT
 -- param: content_hash: &BookId
 -- param: description: &str
 INSERT INTO book_description(book_row_id, description)
-SELECT row_id, :description FROM book WHERE content_hash = :content_hash
+SELECT row_id, pack_description(:description) FROM book WHERE content_hash = :content_hash
   AND (:description <> '' OR EXISTS(SELECT 1 FROM book_description WHERE book_row_id = book.row_id))
 ON CONFLICT(book_row_id) DO UPDATE SET description = excluded.description
 WHERE book_description.description IS NOT excluded.description;
-

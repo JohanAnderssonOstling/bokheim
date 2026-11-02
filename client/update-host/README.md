@@ -31,6 +31,15 @@ non-AppImage installations can receive compatible taxonomy-only offers.
 
 ## Lifecycle
 
+Taxonomy-only updates use the background worker throughout: it verifies and
+prepares an immutable snapshot, then atomically publishes its pointer for the
+next ordinary launch. They do not invoke a startup helper, copy library
+databases or create an application trial. The running process retains its
+selected snapshot. Library subject assignments refresh through their owner
+after foreground startup, and cached catalog indexing also runs after that
+gate. An interrupted snapshot publication can retry without replacing any
+open database. Application updates still use the migration lifecycle below.
+
 1. The app checks for offers once at startup in a background worker, then waits
    for user actions. Update consent is persisted before downloading all approved
    artifacts. Unfinished downloads resume at startup. Hash-verified staging ends at Restart.

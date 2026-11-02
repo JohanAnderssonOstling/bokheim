@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 use super::web_state::{Reply, WebState};
 use super::*;
-use client_platform_web::transport::session::{Session, SessionMessage, SessionSender};
+use client_platform_web::transport::{error_message, field, session::{Session, SessionMessage, SessionSender}};
 
 #[derive(Clone)]
 pub(crate) struct Transport {
@@ -103,11 +103,20 @@ async fn serve_connection(connection: WebConnection, commands: Receiver<Command>
 
 impl Transport {
     pub(crate) async fn connect_web_transport(config: crate::web::WebConfiguration) -> Result<(Self, AppStartupState), BackendError> {
-        let connection = WebConnection::connect(config).await?;
+        let connection = WebConnection::connect_prestarted(config).await?;
         Self::finish_web_connection(connection).await
     }
 
     async fn finish_web_connection(connection: WebConnection) -> Result<(Self, AppStartupState), BackendError> {
+        let failure = connection.startup_failure();
+        if !failure.is_undefined() {
+            let error = error_message(&field(&failure, "error"));
+            return Err(if field(&failure, "storageBusy").as_bool() == Some(true) {
+                BackendError::classified(crate::Failure::StorageBusy, error)
+            } else {
+                BackendError::message(error)
+            });
+        }
         let (commands, incoming) = unbounded();
         let (startup_sender, startup_receiver) = oneshot::channel();
         let callbacks = commands.downgrade();
@@ -138,7 +147,7 @@ impl Transport {
     }
 
     async fn subscribe_value(&self, command: WorkerCommand) -> Result<(u64, WorkerPayload, Receiver<WorkerPayload>), BackendError> {
-        let coalesce = matches!(command, WorkerCommand::App(AppCommand::SubscribeLibraryList));
+        let coalesce = matches!(command, WorkerCommand::App(AppCommand::SubscribeLibraryList | AppCommand::SubscribeDictionaryChanges));
         let (event_sender, event_receiver) = if coalesce { bounded(1) } else { unbounded() };
         let (id, response_receiver) = self.send_web_request(command, Some(event_sender), None)?;
         let mut pending = WebPendingRequest { client: &self.remote, id, subscription: true };
@@ -208,7 +217,15 @@ impl Transport {
     }
 
     pub(crate) async fn library_list_changes_transport(&self) -> Result<watch::Receiver<()>, BackendError> {
-        let (subscription_id, _initial, receiver) = self.subscribe_value(WorkerCommand::App(AppCommand::SubscribeLibraryList)).await?;
+        self.changes_transport(AppCommand::SubscribeLibraryList).await
+    }
+
+    pub(crate) async fn dictionary_changes_transport(&self) -> Result<watch::Receiver<()>, BackendError> {
+        self.changes_transport(AppCommand::SubscribeDictionaryChanges).await
+    }
+
+    async fn changes_transport(&self, command: AppCommand) -> Result<watch::Receiver<()>, BackendError> {
+        let (subscription_id, _initial, receiver) = self.subscribe_value(WorkerCommand::App(command)).await?;
         let (sender, updates) = watch::channel(());
         let subscription_backend = self.clone();
         spawn_detached(async move {

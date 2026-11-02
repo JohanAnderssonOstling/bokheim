@@ -90,7 +90,7 @@ impl AndroidHost {
             taxonomy = active(&self.root)?;
         }
         self.coordinator.set_installed(self.installed_with_taxonomy(taxonomy.as_ref())?);
-        if self.coordinator.activation_due() {
+        if self.coordinator.activation_due() && !self.coordinator.is_taxonomy_only() {
             let manifest = self.coordinator.approved_manifest()?;
             let needs_apk = self.coordinator.record().approved.as_ref().ok_or("no approved update")?.artifacts.iter().any(|a| a.kind == ArtifactKind::Application);
             let installed = self.installed_with_taxonomy(taxonomy.as_ref())?;
@@ -197,6 +197,76 @@ mod tests {
         let after: u32 = observer.pragma_query_value(None, "data_version", |r| r.get(0)).unwrap();
         assert_eq!(before, after, "ordinary startup must not commit update-state writes");
         assert!(UpdateLock::acquire(&root).is_ok(), "startup must release the lock before returning the host");
+    }
+
+    #[test]
+    fn taxonomy_only_waits_for_background_preparation_and_never_copies_libraries() {
+        use update_client::TaxonomyRelease;
+
+        let f = Fixture::new();
+        let snapshot = f.dir.path().join("taxonomy-source.sqlite3");
+        activation::copy_file(&subject_projection::bundled::path().unwrap(), &snapshot).unwrap();
+        let release = subject_projection::bundled::RELEASE_ID + 1;
+        let db = rusqlite::Connection::open(&snapshot).unwrap();
+        db.execute("UPDATE taxonomy_meta SET value=?1 WHERE key='release_id'", [release.to_string()]).unwrap();
+        drop(db);
+        let bytes = fs::read(&snapshot).unwrap();
+        let manifest = Manifest {
+            protocol_version: 1, channel: "stable".into(), sequence: 1,
+            issued_at_unix: now(), expires_at_unix: now() + 3600,
+            application: None, catalog: None,
+            taxonomy: Some(TaxonomyRelease {
+                release_id: release, format_version: 1,
+                minimum_application_version: "1.0.0".parse().unwrap(),
+                minimum_schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32,
+                artifact: Artifact { url: "https://example.org/taxonomy".into(), bytes: bytes.len() as u64, sha256: hex(digest(&SHA256, &bytes).as_ref()) },
+            }),
+        };
+        let payload = serde_json::to_string(&manifest).unwrap();
+        let mut message = SIGNATURE_CONTEXT.to_vec();
+        message.extend_from_slice(payload.as_bytes());
+        let envelope = serde_json::to_vec(&SignedManifest { key_id: "test".into(), payload, signature: hex(f.key.sign(&message).as_ref()) }).unwrap();
+        let mut host = f.host("1.0.0");
+        host.coordinator.discovered(envelope, now()).unwrap();
+        host.approve().unwrap();
+        let stage = host.root.join("staging").join(&host.coordinator.record().approved.as_ref().unwrap().id);
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join("taxonomy.sqlite3"), bytes).unwrap();
+        host.coordinator.artifact_prepared(ArtifactKind::Taxonomy).unwrap();
+        drop(host);
+
+        // A malformed unrelated library proves reference preparation never
+        // opens, sizes, backs up or migrates the library databases.
+        let library = f.dir.path().join("libraries/unrelated/library.db");
+        fs::create_dir_all(library.parent().unwrap()).unwrap();
+        fs::write(&library, b"unrelated library").unwrap();
+        let (mut host, trial) = AndroidHost::open_and_startup(f.dir.path(), "1.0.0", f.config.clone(), "android-aarch64-apk", |_| panic!("taxonomy must not invoke the startup migration helper")).unwrap();
+        assert!(!trial);
+        assert!(active(&host.root).unwrap().is_none());
+        assert!(host.coordinator.record().approved.is_some());
+        let pending = host.coordinator.record().clone();
+        host.prepare().unwrap();
+        let active = active(&host.root).unwrap().unwrap();
+        assert_eq!(active.release, release);
+        assert_eq!(subject_projection::installed::metadata(&active.path).unwrap(), (release, 1));
+        assert!(host.coordinator.record().approved.is_none());
+        assert!(Journal::load(&host.root).unwrap().is_none());
+        assert_eq!(fs::read(&library).unwrap(), b"unrelated library");
+        assert_eq!(f.value(), "prior");
+        assert!(fs::read_dir(active.path.parent().unwrap()).unwrap().all(|entry| entry.unwrap().file_name() == "taxonomy.sqlite3"));
+
+        // Simulate interruption after the pointer was published but before
+        // its durable coordinator acknowledgement. Retry must not rewrite
+        // the immutable file that a new process could already be reading.
+        std::fs::File::options().write(true).open(&active.path).unwrap().set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH)).unwrap();
+        drop(host);
+        let state = rusqlite::Connection::open(f.dir.path().join("updates/state.sqlite")).unwrap();
+        state.execute("UPDATE update_state SET revision=?1,payload=?2 WHERE id=1", rusqlite::params![i64::try_from(pending.revision).unwrap(), serde_json::to_string(&pending).unwrap()]).unwrap();
+        drop(state);
+        let mut retry = f.host("1.0.0");
+        retry.prepare().unwrap();
+        assert!(retry.coordinator.record().approved.is_none());
+        assert_eq!(fs::metadata(&active.path).unwrap().modified().unwrap(), UNIX_EPOCH);
     }
 
     #[test]

@@ -1,18 +1,63 @@
 //! Shared narration state and playback controls.
-use crate::settings::{NarrationPauses, NarrationVoice};
+use crate::settings::{NarrationPauses, NarrationVoice, NarrationVoicePreference, ReaderPreferences};
+mod voice_picker;
 use audiobook_player::{PlaybackMenu, SleepChoice, SleepPlan, format_playback_rate, sleep_menu, speed_menu};
 use components::playback_secondary_button;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, SharedString, Task, div};
+use gpui::{AnyElement, App, Context, SharedString, Task, div, px};
 use gpui_component::menu::DropdownMenu;
 use gpui_component::{Disableable, Icon, IconName};
-use reader_speech::{DesktopSpeech, Pauses, SpeechControl, SpeechEvent, SpeechPassage, Voice, supports_languages};
-use std::time::{Duration, Instant};
+#[cfg(not(target_arch = "wasm32"))]
+use reader_speech::Voice;
+use reader_speech::{DesktopSpeech, DeviceVoice, Pauses, SpeechControl, SpeechEvent, SpeechFailure, SpeechPassage, supports_languages};
+use std::{collections::BTreeMap, time::Duration};
 use ui_components::{self as components, PlaybackTransportAction};
+use web_time::Instant;
+
+pub(crate) fn speech_error_message(failure: SpeechFailure, diagnostic: &str) -> &'static str {
+    log::warn!("Read aloud failed ({failure:?}): {diagnostic}");
+    match failure {
+        SpeechFailure::Interrupted => "Read aloud stopped unexpectedly. Start it again; if it persists, restart the app.",
+        SpeechFailure::VoiceUnavailable => "Couldn't load the selected voice. Try another voice; if it persists, report the problem.",
+        SpeechFailure::AudioOutput => "Couldn't play read-aloud audio. Check your speakers, headphones or Bluetooth connection, then retry.",
+        SpeechFailure::Synthesis => "Couldn't generate speech for this passage. Try another voice or passage; if it persists, report the problem.",
+        SpeechFailure::Blocked => "The browser refused read aloud. Start it again from the read-aloud button; if it persists, check this site's permissions.",
+        SpeechFailure::ServiceUnavailable => "Couldn't start the speech service. Retry; if it persists, restart the app.",
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SpeechStartError {
+    failure: SpeechFailure,
+    diagnostic: String,
+    explanation: Option<String>,
+}
+
+impl SpeechStartError {
+    fn new(failure: SpeechFailure, diagnostic: String) -> Self {
+        Self { failure, diagnostic, explanation: None }
+    }
+
+    pub fn user_message(&self) -> &str {
+        self.explanation.as_deref().unwrap_or_else(|| speech_error_message(self.failure, &self.diagnostic))
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Narration {
     pub service: Option<DesktopSpeech>,
+    languages: Vec<String>,
+    device_voice: Option<String>,
+    voice_preferences: BTreeMap<String, NarrationVoicePreference>,
+    device_voices: Vec<DeviceVoice>,
+    voices_loading: bool,
+    voices_error: Option<String>,
+    voices_revision: u64,
+    voices_task: Option<Task<()>>,
+    #[cfg(target_arch = "wasm32")]
+    availability_watch: Option<reader_speech::AvailabilityWatch>,
+    #[cfg(target_arch = "wasm32")]
+    availability_task: Option<Task<()>>,
     pub generation: u64,
     pub playing: bool,
     pub paused: bool,
@@ -34,6 +79,9 @@ pub(crate) struct Narration {
     pauses: NarrationPauses,
     voice: NarrationVoice,
     media_title: String,
+    media_author: String,
+    media_chapter: String,
+    media_cover: Vec<u8>,
     #[cfg(target_os = "android")]
     volume_button_capture: Option<bool>,
 }
@@ -46,10 +94,10 @@ const PAUSE_CHOICES: [(NarrationPauses, &str, Pauses); 4] = [
     (NarrationPauses::Longer, "Longer pauses", Pauses { sentence_scale: 2.0, passage_gap: 0.8 }),
 ];
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 const VOICE_CHOICES: [(NarrationVoice, &str, &str, Voice); 2] = [(NarrationVoice::Alba, "Alba", "Alba · Scottish English", Voice::Alba), (NarrationVoice::George, "George", "George · British English", Voice::George)];
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 fn speech_voice(choice: NarrationVoice) -> Voice {
     VOICE_CHOICES.into_iter().find(|(voice, ..)| *voice == choice).map_or(Voice::Alba, |(.., voice)| voice)
 }
@@ -69,6 +117,20 @@ impl Narration {
         self.media_title = title.into();
         self
     }
+    fn sync_media_metadata(&self) {
+        if let Some(service) = &self.service {
+            service.set_title(&self.media_title);
+            service.set_media_metadata(&self.media_author, &self.media_chapter, &self.media_cover);
+        }
+    }
+
+    pub fn set_chapter(&mut self, chapter: String) {
+        if self.media_chapter != chapter {
+            self.media_chapter = chapter;
+            self.sync_media_metadata();
+        }
+    }
+
     /// An active narration session reserves hardware volume keys for Android's
     /// media volume, including while paused or preparing the next passage,
     /// unless the reader explicitly uses them to advance a reading ruler.
@@ -82,24 +144,180 @@ impl Narration {
     }
 
     pub fn for_languages(languages: &[String]) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let unavailable_reason = (!supports_languages(languages)).then(|| "This book’s declared language is not supported. Text to speech currently reads English.".into());
-        Self { unavailable_reason, ..Default::default() }
+        #[cfg(target_arch = "wasm32")]
+        let unavailable_reason = None;
+        Self { unavailable_reason, languages: languages.to_vec(), ..Default::default() }
     }
 
-    pub fn start(&mut self, text: Vec<SpeechPassage>, index: usize) -> Result<Option<async_channel::Receiver<SpeechEvent>>, String> {
+    pub fn available(&self) -> bool {
+        true
+    }
+
+    pub fn with_availability<C: TtsReader>(mut self, cx: &mut Context<C>) -> Self {
+        self.reload_voices(cx);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (watch, events) = reader_speech::AvailabilityWatch::new();
+            self.availability_watch = Some(watch);
+            self.availability_task = Some(cx.spawn(async move |this, cx| {
+                while events.recv().await.is_ok() {
+                    if this
+                        .update(cx, |reader, cx| {
+                            reader.narration_mut().reload_voices(cx);
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+        self
+    }
+
+    fn apply_voices(&mut self, result: Result<Vec<DeviceVoice>, String>) {
+        self.voices_loading = false;
+        match result {
+            Ok(voices) => {
+                self.device_voices = voices;
+                if self.voice == NarrationVoice::Device {
+                    if let Some(voice) = self.device_voices.iter().find(|voice| Some(&voice.id) == self.device_voice.as_ref()) {
+                        let language = reader_speech::language_base(&voice.language);
+                        if !language.is_empty() {
+                            self.voice_preferences.entry(language).or_insert_with(|| NarrationVoicePreference { voice: NarrationVoice::Device, device_voice: Some(voice.id.clone()) });
+                        }
+                        if !reader_speech::voice_matches_languages(voice, &self.languages) && self.preferred_voice().is_none() {
+                            self.device_voice = None;
+                        }
+                    }
+                }
+                self.voices_error = None;
+            }
+            Err(error) => {
+                self.device_voices.clear();
+                self.voices_error = Some(error);
+            }
+        }
+        self.refresh_availability();
+    }
+
+    fn reload_voices<C: TtsReader>(&mut self, cx: &mut Context<C>) {
+        self.voices_revision = self.voices_revision.wrapping_add(1);
+        #[cfg(target_arch = "wasm32")]
+        self.apply_voices(reader_speech::device_voices());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.voices_loading = true;
+            let revision = self.voices_revision;
+            self.voices_task = Some(cx.spawn(async move |this, cx| {
+                let discovery = cx.background_executor().spawn(async { reader_speech::device_voices() });
+                let timer = cx.background_executor().timer(Duration::from_secs(20));
+                let result = futures_lite::future::or(async { discovery.await }, async {
+                    timer.await;
+                    Err("Local voice discovery took too long. Try again.".into())
+                })
+                .await;
+                let _ = this.update(cx, |reader, cx| {
+                    let state = reader.narration_mut();
+                    if state.voices_revision == revision {
+                        state.apply_voices(result);
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        self.refresh_availability();
+    }
+
+    pub(crate) fn chunk_language(&self) -> String {
+        if self.voice == NarrationVoice::Device {
+            self.device_voices.iter().find(|voice| Some(&voice.id) == self.device_voice.as_ref()).map(|voice| voice.language.clone()).or_else(|| self.languages.first().cloned()).unwrap_or_else(|| "und".into())
+        } else {
+            "en".into()
+        }
+    }
+
+    fn matching_voices(&self) -> Vec<DeviceVoice> {
+        reader_speech::matching_device_voices(&self.device_voices, &self.languages)
+    }
+
+    fn preferred_voice(&self) -> Option<&NarrationVoicePreference> {
+        self.languages.iter().find_map(|language| {
+            let preference = self.voice_preferences.get(&reader_speech::language_base(language))?;
+            #[cfg(target_arch = "wasm32")]
+            if preference.voice != NarrationVoice::Device {
+                return None;
+            }
+            Some(preference)
+        })
+    }
+
+    fn remember_voice(&mut self, language: &str, voice: NarrationVoice, id: Option<String>) {
+        let language = reader_speech::language_base(language);
+        if language.is_empty() {
+            self.select_voice(voice, id);
+            return;
+        }
+        self.voice_preferences.insert(language.clone(), NarrationVoicePreference { voice, device_voice: id.clone() });
+        if self.languages.iter().all(|language| reader_speech::language_base(language).is_empty()) || self.languages.iter().any(|book_language| reader_speech::language_base(book_language) == language) {
+            self.select_voice(voice, id);
+        }
+    }
+
+    fn refresh_availability(&mut self) {
+        if let Some(preference) = self.preferred_voice().cloned() {
+            self.voice = preference.voice;
+            self.device_voice = preference.device_voice;
+        }
+        if self.voice == NarrationVoice::Device {
+            self.unavailable_reason = if self.voices_loading {
+                Some("Finding installed local voices…".into())
+            } else if let Some(error) = &self.voices_error {
+                Some(error.clone())
+            } else {
+                let voices = self.matching_voices();
+                if self.device_voice.is_none() {
+                    self.device_voice = voices.first().map(|voice| voice.id.clone());
+                }
+                if voices.iter().any(|voice| Some(&voice.id) == self.device_voice.as_ref()) {
+                    None
+                } else if self.device_voice.is_some() {
+                    Some("The selected local voice is unavailable for this book. Choose another installed voice.".into())
+                } else {
+                    Some("No installed voice matches this book’s language. Install one in device settings or choose a matching built-in voice.".into())
+                }
+            };
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.unavailable_reason = (!supports_languages(&self.languages)).then(|| "No built-in voice supports this book’s language. Choose a matching installed voice.".into());
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                self.voice = NarrationVoice::Device;
+                self.refresh_availability();
+            }
+        }
+    }
+
+    pub fn start(&mut self, text: Vec<SpeechPassage>, index: usize) -> Result<Option<async_channel::Receiver<SpeechEvent>>, SpeechStartError> {
         self.begin(index, |service| service.replace_passages_from(text, index))
     }
 
-    pub fn start_items(&mut self, count: usize, index: usize, glyph_start: u32) -> Result<Option<async_channel::Receiver<SpeechEvent>>, String> {
+    pub fn start_items(&mut self, count: usize, index: usize, glyph_start: u32) -> Result<Option<async_channel::Receiver<SpeechEvent>>, SpeechStartError> {
         self.begin(index, |service| service.read_items_from(count, index, glyph_start))
     }
 
-    fn begin(&mut self, index: usize, start: impl FnOnce(&DesktopSpeech) -> u64) -> Result<Option<async_channel::Receiver<SpeechEvent>>, String> {
+    fn begin(&mut self, index: usize, start: impl FnOnce(&DesktopSpeech) -> u64) -> Result<Option<async_channel::Receiver<SpeechEvent>>, SpeechStartError> {
+        self.refresh_availability();
         if let Some(reason) = &self.unavailable_reason {
-            return Err(reason.clone());
+            return Err(SpeechStartError { failure: SpeechFailure::VoiceUnavailable, diagnostic: reason.clone(), explanation: Some(reason.clone()) });
         }
         let events = if self.service.is_none() {
-            let service = DesktopSpeech::new()?;
+            let service = DesktopSpeech::new().map_err(|diagnostic| SpeechStartError::new(SpeechFailure::ServiceUnavailable, diagnostic))?;
             let events = service.events();
             self.service = Some(service);
             Some(events)
@@ -107,12 +325,17 @@ impl Narration {
             None
         };
         let Some(service) = self.service.as_ref() else {
-            return Err("Speech service is unavailable. Try starting read aloud again.".into());
+            return Err(SpeechStartError::new(SpeechFailure::ServiceUnavailable, "speech service is unavailable".into()));
         };
         service.set_title(&self.media_title);
+        service.set_media_metadata(&self.media_author, &self.media_chapter, &self.media_cover);
         service.set_rate(self.rate() as f32);
-        service.set_pauses(speech_pauses(self.pauses));
+        service.set_pauses(if self.voice == NarrationVoice::Device { Pauses::NATURAL } else { speech_pauses(self.pauses) });
+        #[cfg(not(target_arch = "wasm32"))]
         service.set_voice(speech_voice(self.voice));
+        let language = self.chunk_language();
+        service.set_languages(std::slice::from_ref(&language));
+        service.set_device_voice(if self.voice == NarrationVoice::Device { self.device_voice.as_deref() } else { None }).map_err(|diagnostic| SpeechStartError::new(SpeechFailure::VoiceUnavailable, diagnostic))?;
         self.generation = start(service);
         self.playing = true;
         self.paused = false;
@@ -229,20 +452,67 @@ impl Narration {
     }
 
     pub fn with_voice(mut self, voice: NarrationVoice) -> Self {
-        self.voice = voice;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            #[cfg(target_os = "android")]
+            let voice = if voice == NarrationVoice::George { NarrationVoice::Alba } else { voice };
+            self.voice = voice;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = voice;
+            self.voice = NarrationVoice::Device;
+        }
+        self.refresh_availability();
         self
     }
 
-    #[cfg(not(target_os = "android"))]
-    fn set_voice(&mut self, voice: NarrationVoice) {
-        if self.voice == voice {
+    pub fn with_device_voice(mut self, id: Option<String>) -> Self {
+        self.device_voice = id;
+        self.refresh_availability();
+        self
+    }
+
+    pub fn with_voice_preferences(mut self, preferences: &ReaderPreferences) -> Self {
+        self.voice_preferences = preferences.narration_voices.clone();
+        if self.voice != NarrationVoice::Device {
+            self.voice_preferences.entry("en".into()).or_insert_with(|| NarrationVoicePreference { voice: self.voice, device_voice: None });
+        }
+        self.refresh_availability();
+        self
+    }
+
+    fn select_voice(&mut self, voice: NarrationVoice, id: Option<String>) {
+        self.voice = voice;
+        self.device_voice = id;
+        self.refresh_availability();
+        let voice = self.voice;
+        if self.unavailable_reason.is_some() {
+            if let Some(service) = &self.service {
+                service.stop();
+            }
+            self.playing = false;
+            self.needs_restart = true;
             return;
         }
-        self.voice = voice;
         if let Some(service) = &self.service {
-            self.generation = service.set_voice(speech_voice(voice));
-            if self.playing && !self.paused {
-                self.status = "Preparing the selected voice…".into();
+            #[cfg(not(target_arch = "wasm32"))]
+            service.set_voice(speech_voice(voice));
+            service.set_languages(std::slice::from_ref(&self.chunk_language()));
+            service.set_pauses(if voice == NarrationVoice::Device { Pauses::NATURAL } else { speech_pauses(self.pauses) });
+            match service.set_device_voice(if voice == NarrationVoice::Device { self.device_voice.as_deref() } else { None }) {
+                Ok(generation) => {
+                    self.generation = generation;
+                    if self.playing && !self.paused {
+                        self.status = "Preparing the selected local voice…".into();
+                    }
+                }
+                Err(error) => {
+                    service.stop();
+                    self.playing = false;
+                    self.needs_restart = true;
+                    self.unavailable_reason = Some(error);
+                }
             }
         }
     }
@@ -284,8 +554,20 @@ pub(crate) fn adjacent_item(current: usize, count: usize, forward: bool) -> Opti
 }
 
 pub(crate) trait TtsReader: Sized + 'static {
+    fn narration(&self) -> &Narration;
     fn narration_mut(&mut self) -> &mut Narration;
+    fn toggle_active_narration(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.narration_mut().playing {
+            return false;
+        }
+        self.play_pause_tts(cx);
+        true
+    }
+
     fn chapter_key(&self, cx: &App) -> usize;
+    fn chapter_label(&self, cx: &App) -> String {
+        format!("Chapter {}", self.chapter_key(cx) + 1)
+    }
     fn update_tts_chapter_limit(&mut self, _cx: &mut Context<Self>) {}
     fn skip_tts_element(&mut self, forward: bool, cx: &mut Context<Self>);
     fn sleep_tts(&mut self, cx: &mut Context<Self>) {
@@ -347,10 +629,35 @@ pub(crate) trait TtsReader: Sized + 'static {
     }
 }
 
+#[cfg(target_os = "android")]
+pub(crate) fn load_media_metadata<C: TtsReader>(library: std::rc::Rc<library_backend::LibraryClient>, locator: library_model::BookLocator, cx: &mut Context<C>) {
+    cx.spawn(async move |this, cx| {
+        let detail = library.book_detail(locator.content_hash()).await.ok();
+        let cover = library.thumbnail(locator.content_hash(), library_backend::ThumbnailResolution::Browse).await.ok().flatten().unwrap_or_default();
+        let _ = this.update(cx, |reader, _| {
+            let state = reader.narration_mut();
+            if let Some(detail) = detail {
+                state.media_title = detail.book.title;
+                state.media_author = detail.authors.iter().map(|author| author.name.as_str()).collect::<Vec<_>>().join(", ");
+            }
+            state.media_cover = cover;
+            state.sync_media_metadata();
+        });
+    })
+    .detach();
+}
+
 pub(crate) fn listen<C: TtsReader>(events: async_channel::Receiver<SpeechEvent>, cx: &mut Context<C>) -> Task<()> {
     cx.spawn(async move |this, cx| {
         while let Ok(event) = events.recv().await {
-            if this.update(cx, |reader, cx| reader.speech_event(event, cx)).is_err() {
+            if this
+                .update(cx, |reader, cx| {
+                    reader.speech_event(event, cx);
+                    let chapter = reader.chapter_label(cx);
+                    reader.narration_mut().set_chapter(chapter);
+                })
+                .is_err()
+            {
                 break;
             }
         }
@@ -392,7 +699,7 @@ fn choose_sleep<C: TtsReader>(reader: &mut C, choice: SleepChoice, cx: &mut Cont
 
 /// The narration dock under the page, laid out like the audiobook dock but
 /// with transport controls in the centre and tools alongside them on desktop.
-/// Compact docks distribute every control with equal inner and outer spacing.
+/// Compact docks balance equal-width tool groups around the centred transport.
 /// Every compact option opens a window-owned bottom sheet.
 pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: components::BrowserTheme, cx: &mut Context<C>) -> AnyElement {
     let playing = state.playing && !state.paused;
@@ -401,13 +708,26 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
     let skippable = state.playing && !state.needs_restart;
     let transport = components::playback_transport_buttons("tts", playing, components::TransportLayout::Dock, None, components::PlaybackSkipKind::Elements, theme)
         .into_iter()
-        .map(|(action, button)| match action {
-            PlaybackTransportAction::PlayPause => button.disabled(!eligible).tooltip(status.clone()).on_click(cx.listener(|reader, _, _, cx| reader.play_pause_tts(cx))),
-            PlaybackTransportAction::Back | PlaybackTransportAction::Previous => button.disabled(!skippable).on_click(cx.listener(|reader, _, _, cx| reader.skip_tts_element(false, cx))),
-            PlaybackTransportAction::Forward | PlaybackTransportAction::Next => button.disabled(!skippable).on_click(cx.listener(|reader, _, _, cx| reader.skip_tts_element(true, cx))),
+        .map(|(action, button)| {
+            let button = button.when(compact, |button| button.size(px(if matches!(action, PlaybackTransportAction::PlayPause) { 64.0 } else { 32.0 }))).debug_selector(move || {
+                match action {
+                    PlaybackTransportAction::PlayPause => "tts-play",
+                    PlaybackTransportAction::Back | PlaybackTransportAction::Previous => "tts-back",
+                    PlaybackTransportAction::Forward | PlaybackTransportAction::Next => "tts-next",
+                }
+                .into()
+            });
+            match action {
+                PlaybackTransportAction::PlayPause => button.disabled(!eligible).tooltip(status.clone()).on_click(cx.listener(|reader, _, _, cx| reader.play_pause_tts(cx))),
+                PlaybackTransportAction::Back | PlaybackTransportAction::Previous => button.disabled(!skippable).on_click(cx.listener(|reader, _, _, cx| reader.skip_tts_element(false, cx))),
+                PlaybackTransportAction::Forward | PlaybackTransportAction::Next => button.disabled(!skippable).on_click(cx.listener(|reader, _, _, cx| reader.skip_tts_element(true, cx))),
+            }
         })
         .collect::<Vec<_>>();
 
+    let value_button = |id: &'static str, label: SharedString| {
+        if compact { playback_secondary_button(components::base_button(id).ghost()).size(px(32.0)).child(div().text_size(px(14.0)).whitespace_nowrap().child(label)) } else { components::player_dock_text_button(id, label) }
+    };
     let rate = state.rate();
     let entity = cx.entity().downgrade();
     let set_rate = move |rate, cx: &mut App| {
@@ -417,45 +737,14 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
             cx.notify();
         });
     };
-    let speed = components::player_dock_text_button("tts-speed", format_playback_rate(rate), theme).tooltip("Reading speed");
+    let speed = value_button("tts-speed", format_playback_rate(rate).into()).debug_selector(|| "tts-speed".into()).tooltip("Reading speed");
     let speed = if compact {
         speed.on_click(move |_, window, cx| speed_menu(rate).title("Reading speed").open_sheet(window, cx, set_rate.clone())).into_any_element()
     } else {
         speed.dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| speed_menu(rate).dropdown(menu, set_rate.clone())).into_any_element()
     };
 
-    #[cfg(not(target_os = "android"))]
-    let voice = {
-        let current_voice = state.voice;
-        let voice_label = VOICE_CHOICES.into_iter().find(|(voice, ..)| *voice == current_voice).map_or("Alba", |(_, label, ..)| label);
-        let entity = cx.entity().downgrade();
-        let set_voice = move |choice, cx: &mut App| {
-            let _ = entity.update(cx, |reader, cx| {
-                reader.narration_mut().set_voice(choice);
-                crate::settings::ReaderSettings::update(cx, |preferences| preferences.narration_voice = choice);
-                cx.notify();
-            });
-        };
-        let voice = components::player_dock_text_button("tts-voice", voice_label, theme).tooltip("Narration voice");
-        if compact {
-            voice
-                .on_click(move |_, window, cx| {
-                    let choices = VOICE_CHOICES.into_iter().map(|(choice, _, label, _)| (choice, label.into(), choice == current_voice));
-                    PlaybackMenu::new("tts-voice", "Narration voice", choices).open_sheet(window, cx, set_voice.clone());
-                })
-                .into_any_element()
-        } else {
-            voice
-                .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |mut menu, _, _| {
-                    for (choice, _, label, _) in VOICE_CHOICES {
-                        let set_voice = set_voice.clone();
-                        menu = menu.item(components::menu_item(label, move |_, _, cx| set_voice(choice, cx)).checked(choice == current_voice));
-                    }
-                    menu
-                })
-                .into_any_element()
-        }
-    };
+    let voice = voice_picker::button(state, compact, cx);
 
     let current_pauses = state.pauses;
     let entity = cx.entity().downgrade();
@@ -466,7 +755,11 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
             cx.notify();
         });
     };
-    let pauses = playback_secondary_button(components::outlined_icon_button("tts-pauses", "Pauses between sentences and paragraphs", Icon::empty().path("icons/hourglass.svg"), theme));
+    let pauses = playback_secondary_button(components::outlined_icon_button("tts-pauses", "Pauses between sentences and paragraphs", Icon::empty().path("icons/hourglass.svg")))
+        .when(compact, |button| button.size(px(32.0)))
+        .disabled(state.voice == NarrationVoice::Device)
+        .when(state.voice == NarrationVoice::Device, |button| button.tooltip("Custom pauses are unavailable for device voices"))
+        .debug_selector(|| "tts-pauses".into());
     let pauses = if compact {
         pauses
             .on_click(move |_, window, cx| {
@@ -488,33 +781,50 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
 
     let sleep_label = state.sleep_label();
     let sleep = match sleep_label.clone() {
-        Some(label) => components::player_dock_text_button("tts-sleep", label, theme).tooltip("Sleep timer"),
-        None => components::outlined_icon_button("tts-sleep", "Sleep timer", Icon::empty().path("icons/alarm.svg"), theme),
+        Some(label) => {
+            let value = if compact {
+                match state.sleep {
+                    Some(SleepPlan::Until(deadline)) => format!("{}m", deadline.saturating_duration_since(Instant::now()).as_secs().div_ceil(60)).into(),
+                    Some(SleepPlan::EndOfChapter(_)) => "Ch.".into(),
+                    None => label.clone(),
+                }
+            } else {
+                label.clone()
+            };
+            value_button("tts-sleep", value).tooltip(format!("Sleep timer: {label}"))
+        }
+        None => components::outlined_icon_button("tts-sleep", "Sleep timer", Icon::empty().path("icons/alarm.svg")),
     };
     let entity = cx.entity().downgrade();
     let set_sleep = move |choice, cx: &mut App| {
         let _ = entity.update(cx, |reader, cx| choose_sleep(reader, choice, cx));
     };
-    let sleep = playback_secondary_button(components::selectable_button(sleep, sleep_label.is_some(), theme));
+    let sleep = playback_secondary_button(sleep).when(compact, |button| button.size(px(32.0))).debug_selector(|| "tts-sleep".into()).when(sleep_label.is_some(), |button| button.text_color(theme.text_accent));
     let sleep = if compact {
         sleep.on_click(move |_, window, cx| sleep_menu(sleep_label.as_deref()).open_sheet(window, cx, set_sleep.clone())).into_any_element()
     } else {
         sleep.dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _, _| sleep_menu(sleep_label.as_deref()).dropdown(menu, set_sleep.clone())).into_any_element()
     };
-    let close = playback_secondary_button(components::outlined_icon_button("tts-close", "Close player", IconName::Close, theme)).on_click(cx.listener(|reader, _, _, cx| reader.close_tts_dock(cx)));
+    let close = playback_secondary_button(components::outlined_icon_button("tts-close", "Close player", IconName::Close))
+        .when(compact, |button| button.size(px(32.0)))
+        .debug_selector(|| "tts-close".into())
+        .on_click(cx.listener(|reader, _, _, cx| reader.close_tts_dock(cx)));
 
     if compact {
-        let mut controls = Vec::new();
-        #[cfg(not(target_os = "android"))]
-        controls.push(voice);
-        controls.extend([speed, pauses]);
-        controls.extend(transport.into_iter().map(|button| button.into_any_element()));
-        controls.extend([sleep, close.into_any_element()]);
-        return components::player_dock_evenly(controls, theme).id("tts-dock").on_scroll_wheel(|_, _, cx| cx.stop_propagation()).into_any_element();
+        let leading = components::row(0.0).flex_1().min_w_0().child(voice).child(speed).child(pauses);
+        let transport = components::row(0.0).flex_none().children(transport);
+        let trailing = components::row(0.0).flex_1().min_w_0().justify_end().child(sleep).child(close);
+        return components::bottom_bar(theme)
+            .occlude()
+            .relative()
+            .id("tts-dock")
+            .debug_selector(|| "tts-dock".into())
+            .child(components::row(0.0).w_full().h(gpui::rems(components::PLAYER_DOCK_HEIGHT_REM)).child(leading).child(transport).child(trailing))
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .into_any_element();
     }
 
     let trailing = components::player_dock_tools();
-    #[cfg(not(target_os = "android"))]
     let trailing = trailing.child(voice);
     let trailing = trailing.child(sleep).child(speed).child(pauses).child(close);
 
@@ -528,10 +838,80 @@ mod tests {
     use gpui::{AppContext, TestAppContext};
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn saved_voice_preferences_use_a_bundled_voice() {
         assert_eq!(speech_voice(NarrationVoice::Alba), Voice::Alba);
         let expected = if cfg!(target_os = "android") { Voice::Alba } else { Voice::George };
         assert_eq!(speech_voice(NarrationVoice::George), expected);
+    }
+
+    #[test]
+    fn voices_are_remembered_per_language_and_regional_variants_share_a_choice() {
+        let english = DeviceVoice { id: "english".into(), name: "English".into(), language: "en-GB".into() };
+        let swedish = DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into() };
+        let mut state = Narration::for_languages(&["en".into()]).with_voice(NarrationVoice::Device).with_device_voice(Some(english.id.clone()));
+        state.apply_voices(Ok(vec![english.clone(), swedish.clone()]));
+        state.current = Some(12);
+        state.remember_voice("swe", NarrationVoice::Device, Some(swedish.id.clone()));
+        assert_eq!(state.device_voice.as_deref(), Some("english"));
+        assert_eq!(state.current, Some(12));
+        assert_eq!(state.voice_preferences.len(), 2);
+        state.remember_voice("en-US", NarrationVoice::Device, Some("another-english".into()));
+        assert_eq!(state.voice_preferences.len(), 2);
+        assert_eq!(state.voice_preferences["en"].device_voice.as_deref(), Some("another-english"));
+        assert_eq!(state.voice_preferences["sv"].device_voice.as_deref(), Some("swedish"));
+
+        let preferences = ReaderPreferences { narration_voices: state.voice_preferences, ..Default::default() };
+        let mut restored = Narration::for_languages(&["sv".into()]).with_voice_preferences(&preferences);
+        restored.apply_voices(Ok(vec![english, swedish]));
+        assert_eq!(restored.voice, NarrationVoice::Device);
+        assert_eq!(restored.device_voice.as_deref(), Some("swedish"));
+        assert!(restored.unavailable_reason.is_none());
+        restored.apply_voices(Ok(vec![]));
+        assert_eq!(restored.device_voice.as_deref(), Some("swedish"));
+        assert!(restored.unavailable_reason.is_some());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn bundled_voice_replaces_only_its_own_language_selection() {
+        let mut state = Narration::for_languages(&["sv".into()]).with_voice(NarrationVoice::Device);
+        state.apply_voices(Ok(vec![DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into() }]));
+        state.remember_voice("sv", NarrationVoice::Device, Some("swedish".into()));
+        state.remember_voice("en-GB", NarrationVoice::Alba, None);
+        assert_eq!(state.voice, NarrationVoice::Device);
+        assert_eq!(state.device_voice.as_deref(), Some("swedish"));
+        assert_eq!(state.voice_preferences["en"].voice, NarrationVoice::Alba);
+        assert_eq!(state.voice_preferences["sv"].device_voice.as_deref(), Some("swedish"));
+        let preferences = ReaderPreferences { narration_voices: state.voice_preferences, ..Default::default() };
+        let restored = Narration::for_languages(&["en-US".into()]).with_voice_preferences(&preferences);
+        assert_eq!(restored.voice, NarrationVoice::Alba);
+        assert!(restored.device_voice.is_none());
+    }
+
+    #[test]
+    fn missing_saved_local_voice_requires_explicit_replacement() {
+        let mut state = Narration::for_languages(&["sv".into()]).with_voice(NarrationVoice::Device).with_device_voice(Some("removed".into()));
+        state.apply_voices(Ok(vec![DeviceVoice { id: "installed".into(), name: "Swedish".into(), language: "sv-SE".into() }]));
+        assert_eq!(state.device_voice.as_deref(), Some("removed"));
+        assert!(state.unavailable_reason.is_some());
+        assert!(state.start(vec![], 0).is_err());
+        assert!(state.service.is_none());
+        state.select_voice(NarrationVoice::Device, Some("installed".into()));
+        assert!(state.unavailable_reason.is_none());
+        assert_eq!(state.chunk_language(), "sv-SE");
+    }
+
+    #[test]
+    fn catalogue_failure_and_language_mismatch_never_enable_a_fallback() {
+        let mut state = Narration::for_languages(&["sv".into()]).with_voice(NarrationVoice::Device);
+        state.apply_voices(Ok(vec![DeviceVoice { id: "english".into(), name: "English".into(), language: "en-US".into() }]));
+        assert!(state.matching_voices().is_empty());
+        assert!(state.device_voice.is_none());
+        assert!(state.start(vec![], 0).is_err());
+        state.apply_voices(Err("Engine unavailable".into()));
+        assert_eq!(state.unavailable_reason.as_deref(), Some("Engine unavailable"));
+        assert!(state.device_voices.is_empty());
     }
 
     #[test]
@@ -553,6 +933,9 @@ mod tests {
     }
 
     impl TtsReader for PanelReader {
+        fn narration(&self) -> &Narration {
+            &self.tts
+        }
         fn narration_mut(&mut self) -> &mut Narration {
             &mut self.tts
         }
@@ -621,6 +1004,22 @@ mod tests {
             assert!(reader.tts.dock_open && !reader.tts.playing);
             reader.close_tts_dock(cx);
             assert!(!reader.tts.dock_open && !reader.tts.playing);
+        });
+    }
+
+    #[gpui::test]
+    fn playback_key_only_toggles_an_active_narration_session(cx: &mut TestAppContext) {
+        let reader = cx.new(|_| PanelReader { tts: Narration::default() });
+        reader.update(cx, |reader, cx| {
+            assert!(!reader.toggle_active_narration(cx));
+            assert!(!reader.tts.playing && !reader.tts.dock_open);
+            reader.press_tts(cx);
+            assert!(reader.toggle_active_narration(cx));
+            assert!(reader.tts.playing && reader.tts.paused && reader.tts.dock_open);
+            assert!(reader.toggle_active_narration(cx));
+            assert!(reader.tts.playing && !reader.tts.paused);
+            reader.stop_tts(cx);
+            assert!(!reader.toggle_active_narration(cx));
         });
     }
 

@@ -12,11 +12,12 @@ client-platform-runtime = { path = "../../../platforms/runtime" }
 client-runtime = { path = "../../../client-runtime" }
 library-catalog = { path = "../library-catalog" }
 cpu-host = { path = "../cpu-host" }
-cloud-storage = { path = "../cloud-storage" }
+blake3 = "1"
 content-address = { path = "../../../../shared/content-address" }
 library-database = { path = "../library-database" }
 library-files = { path = "../library-files" }
 library-model = { path = "../../../library-model" }
+reader-formats = { path = "../../../reader-formats" }
 library-placement = { path = "../library-placement" }
 library-replica = { path = "../library-replica" }
 library-runtime = { path = "../library-runtime" }
@@ -29,7 +30,11 @@ sync-common = { path = "../../../../shared/sync-common" }
 web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-blake3 = "1"
+futures-lite = "2"
+dirs = "6"
+book-content = { path = "../../../book-content" }
+md-5 = "0.10.6"
+url = "2"
 client-platform-native = { path = "../../../platforms/native" }
 filesystem-scanner = { path = "../filesystem-scanner" }
 tokio = { version = "1", features = ["fs", "io-util"] }
@@ -41,10 +46,12 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-cloud-storage = { path = "../cloud-storage", features = ["test-support"] }
+library-annotation-export = { path = "../library-annotation-export" }
+zip.workspace = true
+audiobook-folder = { path = "../audiobook-folder" }
 url = "2"
 library-database = { path = "../library-database", features = ["scanner"] }
 thumbnail = { path = "../thumbnail" }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { workspace = true, features = ["jpeg", "png"] }
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

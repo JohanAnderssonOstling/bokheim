@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use fs2::FileExt;
-use reqwest::{blocking::Client, redirect::Policy};
+use reqwest::redirect::Policy;
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -150,7 +150,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 fn publish(config: &Config, bundle: &Path, root: &Path, now: u64) -> Result<()> {
     // Anonymous requests prove that clients can fetch the public package. Never
     // use CI's GitHub credentials: draft/private assets must not be advertised.
-    let client = Client::builder().user_agent("bokheim-update-publisher/1").https_only(true).connect_timeout(Duration::from_secs(15)).timeout(Duration::from_secs(60)).redirect(Policy::limited(5)).build()?;
+    let client = http_response::blocking_client_builder().user_agent("bokheim-update-publisher/1").https_only(true).connect_timeout(Duration::from_secs(15)).timeout(Duration::from_secs(60)).redirect(Policy::limited(5)).build()?;
     publish_with_verifier(config, bundle, root, now, |artifact| {
         let response = client.get(&artifact.url).timeout(Duration::from_secs(30 * 60)).send()?.error_for_status()?;
         update_protocol::copy_verified(response, &mut std::io::sink(), artifact).map_err(|e| anyhow!(e))

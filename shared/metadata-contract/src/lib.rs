@@ -330,38 +330,10 @@ pub fn classification_consensus_notation(scheme: ClassificationScheme, notation:
             valid.then_some(value)
         }
         ClassificationScheme::LibraryOfCongress => {
-            let value = notation.trim();
-            let bytes = value.as_bytes();
-            let mut cursor = 0;
-            while cursor < bytes.len() && cursor < 3 && bytes[cursor].is_ascii_alphabetic() {
-                cursor += 1;
-            }
-            if cursor == 0 || bytes.get(cursor).is_some_and(u8::is_ascii_alphabetic) {
-                return None;
-            }
-            let letters = value[..cursor].to_ascii_uppercase();
-            while bytes.get(cursor).is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'\'') {
-                cursor += 1;
-            }
-            let number_start = cursor;
-            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
-                cursor += 1;
-            }
-            if cursor == number_start {
-                return None;
-            }
-            if bytes.get(cursor) == Some(&b'.') {
-                let decimal_start = cursor + 1;
-                let mut decimal_end = decimal_start;
-                while bytes.get(decimal_end).is_some_and(u8::is_ascii_digit) {
-                    decimal_end += 1;
-                }
-                if decimal_end > decimal_start {
-                    cursor = decimal_end;
-                }
-            }
-            Some(format!("{letters}{}", &value[number_start..cursor]))
+            let parsed = book_model::parse_lcc_prefix(notation)?;
+            Some(format!("{}{}", parsed.letters, parsed.number))
         }
+
         ClassificationScheme::Bisac => {
             let value = notation.trim().to_ascii_uppercase();
             (value.len() == 9 && value.as_bytes()[..3].iter().all(u8::is_ascii_alphabetic) && value.as_bytes()[3..].iter().all(u8::is_ascii_digit)).then_some(value)

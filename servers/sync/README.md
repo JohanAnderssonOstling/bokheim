@@ -108,9 +108,17 @@ remove libraries, synced metadata and reading state, OPDS settings, sessions,
 password-reset tokens, storage quota, upload reservations, and blob ownership
 and access records. Pending registrations and queued account emails for that
 email address are also removed. The identity cache is invalidated after commit
-so cached access tokens stop working immediately. Physical book and cover
-files retain the existing asset-store behavior; account deletion does not erase
-files already downloaded to devices or perform physical asset garbage collection.
+so cached access tokens stop working immediately. After commit, deletion wakes
+asset cleanup. Shared book files are removed when no account owns them; covers
+are removed when no live library in their account retains the book. Files
+already downloaded to devices remain on those devices.
+
+Permanent book deletion, library deletion and disabling cloud storage also wake
+cleanup. Books in the trash retain their files so they can be restored. A sweep
+runs at startup and every minute to retry failures and reclaim published files
+left without ownership records. Uploads are staged before publication; database
+advisory locks protect publication and ownership checks against concurrent
+cleanup. No database migration is required for cleanup.
 
 Deploy the sync server before publishing the static page in `bokheim-site`.
 
@@ -141,6 +149,28 @@ service-level invalidations are immediate. Before horizontally running multiple
 server processes, add shared invalidation delivery (for example PostgreSQL
 `LISTEN`/`NOTIFY`) or accept the bounded 30-second cross-process cache window.
 
+## Curated dictionaries
+
+Browser clients download checksum-pinned StarDict archives from
+`https://app.bokheim.se/dictionaries/<sha256>.zip`. Caddy serves these static
+files from `/srv/bokheim-updates/public/dictionaries`, independently of the
+synchronization server. Native clients download the same verified bytes directly
+from their upstream sources. The browser and native installers both check the
+catalog's exact byte count and SHA-256 before installation.
+
+Publish all entries in `shared/dictionary-catalog/data/curated.json` and install
+the updated Caddy configuration before releasing the web client. The publisher
+streams into temporary files, verifies size and checksum, and atomically exposes
+only complete archives. It preserves the ZIP bytes, including upstream license
+and attribution files. Existing archives are reverified and older editions are
+never deleted. See [deployment instructions](deploy/README.md#curated-dictionary-files).
+
+Dictionary downloads require an explicit selection in Settings. Device locales
+and languages on personal-library books only suggest packs; startup, imports,
+metadata changes, and reader lookups never trigger a dictionary download. Older
+automatic-download preferences are ignored. Source attribution and license
+notices remain available in dictionary details after installation.
+
 ## Asset quota and transfer fairness
 
 Book blobs and thumbnails share a PostgreSQL account quota ledger. Physical book
@@ -148,15 +178,43 @@ files remain globally deduplicated by content hash, while each user is charged
 once for every unique book hash referenced anywhere in that user's libraries.
 Thumbnails are physically and financially scoped to the account and are charged
 once per unique thumbnail hash. Metadata does not consume storage quota. New
-accounts receive a 5 GiB quota lazily.
+accounts receive a 5 GB (5,000,000,000 bytes) quota lazily. Schema upgrade 13
+also converts existing accounts with the previous default allowance to 5 GB,
+preserving custom quotas, stored files, and usage accounting.
 
-Global deduplication is not an authorization capability. A book is charged to
-an account only by that account uploading its complete BLAKE3-matching body, and
-only a charged book can be downloaded. Synchronized lifecycle references are
-client-declared and grant no access. A manifest entry the account has not
-uploaded is reported as requiring upload whether or not another account has
-stored the same hash; the store then keeps its single existing copy. An account
-that drops its last reference to a book and later adds it back uploads it again.
+Hosted public catalog EPUBs can reuse their existing file without a sync
+upload. Configure `BOKHEIM_CATALOG_BOOKS_DIR` to the trusted directory of
+public `<BLAKE3>.epub` downloads and `BOKHEIM_CATALOG_PINS_DIR` to a private
+directory on that same filesystem, outside every public web root. Both paths
+are required together; without them ordinary upload behavior is unchanged.
+
+Manifest negotiation verifies the public file's actual hash and size, takes a
+private hard link to retain its inode, and atomically records account charges
+and library ownership. Clients receive the existing `owned` response and settle
+the transfer without uploading. Retained links allow authenticated downloads
+after public catalog removal; a retained link alone cannot authorize a new
+account. Private uploaded files still require proof of possession by uploading.
+Each account remains charged once per unique book, including catalog books.
+
+The minute-based asset collector also consolidates older uploaded copies when
+the same hash is publicly hosted. Catalog and sync own separate hard links:
+catalog removal leaves a retained link while a library needs it, and sync
+cleanup removes only the retained link, never the public download. Temporary
+preparation links left by crashes are removed after the upload-duration limit
+plus five minutes. No book bytes are copied if hard linking is unavailable;
+configuration or acquisition fails explicitly instead.
+
+See [catalog storage setup](deploy/README.md#reuse-hosted-catalog-books) for the
+production permissions and systemd mount configuration.
+
+Private-book deduplication is not an authorization capability. A private book
+is charged to an account after it uploads the complete BLAKE3-matching body,
+and only a charged book can be downloaded. Synchronized lifecycle references
+are client-declared and grant no access. A private manifest entry the account
+has not uploaded requires upload even if another account stores the same hash;
+the store then keeps its single existing copy. An account that drops its last
+reference to a private book and later adds it back uploads it again. Verified
+public catalog files use the explicit adoption flow above.
 
 Uploads require an exact `Content-Length`. The server reserves that many bytes
 before storage, validates the completed asset, then atomically converts the

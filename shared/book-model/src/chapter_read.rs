@@ -22,6 +22,24 @@ impl ChapterReadStatus {
         self.completed.clear();
     }
 
+    /// Every chapter read, or none, and none under way: what marking the whole
+    /// book read or unread leaves.
+    pub fn mark_all(&mut self, entries: &[BookTocEntry], read: bool) {
+        fn complete(entries: &[BookTocEntry], completed: &mut BTreeSet<String>) {
+            for entry in entries {
+                if !entry.target.is_empty() {
+                    completed.insert(entry.target.clone());
+                }
+                complete(&entry.children, completed);
+            }
+        }
+        self.completed.clear();
+        if read {
+            complete(entries, &mut self.completed);
+        }
+        self.active = None;
+    }
+
     pub fn reset_chapter(&mut self, entries: &[BookTocEntry], target: &str) {
         fn clear(entries: &[BookTocEntry], target: &str, inherited: bool, completed: &mut BTreeSet<String>) {
             for entry in entries {
@@ -53,7 +71,7 @@ impl ChapterReadStatus {
     }
 
     pub fn update_position(&mut self, entries: &[BookTocEntry], position: &ReadingPosition, entry: Option<&str>, at_end: bool) -> bool {
-        fn target_at<'a>(entries: &'a [BookTocEntry], position: &ReadingPosition, best: &mut Option<(u64, &'a str)>) {
+        fn target_at<'a>(entries: &'a [BookTocEntry], position: &ReadingPosition, current: u64, best: &mut Option<(u64, &'a str)>) {
             for entry in entries {
                 let start = match position {
                     ReadingPosition::Audiobook(_) => audiobook_toc_position(&entry.target),
@@ -61,17 +79,23 @@ impl ChapterReadStatus {
                     ReadingPosition::Cbz { .. } => crate::cbz_toc_page(&entry.target).map(|page| page as u64),
                     _ => None,
                 };
-                let current = position.audiobook_position_millis().or_else(|| position.pdf_page_index().map(u64::from)).or_else(|| match position { ReadingPosition::Cbz { page, .. } => Some(u64::from(*page)), _ => None });
-                if let Some(start) = start.filter(|start| current.is_some_and(|current| *start <= current)) {
+                if let Some(start) = start.filter(|start| *start <= current) {
                     if best.is_none_or(|(previous, _)| start >= previous) {
                         *best = Some((start, &entry.target));
                     }
                 }
-                target_at(&entry.children, position, best);
+                target_at(&entry.children, position, current, best);
             }
         }
         let mut target = None;
-        target_at(entries, position, &mut target);
+        let current = match position {
+            ReadingPosition::Audiobook(millis) => Some(*millis),
+            ReadingPosition::Pdf(page) | ReadingPosition::PdfAtPoint { page, .. } | ReadingPosition::Cbz { page, .. } => Some(u64::from(*page)),
+            ReadingPosition::Epub(_) => None,
+        };
+        if let Some(current) = current {
+            target_at(entries, position, current, &mut target);
+        }
         self.update(entries, target.map(|(_, target)| target).or(entry), at_end)
     }
 
@@ -90,14 +114,13 @@ impl ChapterReadStatus {
         let previous = self.active.as_deref().and_then(|active| ordered.iter().position(|(id, _)| *id == active));
         let mut changed = false;
         if let Some(previous) = previous {
-            for (index, (id, end)) in ordered.iter().enumerate() {
-                // Complete only the leaf we were inside. Parents derive their
-                // status from their children; skipped leaves remain unread.
-                let entered = index == previous && *end == index + 1;
-                let passed_end = *end <= current || (at_end && *end == ordered.len());
-                if entered && passed_end && !id.is_empty() {
-                    changed |= self.completed.insert((*id).to_owned());
-                }
+            let (id, end) = ordered[previous];
+            // Complete only the leaf we were inside. Parents derive their
+            // status from their children; skipped leaves remain unread.
+            let entered = end == previous + 1;
+            let passed_end = end <= current || (at_end && end == ordered.len());
+            if entered && passed_end && !id.is_empty() {
+                changed |= self.completed.insert(id.to_owned());
             }
         }
         self.active = target.filter(|_| !at_end).map(str::to_owned);
@@ -156,10 +179,10 @@ mod tests {
     fn audio_boundaries_finish_only_the_chapter_that_was_entered() {
         let toc = chapters();
         let mut status = ChapterReadStatus::default();
-        status.update_position(&toc, &ReadingPosition::audiobook_millis(2500), None, false);
-        status.update_position(&toc, &ReadingPosition::audiobook_millis(2999), None, false);
+        status.update_position(&toc, &ReadingPosition::Audiobook(2500), None, false);
+        status.update_position(&toc, &ReadingPosition::Audiobook(2999), None, false);
         assert!(status.completed.is_empty());
-        status.update_position(&toc, &ReadingPosition::audiobook_millis(4000), None, false);
+        status.update_position(&toc, &ReadingPosition::Audiobook(4000), None, false);
         assert_eq!(status.completed, BTreeSet::from([toc[2].target.clone()]));
         let restored: ChapterReadStatus = serde_json::from_str(&serde_json::to_string(&status).unwrap()).unwrap();
         assert_eq!(restored, status);
@@ -167,12 +190,13 @@ mod tests {
 
     #[test]
     fn skipping_from_chapter_five_to_ten_leaves_six_through_nine_unread() {
-        for format in ["epub", "pdf", "audiobook"] {
+        for format in ["epub", "pdf", "pdf-point", "cbz", "audiobook"] {
             let toc: Vec<_> = (0..12)
                 .map(|index| BookTocEntry {
                     title: format!("Chapter {}", index + 1),
                     target: match format {
-                        "pdf" => crate::pdf_toc_target(index * 10),
+                        "pdf" | "pdf-point" => crate::pdf_toc_target(index * 10),
+                        "cbz" => crate::cbz_toc_target(index * 10),
                         "audiobook" => crate::audiobook_toc_target(index as u64 * 1000),
                         _ => format!("chapter-{}.xhtml", index + 1),
                     },
@@ -183,7 +207,9 @@ mod tests {
             for index in [4, 9] {
                 let position = match format {
                     "pdf" => ReadingPosition::pdf_page(index as u32 * 10 + 5),
-                    "audiobook" => ReadingPosition::audiobook_millis(index as u64 * 1000 + 500),
+                    "pdf-point" => ReadingPosition::PdfAtPoint { page: index as u32 * 10 + 5, full_page_position: 0.5 },
+                    "cbz" => ReadingPosition::Cbz { page: index as u32 * 10 + 5, full_page_position: 0.5 },
+                    "audiobook" => ReadingPosition::Audiobook(index as u64 * 1000 + 500),
                     _ => ReadingPosition::epub_cfi(&format!("epubcfi(/6/{})", (index + 1) * 2)).unwrap(),
                 };
                 status.update_position(&toc, &position, Some(&toc[index].target), false);

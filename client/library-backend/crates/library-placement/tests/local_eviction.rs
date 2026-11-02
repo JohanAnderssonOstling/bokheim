@@ -22,6 +22,8 @@ fn local_book() -> (TempDir, AssetStore, Database, BookId) {
     fs::write(root.path().join("book.epub"), BOOK_BYTES).unwrap();
     database
         .commit_import(ImportCommit {
+            source_identity: None,
+            byte_checksum: None,
             parent_id: ROOT_DIR_ID,
             file_name: "book.epub".into(),
             format: BookFormat::Epub,

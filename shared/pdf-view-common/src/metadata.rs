@@ -1,16 +1,23 @@
 //! Ingestion output tied to the exact PDF bytes, independent of a renderer.
+#[path = "metadata/transport.rs"]
+mod transport;
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PdfReaderMetadata {
     pub version: u32,
     pub content_hash: String,
+    #[serde(with = "transport::pages")]
     pub pages: Vec<PdfStoredPage>,
-    /// Zero-based pages containing no content or only a blank-page notice.
-    /// None denotes metadata written before page classification was available.
+    /// Legacy serialized field, retained only to decode existing caches and sync data.
+    /// Page classification has been removed; new metadata always writes None.
     #[serde(default)]
     pub skippable_pages: Option<Vec<usize>>,
+    /// Legacy document-wide annotations; reader rendering discovers one page at a time.
     #[serde(default)]
     pub annotations: Vec<PdfStoredAnnotation>,
+    /// Legacy dependency index, retained for wire compatibility and never produced or used.
     #[serde(default)]
+    #[serde(with = "transport::dependencies")]
     pub dependencies: Option<PdfDependencyIndex>,
 }
 
@@ -26,7 +33,7 @@ impl PdfReaderMetadata {
     pub fn valid_for(&self, content_hash: &str) -> bool {
         self.version == 1
             && self.content_hash == content_hash
-            && (content_hash.len() == 64 || (content_hash.len() == 66 && content_hash.starts_with("01")))
+            && (content_hash.len() == 64 || (content_hash.len() == 66 && (content_hash.starts_with("01") || content_hash.starts_with("02"))))
             && content_hash.bytes().all(|c| c.is_ascii_hexdigit())
             && !self.pages.is_empty()
             && self.pages.len() <= 32767
@@ -94,13 +101,6 @@ impl PdfDependencyIndex {
             && self.startup.len() + self.pages.iter().map(Vec::len).sum::<usize>() <= 100_000
             && self.startup.iter().chain(self.pages.iter().flatten()).all(|r| r.length > 0 && r.offset.checked_add(r.length).is_some_and(|end| end <= self.length))
     }
-}
-
-/// Runs on the document worker before PDFium touches the requested page.
-/// Implementations share their bounded byte cache with the seekable reader.
-pub trait PdfPageSource: Send + Sync {
-    fn prepare_startup(&self) -> Result<(), String>;
-    fn prepare_page(&self, page: usize) -> Result<(), String>;
 }
 
 impl PdfReaderMetadata {

@@ -1,6 +1,6 @@
 //! Conservative storage pruning: reuse existing ranges and base codes without widening coverage.
 use crate::lcc::{canonical_lcc_notation, lcc_match_keys, parse_lcc_call};
-use crate::{UnifiedConceptDefinition, UnifiedTaxonomy, LCC_SYSTEM_ID};
+use crate::{LCC_SYSTEM_ID, UnifiedConceptDefinition, UnifiedTaxonomy};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Exact selectors whose removal together preserves LCC matching. Retains

@@ -30,12 +30,10 @@ impl ThumbnailExtractor {
 }
 impl ThumbnailProcessor for ThumbnailExtractor {
     fn decode(&self, bytes: Vec<u8>) -> BoxedBackendFuture<'_, Result<ThumbnailVersions, BackendError>> {
-        let host = self.host.clone();
-        Box::pin(async move { cpu_host::cover(&*host, bytes).await.map(|v| ThumbnailVersions { browse: v.browse, card_high_density: v.card_high_density, high_density: v.high_density }) })
+        Box::pin(cpu_host::cover(&*self.host, bytes))
     }
     fn generate(&self, extension: String, reader: BoxedBookReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailVersions>, BackendError>> {
-        let host = self.host.clone();
-        Box::pin(async move { host.generate_thumbnail(extension, cpu_host::as_cpu_reader(reader)).await.map(|v| v.map(|v| ThumbnailVersions { browse: v.browse, card_high_density: v.card_high_density, high_density: v.high_density })) })
+        self.host.generate_thumbnail(extension, cpu_host::as_cpu_reader(reader))
     }
 }
 
@@ -82,6 +80,12 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
         async {
             let lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
             let Some(format) = self.db.thumbnail_book_format(hash)? else { return Ok(false) };
+            // Server covers are downloaded as finished images. Do not rebuild
+            // a cached server master while local recovery is being retired.
+            if self.db.server_has_cover(&hash)? {
+                self.db.discard_thumbnail_work(&hash)?;
+                return Ok(true);
+            }
             // A book's cover is set once, so a stored cover is kept. A pending
             // job may have left incomplete bytes behind: decode the cached
             // master before confirming it, and rebuild its browse variant.
@@ -103,13 +107,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             };
             if let Some(versions) = cached {
                 drop(_lease);
-                self.store(hash, &versions, observer).await?;
-                self.db.complete_thumbnail_work(&hash, true)?;
-                return Ok(true);
-            }
-            if self.db.server_has_cover(&hash)? {
-                self.db.discard_thumbnail_work(&hash)?;
-                return Ok(true);
+                return self.complete(hash, Some(versions), observer).await;
             }
             let title = || self.db.browse_book_detail(&hash).ok().map(|detail| detail.book.title).unwrap_or_else(|| "Untitled".into());
             let paths = self.db.book_paths(&hash)?;
@@ -122,9 +120,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                         Ok(versions) => {
                             drop(_lease);
                             drop(local_reader);
-                            self.store(hash, &versions, observer).await?;
-                            self.db.complete_thumbnail_work(&hash, true)?;
-                            return Ok(true);
+                            return self.complete(hash, Some(versions), observer).await;
                         }
                         Err(error) => log::warn!("ignoring invalid M4B sidecar cover for {:?}: {error}", title()),
                     }
@@ -142,9 +138,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                             Ok(versions) => {
                                 drop(_lease);
                                 drop(local_reader);
-                                self.store(hash, &versions, observer).await?;
-                                self.db.complete_thumbnail_work(&hash, true)?;
-                                return Ok(true);
+                                return self.complete(hash, Some(versions), observer).await;
                             }
                             Err(error) => log::warn!("ignoring invalid MP3 folder cover for {:?}: {error}", title()),
                         }
@@ -175,22 +169,21 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             if self.db.thumbnail_work_state(&hash)?.as_deref() == Some("ready") && self.assets.thumbnail_set_exists(&hash).map_err(BackendError::operation)? {
                 return Ok(true);
             }
-            let has_cover = versions.is_some();
             drop(_lease);
-            if let Some(versions) = versions {
-                self.store(hash, &versions, observer).await?;
-            }
-            self.db.complete_thumbnail_work(&hash, has_cover)?;
-            // Both ready and no_cover make external cover enrichment eligible.
-            Ok(true)
+            self.complete(hash, versions, observer).await
         }
         .await
     }
 
-    async fn store(&self, hash: BookId, versions: &ThumbnailVersions, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
-        store_thumbnail(self.assets, hash, &versions.browse, &versions.card_high_density, &versions.high_density).await.map_err(BackendError::operation)?;
-        observer.ready(hash);
-        Ok(())
+    /// Both ready and no_cover make external cover enrichment eligible.
+    async fn complete(&self, hash: BookId, versions: Option<ThumbnailVersions>, observer: &mut impl ThumbnailObserver) -> Result<bool, BackendError> {
+        let has_cover = versions.is_some();
+        if let Some(versions) = versions {
+            store_thumbnail(self.assets, hash, &versions.browse, &versions.card_high_density, &versions.high_density).await.map_err(BackendError::operation)?;
+            observer.ready(hash);
+        }
+        self.db.complete_thumbnail_work(&hash, has_cover)?;
+        Ok(true)
     }
 }
 

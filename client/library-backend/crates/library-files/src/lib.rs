@@ -14,3 +14,5 @@ impl From<AssetStoreError> for client_runtime::BackendError {
         Self::operation(error)
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
+pub mod import_move;

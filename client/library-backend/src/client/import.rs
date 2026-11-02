@@ -3,6 +3,23 @@ use crate::library::{LibraryCommand, PendingCommand};
 use crate::{BackendError, DirId, DirectoryImport, ImportFailure};
 
 impl LibraryClient {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn reader_import_summary(&self, source: crate::ReaderImportSource) -> Result<crate::ReaderLibrarySummary, BackendError> {
+        self.request(LibraryCommand::Pending(PendingCommand::ReaderImportSummary { source })).await
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn import_reader(&self, import_id: uuid::Uuid, source: crate::ReaderImportSource, options: crate::ReaderImportOptions) -> Result<crate::ReaderImportReport, BackendError> {
+        self.request(LibraryCommand::Pending(PendingCommand::ImportReader { import_id, source, options })).await
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn reader_import_progress(&self, import_id: uuid::Uuid) -> Result<Option<crate::ReaderImportProgress>, BackendError> {
+        self.request(LibraryCommand::Ready(crate::ReadyCommand::ReaderImportProgress { import_id })).await
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn cancel_reader_import(&self, import_id: uuid::Uuid) -> Result<bool, BackendError> {
+        self.request(LibraryCommand::Ready(crate::ReadyCommand::CancelReaderImport { import_id })).await
+    }
+
     /// Copy or move complete paths into the library, then import them in place.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn import_paths(&self, parent_id: DirId, paths: Vec<std::path::PathBuf>, moving: bool) -> Result<Vec<ImportFailure>, BackendError> {

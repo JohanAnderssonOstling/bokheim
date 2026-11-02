@@ -12,22 +12,35 @@
 	}
 }
 
+# Shared by the API host and browser proxy. The wire media type is outside
+# Caddy's default compression matcher; images and audiobook ranges stay separate.
+(bokheim_protobuf_compression) {
+	encode zstd gzip {
+		match {
+			header Content-Type application/vnd.bokheim+protobuf*
+		}
+	}
+}
+
 {$BOKHEIM_DOMAIN} {
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		-Server
 	}
 
+	import bokheim_protobuf_compression
 	reverse_proxy unix//run/bokheim/sync.sock
 }
 
 {$BOKHEIM_APP_DOMAIN:app.bokheim.se} {
 	header {
 		Strict-Transport-Security "max-age=31536000"
-		Cross-Origin-Opener-Policy "same-origin"
-		Cross-Origin-Embedder-Policy "require-corp"
 		X-Content-Type-Options "nosniff"
 		-Server
+	}
+	header {
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
 	}
 
 	# Compress the GPUI JavaScript and WebAssembly bundle in transit.
@@ -40,7 +53,7 @@
 	header @immutable Cache-Control "public, max-age=31536000, immutable"
 
 	@revalidate not {
-		path /api/* /pkg/*
+		path /api/* /pkg/* /dictionaries/*
 	}
 	header @revalidate Cache-Control "no-cache"
 
@@ -54,7 +67,21 @@
 	}
 
 	handle /api/* {
+		import bokheim_protobuf_compression
 		reverse_proxy unix//run/bokheim/sync.sock
+	}
+
+	# Curated archives are verified at publication and named by SHA-256. Keep
+	# them outside versioned web bundles so old clients retain their downloads.
+	handle /dictionaries/* {
+		root * /srv/bokheim-updates/public
+		header Cache-Control "public, max-age=31536000, immutable" {
+			match status 200 206 304
+		}
+		header Access-Control-Allow-Origin "*"
+		file_server {
+			hide *.pending
+		}
 	}
 
 	handle {
@@ -75,6 +102,7 @@
 
 	@metadata_api path /health /v3/books /v2/audiobooks/audible
 	handle @metadata_api {
+		import bokheim_protobuf_compression
 		reverse_proxy 127.0.0.1:8091
 	}
 

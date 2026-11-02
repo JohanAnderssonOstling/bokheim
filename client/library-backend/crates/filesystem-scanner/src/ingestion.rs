@@ -1,12 +1,24 @@
 //! Ingest a native book already present on disk, whether copied or discovered.
 
-use std::io::{self, Read, Seek};
+use std::io::{self, Seek};
 use std::path::{Path, PathBuf};
 
+use book_inspection::{CachedPdfReader, InspectedBook};
 use book_model::BookFormat;
+use client_platform_runtime::executor;
+use content_address::{ContentHash, hash_reader_with_size};
+use library_files::asset_store::CopiedBook;
 use sync_common::BookId;
 
+/// Verified PDFs admitted with metadata from another reader. This is not a
+/// completed PDF parser inspection; reader data is loaded when the book opens.
+/// Keep it distinct from every positive parser version.
+pub const READER_PDF_METADATA_VERSION: i64 = -1;
+/// EPUB package/navigation admission, without copyright-page evidence scanning.
+pub const READER_EPUB_METADATA_VERSION: i64 = -2;
+
 pub struct IngestedFile {
+    pub source_identity: Option<book_inspection::PdfSourceIdentity>,
     pub content_hash: BookId,
     pub size_bytes: u64,
     pub fingerprint: u64,
@@ -16,50 +28,107 @@ pub struct IngestedFile {
 
 /// Hash and inspect the same file bytes, rejecting concurrent changes.
 pub async fn ingest_file(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
-    let format = BookFormat::from_file_name(&name)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported book format"))?;
-    let (content_hash, size_bytes, fingerprint, reader) = client_platform_runtime::executor::run_blocking({
+    ingest_file_with_cached_inspection(path, name, host, |_| Ok(None)).await
+}
+
+/// Reinspect bibliographic evidence while reusing byte-matched reader facts.
+pub async fn ingest_file_with_pdf_reader(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, cached_pdf: Option<CachedPdfReader>) -> io::Result<IngestedFile> {
+    ingest_file_inner(path, name, host, None, false, move |_| Ok(cached_pdf), |_| Ok(None)).await
+}
+
+pub async fn ingest_copied_file_with_pdf_reader(copied: &CopiedBook, name: String, host: &dyn cpu_host::CpuHost, cached_pdf: Option<CachedPdfReader>) -> io::Result<IngestedFile> {
+    ingest_file_inner(copied.path().to_owned(), name, host, copied.copied_digest(), false, move |_| Ok(cached_pdf), |_| Ok(None)).await
+}
+
+/// Inspect unchanged staged bytes using the checksum computed during copying.
+pub async fn ingest_copied_file(copied: &CopiedBook, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
+    ingest_file_inner(copied.path().to_owned(), name, host, copied.copied_digest(), false, |_| Ok(None), |_| Ok(None)).await
+}
+
+/// A copied checksum or a previously committed file revision can reuse the
+/// same ingestion checks and inspection cache without re-reading all bytes.
+pub async fn ingest_verified_file(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, digest: (ContentHash, u64, u64), cached: impl FnOnce(BookId) -> io::Result<Option<InspectedBook>>) -> io::Result<IngestedFile> {
+    ingest_file_inner(path, name, host, Some(digest), false, |_| Ok(None), cached).await
+}
+
+/// Reuse a current inspection only after hashing the actual source bytes.
+pub async fn ingest_file_with_cached_inspection(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, cached: impl FnOnce(BookId) -> io::Result<Option<InspectedBook>>) -> io::Result<IngestedFile> {
+    ingest_file_inner(path, name, host, None, false, |_| Ok(None), cached).await
+}
+
+/// Reuse independently versioned reader facts after hashing the source bytes.
+pub async fn ingest_file_with_inspection_caches(
+    path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, cached_pdf: impl FnOnce(BookId) -> io::Result<Option<CachedPdfReader>>, cached: impl FnOnce(BookId) -> io::Result<Option<InspectedBook>>,
+) -> io::Result<IngestedFile> {
+    ingest_file_inner(path, name, host, None, false, cached_pdf, cached).await
+}
+
+/// Reader imports retain external bibliographic facts and only require EPUB
+/// package/navigation parsing. All byte and file-revision checks are shared.
+pub async fn ingest_reader_file_with_cached_inspection(
+    path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, verified: Option<(ContentHash, u64, u64)>, cached: impl FnOnce(BookId) -> io::Result<Option<InspectedBook>>,
+) -> io::Result<IngestedFile> {
+    ingest_file_inner(path, name, host, verified, true, |_| Ok(None), cached).await
+}
+
+async fn ingest_file_inner(
+    path: PathBuf, name: String, host: &dyn cpu_host::CpuHost, copied: Option<(ContentHash, u64, u64)>, reader_metadata: bool, cached_pdf: impl FnOnce(BookId) -> io::Result<Option<CachedPdfReader>>,
+    cached: impl FnOnce(BookId) -> io::Result<Option<InspectedBook>>,
+) -> io::Result<IngestedFile> {
+    let format = BookFormat::from_file_name(&name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported book format"))?;
+    let permit = executor::inspection_permit().await;
+    let (content_hash, size_bytes, fingerprint, source_identity, reader) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
+            let _permit = permit;
             let fingerprint = fingerprint(&path)?;
             let mut reader = library_files::filesystem::open(&path)?;
-            let mut hasher = blake3::Hasher::new();
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let read = match reader.read(&mut buffer) {
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    result => result?,
-                };
-                if read == 0 {
-                    break;
+            let (checksum, size_bytes) = match copied {
+                Some((checksum, size, revision)) => {
+                    if revision != fingerprint {
+                        return Err(io::Error::new(io::ErrorKind::Interrupted, "copied book changed before inspection"));
+                    }
+                    (checksum, size)
                 }
-                hasher.update(&buffer[..read]);
-            }
-            let size_bytes = hasher.count();
+                None => hash_reader_with_size(&mut reader)?,
+            };
             if size_bytes == 0 {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "empty book"));
             }
             require_unchanged(&path, fingerprint)?;
-            let content_hash = BookId::from(hasher.finalize());
+            let content_hash = BookId::from(checksum);
             reader.rewind()?;
-            Ok((content_hash, size_bytes, fingerprint, reader))
+            let source_identity = if format == BookFormat::Pdf {
+                let identity = book_inspection::PdfSourceIdentity::read(&mut reader).ok().flatten();
+                reader.rewind()?;
+                identity
+            } else {
+                None
+            };
+            Ok((content_hash, size_bytes, fingerprint, source_identity, reader))
         }
     })
     .await
     .map_err(|error| io::Error::other(error.to_string()))??;
-    let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, content_hash: Some(content_hash) }, cpu_host::as_cpu_reader(reader)).await;
+    let inspection = match cached(content_hash)? {
+        Some(inspection) => inspection,
+        None if reader_metadata && format == BookFormat::Epub => cpu_host::submit_book(host, cpu_host::InspectEpubMetadata { source_name: name }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
+        None => cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, content_hash: Some(content_hash), cached_pdf: cached_pdf(content_hash)? }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
+    };
     // A file edited during inspection must be retried rather than committed
     // with a content_hash and metadata from different revisions.
     require_unchanged(&path, fingerprint)?;
-    Ok(IngestedFile { content_hash, size_bytes, fingerprint, format, inspection: inspection.map_err(io::Error::other)? })
+    Ok(IngestedFile { source_identity, content_hash, size_bytes, fingerprint, format, inspection })
 }
 
 /// Inspect the reproducible archive of a native MP3 folder, while keeping its
 /// tracks and sidecars as ordinary files at the library placement.
 pub async fn ingest_audiobook_folder(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
-    let (content_hash, size_bytes, fingerprint, reader) = client_platform_runtime::executor::run_blocking({
+    let permit = executor::inspection_permit().await;
+    let (content_hash, size_bytes, fingerprint, reader) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
+            let _permit = permit;
             let tracks = audiobook_folder::discover(&path)?;
             if tracks.is_empty() {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook folder has no MP3 tracks"));
@@ -69,28 +138,17 @@ pub async fn ingest_audiobook_folder(path: PathBuf, name: String, host: &dyn cpu
             let mut archive = audiobook_folder::write_folder_archive(&path, tempfile::tempfile()?, &tracks)?;
             require_folder_unchanged(&path, fingerprint)?;
             archive.rewind()?;
-            let mut hasher = blake3::Hasher::new();
-            let mut bytes = [0u8; 64 * 1024];
-            loop {
-                let read = match archive.read(&mut bytes) {
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    result => result?,
-                };
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&bytes[..read]);
-            }
+            let (checksum, size_bytes) = hash_reader_with_size(&mut archive)?;
             archive.rewind()?;
-            Ok((BookId::from(hasher.finalize()), hasher.count(), fingerprint, archive))
+            Ok((BookId::from(checksum), size_bytes, fingerprint, archive))
         }
     })
     .await
     .map_err(|error| io::Error::other(error.to_string()))??;
     let format = BookFormat::Mp3Folder;
-    let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, content_hash: Some(content_hash) }, cpu_host::as_cpu_reader(reader)).await;
+    let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, content_hash: Some(content_hash), cached_pdf: None }, cpu_host::as_cpu_reader(reader)).await;
     require_folder_unchanged(&path, fingerprint)?;
-    Ok(IngestedFile { content_hash, size_bytes, fingerprint, format, inspection: inspection.map_err(io::Error::other)? })
+    Ok(IngestedFile { source_identity: None, content_hash, size_bytes, fingerprint, format, inspection: inspection.map_err(io::Error::other)? })
 }
 
 fn require_folder_unchanged(path: &Path, fingerprint: u64) -> io::Result<()> {

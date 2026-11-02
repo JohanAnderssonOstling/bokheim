@@ -3,7 +3,7 @@ use server_postgres::{AssetApplication, PostgresDatabase, PostgresSyncRepository
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{io::Cursor, sync::Arc};
 use sync_common::api::{assets::BlobManifestEntry, libraries::LibraryNameRequest};
-use sync_common::storage::{CloudLibraryRoot, CloudProvider, LibraryStorage, ProviderId, ProviderScope};
+use sync_common::storage::LibraryStorage;
 use sync_common::{BookId, ConflictRank, LibraryId, OpaquePublication, OpaqueStateEntry, ReplicaId, ReplicaSeq, StateAddress, SyncCursor, SyncExchangeRequest, VersionKey, Versioned};
 use tokio::io::AsyncReadExt;
 
@@ -41,13 +41,13 @@ async fn another_accounts_book_requires_upload_even_with_a_forged_lifecycle() {
     let hash: BookId = "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85".parse().unwrap();
     assets.put_book("alice", &alice_library, &hash, 3, Box::new(Cursor::new(b"abc"))).await.unwrap();
     assert!(assets.open_from("bob", &bob_library, AssetKind::Book, &hash, 0).await.unwrap().is_none());
-    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { content_hash: hash, size_bytes: 3 }]).await.unwrap();
+    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await.unwrap();
     assert!(manifest.owned.is_empty());
     assert_eq!(manifest.upload, vec![hash]);
     assert!(assets.open_from("bob", &bob_library, AssetKind::Book, &hash, 0).await.unwrap().is_none());
 
     // A wrong length must not disclose whether another account stores a hash.
-    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { content_hash: hash, size_bytes: 4 }]).await.unwrap();
+    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 4 }]).await.unwrap();
     assert!(manifest.owned.is_empty());
     assert!(manifest.rejected.is_empty());
     assert_eq!(manifest.upload, vec![hash]);
@@ -77,7 +77,7 @@ async fn another_accounts_book_requires_upload_even_with_a_forged_lifecycle() {
     assert!(result.push.rejected.is_empty());
     assert!(assets.open_from("bob", &bob_library, AssetKind::Book, &hash, 0).await.unwrap().is_none());
     assert!(assets.audiobook_track("bob", &bob_library, &hash, 0).await.unwrap().is_none());
-    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { content_hash: hash, size_bytes: 3 }]).await.unwrap();
+    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await.unwrap();
     assert!(manifest.owned.is_empty());
     assert_eq!(manifest.upload, vec![hash]);
 
@@ -89,29 +89,26 @@ async fn another_accounts_book_requires_upload_even_with_a_forged_lifecycle() {
     assert_eq!(bytes, b"abc");
     assert_eq!(assets.storage_usage("bob").await.unwrap().used_bytes, 3);
 
-    // Selecting external storage denies every Bokheim file/cover operation,
+    // Selecting local storage denies every Bokheim file/cover operation,
     // including when this user already owns the requested bytes elsewhere.
-    let external_library = LibraryId::new_v4();
-    let storage = LibraryStorage::External(CloudLibraryRoot {
-        scope: ProviderScope { provider: CloudProvider::GoogleDrive, account_id: ProviderId::new("google-account").unwrap(), container_id: ProviderId::new("my_drive").unwrap() },
-        folder_id: ProviderId::new("library-folder").unwrap(),
-    });
-    sync.create_library("alice", &LibraryNameRequest { library_id: external_library, library_name: "Google Drive".into(), storage }).await.unwrap();
+    let local_library = LibraryId::new_v4();
+    let storage = LibraryStorage::Local;
+    sync.create_library("alice", &LibraryNameRequest { library_id: local_library, library_name: "Local".into(), storage }).await.unwrap();
     let before = assets.storage_usage("alice").await.unwrap();
-    assert!(matches!(assets.open_from("alice", &external_library, AssetKind::Book, &hash, 0).await, Err(AssetError::Forbidden)));
-    assert!(matches!(assets.audiobook_track("alice", &external_library, &hash, 0).await, Err(AssetError::Forbidden)));
-    assert!(matches!(assets.negotiate_books("alice", &external_library, vec![BlobManifestEntry { content_hash: hash, size_bytes: 3 }]).await, Err(AssetError::Forbidden)));
-    assert!(matches!(assets.put_book("alice", &external_library, &hash, 3, Box::new(Cursor::new(b"abc"))).await, Err(AssetError::Forbidden)));
-    assert!(matches!(assets.thumbnail_presence("alice", &external_library, &[hash]).await, Err(AssetError::Forbidden)));
-    assert!(matches!(assets.thumbnail_pair("alice", &external_library, &hash).await, Err(AssetError::Forbidden)));
-    assert!(matches!(assets.put_thumbnail_pair("alice", &external_library, &hash, b"cover", b"browse").await, Err(AssetError::Forbidden)));
-    assert!(matches!(assets.remove_thumbnail("alice", &external_library, &hash).await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.open_from("alice", &local_library, AssetKind::Book, &hash, 0).await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.audiobook_track("alice", &local_library, &hash, 0).await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.negotiate_books("alice", &local_library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.put_book("alice", &local_library, &hash, 3, Box::new(Cursor::new(b"abc"))).await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.thumbnail_presence("alice", &local_library, &[hash]).await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.thumbnail_pair("alice", &local_library, &hash).await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.put_thumbnail_pair("alice", &local_library, &hash, b"cover", b"browse").await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.remove_thumbnail("alice", &local_library, &hash).await, Err(AssetError::Forbidden)));
     for kind in [AssetKind::Thumbnail, AssetKind::ThumbnailBrowse] {
-        assert!(matches!(assets.open_from("alice", &external_library, kind, &hash, 0).await, Err(AssetError::Forbidden)));
-        assert!(matches!(assets.put("alice", &external_library, kind, &hash, Some(5), Box::new(Cursor::new(b"cover"))).await, Err(AssetError::Forbidden)));
+        assert!(matches!(assets.open_from("alice", &local_library, kind, &hash, 0).await, Err(AssetError::Forbidden)));
+        assert!(matches!(assets.put("alice", &local_library, kind, &hash, Some(5), Box::new(Cursor::new(b"cover"))).await, Err(AssetError::Forbidden)));
     }
     assert_eq!(assets.storage_usage("alice").await.unwrap(), before);
-    assert!(!assets.library_storage_usage("alice").await.unwrap().iter().any(|usage| usage.library_id == external_library && usage.used_bytes != 0));
+    assert!(!assets.library_storage_usage("alice").await.unwrap().iter().any(|usage| usage.library_id == local_library && usage.used_bytes != 0));
 
     database.pool().close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE")).execute(&admin).await.unwrap();

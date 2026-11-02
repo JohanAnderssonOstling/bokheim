@@ -8,12 +8,13 @@ pub async fn upload(book: &VerifiedBook, url: &reqwest::Url, token: &str) -> Res
         return Err(TransferError::retryable("verified book size changed"));
     }
     let bearer = format!("Bearer {token}");
+    let checksum = book.content_hash.to_hex();
     trace.phase("send_body_wait_response");
     let trace_id = trace.id();
     let status = client_platform_web::transport::upload::put_blob(
         &file,
         url.as_str(),
-        &[("authorization", &bearer), ("x-bokheim-trace-id", &trace_id), ("content-type", "application/octet-stream")],
+        &[("authorization", &bearer), ("x-bokheim-content-hash", &checksum), ("x-bokheim-trace-id", &trace_id), ("content-type", "application/octet-stream")],
     )
     .await
     .map_err(TransferError::retryable)?;

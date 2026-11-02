@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+http-response = { workspace = true }
 tokio = { version = "1", features = ["sync"] }
 account-contract = { path = "../../shared/account-contract" }
 serde = { version = "1", features = ["derive"] }
@@ -14,10 +15,10 @@ url = { version = "2", features = ["serde"] }
 web-time = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-reqwest = { workspace = true, default-features = false, features = ["json"] }
+reqwest = { workspace = true, features = ["json"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "gzip", "json"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "gzip", "json"] }
 
 [dev-dependencies]
 axum = "0.7"

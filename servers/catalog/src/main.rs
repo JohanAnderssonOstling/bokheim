@@ -107,7 +107,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let [dir, command, rest @ ..] = args else { return Err(USAGE.into()) };
     let dir = PathBuf::from(dir);
     let db = curation::open(&dir)?;
-    let http = Client::builder().user_agent("bokheim-catalog").timeout(std::time::Duration::from_secs(90)).build().map_err(|e| e.to_string())?;
+    let http = http_response::blocking_client_builder().user_agent("bokheim-catalog").timeout(std::time::Duration::from_secs(90)).build().map_err(|e| e.to_string())?;
     match (command.as_str(), rest) {
         ("subject-audit", []) => classification::audit(&db),
         ("resolve-subject-codes", []) => classification::resolve_codes(),
@@ -287,7 +287,7 @@ fn store_book_with_cover_policy(
     }
     let inspected = {
         let _timing = timing::measure("epub_inspect", file_name);
-        book_inspection::inspect_book_reader_with_hash(Path::new(file_name), BookFormat::Epub, Cursor::new(bytes.to_vec()), Some(content_hash)).map_err(|e| e.to_string())?
+        book_inspection::inspect_book_reader_with_hash(Path::new(file_name), BookFormat::Epub, Cursor::new(bytes.to_vec()), Some(content_hash.into())).map_err(|e| e.to_string())?
     };
     let mut record = inspected.metadata;
     if let Some(metadata) = metadata {
@@ -452,7 +452,7 @@ mod enrichment_tests {
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).unwrap();
             stream.write_all(&response).unwrap();
         });
-        let http = Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+        let http = http_response::blocking_client_builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
         assert_eq!(store_book_with_embedded_cover(dir.path(), &db, &http, &bytes, "book.epub", None).unwrap(), hash);
         serving.join().unwrap();
         let expected = thumbnail::generate_thumbnail_versions_with_pdf_renderer("epub", Cursor::new(bytes.clone()), thumbnail::render_pdf_cover).unwrap().unwrap();
@@ -569,7 +569,7 @@ mod enrichment_tests {
                     stream.write_all(&response).unwrap();
                 }
             });
-            let http = Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+            let http = http_response::blocking_client_builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
             let stored = store_book(dir.path(), &db, &http, bytes, "test.epub", Vec::new(), source_image.as_ref(), None).unwrap();
             serving.join().unwrap();
             assert_eq!(stored, hash);

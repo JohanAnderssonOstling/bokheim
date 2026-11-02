@@ -64,11 +64,44 @@ alongside the SQLite file: Caddy negotiates the precompressed representation,
 and clients verify and store the decoded SQLite bytes. The manifest still names
 the ordinary `.sqlite3` URL, size, and SHA-256. Existing snapshots can gain these
 representations with `catalog compress-snapshot INPUT`, preserving their bytes.
-Catalog format 8 uses 8 KiB SQLite pages, 32-byte binary book hashes, shared
-descriptions, and integer references to subject source and authority labels.
-The app reads only format 8. Convert an existing format-7 local snapshot once
-with `catalog compact-snapshot INPUT OUTPUT`; this preserves its release ID
-and all records. Install the converted file after updating the application.
+Catalog format 11 uses 8 KiB SQLite pages, 32-byte binary book hashes, complete
+UTF-8 descriptions, and integer taxonomy concept assignments. Publication shares
+only byte-identical complete descriptions. There are no per-line references.
+Earlier format-10 and format-11 snapshots can expose the same `description(row_id,text)`
+interface through a view over shared lines; existing clients read both layouts.
+Source observations use numeric IDs and retain popularity values and source
+credits. Native entry IDs and audit page URLs remain in server curation. Book
+entry URLs and download URLs stay in the client catalog for acquisition.
+Gutenberg, Loyal Books, Standard Ebooks, and Unglue.it popularity scores use average tied-rank percentiles
+over the known observations of each source in the catalog (0–100, higher is more
+popular). A source observation counts once even when it supplies multiple formats.
+Missing observations stay unknown; a singleton or entirely tied cohort scores 50.
+For combined Gutenberg volumes, the raw score is the arithmetic mean of the
+components' download counts, computed before source percentiles. Each Gutenberg
+component needs an observed count; zero is included. Raw counts, lookup dates,
+and page evidence remain in server curation.
+Publication and local conversion apply the same idempotent projection; clients
+also migrate older snapshots when rebuilding browse projection version 19.
+Bilinguator books receive an assigned score of 50, without inventing a download
+count. Litteraturbanken retains its existing equally weighted percentiles.
+Popularity sorting compares only these numeric scores, with unknowns last and
+alphabetical ties. Source preference does not override book, author, or subject
+popularity order. Author and subject totals sum normalized scores across sources;
+shared source observations still count once where tracked. This compares relative
+position within each source, rather than absolute downloads or audience size.
+Subject names, source headings, external classification codes, and their
+provenance remain in server curation; clients resolve labels and hierarchy from their taxonomy database.
+When a taxonomy adds subjects or changes external-code mappings, rebuild the
+catalog from curation with that taxonomy and publish both offers in the same
+signed feed. A taxonomy-only update cannot discover new assignments from codes
+that clients no longer carry. Existing concept identities survive taxonomy
+renaming and reparenting, including after importing a catalog book.
+The app reads formats 8 through 11 during migration. Convert an existing
+format-8 through format-11 local snapshot with
+`catalog compact-snapshot INPUT OUTPUT`; this preserves
+its release ID, book metadata, and all published concept assignments, while
+leaving the input intact. Use the converted file with an updated application.
+Public releases remain immutable: publish a new release ID for a format change.
 Copy OUT_DIR to
 `/srv/bokheim-updates/public/catalog/`; the publisher then verifies the
 snapshot's existing bytes like any previously published artifact. Books and
@@ -159,7 +192,7 @@ python3 servers/updates/prepare-github-release.py \
 ```
 
 Use `--previous-manifest reviewed-previous-payload.json` instead of `--initial`
-for later releases; this carries forward the taxonomy offer. Input is the reviewed
+for later releases; this carries forward the taxonomy and catalog offers. Input is the reviewed
 plain manifest payload, not the signed envelope. The server still independently
 enforces signatures and increasing publication sequence. Validity defaults to
 14 days and can be set with `--valid-days` (1–90).
@@ -220,12 +253,18 @@ access to the published source release. For remote publication, the command also
 and requires it to match the signed envelope exactly. Signing keys stay local;
 only the signed bundle and publisher binary are transferred.
 
+Remote publication reads `/etc/bokheim-updates.json` by default. Set
+`BOKHEIM_UPDATES_REMOTE_CONFIG` to use another independently provisioned public
+configuration on that server. Its origin mappings must include every retained
+component, including `https://catalogs.bokheim.se` mapped to `catalog` when
+carrying forward the production catalog. Keep the existing trusted signing keys.
+
 Signed output is retained if publication or public verification fails. A network
 error may happen after promotion, so inspect the public feed before retrying.
 Rerunning with the same reviewed inputs and a fresh output directory rechecks
 the gates and recreates the same signed payload; the publisher is idempotent.
 Changes to either reviewed JSON file require a new review digest. This integration
-handles prepared application releases and their carried-forward taxonomy offer;
+handles prepared application releases and their carried-forward taxonomy and catalog offers;
 the generic publisher/signing tools remain available for independent taxonomy
 publication and other artifact providers.
 

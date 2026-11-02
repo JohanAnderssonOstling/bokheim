@@ -55,8 +55,7 @@ impl LibraryEnrichment {
     /// Enriches every book prepared for upload, waking sync and asset
     /// transfer when an answer finalized one.
     async fn enrich_prepared(&self) -> EnrichmentResult<()> {
-        let snapshot = self.database.upload_preparation_snapshot()?;
-        let scope = self.database.prepared_upload_batch(&snapshot.hashes())?.hashes();
+        let scope = self.database.prepared_upload_batch()?.hashes();
         if self.enrich_books(&scope).await? > 0 {
             self.events.sync.wake();
             self.events.assets.wake();

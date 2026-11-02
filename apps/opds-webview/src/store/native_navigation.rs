@@ -1,7 +1,8 @@
-//! Recover explicit toolbar navigation when WebKit's page process is hung.
+//! Recover explicit toolbar and mouse navigation when WebKit's page process is hung.
+use gtk::{glib::Propagation, prelude::WidgetExt};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use webkit2gtk::{BackForwardListExt, BackForwardListItem, LoadEvent, NetworkError, WebProcessTerminationReason, WebView, WebViewExt};
+use webkit2gtk::{BackForwardListExt, BackForwardListItem, BackForwardListItemExt, LoadEvent, NetworkError, WebProcessTerminationReason, WebView, WebViewExt};
 
 #[derive(Clone)]
 enum Navigation {
@@ -20,6 +21,7 @@ impl Navigation {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct NativeNavigation {
     pending: Rc<RefCell<Option<Navigation>>>,
     restarting: Rc<Cell<bool>>,
@@ -65,7 +67,21 @@ impl NativeNavigation {
                 }
             }
         });
-        Self { pending, restarting }
+        let navigation = Self { pending, restarting };
+        page.connect_button_press_event({
+            let navigation = navigation.clone();
+            move |page, event| match event.button() {
+                8 | 9 => {
+                    navigation.history(page, event.button() == 9);
+                    Propagation::Stop
+                }
+                _ => Propagation::Proceed,
+            }
+        });
+        page.connect_button_release_event(|_, event| {
+            if matches!(event.button(), 8 | 9) { Propagation::Stop } else { Propagation::Proceed }
+        });
+        navigation
     }
 
     pub(super) fn load(&self, page: &WebView, url: &str) {
@@ -77,6 +93,9 @@ impl NativeNavigation {
 
     pub(super) fn history(&self, page: &WebView, forward: bool) {
         if let Some(item) = page.back_forward_list().and_then(|list| if forward { list.forward_item() } else { list.back_item() }) {
+            if !forward && item.uri().is_none_or(|url| url == "about:blank") {
+                return;
+            }
             self.start(page, Navigation::History(item));
         }
     }

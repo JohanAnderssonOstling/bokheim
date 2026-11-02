@@ -3,6 +3,7 @@
 pub mod account;
 pub mod events;
 pub mod interest;
+pub mod quota;
 pub mod reading_positions;
 pub mod scheduler;
 

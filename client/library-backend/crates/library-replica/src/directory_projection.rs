@@ -1,5 +1,5 @@
 use crate::DirectoryLifecycleState;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use sync_common::{DirId, FileName, ROOT_DIR_ID};
 
 #[derive(Debug)]
@@ -26,49 +26,46 @@ pub struct DirectoryProjection {
 /// A parent chain that loops back on itself is cut by moving its largest id
 /// to the root, so every device repairs the same cycle the same way.
 fn break_cycles(intents: &HashMap<DirId, DirectoryIntent>, suppressed: &HashSet<DirId>, parents: &mut HashMap<DirId, DirId>) {
-    let mut ids: Vec<_> = intents.keys().copied().collect();
-    ids.sort();
-    for start in ids {
-        if suppressed.contains(&start) {
+    let mut visited = HashSet::new();
+    let mut path = Vec::new();
+    for &start in intents.keys() {
+        if suppressed.contains(&start) || visited.contains(&start) {
             continue;
         }
-        let mut path = Vec::new();
-        let mut positions = HashMap::new();
+        path.clear();
         let mut current = start;
         loop {
             if suppressed.contains(&current) || current == ROOT_DIR_ID {
                 break;
             }
-            if let Some(position) = positions.get(&current).copied() {
-                if let Some(loser) = path[position..].iter().max().copied() {
-                    parents.insert(loser, ROOT_DIR_ID);
+            if !visited.insert(current) {
+                // A repeated node in this path is a cycle; otherwise the walk
+                // joined a parent chain that was already inspected.
+                if let Some(position) = path.iter().position(|id| *id == current) {
+                    if let Some(loser) = path[position..].iter().max().copied() {
+                        parents.insert(loser, ROOT_DIR_ID);
+                    }
                 }
                 break;
             }
             let Some(parent) = parents.get(&current) else {
                 break;
             };
-            positions.insert(current, path.len());
             path.push(current);
             current = *parent;
         }
     }
 }
 
-/// Directories under a missing or suppressed parent are suppressed too,
-/// repeated until no more are found.
-fn suppress_orphans(intents: &HashMap<DirId, DirectoryIntent>, parents: &HashMap<DirId, DirId>, suppressed: &mut HashSet<DirId>) {
-    loop {
-        let newly_suppressed: Vec<_> = intents
-            .values()
-            .filter(|intent| !suppressed.contains(&intent.id))
-            .filter(|intent| parents[&intent.id] != ROOT_DIR_ID && (!intents.contains_key(&parents[&intent.id]) || suppressed.contains(&parents[&intent.id])))
-            .map(|intent| intent.id)
-            .collect();
-        if newly_suppressed.is_empty() {
-            break;
+/// Propagate deleted and missing-parent state through their descendants once.
+fn suppress_orphans(children: &HashMap<DirId, Vec<DirId>>, suppressed: &mut HashSet<DirId>) {
+    let mut pending: Vec<_> = suppressed.iter().copied().collect();
+    while let Some(parent) = pending.pop() {
+        for child in children.get(&parent).into_iter().flatten() {
+            if suppressed.insert(*child) {
+                pending.push(*child);
+            }
         }
-        suppressed.extend(newly_suppressed);
     }
 }
 
@@ -76,7 +73,16 @@ pub fn project_directories(intents: &HashMap<DirId, DirectoryIntent>) -> Directo
     let mut suppressed: HashSet<_> = intents.values().filter(|intent| intent.lifecycle != DirectoryLifecycleState::Present).map(|intent| intent.id).collect();
     let mut parents = intents.iter().map(|(id, intent)| (*id, intent.parent_id)).collect();
     break_cycles(intents, &suppressed, &mut parents);
-    suppress_orphans(intents, &parents, &mut suppressed);
+    let mut children: HashMap<DirId, Vec<DirId>> = HashMap::new();
+    for (&id, &parent) in &parents {
+        if parent != ROOT_DIR_ID {
+            children.entry(parent).or_default().push(id);
+            if !parents.contains_key(&parent) {
+                suppressed.insert(id);
+            }
+        }
+    }
+    suppress_orphans(&children, &mut suppressed);
     let names = {
         let mut groups: HashMap<(DirId, String), Vec<&DirectoryIntent>> = HashMap::new();
         let mut occupied: HashMap<DirId, HashSet<String>> = HashMap::new();
@@ -108,23 +114,85 @@ pub fn project_directories(intents: &HashMap<DirId, DirectoryIntent>) -> Directo
         names
     };
 
-    let mut remaining: Vec<_> = intents.keys().filter(|id| !suppressed.contains(*id)).copied().collect();
-    remaining.sort();
-    let mut active = HashSet::new();
-    let mut ordered_active = Vec::with_capacity(remaining.len());
-    while !remaining.is_empty() {
-        let position = remaining
-            .iter()
-            .position(|id| {
-                let parent = parents[id];
-                parent == ROOT_DIR_ID || active.contains(&parent)
-            })
-            .expect("cycles were repaired and unreachable parents were suppressed");
-        let id = remaining.remove(position);
-        active.insert(id);
+    let active_count = intents.len() - suppressed.len();
+    let mut ready: BTreeSet<_> = parents.iter().filter_map(|(id, parent)| (*parent == ROOT_DIR_ID && !suppressed.contains(id)).then_some(*id)).collect();
+    let mut ordered_active = Vec::with_capacity(active_count);
+    while let Some(id) = ready.pop_first() {
         ordered_active.push(id);
+        ready.extend(children.get(&id).into_iter().flatten().copied().filter(|child| !suppressed.contains(child)));
     }
+    assert_eq!(ordered_active.len(), active_count, "cycles were repaired and unreachable parents were suppressed");
     DirectoryProjection { ordered_active, suppressed, parents, names }
+}
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+    use DirectoryLifecycleState::{Deleted, Present, Purged};
+
+    fn intents(rows: &[(u128, u128, DirectoryLifecycleState)]) -> HashMap<DirId, DirectoryIntent> {
+        rows.iter()
+            .map(|(id, parent, lifecycle)| {
+                let id = DirId::from_u128(*id);
+                (id, DirectoryIntent { id, parent_id: DirId::from_u128(*parent), name: format!("Folder {id}"), lifecycle: lifecycle.clone() })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn materialization_chooses_the_smallest_ready_id_after_every_parent() {
+        let input = intents(&[(1, 5, Present), (2, 9, Present), (3, 5, Present), (4, 9, Present), (5, 0, Present), (6, 0, Present), (9, 0, Present)]);
+        let projection = project_directories(&input);
+        assert_eq!(projection.ordered_active, [5, 1, 3, 6, 9, 2, 4].map(DirId::from_u128));
+        assert!(projection.suppressed.is_empty());
+    }
+
+    #[test]
+    fn cycle_repairs_ignore_feeders_shared_tails_and_suppressed_cycles() {
+        let mut rows = vec![
+            (100, 2, Present),
+            (101, 3, Present),
+            (102, 100, Present),
+            (103, 102, Present),
+            (2, 3, Present),
+            (3, 4, Present),
+            (4, 2, Present),
+            (200, 10, Present),
+            (10, 20, Present),
+            (20, 10, Present),
+            (30, 30, Present),
+            (40, 41, Deleted),
+            (41, 40, Present),
+            (42, 41, Present),
+            (50, 99, Present),
+            (51, 50, Present),
+            (60, 0, Present),
+            (61, 60, Present),
+        ];
+        let mut expected_parents: HashMap<_, _> = rows.iter().map(|(id, parent, _)| (DirId::from_u128(*id), DirId::from_u128(*parent))).collect();
+        for id in [4, 20, 30] {
+            expected_parents.insert(DirId::from_u128(id), ROOT_DIR_ID);
+        }
+        for _ in 0..rows.len() {
+            let projection = project_directories(&intents(&rows));
+            assert_eq!(projection.parents, expected_parents);
+            assert_eq!(projection.suppressed, [40, 41, 42, 50, 51].map(DirId::from_u128).into_iter().collect());
+            assert_eq!(projection.ordered_active, [4, 3, 2, 20, 10, 30, 60, 61, 100, 101, 102, 103, 200].map(DirId::from_u128));
+            rows.rotate_left(1);
+        }
+    }
+
+    #[test]
+    fn suppression_propagates_through_missing_deleted_and_purged_parents_without_hiding_repaired_cycles() {
+        let mut rows =
+            vec![(1, 0, Present), (2, 1, Present), (10, 0, Deleted), (11, 10, Present), (12, 11, Present), (20, 99, Present), (21, 20, Present), (22, 21, Present), (30, 0, Purged), (31, 30, Present), (40, 41, Present), (41, 40, Present)];
+        let projection = project_directories(&intents(&rows));
+        assert_eq!(projection.suppressed, [10, 11, 12, 20, 21, 22, 30, 31].map(DirId::from_u128).into_iter().collect());
+        assert_eq!(projection.ordered_active, [1, 2, 41, 40].map(DirId::from_u128));
+        assert_eq!(projection.parents[&DirId::from_u128(41)], ROOT_DIR_ID);
+        rows.reverse();
+        assert_eq!(project_directories(&intents(&rows)), projection);
+    }
 }
 
 #[cfg(test)]

@@ -1,10 +1,11 @@
 //! The shared import path: validate the destination, prepare folders,
 //! inspect the book, publish its bytes, and commit the addition.
 
-
 use book_model::BookFormat;
 use client_runtime::BackendError;
-use library_files::asset_store::CopiedBook;
+use library_files::AssetStore;
+use library_files::asset_store::{CopiedBook, StagedBook};
+use library_model::PublishedStagedBook;
 use library_replica::filenames;
 use sync_common::{BookId, DirId};
 
@@ -16,6 +17,14 @@ pub(crate) struct ValidatedImport {
     pub(crate) format: BookFormat,
 }
 
+impl ValidatedImport {
+    pub(crate) fn new(parent_id: DirId, file_name: &str) -> Result<Self, BackendError> {
+        let file_name = filenames::validate_component(file_name)?;
+        let format = BookFormat::from_file_name(&file_name).ok_or("only EPUB, PDF, DRM-free MOBI/AZW/AZW3, FB2, CBZ, and M4B files can be added to a library")?;
+        Ok(Self { parent_id, file_name, format })
+    }
+}
+
 pub(crate) fn validate_import_destination(db: &library_database::Database, parent_id: &DirId) -> Result<(), BackendError> {
     if !db.is_live_destination(parent_id).map_err(BackendError::operation)? {
         return Err(format!("library folder does not exist: {parent_id}").into());
@@ -25,20 +34,21 @@ pub(crate) fn validate_import_destination(db: &library_database::Database, paren
 
 impl LibraryImport {
     pub(crate) fn validate_import(&self, parent_id: &DirId, file_name: &str) -> Result<ValidatedImport, BackendError> {
-        let file_name = filenames::validate_component(file_name)?;
-        let format = BookFormat::from_file_name(&file_name).ok_or("only EPUB, PDF, DRM-free MOBI/AZW/AZW3, FB2, CBZ, and M4B files can be added to a library")?;
+        let import = ValidatedImport::new(*parent_id, file_name)?;
         validate_import_destination(&self.database, parent_id)?;
-        Ok(ValidatedImport { parent_id: *parent_id, file_name, format })
+        Ok(import)
     }
 
     pub(crate) async fn finish_import(&self, import: ValidatedImport, staged: CopiedBook) -> Result<BookId, BackendError> {
         #[cfg(not(target_arch = "wasm32"))]
-        let (staged, inspection) = {
-            let ingested = filesystem_scanner::ingestion::ingest_file(staged.path().to_owned(), import.file_name.clone(), &*self.cpu)
+        let (staged, inspection, source_identity) = {
+            let cached_pdf =
+                if import.format == BookFormat::Pdf { staged.copied_digest().map(|(checksum, _, _)| self.database.cached_pdf_reader(BookId::from(checksum))).transpose().map_err(BackendError::operation)?.flatten() } else { None };
+            let ingested = filesystem_scanner::ingestion::ingest_copied_file_with_pdf_reader(&staged, import.file_name.clone(), &*self.cpu, cached_pdf)
                 .await
-                .map_err(|error| BackendError::message(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?;
+                .map_err(|error| BackendError::operation(error).context(format!("invalid {} book", import.format.canonical_extension().to_ascii_uppercase())))?;
             let inspection = Some(ingested.inspection);
-            (staged.into_staged(ingested.content_hash, ingested.size_bytes), inspection)
+            (staged.into_staged(ingested.content_hash, ingested.size_bytes), inspection, ingested.source_identity)
         };
         #[cfg(target_arch = "wasm32")]
         let inspection = {
@@ -48,39 +58,42 @@ impl LibraryImport {
             } else {
                 let reader = staged.open_reader().map_err(BackendError::operation)?;
                 Some(
-                    cpu_host::submit_book(&*self.cpu, cpu_host::Inspect { source_name: import.file_name.clone(), format: import.format, content_hash: Some(staged.content_hash()) }, cpu_host::as_cpu_reader(reader))
-                        .await
-                        .map_err(|error| BackendError::message(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?,
+                    cpu_host::submit_book(
+                        &*self.cpu,
+                        cpu_host::Inspect {
+                            source_name: import.file_name.clone(),
+                            format: import.format,
+                            content_hash: Some(staged.content_hash()),
+                            cached_pdf: if import.format == BookFormat::Pdf { self.database.cached_pdf_reader(staged.content_hash()).map_err(BackendError::operation)? } else { None },
+                        },
+                        cpu_host::as_cpu_reader(reader),
+                    )
+                    .await
+                    .map_err(|error| error.context(format!("invalid {} book", import.format.canonical_extension().to_ascii_uppercase())))?,
                 )
             }
         };
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.database.storage_policy().map_err(BackendError::operation)?.external().is_some() {
-            return self.finish_provider_import(import, staged, inspection.expect("native import inspection")).await;
-        }
+
+        let byte_checksum = staged.byte_checksum();
         #[cfg(target_arch = "wasm32")]
-        if self.database.storage_policy().map_err(BackendError::operation)?.external().is_some() {
-            return Err(BackendError::message("cloud provider imports are not configured for this platform yet"));
-        }
-        let content_hash = staged.content_hash();
-        let size_bytes = staged.size_bytes();
+        let source_identity = None;
+        let content = self.resolve_import_content(byte_checksum, staged.size_bytes(), source_identity)?;
+        let content_hash = content.content_hash;
+        let staged = staged.with_local_identity(&self.assets, content_hash).await.map_err(BackendError::operation)?;
+        let _lease = self.lease_import_content(&content).await?;
         // Inspection may overlap a delete/move. Do not publish into a folder
         // that became unavailable while CPU or source I/O was in flight.
         validate_import_destination(&self.database, &import.parent_id)?;
-        let _lease = self.assets.lease_book(&content_hash).await.map_err(|error| BackendError::message(format!("could not lock the imported book: {error}")))?;
 
         // Book precedes the metadata commit. On a database failure the
         // library file remains discoverable by the next scan.
-        let published = self.publish_import(&import, staged).await?;
-        self.commit_import(import, content_hash, size_bytes, inspection, published)?;
-        drop(_lease);
+        let published = self.publish_import(&self.assets, &import, staged).await?;
+        self.commit_import(import, content, inspection, published)?;
         Ok(content_hash)
     }
 
-    pub(crate) async fn publish_import(&self, import: &ValidatedImport, staged: library_files::asset_store::StagedBook) -> Result<library_model::PublishedStagedBook, BackendError> {
-        library_placement::publish_import(&self.assets, &self.database, import.parent_id, &import.file_name, staged, import.format == BookFormat::Mp3Folder)
-            .await
-            .map_err(|error| BackendError::message(format!("could not publish the imported book: {error}")))
+    pub(crate) async fn publish_import(&self, assets: &AssetStore, import: &ValidatedImport, staged: StagedBook) -> Result<PublishedStagedBook, BackendError> {
+        library_placement::publish_import(assets, &self.database, import.parent_id, &import.file_name, staged, import.format == BookFormat::Mp3Folder).await.map_err(|error| error.context("could not publish the imported book"))
     }
 
     /// Placement rows whose remembered path disagrees with storage, resolved
@@ -94,23 +107,5 @@ impl LibraryImport {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn import_restore_paths(&self, _content_hash: &BookId) -> Result<Vec<String>, BackendError> {
         Ok(Vec::new())
-    }
-
-    /// Committing the metadata transaction is the import's success point.
-    /// Resolve all fallible result data before it, and notify before optional work.
-    pub(crate) fn commit_import(&self, import: ValidatedImport, content_hash: BookId, size_bytes: u64, inspection: Option<book_inspection::InspectedBook>, published: library_model::PublishedStagedBook) -> Result<(), BackendError> {
-        let request_thumbnail = !self.assets.thumbnail_set_exists(&content_hash).map_err(BackendError::operation)?;
-        let restore_paths = self.import_restore_paths(&content_hash)?;
-        let ValidatedImport { parent_id, file_name, format } = import;
-        let catalog_record = library_database::catalog::import_record(content_hash, format).map_err(BackendError::operation)?;
-        self.database
-            .commit_import_with_catalog_answer(
-                library_database::ImportCommit { parent_id, file_name, format, content_hash, size_bytes, inspection_version: book_inspection::inspection_version(format), inspection, published, request_thumbnail, restore_paths },
-                Some(metadata_contract::matching::same_author),
-                catalog_record,
-            )
-            .map_err(BackendError::operation)?;
-        self.events.notify_contents_changed();
-        Ok(())
     }
 }

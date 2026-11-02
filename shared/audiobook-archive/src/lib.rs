@@ -397,12 +397,6 @@ pub fn archived_tracks<R: Read + Seek>(reader: R) -> io::Result<Vec<ArchivedTrac
     Ok(tracks)
 }
 
-/// Extracts tracks into a caller-owned staging directory. The caller publishes
-/// that directory only after this function returns successfully.
-pub fn extract_archive<R: Read + Seek>(reader: R, destination: &Path) -> io::Result<Vec<String>> {
-    extract_archive_with_names(reader, destination, |name| Ok(name.to_owned()))
-}
-
 /// Extract with device-local filenames while retaining the archive's logical
 /// names in the returned index. Callers persist their mapping before publishing.
 pub fn extract_archive_with_names<R: Read + Seek>(reader: R, destination: &Path, mut local_name: impl FnMut(&str) -> io::Result<String>) -> io::Result<Vec<String>> {
@@ -541,7 +535,7 @@ mod tests {
         zip.write_all(b"x").unwrap();
         let bytes = zip.finish().unwrap().into_inner();
         let output = tempfile::tempdir().unwrap();
-        assert!(extract_archive(Cursor::new(bytes), output.path()).is_err());
+        assert!(extract_archive_with_names(Cursor::new(bytes), output.path(), |name| Ok(name.to_owned())).is_err());
         assert!(!output.path().parent().unwrap().join("escape.mp3").exists());
     }
 }

@@ -2,9 +2,10 @@
 
 use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputState, OtpState};
+use std::time::Duration;
 
 use crate::model::AccountFlow;
-use crate::services::UiFuture;
+use app::BackendError;
 
 use super::SyncPage;
 
@@ -16,6 +17,8 @@ pub(super) struct AuthenticationInputs {
     pub(super) verification_pin: Entity<OtpState>,
     pub(super) reset_token: Entity<InputState>,
     pub(super) new_password: Entity<InputState>,
+    pub(super) resend_seconds_remaining: u32,
+    resend_task: Option<gpui::Task<()>>,
 }
 
 impl AuthenticationInputs {
@@ -30,6 +33,8 @@ impl AuthenticationInputs {
             verification_pin,
             reset_token: input("Reset code from your email", false, cx),
             new_password: input("New password", true, cx),
+            resend_seconds_remaining: 0,
+            resend_task: None,
         }
     }
 }
@@ -37,13 +42,12 @@ impl AuthenticationInputs {
 impl SyncPage {
     /// Leaving a flow re-masks every password, so a field revealed on one
     /// screen is never left in clear text behind another.
-    pub(super) fn set_flow(&mut self, flow: AccountFlow, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_flow(&mut self, flow: AccountFlow, cx: &mut Context<Self>) {
         if self.flow == flow && self.error.is_none() && self.message.is_none() {
             return;
         }
-        self.password_revealed = false;
         for state in [&self.authentication.password, &self.authentication.registration_password, &self.authentication.new_password] {
-            state.update(cx, |state, cx| state.set_masked(true, window, cx));
+            state.update(cx, |state, cx| state.set_masked(true, cx));
         }
         self.flow = flow;
         self.login_failed = false;
@@ -52,7 +56,7 @@ impl SyncPage {
         cx.notify();
     }
 
-    fn start_account_request(&mut self, progress: &'static str, success: &'static str, next_flow: AccountFlow, operation: UiFuture<()>, cx: &mut Context<Self>) {
+    fn start_account_request(&mut self, progress: &'static str, success: &'static str, next_flow: AccountFlow, operation: impl Future<Output = Result<(), BackendError>> + 'static, cx: &mut Context<Self>) {
         if self.is_busy() {
             return;
         }
@@ -66,8 +70,10 @@ impl SyncPage {
                 page.activity = super::AccountActivity::Idle;
                 match result {
                     Ok(()) => {
-                        page.password_revealed = false;
-                        page.flow = next_flow;
+                        if next_flow == AccountFlow::VerifyEmail {
+                            page.start_resend_cooldown(cx);
+                        }
+                        page.set_flow(next_flow, cx);
                         page.message = Some(success.into());
                     }
                     Err(error) => {
@@ -88,7 +94,8 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        let operation = super::account::login(&self.services.backend, email, password);
+        let backend = self.services.backend.clone();
+        let operation = async move { backend.login(email, password).await };
         self.start_snapshot_operation("Signing in…", None, true, operation, cx);
     }
 
@@ -101,11 +108,14 @@ impl SyncPage {
             return;
         }
         let backend = self.services.backend.clone();
-        let operation = Box::pin(async move { backend.request_public_registration(email, password).await });
+        let operation = async move { backend.request_public_registration(email, password).await };
         self.start_account_request("Creating account…", "Check your email for a six-digit verification PIN", AccountFlow::VerifyEmail, operation, cx);
     }
 
     pub(super) fn start_resend_verification(&mut self, cx: &mut Context<Self>) {
+        if self.authentication.resend_seconds_remaining > 0 {
+            return;
+        }
         let email = self.authentication.email.read(cx).value().trim().to_owned();
         if email.is_empty() {
             self.error = Some("Enter your email address.".into());
@@ -113,8 +123,26 @@ impl SyncPage {
             return;
         }
         let backend = self.services.backend.clone();
-        let operation = Box::pin(async move { backend.resend_verification(email).await });
-        self.start_account_request("Resending PIN…", "Verification PIN sent if the address exists", AccountFlow::VerifyEmail, operation, cx);
+        let operation = async move { backend.resend_verification(email).await };
+        self.start_account_request("Resending PIN…", "A new PIN has been requested. Check your email and use the latest PIN.", AccountFlow::VerifyEmail, operation, cx);
+    }
+
+    fn start_resend_cooldown(&mut self, cx: &mut Context<Self>) {
+        self.authentication.resend_seconds_remaining = account_contract::EMAIL_RESEND_COOLDOWN_SECONDS;
+        let executor = cx.background_executor().clone();
+        self.authentication.resend_task = Some(cx.spawn(async move |page, cx| {
+            loop {
+                executor.timer(Duration::from_secs(1)).await;
+                let remaining = page.update(cx, |page, cx| {
+                    page.authentication.resend_seconds_remaining = page.authentication.resend_seconds_remaining.saturating_sub(1);
+                    cx.notify();
+                    page.authentication.resend_seconds_remaining
+                });
+                if !matches!(remaining, Ok(remaining) if remaining > 0) {
+                    break;
+                }
+            }
+        }));
     }
 
     pub(super) fn start_verify_email(&mut self, cx: &mut Context<Self>) {
@@ -133,11 +161,12 @@ impl SyncPage {
             return;
         }
         if password.is_empty() {
-            self.error = Some("Enter the password you chose for this account.".into());
+            self.error = Some("Your signup details are missing. Start account creation again.".into());
             cx.notify();
             return;
         }
-        let operation = super::account::verify_email(&self.services.backend, email, pin, password);
+        let backend = self.services.backend.clone();
+        let operation = async move { backend.verify_email(email, pin, password).await };
         self.start_snapshot_operation("Verifying email…", Some("Email verified"), false, operation, cx);
     }
 
@@ -149,7 +178,7 @@ impl SyncPage {
             return;
         }
         let backend = self.services.backend.clone();
-        let operation = Box::pin(async move { backend.request_password_reset(email).await });
+        let operation = async move { backend.request_password_reset(email).await };
         self.start_account_request("Requesting reset…", "Check your email for a password reset code. If the address has an account, an email will arrive shortly.", AccountFlow::ResetPassword, operation, cx);
     }
 
@@ -162,7 +191,7 @@ impl SyncPage {
             return;
         }
         let backend = self.services.backend.clone();
-        let operation = Box::pin(async move { backend.reset_password(token, password).await });
+        let operation = async move { backend.reset_password(token, password).await };
         self.start_account_request("Updating password…", "Password updated. Sign in with your new password.", AccountFlow::SignIn, operation, cx);
     }
 }

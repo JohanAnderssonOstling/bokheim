@@ -33,7 +33,7 @@ async fn cross_library_copy_preserves_nested_empty_folders_bytes_and_reader_stat
     let nested = src.placement.create_directory(&shelf, "Nested").unwrap().id;
     src.placement.create_directory(&nested, "Empty").unwrap();
     let hash = seed(&src, nested, "Novel.epub", EPUB).await;
-    src.placement.copy_book_to_directory(&hash, Some(&nested), &shelf).unwrap();
+    src.placement.copy_book_to_directory(&hash, Some(&nested), &shelf).await.unwrap();
     src.db.update_reading_position(&hash, "epubcfi(/6/2)", Some(42.0), None).unwrap();
     let note = Annotation {
         id: "transfer-note".into(),
@@ -70,44 +70,6 @@ async fn cross_library_copy_preserves_nested_empty_folders_bytes_and_reader_stat
             assert_eq!(std::fs::read(second.path().join(path.as_str().trim_start_matches('/'))).unwrap(), EPUB);
         }
         assert!(src.db.is_live_destination(&shelf).unwrap());
-        source.shutdown();
-        destination.shutdown();
-    };
-    tokio::join!(source_actor.serve(source_inbox), destination_actor.serve(destination_inbox), exercise);
-}
-
-#[tokio::test]
-async fn cross_library_move_from_local_only_to_cloud_library_keeps_verified_local_bytes_and_is_reversible() {
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    let (mut source_actor, source, source_inbox) = fixture(first.path(), "http://127.0.0.1:1".parse().unwrap());
-    let (mut destination_actor, destination, destination_inbox) = fixture(second.path(), "http://127.0.0.1:1".parse().unwrap());
-    let src = source_actor.session.clone();
-    let dst = destination_actor.session.clone();
-    src.db.set_asset_storage_policy(false, false).unwrap();
-    src.sync.clone().set_asset_storage_enabled(false);
-    let hash = seed(&src, ROOT_DIR_ID, "Local.epub", EPUB).await;
-    let facts = src.db.book_transfer_state(hash).unwrap().addition;
-    src.db.record_catalog_answer(&hash, facts.record).unwrap();
-    let (from, to) = clients(&source, &destination);
-    let exercise = async {
-        let outcome = to.transfer_from(&from, selection(vec![], vec![hash], Some(ROOT_DIR_ID)), ROOT_DIR_ID, true).await;
-        assert!(outcome.error.is_none(), "{:?}", outcome.error);
-        assert_eq!(outcome.created_placements, vec![(hash, ROOT_DIR_ID)]);
-        assert_eq!(outcome.removed_placements, vec![(hash, ROOT_DIR_ID)]);
-        assert!(dst.sync.clone().asset_storage_enabled());
-        assert!(!src.sync.clone().asset_storage_enabled());
-        assert_eq!(src.db.library_trash().unwrap().books.len(), 1);
-        assert_eq!(std::fs::read(second.path().join(dst.db.book_paths(&hash).unwrap()[0].as_str().trim_start_matches('/'))).unwrap(), EPUB);
-        // Destination receives a local upload revision independently of source policy.
-        assert!(dst.db.upload_preparation_snapshot().unwrap().hashes().contains(&hash));
-        dst.run_file_jobs().await.unwrap();
-        dst.admit_uploads().unwrap();
-        assert!(dst.db.pending_book_uploads(0, 10).unwrap().iter().any(|intent| intent.content_hash == hash));
-        from.restore_book_placement(hash, ROOT_DIR_ID).await.unwrap();
-        to.remove_book_from_directory(hash, ROOT_DIR_ID).await.unwrap();
-        assert!(src.db.library_trash().unwrap().books.is_empty());
-        assert!(!src.db.book_paths(&hash).unwrap().is_empty());
         source.shutdown();
         destination.shutdown();
     };
@@ -155,40 +117,6 @@ async fn cross_library_move_rejects_a_source_tree_changed_during_copy() {
 }
 
 #[tokio::test]
-async fn cross_library_copy_of_an_mp3_folder_transfers_the_full_archive_and_track_metadata() {
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    let input = tempfile::tempdir().unwrap();
-    let audio = input.path().join("Audio");
-    std::fs::create_dir(&audio).unwrap();
-    let track = include_bytes!("../../crates/book-inspection/tests/fixtures/silence.mp3");
-    std::fs::write(audio.join("01.mp3"), track).unwrap();
-    std::fs::write(audio.join("02.mp3"), track).unwrap();
-    let (mut source_actor, source, source_inbox) = fixture(first.path(), "http://127.0.0.1:1".parse().unwrap());
-    let (mut destination_actor, destination, destination_inbox) = fixture(second.path(), "http://127.0.0.1:1".parse().unwrap());
-    let src = source_actor.session.clone();
-    let dst = destination_actor.session.clone();
-    assert!(src.import_paths(ROOT_DIR_ID, vec![audio], false).await.unwrap().is_empty());
-    src.scan_folder().await.unwrap();
-    let hash = src.db.upload_preparation_snapshot().unwrap().hashes().into_iter().next().unwrap();
-    let original = src.db.book_transfer_state(hash).unwrap();
-    let (from, to) = clients(&source, &destination);
-    let exercise = async {
-        let outcome = to.transfer_from(&from, selection(vec![], vec![hash], Some(ROOT_DIR_ID)), ROOT_DIR_ID, false).await;
-        assert!(outcome.error.is_none(), "{:?}", outcome.error);
-        assert_eq!(dst.db.book_transfer_state(hash).unwrap().addition, original.addition);
-        let path = dst.db.book_paths(&hash).unwrap()[0].clone();
-        let audio = second.path().join(path.as_str().trim_start_matches('/'));
-        assert_eq!(std::fs::read(audio.join("01.mp3")).unwrap(), track);
-        assert_eq!(std::fs::read(audio.join("02.mp3")).unwrap(), track);
-        assert_eq!(dst.db.audiobook_tracks(&hash).unwrap().len(), 2);
-        source.shutdown();
-        destination.shutdown();
-    };
-    tokio::join!(source_actor.serve(source_inbox), destination_actor.serve(destination_inbox), exercise);
-}
-
-#[tokio::test]
 async fn cross_library_move_to_existing_book_preserves_destination_state_and_other_source_placements() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
@@ -199,7 +127,7 @@ async fn cross_library_move_to_existing_book_preserves_destination_state_and_oth
     let hash = seed(&src, ROOT_DIR_ID, "Novel.epub", EPUB).await;
     seed(&dst, ROOT_DIR_ID, "Existing.epub", EPUB).await;
     let retained = src.placement.create_directory(&ROOT_DIR_ID, "Retained").unwrap().id;
-    src.placement.copy_book_to_directory(&hash, Some(&ROOT_DIR_ID), &retained).unwrap();
+    src.placement.copy_book_to_directory(&hash, Some(&ROOT_DIR_ID), &retained).await.unwrap();
     src.db.update_reading_position(&hash, "epubcfi(/6/2)", Some(20.0), None).unwrap();
     dst.db.update_reading_position(&hash, "epubcfi(/6/4)", Some(60.0), None).unwrap();
     let original = dst.db.book_transfer_state(hash).unwrap();

@@ -417,7 +417,7 @@ mod tests {
         setup(&db).unwrap();
         let loyal_url = "https://www.loyalbooks.com/book/not-rated";
         seed(&db, &[Url::parse(loyal_url).unwrap()]).unwrap();
-        let http = Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+        let http = http_response::blocking_client_builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
         let prefetched = Prefetch::start(&http, &url);
         received.recv_timeout(Duration::from_secs(5)).unwrap();
         let queue: (String, i64) = db.query_row("SELECT state,attempts FROM source_crawl_page", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();

@@ -4,15 +4,34 @@ use super::*;
 use crate::projection::project_dirty;
 use crate::query_methods::query_rows;
 use crate::transactions::WriteOutcome::Commit;
-use sync_common::StateKey;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use sync_common::{BookId, StateAddress, StateKey};
+
+/// Changes accepted by a committed pull, excluding stale or repeated mutations.
+#[derive(Debug, Default)]
+pub struct SyncPullChanges {
+    pub contents_changed: bool,
+    pub reading_progress: BTreeSet<BookId>,
+}
+
+impl SyncPullChanges {
+    fn record(&mut self, entry: &LibraryStateEntry) {
+        match entry {
+            LibraryStateEntry::ReadingPosition { content_hash, .. } | LibraryStateEntry::ChapterReadStatus { content_hash, .. } => {
+                self.reading_progress.insert(*content_hash);
+            }
+            _ => self.contents_changed = true,
+        }
+    }
+}
 
 impl Database {
     /// Acknowledges sent mutations and applies a page atomically. Wire decoding,
     /// batch planning and input-only serialization run before reserving the writer.
-    /// Returns whether the page carried remote changes, including stale changes.
-    pub fn sync_commit_pull_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> Result<bool, DatabaseError> {
+    /// Returns the kinds of changes accepted by the merge for presentation updates.
+    pub fn sync_commit_pull_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> Result<SyncPullChanges, DatabaseError> {
         if page.mutations.is_empty() && ids.is_empty() && read_pull_cursor(&self.connection)? == page.next_cursor {
-            return Ok(false);
+            return Ok(SyncPullChanges::default());
         }
         let mut changes = Vec::with_capacity(page.mutations.len());
         for change in &page.mutations {
@@ -22,43 +41,45 @@ impl Database {
                 log::debug!("Skipping unknown synchronized state kind {}", change.state.value.address.kind);
             }
         }
-        let prepared = PreparedRemoteChanges { changes };
-        let acknowledgements = if ids.is_empty() { None } else { Some(serde_json::to_string(&ids.iter().map(|seq| seq.get()).collect::<Vec<_>>()).map_err(DatabaseError::operation)?) };
+        let acknowledgements = if ids.is_empty() { None } else { Some(serde_json::to_string(ids).map_err(DatabaseError::operation)?) };
         self.with_write_transaction(|tx| {
             tx.pragma_update(None, "defer_foreign_keys", "ON").map_err(DatabaseError::operation)?;
-            let mut acknowledged_fields = Vec::new();
+            let mut confirmed = HashMap::new();
             if let Some(payload) = acknowledgements {
                 // An acknowledgement confirms a publication even if its field
                 // is on a later pull page. Capture only still-matching queue
                 // generations: old acknowledgements cannot confirm new edits.
-                let cells = query_rows(|callback| tx.pull_acknowledged_addresses(&(&payload), callback), |r| Ok((r.get::<_, String>(0)?, r.get::<_, StateKey>(1)?, r.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+                let cells = query_rows(|callback| tx.pull_acknowledged_addresses(&(&payload), callback), |r| Ok(StateAddress { kind: r.get(0)?, entity_key: r.get(1)?, entity_subkey: r.get(2)? }))?;
                 for cell in cells {
-                    if let Some(version) = publication_version(tx, &cell.0, &cell.1, &cell.2)? {
-                        acknowledged_fields.push((cell, version));
+                    if let Some(version) = publication_version(tx, &cell.kind, &cell.entity_key, &cell.entity_subkey)? {
+                        confirmed.insert(cell, version);
                     }
                 }
                 tx.outbox_delete_for_ids(&payload).map_err(DatabaseError::operation)?;
             }
             if page.mutations.is_empty() && read_pull_cursor(tx)? == page.next_cursor {
-                return Ok(Commit(false));
+                return Ok(Commit(SyncPullChanges::default()));
             }
+            let mut applied = SyncPullChanges::default();
             {
                 // The server delivers a book's lifecycle before any of its
                 // fields, so the page's lifecycles are the only book creations.
-                let lifecycles = prepared.changes.iter().filter_map(|state| match &state.value {
+                let lifecycles = changes.iter().filter_map(|state| match &state.value {
                     LibraryStateEntry::BookLifecycle { content_hash, .. } => Some((state, content_hash)),
                     _ => None,
                 });
                 // A still-existing row may have missed a complete purge/readd.
                 // Remember its lifecycle before merging this page.
-                let mut existing = std::collections::BTreeMap::new();
+                let mut existing = BTreeMap::new();
                 for (_, hash) in lifecycles.clone() {
                     if tx.pull_book_exists(&hash, |r| r.get::<_, bool>(0))? {
                         existing.insert(hash.to_owned(), read_version(tx, "book_lifecycle", &StateKey::Book(*hash), "")?);
                     }
                 }
                 for (state, _) in lifecycles.clone() {
-                    registers::merge(tx, state)?;
+                    if registers::merge(tx, state)? {
+                        applied.record(&state.value);
+                    }
                 }
                 // Apply final lifecycle winners before admitting dependent fields.
                 project_dirty(tx)?;
@@ -71,24 +92,25 @@ impl Database {
                         }
                         if tx.pull_ensure_book(&hash, &(crate::browse::text::search_title(None, None)))? != 0 {
                             tx.pull_mark_book_dirty(&hash)?;
+                            applied.contents_changed = true;
                         }
                     }
                 }
-                for state in prepared.changes.iter().filter(|state| !matches!(state.value, LibraryStateEntry::BookLifecycle { .. })) {
-                    registers::merge(tx, state)?;
+                for state in changes.iter().filter(|state| !matches!(state.value, LibraryStateEntry::BookLifecycle { .. })) {
+                    if registers::merge(tx, state)? {
+                        applied.record(&state.value);
+                    }
                 }
                 project_dirty(tx)?;
                 {
-                    let prepared: &PreparedRemoteChanges = &prepared;
-                    let acknowledged: Vec<((String, StateKey, String), library_replica::VersionKey)> = acknowledged_fields;
-                    let mut confirmed = acknowledged.into_iter().collect::<std::collections::HashMap<_, _>>();
-                    for state in &prepared.changes {
-                        let version = state.version.clone();
-                        let (kind, key, subkey) = sync_state_identity(&state.value);
+                    for state in changes {
+                        let version = state.version;
+                        let address = state.value.address();
+                        let immutable = records::is_record(&address.kind);
                         confirmed
-                            .entry((kind.to_owned(), key, subkey))
-                            .and_modify(|old: &mut library_replica::VersionKey| {
-                                if records::is_record(kind) || version > *old {
+                            .entry(address)
+                            .and_modify(|old| {
+                                if immutable || version > *old {
                                     *old = version.clone();
                                 }
                             })
@@ -100,10 +122,7 @@ impl Database {
                         }
                         for cell in registers::book_fields(tx, &hash)? {
                             let current = publication_version(tx, &cell.kind, &cell.entity_key, &cell.entity_subkey)?;
-                            if confirmed
-                                .get(&(cell.kind.clone(), cell.entity_key.clone(), cell.entity_subkey.clone()))
-                                .is_some_and(|seen| if records::is_record(&cell.kind) { Some(seen) == current.as_ref() } else { Some(seen) >= current.as_ref() })
-                            {
+                            if confirmed.get(&cell).is_some_and(|seen| if records::is_record(&cell.kind) { Some(seen) == current.as_ref() } else { Some(seen) >= current.as_ref() }) {
                                 continue;
                             }
                             registers::recover(tx, &cell)?;
@@ -112,7 +131,7 @@ impl Database {
                 };
                 write_pull_cursor(tx, &page.next_cursor)?;
             }
-            Ok(Commit(!page.mutations.is_empty()))
+            Ok(Commit(applied))
         })
     }
 }

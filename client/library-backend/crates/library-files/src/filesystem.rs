@@ -129,6 +129,16 @@ pub fn place_into_directory(source: &Path, directory: &Path, occupied: &[String]
 /// Records each candidate destination before publishing it, so an owner can
 /// recover a move interrupted between the rename and its database acknowledgement.
 pub fn place_into_directory_with_intent(source: &Path, directory: &Path, occupied: &[String], moving: bool, mut before_publish: impl FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
+    place_entry(source, directory, occupied, moving, true, &mut before_publish)
+}
+
+/// A same-filesystem move only. Never silently turn a failed rename into
+/// copying and deleting the caller's source.
+pub fn rename_into_directory_with_intent(source: &Path, directory: &Path, occupied: &[String], mut before_publish: impl FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
+    place_entry(source, directory, occupied, true, false, &mut before_publish)
+}
+
+fn place_entry(source: &Path, directory: &Path, occupied: &[String], moving: bool, copy_fallback: bool, before_publish: &mut dyn FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
     let metadata = fs::symlink_metadata(source)?;
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(Error::other("only regular files and folders can be added to a library"));
@@ -157,7 +167,7 @@ pub fn place_into_directory_with_intent(source: &Path, directory: &Path, occupie
             match rename_entry(&source, &destination) {
                 Ok(()) => return Ok(destination),
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                Err(error) if error.kind() == ErrorKind::CrossesDevices => {}
+                Err(error) if copy_fallback && error.kind() == ErrorKind::CrossesDevices => {}
                 Err(error) => return Err(error),
             }
         }
@@ -192,7 +202,7 @@ pub fn place_into_directory_with_intent(source: &Path, directory: &Path, occupie
     unreachable!("numeric name suffix space is unbounded")
 }
 
-fn rename_entry(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn rename_entry(source: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(target_os = "android")]
     {
         // Filename candidates and destination checks above handle conflicts.
@@ -205,7 +215,7 @@ fn rename_entry(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
-fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.is_dir() {
         fs::create_dir(destination)?;

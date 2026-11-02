@@ -10,20 +10,22 @@ use gpui::prelude::*;
 use gpui::{App, Context, Window};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::tree::TreeState;
-use html_view_core::{RendererCommand, RendererEvent, RendererInitialConfig};
 use html_view_gpui::{DocumentTap, HtmlView};
 use library_backend::LibraryClient;
 use library_model::BookLocator;
+use skrift_column_paginator::{RendererCommand, RendererEvent, RendererInitialConfig};
 
 use crate::epub::toc::TocState;
 use crate::epub::{LoadState, ProgressState, ReaderView, SearchState};
 use crate::invalidation::{Component, notify};
+use crate::opening_error::opening_error;
 use crate::settings::{ReaderSettings, library_interaction_palette, library_link_foreground, library_paint_palette, library_theme_adaptation};
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::ReadingPositionWriter;
 use crate::shell::search::SearchBarTarget;
 use crate::shell::settings_navigation::SettingsNavigation;
 use crate::shell::state_panel::SidebarState;
+use app::{BackendError, Failure};
 use app_preferences::LINE_WIDTH_MAX;
 
 pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
@@ -46,8 +48,8 @@ pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
 
 impl ReaderView {
     pub(crate) fn new(
-        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window,
-        cx: &mut Context<Self>,
+        locator: BookLocator, title: String, app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, cjk_font: Option<crate::cjk::CjkFont>, preparation: skrift_column_paginator::RendererPreparation,
+        save_progress: bool, close_reader: crate::CloseReader, #[cfg(feature = "kobo")] device_controls: Option<gpui::AnyView>, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         let search_input = cx.new(|cx| {
             let input = InputState::new(window, cx);
@@ -66,12 +68,20 @@ impl ReaderView {
             _ => {}
         });
         let annotation_note_input = cx.new(|cx| crate::shell::annotation_editor::note_input(window, cx));
+        crate::shell::bookmarks::watch_name_validity(&annotation_note_input, cx, |this| this.marks.selected().is_some_and(library_backend::Annotation::is_bookmark));
         let font_picker = cx.new(|cx| super::font_picker::FontPicker::new(window, cx));
-        cx.subscribe_in(&font_picker, window, |this, _, event: &super::font_picker::FontSelected, window, cx| {
-            this.set_system_font_family(event.0.clone(), cx);
-            this.sidebar_focus.focus(window, cx);
-        })
-        .detach();
+        let cjk_font_picker = cx.new(|cx| {
+            let mut picker = super::font_picker::FontPicker::new(window, cx);
+            picker.set_cjk(true);
+            picker
+        });
+        for picker in [&font_picker, &cjk_font_picker] {
+            cx.subscribe_in(picker, window, |this, _, event: &super::font_picker::FontSelected, _, cx| {
+                this.set_custom_font_family(event.role, event.family.clone(), cx);
+            })
+            .detach();
+        }
+        let bookmark_filter_input = crate::shell::bookmarks::filter_input(window, cx);
         let annotation_filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter annotations"));
         let annotation_filter_subscription = cx.subscribe(&annotation_filter_input, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -80,20 +90,29 @@ impl ReaderView {
         });
         let focus = cx.focus_handle();
         let toc_tree = cx.new(|cx| TreeState::new(cx));
+        let toc_filter = cx.new(|cx| crate::shell::toc_filter::TocFilter::new(toc_tree.clone(), window, cx));
         focus.focus(window, cx);
-        let reading_positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone());
+        let reading_positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone()).with_saving_enabled(save_progress);
         let marks = MarkSession::new(cx, library.clone());
+        let bookmark_updates = marks.watch_bookmarks(cx, Self::update_bookmarks);
 
-        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
         let tts = crate::shell::tts::Narration::for_languages(&book.languages())
             .with_title(title.clone())
             .with_rate(ReaderSettings::preferences(cx).audiobook_speed)
             .with_pauses(ReaderSettings::preferences(cx).narration_pauses)
-            .with_voice(ReaderSettings::preferences(cx).narration_voice);
+            .with_voice(ReaderSettings::preferences(cx).narration_voice)
+            .with_device_voice(ReaderSettings::preferences(cx).narration_device_voice.clone())
+            .with_voice_preferences(ReaderSettings::preferences(cx))
+            .with_availability(cx);
 
+        let mut toc = TocState::default();
+        toc.cfi = book.cfi.clone();
         let mut reader = Self {
+            app,
+            dictionary: None,
             #[cfg(feature = "kobo")]
-            brightness: cx.new(|cx| crate::shell::brightness::BrightnessControls::new(_app.clone(), window, cx)),
+            device_controls,
             locator,
             library,
             book_title: title.clone(),
@@ -101,14 +120,17 @@ impl ReaderView {
             load_state: LoadState::Loading,
             applied_palette: None,
             last_column_viewport_plan: None,
-            desired_column_count: if cfg!(feature = "kobo") { 1 } else { u8::MAX },
-            toc: TocState::default(),
+            desired_column_count: u8::MAX,
+            toc,
             toc_tree,
+            toc_filter,
             annotation_tree: Default::default(),
+            bookmark_tree: Default::default(),
             sidebar: SidebarState::from_preferences(cx),
-            chrome: crate::shell::chrome::ChromeState::from_preferences(Component::ReaderShell, cx),
+            chrome: crate::shell::chrome::ChromeState::from_preferences(Component::ReaderShell, ui_components::uses_mobile_reader_controls(window), cx),
             wheel_delta: 0.0,
             wheel_debounce: None,
+            touchpad: ui_components::TouchpadNavigation::default(),
             touch_swipe: None,
             swipe_preview: ui_components::SwipePreview::default(),
             page_turn: None,
@@ -116,23 +138,31 @@ impl ReaderView {
             touch_swipe_from_edge: false,
             search_input,
             font_picker,
+            cjk_font_picker,
             search: SearchState::default(),
             book,
+            cjk_font,
             reading_position: None,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            history: Default::default(),
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_fragments: Vec::new(),
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_doc: 0,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_navigation_revision: 0,
             progress: ProgressState::default(),
             marks,
+            recurring: Default::default(),
+            annotation_load_generation: 0,
+            _annotation_updates: None,
+            _bookmark_updates: bookmark_updates,
             selection: None,
             touch_selection: Default::default(),
             annotation_note_input,
             annotation_filter_input,
+            bookmark_filter_input,
             annotation_popup_anchor: None,
             footnote: None,
             image_preview: None,
@@ -148,20 +178,24 @@ impl ReaderView {
             _search_subscription: search_subscription,
             _annotation_filter_subscription: annotation_filter_subscription,
         };
+        #[cfg(all(feature = "native-tts", target_os = "android"))]
+        crate::shell::tts::load_media_metadata(reader.library.clone(), reader.locator.clone(), cx);
+        reader.refresh_bookmark_rows(cx);
         reader.finish_load(preparation, window, cx);
         reader
     }
 
-    fn finish_load(&mut self, preparation: html_view_core::RendererPreparation, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_load(&mut self, preparation: skrift_column_paginator::RendererPreparation, window: &mut Window, cx: &mut Context<Self>) {
         let renderer = match HtmlView::create_from_preparation(preparation, window, cx) {
             Ok(renderer) => renderer,
             Err(error) => {
                 log::error!("could not initialize EPUB renderer: {error}");
-                let failure = error.clone();
+                let failure = opening_error(BackendError::message(error), "renderer_initialize", Failure::BookRendererFailed);
+                let message = ui_components::user_facing_error(&failure, "Couldn't display this book. Reopen the app and retry.").to_owned();
                 // The parent installs its failure subscription after this
                 // constructor returns, before deferred events are delivered.
                 cx.defer_in(window, move |_, _, cx| cx.emit(crate::BookOpenFailed(failure)));
-                self.load_state = LoadState::Error(ui_components::user_facing_error(&error, "Try opening this book again. If it still fails, download another copy or choose another edition.").to_owned());
+                self.load_state = LoadState::Error(message);
                 cx.notify();
                 return;
             }
@@ -185,6 +219,7 @@ impl ReaderView {
         // paging works without clicking the text first.
         self.focus_document(window, cx);
         self.load_reader_state(cx);
+        self.watch_annotation_updates(cx);
         self.load_database_toc(cx);
         notify(cx, Component::ReaderShell, "reader_ready");
     }

@@ -1,10 +1,10 @@
 //! Deserialize the protobuf tree directly. Byte sequences stream u8 values;
 //! arbitrary map keys alone retain the original Serde ordering and deduplication.
-use crate::protobuf::{self, value::Kind, Value};
-use crate::{domain_value, protobuf_value, WireError};
+use crate::protobuf::{self, Value, value::Kind};
+use crate::{WireError, domain_value, protobuf_value};
 use serde::de::{self, DeserializeSeed, Deserializer as _, Visitor};
 use serde_value::{DeserializerError as Error, Value as Key};
-use std::collections::{btree_map, BTreeMap};
+use std::collections::{BTreeMap, btree_map};
 use std::vec;
 
 pub(crate) fn validate(value: &Value) -> Result<(), WireError> {
@@ -43,6 +43,53 @@ fn ordered_entries(value: protobuf::Map, byte_fields: bool) -> Result<BTreeMap<K
     value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or_else(|| error("missing map key"))?, byte_fields).map_err(|failure| error(&failure.to_string()))?, entry.value.ok_or_else(|| error("missing map value"))?))).collect()
 }
 
+// Keep mismatched compound values out of each typed visitor's generated code.
+#[cold]
+#[inline(never)]
+fn mismatch(kind: Option<Kind>, expected: &str) -> Error {
+    let unexpected = match &kind {
+        Some(Kind::BoolValue(value)) => de::Unexpected::Bool(*value),
+        Some(Kind::U32Value(value)) => de::Unexpected::Unsigned(u64::from(*value)),
+        Some(Kind::U64Value(value)) => de::Unexpected::Unsigned(*value),
+        Some(Kind::I32Value(value)) => de::Unexpected::Signed(i64::from(*value)),
+        Some(Kind::I64Value(value)) => de::Unexpected::Signed(*value),
+        Some(Kind::F32Bits(value)) => de::Unexpected::Float(f64::from(f32::from_bits(*value))),
+        Some(Kind::F64Bits(value)) => de::Unexpected::Float(f64::from_bits(*value)),
+        Some(Kind::CharValue(value)) => de::Unexpected::Char(char::from_u32(*value).unwrap_or('\u{fffd}')),
+        Some(Kind::StringValue(value)) => de::Unexpected::Str(value),
+        Some(Kind::BytesValue(value)) => de::Unexpected::Bytes(value),
+        Some(Kind::Unit(_)) => de::Unexpected::Unit,
+        Some(Kind::Sequence(_)) => de::Unexpected::Seq,
+        Some(Kind::Map(_)) => de::Unexpected::Map,
+        Some(Kind::OptionValue(_)) => de::Unexpected::Option,
+        Some(Kind::NewtypeValue(_)) => de::Unexpected::NewtypeStruct,
+        None => return error("missing protobuf value kind"),
+    };
+    de::Error::invalid_type(unexpected, &expected)
+}
+
+impl Deserializer {
+    fn number<'de, V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::U32Value(value)) => visitor.visit_u32(value),
+            Some(Kind::U64Value(value)) => visitor.visit_u64(value),
+            Some(Kind::I32Value(value)) => visitor.visit_i32(value),
+            Some(Kind::I64Value(value)) => visitor.visit_i64(value),
+            Some(Kind::F32Bits(value)) => visitor.visit_f32(f32::from_bits(value)),
+            Some(Kind::F64Bits(value)) => visitor.visit_f64(f64::from_bits(value)),
+            other => Err(mismatch(other, "a number")),
+        }
+    }
+}
+
+macro_rules! numbers {
+    ($($method:ident)*) => {$(
+        fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            self.number(visitor)
+        }
+    )*};
+}
+
 impl<'de> de::Deserializer<'de> for Deserializer {
     type Error = Error;
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
@@ -71,12 +118,17 @@ impl<'de> de::Deserializer<'de> for Deserializer {
     }
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         match self.value.kind {
-            Some(Kind::OptionValue(_) | Kind::Unit(_)) => self.deserialize_any(visitor),
+            Some(Kind::OptionValue(value)) => match value.value {
+                Some(value) => visitor.visit_some(Self { value: *value, byte_fields: self.byte_fields }),
+                None => visitor.visit_none(),
+            },
+            Some(Kind::Unit(_)) => visitor.visit_unit(),
             _ => visitor.visit_some(self),
         }
     }
-    fn deserialize_newtype_struct<V: Visitor<'de>>(self, _: &'static str, visitor: V) -> Result<V::Value, Error> {
+    fn deserialize_newtype_struct<V: Visitor<'de>>(self, name: &'static str, visitor: V) -> Result<V::Value, Error> {
         match self.value.kind {
+            Some(Kind::BytesValue(value)) if name == "BokheimTransportBytes" => visitor.visit_newtype_struct(de::value::BytesDeserializer::<Error>::new(&value)),
             Some(Kind::NewtypeValue(value)) => visitor.visit_newtype_struct(Self { value: *value, byte_fields: self.byte_fields }),
             _ => visitor.visit_newtype_struct(self),
         }
@@ -84,7 +136,8 @@ impl<'de> de::Deserializer<'de> for Deserializer {
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         match self.value.kind {
             Some(Kind::BytesValue(value)) => visitor.visit_seq(Bytes(value.into_iter())),
-            _ => self.deserialize_any(visitor),
+            Some(Kind::Sequence(value)) => visitor.visit_seq(Sequence { values: value.values.into_iter(), byte_fields: self.byte_fields }),
+            other => Err(mismatch(other, "a sequence")),
         }
     }
     fn deserialize_tuple<V: Visitor<'de>>(self, _: usize, visitor: V) -> Result<V::Value, Error> {
@@ -119,7 +172,81 @@ impl<'de> de::Deserializer<'de> for Deserializer {
         };
         visitor.visit_enum(Enumeration { variant, value, byte_fields })
     }
-    serde::forward_to_deserialize_any! { bool u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 char str string unit bytes byte_buf map unit_struct struct identifier }
+    numbers! { deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64 deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64 deserialize_f32 deserialize_f64 }
+
+    fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::BoolValue(value)) => visitor.visit_bool(value),
+            other => Err(mismatch(other, "a boolean")),
+        }
+    }
+    fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::CharValue(value)) => visitor.visit_char(char::from_u32(value).ok_or_else(|| error("invalid protobuf character"))?),
+            Some(Kind::StringValue(value)) => visitor.visit_string(value),
+            other => Err(mismatch(other, "a character")),
+        }
+    }
+    fn deserialize_str<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        self.deserialize_string(visitor)
+    }
+    fn deserialize_string<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::StringValue(value)) => visitor.visit_string(value),
+            Some(Kind::CharValue(value)) => visitor.visit_char(char::from_u32(value).ok_or_else(|| error("invalid protobuf character"))?),
+            Some(Kind::BytesValue(value)) if self.byte_fields && !value.is_empty() => visitor.visit_byte_buf(value),
+            other => Err(mismatch(other, "a string")),
+        }
+    }
+    fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        self.deserialize_byte_buf(visitor)
+    }
+    fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::BytesValue(value)) if self.byte_fields && !value.is_empty() => visitor.visit_byte_buf(value),
+            Some(Kind::BytesValue(value)) => visitor.visit_seq(Bytes(value.into_iter())),
+            Some(Kind::Sequence(value)) => visitor.visit_seq(Sequence { values: value.values.into_iter(), byte_fields: self.byte_fields }),
+            Some(Kind::StringValue(value)) => visitor.visit_string(value),
+            Some(Kind::CharValue(value)) => visitor.visit_char(char::from_u32(value).ok_or_else(|| error("invalid protobuf character"))?),
+            Some(Kind::Unit(_)) => visitor.visit_unit(),
+            other => Err(mismatch(other, "bytes")),
+        }
+    }
+    fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::Unit(_)) => visitor.visit_unit(),
+            other => Err(mismatch(other, "unit")),
+        }
+    }
+    fn deserialize_unit_struct<V: Visitor<'de>>(self, _: &'static str, visitor: V) -> Result<V::Value, Error> {
+        self.deserialize_unit(visitor)
+    }
+    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::Map(value)) => visitor.visit_map(Mapping { entries: MapEntries::new(value, self.byte_fields)?, pending: None, byte_fields: self.byte_fields }),
+            other => Err(mismatch(other, "a map")),
+        }
+    }
+    fn deserialize_struct<V: Visitor<'de>>(self, _: &'static str, _: &'static [&'static str], visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::Map(value)) => visitor.visit_map(Mapping { entries: MapEntries::new(value, self.byte_fields)?, pending: None, byte_fields: self.byte_fields }),
+            Some(Kind::Sequence(value)) => visitor.visit_seq(Sequence { values: value.values.into_iter(), byte_fields: self.byte_fields }),
+            Some(Kind::BytesValue(value)) if !self.byte_fields || value.is_empty() => visitor.visit_seq(Bytes(value.into_iter())),
+            other => Err(mismatch(other, "a struct")),
+        }
+    }
+    fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.value.kind {
+            Some(Kind::StringValue(value)) => visitor.visit_string(value),
+            Some(Kind::CharValue(value)) => visitor.visit_char(char::from_u32(value).ok_or_else(|| error("invalid protobuf character"))?),
+            Some(Kind::BytesValue(value)) if self.byte_fields && !value.is_empty() => visitor.visit_byte_buf(value),
+            Some(Kind::U32Value(value)) => visitor.visit_u32(value),
+            Some(Kind::U64Value(value)) => visitor.visit_u64(value),
+            Some(Kind::I32Value(value)) => visitor.visit_i32(value),
+            Some(Kind::I64Value(value)) => visitor.visit_i64(value),
+            other => Err(mismatch(other, "an identifier")),
+        }
+    }
 }
 
 struct Sequence {

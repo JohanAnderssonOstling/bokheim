@@ -7,7 +7,6 @@ use kobo_device::{
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-const AUTOMATIC_POWER_OFF: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
@@ -21,13 +20,13 @@ thread_local! {
     static STATE: RefCell<PowerState> = RefCell::new(PowerState::default());
 }
 
-pub fn prepare_sleep() -> Result<(), String> {
+pub fn prepare_sleep(auto_power_off: Option<Duration>) -> Result<(), String> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if state.sleep.is_some() {
             return Err("Sleep session already active".into());
         }
-        state.sleep = Some(SleepSession::prepare(Some(AUTOMATIC_POWER_OFF)).map_err(|error| error.to_string())?);
+        state.sleep = Some(SleepSession::prepare(auto_power_off).map_err(|error| error.to_string())?);
         Ok(())
     })
 }

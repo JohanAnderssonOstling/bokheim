@@ -51,6 +51,8 @@ pub mod assets {
     pub struct BlobManifestEntry {
         pub content_hash: BookId,
         pub size_bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub byte_checksum: Option<content_address::ContentHash>,
     }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

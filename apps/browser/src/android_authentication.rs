@@ -59,7 +59,7 @@ impl Session {
         let session = Self(NEXT_ID.fetch_add(1, Ordering::Relaxed));
         let (sender, receiver) = async_channel::bounded(2);
         *active_session() = Some((session.0, sender));
-        send(serde_json::json!({"command":"open", "id":session.0, "colors":colors, "minimum":account_contract::PASSWORD_MIN_CHARACTERS}))?;
+        send(serde_json::json!({"command":"open", "id":session.0, "colors":colors, "minimum":account_contract::PASSWORD_MIN_CHARACTERS, "resendCooldownSeconds":account_contract::EMAIL_RESEND_COOLDOWN_SECONDS}))?;
         Ok((session, receiver))
     }
     pub fn complete(id: u64, error: Option<&str>) {

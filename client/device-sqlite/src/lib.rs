@@ -3,6 +3,8 @@
 //! Callers supply storage locators and database policy without knowing whether
 //! SQLite is backed by native files or a browser-installed virtual filesystem.
 
+pub mod fts5;
+
 use rusqlite::Connection;
 use std::fmt;
 use std::path::Path;

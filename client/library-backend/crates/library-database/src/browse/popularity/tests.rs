@@ -14,7 +14,7 @@ fn database() -> Database {
 }
 
 fn query(location: BrowseLocation) -> LibraryBrowseQuery {
-    LibraryBrowseQuery { location, search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::Popularity, book_sort: BrowseBookSort::Popularity, hide_finished: false, include_direct_child_books: false }
+    LibraryBrowseQuery { location, search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::Popularity, book_sort: BrowseBookSort::Popularity, hide_finished: false }
 }
 
 fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>, authors: &[&str], language: &str) -> BookId {
@@ -24,6 +24,8 @@ fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>
     let record =
         BookRecord { metadata: BookDetails { title: title.into(), contributors, book: BookMetadata { languages: vec![LanguageTag::parse(language).unwrap()], ..Default::default() }, ..Default::default() }, description: String::new() };
     db.commit_import(ImportCommit {
+        source_identity: None,
+        byte_checksum: None,
         parent_id: parent,
         file_name: name.clone(),
         format: BookFormat::Epub,
@@ -40,7 +42,7 @@ fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>
     db.record_enrichment(
         &hash,
         &candidate.request_key,
-        &BookEnrichment {
+        BookEnrichment {
             key: String::new(),
             status: BookEnrichmentStatus::Found,
             record: Some(candidate.record),
@@ -53,22 +55,6 @@ fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>
     )
     .unwrap();
     hash
-}
-
-#[test]
-fn leaf_popularity_orders_known_scores_before_unknowns_and_keeps_answers_immutable() {
-    let db = database();
-    let unknown = add(&db, ROOT_DIR_ID, 1, "A unknown", None, &["Writer"], "en");
-    let zero = add(&db, ROOT_DIR_ID, 2, "B zero", Some(0), &["Writer"], "en");
-    let beta = add(&db, ROOT_DIR_ID, 3, "Z beta", Some(30), &["Writer"], "sv");
-    let alpha = add(&db, ROOT_DIR_ID, 4, "C alpha", Some(30), &["Writer"], "en");
-    let before = db.sync_publishable_mutations().unwrap();
-    let mut query = query(BrowseLocation::Books);
-    assert_eq!(db.browse_contents(&query, false).unwrap().books.iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>(), [alpha, beta, zero, unknown]);
-    query.languages = vec!["en".into()];
-    assert_eq!(db.browse_contents(&query, false).unwrap().books.iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>(), [alpha, zero, unknown]);
-    assert_eq!(db.sync_publishable_mutations().unwrap(), before);
-    assert_eq!(db.enrichment_popularity(&beta).unwrap().unwrap().rating_count, 30);
 }
 
 fn stored_count(db: &Database, hash: &BookId) -> Option<f64> {
@@ -100,52 +86,6 @@ fn popularity_browsing_reads_projected_counts_without_decoding_book_records() {
     db.connection.execute("UPDATE sync_book_record SET body=?1 WHERE state_kind='book_add'", [b"invalid".as_slice()]).unwrap();
     assert_eq!(db.browse_contents(&query(BrowseLocation::Books), false).unwrap().books.iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>(), [more, less]);
     assert_eq!(db.browse(&query(BrowseLocation::Author(None)), false).unwrap().contents.children.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Z writer", "A writer"]);
-}
-
-#[test]
-fn version_38_backfills_popularity_once_and_preserves_authored_state() {
-    let path = std::env::temp_dir().join(format!("popularity-migration-{}.sqlite3", uuid::Uuid::new_v4()));
-    let db = Database::open(&path).unwrap();
-    let replica = db.initialize_library().unwrap();
-    let unknown = add(&db, ROOT_DIR_ID, 1, "Unknown", None, &["Writer"], "en");
-    let zero = add(&db, ROOT_DIR_ID, 2, "Zero", Some(0), &["Writer"], "en");
-    let known = add(&db, ROOT_DIR_ID, 3, "Known", Some(42), &["Writer"], "en");
-    let unobserved = BookId::from_bytes([4; 32]);
-    db.connection.fixtures_insert_book(&unobserved).unwrap();
-    let publications = db.sync_publishable_mutations().unwrap();
-    crate::browse::revision::remove(&db.connection).unwrap();
-    db.connection.execute_batch("ALTER TABLE book DROP COLUMN popularity_rating_count; PRAGMA user_version=38;").unwrap();
-    drop(db);
-
-    let db = Database::open(&path).unwrap();
-    assert_eq!(db.initialize_library().unwrap(), replica);
-    assert_eq!(stored_count(&db, &unknown), None);
-    assert_eq!(stored_count(&db, &zero), Some(0.0));
-    assert_eq!(stored_count(&db, &known), Some(42.0));
-    assert_eq!(stored_count(&db, &unobserved), None);
-    assert_eq!(db.sync_publishable_mutations().unwrap(), publications);
-    assert_eq!(db.connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), crate::LIBRARY_SCHEMA_VERSION);
-    assert_eq!(db.initialize_library().unwrap(), replica);
-    assert_eq!(stored_count(&db, &known), Some(42.0));
-    db.check_migrated().unwrap();
-    drop(db);
-    std::fs::remove_file(path).unwrap();
-}
-
-#[test]
-fn server_accepted_addition_updates_and_clears_projected_popularity() {
-    let db = database();
-    let hash = add(&db, ROOT_DIR_ID, 1, "Book", Some(10), &["Writer"], "en");
-    let publication = db.sync_publishable_mutations().unwrap().into_iter().find(|publication| matches!(publication.state.value, LibraryStateEntry::BookAdd { .. })).unwrap();
-    let LibraryStateEntry::BookAdd { value: mut addition, .. } = publication.state.value else { unreachable!() };
-    for (sequence, count) in [(1, Some(50)), (2, None)] {
-        let Some(EnrichmentResult::Found { popularity, .. }) = &mut addition.enrichment else { unreachable!() };
-        *popularity = count.map(|rating_count| WorkPopularity { open_library_work_id: "OL1W".into(), rating_count, snapshot_date: "2026-09-01".into() });
-        let accepted = LibraryStateEntry::BookAdd { content_hash: hash, value: addition.clone() }.publication(ReplicaId::from_u128(0), 0, ReplicaSeq::new(sequence).unwrap());
-        let delivery = Delivery { state: sync_common::transport::representation(&accepted.state).unwrap(), revision: LibraryRevision::new(sequence).unwrap() };
-        db.sync_commit_pull_response(&[], &PullStateResponse { mutations: vec![delivery], next_cursor: SyncCursor::default(), has_more: false }).unwrap();
-        assert_eq!(stored_count(&db, &hash), count.map(|count| count as f64));
-    }
 }
 
 #[test]

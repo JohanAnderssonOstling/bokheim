@@ -1,7 +1,7 @@
 //! One durable lifecycle for native hosts; policies supply package differences.
 use super::*;
 use std::ops::Deref;
-use update_client::blocking;
+use update_client::{blocking, native_files::sync_file};
 
 pub trait Platform: Sized {
     fn target(&self) -> String;
@@ -119,7 +119,52 @@ impl<P: Platform> NativeHost<P> {
                 return Err(error);
             }
         }
+        if let Err(error) = self.prepare_taxonomy(&lock) {
+            self.coordinator.activation_recovered_for_retry(now(), WaitReason::Retry, error.clone())?;
+            return Err(error);
+        }
         Ok(self.view())
+    }
+
+    /// Publish an immutable reference for the next process. The running
+    /// process keeps its selected snapshot and all existing library handles.
+    fn prepare_taxonomy(&mut self, lock: &UpdateLock) -> Result<(), String> {
+        if !self.coordinator.is_taxonomy_only() || !self.coordinator.record().approved.as_ref().is_some_and(|plan| matches!(plan.phase, Phase::Ready | Phase::Activating)) {
+            return Ok(());
+        }
+        let manifest = self.coordinator.approved_manifest()?;
+        let release = manifest.taxonomy.as_ref().ok_or("missing taxonomy release")?;
+        let mut installed = self.installed()?;
+        if installed.application < release.minimum_application_version || installed.schema < release.minimum_schema_version || !installed.taxonomy_formats.contains(&release.format_version) {
+            return Err("taxonomy is incompatible with the installed application".into());
+        }
+        let paths = self.coordinator.staged_paths(&self.root, lock)?;
+        let source = &paths.iter().find(|(kind, _)| *kind == ArtifactKind::Taxonomy).ok_or("missing staged taxonomy")?.1;
+        let id = &self.coordinator.record().approved.as_ref().ok_or("missing approved taxonomy")?.id;
+        let directory = self.root.join("generations").join(id);
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let path = directory.join("taxonomy.sqlite3");
+        // Never overwrite a snapshot selected by this or another process,
+        // including a retry after publication but before acknowledgement.
+        if active(&self.root)?.as_ref().is_none_or(|active| active.path != path) {
+            activation::copy_file(source, &path)?;
+            if subject_projection::installed::metadata(&path)? != (release.release_id, release.format_version) {
+                return Err("taxonomy version differs from signed manifest".into());
+            }
+            subject_projection::installed::prepare(&path)?;
+            sync_file(&path)?;
+            activation::sync_dir(&directory)?;
+            activation::sync_dir(&self.root.join("generations"))?;
+            self.coordinator.begin_activation()?;
+            activation::write_json(&self.root.join("active-taxonomy.json"), &ActiveTaxonomy { path, release: release.release_id })?;
+        } else {
+            if subject_projection::installed::metadata(&path)? != (release.release_id, release.format_version) {
+                return Err("published taxonomy differs from approved release".into());
+            }
+            self.coordinator.begin_activation()?;
+        }
+        installed.taxonomy_release = release.release_id;
+        self.coordinator.activated(installed)
     }
 
     pub(crate) fn reload_locked(&mut self) -> Result<UpdateLock, String> {
@@ -174,6 +219,11 @@ impl<P: Platform> NativeHost<P> {
     }
 
     pub(crate) fn workspace_bytes(&self) -> Result<u64, String> {
+        if self.coordinator.is_taxonomy_only() {
+            return self.coordinator.record().approved.as_ref().ok_or("missing approved taxonomy")?.artifacts.iter().try_fold(0_u64, |bytes, artifact| {
+                bytes.checked_add(artifact.artifact.bytes.checked_mul(2).ok_or("taxonomy workspace overflow")?).ok_or_else(|| "taxonomy workspace overflow".into())
+            });
+        }
         self.platform.workspace(self)
     }
 

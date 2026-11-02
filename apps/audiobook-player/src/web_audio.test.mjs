@@ -126,6 +126,7 @@ function setup(media = true) {
     return {player, actions, session, saves};
 }
 
+
 test('media errors under direct recovery do not discard the session', async t => {
     const {player, config} = directPlayer(t, async () => ({...config, url: 'https://audio.invalid/api/playback/new'}));
     player.validUntil = Infinity;

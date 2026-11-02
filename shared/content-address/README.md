@@ -1,38 +1,47 @@
-# Content addresses
+# Book identities and content hashes
 
-`ContentHash` stores a raw 32-byte BLAKE3 digest. Hexadecimal is used for text
-boundaries such as filenames, URLs and JSON; SQLite uses BLOB and PostgreSQL
-uses bytea. Binary storage and transport messages contain the raw digest.
-The same crate provides streaming byte-hashing helpers for native and browser
-readers. Hashing does not interpret file formats.
+`ContentHash` is the BLAKE3 digest of the complete current byte stream. Hashing
+never interprets or modifies a file. MP3 folders use the digest of their
+reproducible archive, including track order and sidecars.
 
-Book files use the BLAKE3 hash of their complete current bytes as identity.
-PDF and M4B follow the same rule as EPUB and other single-file formats.
-`hash_file` seeks to the start and hashes the file; `hash_reader` hashes from the
-reader's current position. Neither parses formats nor modifies files.
+`BookId` identifies a logical book independently of its current local bytes:
 
-External edits to metadata, covers, chapters or content change identity.
-Renaming a file preserves its identity because its bytes are unchanged.
-Existing `BokheimContentHash` PDF markers are ignored, including malformed
-markers. They remain part of the bytes being hashed and are not removed.
-Enrichment and reader annotations belong in the library database.
+- Existing content-addressed IDs retain their exact 32-byte encoding.
+- Provider IDs use tag `01` and a digest of the scoped provider file identity.
+- New local IDs use tag `02` and a digest of the library ID and first observed
+  checksum. They remain stable when annotations are written into the local PDF.
 
-Every book has one content hash for library identity, storage and transfer
-verification. Uploads verify bytes against the hash in the URL; downloads use
-that same hash as their ETag. MP3 folders use the hash of their reproducible
-ZIP archive, including track order and NFO, CUE and cover sidecars. Editing
-any included bytes changes the folder's identity.
+Tagged IDs cannot be converted into `ContentHash`. Hexadecimal is used at text
+boundaries; SQLite and binary transport retain the raw bytes and identity tag.
+A legacy ID's `content_hash()` exposes its historical digest, which is not a
+substitute for a separately recorded revision checksum.
 
-PDF entries created with embedded original-hash identities and M4B entries
-created with audio fingerprints, and MP3 folders created with track-only hashes have different keys from the byte-hash scheme.
-Those existing entries require migration or reimport before their assets can
-be verified with this implementation. Clients and servers must use the same
-identity scheme. This change does not rewrite existing files or library data.
+The first successful upload fixes the canonical checksum and byte length.
+Annotations already written into the PDF before that upload are included in
+its canonical bytes. Later PDF writes update only the current local checksum,
+local fingerprint, and local aliases. Annotation and reading-position records
+continue using the stable book ID. The filesystem fingerprint is an inexpensive
+mtime/size/inode observation, separate from the byte checksum.
 
-This consolidation uses library schema 26, sync server schema 7 and transport
-version 26, with binary storage version 15. Earlier library databases require migration or recreation. The
-server schema upgrade rejects legacy identity-to-blob mappings that differ;
-those books must be migrated or reimported first.
+Uploads address the book ID and supply `x-bokheim-content-hash` independently.
+The server verifies the complete byte stream and refuses to replace an uploaded
+revision. Downloads advertise the canonical checksum and verify bytes against
+it. A PDF's canonical reader metadata describes that uploaded revision; local
+writebacks never replace its server-side offsets or bytes.
 
-Book register keys, pagination cursors and browser worker hash results use
-raw content hashes internally. Other register identifiers remain text IDs.
+Local aliases map historical byte checksums to stable book IDs. They are never
+synchronized. Scanning and import resolve these aliases before assigning a new
+identity. A reader resolves a byte-hash reference once when opening; its normal
+annotation and progress queries continue using the stable ID.
+
+PDF exporters can add the versioned `BokheimSourceIdentity` catalog dictionary
+through `book_inspection::PdfSourceIdentity`. It contains the stable book ID
+and, when known, its canonical checksum. This is a recovery hint rather than
+proof of a file's contents. The resulting file is still hashed in full. Legacy
+`BokheimContentHash` markers remain ordinary bytes and are ignored for identity.
+
+Library schema 45 preserves existing IDs and records their known uploaded
+checksums. Sync schema 14 binds each logical book to an immutable byte checksum.
+Identical canonical bytes share physical storage and count once toward each
+account’s quota, including across libraries. Existing uploads are backfilled.
+Neither migration rewrites book files.

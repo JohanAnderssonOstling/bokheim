@@ -1,0 +1,15 @@
+[package]
+name = "dictionary-settings"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dictionary = { path = "../../client/app/crates/dictionary", features = ["client"] }
+dictionary-catalog = { path = "../../shared/dictionary-catalog" }
+ui-components = { path = "../components" }
+gpui.workspace = true
+gpui-component.workspace = true
+sys-locale = { version = "0.3", features = ["js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-util = { version = "0.3", features = ["io"] }

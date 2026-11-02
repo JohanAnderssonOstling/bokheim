@@ -81,7 +81,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::new();
+        let client = http_response::client();
 
         for status in [401, 403, 410, 404, 500, 200] {
             let error = send::<_, ()>(client.post(origin.join(&status.to_string()).unwrap()), &()).await.unwrap_err();
@@ -124,7 +124,7 @@ mod tests {
             value: OpaqueStateEntry { address: StateAddress { kind: "reading_position".into(), entity_key: book.into(), entity_subkey: "epub".into() }, book: Some(book), bytes: (0..128 * 1024).map(|byte| byte as u8).collect() },
             version: VersionKey::new(1, ConflictRank::Update, ReplicaId::from_u128(1), ReplicaSeq::new(1).unwrap()),
         };
-        let response = exchange_changes(&reqwest::Client::new(), &credentials, LibraryId::from_u128(3), ReplicaId::from_u128(1), vec![OpaquePublication { publisher_seq: ReplicaSeq::new(1).unwrap(), state: state.clone() }], SyncCursor::default()).await.unwrap();
+        let response = exchange_changes(&http_response::client(), &credentials, LibraryId::from_u128(3), ReplicaId::from_u128(1), vec![OpaquePublication { publisher_seq: ReplicaSeq::new(1).unwrap(), state: state.clone() }], SyncCursor::default()).await.unwrap();
         assert_eq!(response.pull.mutations[0].state, state);
         assert_eq!(response.pull.next_cursor.generation, Some(LibraryId::from_u128(2)));
         server.abort();

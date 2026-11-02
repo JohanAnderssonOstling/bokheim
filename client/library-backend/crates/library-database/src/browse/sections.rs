@@ -126,19 +126,11 @@ mod tests {
                             chip_sort: BrowseChipSort::Popularity,
                             book_sort: sort,
                             hide_finished: true,
-                            include_direct_child_books: false,
                         };
                         let full = db.browse(&query, downloaded_only).unwrap();
                         assert_windows(&db, &query, downloaded_only);
-                        let first = db.browse_sections(&query, downloaded_only, 2).unwrap();
-                        assert_eq!(first.contents, full.contents);
-                        assert_eq!(first.sections.len(), full.sections.len());
-                        for (page, complete) in first.sections.iter().zip(full.sections.iter()) {
-                            assert_eq!(page.parent, complete.parent);
-                            assert_eq!(page.children, complete.children);
-                            assert_eq!(page.book_count, Some(complete.books.len()));
-                            assert_eq!(page.books, complete.books[..complete.books.len().min(2)]);
-                            query.location = page.parent.id;
+                        for complete in &full.sections {
+                            query.location = complete.parent.id;
                             assert_windows(&db, &query, downloaded_only);
                             let mut concatenated = Vec::new();
                             for offset in (0..complete.books.len()).step_by(2) {
@@ -160,7 +152,11 @@ mod tests {
     }
 
     fn assert_windows(db: &Database, query: &LibraryBrowseQuery, downloaded_only: bool) {
-        let full = db.browse_sections(query, downloaded_only, library_model::BROWSE_SECTION_BOOK_LIMIT).unwrap();
+        let mut full = db.browse(query, downloaded_only).unwrap();
+        for section in &mut full.sections {
+            section.book_count = Some(section.books.len());
+            section.books.truncate(library_model::BROWSE_SECTION_BOOK_LIMIT);
+        }
         let first = db.browse_page(query, downloaded_only, BrowsePageRequest { section_limit: 1, book_limit: 0, ..Default::default() }).unwrap();
         let heading_state = first.page.unwrap().headings;
         let total = heading_state.as_ref().map_or(full.sections.len(), |headings| headings.total);
@@ -224,7 +220,6 @@ mod tests {
             chip_sort: BrowseChipSort::Alphabetical,
             book_sort: BrowseBookSort::Alphabetical,
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let first = db.browse_page(&query, false, BrowsePageRequest::default()).unwrap();
         assert_eq!(first.contents.children.len(), 24);
@@ -273,7 +268,6 @@ mod tests {
                     chip_sort: BrowseChipSort::Alphabetical,
                     book_sort: BrowseBookSort::Alphabetical,
                     hide_finished: false,
-                    include_direct_child_books: true,
                 };
                 assert_windows(&db, &query, false);
                 let first = db.browse_page(&query, false, BrowsePageRequest { book_limit: 2, ..Default::default() }).unwrap();

@@ -29,6 +29,8 @@ pub mod web {
 pub mod cpu {
     #[cfg(target_arch = "wasm32")]
     pub use crate::runtime::bisac::install as initialize_bisac_reference;
+    #[cfg(target_arch = "wasm32")]
+    pub use crate::runtime::taxonomy::install_bundled_matching as initialize_bundled_taxonomy;
     pub use cpu_host::{execute, execute_book_with_mobi, BookTask, CpuRequest, CpuResponse, ThumbnailBytes};
 }
 

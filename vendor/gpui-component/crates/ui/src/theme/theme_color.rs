@@ -29,10 +29,7 @@ impl Deref for ThemeToken {
 
 impl From<Hsla> for ThemeToken {
     fn from(color: Hsla) -> Self {
-        Self {
-            color,
-            background: color.into(),
-        }
+        Self { color, background: color.into() }
     }
 }
 
@@ -515,11 +512,11 @@ define_theme_tokens! {
 impl ThemeColor {
     /// Get the default light theme colors.
     pub fn light() -> Arc<Self> {
-        DEFAULT_THEME_COLORS[&ThemeMode::Light].0.clone()
+        DEFAULT_THEME_COLORS[&ThemeMode::Light].clone()
     }
 
     /// Get the default dark theme colors.
     pub fn dark() -> Arc<Self> {
-        DEFAULT_THEME_COLORS[&ThemeMode::Dark].0.clone()
+        DEFAULT_THEME_COLORS[&ThemeMode::Dark].clone()
     }
 }

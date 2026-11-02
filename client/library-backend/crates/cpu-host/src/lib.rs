@@ -7,15 +7,16 @@
 //! handles, and launchers may override the process-wide default.
 
 use content_address::BookId;
+use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use std::sync::OnceLock;
-use serde::{Deserialize, Serialize};
 
 use client_platform_runtime::executor::BoxedBackendFuture;
 pub use client_runtime::BackendError;
-pub use update_protocol::Artifact;
 use std::sync::Arc;
+pub use update_protocol::Artifact;
+mod text_search;
 
 /// Byte reader handed to CPU work. A single trait keeps the object type legal;
 /// holders of book-access readers convert them with [`as_cpu_reader`].
@@ -23,30 +24,37 @@ pub trait CpuReader: Read + Seek + Send + Sync + 'static {}
 impl<T: Read + Seek + Send + Sync + 'static> CpuReader for T {}
 pub type BoxedCpuReader = Box<dyn CpuReader>;
 
-struct HostReader<R>(R);
-impl<R: Read> Read for HostReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-impl<R: Seek> Seek for HostReader<R> {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.0.seek(pos)
-    }
-}
-
 /// Adapt an owned book reader (for example a book-access reader) for CPU work.
 /// The opened reader owns its bytes; callers must not hold placement leases
 /// across the conversion.
 pub fn as_cpu_reader<R: Read + Seek + Send + Sync + 'static>(reader: R) -> BoxedCpuReader {
-    Box::new(HostReader(reader))
+    Box::new(reader)
 }
 
 /// Metadata and cover parsers request ranges from the storage owner.
 #[derive(Serialize, Deserialize)]
 pub enum BookTask {
-    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<BookId> },
-    Thumbnail { extension: String },
+    Inspect {
+        source_name: String,
+        format: book_model::BookFormat,
+        content_hash: Option<BookId>,
+        #[serde(default)]
+        cached_pdf: Option<book_inspection::CachedPdfReader>,
+    },
+    InspectEpubMetadata {
+        source_name: String,
+    },
+    Thumbnail {
+        extension: String,
+    },
+    TextMatches {
+        format: book_model::BookFormat,
+        locations: Vec<book_model::BookTextLocation>,
+        query: String,
+    },
+    IndexText {
+        format: book_model::BookFormat,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,23 +64,11 @@ pub enum CpuResponse {
     Hash(BookId),
     Thumbnail(Option<ThumbnailBytes>),
     Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
+    TextMatches(Vec<book_model::BookTextMatch>),
+    TextIndex(book_model::BookTextIndex),
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ThumbnailBytes {
-    #[serde(with = "serde_bytes")]
-    pub browse: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    pub card_high_density: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    pub high_density: Vec<u8>,
-}
-
-impl From<thumbnail::ThumbnailVersions> for ThumbnailBytes {
-    fn from(versions: thumbnail::ThumbnailVersions) -> Self {
-        Self { browse: versions.browse, card_high_density: versions.card_high_density, high_density: versions.high_density }
-    }
-}
+pub use thumbnail::ThumbnailVersions as ThumbnailBytes;
 
 pub fn execute(request: CpuRequest) -> Result<CpuResponse, BackendError> {
     match request {
@@ -101,7 +97,7 @@ pub fn execute(request: CpuRequest) -> Result<CpuResponse, BackendError> {
         }
         CpuRequest::Cover { bytes } => {
             let versions = cover_thumbnails(&bytes).map_err(BackendError::operation)?;
-            Ok(CpuResponse::Thumbnail(Some(versions.into())))
+            Ok(CpuResponse::Thumbnail(Some(versions)))
         }
         CpuRequest::Resize { width, bytes } => {
             // The worker accepts only the product's supported display buckets.
@@ -129,15 +125,14 @@ thread_local! {
     static HASHERS: std::cell::RefCell<std::collections::HashMap<String, blake3::Hasher>> = Default::default();
 }
 
-
-pub fn execute_book_with_mobi<R: Read + Seek + Send + Sync + 'static>(
-    task: BookTask, mut reader: R, mobi_pages: fn(&Path, &[u8]) -> Result<book_model::BookMetadata, BackendError>,
-) -> Result<CpuResponse, BackendError> {
+pub fn execute_book_with_mobi<R: Read + Seek + Send + Sync + 'static>(task: BookTask, mut reader: R, mobi_pages: fn(&Path, &[u8]) -> Result<book_model::BookMetadata, BackendError>) -> Result<CpuResponse, BackendError> {
     match task {
-        BookTask::Inspect { source_name, format, content_hash } => {
+        BookTask::TextMatches { format, locations, query } => text_search::previews(format, Box::new(reader), locations, &query).map(CpuResponse::TextMatches),
+        BookTask::IndexText { format } => text_search::index(format, Box::new(reader)).map(CpuResponse::TextIndex),
+        BookTask::Inspect { source_name, format, content_hash, cached_pdf } => {
             let path = Path::new(&source_name);
             if format != book_model::BookFormat::Mobi {
-                return book_inspection::inspect_book_reader_with_hash(path, format, reader, content_hash).map(CpuResponse::Inspection).map_err(BackendError::operation);
+                return book_inspection::inspect_book_reader_with_cached_pdf(path, format, reader, content_hash, cached_pdf).map(CpuResponse::Inspection).map_err(BackendError::operation);
             }
             // Page evidence joins the file facts the metadata server is asked about.
             let mut bytes = Vec::new();
@@ -159,7 +154,11 @@ pub fn execute_book_with_mobi<R: Read + Seek + Send + Sync + 'static>(
             }
             Ok(CpuResponse::Inspection(inspected))
         }
-        BookTask::Thumbnail { extension } => thumbnail::generate_thumbnail_versions_with_pdf_renderer(&extension, reader, thumbnail::render_pdf_cover).map(|versions| CpuResponse::Thumbnail(versions.map(ThumbnailBytes::from))).map_err(BackendError::operation),
+        BookTask::InspectEpubMetadata { source_name } => {
+            let inspected = book_inspection::inspect_epub_metadata_reader(Path::new(&source_name), reader).map_err(BackendError::operation)?;
+            Ok(CpuResponse::Inspection(book_inspection::InspectedBook { metadata: inspected.metadata, toc: inspected.toc, pdf: None, audiobook: None }))
+        }
+        BookTask::Thumbnail { extension } => thumbnail::generate_thumbnail_versions_with_pdf_renderer(&extension, reader, thumbnail::render_pdf_cover).map(CpuResponse::Thumbnail).map_err(BackendError::operation),
     }
 }
 
@@ -177,7 +176,8 @@ macro_rules! operations {
         #[derive(Serialize, Deserialize)]
         pub enum CpuRequest {
             /// `taxonomy` names the snapshot a browser CPU worker loads before
-            /// inspecting; native hosts share the process taxonomy and send none.
+            /// inspecting. None selects the web app's bundled reference;
+            /// native hosts share the process taxonomy and also send none.
             Book { task: BookTask, taxonomy: Option<Artifact> },
             $($name { $($(#[$attribute])* $field: $ty),* }),*
         }
@@ -215,7 +215,10 @@ macro_rules! book_operations {
     )*};
 }
 book_operations! {
-    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<BookId> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
+    IndexText { format: book_model::BookFormat } => book_model::BookTextIndex, CpuResponse::TextIndex(index) => index;
+    TextMatches { format: book_model::BookFormat, locations: Vec<book_model::BookTextLocation>, query: String } => Vec<book_model::BookTextMatch>, CpuResponse::TextMatches(matches) => matches;
+    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<BookId>, cached_pdf: Option<book_inspection::CachedPdfReader> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
+    InspectEpubMetadata { source_name: String } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     Thumbnail { extension: String } => Option<ThumbnailBytes>, CpuResponse::Thumbnail(versions) => versions;
 }
 
@@ -225,7 +228,9 @@ book_operations! {
 pub trait CpuHost: Send + Sync + 'static {
     fn book(&self, task: BookTask, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>>;
     fn request(&self, request: CpuRequest) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>>;
-    fn generate_thumbnail(&self, extension: String, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailBytes>, BackendError>>;
+    fn generate_thumbnail(&self, extension: String, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailBytes>, BackendError>> {
+        Box::pin(async move { Thumbnail::decode(self.book(BookTask::Thumbnail { extension }, reader).await?) })
+    }
 }
 
 pub async fn submit<O: Operation>(host: &dyn CpuHost, operation: O) -> Result<O::Reply, BackendError> {
@@ -253,7 +258,6 @@ pub static HOST: OnceLock<Arc<dyn CpuHost>> = OnceLock::new();
 pub fn set_cpu_host(host: Arc<dyn CpuHost>) -> Result<(), Arc<dyn CpuHost>> {
     HOST.set(host)
 }
-
 
 /// Remote BLAKE3 session over any host. Dropping an unfinished session
 /// releases the worker-side hasher.
@@ -302,6 +306,47 @@ mod tests {
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&response).unwrap()).unwrap()
     }
 
+    #[test]
+    fn reader_epub_operation_roundtrips_and_omits_page_evidence() {
+        let task = InspectEpubMetadata { source_name: "book.epub".into() }.task();
+        let encoded = rmp_serde::to_vec_named(&task).unwrap();
+        let task = rmp_serde::from_slice(&encoded).unwrap();
+        let bytes = include_bytes!("../../book-inspection/tests/fixtures/back-matter-evidence.epub");
+        let response = execute_book_with_mobi(task, Cursor::new(bytes.to_vec()), |_, _| panic!("EPUB metadata must not invoke MOBI inspection")).unwrap();
+        let CpuResponse::Inspection(inspection) = response else { panic!("expected EPUB metadata") };
+        assert_eq!(inspection.metadata.title, "Science History");
+        assert!(inspection.metadata.book.identifiers.is_empty());
+        assert!(inspection.pdf.is_none());
+        assert!(inspection.audiobook.is_none());
+    }
+
+    #[test]
+    fn shared_thumbnail_versions_keep_the_previous_worker_encoding() {
+        #[derive(Serialize, Deserialize)]
+        struct PreviousThumbnailBytes {
+            #[serde(with = "serde_bytes")]
+            browse: Vec<u8>,
+            #[serde(with = "serde_bytes")]
+            card_high_density: Vec<u8>,
+            #[serde(with = "serde_bytes")]
+            high_density: Vec<u8>,
+        }
+
+        let previous = PreviousThumbnailBytes { browse: vec![0, 128, 255], card_high_density: vec![1, 129, 254], high_density: vec![2, 130, 253] };
+        for named in [false, true] {
+            let original = if named { rmp_serde::to_vec_named(&previous).unwrap() } else { rmp_serde::to_vec(&previous).unwrap() };
+            let versions: ThumbnailBytes = rmp_serde::from_slice(&original).unwrap();
+            assert_eq!(versions.browse, previous.browse);
+            assert_eq!(versions.card_high_density, previous.card_high_density);
+            assert_eq!(versions.high_density, previous.high_density);
+            let encoded = if named { rmp_serde::to_vec_named(&versions).unwrap() } else { rmp_serde::to_vec(&versions).unwrap() };
+            assert_eq!(encoded, original);
+            let decoded: PreviousThumbnailBytes = rmp_serde::from_slice(&encoded).unwrap();
+            assert_eq!(decoded.browse, previous.browse);
+            assert_eq!(decoded.card_high_density, previous.card_high_density);
+            assert_eq!(decoded.high_density, previous.high_density);
+        }
+    }
 
     #[test]
     fn hashing_worker_returns_digest_bytes() {

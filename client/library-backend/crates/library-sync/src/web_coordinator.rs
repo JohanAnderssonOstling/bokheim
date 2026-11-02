@@ -2,11 +2,11 @@
 //! coordinator's network worker; this WASM entry point never opens storage.
 #![cfg(target_arch = "wasm32")]
 
-use crate::engine::{StoreFuture, SyncStore};
-use crate::state_sync::{PublicationOutbox, acknowledge, apply_response, next_outbox_page, prepare_outbox};
+use crate::engine::{PreparedSync, StoreFuture, SyncStore};
+use crate::state_sync::{PublicationOutbox, acknowledge, apply_response, next_outbox_page, prepare_outbox, prepare_sync};
 use library_runtime::events::LibraryEventRouter;
 use serde::{Deserialize, Serialize};
-use sync_common::{LibraryId, PullStateResponse, ReplicaId, ReplicaSeq, SyncCursor};
+use sync_common::{LibraryId, PullStateResponse, ReplicaId, ReplicaSeq};
 
 #[derive(Serialize, Deserialize)]
 struct SyncInput {
@@ -24,10 +24,9 @@ struct SyncOutput {
 
 #[derive(Serialize, Deserialize)]
 enum StorageCommand {
-    CursorRecoveryPending,
+    PrepareSync,
     BeginCursorRecovery,
     CompleteCursorRecovery,
-    PullCursor,
     PrepareOutbox,
     PendingMutations,
     AcknowledgeMutations(Vec<ReplicaSeq>),
@@ -50,13 +49,24 @@ async fn storage_command(database: &library_database::Database, events: Option<&
             }
             rmp_serde::to_vec_named(&()).map_err(|error| error.to_string())
         }
-        StorageCommand::CursorRecoveryPending => reply!(database.sync_cursor_recovery_pending()),
+        StorageCommand::PrepareSync => {
+            let prepared = match prepare_sync(database, events).map_err(|error| error.to_string())? {
+                PreparedSync::RecoveryPending => {
+                    *scan = None;
+                    PreparedSync::RecoveryPending
+                }
+                PreparedSync::Ready { cursor, outbox, mutations } => {
+                    *scan = Some(outbox);
+                    PreparedSync::Ready { cursor, outbox: (), mutations }
+                }
+            };
+            rmp_serde::to_vec_named(&prepared).map_err(|error| error.to_string())
+        }
         StorageCommand::BeginCursorRecovery => reply!(database.sync_begin_cursor_recovery()),
         StorageCommand::CompleteCursorRecovery => {
             let inserted = crate::recovery::complete(database).await.map_err(|error| error.to_string())?;
             rmp_serde::to_vec_named(&inserted).map_err(|error| error.to_string())
         }
-        StorageCommand::PullCursor => reply!(database.sync_pull_cursor()),
         StorageCommand::PrepareOutbox => {
             *scan = Some(prepare_outbox(database, events).map_err(|error| error.to_string())?);
             rmp_serde::to_vec_named(&()).map_err(|error| error.to_string())
@@ -103,14 +113,14 @@ impl CoordinatorStore {
 impl SyncStore for CoordinatorStore {
     type Outbox = ();
 
+    fn prepare_sync(&self) -> StoreFuture<'_, PreparedSync<Self::Outbox>> {
+        self.command(StorageCommand::PrepareSync)
+    }
     fn prepare_outbox(&self) -> StoreFuture<'_, Self::Outbox> {
         self.command(StorageCommand::PrepareOutbox)
     }
     fn record_mutation_issues(&self, issues: &[sync_common::MutationIssue]) -> StoreFuture<'_, ()> {
         self.command(StorageCommand::RecordMutationIssues(issues.to_vec()))
-    }
-    fn cursor_recovery_pending(&self) -> StoreFuture<'_, bool> {
-        self.command(StorageCommand::CursorRecoveryPending)
     }
     fn begin_cursor_recovery(&self) -> StoreFuture<'_, ()> {
         self.command(StorageCommand::BeginCursorRecovery)
@@ -118,17 +128,14 @@ impl SyncStore for CoordinatorStore {
     fn complete_cursor_recovery(&self) -> StoreFuture<'_, usize> {
         self.command(StorageCommand::CompleteCursorRecovery)
     }
-    fn pull_cursor(&self) -> StoreFuture<'_, SyncCursor> {
-        self.command(StorageCommand::PullCursor)
-    }
     fn pending_mutations<'a>(&'a self, _scan: &'a mut Self::Outbox) -> StoreFuture<'a, Vec<library_replica::StatePublication>> {
         self.command(StorageCommand::PendingMutations)
     }
     fn acknowledge_mutations(&self, ids: &[ReplicaSeq]) -> StoreFuture<'_, ()> {
         self.command(StorageCommand::AcknowledgeMutations(ids.to_vec()))
     }
-    fn apply_exchange_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> StoreFuture<'_, ()> {
-        self.command(StorageCommand::ApplyExchangeResponse { ids: ids.to_vec(), page: page.clone() })
+    fn apply_exchange_response(&self, ids: Vec<ReplicaSeq>, page: PullStateResponse) -> StoreFuture<'_, ()> {
+        self.command(StorageCommand::ApplyExchangeResponse { ids, page })
     }
 }
 
@@ -138,7 +145,7 @@ pub async fn run(bytes: &[u8], storage: client_platform_web::transport::BytesOpe
     let server_url = sync_transport::Url::parse(&input.server_url).map_err(|error| error.to_string())?;
     let credentials = Some(sync_transport::SyncCredentials::new(server_url, input.access_token));
     let store = CoordinatorStore(storage);
-    let client = reqwest::Client::new();
+    let client = http_response::client();
     let engine = crate::engine::SyncEngine::new(crate::engine::SyncEngineConfig { store, http_client: &client, library_id: input.library_id, replica_id: input.replica_id, credentials });
     let result = if input.outbox_only { engine.drain_outbox().await } else { engine.synchronize().await }.map(|outcome| outcome.mutation_issues);
     rmp_serde::to_vec_named(&SyncOutput { result }).map_err(|error| error.to_string())

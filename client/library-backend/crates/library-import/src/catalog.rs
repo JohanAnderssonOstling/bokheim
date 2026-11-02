@@ -17,7 +17,7 @@ impl LibraryImport {
         let book = library_database::catalog::entry(CardKey::from(hash)).map_err(BackendError::operation)?.filter(|book| book.hash.is_some()).ok_or_else(|| BackendError::classified(Failure::NotFound, "the book is not in the catalog"))?;
         let entry = CardKey::from(hash);
         let bytes = library_catalog::download_book_with_progress(hash, &|progress| self.events.publish_update(LibraryUpdate::CatalogImport { entry, progress })).await?;
-        self.import_catalog_download(parent_id, &book, bytes).await
+        self.import_catalog_download(parent_id, book, bytes).await
     }
 
     /// Downloads an external audiobook from its source and imports it with
@@ -25,7 +25,7 @@ impl LibraryImport {
     pub async fn import_external_catalog_audiobook(&self, parent_id: DirId, entry: CardKey) -> Result<BookId, BackendError> {
         let book = library_database::catalog::entry(entry).map_err(BackendError::operation)?.filter(|book| book.hash.is_none()).ok_or_else(|| BackendError::classified(Failure::NotFound, "the audiobook is not in the catalog"))?;
         let bytes = library_catalog::download_audiobook_with_progress(entry, &|progress| self.events.publish_update(LibraryUpdate::CatalogImport { entry, progress })).await?;
-        let imported = self.import_catalog_download(parent_id, &book, bytes).await?;
+        let imported = self.import_catalog_download(parent_id, book, bytes).await?;
         self.refresh_external_catalog_audiobook_cover(imported, entry).await?;
         Ok(imported)
     }
@@ -50,19 +50,19 @@ impl LibraryImport {
         Ok(true)
     }
 
-    async fn import_catalog_download(&self, parent_id: DirId, book: &CatalogBook, bytes: Vec<u8>) -> Result<BookId, BackendError> {
-        let name = if book.author.is_empty() { book.title.clone() } else { format!("{} - {}", book.author, book.title) };
+    async fn import_catalog_download(&self, parent_id: DirId, book: CatalogBook, bytes: Vec<u8>) -> Result<BookId, BackendError> {
         let extension = book.format().canonical_extension();
+        let name = if book.author.is_empty() { book.title } else { format!("{} - {}", book.author, book.title) };
         let file_name = format!("{}.{extension}", name.replace(['/', '\\', ':'], " ").trim());
         let imported = self.import_downloaded_book(parent_id, &file_name, bytes).await?;
-        self.database.record_catalog_answer(&imported, book.record.clone()).map_err(BackendError::operation)?;
+        self.database.record_catalog_answer(&imported, book.record).map_err(BackendError::operation)?;
         Ok(imported)
     }
 
     /// Imports a downloaded file as if it were a local one.
     pub async fn import_downloaded_book(&self, parent_id: DirId, file_name: &str, bytes: Vec<u8>) -> Result<BookId, BackendError> {
         let mut import = self.validate_import(&parent_id, file_name)?;
-        let (name, staged) = stage_import(&self.assets, &self.database, parent_id, import.file_name.clone(), Box::new(std::io::Cursor::new(bytes)), Default::default()).await.map_err(BackendError::operation)?;
+        let (name, staged) = stage_import(&self.assets, &self.database, parent_id, &import.file_name, Box::new(std::io::Cursor::new(bytes)), Default::default()).await.map_err(BackendError::operation)?;
         import.file_name = name;
         self.finish_import(import, staged).await
     }
@@ -104,6 +104,8 @@ mod tests {
         let record = BookRecord { metadata: BookDetails { title: "Audio book".into(), ..Default::default() }, description: String::new() };
         database
             .commit_import(ImportCommit {
+                source_identity: None,
+                byte_checksum: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: "Story".into(),
                 format: BookFormat::Mp3Folder,
@@ -125,17 +127,14 @@ mod tests {
         catalog.execute_batch(include_str!("../../library-database/tests/sql/catalog_pagination.sql")).unwrap();
         catalog
             .execute_batch(
-                "INSERT INTO snapshot VALUES(1,8,1);
+                "INSERT INTO snapshot VALUES(1,11,1);
                  INSERT INTO source VALUES(1,'example.org');
-                 INSERT INTO description VALUES(1,''),(2,'Reviewed catalog description');
-                 INSERT INTO subject_source VALUES(1,'manual:subject');
-                 INSERT INTO subject_authority VALUES(1,'unified');
-                 INSERT INTO subject VALUES(1,NULL,'Short Stories',NULL,1,1,'Literature / Genres / Literary Forms / Forms & Literary Traditions / Short Stories');",
+                 INSERT INTO description VALUES(1,''),(2,'Reviewed catalog description');",
             )
             .unwrap();
         catalog.execute("INSERT INTO book(row_id,key,external,title,description_id,source_id,entry_url,format) VALUES(1,?1,1,'Audio book',1,1,'https://example.org/book',16)", [&key.0[..]]).unwrap();
         catalog.execute("INSERT INTO book(row_id,key,external,title,description_id,source_id,format) VALUES(2,?1,0,'Curated fixture',2,1,1)", [epub_hash.as_bytes()]).unwrap();
-        catalog.execute_batch("INSERT INTO book_source VALUES(1,1),(2,1); INSERT INTO book_subject VALUES(2,1);").unwrap();
+        catalog.execute_batch("INSERT INTO book_source VALUES(1,1),(2,1); INSERT INTO book_concept VALUES(2,4107);").unwrap();
         library_database::catalog::activate(catalog.serialize("main").unwrap().to_vec()).unwrap();
 
         let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
@@ -151,13 +150,15 @@ mod tests {
         let (enrichment, _) = SyncScheduler::new();
         let (events, _) = LibraryEventRouter::new(sync, asset_work, files, enrichment);
         let placement = Arc::new(LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
-        let importer = LibraryImport { library_id: DirId::new_v4(), cloud: Default::default(), provider_upload_lock: Default::default(), database: database.clone(), assets: assets.clone(), cpu: cpu.clone(), events, placement, root: root.path().to_str().unwrap().into() };
+        let importer = LibraryImport { library_id: DirId::new_v4(), database: database.clone(), assets: assets.clone(), cpu: cpu.clone(), events, placement, root: root.path().to_str().unwrap().into() };
         // A renamed copy uses the catalog only when its actual bytes match.
         let added = importer.import_downloaded_book(ROOT_DIR_ID, "renamed.epub", epub_bytes.clone()).await.unwrap();
-        assert_eq!(added, epub_hash);
+        assert!(added.is_local());
+        assert_eq!(database.resolve_book_identity(epub_hash).unwrap(), added);
         let answer = database.enrichment_cover_record(&added).unwrap().unwrap();
         assert_eq!(answer.metadata.title, inspected.inspection.metadata.metadata.title);
-        assert_eq!(answer.book.subjects[0].source(), "manual:subject");
+        assert_eq!(answer.book.subjects[0].source(), "catalog:concept");
+        assert_eq!(answer.book.subjects[0].code(), Some("concept:4107"));
         assert_eq!(answer.book.subjects[0].authority(), Some("unified"));
         assert!(database.enrichment_candidates(&[added], i64::MAX).unwrap().is_empty());
         assert!(import_record(added, BookFormat::Pdf).unwrap().is_none());
@@ -171,20 +172,22 @@ mod tests {
         let books = InspectedFilesystemScan {
             readable: true,
             books: vec![ScannedBook {
-                directory: ROOT_DIR_ID,
+            source_identity: None,
+            directory: ROOT_DIR_ID,
                 name: "discovered.epub".into(),
                 path: "discovered.epub".into(),
                 fingerprint: inspected.fingerprint,
-                content_hash: added,
+                content_hash: epub_hash,
                 size_bytes: inspected.size_bytes,
                 extension: "epub".into(),
                 inspection: inspected.inspection,
                 inspection_version: book_inspection::inspection_version(BookFormat::Epub),
             }],
         };
-        assert_eq!(discovered.apply_filesystem_scan_batch(&mut snapshot, &discovery, &books, true, None).unwrap(), ScanApplyResult::Applied);
-        assert_eq!(discovered.enrichment_cover_record(&added).unwrap().unwrap().book.subjects, answer.book.subjects);
-        assert!(discovered.enrichment_candidates(&[added], i64::MAX).unwrap().is_empty());
+        assert_eq!(discovered.apply_filesystem_scan_batch(&mut snapshot, &discovery, books, true, None).unwrap(), ScanApplyResult::Applied);
+        let discovered_id = discovered.resolve_book_identity(epub_hash).unwrap();
+        assert_eq!(discovered.enrichment_cover_record(&discovered_id).unwrap().unwrap().book.subjects, answer.book.subjects);
+        assert!(discovered.enrichment_candidates(&[discovered_id], i64::MAX).unwrap().is_empty());
         // A valid EPUB with different bytes and the same embedded metadata must
         // still use ordinary enrichment rather than a title/author match.
         let mut different = epub_bytes.clone();

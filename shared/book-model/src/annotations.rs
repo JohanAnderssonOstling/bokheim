@@ -1,4 +1,4 @@
-use crate::UnixMillis;
+use crate::{UnixMillis, PUBLICATION_CFI_PREFIX};
 use content_address::BookId;
 use serde::{Deserialize, Serialize};
 use wire::WireError;
@@ -10,6 +10,44 @@ pub enum AnnotationStyle {
     Underline,
     Squiggly,
     Strikethrough,
+}
+
+/// Parse the opaque CSS color subset used by reader annotation files. Unknown
+/// spellings return None; malformed numeric components return their parse error.
+pub fn parse_annotation_color(value: &str) -> Result<Option<u32>, std::num::ParseIntError> {
+    let named = match value {
+        "yellow" => Some(0xffff00),
+        "orange" => Some(0xffa500),
+        "red" => Some(0xff0000),
+        "magenta" | "fuchsia" => Some(0xff00ff),
+        "aqua" | "cyan" => Some(0x00ffff),
+        "lime" => Some(0x00ff00),
+        "blue" => Some(0x0000ff),
+        "green" => Some(0x008000),
+        "black" => Some(0),
+        "white" => Some(0xffffff),
+        _ => None,
+    };
+    if named.is_some() {
+        return Ok(named);
+    }
+    if let Some(hex) = value.strip_prefix('#') {
+        let hex = if hex.len() == 3 { hex.chars().flat_map(|c| [c, c]).collect::<String>() } else { hex.into() };
+        if hex.len() == 6 {
+            return u32::from_str_radix(&hex, 16).map(Some);
+        }
+    }
+    if let Some(rgb) = value.strip_prefix("rgb(").or_else(|| value.strip_prefix("rgba(")).and_then(|value| value.strip_suffix(')')) {
+        let components = rgb.split(',').map(str::trim).collect::<Vec<_>>();
+        if components.len() == 3 || (components.len() == 4 && components[3] == "1") {
+            let mut color = 0;
+            for component in &components[..3] {
+                color = (color << 8) | component.parse::<u8>()? as u32;
+            }
+            return Ok(Some(color));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -41,24 +79,96 @@ impl PdfAnnotationAnchor {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum AnnotationAnchor {
-    EpubCfi { cfi: String },
+    EpubCfi {
+        cfi: String,
+    },
     Pdf(PdfAnnotationAnchor),
+    /// An annotation that repeats on matching text, retaining its creation passage.
+    /// Appending a variant keeps existing persisted annotation layouts intact.
+    Recurring {
+        origin: Box<AnnotationAnchor>,
+        scope: RecurringScope,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RecurringScope {
+    Chapter,
+    Book,
+    Library,
+}
+
+impl RecurringScope {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Chapter => "Chapter",
+            Self::Book => "Book",
+            Self::Library => "Library",
+        }
+    }
 }
 
 impl AnnotationAnchor {
+    pub fn origin(&self) -> &Self {
+        match self {
+            Self::Recurring { origin, .. } => origin.origin(),
+            _ => self,
+        }
+    }
+
+    pub fn recurring_scope(&self) -> Option<RecurringScope> {
+        match self {
+            Self::Recurring { scope, .. } => Some(*scope),
+            _ => None,
+        }
+    }
+
+    /// Changing scope never changes the creation passage.
+    pub fn with_recurring_scope(&self, scope: Option<RecurringScope>) -> Self {
+        let origin = self.origin().clone();
+        match scope {
+            Some(scope) => Self::Recurring { origin: Box::new(origin), scope },
+            None => origin,
+        }
+    }
+
+    pub fn with_origin(&self, origin: Self) -> Self {
+        origin.with_recurring_scope(self.recurring_scope())
+    }
+
+    /// An explicit reader-opening destination. Keeps publication-CFI versioning
+    /// and PDF rectangles intact across the browser/reader boundary.
+    pub fn open_target(&self) -> Option<String> {
+        serde_json::to_string(self.origin()).ok().map(|body| format!("annotation-location:{body}"))
+    }
+
+    pub fn from_open_target(target: &str) -> Option<Self> {
+        serde_json::from_str(target.strip_prefix("annotation-location:")?).ok()
+    }
+
+    pub fn epub_publication_cfi(cfi: impl Into<String>) -> Self {
+        // Keep the existing wire variant. Older clients can retain the opaque
+        // location without rejecting the entire annotation/sync document.
+        Self::EpubCfi { cfi: format!("{PUBLICATION_CFI_PREFIX}{}", cfi.into()) }
+    }
+    pub fn is_epub_publication_cfi(&self) -> bool {
+        matches!(self.origin(), Self::EpubCfi { cfi } if cfi.starts_with(PUBLICATION_CFI_PREFIX))
+    }
     pub fn epub_cfi(cfi: impl Into<String>) -> Self {
         Self::EpubCfi { cfi: cfi.into() }
     }
     pub fn epub_cfi_value(&self) -> Option<&str> {
         match self {
-            Self::EpubCfi { cfi } => Some(cfi),
+            Self::EpubCfi { cfi } => Some(cfi.strip_prefix(PUBLICATION_CFI_PREFIX).unwrap_or(cfi)),
             Self::Pdf(anchor) => anchor.fallback_cfi.as_deref(),
+            Self::Recurring { origin, .. } => origin.epub_cfi_value(),
         }
     }
     pub fn pdf_anchor(&self) -> Option<&PdfAnnotationAnchor> {
         match self {
             Self::EpubCfi { .. } => None,
             Self::Pdf(anchor) => Some(anchor),
+            Self::Recurring { origin, .. } => origin.pdf_anchor(),
         }
     }
 }
@@ -77,11 +187,18 @@ pub struct Annotation {
     pub color: u32,
     pub note: String,
     pub created_at: UnixMillis,
+    /// Required for bookmarks; optional for annotations.
+    /// For bookmarks in a book without a TOC, zero denotes the whole book.
     pub toc_ordinal: Option<i64>,
     pub progress: Option<f32>,
     pub modified_at: UnixMillis,
     pub deleted: bool,
 }
+
+/// Bookmarks share the versioned mark register so existing databases and sync
+/// relays preserve them without a wire-format or schema migration. The name is
+/// stored in `note`; the anchor is a point and `exact_text` is empty.
+pub const BOOKMARK_ID_PREFIX: &str = "bookmark:";
 
 pub const EXTERNAL_PDF_ANNOTATION_ID_PREFIX: &str = "pdf-external:";
 
@@ -94,11 +211,20 @@ impl Annotation {
         wire::decode(bytes, wire::MAX_DECODED_REQUEST_BYTES)
     }
 
+    pub fn is_bookmark(&self) -> bool {
+        self.id.starts_with(BOOKMARK_ID_PREFIX)
+    }
+
     pub fn is_external_pdf_annotation(&self) -> bool {
         self.id.starts_with(EXTERNAL_PDF_ANNOTATION_ID_PREFIX)
     }
 
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let AnnotationAnchor::Recurring { origin, .. } = &self.anchor {
+            if matches!(origin.as_ref(), AnnotationAnchor::Recurring { .. }) || self.exact_text.trim().is_empty() {
+                return Err("recurring annotations require text and a single creation anchor".into());
+            }
+        }
         if self.created_at > i64::MAX as u64 || self.modified_at > i64::MAX as u64 {
             return Err("annotation timestamps exceed the database range".into());
         }

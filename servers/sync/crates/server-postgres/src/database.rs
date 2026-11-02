@@ -3,6 +3,8 @@
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::time::Duration;
+use std::sync::Arc;
+use tokio::sync::Notify;
 use sync_common::SyncGeneration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,12 +49,16 @@ fn parse_bounded_u64(raw: Option<String>, default: u64, minimum: u64, maximum: u
 #[derive(Clone)]
 pub struct PostgresDatabase {
     pool: PgPool,
+    cleanup: Arc<Notify>,
 }
 
 impl PostgresDatabase {
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, cleanup: Arc::new(Notify::new()) }
     }
+
+    /// Shared by the account, sync and asset services within this server.
+    pub fn asset_cleanup_signal(&self) -> Arc<Notify> { self.cleanup.clone() }
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
@@ -74,7 +80,7 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
         .map(PostgresDatabase::from_pool)
 }
 
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 14;
 
 /// Applies the initial schema to an empty database. Files are
 /// applied in filename order -- `01_core.sql` before the domain files that
@@ -132,7 +138,13 @@ pub async fn upgrade_existing(database: &PostgresDatabase) -> Result<(), sqlx::E
         sqlx::raw_sql(include_str!("../schema/migrations/sync_history.sql")).execute(&mut *transaction).await?;
     }
     if version <= 11 {
-        sqlx::raw_sql(include_str!("../schema/migrations/storage_provider.sql")).execute(&mut *transaction).await?;
+        sqlx::raw_sql(include_str!("../schema/migrations/storage_policy.sql")).execute(&mut *transaction).await?;
+    }
+    if version <= 12 {
+        sqlx::raw_sql(include_str!("../schema/migrations/decimal_storage_quota.sql")).execute(&mut *transaction).await?;
+    }
+    if version <= 13 {
+        sqlx::raw_sql(include_str!("../schema/migrations/stable_book_content.sql")).execute(&mut *transaction).await?;
     }
     transaction.commit().await?;
     Ok(())

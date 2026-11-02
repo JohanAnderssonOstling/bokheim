@@ -38,7 +38,6 @@ pub struct BookTransfers {
 }
 impl BookTransfers {
     pub(crate) fn credentials(&self) -> Result<SyncCredentials, TransferError> {
-        if self.database.storage_policy()?.external().is_some() { return Err(TransferError::rejected("external library books belong to the selected storage provider")); }
         self.credentials.credentials().ok_or(TransferError::AuthenticationRequired)
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -58,7 +57,7 @@ impl BookTransfers {
             return Err(TransferError::retryable("upload intent changed during transfer"));
         }
         let file_name = asset.upload.local_versions.first().map(|(_, file_name, _)| file_name.as_str()).unwrap_or("unknown file");
-        let Some(book) = self.assets.verified_book_reader(*content_hash, asset.upload_paths.clone()).await? else {
+        let Some(book) = self.assets.verified_book_reader_with_checksum(*content_hash, asset.upload_paths.clone(), intent.byte_checksum).await? else {
             // Verification rejects missing or mismatching bytes without deleting
             // other local revisions. Retrying that same job forever would
             // pin the queue behind one pathological file.
@@ -71,10 +70,21 @@ impl BookTransfers {
             return Err(TransferError::retryable("local bytes do not match queued book version"));
         }
         #[cfg(not(target_arch = "wasm32"))]
+        let (book, canonical_pdf) = if self.database.local_book_info(content_hash)?.format == book_model::BookFormat::Pdf {
+            let identity = content_hash.to_hex();
+            let (book, pdf, _) = client_platform_runtime::executor::run_blocking(move || pdf_reader_core::inspect_reader_metadata_with_identity(book, identity))
+                .await.map_err(TransferError::retryable)?.map_err(TransferError::retryable)?;
+            (book, Some(pdf))
+        } else { (book, None) };
+        #[cfg(target_arch = "wasm32")]
+        let canonical_pdf = self.database.pdf_metadata(content_hash)?;
+        let uploaded_size = book.length;
+        let uploaded_checksum = book.content_hash.content_hash().ok_or_else(|| TransferError::rejected("verified book checksum is unavailable"))?;
+        #[cfg(not(target_arch = "wasm32"))]
         {
             transfer_deadline(
                 upload_timeout(intent.size_bytes),
-                crate::upload_book_stream(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, content_hash, intent.size_bytes, reqwest::Body::wrap_stream(book.into_upload_stream())),
+                sync_transport::upload_book_stream_with_checksum(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, content_hash, intent.byte_checksum, intent.size_bytes, reqwest::Body::wrap_stream(book.into_upload_stream())),
             )
             .await?
             .map_err(TransferError::from)?;
@@ -84,11 +94,7 @@ impl BookTransfers {
             let endpoint = sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, content_hash).map_err(crate::AssetResponseError::Url)?;
             transfer_deadline(upload_timeout(book.length), web_upload::upload(&book, &endpoint, credentials.access_token())).await??;
         }
-        // A placement that changed mid-upload is not recorded; the job
-        // retries with the current version.
-        if !self.database.complete_book_upload(content_hash, &asset.upload.local_versions, Some(intent))? {
-            return Err(TransferError::retryable("local bytes changed before the job could be confirmed"));
-        }
+        self.database.confirm_uploaded_content_with_pdf(*content_hash, uploaded_checksum, Some(uploaded_size), canonical_pdf)?;
         Ok(())
     }
 
@@ -114,6 +120,12 @@ impl BookTransfers {
             return Ok(());
         }
         let response = crate::validate_streaming_asset_response(response)?;
+        let server_checksum = response.headers().get("x-bokheim-content-hash").map(|value| value.to_str().ok().and_then(|value| value.parse::<content_address::ContentHash>().ok()).ok_or_else(|| TransferError::rejected("invalid server book checksum"))).transpose()?;
+        let known_checksum = self.database.canonical_content_hash(*content_hash)?;
+        if known_checksum.zip(server_checksum).is_some_and(|(known, server)| known != server) {
+            return Err(TransferError::rejected("server book revision differs from its canonical checksum"));
+        }
+        let checksum = known_checksum.or(server_checksum).or_else(|| content_hash.content_hash()).ok_or_else(|| TransferError::rejected("book checksum is unavailable"))?;
         let total_bytes = response.content_length();
         self.assets.check_write_capacity(total_bytes.unwrap_or(1))?;
         let mut destination = {
@@ -136,7 +148,7 @@ impl BookTransfers {
                 }
             }
         }
-        let destination = match destination.verify().await {
+        let destination = match destination.verify_checksum(checksum).await {
             Ok(destination) => destination,
             Err(error) => {
                 self.database.cancel_download(content_hash)?;
@@ -149,7 +161,7 @@ impl BookTransfers {
         let published = destination.publish_snapshot_with_track_titles(&self.assets, &book.relative_path, &book.occupied_names, book.format == book_model::BookFormat::Mp3Folder, &book.audiobook_track_titles)?;
         // The write revalidates the placement and name conflicts before applying the result.
         let completion = NativeBookCompletion { snapshot: book, publication: published, size_bytes: completed_bytes };
-        self.database.complete_downloaded_book(completion, self.assets.thumbnail_set_exists(content_hash)?)?;
+        self.database.complete_downloaded_book_with_content(completion, checksum, self.assets.thumbnail_set_exists(content_hash)?)?;
         Ok(())
     }
 }

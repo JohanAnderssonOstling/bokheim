@@ -11,15 +11,13 @@
 //! it needed a book, and hid which layer a type actually belongs to.
 
 mod placement;
-pub use placement::{BookPlacement, BookUploadIntent, PublishedStagedBook, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
+pub use placement::{BookPlacement, BookUploadIntent, CloudQuotaBook, PublishedStagedBook, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
 
 mod transfer;
 pub use transfer::{BlobKey, BlobKind, TransferJobKind, TransferOrigin};
 
 mod download;
 mod playback;
-mod torrent;
-pub use torrent::{TorrentInput, TorrentStatus};
 mod view;
 
 pub use download::{BookDownloadStatus, BrowserDownloadPhase, BrowserDownloadUpdate, CatalogImportProgress, DownloadProgress, DownloadProgressError, DownloadState};
@@ -27,3 +25,20 @@ pub use playback::PlaybackMetadata;
 pub use view::*;
 
 pub use book_model::BookTocEntry;
+
+mod foliate_identity;
+pub use foliate_identity::match_foliate_annotations;
+
+mod annotation_export;
+pub use annotation_export::*;
+mod recurring_annotation;
+pub use recurring_annotation::RecurringAnnotation;
+mod annotation_markdown;
+pub use annotation_markdown::{annotation_markdown, annotation_source_label, ReaderLink};
+mod notebook;
+mod text_search;
+pub use text_search::{BookTextMatch, BookTextMatchPage, BookTextSearchBook, BookTextSearchPage, TextSearchRemoval};
+pub use notebook::{NotebookAnnotationPage, NotebookBook, NotebookPage, NotebookQuery, NotebookRequest, NotebookSort, NOTEBOOK_ANNOTATION_PAGE_SIZE};
+
+mod pdf_annotation;
+pub use pdf_annotation::stored_pdf_annotation;

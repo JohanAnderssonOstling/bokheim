@@ -118,11 +118,6 @@ impl AddressHistory {
         save(&self.path.with_extension("visits.json"), &self.visited)
     }
 
-    /// Frequency first, then title alphabetically. No recency is recorded.
-    pub fn most_visited(&self) -> &[VisitedPage] {
-        &self.visited[..self.visited.len().min(8)]
-    }
-
     /// Automatic start-page tiles exclude Gutenberg without removing visits
     /// or typed addresses from the browser history.
     pub fn start_page_shortcuts(&self) -> impl Iterator<Item = &VisitedPage> {
@@ -249,7 +244,7 @@ mod tests {
         assert_eq!(AddressHistory::load(typed).addresses, ["https://example.com/"]);
         let visited = directory.path().join("visited/profile/history.json");
         AddressHistory::load(visited.clone()).record_visit(PageMetadata::for_url("https://example.com/")).unwrap();
-        assert_eq!(AddressHistory::load(visited).most_visited()[0].visits, 1);
+        assert_eq!(AddressHistory::load(visited).start_page_shortcuts().collect::<Vec<_>>()[0].visits, 1);
     }
 
     #[test]
@@ -303,7 +298,7 @@ mod tests {
         first.record_visit(page("a", "Alpha")).unwrap();
         second.record_visit(page("z", "Zulu renamed")).unwrap();
         let reopened = AddressHistory::load(path);
-        let shortcuts = reopened.most_visited();
+        let shortcuts = reopened.start_page_shortcuts().collect::<Vec<_>>();
         assert_eq!(shortcuts.iter().map(|saved| (saved.page.title.as_str(), saved.visits)).collect::<Vec<_>>(),
             [("Zulu renamed", 2), ("Alpha", 1), ("beta", 1)]);
         assert_eq!(shortcuts[0].page.icon.as_deref(), Some("https://example.com/icon.png"));
@@ -335,8 +330,8 @@ mod tests {
             history.record_visit(PageMetadata { url: format!("https://example.com/#{fragment}"), title: "  ".into(), icon: Some("javascript:alert(1)".into()), site_name: None }).unwrap();
         }
         let reopened = AddressHistory::load(path);
-        assert_eq!(reopened.most_visited().len(), 1);
-        let saved = &reopened.most_visited()[0];
+        assert_eq!(reopened.start_page_shortcuts().collect::<Vec<_>>().len(), 1);
+        let saved = &reopened.start_page_shortcuts().collect::<Vec<_>>()[0];
         assert_eq!(saved.page.url, "https://example.com/");
         assert_eq!(saved.page.title, "Untitled page");
         assert_eq!(saved.page.icon, None);
@@ -349,13 +344,13 @@ mod tests {
         let path = directory.path().join("history.json");
         fs::write(path.with_extension("visits.json"), b"broken").unwrap();
         let mut history = AddressHistory::load(path);
-        assert!(history.most_visited().is_empty());
+        assert!(history.start_page_shortcuts().collect::<Vec<_>>().is_empty());
         for index in (0..12).rev() {
             history.record_visit(PageMetadata { url: format!("https://example.com/{index}"), title: format!("Page {index:02}"), icon: None, site_name: None }).unwrap();
         }
-        assert_eq!(history.most_visited().len(), 8);
-        assert_eq!(history.most_visited()[0].page.title, "Page 00");
-        assert_eq!(history.most_visited()[7].page.title, "Page 07");
+        assert_eq!(history.start_page_shortcuts().collect::<Vec<_>>().len(), 8);
+        assert_eq!(history.start_page_shortcuts().collect::<Vec<_>>()[0].page.title, "Page 00");
+        assert_eq!(history.start_page_shortcuts().collect::<Vec<_>>()[7].page.title, "Page 07");
         for url in ["https://gutenberg.org/", "http://www.gutenberg.org/", "https://m.gutenberg.org/"] {
             history.remember(url).unwrap();
             for _ in 0..2 {

@@ -9,22 +9,22 @@ python3 "$workspace_dir/shared/pdfium/prepare.py" --target wasm32-unknown-unknow
 output_dir="${BOKHEIM_WEB_OUTPUT_DIR:-$app_dir/dist}"
 target_dir="${CARGO_TARGET_DIR:-$workspace_dir/target}"
 if [[ "$target_dir" != /* ]]; then target_dir="$workspace_dir/$target_dir"; fi
-local_bindgen="$workspace_dir/target/wasm-bindgen-cli/bin/wasm-bindgen"
 bundle_dir="${output_dir}/pkg/.building"
 # Rebuild std for every module: Rust's distributed wasm std uses panic=abort.
 # Use standardized exception instructions in both isolated and shared memory.
 web_rustflags='--cfg getrandom_backend="wasm_js" -C panic=unwind -C target-feature=+exception-handling -C llvm-args=-wasm-use-legacy-eh=false'
 
+
 (
     cd "$workspace_dir"
     RUSTC_BOOTSTRAP=1 RUSTFLAGS="$web_rustflags" cargo build \
-        -Z build-std=std,panic_unwind \
+        -Z build-std=std,panic_unwind --no-default-features \
         --manifest-path "$workspace_dir/Cargo.toml" \
         -p web-backend-worker \
         --target wasm32-unknown-unknown \
         --profile web-release
     RUSTC_BOOTSTRAP=1 RUSTFLAGS="$web_rustflags" cargo build \
-        -Z build-std=std,panic_unwind \
+        -Z build-std=std,panic_unwind --no-default-features \
         --manifest-path "$workspace_dir/Cargo.toml" \
         -p web-backend-worker --example cpu_worker --example sync_coordinator \
         --target wasm32-unknown-unknown --profile web-release
@@ -32,7 +32,7 @@ web_rustflags='--cfg getrandom_backend="wasm_js" -C panic=unwind -C target-featu
     # Build Rust and C dependencies with atomics; backend workers stay isolated.
     CFLAGS_wasm32_unknown_unknown="${CFLAGS_wasm32_unknown_unknown:-} -matomics -mbulk-memory" \
     RUSTC_BOOTSTRAP=1 RUSTFLAGS="$web_rustflags -C target-feature=+atomics,+bulk-memory,+mutable-globals,+exception-handling -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base" cargo rustc \
-        -Z build-std=std,panic_unwind \
+        -Z build-std=std,panic_unwind --no-default-features \
         --manifest-path "$workspace_dir/Cargo.toml" -p web-gpui \
         --target wasm32-unknown-unknown --profile web-release -- -C link-arg=--export=__heap_base
 )
@@ -41,20 +41,40 @@ mkdir -p "$bundle_dir"
 (
     cd "$workspace_dir"
     cargo run --release -p subject-projection --example export_bisac_reference -- "$bundle_dir"
+    cargo run --release -p subject-projection --example export_web_taxonomy -- "$bundle_dir"
 )
 install -d "$output_dir/assets/icons"
 cp -a "$workspace_dir/vendor/gpui-component/crates/assets/assets/icons/." "$output_dir/assets/icons/"
-if [[ -x "$local_bindgen" ]]; then
-    wasm_bindgen="$local_bindgen"
-else
-    wasm_bindgen="$(command -v wasm-bindgen)"
+bindgen_version=$(python3 - "$workspace_dir/Cargo.lock" <<'PY_BINDGEN'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as source:
+    packages = tomllib.load(source)['package']
+versions = {package['version'] for package in packages if package['name'] == 'wasm-bindgen'}
+if len(versions) != 1:
+    raise SystemExit('Expected one wasm-bindgen version in Cargo.lock')
+print(versions.pop())
+PY_BINDGEN
+)
+wasm_bindgen=
+for candidate in "$workspace_dir/target/wasm-bindgen-cli-$bindgen_version/bin/wasm-bindgen" \
+    "$workspace_dir/target/wasm-bindgen-cli/bin/wasm-bindgen" "$(command -v wasm-bindgen || true)"; do
+    if [[ -x "$candidate" && "$("$candidate" --version)" == "wasm-bindgen $bindgen_version" ]]; then
+        wasm_bindgen="$candidate"
+        break
+    fi
+done
+if [[ -z "$wasm_bindgen" ]]; then
+    echo "error: install wasm-bindgen-cli $bindgen_version with --root $workspace_dir/target/wasm-bindgen-cli-$bindgen_version" >&2
+    exit 1
 fi
 # Inline JS snippet names are local to each bindgen invocation. Keep outputs
 # separate so one WASM module cannot overwrite another module's imports.
 bind_module() {
     local module_name="$1"
     local module_binary="$2"
-    "$wasm_bindgen" --target web --out-dir "$bundle_dir/$module_name" --out-name "$module_name" "$module_binary"
+    # Release stripping removes target-feature metadata. Unwinding imports need
+    # the externref transform even when bindgen cannot infer reference types.
+    "$wasm_bindgen" --reference-types --target web --out-dir "$bundle_dir/$module_name" --out-name "$module_name" "$module_binary"
     printf 'import initialize from "./%s/%s.js";\nimport { compressedWasm } from "./compressed_wasm.js";\nexport * from "./%s/%s.js";\nexport default async function init(options) {\n  if (options !== undefined) return initialize(options);\n  const response = await compressedWasm(new URL("./%s/%s_bg.wasm", import.meta.url));\n  return initialize(response ? { module_or_path: response } : undefined);\n}\n' "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" > "$bundle_dir/$module_name.js"
 }
 bind_module web_gpui "$target_dir/wasm32-unknown-unknown/web-release/web_gpui.wasm"
@@ -66,7 +86,7 @@ python3 - "$bundle_dir/sync_coordinator/sync_coordinator.js" <<'PY'
 from pathlib import Path
 import sys
 module = Path(sys.argv[1]).read_text()
-for name in ("startSharedCoordinator", "startNetworkWorker"):
+for name in ("startSharedCoordinator", "startNetworkWorker", "prepareBackend"):
     if f"export function {name}(" not in module:
         raise SystemExit(f"Coordinator WASM is missing required export {name}")
 for name in ("synchronize", "backgroundCycle", "syncService", "cpuService", "startCoordinator"):
@@ -108,6 +128,11 @@ done
 cp "$app_dir/pdf_worker.js" "$bundle_dir/pdf_worker.js"
 python3 "$app_dir/scripts/package-pdfium.py" "$bundle_dir/pdfium"
 
+# Reader-only glyph fallback is fetched through the existing font cache when
+# a book opens; keep its bytes out of the initial UI WebAssembly module.
+install -d "$bundle_dir/fonts"
+cp "$workspace_dir/apps/desktop-gpui/assets/fonts/DroidSansFallback.ttf" "$workspace_dir/apps/desktop-gpui/assets/fonts/LICENSE-DROID.txt" "$bundle_dir/fonts/"
+
 # HTTP Content-Encoding supports Brotli without a JavaScript decoder. Keep
 # gzip and identity variants for clients and hosts with different capabilities.
 python3 "$app_dir/scripts/compress-assets.py" "$bundle_dir"
@@ -130,6 +155,7 @@ fi
 cp "$app_dir/index.html" "$output_dir/index.html"
 cp "$app_dir/compatibility.mjs" "$output_dir/compatibility.mjs"
 cp "$app_dir/startup.mjs" "$output_dir/startup.mjs"
+cp "$app_dir/backend-startup.mjs" "$output_dir/backend-startup.mjs"
 sed -i "s|\"\./pkg\"|\"./${asset_base}\"|" "$output_dir/index.html"
 sed -i "s|\./pkg/web_gpui\.js|./${asset_base}/web_gpui.js|" "$output_dir/index.html"
 

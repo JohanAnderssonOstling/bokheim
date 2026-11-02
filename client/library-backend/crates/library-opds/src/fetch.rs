@@ -12,7 +12,7 @@ use url::{Origin, Url};
 /// the limits are on connecting and on each wait for data, not the whole
 /// response, so a large book still downloads.
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    let builder = reqwest::Client::builder();
+    let builder = http_response::client_builder();
     #[cfg(not(target_arch = "wasm32"))]
     let builder = builder.connect_timeout(std::time::Duration::from_secs(10)).read_timeout(std::time::Duration::from_secs(30));
     builder.build().unwrap_or_default()

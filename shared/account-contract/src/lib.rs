@@ -6,6 +6,7 @@ pub const PASSWORD_MIN_CHARACTERS: usize = 12;
 pub const PASSWORD_MAX_BYTES: usize = 1024;
 pub const EMAIL_MAX_BYTES: usize = 254;
 pub const EMAIL_VERIFICATION_PIN_DIGITS: usize = 6;
+pub const EMAIL_RESEND_COOLDOWN_SECONDS: u32 = 60;
 pub const ONE_TIME_TOKEN_BYTES: usize = 43;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -102,6 +103,15 @@ pub struct LibraryStorageUsage {
     /// attributions across libraries partition the account's used bytes, so a
     /// book held by two libraries is counted under one of them only. A thumbnail
     /// is attributed to the first library that uploads it.
+    pub used_bytes: u64,
+}
+
+pub const MAX_ACCOUNT_STORAGE_BOOKS: usize = 100;
+
+/// An account-owned book's charged bytes. Titles remain client-owned metadata.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BookStorageUsage {
+    pub content_hash: sync_common::BookId,
     pub used_bytes: u64,
 }
 

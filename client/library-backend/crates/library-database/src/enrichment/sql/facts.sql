@@ -12,11 +12,12 @@ ORDER BY file_name LIMIT 8;
 
 -- name: facts_candidates?
 -- param: scope: &str
-SELECT b.content_hash, b.format, draft.retry_at
+-- param: now: i64
+SELECT b.content_hash, b.format, draft.body
 FROM json_each(:scope) member
 JOIN book b ON b.content_hash = unhex(member.value)
 JOIN local_book_draft draft ON draft.content_hash = b.content_hash
-WHERE b.deleted_at IS NULL
+WHERE b.deleted_at IS NULL AND (draft.retry_at IS NULL OR draft.retry_at <= :now)
 ORDER BY b.content_hash;
 
 -- name: facts_record_failure!

@@ -1,7 +1,8 @@
 //! Card-only crop and stretch, applied once while generating JPEG assets.
 use super::{encode_jpeg, validate_cover_image_dimensions, ThumbnailResult};
-use fast_image_resize::images::{Image, ImageRef};
-use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+use fast_image_resize::images::{TypedImage, TypedImageRef};
+use fast_image_resize::pixels::U8x3;
+use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 use image::RgbImage;
 
 pub const CARD_TARGET_HEIGHT_RATIO: f64 = 1.6;
@@ -64,11 +65,12 @@ pub fn card_thumbnail_geometry(source_width: u32, source_height: u32, width: u32
 
 pub fn encode_card_thumbnail_at_width(decoded: &RgbImage, width: u32) -> ThumbnailResult<Vec<u8>> {
     let geometry = card_thumbnail_geometry(decoded.width(), decoded.height(), width)?;
-    let source = ImageRef::new(decoded.width(), decoded.height(), decoded.as_raw(), PixelType::U8x3)?;
-    let mut destination = Image::new(geometry.output_width, geometry.output_height, PixelType::U8x3);
+    let source = TypedImageRef::<U8x3>::from_buffer(decoded.width(), decoded.height(), decoded.as_raw())?;
+    let mut destination = RgbImage::new(geometry.output_width, geometry.output_height);
+    let mut destination_view = TypedImage::<U8x3>::from_buffer(geometry.output_width, geometry.output_height, destination.as_mut())?;
     let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Hamming)).crop(geometry.left, geometry.top, geometry.source_width, geometry.source_height);
-    Resizer::new().resize(&source, &mut destination, Some(&options))?;
-    encode_jpeg(destination.buffer(), geometry.output_width, geometry.output_height)
+    Resizer::new().resize_typed(&source, &mut destination_view, Some(&options))?;
+    encode_jpeg(destination.as_raw(), geometry.output_width, geometry.output_height)
 }
 
 pub fn card_thumbnail_suffix(width: u32) -> String {

@@ -7,7 +7,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(module = "/web/authentication.js")]
 extern "C" {
     #[wasm_bindgen(js_name = openAuthentication, catch)]
-    fn open_authentication(theme: &str, minimum: u32, submit: &js_sys::Function) -> Result<JsValue, JsValue>;
+    fn open_authentication(theme: &str, minimum: u32, submit: &js_sys::Function, resend_cooldown_seconds: u32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = closeAuthentication)]
     fn close_authentication(panel: &JsValue);
     #[wasm_bindgen(js_name = registerAuthenticationFont, catch)]
@@ -58,7 +58,7 @@ impl SyncPage {
         // Dispose an earlier panel before opening another modal; never leave
         // duplicate credential forms for password managers to discover.
         self.web_authentication = None;
-        match open_authentication(&theme.to_string(), account_contract::PASSWORD_MIN_CHARACTERS as u32, submit.as_ref().unchecked_ref()) {
+        match open_authentication(&theme.to_string(), account_contract::PASSWORD_MIN_CHARACTERS as u32, submit.as_ref().unchecked_ref(), account_contract::EMAIL_RESEND_COOLDOWN_SECONDS) {
             Ok(panel) => {
                 self.web_authentication = Some(WebAuthentication { panel, _submit: submit });
             }

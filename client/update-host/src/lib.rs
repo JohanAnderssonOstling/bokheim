@@ -1,5 +1,6 @@
 #![cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))]
-//! Native update lifecycle and platform installation policies. Activation runs before workers.
+//! Native update lifecycle and platform installation policies. Application
+//! activation precedes workers; reference-only preparation runs in the background.
 
 use serde::{Deserialize, Serialize};
 use std::env::consts::ARCH;
@@ -142,7 +143,7 @@ impl Host {
                 }
             }
         }
-        if self.coordinator.activation_due() {
+        if self.coordinator.activation_due() && !self.coordinator.is_taxonomy_only() {
             match self.prepare_and_promote(&lock) {
                 Ok(id) => return Ok(Startup::Relaunch { executable: self.appimage.clone().unwrap_or_else(|| self.executable.clone()), trial: Some(id) }),
                 Err(error) => self.failed_activation(error)?,

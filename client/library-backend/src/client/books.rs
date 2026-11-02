@@ -5,6 +5,11 @@ use crate::{BackendError, BookId, DownloadState, ResolvedBook};
 use library_model::CardKey;
 
 impl LibraryClient {
+    pub async fn resolve_book_identity(&self, content_hash: BookId) -> Result<BookId, BackendError> {
+        if content_hash.content_hash().is_none() { return Ok(content_hash); }
+        self.request(LibraryCommand::Ready(ReadyCommand::ResolveBookIdentity { content_hash })).await
+    }
+
     pub async fn book_format(&self, content_hash: BookId) -> Result<Option<book_model::BookFormat>, BackendError> {
         self.request(LibraryCommand::Ready(ReadyCommand::BookFormat { content_hash })).await
     }
@@ -42,7 +47,13 @@ impl LibraryClient {
     pub async fn resolve_book(&self, content_hash: BookId) -> Result<ResolvedBook, BackendError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.transport.handle().await?.resolve_book(content_hash).await
+            use client_platform_runtime::startup_profile::StartupProfile;
+            let mut profile = StartupProfile::new("book_lookup_client");
+            let handle = self.transport.handle().await?;
+            profile.mark("transport_handle");
+            let result = handle.resolve_book(content_hash).await;
+            profile.mark("actor_roundtrip");
+            result
         }
         #[cfg(target_arch = "wasm32")]
         {

@@ -11,6 +11,13 @@ use ui_components::theme::apply_appearance;
 
 use crate::services::AppServices;
 
+/// Whether device-local book text search is available in navigation.
+pub(crate) struct TextSearchEnabled(pub(crate) bool);
+impl gpui::Global for TextSearchEnabled {}
+pub(crate) fn text_search_enabled(cx: &App) -> bool {
+    cx.try_global::<TextSearchEnabled>().is_some_and(|value| value.0)
+}
+
 /// The live "cover text" setting, read by every book card and by the pages
 /// that size the row a card sits in.
 ///
@@ -76,23 +83,34 @@ pub(crate) struct Preferences {
 }
 
 impl Preferences {
+    pub(crate) fn backend(&self) -> Rc<app::AppClient> {
+        self.backend.clone()
+    }
     /// Initialized once for the application; every window observes this owner.
     pub(crate) fn shared(services: &AppServices, cx: &mut App) -> Entity<Self> {
         if let Some(store) = cx.try_global::<PreferencesStore>() {
             return store.0.clone();
         }
-        if let Err(error) = ui_components::register_fonts(cx) {
-            log::warn!("failed to install interface fonts: {error}");
-        }
         let browsing = services.startup.browsing_preferences.clone();
         ui_components::apply_keyboard_shortcuts(browsing.keyboard_shortcuts(), cx);
         apply_appearance(&browsing, cx);
+        cx.set_global(TextSearchEnabled(browsing.text_search()));
         cx.set_global(CoverTextSetting(browsing.cover_text()));
         cx.set_global(GeneratedCoversOnly(browsing.generated_covers_only()));
         let backend = services.backend.clone();
         #[cfg(feature = "kobo")]
         cx.set_global(gpui_kobo::KoboKeyboardLayouts(browsing.keyboard_layouts().to_vec()));
-        let store = cx.new(|_| Self { backend, browsing });
+        let store = cx.new(|cx| {
+            #[cfg(target_os = "android")]
+            cx.observe_global::<ui_components::SystemFontFamilies>(|preferences: &mut Self, cx| {
+                apply_appearance(&preferences.browsing, cx);
+                cx.notify();
+            })
+            .detach();
+            #[cfg(not(target_os = "android"))]
+            let _ = cx;
+            Self { backend, browsing }
+        });
         cx.set_global(PreferencesStore(store.clone()));
         let shortcut_preferences = store.clone();
         ui_components::configure_shortcut_saving(
@@ -102,7 +120,7 @@ impl Preferences {
             },
             cx,
         );
-        // The keyboard's layout key rotates the global; save what it chose.
+        // The keyboard's layout chooser updates the global; save its selection.
         #[cfg(feature = "kobo")]
         cx.observe_global::<gpui_kobo::KoboKeyboardLayouts>(|cx| {
             let layouts = cx.global::<gpui_kobo::KoboKeyboardLayouts>().0.clone();
@@ -124,8 +142,8 @@ impl Preferences {
         self.browsing.clone()
     }
 
-    pub(crate) fn interface_font_name(&self) -> SharedString {
-        SharedString::from(self.browsing.ui_font_family().family_name())
+    pub(crate) fn interface_font_name(&self, cx: &App) -> SharedString {
+        SharedString::from(ui_components::configured_ui_font_name(&self.browsing, cx).to_owned())
     }
 
     pub(crate) fn ui_font_size_px(&self) -> u8 {
@@ -149,6 +167,20 @@ impl Preferences {
 
     /// Commit this backend-enforced setting only after acknowledgement. The
     /// caller owns any window-specific presentation of a failed save.
+    pub(crate) fn save_text_search(&mut self, enabled: bool, cx: &mut Context<Self>) -> Task<Result<(), app::BackendError>> {
+        let backend = self.backend.clone();
+        cx.spawn(async move |preferences, cx| {
+            let saved = backend.update_browsing_preference(BrowsingPreferencePatch::TextSearch(enabled)).await?;
+            preferences
+                .update(cx, |preferences, cx| {
+                    let _ = BrowsingPreferencePatch::TextSearch(saved.text_search()).apply(&mut preferences.browsing);
+                    cx.set_global(TextSearchEnabled(saved.text_search()));
+                    cx.notify();
+                })
+                .map_err(|error| app::BackendError::message(error.to_string()))
+        })
+    }
+
     pub(crate) fn save_metered_transfers(&mut self, enabled: bool, cx: &mut Context<Self>) -> Task<Result<(), app::BackendError>> {
         let backend = self.backend.clone();
         cx.spawn(async move |preferences, cx| {
@@ -178,8 +210,13 @@ impl Preferences {
         let previous = self.browsing();
         let mut browsing = previous.clone();
         patch.clone().apply(&mut browsing).map_err(|error| error.to_string())?;
-        let appearance_changed =
-            previous.theme() != browsing.theme() || previous.appearance_override() != browsing.appearance_override() || previous.ui_font_size_px() != browsing.ui_font_size_px() || previous.ui_font_family() != browsing.ui_font_family();
+        let appearance_changed = previous.animations() != browsing.animations()
+            || previous.theme() != browsing.theme()
+            || previous.appearance_override() != browsing.appearance_override()
+            || previous.ui_font_size_px() != browsing.ui_font_size_px()
+            || previous.ui_font_family() != browsing.ui_font_family()
+            || previous.custom_ui_font_active() != browsing.custom_ui_font_active()
+            || previous.custom_ui_font_family() != browsing.custom_ui_font_family();
         self.browsing = browsing.clone();
         if previous.keyboard_shortcuts() != browsing.keyboard_shortcuts() {
             ui_components::apply_keyboard_shortcuts(browsing.keyboard_shortcuts(), cx);

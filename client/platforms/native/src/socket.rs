@@ -1,5 +1,6 @@
 //! Native WebSocket ownership and TLS. Callers supply credentials and timing policy.
 use futures_util::{SinkExt, StreamExt};
+use rustls::crypto::{CryptoProvider, ring};
 use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, Message as Frame},
     MaybeTlsStream, WebSocketStream,
@@ -24,7 +25,9 @@ fn request(url: &str, headers: &[(&str, &str)]) -> Result<tokio_tungstenite::tun
 impl Connection {
     pub async fn connect(url: &str, headers: &[(&str, &str)]) -> Result<Self, String> {
         let request = request(url, headers)?;
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        if CryptoProvider::get_default().is_none() {
+            let _ = ring::default_provider().install_default();
+        }
         tokio_tungstenite::connect_async(request).await.map(|(socket, _)| Self(socket)).map_err(|e| e.to_string())
     }
     pub async fn receive(&mut self) -> Option<Result<Message, String>> {

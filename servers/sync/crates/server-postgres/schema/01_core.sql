@@ -2,11 +2,11 @@
 -- file's foreign keys ultimately point back to users/libraries, so this
 -- file must be applied first.
 --
--- A new installation starts at schema version 12.
+-- A new installation starts at schema version 13.
 CREATE TABLE bokheim_schema_version (
-    version integer PRIMARY KEY CHECK (version = 12)
+    version integer PRIMARY KEY CHECK (version = 14)
 );
-INSERT INTO bokheim_schema_version(version) VALUES (12);
+INSERT INTO bokheim_schema_version(version) VALUES (14);
 
 CREATE TABLE users (
     id text PRIMARY KEY,
@@ -26,8 +26,7 @@ CREATE TABLE libraries (
     -- recreate the same logical library through upsert or implicit sync.
     deleted_at timestamp with time zone,
     cloud_storage_enabled boolean NOT NULL DEFAULT true,
-    storage_configuration jsonb NOT NULL DEFAULT '"bokheim"',
-    CHECK (NOT (storage_configuration ? 'external') OR NOT cloud_storage_enabled)
+    storage_configuration jsonb NOT NULL DEFAULT '"bokheim"'
 );
 
 -- The account's OPDS feeds, which every device lists. Credentials for them

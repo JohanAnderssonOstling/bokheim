@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bokheim · Import from Readest</title>
+<link rel="icon" href="data:,">
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Bold.ttf');font-weight:700}
+:root{color-scheme:light;--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--rule:#c5bdac;--accent:#466853;--on-accent:white}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--paper);color:var(--ink);font:18px/1.4 Garamond,Georgia,serif}
+button,input,select{font:inherit;color:inherit}button{cursor:pointer;border:1px solid var(--rule);border-radius:3px;background:transparent;padding:7px 14px}button:hover{background:#4668530b}button:disabled{opacity:.5;cursor:default}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--rule);padding:20px 30px;gap:20px}
+.brand{font-size:29px}.library{margin-left:24px;color:var(--muted);font-size:17px}
+main{padding:30px}main h1{font-weight:400;font-size:30px;margin:0}
+dialog{width:min(420px,calc(100vw - 28px));max-height:calc(100dvh - 28px);padding:0;background:var(--paper);color:var(--ink);border:1px solid var(--rule);border-radius:5px;box-shadow:0 8px 35px #0002;overflow:auto}
+dialog::backdrop{background:#25231f38}
+.heading{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 24px 0}.heading h2{font-size:25px;font-weight:400;margin:0}.close{border:0;padding:0 5px;font-size:25px;line-height:1;color:var(--muted)}
+.body{padding:22px 24px}.group-field{display:flex;align-items:center;gap:14px;margin-bottom:12px}.group-field label{flex:none}.group-field select{min-width:0;flex:1;border:1px solid var(--rule);border-radius:3px;background:var(--paper);padding:7px 9px;font-size:16px}.summary{font-size:16px;color:var(--muted);margin:0 0 20px}
+fieldset{border:0;padding:0;margin:0;display:flex;gap:25px}fieldset label{display:flex;gap:8px;align-items:center;cursor:pointer}input[type=radio]{accent-color:var(--accent);margin:0;width:16px;height:16px}
+footer{border-top:1px solid var(--rule);padding:14px 24px;display:flex;justify-content:flex-end;gap:8px}.primary{background:var(--accent);color:var(--on-accent);border-color:var(--accent);padding-inline:19px}.primary:hover{background:var(--accent);filter:brightness(.95)}
+progress{display:block;width:100%;height:7px;accent-color:var(--accent);margin:19px 0 7px}.status{font-size:16px;margin:0;color:var(--accent)}
+@media(max-width:520px){header{padding:16px 20px}.library{display:none}.heading{padding:19px 20px 0}.body{padding:20px}.heading h2{font-size:24px}footer{padding:14px 20px}}
+</style>
+</head>
+<body>
+<header><div><span class="brand">Bokheim</span><span class="library">Personal library</span></div><button id="open">Import from Readest…</button></header>
+<main><h1>Library</h1></main>
+<dialog id="import-dialog" aria-labelledby="title">
+<div class="heading"><h2 id="title">Import from Readest</h2><button class="close" id="close" aria-label="Close import">×</button></div>
+<form id="import-form">
+<div class="body">
+<div class="group-field"><label for="group">Group</label><select id="group"><option value="">All groups</option></select></div>
+<p class="summary" id="summary">69 books found · 45 EPUB, 24 PDF</p>
+<fieldset aria-label="How to import book files"><label><input type="radio" name="mode" value="copy" checked>Copy files</label><label><input type="radio" name="mode" value="move">Move files</label></fieldset>
+<div id="progress-area" hidden><progress id="progress" value="0" max="69" aria-label="Import progress"></progress><p class="status" id="status" role="status" aria-live="polite"></p></div>
+</div>
+<footer><button type="button" id="cancel">Cancel</button><button type="submit" class="primary" id="import">Import 69 books</button></footer>
+</form>
+</dialog>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const groups=[{"name": "Dator", "epub": 2, "pdf": 16}, {"name": "Dator/Databas", "epub": 7, "pdf": 0}, {"name": "Dator/Datavetenskap", "epub": 1, "pdf": 3}, {"name": "Dator/Dokumentation", "epub": 2, "pdf": 0}, {"name": "Dator/Historia", "epub": 1, "pdf": 0}, {"name": "Dator/ML", "epub": 2, "pdf": 0}, {"name": "Dator/Mjukvaruarkitektur", "epub": 1, "pdf": 0}, {"name": "Dator/Nätverk", "epub": 0, "pdf": 4}, {"name": "Dator/Programmering", "epub": 19, "pdf": 0}, {"name": "Dator/Programmering/Python", "epub": 1, "pdf": 0}, {"name": "Dator/Programmering/Rust", "epub": 9, "pdf": 1}];
+let count=69;
+const bookWord=()=>count===1?'book':'books';
+function groupTotals(name){return groups.filter(group=>name===''||(name==='__ungrouped__'?group.name==='':group.name===name||group.name.startsWith(name+'/'))).reduce((sum,group)=>({epub:sum.epub+group.epub,pdf:sum.pdf+group.pdf}),{epub:0,pdf:0})}
+function selectGroup(){const totals=groupTotals($('group').value);count=totals.epub+totals.pdf;$('summary').textContent=count+' '+bookWord()+' selected · '+totals.epub+' EPUB, '+totals.pdf+' PDF';$('import').textContent='Import '+count+' '+bookWord();$('import').disabled=count===0;}
+for(const group of groups){const option=document.createElement('option');option.value=group.name||'__ungrouped__';const totals=groupTotals(option.value);option.textContent=(group.name?group.name.replaceAll('/',' / '):'Ungrouped')+' ('+(totals.epub+totals.pdf)+')';$('group').append(option);}
+$('group').onchange=selectGroup;
+let done=0,running=false,stopping=false,finished=false,timer;
+const isMove=()=>document.querySelector('input[name=mode]:checked').value==='move';
+function lock(locked){$('group').disabled=locked;document.querySelectorAll('input[name=mode]').forEach(el=>el.disabled=locked)}
+function openImport(){clearInterval(timer);done=0;running=false;stopping=false;finished=false;lock(false);selectGroup();$('progress-area').hidden=true;$('progress').value=0;$('import').disabled=count===0;$('import').textContent='Import '+count+' '+bookWord();$('cancel').textContent='Cancel';$('cancel').hidden=false;if(!$('import-dialog').open)$('import-dialog').showModal();$('import').focus()}
+function closeImport(){if(running){stopping=true;$('cancel').disabled=true;$('cancel').textContent='Stopping…';return}$('import-dialog').close();$('open').focus()}
+function updateProgress(){$('progress').max=count;$('progress').value=done;$('status').textContent=(isMove()?'Moving ':'Copying ')+done+' of '+count+' '+bookWord()+'…'}
+$('import-form').onsubmit=event=>{
+ event.preventDefault();if(finished){closeImport();return}if(running||!count)return;
+ running=true;stopping=false;lock(true);$('progress-area').hidden=false;$('import').disabled=true;$('cancel').disabled=false;$('cancel').textContent='Cancel';updateProgress();
+ timer=setInterval(()=>{done++;updateProgress();if(done>=count||stopping){clearInterval(timer);running=false;$('import').disabled=false;$('cancel').disabled=false;if(done>=count){finished=true;$('status').textContent='Imported '+count+' '+bookWord()+'.';$('import').textContent='Done';$('cancel').hidden=true;}else{$('status').textContent='Stopped. '+done+' of '+count+' '+bookWord()+' imported.';$('import').textContent='Continue import';$('cancel').textContent='Close';}}},100);
+};
+$('cancel').onclick=closeImport;$('close').onclick=closeImport;$('open').onclick=openImport;
+$('import-dialog').addEventListener('cancel',event=>{event.preventDefault();closeImport()});
+openImport();
+</script>
+</body>
+</html>

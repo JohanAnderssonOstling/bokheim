@@ -6,7 +6,7 @@ use std::time::Duration;
 use update_protocol::stage_verified;
 
 pub fn client(user_agent: &str) -> Result<Client, String> {
-    Client::builder()
+    http_response::blocking_client_builder()
         .user_agent(user_agent)
         .https_only(true)
         .connect_timeout(Duration::from_secs(15))

@@ -1,7 +1,7 @@
 //! Import storage lifecycle. The caller retains the content lease and metadata commit.
+use super::{AssetStore, AssetStoreError, CopiedBook};
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_native::filesystem::parent_directory;
-use super::{AssetStore, AssetStoreError, CopiedBook};
 use library_model::RelativeBookPath;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::PoisonError;
@@ -22,7 +22,7 @@ impl AssetStore {
                 let mut occupied = occupied;
                 let store = self.clone();
                 return client_platform_runtime::executor::run_blocking(move || {
-                    use crate::asset_store::native::{DIRECT_IMPORTS, DirectBook, placement_path, write_import_bytes};
+                    use crate::asset_store::native::{placement_path, write_import_bytes, DirectBook, DIRECT_IMPORTS};
                     let requested = relative.file_name();
                     let directory = parent_directory(&placement_path(&store.0, &relative))?.canonicalize()?;
                     occupied.extend(std::fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
@@ -44,8 +44,9 @@ impl AssetStore {
                         // No temporary filename, rename, hard link, or second copy is involved.
                         let cleanup = tempfile::TempPath::try_from_path(path)?;
                         let mut file = tempfile::NamedTempFile::from_parts(file, cleanup);
-                        write_import_bytes(file.as_file_mut(), source.as_mut(), &directory)?;
-                        return Ok((name, CopiedBook { inner: super::imp::CopiedBook { temporary_path: file.into_temp_path(), direct: Some(direct) } }));
+                        let (checksum, size) = write_import_bytes(&store.0, file.as_file_mut(), source.as_mut(), &directory)?;
+                        let copied_digest = Some((checksum, size, crate::filesystem::fingerprint(file.path())?));
+                        return Ok((name, CopiedBook { inner: super::imp::CopiedBook { copied_digest, temporary_path: file.into_temp_path(), direct: Some(direct) } }));
                     }
                     unreachable!("numeric name suffix space is unbounded")
                 })

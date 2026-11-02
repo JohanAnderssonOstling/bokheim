@@ -4,19 +4,25 @@
 
 use std::path::PathBuf;
 mod audiobook_footer;
+mod keyboard;
 #[cfg(feature = "kobo")]
 mod kobo_bar;
+mod panes;
 mod playback;
+pub use panes::ApplicationRoot;
 
 use std::rc::Rc;
 
-use app::AppClient;
-use browser_ui::{AppServices, BrowserRoot, DismissSettings, NavigationSession, NowPlaying, NowPlayingBook, OpenBookRequested, ReaderSession, SaveNavigationSession, WindowSession};
+use app::{AppClient, BackendError};
+use browser_ui::{AppServices, BrowserRoot, DismissSettings, NavigationSession, NowPlayingBook, OpenBookRequested, ReaderSession, SaveNavigationSession, WindowSession};
 use gpui::prelude::*;
 use gpui::{AnyView, App, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, Modifiers, Render, SharedString, Subscription, Window};
+#[cfg(all(not(feature = "mobile"), any(target_family = "wasm", target_os = "linux", target_os = "macos", target_os = "windows")))]
+use gpui::{MouseButton, MouseDownEvent, NavigationDirection, canvas};
 #[cfg(all(target_os = "linux", not(feature = "mobile")))]
 use gpui::{MouseMoveEvent, div, px};
 use gpui_component::{Root, WindowExt, notification::Notification};
+use gpui_image_eviction::trim_unused_images_after_transition;
 use library_model::BookLocator;
 use sync_common::LibraryId;
 
@@ -41,8 +47,8 @@ fn active_reader_library_is_missing(active_library: Option<&LibraryId>, contains
 
 type NativeBackOverlay = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
 
-/// Owns one application window and switches between browsing and reading.
-pub struct ApplicationRoot {
+/// Owns one pane and switches between its browser and reader.
+pub(crate) struct ApplicationPane {
     #[cfg(target_arch = "wasm32")]
     sync_state: Entity<browser_ui::SyncState>,
     #[cfg(target_arch = "wasm32")]
@@ -80,11 +86,31 @@ pub struct ApplicationRoot {
     opening_focus: FocusHandle,
     application_title: SharedString,
     _browser_subscription: Subscription,
+    split_enabled: bool,
     notification_mode: Option<bool>,
     notification_task: Option<gpui::Task<()>>,
 }
 
-impl ApplicationRoot {
+impl ApplicationPane {
+    #[cfg(test)]
+    fn new(
+        services: AppServices, session: WindowSession, backend: AppClient, application_title: impl Into<SharedString>, playback_restore_path: Option<PathBuf>, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_playback(
+            services,
+            session,
+            backend,
+            application_title,
+            playback_restore_path,
+            None,
+            #[cfg(feature = "kobo")]
+            kobo_auto_rotate,
+            window,
+            cx,
+        )
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn apply_sync_event(&mut self, event: browser_ui::SyncEvent, cx: &mut Context<Self>) {
         use browser_ui::SyncEvent;
@@ -141,6 +167,7 @@ impl ApplicationRoot {
                 })
                 .detach();
             }
+
             SyncEvent::Authenticate { request, reply } => {
                 let backend = self.backend.clone();
                 let sender = self.sync_sender.clone();
@@ -196,9 +223,9 @@ impl ApplicationRoot {
         }
     }
 
-    pub fn new(
-        services: AppServices, session: WindowSession, backend: AppClient, application_title: impl Into<SharedString>, playback_restore_path: Option<PathBuf>, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window,
-        cx: &mut Context<Self>,
+    pub(crate) fn new_with_playback(
+        services: AppServices, session: WindowSession, backend: AppClient, application_title: impl Into<SharedString>, playback_restore_path: Option<PathBuf>, playback_controller: Option<Entity<playback::PlaybackController>>,
+        #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         cx.set_volume_button_capture(true);
         let sync_state = cx.new(|_| browser_ui::SyncState::new(&services));
@@ -243,12 +270,17 @@ impl ApplicationRoot {
             }
             root.save_navigation(cx);
         });
+        cx.subscribe_in(&browser, window, |root, _, request: &browser_ui::PaneRequest, window, cx| match request {
+            browser_ui::PaneRequest::Browse => root.return_to_library(window, cx),
+            request => cx.emit(request.clone()),
+        })
+        .detach();
         cx.subscribe_in(&browser, window, |root, _, request: &OpenBookRequested, window, cx| {
             root.open_book(request.locator.clone(), request.title.clone(), request.initial_target.clone(), window, cx);
         })
         .detach();
         cx.observe_window_activation(window, |root, window, cx| root.update_notification_interest(window, cx)).detach();
-        let playback = playback::PlaybackController::shared(backend.clone(), playback_restore_path, cx);
+        let playback = playback_controller.unwrap_or_else(|| playback::PlaybackController::shared(backend.clone(), playback_restore_path, cx));
         cx.observe_in(&playback, window, |root, _, window, cx| root.sync_playback(window, cx)).detach();
         let audiobook_footer = cx.new(|_| audiobook_footer::AudiobookFooter::default());
         cx.subscribe(&audiobook_footer, |root, _, _: &audiobook_footer::CancelPending, cx| {
@@ -286,6 +318,7 @@ impl ApplicationRoot {
             native_pointer_left_client: false,
             application_title: application_title.into(),
             _browser_subscription: browser_subscription,
+            split_enabled: false,
             notification_mode: None,
             notification_task: None,
             native_back_overlay: None,
@@ -358,6 +391,62 @@ impl ApplicationRoot {
         self.opening = true;
         self.opening_focus.focus(window, cx);
         cx.notify();
+    }
+
+    fn open_reader_link(&mut self, link: library_model::ReaderLink, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_task.take();
+        self.pending_audiobook = None;
+        self.pending_reader = None;
+        self.begin_opening(window, cx);
+        let backend = self.backend.clone();
+        self.open_task = Some(cx.spawn(async move |root, cx| {
+            let result = async {
+                let library_id = *link.locator.library_id();
+                if !backend.libraries().await?.iter().any(|entry| *entry.library_id() == library_id) {
+                    return Err(BackendError::message("This link refers to a library that is not configured on this device."));
+                }
+                let library = backend.library(library_id);
+                let book = link.locator.content_hash();
+                let mut anchor = link.anchor;
+                if let Some(id) = link.annotation_id {
+                    match library.annotation(book, id).await {
+                        Ok(Some(annotation)) => anchor = annotation.anchor,
+                        Ok(None) => {}
+                        Err(error) => log::warn!("could not resolve linked annotation; using its saved passage: {error}"),
+                    }
+                }
+                let reused = root
+                    .update_in(cx, |root, window, cx| {
+                        let Some(reader) = root.reader.as_ref().filter(|reader| reader.locator == link.locator) else { return false };
+                        if let Err(message) = reader.view.update(cx, |reader, cx| reader.open_annotation_anchor(anchor.clone(), window, cx)) {
+                            window.push_notification(Notification::error(message), cx);
+                        }
+                        root.opening = false;
+                        cx.notify();
+                        true
+                    })
+                    .map_err(BackendError::operation)?;
+                if reused {
+                    return Ok(());
+                }
+                let title = library.book_detail(book).await?.book.title;
+                let target = anchor.open_target().ok_or_else(|| BackendError::message("The linked passage has an invalid location."))?;
+                root.update_in(cx, |root, window, cx| {
+                    root.opening = false;
+                    root.open_book(link.locator, title, Some(target), window, cx);
+                })
+                .map_err(BackendError::operation)?;
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = root.update_in(cx, |root, window, cx| {
+                    root.opening = false;
+                    window.push_notification(Notification::error(ui_components::user_facing_error(&error, "Could not open this reader link.")), cx);
+                    cx.notify();
+                });
+            }
+        }));
     }
 
     pub fn open_book(&mut self, locator: BookLocator, title: String, initial_target: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -443,7 +532,12 @@ impl ApplicationRoot {
         let audio_locator = locator.clone();
         let audio_title = title.clone();
         let saved_title = title.clone();
-        let reader = cx.new(|cx| reader_ui::ReaderView::new(locator.clone(), title, initial_target, self.backend.clone(), library, window, cx));
+        let reader = cx.new(|cx| {
+            let reader = reader_ui::ReaderView::new(locator.clone(), title, initial_target, self.backend.clone(), library, window, cx);
+            #[cfg(feature = "kobo")]
+            let reader = reader.with_device_controls(self.device_bar.clone());
+            reader
+        });
         cx.subscribe_in(&reader, window, |root, reader, _: &reader_ui::CloseRequested, window, cx| {
             if root.reader.as_ref().is_some_and(|surface| surface.view.entity_id() == reader.entity_id()) {
                 root.return_to_library(window, cx);
@@ -455,7 +549,7 @@ impl ApplicationRoot {
             // the book the user subsequently opened.
             if let Some(surface) = root.reader.as_ref().filter(|surface| surface.view.entity_id() == reader.entity_id()) {
                 let title = surface.title.clone();
-                root.book_open_failed(&title, app::BackendError::Message(error.0.clone()), window, cx);
+                root.book_open_failed(&title, error.0.clone(), window, cx);
             }
         })
         .detach();
@@ -476,7 +570,7 @@ impl ApplicationRoot {
         .detach();
         self.reader = Some(ReaderSurface { locator, title: saved_title, view: reader });
         self.pending_reader = None;
-        browser_ui::evict_covers(cx);
+        browser_ui::evict_covers(window);
         let backend = self.backend.clone();
         cx.spawn(async move |_, _| {
             if let Err(error) = backend.evict_cover_caches().await {
@@ -496,6 +590,7 @@ impl ApplicationRoot {
         self.opening = false;
         self.reader = None;
         self.pending_reader = None;
+        trim_unused_images_after_transition(window);
         self.save_navigation(cx);
         #[cfg(all(target_os = "linux", not(feature = "mobile")))]
         {
@@ -562,7 +657,7 @@ impl ApplicationRoot {
             self.return_to_library(window, cx);
         }
         let Some((locator, session)) = active else {
-            cx.set_global(NowPlaying::default());
+            self.browser.update(cx, |browser, cx| browser.set_now_playing(None, cx));
             cx.notify();
             return;
         };
@@ -582,7 +677,7 @@ impl ApplicationRoot {
                 }
             })
         });
-        cx.set_global(NowPlaying { book: Some(NowPlayingBook { locator: locator.clone(), controls: controls.into(), position, chapter_read_status, reset_chapter_read_status }) });
+        self.browser.update(cx, |browser, cx| browser.set_now_playing(Some(NowPlayingBook { locator: locator.clone(), controls: controls.into(), position, chapter_read_status, reset_chapter_read_status }), cx));
         let dock = cx.new(|cx| reader_ui::AudiobookDock::new(session.clone(), cx));
         cx.subscribe_in(&dock, window, |root, _, action: &reader_ui::DockAction, window, cx| match action {
             reader_ui::DockAction::Expand => root.expand_audiobook(window, cx),
@@ -612,17 +707,10 @@ impl ApplicationRoot {
         }
     }
 
-    /// Back first closes the full-screen audiobook player, which covers
-    /// whatever page is underneath and so must not let that page go back.
-    fn collapse_audiobook_on_back(&mut self, _: &DismissSettings, window: &mut Window, cx: &mut Context<Self>) {
+    /// An in-flight open is cancelled before navigating away from the page.
+    fn cancel_opening_on_back(&mut self, _: &DismissSettings, window: &mut Window, cx: &mut Context<Self>) {
         if self.opening || self.pending_reader.is_some() {
             self.return_to_library(window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        if let Some(audio) = &self.audiobook
-            && audio.dock.update(cx, |dock, cx| dock.collapse_mobile(cx))
-        {
             cx.stop_propagation();
         }
     }
@@ -636,6 +724,7 @@ impl ApplicationRoot {
     }
 
     /// Registers a host-owned surface, such as Android's embedded webpage browser.
+    #[cfg(test)]
     pub fn set_native_back_overlay(&mut self, handler: impl Fn(&mut Window, &mut App) -> bool + 'static) {
         self.native_back_overlay = Some(Rc::new(handler));
     }
@@ -653,9 +742,6 @@ impl ApplicationRoot {
             self.return_to_library(window, cx);
             return true;
         }
-        if self.audiobook.as_ref().is_some_and(|audio| audio.dock.update(cx, |dock, cx| dock.collapse_mobile(cx))) {
-            return true;
-        }
         if let Some(reader) = &self.reader {
             reader.view.update(cx, |reader, cx| reader.native_back(window, cx));
             return true;
@@ -671,8 +757,11 @@ impl ApplicationRoot {
     }
 }
 
-impl Render for ApplicationRoot {
+impl gpui::EventEmitter<browser_ui::PaneRequest> for ApplicationPane {}
+
+impl Render for ApplicationPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.install_playback_keys(window, cx);
         window.set_page_scroll_on_swipe(cfg!(feature = "mobile") || cx.supports_touch_input());
         let footer = {
             // No dock while the book is open in the reader, or while its detail
@@ -684,8 +773,11 @@ impl Render for ApplicationRoot {
             self.audiobook_footer.update(cx, |footer, cx| footer.set(dock, pending, cx));
             visible.then(|| AnyView::from(self.audiobook_footer.clone()))
         };
-        self.browser.update(cx, |browser, cx| browser.set_content_footer(footer.clone().filter(|_| self.reader.is_none()), cx));
-        let content = self.reader.as_ref().map(|reader| AnyView::from(reader.view.clone())).unwrap_or_else(|| AnyView::from(self.browser.clone()));
+        let embedded_reader = self.split_enabled && browser_ui::native_windows_available() && !ui_components::uses_mobile_navigation(window);
+        self.browser.update(cx, |browser, cx| browser.set_content_footer(footer.clone().filter(|_| self.reader.is_none() || embedded_reader), cx));
+        let reader_surface = self.reader.as_ref().filter(|_| embedded_reader).map(|reader| AnyView::from(reader.view.clone()));
+        self.browser.update(cx, |browser, cx| browser.set_reader_surface(reader_surface, cx));
+        let content = self.reader.as_ref().filter(|_| !embedded_reader).map(|reader| AnyView::from(reader.view.clone())).unwrap_or_else(|| AnyView::from(self.browser.clone()));
         // Covers the gap between tapping a book and the async format lookup
         // in `open_book` resolving, so the tap isn't indistinguishable from
         // one that did nothing.
@@ -712,8 +804,36 @@ impl Render for ApplicationRoot {
             .key_context("Application")
             .track_focus(&self.opening_focus)
             .capture_key_down(cx.listener(Self::cancel_opening_on_key))
-            .capture_action(cx.listener(Self::collapse_audiobook_on_back))
+            .capture_action(cx.listener(Self::cancel_opening_on_back))
+            .on_action(cx.listener(|root, _: &ui_components::CloseBookPlayer, window, cx| root.close_audiobook(window, cx)))
             .on_action(cx.listener(Self::on_back));
+        #[cfg(all(not(feature = "mobile"), any(target_family = "wasm", target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let root = {
+            let mouse_target = cx.weak_entity();
+            // Use pane bounds so Back also reaches custom overlays that
+            // occlude the page. Child readers handle their own history first.
+            root.child(
+                canvas(
+                    |bounds, _, _| bounds,
+                    move |_, bounds, window, _| {
+                        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                            if !ui_components::mouse_navigation_enabled() || event.button != MouseButton::Navigate(NavigationDirection::Back) {
+                                return;
+                            }
+                            // Modal layers occlude page hitboxes and own Back before
+                            // a reader or the pane beneath them can navigate.
+                            let handled = if phase.capture() { Root::dismiss_active_overlay(window, cx) } else { bounds.contains(&event.position) && mouse_target.update(cx, |pane, cx| pane.native_back(window, cx)).is_ok() };
+                            if handled {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+        };
         #[cfg(all(target_os = "linux", not(feature = "mobile")))]
         let root = root
             .on_mouse_exit(cx.listener(|root, _: &gpui::MouseExitEvent, _, _| {
@@ -743,7 +863,7 @@ impl Render for ApplicationRoot {
         let root = root.child(gpui::div().flex_1().min_h_0().w_full().child(content));
         // No bottom nav bar below the dock on this path, so it needs its own
         // padding to clear the OS gesture/button bar.
-        let root = root.children(footer.filter(|_| self.reader.is_some()).map(|footer| gpui::div().w_full().flex_none().pb(window.insets().safe_area.bottom).child(footer)));
+        let root = root.children(footer.filter(|_| self.reader.is_some() && !embedded_reader).map(|footer| gpui::div().w_full().flex_none().pb(window.insets().safe_area.bottom).child(footer)));
         let root = root.children(opening_overlay);
         #[cfg(all(target_os = "linux", not(feature = "mobile")))]
         let root = root.when(matches!(window.window_decorations(), gpui::Decorations::Client { .. }), |root| {
@@ -791,12 +911,13 @@ impl Render for ApplicationRoot {
                 )
             }
         });
-        root.children(Root::render_sheet_layer(window, cx).map(|sheet| gpui::deferred(sheet).with_priority(2)))
+        root.when(!self.split_enabled, |root| root.children(Root::render_sheet_layer(window, cx).map(|sheet| gpui::deferred(sheet).with_priority(2))))
     }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
 mod navigation_tests {
+    use super::ApplicationPane as ApplicationRoot;
     use super::*;
     use browser_ui::{AppStartup, BrowsePageSession, LibraryRoute, Route};
     use gpui::{AnyWindowHandle, TestAppContext, WindowHandle};
@@ -919,6 +1040,69 @@ mod navigation_tests {
     }
 
     #[gpui::test]
+    async fn playback_keys_seek_and_preserve_reader_and_dialog_navigation(cx: &mut TestAppContext) {
+        let (_directory, services, backend, library_id) = back_fixture(cx).await;
+        cx.update(|cx| reader_ui::configure(reader_ui::ReaderPreferences::default(), Rc::new(|_, _, _| {}), cx));
+        let (window, root) = back_window(services, backend.clone(), library_id, LibraryRoute::Home, cx);
+        let locator = BookLocator::new(library_id, BookId::from_bytes([42; 32]));
+        let metadata = library_model::PlaybackMetadata {
+            format: book_model::BookFormat::M4b,
+            title: "Keyboard playback".into(),
+            author: String::new(),
+            narrator: None,
+            duration_ms: 120_000,
+            chapters: Vec::new(),
+            tracks: Vec::new(),
+            cover: Vec::new(),
+        };
+        let record = reader_ui::ActiveAudiobook::new(locator.clone(), 45_000, 1.0, metadata);
+        let session = cx.update(|cx| reader_ui::restore_audiobook(&record, backend.library(library_id), cx));
+        window
+            .update(cx, |_, window, cx| {
+                root.update(cx, |root, cx| {
+                    root.playback.update(cx, |controller, cx| controller.replace(locator, record.metadata.title, session.clone(), cx));
+                    root.sync_playback(window, cx);
+                    root.opening_focus.focus(window, cx);
+                })
+            })
+            .unwrap();
+        let position = |cx: &TestAppContext| session.read_with(cx, |session, _| session.listening_position().unwrap().0);
+        cx.simulate_keystrokes(window.into(), "left");
+        assert_eq!(position(cx), Duration::from_secs(30));
+        cx.simulate_keystrokes(window.into(), "right");
+        assert_eq!(position(cx), Duration::from_secs(60));
+        cx.simulate_keystrokes(window.into(), "ctrl-left shift-right");
+        assert_eq!(position(cx), Duration::from_secs(60));
+
+        window
+            .update(cx, |_, window, cx| {
+                window.open_dialog(cx, |dialog, _, _| dialog.title("Keep keyboard focus"));
+                // The overlay must win even if focus is stale underneath it.
+                let focus = root.read(cx).opening_focus.clone();
+                focus.focus(window, cx);
+            })
+            .unwrap();
+        cx.simulate_keystrokes(window.into(), "left right");
+        assert_eq!(position(cx), Duration::from_secs(60));
+        window
+            .update(cx, |_, window, cx| {
+                Root::dismiss_active_overlay(window, cx);
+                root.update(cx, |root, cx| {
+                    let locator = BookLocator::new(library_id, BookId::from_bytes([43; 32]));
+                    let view = cx.new(|cx| reader_ui::ReaderView::new(locator.clone(), "Other reader".into(), None, backend.clone(), Rc::new(backend.library(library_id)), window, cx));
+                    root.reader = Some(ReaderSurface { locator, title: "Other reader".into(), view });
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.simulate_keystrokes(window.into(), "left right");
+        assert_eq!(position(cx), Duration::from_secs(60), "an open reader owns the arrow keys");
+        window.update(cx, |_, window, cx| root.update(cx, |root, cx| root.return_to_library(window, cx))).unwrap();
+        cx.simulate_keystrokes(window.into(), "left");
+        assert_eq!(position(cx), Duration::from_secs(45));
+    }
+
+    #[gpui::test]
     async fn native_back_with_stale_modal_focus_respects_stacking_and_cancel_veto(cx: &mut TestAppContext) {
         let (_directory, services, backend, library_id) = back_fixture(cx).await;
         let (window, root) = back_window(services, backend, library_id, LibraryRoute::Home, cx);
@@ -1036,7 +1220,7 @@ mod navigation_tests {
         let (_directory, services, backend, library_id) = back_fixture(cx).await;
         let (home, _) = back_window(services.clone(), backend.clone(), library_id, LibraryRoute::Home, cx);
         let stale_focus = cx.update(|cx| cx.focus_handle());
-        for route in [LibraryRoute::Books, LibraryRoute::Folders, LibraryRoute::Subjects, LibraryRoute::Authors, LibraryRoute::Catalog, LibraryRoute::Trash] {
+        for route in [LibraryRoute::Books, LibraryRoute::Folders, LibraryRoute::Subjects, LibraryRoute::Authors, LibraryRoute::Catalog, LibraryRoute::Trash, LibraryRoute::Notebook] {
             let (window, root) = back_window(services.clone(), backend.clone(), library_id, route, cx);
             cx.update_window(home.into(), |_, window, _| window.blur()).unwrap();
             assert!(!press_native_back(home.into(), cx), "another window must not intercept Home's exit");
@@ -1123,7 +1307,7 @@ mod navigation_tests {
         // Back must follow the nested trail even before its asynchronous
         // listing has replaced the initial root listing.
         let pages = vec![BrowsePageSession { path: vec![(BrowseLocation::Folder(parent), "Parent".into()), (BrowseLocation::Folder(child), "Child".into())], detail: None }];
-        let session = WindowSession { initial: NavigationSession { library_id: Some(*library.library_id()), route: Route::Library(LibraryRoute::Folders), pages, reader: None }, ..Default::default() };
+        let session = WindowSession { initial: NavigationSession { library_id: Some(*library.library_id()), route: Route::Library(LibraryRoute::Folders), pages, reader: None, ..Default::default() }, ..Default::default() };
         let window = cx.add_window(|window, cx| {
             let root = cx.new(|cx| ApplicationRoot::new(services, session, backend, "Test", None, window, cx));
             gpui_component::Root::new(root, window, cx)
@@ -1245,6 +1429,39 @@ mod navigation_tests {
             assert!(root.open_task.is_none());
             assert_eq!(root.last_saved_navigation.as_ref().unwrap().route, Route::Library(LibraryRoute::Authors));
         });
+    }
+
+    #[gpui::test]
+    async fn failed_reader_link_clears_a_cancelled_audiobook_load(cx: &mut TestAppContext) {
+        let (_directory, services, backend, library_id) = back_fixture(cx).await;
+        let (window, root) = back_window(services, backend, library_id, LibraryRoute::Authors, cx);
+        let link = library_model::ReaderLink { locator: BookLocator::new(library_id, BookId::from_bytes([19; 32])), annotation_id: None, anchor: book_model::AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2/1:0)") };
+        let (finished, completion) = async_channel::bounded(1);
+        let _observation = cx.update(|cx| {
+            cx.observe(&root, move |root, cx| {
+                if !root.read(cx).opening {
+                    let _ = finished.try_send(());
+                }
+            })
+        });
+        window
+            .update(cx, |_, window, cx| {
+                root.update(cx, |root, cx| {
+                    root.pending_audiobook = Some("Opening audiobook…".into());
+                    root.open_task = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+                    root.open_reader_link(link, window, cx);
+                    assert!(root.pending_audiobook.is_none(), "cancelled audiobook state must clear before the link lookup completes");
+                })
+            })
+            .unwrap();
+        completion.recv().await.unwrap();
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            assert!(root.pending_audiobook.is_none());
+            assert!(root.reader.is_none());
+            assert_eq!(root.browser.read(cx).navigation_session(cx).route, Route::Library(LibraryRoute::Authors));
+        });
+        window.update(cx, |root, _, cx| assert_eq!(root.notification.read(cx).notifications().len(), 1)).unwrap();
     }
 
     #[gpui::test]

@@ -4,20 +4,24 @@ use app::{AppDataLocation, host::BackendLaunch};
 use gpui::Platform;
 use gpui_android::{AndroidApp, AndroidPlatform, AndroidPlatformOptions};
 use jni::EnvUnowned;
-use jni::objects::{JClass, JObject, JString};
+use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::refs::Reference;
 use jni::sys::{jboolean, jint, jlong, jstring};
+use std::borrow::Cow;
+use std::ffi::CString;
 use std::fs::File;
+use std::io::Read;
 use std::os::fd::FromRawFd as _;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Once;
 use std::sync::mpsc::TrySendError;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 
-use crate::{IncomingBook, IncomingBookResult, UiLaunchOptions, open_ui};
+use crate::{IncomingBook, IncomingBookResult, ReaderActivation, UiLaunchOptions, open_ui};
 
 static INCOMING_FILE_SENDER: OnceLock<async_channel::Sender<IncomingBookResult>> = OnceLock::new();
+static READER_LINKS: LazyLock<(async_channel::Sender<ReaderActivation>, async_channel::Receiver<ReaderActivation>)> = LazyLock::new(async_channel::unbounded);
 // Queue entries and storage snapshots remain valid if a callback unwinds.
 // Recover these locks so a later JNI callback cannot panic on poisoning.
 static EARLY_INCOMING_FILES: Mutex<Vec<IncomingBookResult>> = Mutex::new(Vec::new());
@@ -158,6 +162,24 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
             .map(Into::into)
             .map_err(|error| error.to_string())
     });
+    let device_vm = speech_vm.clone();
+    let device_refs = speech_refs.clone();
+    reader_speech::device::initialize(move |command| {
+        device_vm
+            .attach_current_thread(|env| {
+                let command = JString::from_str(env, command)?;
+                let response = env
+                    .call_static_method(
+                        &device_refs.0,
+                        jni::jni_str!("localSpeechCommand"),
+                        jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;"),
+                        &[jni::objects::JValue::Object(device_refs.1.as_ref()), jni::objects::JValue::Object(command.as_ref())],
+                    )?
+                    .l()?;
+                env.cast_local::<JString>(response)?.try_to_string(env)
+            })
+            .map_err(|error| error.to_string())
+    });
     reader_speech::android::initialize(move |command| {
         speech_vm
             .attach_current_thread(|env| {
@@ -245,18 +267,19 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
 
     app::host::configure_opds_browser(data_dir.join("opds-webview"));
     let update_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    let (update_class, update_context, play_store) = update_vm
+    let (update_class, update_context, play_store, self_updates_enabled) = update_vm
         .attach_current_thread(|env| {
             let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
             let activity = unsafe { env.as_cast_raw::<jni::refs::Global<JObject>>(&raw_activity)? };
             let class = env.get_object_class(activity.as_ref())?;
             let class = env.new_global_ref(class)?;
             let play_store = env.call_static_method(&class, jni::jni_str!("isPlayStoreBuild"), jni::jni_sig!("()Z"), &[])?.z()?;
+            let self_updates_enabled = env.call_static_method(&class, jni::jni_str!("isSelfUpdateEnabled"), jni::jni_sig!("()Z"), &[])?.z()?;
             let context = env.call_method(activity.as_ref(), jni::jni_str!("getApplicationContext"), jni::jni_sig!("()Landroid/content/Context;"), &[])?.l()?;
-            Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, play_store))
+            Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, play_store, self_updates_enabled))
         })
         .map_err(|error| format!("could not initialize Android update bridge: {error}"))?;
-    let update_trial = if play_store {
+    let update_trial = if !self_updates_enabled {
         // No update host means no feed requests, APK staging or update controls.
         false
     } else {
@@ -288,12 +311,12 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
     let maintenance_permit = defer_maintenance.then(defer_library_maintenance);
     let incoming_directory = data_dir.join("incoming");
     std::fs::create_dir_all(&incoming_directory).map_err(|error| format!("failed to create Android incoming book directory: {error}"))?;
-    cleanup_abandoned_incoming_files(&incoming_directory);
     let (staging_sender, staging_receiver) = std::sync::mpsc::sync_channel::<StagingRequest>(2);
     STAGING_QUEUE.set(staging_sender).ok();
     std::thread::Builder::new()
         .name("incoming-book".to_owned())
         .spawn(move || {
+            cleanup_abandoned_incoming_files(&incoming_directory);
             for request in staging_receiver {
                 let path = incoming_directory.join(format!("{}.part", uuid::Uuid::new_v4()));
                 match crate::stage_incoming_book(request.file, &path) {
@@ -309,33 +332,62 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
     log::info!("initializing backend in {}", data_dir.display());
     let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).map_err(|error| format!("failed to initialize Android app-data directory: {error}"))?;
     let backend_context = if play_store { backend_context.with_private_library_storage() } else { backend_context };
+    let backend_context = if defer_maintenance { backend_context.with_libraries_after_first_frame() } else { backend_context };
     profile.mark("staging_and_launch_config");
     log::info!("backend context initialized");
 
     log::info!("constructing GPUI application");
-    // The platform's loader includes only a small set of Roboto/symbol faces.
-    // Register the complete device catalog here before any reader is created.
+    // Start the UI with bundled fonts. Device font I/O and registration run
+    // in the background after the application window has been installed.
     let platform =
-        AndroidPlatform::new_with_options(false, AndroidPlatformOptions { load_system_fonts: false, system_font_fallback: "Raleway".into(), cache_gpu_pipelines, graphics_backends: force_opengl.then_some(gpui_android::wgpu::Backends::GL) });
-    if load_system_fonts {
-        crate::android_fonts::load(platform.text_system().as_ref());
-    }
-    let font_families = platform.text_system().all_font_names();
-    profile.mark("system_fonts");
+        AndroidPlatform::new_with_options(false, AndroidPlatformOptions { load_system_fonts: false, system_font_fallback: "Noto Sans".into(), cache_gpu_pipelines, graphics_backends: force_opengl.then_some(gpui_android::wgpu::Backends::GL) });
+    let font_text_system = load_system_fonts.then(|| platform.text_system());
     let application = gpui::Application::with_platform(Rc::new(platform)).with_assets(ui_components::Assets);
     profile.mark("application_construct");
     log::info!("running GPUI application");
+    let font_assets = app.asset_manager();
     application.run(move |cx| {
-        cx.set_global(ui_components::SystemFontFamilies(font_families));
+        ui_components::configure_bundled_font_source(move |name| {
+            let path = CString::new(format!("fonts/{name}")).map_err(|error| error.to_string())?;
+            let mut asset = font_assets.open(&path).ok_or_else(|| format!("bundled font asset is missing: {name}"))?;
+            let mut bytes = Vec::with_capacity(asset.length());
+            asset.read_to_end(&mut bytes).map_err(|error| format!("read bundled font {name}: {error}"))?;
+            Ok(Cow::Owned(bytes))
+        }, cx);
+        cx.set_global(ui_components::SystemFontFamilies(if load_system_fonts { Vec::new() } else { vec!["NV Garamond".into(), "Raleway".into(), "Bodoni Moda".into()] }));
+        let pending_fonts = font_text_system.map(|text_system| {
+            let (ready, receiver) = async_channel::bounded::<()>(1);
+            cx.set_global(reader_ui::SystemFontsLoading(receiver));
+            (text_system, ready)
+        });
         cx.set_global(browser_ui::AndroidStoragePolicy { all_files_access_available: !play_store });
         profile.mark("event_loop_ready");
         log::info!("opening shared Bokheim UI");
         let opened = open_ui(backend_context, UiLaunchOptions::MOBILE, Some(incoming_files), cx);
+        if let Some(root) = opened.clone() {
+            crate::forward_reader_links(READER_LINKS.1.clone(), root, cx);
+        }
         if opened.is_none() {
             log::error!("failed to open the Android application UI");
             finish_activity(&app);
             cx.quit();
             return;
+        }
+        if let Some((text_system, ready)) = pending_fonts {
+            let fonts = cx.background_executor().spawn(async move {
+                crate::android_fonts::load(text_system.as_ref());
+                text_system.all_font_names()
+            });
+            cx.spawn(async move |cx| {
+                let families = fonts.await;
+                let _ = cx.update(|cx| {
+                    cx.set_global(ui_components::SystemFontFamilies(families));
+                    cx.refresh_windows();
+                });
+                // No messages are sent: closing wakes every waiting reader.
+                drop(ready);
+            })
+            .detach();
         }
         if let Some(root) = opened.clone() {
             let back_app = app.clone();
@@ -422,6 +474,8 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeNetworkCostCha
     });
 }
 
+// Keep the Java callback ABI available in builds without provider support.
+
 #[unsafe(no_mangle)]
 extern "system" fn Java_se_bokheim_reader_gpui_UpdateMetadata_nativeJson<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: jni::objects::JClass<'caller>) -> jni::sys::jstring {
     unowned_env
@@ -478,6 +532,17 @@ fn cleanup_abandoned_incoming_files(directory: &Path) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeOpenReaderLink<'caller>(mut unowned_env: EnvUnowned<'caller>, _activity: JObject<'caller>, url: JString<'caller>) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            let url = url.try_to_string(env)?;
+            let _ = READER_LINKS.0.try_send(vec![url].into());
+            Ok(())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>();
 }
 
 #[unsafe(no_mangle)]
@@ -638,6 +703,36 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeReaderChromeRe
     unowned_env
         .with_env(|_| -> jni::errors::Result<()> {
             gpui_android::reader_chrome_revealed();
+            Ok(())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>();
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_DeviceSpeech_nativeBegin(_env: EnvUnowned<'_>, _class: JClass<'_>, id: jlong, rate: jint, encoding: jint, channels: jint) -> jboolean {
+    id > 0 && rate > 0 && reader_speech::device::started(id as u64, rate as u32, encoding, channels)
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_DeviceSpeech_nativeAudio<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>, id: jlong, bytes: JByteArray<'caller>) -> jboolean {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<_> {
+            if id <= 0 || bytes.len(env)? > 32 * 1024 * 1024 {
+                return Ok(false);
+            }
+            Ok(reader_speech::device::audio(id as u64, &env.convert_byte_array(&bytes)?))
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_DeviceSpeech_nativeComplete<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>, id: jlong, error: JString<'caller>) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            let error = if error.is_null() { None } else { Some(error.try_to_string(env)?) };
+            if id > 0 {
+                reader_speech::device::complete(id as u64, error);
+            }
             Ok(())
         })
         .resolve::<jni::errors::LogErrorAndDefault>();

@@ -4,9 +4,14 @@ mod account;
 mod catalog;
 mod core;
 pub(crate) mod data;
+pub(crate) mod dictionaries;
 mod libraries;
-mod cloud;
-pub use cloud::{CloudFolderListing, CloudLoginRequest};
+mod quota;
+#[cfg(not(target_arch = "wasm32"))]
+mod root_recovery;
+mod storage_copy;
+pub(crate) mod wikipedia;
+pub mod translation;
 #[cfg(not(target_arch = "wasm32"))]
 mod opds;
 pub mod preferences;
@@ -21,17 +26,9 @@ pub const APP_NAME_LOWER: &str = "bokheim";
 pub const API_SERVER_ORIGIN: &str = "https://api.bokheim.se";
 pub const METADATA_SERVER_ORIGIN: &str = "https://meta.bokheim.se";
 
-fn google_books_api_key() -> Option<String> {
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Ok(key) = std::env::var("BOKHEIM_GOOGLE_BOOKS_API_KEY") {
-        if !key.trim().is_empty() { return Some(key); }
-    }
-    option_env!("BOKHEIM_GOOGLE_BOOKS_API_KEY").filter(|key| !key.trim().is_empty()).map(str::to_owned)
-}
-
 pub use crate::api::AppClient;
 pub use crate::runtime::{AccountSnapshot, AppStartupState};
-pub use account::{AccountStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
+pub use account::{AccountStatus, LocalLibraryStorageUsage, ServerBookStorageUsage, ServerLibraryStorageUsage};
 pub(crate) use core::AppBackend;
 pub(crate) use data::BackendContext;
 pub use data::{AppDataLocation, LibraryEntry};

@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.os.Build;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.text.method.PasswordTransformationMethod;
 import android.view.Gravity;
@@ -42,6 +43,7 @@ final class AccountDialog extends Dialog {
     final long sessionId;
     private final Submit submit;
     private final int minimum;
+    private final int resendCooldownSeconds;
     private final int[] colors;
     private final LinearLayout form;
     private final AutofillManager autofill;
@@ -51,12 +53,17 @@ final class AccountDialog extends Dialog {
     private boolean busy, finished, committed;
     private EditText email, password, pin, token;
     private TextView feedback;
+    private String registrationEmail = "", registrationPassword = "";
+    private Button resendButton;
+    private long resendAvailableAt;
+    private final Runnable resendTick = this::updateResend;
 
-    AccountDialog(Activity activity, long id, int minimum, int[] colors, Submit submit) {
+    AccountDialog(Activity activity, long id, int minimum, int resendCooldownSeconds, int[] colors, Submit submit) {
         super(activity, ColorUtils.calculateLuminance(colors[BACKGROUND]) > 0.5
             ? android.R.style.Theme_Material_Light_NoActionBar : android.R.style.Theme_Material_NoActionBar);
         this.sessionId = id;
         this.minimum = minimum;
+        this.resendCooldownSeconds = resendCooldownSeconds;
         this.colors = colors;
         this.submit = submit;
         autofill = activity.getSystemService(AutofillManager.class);
@@ -101,6 +108,8 @@ final class AccountDialog extends Dialog {
         // now, before an already queued network response can commit credentials.
         if (!finished) {
             finished = true;
+            registrationEmail = registrationPassword = "";
+            form.removeCallbacks(resendTick);
             if (!committed && autofill != null) autofill.cancel();
             submit.send(sessionId, JSONObject.quote("closed"));
         }
@@ -199,14 +208,32 @@ final class AccountDialog extends Dialog {
     }
     private void change(String next) {
         if (autofill != null) autofill.cancel();
-        render(next, email.getText().toString().trim(), "");
+        render(next, currentEmail(), "");
+    }
+    private String currentEmail() {
+        return flow.equals("verify") ? registrationEmail : email.getText().toString().trim();
+    }
+    private void startResendCooldown() {
+        resendAvailableAt = SystemClock.elapsedRealtime() + resendCooldownSeconds * 1000L;
+        updateResend();
+    }
+    private void updateResend() {
+        form.removeCallbacks(resendTick);
+        if (finished || resendButton == null) return;
+        long seconds = Math.max(0, (resendAvailableAt - SystemClock.elapsedRealtime() + 999) / 1000);
+        resendButton.setText(seconds > 0 ? "Resend PIN (" + seconds + "s)" : "Resend PIN");
+        resendButton.setEnabled(!busy && seconds == 0);
+        if (seconds > 0) form.postDelayed(resendTick, 1000);
     }
     private void render(String next, String address, String message) {
         flow = next;
+        if (!flow.equals("verify")) registrationEmail = registrationPassword = "";
+        form.removeCallbacks(resendTick);
+        resendButton = null;
         committed = false;
         form.removeAllViews();
         buttons.clear();
-        password = pin = token = null;
+        email = password = pin = token = null;
         String title;
         switch (flow) {
             case "register": title = "Create account"; break;
@@ -231,15 +258,13 @@ final class AccountDialog extends Dialog {
         feedback = text(message, 16);
         feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         feedback(message, false);
-        email = field(R.id.account_email, "Email", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
+        if (!flow.equals("verify")) email = field(R.id.account_email, "Email", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
             flow.equals("register") ? "newUsername" : View.AUTOFILL_HINT_USERNAME, address);
         if (flow.equals("verify")) pin = field(R.id.account_pin, "Verification PIN", InputType.TYPE_CLASS_NUMBER, null, "");
-        // Verification asks for the registration password too: the PIN proves
-        // the mailbox, the password proves the registrant.
-        if (flow.equals("login") || flow.equals("register") || flow.equals("reset") || flow.equals("verify")) {
-            password = field(R.id.account_password, flow.equals("reset") ? "New password" : flow.equals("verify") ? "Password you chose" : "Password",
+        if (flow.equals("login") || flow.equals("register") || flow.equals("reset")) {
+            password = field(R.id.account_password, flow.equals("reset") ? "New password" : "Password",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD,
-                flow.equals("login") || flow.equals("verify") ? View.AUTOFILL_HINT_PASSWORD : "newPassword", "");
+                flow.equals("login") ? View.AUTOFILL_HINT_PASSWORD : "newPassword", "");
             password.setTransformationMethod(PasswordTransformationMethod.getInstance());
             Button reveal = button("Show password", () -> {});
             LinearLayout.LayoutParams revealLayout = new LinearLayout.LayoutParams(-2, -2);
@@ -256,7 +281,7 @@ final class AccountDialog extends Dialog {
             if (flow.equals("register") || flow.equals("reset")) text("Use at least " + minimum + " characters.", 14).setTextColor(colors[MUTED]);
         }
         if (flow.equals("reset")) token = field(R.id.account_reset_token, "Reset code from your email", InputType.TYPE_CLASS_TEXT, null, "");
-        EditText last = token != null ? token : password != null ? password : email;
+        EditText last = token != null ? token : pin != null ? pin : password != null ? password : email;
         last.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         last.setOnEditorActionListener((v, action, event) -> {
             if (action == EditorInfo.IME_ACTION_DONE) { perform(flow); return true; }
@@ -273,26 +298,31 @@ final class AccountDialog extends Dialog {
             button("Forgot password?", () -> change("request-reset"));
             button("Create account", () -> change("register"));
         } else {
-            if (flow.equals("verify")) button("Resend PIN", () -> perform("resend"));
+            if (flow.equals("verify")) {
+                resendButton = button("Resend PIN", () -> perform("resend"));
+                button("Use a different email", () -> change("register"));
+            }
             button("Back to sign in", () -> change("login"));
         }
-        email.requestFocus();
+        (pin != null ? pin : email).requestFocus();
     }
     private void setBusy(boolean value) {
         busy = value;
         setCancelable(!value);
         for (Button button : buttons) { button.setEnabled(!value); button.setAlpha(value ? 0.55f : 1f); }
         for (EditText field : new EditText[]{email, password, pin, token}) if (field != null) { field.setEnabled(!value); field.setAlpha(value ? 0.55f : 1f); }
+        updateResend();
     }
     private void perform(String action) {
         if (busy || finished) return;
-        String address = email.getText().toString().trim();
-        String secret = password != null ? password.getText().toString() : "";
+        if (action.equals("resend") && SystemClock.elapsedRealtime() < resendAvailableAt) return;
+        String address = currentEmail();
+        String secret = flow.equals("verify") ? registrationPassword : password != null ? password.getText().toString() : "";
         String code = pin != null ? pin.getText().toString().trim() : "";
         String resetToken = token == null ? "" : token.getText().toString().trim();
-        if (!android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches()) { email.setError("Enter a valid email address"); email.requestFocus(); return; }
+        if (email != null && !android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches()) { email.setError("Enter a valid email address"); email.requestFocus(); return; }
         if (action.equals("verify") && !code.matches("[0-9]{6}")) { pin.setError("Enter the six-digit PIN"); pin.requestFocus(); return; }
-        if (((action.equals("login") || action.equals("verify")) && secret.isEmpty()) || ((action.equals("register") || action.equals("reset")) && secret.codePointCount(0, secret.length()) < minimum)) {
+        if ((action.equals("login") && secret.isEmpty()) || ((action.equals("register") || action.equals("reset")) && secret.codePointCount(0, secret.length()) < minimum)) {
             password.setError(action.equals("register") || action.equals("reset") ? "Use at least " + minimum + " characters" : "Enter your password"); password.requestFocus(); return;
         }
         if (action.equals("reset") && resetToken.isEmpty()) { token.setError("Enter the reset code from your email"); token.requestFocus(); return; }
@@ -315,7 +345,7 @@ final class AccountDialog extends Dialog {
         if (!busy || finished) return;
         setBusy(false);
         if (error != null) { feedback(error, true); return; }
-        String address = email.getText().toString().trim();
+        String address = currentEmail();
         if (pending.equals("login")) {
             // Only sign-in proves this exact email/password pair is valid.
             // Registration hides conflicts; reset tokens may belong to another
@@ -327,8 +357,16 @@ final class AccountDialog extends Dialog {
         }
         switch (pending) {
             case "login": case "verify": dismiss(); break;
-            case "register": render("verify", address, "Check your email for a six-digit verification PIN."); break;
-            case "resend": feedback("Verification PIN sent if the address exists.", false); break;
+            case "register":
+                registrationEmail = address;
+                registrationPassword = password.getText().toString();
+                render("verify", address, "Enter the six-digit PIN sent to " + address + ".");
+                startResendCooldown();
+                break;
+            case "resend":
+                feedback("A new PIN has been requested. Check your email and use the latest PIN.", false);
+                startResendCooldown();
+                break;
             case "request-reset": render("reset", address, "Check your email for a reset code."); break;
             case "reset": render("login", address, "Password updated. Sign in with your new password."); break;
         }

@@ -73,6 +73,7 @@ cp "$REPO_ROOT/apps/desktop-gpui/kobo/command-shims/bluetoothctl" "$APP/command-
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/command-timeout.sh" "$APP/command-timeout.sh"
 cp "$BUILD_TARGET/armv7-unknown-linux-gnueabihf/release/desktop-gpui-kobo" "$APP/desktop-gpui-kobo"
 cp "$BUILD_TARGET/armv7-unknown-linux-gnueabihf/release/taxonomy.sqlite3" "$APP/taxonomy.sqlite3"
+cp -R "$BUILD_TARGET/armv7-unknown-linux-gnueabihf/release/fonts" "$APP/fonts"
 # RPATH also covers libraries loaded by PDFium. RUNPATH only covers direct
 # dependencies, and exporting LD_LIBRARY_PATH would affect firmware subprocesses.
 if ! "$CROSS-readelf" -d "$APP/desktop-gpui-kobo" | grep -F '(RPATH)' | grep -Fq '[$ORIGIN/runtime]'; then

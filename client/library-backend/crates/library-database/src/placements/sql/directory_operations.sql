@@ -8,10 +8,6 @@ SELECT body FROM sync_state_version WHERE state_key=:state_key AND state_subkey=
 -- param: dir_id: &SqlParam<'_>
 SELECT parent_id,name FROM dir WHERE id=:dir_id AND deleted_at IS NULL;
 
--- name: directory_read_dir_parent_id_name_2 ?
--- param: dir_id: &SqlParam<'_>
-SELECT parent_id,name FROM dir WHERE id=:dir_id AND deleted_at IS NULL;
-
 -- name: directory_work_roots ?
 SELECT dir_id FROM local_directory_work;
 

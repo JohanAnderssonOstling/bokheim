@@ -1,33 +1,37 @@
 #[cfg(not(target_os = "android"))]
 use super::NetworkCost;
 use super::POLICY;
+use crate::executor::BackendExecutor;
+#[cfg(not(target_os = "android"))]
+use crate::executor::BackendTask;
+#[cfg(not(target_os = "android"))]
+use crate::storage_queue::{self, Priority};
+#[cfg(not(target_os = "android"))]
+use std::future::pending;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "android")]
 use std::sync::{Mutex, PoisonError};
-#[cfg(not(target_os = "android"))]
-use std::sync::{Mutex, Once, PoisonError};
 #[cfg(not(target_os = "android"))]
 use std::time::Duration;
 
 static FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
 #[cfg(not(target_os = "android"))]
-static START: Once = Once::new();
+static MONITOR: Mutex<Option<BackendTask<()>>> = Mutex::new(None);
 
 /// The registry owns the preference; this small atomic mirror lets the browser
 /// helper and native update workers observe the same setting across processes.
-pub fn initialize(directory: &Path, allow: bool) -> io::Result<()> {
+pub fn initialize(directory: &Path, allow: bool, executor: &BackendExecutor) -> io::Result<()> {
     *FILE.lock().unwrap_or_else(PoisonError::into_inner) = Some(directory.join("transfer-policy.json"));
     save_allow_metered(allow)?;
-    start();
+    start(executor, false);
     Ok(())
 }
 
-pub fn configure_reader(path: PathBuf) {
+pub fn configure_reader(path: PathBuf, executor: &BackendExecutor) {
     *FILE.lock().unwrap_or_else(PoisonError::into_inner) = Some(path);
     refresh();
-    start();
+    start(executor, true);
 }
 
 pub fn save_allow_metered(allow: bool) -> io::Result<()> {
@@ -54,44 +58,120 @@ fn refresh() {
     }
 }
 
-// Android publishes an initial observation and subsequent network callbacks
-// before opening the backend. Preferences update POLICY directly in-process.
+// Android publishes observations through platform callbacks.
 #[cfg(target_os = "android")]
-fn start() {}
+fn start(_executor: &BackendExecutor, _refresh_preferences: bool) {}
 
 #[cfg(not(target_os = "android"))]
-fn start() {
-    START.call_once(|| {
-        // Wait for the first OS observation instead of starting a transfer
-        // during the monitor's startup race. Unknown after probing is allowed.
+fn start(executor: &BackendExecutor, refresh_preferences: bool) {
+    let mut monitor = MONITOR.lock().unwrap_or_else(PoisonError::into_inner);
+    if monitor.is_none() {
         POLICY.cost.store(3, std::sync::atomic::Ordering::Release);
-        #[cfg(target_os = "macos")]
-        macos::start();
-        if let Err(error) = std::thread::Builder::new().name("network-cost".into()).spawn(|| loop {
-            refresh();
-            #[cfg(not(target_os = "macos"))]
-            POLICY.set_network_cost(platform_cost());
-            std::thread::sleep(Duration::from_secs(1));
-        }) {
-            log::warn!("could not start network cost monitor: {error}");
-            POLICY.set_network_cost(NetworkCost::Unknown);
+        POLICY.notify();
+    }
+    #[cfg(target_os = "macos")]
+    macos::start();
+    let task = executor.spawn(async move {
+        let preferences = async move {
+            if !refresh_preferences {
+                return pending::<()>().await;
+            }
+            loop {
+                if let Err(error) = storage_queue::run(Priority::Background, refresh).await {
+                    log::warn!("could not refresh transfer preferences: {error}");
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        };
+        tokio::select! {
+            () = preferences => {},
+            () = monitor_network_cost() => {},
         }
     });
+    // Replacement cancels the old monitor; a replacement backend/runtime can
+    // start a new one without retaining a process-lifetime OS thread.
+    *monitor = Some(task);
 }
 
-#[cfg(target_os = "linux")]
-fn platform_cost() -> NetworkCost {
-    use zbus::blocking::{connection::Builder, Proxy};
-    let cost = (|| {
-        let connection = Builder::system().ok()?.method_timeout(Duration::from_secs(1)).build().ok()?;
-        let proxy = Proxy::new(&connection, "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager", "org.freedesktop.NetworkManager").ok()?;
-        proxy.get_property::<u32>("Metered").ok()
-    })();
-    match cost {
-        Some(1 | 3) => NetworkCost::Metered,
-        Some(2 | 4) => NetworkCost::Unmetered,
+#[cfg(all(target_os = "linux", feature = "linux-network-cost"))]
+async fn monitor_network_cost() {
+    loop {
+        if let Err(error) = watch_network_cost().await {
+            POLICY.set_network_cost(NetworkCost::Unknown);
+            log::debug!("network cost observation will reconnect: {error}");
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-network-cost"))]
+async fn watch_network_cost() -> zbus::Result<()> {
+    use futures_util::StreamExt;
+    use zbus::{MessageStream, Proxy, connection::Builder};
+
+    let connection = Builder::system()?
+        .internal_executor(false)
+        .method_timeout(Duration::from_secs(1))
+        .build()
+        .await?;
+    let driver = connection.executor().clone();
+    let observe = async {
+        let proxy = Proxy::new(&connection, "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager", "org.freedesktop.NetworkManager").await?;
+        let mut changes = proxy.receive_property_changed::<u32>("Metered").await;
+        let mut owners = proxy.receive_owner_changed().await?;
+        let mut messages = MessageStream::from(&connection);
+        POLICY.set_network_cost(network_cost(proxy.get_property::<u32>("Metered").await?));
+        loop {
+            tokio::select! {
+                change = changes.next() => {
+                    let Some(change) = change else { return Err(zbus::Error::Failure("network cost subscription closed".into())) };
+                    POLICY.set_network_cost(network_cost(change.get().await?));
+                }
+                _ = owners.next() => return Err(zbus::Error::Failure("NetworkManager owner changed".into())),
+                message = messages.next() => match message {
+                    Some(Ok(_)) => {},
+                    Some(Err(error)) => return Err(error),
+                    None => return Err(zbus::Error::Failure("system bus disconnected".into())),
+                },
+            }
+        }
+    };
+    // Drive zbus on the existing backend runtime instead of allowing it to
+    // create an additional connection executor thread.
+    tokio::select! {
+        result = observe => result,
+        () = async { loop { driver.tick().await; } } => unreachable!(),
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-network-cost"))]
+fn network_cost(metered: u32) -> NetworkCost {
+    match metered {
+        1 | 3 => NetworkCost::Metered,
+        2 | 4 => NetworkCost::Unmetered,
         _ => NetworkCost::Unknown,
     }
+}
+
+#[cfg(target_os = "windows")]
+async fn monitor_network_cost() {
+    loop {
+        let cost = crate::executor::run_blocking(platform_cost).await.unwrap_or(NetworkCost::Unknown);
+        POLICY.set_network_cost(cost);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn monitor_network_cost() {
+    // Network.framework delivers changes on its dispatch queue.
+    pending::<()>().await;
+}
+
+#[cfg(not(any(target_os = "android", target_os = "windows", target_os = "macos", all(target_os = "linux", feature = "linux-network-cost"))))]
+async fn monitor_network_cost() {
+    POLICY.set_network_cost(NetworkCost::Unknown);
+    pending::<()>().await;
 }
 
 #[cfg(target_os = "windows")]
@@ -100,7 +180,7 @@ fn platform_cost() -> NetworkCost {
         INetworkCostManager, NetworkListManager, NLM_CONNECTION_COST_FIXED, NLM_CONNECTION_COST_OVERDATALIMIT, NLM_CONNECTION_COST_ROAMING, NLM_CONNECTION_COST_UNRESTRICTED, NLM_CONNECTION_COST_VARIABLE,
     };
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED};
-    // This runs on our dedicated monitor thread, outside the UI's apartment.
+    // This runs on a shared blocking worker, outside the UI's apartment.
     unsafe {
         if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
             return NetworkCost::Unknown;
@@ -119,17 +199,15 @@ fn platform_cost() -> NetworkCost {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos", target_os = "android")))]
-fn platform_cost() -> NetworkCost {
-    NetworkCost::Unknown
-}
-
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
     use block2::{Block, RcBlock};
     use dispatch2::DispatchQueue;
     use std::ffi::c_void;
+    use std::sync::Once;
+
+    static START: Once = Once::new();
 
     #[link(name = "Network", kind = "framework")]
     extern "C" {
@@ -142,6 +220,10 @@ mod macos {
     }
 
     pub(super) fn start() {
+        START.call_once(start_monitor);
+    }
+
+    fn start_monitor() {
         let queue = DispatchQueue::new("se.bokheim.network-cost", None);
         let handler = RcBlock::new(|path: *mut c_void| {
             // Network.framework lends a valid path during this callback.

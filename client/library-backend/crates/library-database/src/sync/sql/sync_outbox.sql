@@ -8,13 +8,7 @@
 SELECT COALESCE(MAX(replica_seq), 0) FROM sync_outbox;
 
 -- name: sync_pending_uploads?
-SELECT content_hash FROM book_transfer WHERE upload_id IS NOT NULL
-UNION
-SELECT b.content_hash FROM book b
-LEFT JOIN provider_book p ON p.book_id=b.content_hash
-WHERE p.book_id IS NULL AND EXISTS (
-    SELECT 1 FROM library_storage WHERE singleton=1 AND json_type(configuration,'$.external') IS NOT NULL
-);
+SELECT content_hash FROM book_transfer WHERE upload_id IS NOT NULL;
 
 -- name: sync_cloud_storage_enabled ->
 SELECT CASE WHEN s.configuration IS NOT NULL THEN s.configuration != '"local"' ELSE m.cloud_storage_enabled END
@@ -24,16 +18,6 @@ WHERE m.singleton=1;
 -- name: sync_acknowledge_mutations!
 -- param: ids: &str
 DELETE FROM sync_outbox WHERE replica_seq IN (SELECT value FROM json_each(:ids));
-
--- name: clear_sync_outbox!
-DELETE FROM sync_outbox;
-
--- name: seed_poison_outbox_mutation!
--- param: replica_seq: i64
--- param: body: &[u8]
--- param: changed_at: i64
-INSERT INTO sync_outbox(replica_seq,state_kind,state_key,body,changed_at) VALUES(:replica_seq,'reading_position','1',:body,:changed_at);
-
 
 -- name: outbox_pending_snapshots ?
 SELECT state_kind,state_key,state_subkey,replica_seq FROM sync_outbox WHERE body IS NULL ORDER BY replica_seq;

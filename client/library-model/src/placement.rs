@@ -1,6 +1,6 @@
 //! Shared physical placement, upload intent, and validated library-relative paths.
 
-use content_address::BookId;
+use content_address::{BookId, ContentHash};
 use std::error::Error;
 use std::fmt;
 
@@ -62,8 +62,17 @@ impl BookPlacement {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CloudQuotaBook {
+    pub book_id: BookId,
+    pub byte_checksum: Option<ContentHash>,
+    pub size_bytes: u64,
+    pub server_has_book: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BookUploadIntent {
+    pub byte_checksum: Option<ContentHash>,
     pub id: i64,
     pub content_hash: BookId,
     pub size_bytes: u64,

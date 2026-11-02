@@ -171,34 +171,6 @@ pub fn toc(db: &Connection, hash: &str) -> Result<Vec<BookTocEntry>, String> {
     serde_json::from_str(&json).map_err(|e| format!("{hash}: invalid table of contents: {e}"))
 }
 
-/// Backfills navigation from already curated files without replacing enriched
-/// metadata or fetching anything. An empty list is a completed extraction.
-pub fn ensure_toc(dir: &Path, db: &Connection) -> Result<(), String> {
-    let mut statement = db.prepare("SELECT hash FROM book WHERE toc IS NULL ORDER BY hash").map_err(|e| e.to_string())?;
-    let hashes = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
-    drop(statement);
-    let mut extracted = Vec::new();
-    for hash in hashes {
-        let path = dir.join(format!("books/{hash}.epub"));
-        let mut file = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let actual = content_address::hash_reader(&mut file).map_err(|e| e.to_string())?;
-        if actual.to_hex() != hash {
-            return Err(format!("{} differs from the catalog's hash", path.display()));
-        }
-        let inspected = book_inspection::inspect_epub_metadata_with_toc(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        extracted.push((hash, inspected.toc));
-    }
-    let transaction = db.unchecked_transaction().map_err(|e| e.to_string())?;
-    for (hash, toc) in &extracted {
-        set_toc(&transaction, hash, toc)?;
-    }
-    transaction.commit().map_err(|e| e.to_string())?;
-    if !extracted.is_empty() {
-        eprintln!("Extracted table of contents for {} catalog books", extracted.len());
-    }
-    Ok(())
-}
-
 /// The authors as the library shows them on a card.
 pub fn author(record: &BookRecord) -> String {
     record.authors().map(|author| author.name()).collect::<Vec<_>>().join(", ")

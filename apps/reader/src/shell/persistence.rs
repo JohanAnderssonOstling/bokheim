@@ -64,6 +64,17 @@ impl MutationWriter {
             log::error!("failed to queue {what}");
         }
     }
+
+    /// A snapshot taken after this barrier observes all writes already queued.
+    /// Later optimistic edits are still protected by the session revision.
+    pub(crate) fn flush(&self) -> async_channel::Receiver<()> {
+        let (finished, receiver) = async_channel::bounded(1);
+        self.record("finish reader annotation writes", move |_| Box::pin(async move {
+            let _ = finished.try_send(());
+            Ok(())
+        }));
+        receiver
+    }
 }
 
 /// How long a position update waits for a quieter one to supersede it.
@@ -189,6 +200,7 @@ impl StoredPosition {
 /// coordinates.
 pub(crate) struct ReadingPositionWriter {
     writer: PositionWriter<StoredPosition>,
+    saving_enabled: bool,
     narration_position: RefCell<Option<(u64, StoredPosition)>>,
     last_position: RefCell<Option<StoredPosition>>,
 }
@@ -221,7 +233,19 @@ impl ReadingPositionWriter {
             |previous, next| previous.entry == next.entry && (previous.percent >= 100.0) == (next.percent >= 100.0) && previous.reset_read_status.is_none() && next.reset_read_status.is_none(),
             library,
         );
-        Self { writer, narration_position: RefCell::new(None), last_position: RefCell::new(None) }
+        Self { writer, saving_enabled: true, narration_position: RefCell::new(None), last_position: RefCell::new(None) }
+    }
+
+    /// Recovery must not replace an unread saved position with the fallback.
+    pub(crate) fn with_saving_enabled(mut self, enabled: bool) -> Self {
+        self.saving_enabled = enabled;
+        self
+    }
+
+    fn persist(&self, position: StoredPosition, what: &'static str) {
+        if self.saving_enabled {
+            self.writer.record(position, what);
+        }
     }
 
     pub(crate) fn record(&self, position: StoredPosition, navigation_revision: u64) {
@@ -234,7 +258,7 @@ impl ReadingPositionWriter {
             }
         };
         *self.last_position.borrow_mut() = Some(position.clone());
-        self.writer.record(position, "reading position");
+        self.persist(position, "reading position");
     }
 
     /// Keep the audible source address until the user navigates. Following a
@@ -242,20 +266,20 @@ impl ReadingPositionWriter {
     pub(crate) fn record_narration(&self, position: StoredPosition, navigation_revision: u64) {
         *self.narration_position.borrow_mut() = Some((navigation_revision, position.clone()));
         *self.last_position.borrow_mut() = Some(position.clone());
-        self.writer.record(position, "reading position");
+        self.persist(position, "reading position");
     }
 
     pub(crate) fn reset_read_status(&self) {
         if let Some(mut position) = self.last_position.borrow().clone() {
             position.reset_read_status = Some(ChapterReadReset::All);
-            self.writer.record(position, "reset chapter read status");
+            self.persist(position, "reset chapter read status");
         }
     }
 
     pub(crate) fn reset_chapter_read_status(&self, target: String) {
         if let Some(mut position) = self.last_position.borrow().clone() {
             position.reset_read_status = Some(ChapterReadReset::Chapter(target));
-            self.writer.record(position, "reset chapter read status");
+            self.persist(position, "reset chapter read status");
         }
     }
 }
@@ -274,7 +298,19 @@ mod tests {
 
     fn writer() -> (ReadingPositionWriter, async_channel::Receiver<StoredPosition>) {
         let (updates, incoming) = async_channel::unbounded();
-        (ReadingPositionWriter { writer: PositionWriter { updates }, narration_position: RefCell::new(None), last_position: RefCell::new(None) }, incoming)
+        (ReadingPositionWriter { writer: PositionWriter { updates }, saving_enabled: true, narration_position: RefCell::new(None), last_position: RefCell::new(None) }, incoming)
+    }
+
+    #[test]
+    fn recovery_sessions_never_overwrite_positions_or_chapter_read_status() {
+        let (writer, incoming) = writer();
+        let writer = writer.with_saving_enabled(false);
+        let position = || StoredPosition::epub("fallback-position".into(), 0.0);
+        writer.record(position(), 0);
+        writer.record_narration(position(), 1);
+        writer.reset_read_status();
+        writer.reset_chapter_read_status("chapter.xhtml".into());
+        assert!(matches!(incoming.try_recv(), Err(async_channel::TryRecvError::Empty)));
     }
 
     #[test]

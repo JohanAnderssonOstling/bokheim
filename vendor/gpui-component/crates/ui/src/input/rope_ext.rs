@@ -3,34 +3,17 @@ use std::ops::Range;
 use ropey::{LineType, Rope, RopeSlice};
 use sum_tree::Bias;
 
-#[cfg(feature = "tree-sitter")]
-pub use tree_sitter::{InputEdit, Point};
-
-#[cfg(not(feature = "tree-sitter"))]
-/// Stub type for tree-sitter Point on WASM (tree-sitter not available).
+/// A byte column within a logical text row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Point {
     pub row: usize,
     pub column: usize,
 }
 
-#[cfg(not(feature = "tree-sitter"))]
 impl Point {
     pub fn new(row: usize, column: usize) -> Self {
         Self { row, column }
     }
-}
-
-#[cfg(not(feature = "tree-sitter"))]
-/// Stub type for tree-sitter InputEdit on WASM (tree-sitter not available).
-#[derive(Debug, Clone, Copy)]
-pub struct InputEdit {
-    pub start_byte: usize,
-    pub old_end_byte: usize,
-    pub new_end_byte: usize,
-    pub start_position: Point,
-    pub old_end_position: Point,
-    pub new_end_position: Point,
 }
 
 use crate::input::Position;
@@ -46,11 +29,7 @@ impl<'a> RopeLines<'a> {
     /// Create a new `RopeLines` iterator.
     pub fn new(rope: &'a Rope) -> Self {
         let end_row = rope.lines_len();
-        Self {
-            row: 0,
-            end_row,
-            rope,
-        }
+        Self { row: 0, end_row, rope }
     }
 }
 impl<'a> Iterator for RopeLines<'a> {
@@ -335,12 +314,7 @@ impl RopeExt for Rope {
 
     fn position_to_offset(&self, pos: &Position) -> usize {
         let line = self.slice_line(pos.line as usize);
-        self.line_start_offset(pos.line as usize)
-            + line
-                .chars()
-                .take(pos.character as usize)
-                .map(|c| c.len_utf8())
-                .sum::<usize>()
+        self.line_start_offset(pos.line as usize) + line.chars().take(pos.character as usize).map(|c| c.len_utf8()).sum::<usize>()
     }
 
     fn offset_to_position(&self, offset: usize) -> Position {
@@ -387,10 +361,7 @@ impl RopeExt for Rope {
         }
         let start = offset.saturating_sub(left.len());
 
-        let right = self
-            .chars_at(offset)
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect::<String>();
+        let right = self.chars_at(offset).take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>();
 
         let end = offset + right.len();
 
@@ -398,11 +369,7 @@ impl RopeExt for Rope {
     }
 
     fn word_at(&self, offset: usize) -> String {
-        if let Some(range) = self.word_range(offset) {
-            self.slice(range).to_string()
-        } else {
-            String::new()
-        }
+        if let Some(range) = self.word_range(offset) { self.slice(range).to_string() } else { String::new() }
     }
 
     #[inline]
@@ -424,8 +391,7 @@ impl RopeExt for Rope {
     }
 
     fn replace(&mut self, range: Range<usize>, new_text: &str) {
-        let range =
-            self.clip_offset(range.start, Bias::Left)..self.clip_offset(range.end, Bias::Right);
+        let range = self.clip_offset(range.start, Bias::Left)..self.clip_offset(range.end, Bias::Right);
         self.remove(range.clone());
         self.insert(range.start, new_text);
     }
@@ -439,11 +405,7 @@ impl RopeExt for Rope {
             return offset;
         }
 
-        if bias == Bias::Left {
-            self.floor_char_boundary(offset)
-        } else {
-            self.ceil_char_boundary(offset)
-        }
+        if bias == Bias::Left { self.floor_char_boundary(offset) } else { self.ceil_char_boundary(offset) }
     }
 
     fn char_index_to_offset(&self, char_offset: usize) -> usize {
@@ -499,10 +461,7 @@ mod tests {
     fn test_lines() {
         let rope = Rope::from("Hello\nWorld\r\nThis is a test 中文\nRope\r");
         let lines: Vec<_> = rope.iter_lines().map(|r| r.to_string()).collect();
-        assert_eq!(
-            lines,
-            vec!["Hello", "World\r", "This is a test 中文", "Rope\r"]
-        );
+        assert_eq!(lines, vec!["Hello", "World\r", "This is a test 中文", "Rope\r"]);
     }
 
     #[test]
@@ -518,12 +477,7 @@ mod tests {
     #[test]
     fn test_iter_lines() {
         let rope = Rope::from("Hello\nWorld\r\nThis is a test 中文\nRope");
-        let lines: Vec<_> = rope
-            .iter_lines()
-            .skip(1)
-            .take(2)
-            .map(|r| r.to_string())
-            .collect();
+        let lines: Vec<_> = rope.iter_lines().skip(1).take(2).map(|r| r.to_string()).collect();
         assert_eq!(lines, vec!["World\r", "This is a test 中文"]);
     }
 
@@ -550,23 +504,11 @@ mod tests {
     fn test_line_column() {
         let rope = Rope::from("a 中文🎉 test\nRope");
         assert_eq!(rope.position_to_offset(&Position::new(0, 3)), "a 中".len());
-        assert_eq!(
-            rope.position_to_offset(&Position::new(0, 5)),
-            "a 中文🎉".len()
-        );
-        assert_eq!(
-            rope.position_to_offset(&Position::new(1, 1)),
-            "a 中文🎉 test\nR".len()
-        );
+        assert_eq!(rope.position_to_offset(&Position::new(0, 5)), "a 中文🎉".len());
+        assert_eq!(rope.position_to_offset(&Position::new(1, 1)), "a 中文🎉 test\nR".len());
 
-        assert_eq!(
-            rope.offset_to_position("a 中文🎉 test\nR".len()),
-            Position::new(1, 1)
-        );
-        assert_eq!(
-            rope.offset_to_position("a 中文🎉".len()),
-            Position::new(0, 5)
-        );
+        assert_eq!(rope.offset_to_position("a 中文🎉 test\nR".len()), Position::new(1, 1));
+        assert_eq!(rope.offset_to_position("a 中文🎉".len()), Position::new(0, 5));
     }
 
     #[test]
@@ -576,10 +518,7 @@ mod tests {
         assert_eq!(rope.offset_to_point(1), Point::new(0, 1));
         assert_eq!(rope.offset_to_point("a 中".len()), Point::new(0, 5));
         assert_eq!(rope.offset_to_point("a 中文🎉".len()), Point::new(0, 12));
-        assert_eq!(
-            rope.offset_to_point("a 中文🎉 test\nR".len()),
-            Point::new(1, 1)
-        );
+        assert_eq!(rope.offset_to_point("a 中文🎉 test\nR".len()), Point::new(1, 1));
     }
 
     #[test]
@@ -589,10 +528,7 @@ mod tests {
         assert_eq!(rope.point_to_offset(Point::new(0, 1)), 1);
         assert_eq!(rope.point_to_offset(Point::new(0, 5)), "a 中".len());
         assert_eq!(rope.point_to_offset(Point::new(0, 12)), "a 中文🎉".len());
-        assert_eq!(
-            rope.point_to_offset(Point::new(1, 1)),
-            "a 中文🎉 test\nR".len()
-        );
+        assert_eq!(rope.point_to_offset(Point::new(1, 1)), "a 中文🎉 test\nR".len());
     }
 
     #[test]
@@ -647,22 +583,13 @@ mod tests {
     fn test_replace() {
         let mut rope = Rope::from("Hello\nWorld\r\nThis is a test 中文\nRope");
         rope.replace(6..11, "Universe");
-        assert_eq!(
-            rope.to_string(),
-            "Hello\nUniverse\r\nThis is a test 中文\nRope"
-        );
+        assert_eq!(rope.to_string(), "Hello\nUniverse\r\nThis is a test 中文\nRope");
 
         rope.replace(0..5, "Hi");
-        assert_eq!(
-            rope.to_string(),
-            "Hi\nUniverse\r\nThis is a test 中文\nRope"
-        );
+        assert_eq!(rope.to_string(), "Hi\nUniverse\r\nThis is a test 中文\nRope");
 
         rope.replace(rope.len() - 4..rope.len(), "String");
-        assert_eq!(
-            rope.to_string(),
-            "Hi\nUniverse\r\nThis is a test 中文\nString"
-        );
+        assert_eq!(rope.to_string(), "Hi\nUniverse\r\nThis is a test 中文\nString");
 
         // Test for not on a char boundary
         let mut rope = Rope::from("中文");

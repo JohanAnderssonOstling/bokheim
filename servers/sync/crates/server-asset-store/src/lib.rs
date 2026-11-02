@@ -1,13 +1,17 @@
 use std::io::ErrorKind;
 use std::time::Instant;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use sync_common::BookId;
+use content_address::ContentHash;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+mod catalog;
+pub use catalog::{CatalogStorage, PreparedCatalogBook};
 
 pub type AssetReader = Box<dyn AsyncRead + Unpin + Send>;
 pub const MAX_BOOK_UPLOAD_DURATION: Duration = Duration::from_secs(2 * 60 * 60);
@@ -152,6 +156,82 @@ pub struct FsAssetStore {
     books_root: PathBuf,
     thumbnails_root: PathBuf,
     staging: StagingGate,
+    catalog: Option<CatalogStorage>,
+}
+
+/// Verified upload bytes that have not yet been published. Dropping this value
+/// removes its temporary file, including when database authorization fails.
+pub struct StagedAsset {
+    temp: TemporaryFile,
+    final_path: PathBuf,
+    kind: AssetKind,
+    total: u64,
+    checksum: Option<ContentHash>,
+    _permit: Option<StagingPermit>,
+    catalog_pin: Option<PathBuf>,
+}
+
+impl StagedAsset {
+    pub fn size_bytes(&self) -> u64 { self.total }
+    pub fn discard(self) -> Result<(), AssetError> { self.temp.remove().map_err(storage_error) }
+
+    pub async fn publish(self) -> Result<u64, AssetError> {
+        let Self { temp, final_path, kind, total, checksum, _permit, catalog_pin } = self;
+        let parent = final_path.parent().expect("staged asset has a parent");
+        if kind == AssetKind::Book {
+            // Catalog adoption is serialized against publication by the
+            // caller's database lock. Older clients may still send bytes;
+            // verify them during staging, then keep the retained catalog inode.
+            if let Some(pin) = catalog_pin {
+                match tokio::fs::symlink_metadata(pin).await {
+                    Ok(metadata) if metadata.is_file() && metadata.len() == total => {
+                        temp.remove().map_err(storage_error)?;
+                        std::fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(storage_error)?;
+                        return Ok(total);
+                    }
+                    Ok(_) => return Err(AssetError::Storage("retained catalog file is inconsistent".into())),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(storage_error(error)),
+                }
+            }
+            match tokio::fs::hard_link(temp.path(), &final_path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    let existing = tokio::fs::metadata(&final_path).await.map_err(storage_error)?.len();
+                    if let Some(expected) = checksum {
+                        let mut file = File::open(&final_path).await.map_err(storage_error)?;
+                        let mut hasher = blake3::Hasher::new();
+                        let mut buffer = vec![0; 64 * 1024];
+                        loop {
+                            let count = file.read(&mut buffer).await.map_err(storage_error)?;
+                            if count == 0 { break; }
+                            hasher.update(&buffer[..count]);
+                        }
+                        if hasher.finalize().as_bytes() != expected.as_bytes() { return Err(AssetError::HashMismatch); }
+                    }
+                    if existing != total {
+                        return Err(AssetError::Storage(format!("existing content-addressed asset has length {existing}, uploaded copy has length {total}")));
+                    }
+                }
+                Err(error) => return Err(storage_error(error)),
+            }
+        } else {
+            tokio::fs::rename(temp.path(), &final_path).await.map_err(storage_error)?;
+        }
+        temp.remove().map_err(storage_error)?;
+        std::fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(storage_error)?;
+        Ok(total)
+    }
+}
+
+fn storage_error(error: std::io::Error) -> AssetError { AssetError::Storage(error.to_string()) }
+
+fn remove_if_present(path: &Path) -> Result<(), AssetError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage_error(error)),
+    }
 }
 
 struct TemporaryFile {
@@ -194,11 +274,135 @@ impl FsAssetStore {
     }
 
     pub fn with_upload_limits(books_root: PathBuf, thumbnails_root: PathBuf, limits: UploadLimits) -> Self {
-        Self { books_root, thumbnails_root, staging: StagingGate::new(limits) }
+        Self { books_root, thumbnails_root, staging: StagingGate::new(limits), catalog: None }
     }
 
-    fn user_scope(user_id: &str) -> String {
+    pub fn user_scope(user_id: &str) -> String {
         blake3::hash(user_id.as_bytes()).to_hex().to_string()
+    }
+
+    /// Enumerates published books only; active temporary uploads are excluded.
+    pub async fn book_hashes(&self) -> Result<Vec<BookId>, AssetError> {
+        let mut hashes = Vec::new();
+        let mut shards = tokio::fs::read_dir(&self.books_root).await.map_err(storage_error)?;
+        while let Some(shard) = shards.next_entry().await.map_err(storage_error)? {
+            if !shard.file_type().await.map_err(storage_error)?.is_dir() { continue; }
+            let mut files = tokio::fs::read_dir(shard.path()).await.map_err(storage_error)?;
+            while let Some(file) = files.next_entry().await.map_err(storage_error)? {
+                let Some(hash) = file.file_name().to_str().and_then(|name| name.parse::<BookId>().ok()) else { continue; };
+                if file.path() == self.path("", AssetKind::Book, &hash)? && file.file_type().await.map_err(storage_error)?.is_file() {
+                    hashes.push(hash);
+                }
+            }
+        }
+        if let Some(catalog) = &self.catalog {
+            let mut pins = tokio::fs::read_dir(&catalog.pins).await.map_err(storage_error)?;
+            while let Some(pin) = pins.next_entry().await.map_err(storage_error)? {
+                let Some(hash) = pin.file_name().to_str().and_then(|name| name.parse::<BookId>().ok()) else {
+                    continue;
+                };
+                if pin.file_type().await.map_err(storage_error)?.is_file() {
+                    hashes.push(hash);
+                }
+            }
+        }
+        hashes.sort_unstable();
+        hashes.dedup();
+        Ok(hashes)
+    }
+
+    /// Enumerates account-scoped covers, including both legacy variants.
+    pub async fn thumbnail_objects(&self) -> Result<Vec<(String, BookId)>, AssetError> {
+        let mut objects = Vec::new();
+        let mut users = match tokio::fs::read_dir(self.thumbnails_root.join("users")).await {
+            Ok(users) => users,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(objects),
+            Err(error) => return Err(storage_error(error)),
+        };
+        while let Some(user) = users.next_entry().await.map_err(storage_error)? {
+            let scope = user.file_name().to_string_lossy().into_owned();
+            if scope.len() != 64 || !scope.bytes().all(|byte| byte.is_ascii_hexdigit()) || !user.file_type().await.map_err(storage_error)?.is_dir() { continue; }
+            let mut seen = HashSet::new();
+            let mut files = tokio::fs::read_dir(user.path()).await.map_err(storage_error)?;
+            while let Some(file) = files.next_entry().await.map_err(storage_error)? {
+                let name = file.file_name();
+                let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".pair").or_else(|| name.strip_suffix(".jpg"))) else { continue; };
+                let stem = stem.strip_suffix("-300").unwrap_or(stem);
+                if let Ok(hash) = stem.parse::<BookId>() {
+                    if seen.insert(hash) { objects.push((scope.clone(), hash)); }
+                }
+            }
+        }
+        Ok(objects)
+    }
+
+    /// Synchronous unlink avoids an offloaded unlink continuing after the
+    /// caller's database lock has been released by task cancellation.
+    /// Preserve physical content deduplication across distinct logical IDs.
+    /// The application holds its publication lock and authorizes the source.
+    pub async fn link_book_revision(&self, source: &BookId, destination: &BookId, checksum: ContentHash, length: u64) -> Result<bool, AssetError> {
+        let source_id = source;
+        let source = self.resolved_path("", AssetKind::Book, source_id).await?;
+        let catalog_source = self.catalog_pin(source_id).as_deref() == Some(source.as_path());
+        let mut file = match File::open(&source).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(storage_error(error)),
+        };
+        if file.metadata().await.map_err(storage_error)?.len() != length { return Err(AssetError::HashMismatch); }
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer).await.map_err(storage_error)?;
+            if count == 0 { break; }
+            hasher.update(&buffer[..count]);
+        }
+        if hasher.finalize().as_bytes() != checksum.as_bytes() { return Err(AssetError::HashMismatch); }
+        let target = self.path("", AssetKind::Book, destination)?;
+        tokio::fs::create_dir_all(target.parent().expect("book path has a parent")).await.map_err(storage_error)?;
+        match tokio::fs::hard_link(&source, &target).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                let mut existing = File::open(&target).await.map_err(storage_error)?;
+                let mut hash = blake3::Hasher::new();
+                loop {
+                    let count = existing.read(&mut buffer).await.map_err(storage_error)?;
+                    if count == 0 { break; }
+                    hash.update(&buffer[..count]);
+                }
+                if hash.finalize().as_bytes() != checksum.as_bytes() { return Err(AssetError::HashMismatch); }
+            }
+            // Catalog pins live beside the public catalog and can be on a
+            // different filesystem. The application's checksum mapping reads
+            // that retained pin directly; never copy the public file here.
+            Err(error) if error.kind() == ErrorKind::CrossesDevices && catalog_source => return Ok(true),
+            Err(error) => return Err(storage_error(error)),
+        }
+        std::fs::File::open(target.parent().expect("book path has a parent")).and_then(|directory| directory.sync_all()).map_err(storage_error)?;
+        Ok(true)
+    }
+
+    /// Only the application may call this after confirming that no committed
+    /// database binding exists. Failed database commits can leave such aliases.
+    pub fn discard_unbound_book_alias(&self, book: &BookId) -> Result<(), AssetError> {
+        remove_if_present(&self.path("", AssetKind::Book, book)?)
+    }
+
+    pub fn remove_book(&self, hash: &BookId) -> Result<(), AssetError> {
+        remove_if_present(&self.path("", AssetKind::Book, hash)?)?;
+        if let Some(pin) = self.catalog_pin(hash) { remove_if_present(&pin)?; }
+        Ok(())
+    }
+
+    pub fn remove_scoped_thumbnail(&self, scope: &str, hash: &BookId) -> Result<(), AssetError> {
+        if scope.len() != 64 || !scope.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(AssetError::InvalidInput("invalid thumbnail account scope".into()));
+        }
+        let root = self.thumbnails_root.join("users").join(scope);
+        for name in [format!("{hash}.pair"), format!("{hash}.jpg"), format!("{hash}-300.jpg")] {
+            remove_if_present(&root.join(name))?;
+        }
+        Ok(())
     }
 
     fn path(&self, user_id: &str, kind: AssetKind, hash: &BookId) -> Result<PathBuf, AssetError> {
@@ -240,12 +444,14 @@ impl FsAssetStore {
     pub async fn initialize(&self) -> Result<(), AssetError> {
         Self::probe_root("book", &self.books_root, true).await?;
         Self::probe_root("thumbnail", &self.thumbnails_root, true).await?;
+        self.initialize_catalog(true).await?;
         Ok(())
     }
 
     pub async fn check_ready(&self) -> Result<(), AssetError> {
         Self::probe_root("book", &self.books_root, false).await?;
         Self::probe_root("thumbnail", &self.thumbnails_root, false).await?;
+        self.initialize_catalog(false).await?;
         Ok(())
     }
 
@@ -255,7 +461,7 @@ impl FsAssetStore {
                 return Ok(Some(if kind == AssetKind::Thumbnail { bytes.len() } else { browse.len() } as u64));
             }
         }
-        match tokio::fs::metadata(self.path(user_id, kind, hash)?).await {
+        match tokio::fs::metadata(self.resolved_path(user_id, kind, hash).await?).await {
             Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
             Ok(_) => Ok(None),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
@@ -369,7 +575,7 @@ impl FsAssetStore {
                 return Ok(Some(StoredAsset { reader: Box::new(reader), total_len: len, offset, content_hash: *hash }));
             }
         }
-        let mut file = match File::open(self.path(user_id, kind, hash)?).await {
+        let mut file = match File::open(self.resolved_path(user_id, kind, hash).await?).await {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(AssetError::Storage(error.to_string())),
@@ -383,15 +589,24 @@ impl FsAssetStore {
     }
 
     pub async fn book_tracks(&self, content_hash: &BookId) -> Result<Vec<audiobook_archive::ArchivedTrack>, AssetError> {
-        let path = self.path("", AssetKind::Book, content_hash)?;
+        let path = self.resolved_path("", AssetKind::Book, content_hash).await?;
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
             audiobook_archive::archived_tracks(file).map_err(|error| AssetError::InvalidInput(error.to_string()))
         }).await.map_err(|error| AssetError::Storage(error.to_string()))?
     }
 
-    pub async fn put(&self, user_id: &str, kind: AssetKind, hash: &BookId, expected_len: Option<u64>, mut reader: AssetReader) -> Result<u64, AssetError> {
-        let _staging_permit = if kind == AssetKind::Book { Some(self.staging.acquire(user_id, expected_len.ok_or(AssetError::LengthRequired)?)?) } else { None };
+    pub async fn put(&self, user_id: &str, kind: AssetKind, hash: &BookId, expected_len: Option<u64>, reader: AssetReader) -> Result<u64, AssetError> {
+        self.stage(user_id, kind, hash, expected_len, reader).await?.publish().await
+    }
+
+    pub async fn stage(&self, user_id: &str, kind: AssetKind, hash: &BookId, expected_len: Option<u64>, reader: AssetReader) -> Result<StagedAsset, AssetError> {
+        self.stage_with_checksum(user_id, kind, hash, expected_len, hash.content_hash(), reader).await
+    }
+
+    pub async fn stage_with_checksum(&self, user_id: &str, kind: AssetKind, hash: &BookId, expected_len: Option<u64>, checksum: Option<ContentHash>, mut reader: AssetReader) -> Result<StagedAsset, AssetError> {
+        if kind == AssetKind::Book && checksum.is_none() { return Err(AssetError::HashMismatch); }
+        let permit = if kind == AssetKind::Book { Some(self.staging.acquire(user_id, expected_len.ok_or(AssetError::LengthRequired)?)?) } else { None };
         let final_path = self.path(user_id, kind, hash)?;
         let parent = final_path.parent().ok_or_else(|| AssetError::Storage("asset path has no parent".to_string()))?;
         tokio::fs::create_dir_all(parent).await.map_err(|error| AssetError::Storage(error.to_string()))?;
@@ -434,7 +649,7 @@ impl FsAssetStore {
             return Err(AssetError::LengthMismatch { expected: expected_len.unwrap_or(0), actual: total });
         }
         if let Some(hasher) = book_hasher {
-            if hasher.finalize().as_bytes() != hash.as_bytes() {
+            if Some(ContentHash::from(hasher.finalize())) != checksum {
                 return Err(AssetError::HashMismatch);
             }
         }
@@ -446,29 +661,7 @@ impl FsAssetStore {
         durable_file.sync_all().await.map_err(|error| AssetError::Storage(error.to_string()))?;
         drop(durable_file);
         tracing::debug!(target: "sync_performance", phase = "file_flush_fsync", elapsed_ms = durable_started.elapsed().as_secs_f64() * 1000.0);
-        let publish_started = Instant::now();
-        if kind == AssetKind::Book {
-            // Book revisions are content addressed and remain immutable.
-            match tokio::fs::hard_link(temp.path(), &final_path).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    let existing_len = tokio::fs::metadata(&final_path).await.map_err(|metadata_error| AssetError::Storage(metadata_error.to_string()))?.len();
-                    if existing_len != total {
-                        return Err(AssetError::Storage(format!("existing content-addressed asset has length {existing_len}, uploaded copy has length {total}")));
-                    }
-                    return Ok(existing_len);
-                }
-                Err(error) => return Err(AssetError::Storage(error.to_string())),
-            }
-        } else {
-            // A cover may change while the audiobook identity stays fixed.
-            // Rename publishes complete bytes atomically over the old image.
-            tokio::fs::rename(temp.path(), &final_path).await.map_err(|error| AssetError::Storage(error.to_string()))?;
-        }
-        temp.remove().map_err(|error| AssetError::Storage(error.to_string()))?;
-        std::fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(|error| AssetError::Storage(error.to_string()))?;
-        tracing::debug!(target: "sync_performance", phase = "publish_directory_fsync", elapsed_ms = publish_started.elapsed().as_secs_f64() * 1000.0);
-        Ok(total)
+        Ok(StagedAsset { temp, final_path, kind, total, checksum, _permit: permit, catalog_pin: (checksum == hash.content_hash()).then(|| self.catalog_pin(hash)).flatten() })
     }
 }
 
@@ -483,7 +676,6 @@ mod tests {
     fn reader(bytes: Vec<u8>) -> Box<dyn AsyncRead + Unpin + Send> {
         Box::new(std::io::Cursor::new(bytes))
     }
-
 
     fn jpeg(pixel: [u8; 3]) -> Vec<u8> {
         let mut image = DynamicImage::new_rgb8(1, 1).to_rgb8();
@@ -547,6 +739,26 @@ mod tests {
         let error = store.check_ready().await.unwrap_err();
         assert!(error.to_string().contains("cannot inspect book storage"));
         assert!(!books.exists(), "readiness must not hide a lost mount by recreating its directory");
+    }
+
+    #[tokio::test]
+    async fn stable_identity_requires_a_checksum_and_retains_the_first_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs"));
+        store.initialize().await.unwrap();
+        let identity = BookId::for_local_content(&[4;16], blake3::hash(b"original").into());
+        let accepted = b"first uploaded PDF".to_vec();
+        let checksum = ContentHash::from(blake3::hash(&accepted));
+        assert!(matches!(store.stage("user", AssetKind::Book, &identity, Some(accepted.len() as u64), reader(accepted.clone())).await, Err(AssetError::HashMismatch)));
+        store.stage_with_checksum("user",AssetKind::Book,&identity,Some(accepted.len() as u64),Some(checksum),reader(accepted.clone())).await.unwrap().publish().await.unwrap();
+        let changed = b"later modified PDF".to_vec();
+        let changed_checksum = ContentHash::from(blake3::hash(&changed));
+        let staged = store.stage_with_checksum("user",AssetKind::Book,&identity,Some(changed.len() as u64),Some(changed_checksum),reader(changed)).await.unwrap();
+        assert!(matches!(staged.publish().await,Err(AssetError::HashMismatch)));
+        let mut stored = store.open_from("user",AssetKind::Book,&identity,0).await.unwrap().unwrap();
+        let mut actual = Vec::new();
+        stored.reader.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual,accepted);
     }
 
     #[tokio::test]

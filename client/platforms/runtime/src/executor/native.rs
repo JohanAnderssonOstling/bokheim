@@ -1,13 +1,11 @@
-use super::task::{owned_local_task, owned_task, BackendTask};
+use super::startup::startup_ready;
+use super::task::{owned_task, BackendTask};
 use super::{BackendExecutorError, BackendFuture, BackendOutput, BackendSend, BackendTimeout};
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::{self, ThreadId};
 use tokio::sync::watch;
-
-// Startup trials may inspect local state, but background sync/import must not
-// publish side effects before the host commits the new generation.
-static STARTUP_GATE: Mutex<Option<watch::Receiver<bool>>> = Mutex::new(None);
 
 // Foreground library commands remain available while the initial UI is built.
 // Only scan/sync/import maintenance waits for the host's first presented frame.
@@ -38,43 +36,7 @@ pub fn defer_library_maintenance() -> LibraryMaintenancePermit {
 pub async fn library_maintenance_ready() {
     let receiver = LIBRARY_MAINTENANCE_GATE.lock().unwrap_or_else(PoisonError::into_inner).clone();
     if let Some(mut receiver) = receiver {
-        loop {
-            if *receiver.borrow_and_update() {
-                break;
-            }
-            if receiver.changed().await.is_err() {
-                break;
-            }
-        }
-    }
-}
-
-pub struct StartupPermit(watch::Sender<bool>);
-impl StartupPermit {
-    pub fn release(self) {
-        *STARTUP_GATE.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        self.0.send_replace(true);
-    }
-}
-pub fn defer_background_work() -> StartupPermit {
-    let (sender, receiver) = watch::channel(false);
-    let mut gate = STARTUP_GATE.lock().unwrap_or_else(PoisonError::into_inner);
-    assert!(gate.is_none(), "startup work is already deferred");
-    *gate = Some(receiver);
-    StartupPermit(sender)
-}
-async fn startup_ready() {
-    let receiver = STARTUP_GATE.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    if let Some(mut receiver) = receiver {
-        loop {
-            let ready = *receiver.borrow_and_update();
-            if ready {
-                break;
-            }
-            if receiver.changed().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-        }
+        let _ = receiver.wait_for(|ready| *ready).await;
     }
 }
 
@@ -138,6 +100,7 @@ impl BackendExecutor {
 #[derive(Clone)]
 pub struct LibraryExecutor {
     submit: tokio::sync::mpsc::UnboundedSender<LocalJob>,
+    worker_thread: ThreadId,
 }
 
 type LocalJob = Box<dyn FnOnce() + Send>;
@@ -145,7 +108,7 @@ type LocalJob = Box<dyn FnOnce() + Send>;
 impl LibraryExecutor {
     pub fn new() -> Result<Self, BackendExecutorError> {
         let (submit, mut jobs) = tokio::sync::mpsc::unbounded_channel::<LocalJob>();
-        std::thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("bokheim-library".to_owned())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -165,7 +128,7 @@ impl LibraryExecutor {
                 });
             })
             .map_err(|error| BackendExecutorError(error.to_string()))?;
-        Ok(Self { submit })
+        Ok(Self { submit, worker_thread: worker.thread().id() })
     }
 
     /// Runs `job` on this thread. `job` must be `Send` to cross onto it, but
@@ -179,8 +142,12 @@ impl LibraryExecutor {
 
     /// Runs `job` on this thread and blocks the calling thread for its
     /// result. For synchronous, non-runtime call sites (library open) that
-    /// need the outcome before continuing.
+    /// need the outcome before continuing. Returns an error on its own worker
+    /// thread, which cannot process a queued job while waiting for its result.
     pub fn run_blocking<T: Send + 'static>(&self, job: impl FnOnce() -> T + Send + 'static) -> Result<T, BackendExecutorError> {
+        if thread::current().id() == self.worker_thread {
+            return Err(BackendExecutorError("cannot wait synchronously on the library executor's own thread".into()));
+        }
         let (reply, result) = std::sync::mpsc::channel();
         self.run(move || {
             let _ = reply.send(job());
@@ -193,7 +160,7 @@ impl LibraryExecutor {
     /// for use by code already running on this thread (inside a job passed
     /// to [`Self::run`] or [`Self::run_blocking`]) — it does not hop threads.
     pub fn spawn_local<T: 'static>(future: impl Future<Output = T> + 'static) -> BackendTask<T> {
-        let (task, runner) = owned_local_task(future);
+        let (task, runner) = owned_task(future);
         tokio::task::spawn_local(async move {
             startup_ready().await;
             runner.await
@@ -234,6 +201,7 @@ pub async fn timeout<T>(duration: std::time::Duration, future: impl Future<Outpu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::defer_background_work;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -248,8 +216,23 @@ mod tests {
     fn stopped_library_executor_returns_an_error() {
         let (submit, jobs) = tokio::sync::mpsc::unbounded_channel();
         drop(jobs);
-        let executor = LibraryExecutor { submit };
+        let worker_thread = thread::spawn(|| thread::current().id()).join().unwrap();
+        let executor = LibraryExecutor { submit, worker_thread };
         assert!(executor.run_blocking(|| 42).is_err());
+    }
+
+    #[test]
+    fn library_executor_rejects_waiting_on_its_own_worker() {
+        let executor = LibraryExecutor::new().unwrap();
+        let nested = executor.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        executor.run(move || sent.send(nested.run_blocking(|| 42)).unwrap());
+        let error = received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("self-thread call must return without deadlocking")
+            .expect_err("self-thread wait must be rejected");
+        assert!(error.to_string().contains("own thread"));
+        assert_eq!(executor.run_blocking(|| 42).unwrap(), 42);
     }
 
     #[test]
@@ -300,5 +283,5 @@ mod tests {
 
 /// Report available CPU capacity; callers choose their own concurrency limits.
 pub fn available_parallelism() -> usize {
-    std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1)
+    thread::available_parallelism().map(|count| count.get()).unwrap_or(1)
 }

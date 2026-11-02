@@ -18,6 +18,9 @@ Environment=RUST_LOG=info,sync_performance=debug
 Environment="BOKHEIM_EMAIL_FROM=Bokheim <accounts@mail.bokheim.se>"
 Environment=BOKHEIM_TEST_USER_EMAIL=test@bokheim.se
 Environment=BOKHEIM_ASSETS_DIR=/var/lib/bokheim/assets
+# Opt-in configuration, outside Caddy's public root. Normal deployments keep
+# this file, so later server releases preserve catalog reuse activation.
+EnvironmentFile=-/srv/bokheim-updates/sync-catalog.env
 LoadCredential=database_url:/etc/bokheim/database-url
 LoadCredential=account_token_key:/etc/bokheim/account-token-key
 LoadCredential=resend_api_key:/etc/bokheim/resend-api-key
@@ -51,6 +54,9 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
 ProtectSystem=strict
+# One shared mount for catalog books and private retention links. Separate
+# writable bind mounts would make hard links fail across mount boundaries.
+ReadWritePaths=-/srv/bokheim-updates
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RemoveIPC=true

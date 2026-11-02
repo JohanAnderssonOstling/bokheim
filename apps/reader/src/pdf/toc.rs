@@ -1,12 +1,12 @@
 //! The PDF outline, and which of its entries the current page falls under.
 //!
 //! The outline arrives as the tree the publisher authored, in the navigation
-//! form every format shares, and that tree is the only copy this view keeps.
+//! form every format shares. Chapter lookups are indexed when it changes.
 //! An entry is named by its position in document order, so the sidebar, the
 //! page lookup and the active-entry search all agree on identity without
-//! anything having to be stored twice.
+//! duplicating navigation identities.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use book_model::{BookTocEntry, ChapterReadStatus, ReadingPosition, pdf_toc_page};
 use gpui_component::tree::TreeItem;
@@ -24,9 +24,13 @@ fn toc_order(id: &str) -> Option<usize> {
 #[derive(Default)]
 pub(crate) struct PdfTocState {
     entries: Vec<BookTocEntry>,
+    sidebar_targets: Vec<String>,
+    chapter_pages: Vec<usize>,
+    chapter_titles: HashMap<usize, String>,
     pub(crate) read_status: ChapterReadStatus,
     /// The entry the current page sits under, if any.
     active_id: Option<String>,
+    loaded: bool,
 }
 
 impl PdfTocState {
@@ -39,50 +43,72 @@ impl PdfTocState {
         self.read_status.update_position(&self.entries, &ReadingPosition::pdf_page(page as u32), None, at_end);
     }
 
-    pub(crate) fn read_ids(&self) -> HashSet<String> {
-        fn visit(entries: &[BookTocEntry], status: &ChapterReadStatus, next: &mut usize, ids: &mut HashSet<String>) {
-            for entry in entries {
-                if status.completed.contains(&entry.target) {
-                    ids.insert(toc_id(*next));
-                }
-                *next += 1;
-                visit(&entry.children, status, next, ids);
-            }
-        }
-        let mut ids = HashSet::new();
-        visit(&self.entries, &self.read_status, &mut 0, &mut ids);
-        ids
+    pub(crate) fn is_read(&self, id: &str) -> bool {
+        toc_order(id).and_then(|order| self.sidebar_targets.get(order)).is_some_and(|target| self.read_status.completed.contains(target))
     }
     pub(crate) fn has_entries(&self) -> bool {
         !self.entries.is_empty()
     }
 
     pub(crate) fn replace_entries(&mut self, entries: Vec<BookTocEntry>) {
+        self.loaded = true;
         self.entries = entries;
-    }
-
-    fn chapter_pages(&self) -> Vec<usize> {
-        fn visit(entries: &[BookTocEntry], result: &mut Vec<usize>) {
+        fn visit<'a>(entries: &'a [BookTocEntry], depth: usize, in_chapter: bool, targets: &mut Vec<String>, pages: &mut Vec<usize>, titles: &mut HashMap<usize, (usize, usize, &'a str)>) {
             for entry in entries {
-                if let Some(page) = pdf_toc_page(&entry.target) {
-                    result.push(page);
-                } else {
-                    visit(&entry.children, result);
+                let order = targets.len();
+                targets.push(entry.target.clone());
+                let page = pdf_toc_page(&entry.target);
+                if let Some(page) = page {
+                    if !in_chapter {
+                        pages.push(page);
+                    }
+                    if titles.get(&page).is_none_or(|(best_depth, best_order, _)| (depth, order) > (*best_depth, *best_order)) {
+                        titles.insert(page, (depth, order, entry.title.as_str()));
+                    }
                 }
+                visit(&entry.children, depth + 1, in_chapter || page.is_some(), targets, pages, titles);
             }
         }
-        let mut pages = Vec::new();
-        visit(&self.entries, &mut pages);
-        pages.sort_unstable();
-        pages.dedup();
-        pages
+        self.sidebar_targets.clear();
+        self.chapter_pages.clear();
+        let mut titles = HashMap::new();
+        visit(&self.entries, 0, false, &mut self.sidebar_targets, &mut self.chapter_pages, &mut titles);
+        self.chapter_pages.sort_unstable();
+        self.chapter_pages.dedup();
+        // The single walk resolves equal-page titles by depth and document
+        // order. Page zero also covers locations before the first chapter.
+        self.chapter_titles = self.chapter_pages.iter().copied().chain([0]).filter_map(|page| titles.get(&page).map(|(_, _, title)| (page, (*title).to_owned()))).collect();
+    }
+
+    #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
+    pub(crate) fn narration_chapter_label(&self, page: usize) -> String {
+        let start = self.chapter_at(page);
+        let number = self.chapter_pages.binary_search(&start).unwrap_or(0) + 1;
+        fn chapter_title(entries: &[BookTocEntry], start: usize) -> Option<&str> {
+            for entry in entries {
+                if let Some(page) = pdf_toc_page(&entry.target) {
+                    if page == start {
+                        return Some(entry.title.as_str());
+                    }
+                } else if let Some(title) = chapter_title(&entry.children, start) {
+                    return Some(title);
+                }
+            }
+            None
+        }
+        let title = chapter_title(&self.entries, start).filter(|title| !title.trim().is_empty());
+        title.map_or_else(|| format!("Chapter {number}"), |title| format!("Chapter {number} · {title}"))
     }
 
     pub(crate) fn chapter_at(&self, page: usize) -> usize {
-        self.chapter_pages().into_iter().rev().find(|start| *start <= page).unwrap_or(0)
+        self.chapter_pages.partition_point(|start| *start <= page).checked_sub(1).map_or(0, |index| self.chapter_pages[index])
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    pub(crate) fn chapter_title_at(&self, page: usize) -> Option<&str> {
+        self.chapter_titles.get(&self.chapter_at(page)).map(String::as_str)
+    }
+
+    #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn narration_start_page(&self, page: usize, page_count: usize) -> Option<usize> {
         (page..page_count).find(|page| {
             let entry = self.ordinal_at(*page).and_then(|ordinal| entry_in_order(&self.entries, ordinal, &mut 0));
@@ -116,6 +142,21 @@ impl PdfTocState {
         let mut best = None;
         best_entry_at(&self.entries, page_index, 0, &mut 0, &mut best);
         best.map(|(_, _, order)| order)
+    }
+
+    pub(crate) fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    /// Before the outline starts, use its earliest destination. Zero denotes
+    /// the implicit whole-book entry when the publication has no outline.
+    pub(crate) fn bookmark_ordinal_at(&self, page: usize) -> usize {
+        self.ordinal_at(page).or_else(|| self.sidebar_targets.iter().enumerate().filter_map(|(ordinal, target)| pdf_toc_page(target).map(|page| (page, ordinal))).min().map(|(_, ordinal)| ordinal)).unwrap_or(0)
+    }
+
+    pub(crate) fn chapter_for_ordinal(&self, ordinal: usize) -> Option<(usize, &str)> {
+        let page = pdf_toc_page(self.sidebar_targets.get(ordinal)?)?;
+        Some((self.chapter_at(page), self.chapter_title_at(page)?))
     }
 
     pub(crate) fn page_of(&self, id: &str) -> Option<usize> {
@@ -204,6 +245,25 @@ mod tts_tests {
     }
 
     #[test]
+    fn bookmark_ordinals_group_stored_sections_and_support_books_without_an_outline() {
+        let mut toc = PdfTocState::default();
+        assert!(!toc.is_loaded());
+        toc.replace_entries(vec![
+            BookTocEntry { title: "One".into(), target: "pdf-page:2".into(), children: vec![BookTocEntry { title: "Section".into(), target: "pdf-page:5".into(), children: vec![] }] },
+            BookTocEntry { title: "Two".into(), target: "pdf-page:10".into(), children: vec![] },
+        ]);
+        assert!(toc.is_loaded());
+        assert_eq!(toc.bookmark_ordinal_at(0), 0);
+        assert_eq!(toc.bookmark_ordinal_at(8), 1);
+        assert_eq!(toc.chapter_for_ordinal(1), Some((2, "One")));
+        assert_eq!(toc.chapter_for_ordinal(2), Some((10, "Two")));
+        toc.replace_entries(vec![]);
+        assert!(toc.is_loaded());
+        assert_eq!(toc.bookmark_ordinal_at(8), 0);
+        assert_eq!(toc.chapter_for_ordinal(0), None);
+    }
+
+    #[test]
     fn sleep_chapters_group_outline_subsections() {
         let mut toc = PdfTocState::default();
         toc.replace_entries(vec![
@@ -213,5 +273,58 @@ mod tts_tests {
         assert_eq!(toc.chapter_at(8), 0);
         assert_eq!(toc.chapter_at(12), 10);
         assert_eq!(PdfTocState::default().chapter_at(3), 0);
+    }
+
+    #[test]
+    fn chapter_index_preserves_outline_ties_and_refreshes_on_replacement() {
+        let mut toc = PdfTocState::default();
+        toc.replace_entries(vec![
+            BookTocEntry { title: "Later".into(), target: "pdf-page:10".into(), children: vec![] },
+            BookTocEntry {
+                title: "One".into(),
+                target: "pdf-page:2".into(),
+                children: vec![
+                    BookTocEntry { title: "Opening".into(), target: "pdf-page:2".into(), children: vec![] },
+                    BookTocEntry { title: "Opening again".into(), target: "pdf-page:2".into(), children: vec![] },
+                    BookTocEntry { title: "Section".into(), target: "pdf-page:5".into(), children: vec![] },
+                ],
+            },
+        ]);
+        assert_eq!(toc.chapter_at(1), 0);
+        assert_eq!(toc.chapter_title_at(1), None);
+        assert_eq!(toc.chapter_at(8), 2);
+        assert_eq!(toc.chapter_title_at(8), Some("Opening again"));
+        assert_eq!(toc.chapter_title_at(10), Some("Later"));
+
+        toc.replace_entries(vec![BookTocEntry { title: "Replacement".into(), target: "pdf-page:4".into(), children: vec![] }]);
+        assert_eq!(toc.chapter_at(8), 4);
+        assert_eq!(toc.chapter_title_at(8), Some("Replacement"));
+        assert_eq!(toc.chapter_title_at(2), None);
+        toc.replace_entries(vec![]);
+        assert_eq!(toc.chapter_at(8), 0);
+        assert_eq!(toc.chapter_title_at(8), None);
+    }
+
+    #[test]
+    fn chapter_walk_delegates_non_navigation_groups_and_reads_current_status() {
+        let mut toc = PdfTocState::default();
+        toc.replace_entries(vec![BookTocEntry {
+            title: "Part".into(),
+            target: String::new(),
+            children: vec![
+                BookTocEntry { title: "One".into(), target: "pdf-page:0".into(), children: vec![BookTocEntry { title: "Section".into(), target: "pdf-page:3".into(), children: vec![] }] },
+                BookTocEntry { title: "Two".into(), target: "pdf-page:10".into(), children: vec![] },
+            ],
+        }]);
+        assert_eq!(toc.chapter_at(8), 0);
+        assert_eq!(toc.chapter_title_at(8), Some("One"));
+        assert_eq!(toc.chapter_at(12), 10);
+        assert_eq!(toc.chapter_title_at(12), Some("Two"));
+        assert!(!toc.is_read("pdf-toc-3"));
+        toc.read_status.completed.insert("pdf-page:10".into());
+        assert!(toc.is_read("pdf-toc-3"));
+        assert!(!toc.is_read("pdf-toc-2"));
+        toc.read_status.reset();
+        assert!(!toc.is_read("pdf-toc-3"));
     }
 }

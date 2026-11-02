@@ -8,6 +8,7 @@ publish = false
 workspace = true
 
 [dependencies]
+http-response = { workspace = true }
 axum = "0.7"
 book-model = { path = "../../shared/book-model" }
 flate2 = "1"
@@ -17,7 +18,7 @@ metadata-contract = { path = "../../shared/metadata-contract" }
 r2d2 = "0.8"
 r2d2_sqlite = "0.35"
 rayon = "1"
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "stream"] }
 roxmltree = "0.20"
 rusqlite = { version = "0.40.0", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }

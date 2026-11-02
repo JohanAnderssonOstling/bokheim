@@ -184,11 +184,11 @@ fn validate_nickel_menu_install(root: &Path) -> io::Result<()> {
     kobo_package::installed_profile(&version)?;
     let pending = root.join(".kobo/KoboRoot.tgz");
     if pending.exists() && fs::read(&pending)? != NICKEL_MENU_ARCHIVE {
-        return Err(io::Error::other("A different Kobo firmware/update package is pending. Finish that update before installing Bokheim; it will not be overwritten."));
+        return Err(io::Error::other("A Kobo update package is pending. Finish it before installing this app; the package won't be overwritten."));
     }
     let upgrade = root.join(".kobo/upgrade");
     if upgrade.is_dir() && fs::read_dir(upgrade)?.next().is_some() {
-        return Err(io::Error::other("A Kobo firmware upgrade is pending. Finish that upgrade before installing Bokheim."));
+        return Err(io::Error::other("A Kobo firmware upgrade is pending. Finish it before installing this app."));
     }
     Ok(())
 }

@@ -2,15 +2,19 @@
 //! one or drawing its cover needs, which a card does not carry. Like the
 //! page table, it lives as long as the process.
 use crate::fetch::{self, Access};
-use client_runtime::{BackendError, Failure};
 use crate::{PDF, Publication};
-use library_model::{CardKey, OpdsCredentials, OpdsSource};
+use book_model::BookFormat;
+use client_runtime::{BackendError, Failure};
+use library_model::{CardKey, OpdsCredentials, OpdsPublication, OpdsSource};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use url::Url;
 
 struct Listed {
+    title: String,
+    subtitle: Option<String>,
+    authors: Vec<String>,
     file_stem: String,
     download: Option<(Url, &'static str)>,
     buy: Option<Url>,
@@ -34,17 +38,56 @@ pub(crate) fn remember(key: CardKey, publication: &Publication) {
     let name = publication.title.replace(['/', '\\', ':'], " ");
     let file_stem = if publication.authors.is_empty() { name } else { format!("{} - {name}", publication.authors.join(", ")) };
     let listed = Listed {
+        title: publication.title.clone(),
+        subtitle: publication.subtitle.clone(),
+        authors: publication.authors.clone(),
         file_stem: file_stem.trim().to_owned(),
         download: publication.download.as_ref().map(|download| (download.href.clone(), download.media_type)),
         buy: publication.buy.clone(),
         cover: publication.cover.clone(),
         description: publication.description.clone(),
     };
-    LISTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(key, listed);
+    let changed = LISTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(key, listed).is_some_and(|old| old.cover != publication.cover);
+    if changed {
+        COVERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|(entry, _, _), _| *entry != key);
+    }
 }
 
 fn listed<T>(key: CardKey, read: impl FnOnce(&Listed) -> T) -> Option<T> {
     LISTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&key).map(read)
+}
+
+/// Feed facts for a visible entry, also usable after a restart once persisted.
+pub fn publication(entry: CardKey) -> Result<OpdsPublication, BackendError> {
+    listed(entry, |book| OpdsPublication {
+        entry,
+        title: book.title.clone(),
+        subtitle: book.subtitle.clone(),
+        authors: book.authors.clone(),
+        description: book.description.clone(),
+        format: book.download.as_ref().and_then(|(_, kind)| match *kind {
+            crate::EPUB => Some(BookFormat::Epub),
+            PDF => Some(BookFormat::Pdf),
+            crate::FB2 | crate::FB2_ZIP => Some(BookFormat::Fb2),
+            crate::CBZ | crate::CBZ_LEGACY => Some(BookFormat::Cbz),
+            _ => None,
+        }),
+        download_url: book.download.as_ref().map(|(href, _)| href.to_string()),
+        cover_url: book.cover.as_ref().map(ToString::to_string),
+    })
+    .ok_or_else(unlisted)
+}
+
+pub async fn download_publication(source: &OpdsSource, credentials: Option<&OpdsCredentials>, book: &OpdsPublication) -> Result<Vec<u8>, BackendError> {
+    let root = Url::parse(&source.url).map_err(BackendError::operation)?;
+    let url = Url::parse(book.download_url.as_deref().ok_or("this book has no download")?).map_err(BackendError::operation)?;
+    fetch::download(&url, &Access::new(&root, credentials)).await
+}
+
+pub async fn publication_cover_bytes(source: &OpdsSource, credentials: Option<&OpdsCredentials>, book: &OpdsPublication) -> Option<Vec<u8>> {
+    let url = Url::parse(book.cover_url.as_deref()?).ok()?;
+    let root = Url::parse(&source.url).ok()?;
+    fetch::bytes(&url, &Access::new(&root, credentials)).await.ok()
 }
 
 /// The feed's description of a listed publication, as HTML: what its page
@@ -98,7 +141,7 @@ async fn cover_for_presentation(source: &OpdsSource, credentials: Option<&OpdsCr
     cover
 }
 
-fn thumbnail_jpeg(bytes: &[u8], width: u32, card: bool) -> Option<Vec<u8>> {
+pub fn thumbnail_jpeg(bytes: &[u8], width: u32, card: bool) -> Option<Vec<u8>> {
     let format = image::guess_format(bytes).ok()?;
     let decoded = thumbnail::decode_cover_image(bytes, format).ok()?;
     if card { thumbnail::encode_card_thumbnail_at_width(&decoded, width).ok() } else { thumbnail::encode_thumbnail_at_width(&decoded, width).ok() }
@@ -119,7 +162,19 @@ mod eviction_tests {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let source = OpdsSource { id: OpdsSourceId::from_u128(94), name: "Fixture".into(), url: origin.clone() };
         let key = CardKey([94; 32]);
-        LISTED.lock().unwrap().insert(key, Listed { file_stem: "Fixture".into(), download: None, buy: None, cover: Some(Url::parse(&format!("{origin}/cover.jpg")).unwrap()), description: "Keep this description".into() });
+        LISTED.lock().unwrap().insert(
+            key,
+            Listed {
+                title: "Fixture".into(),
+                subtitle: None,
+                authors: Vec::new(),
+                file_stem: "Fixture".into(),
+                download: None,
+                buy: None,
+                cover: Some(Url::parse(&format!("{origin}/cover.jpg")).unwrap()),
+                description: "Keep this description".into(),
+            },
+        );
         let jpeg = |red| {
             let pixels = image::RgbImage::from_pixel(2, 3, image::Rgb([red, 0, 0]));
             let mut bytes = Vec::new();

@@ -307,8 +307,8 @@ def stage_snapshot(source, destination, plan, release):
     with sqlite3.connect(destination) as db:
         db.execute('PRAGMA foreign_keys=ON')
         old_format, old_release = db.execute('SELECT format_version,release_id FROM snapshot WHERE singleton=1').fetchone()
-        if old_format != 8 or release <= old_release:
-            raise ValueError('Expected a format-8 snapshot and a strictly newer release')
+        if old_format not in (8, 9, 10, 11) or release <= old_release:
+            raise ValueError('Expected a supported format-8 through format-11 snapshot and a strictly newer release')
         db.execute('CREATE TABLE IF NOT EXISTS book_audiobook_duration('
                    'book_row_id INTEGER PRIMARY KEY REFERENCES book(row_id),'
                    'duration_ms INTEGER NOT NULL CHECK(duration_ms>0)) STRICT')

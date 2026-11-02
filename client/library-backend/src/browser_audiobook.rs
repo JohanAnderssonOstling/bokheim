@@ -1,22 +1,27 @@
-//! Local media retains a storage lease; remote media uses expiring direct URLs.
+//! Local media retains a storage lease. Remote media uses its library's storage
+//! provider.
 
 pub use crate::library::{PlaybackLocation, PlaybackSource};
-use library_model::PlaybackMetadata;
 use crate::BackendError;
 use crate::{BookId, LibrarySession};
+use library_model::PlaybackMetadata;
 pub type PlaybackLease = client_platform_web::audiobook::PlaybackLease;
 pub type BrowserAudiobook = client_platform_web::audiobook::BrowserAudiobook<PlaybackMetadata, crate::library::DirectPlayback>;
 
 pub(crate) async fn prepare(library: &LibrarySession, hash: BookId) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
-    let file = library.assets.playback_reader(&hash).await.map_err(BackendError::operation)?;
+    let file = playback_file(library, hash).await?;
     prepare_with_file(library, hash, file).await
+}
+
+pub(crate) async fn playback_file(library: &LibrarySession, hash: BookId) -> Result<Option<client_platform_web::web_storage::FileReader>, BackendError> {
+    library.assets.playback_reader(&hash).await.map_err(BackendError::operation)
 }
 
 /// Browser-host command used when a local audiobook is absent.  The format
 /// check and storage probe remain inside the owning library module.
 pub async fn open_remote_audio(library: &LibrarySession, hash: BookId) -> Result<Option<PlaybackSource>, BackendError> {
     let format = library.db.book_format(&hash).map_err(BackendError::operation)?;
-    if !matches!(format, Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder)) || library.assets.playback_reader(&hash).await.map_err(BackendError::operation)?.is_some() {
+    if !matches!(format, Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder)) || playback_file(library, hash).await?.is_some() {
         return Ok(None);
     }
     let (source, _lease) = prepare(library, hash).await?;
@@ -57,6 +62,7 @@ pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: BookId, fi
             let (url, lease) = client_platform_web::transport::resources::local_media_lease(file).await.map_err(BackendError::operation)?;
             (PlaybackLocation::LocalUrl(url), Some(lease))
         }
+
         None => {
             let source = library.direct_audio_source(hash).await?;
             if format == Some(book_model::BookFormat::Mp3Folder) && !book_model::tracks_match_archive(&metadata.tracks, source.content_hash) {

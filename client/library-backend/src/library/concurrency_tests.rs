@@ -3,6 +3,7 @@ use crate::library::{LibraryCommand, LibraryDirectory, LibraryNotifications, Rea
 use library_runtime::interest::{InterestState, NotificationInterest};
 use std::sync::Arc;
 use std::time::Duration;
+use sync_common::ROOT_DIR_ID;
 use sync_common::api::notifications::NotificationMessage;
 use web_time::Instant;
 
@@ -24,25 +25,73 @@ pub(in crate::library) fn fixture(root: &std::path::Path, url: account_client::U
     let account = library_runtime::account::LibraryAccountSession::load(Account(account_client::Session::try_new(url.clone(), "user".into(), "reader@example.com".into(), "a".repeat(43)).unwrap()), url.clone()).unwrap();
     let session = LibrarySession::open(super::super::LibraryRuntimeSpec {
         config: super::super::LibraryOpenConfig {
+            opds: None,
             id: LibraryId::new_v4(),
             display_name: "Concurrency".into(),
             root: root.to_string_lossy().into_owned(),
             database_locator: root.join("library.sqlite").to_string_lossy().into_owned(),
             default_sync_server_url: url,
             metadata_server_url: "http://127.0.0.1:1".into(),
-            google_books_api_key: None,
             storage: sync_common::storage::LibraryStorage::Bokheim,
             reset_cloud_presence: false,
         },
         account: account.library_account(),
-        cloud: Default::default(),
         notification_interest: Default::default(),
+        root_failures: None,
     })
     .unwrap();
     let (commands, inbox) = async_channel::unbounded();
     let handle = LibraryHandle { id: session.id, commands };
     let actor = LibraryActor::new(session);
     (actor, handle, inbox)
+}
+
+#[cfg(feature = "scanner")]
+#[tokio::test]
+async fn scanner_records_manual_files_without_cloud_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let (actor, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
+    let path = root.path().join("Manual.epub");
+    std::fs::write(&path, bytes).unwrap();
+
+    actor.session.scan_folder().await.unwrap();
+    assert_eq!(actor.session.db.book_count().unwrap(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(!actor.session.scanner_running());
+
+    let smaller = include_bytes!("../../crates/book-inspection/tests/fixtures/malformed-language.epub");
+    let smaller_path = root.path().join("Small.epub");
+    std::fs::write(&smaller_path, smaller).unwrap();
+    actor.session.scan_folder().await.unwrap();
+    assert_eq!(actor.session.db.book_count().unwrap(), 2);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read(&smaller_path).unwrap(), smaller);
+
+    actor.session.scan_folder().await.unwrap();
+    assert_eq!(actor.session.db.book_count().unwrap(), 2);
+    assert_ne!(actor.session.sync_status(true, Some(true)).unwrap().state, LibrarySyncState::CloudStorageFull);
+}
+
+#[tokio::test]
+async fn cloud_and_local_only_imports_commit_without_cloud_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let (actor, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
+    let source = external.path().join("Book.epub");
+    std::fs::write(&source, bytes).unwrap();
+    let failures = actor.session.import.import_paths(ROOT_DIR_ID, vec![source.clone()], true).await.unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(root.path().join("Book.epub")).unwrap(), bytes);
+    actor.session.import.import_downloaded_book(ROOT_DIR_ID, "Downloaded.epub", bytes.to_vec()).await.unwrap();
+    assert_eq!(actor.session.db.book_count().unwrap(), 1);
+    assert!(root.path().join("Downloaded.epub").exists());
+
+    actor.session.db.set_storage_policy(&sync_common::storage::LibraryStorage::Local, false).unwrap();
+    actor.session.import.import_downloaded_book(ROOT_DIR_ID, "Local.epub", bytes.to_vec()).await.unwrap();
+    assert_eq!(actor.session.db.book_count().unwrap(), 1);
 }
 
 #[cfg(feature = "scanner")]
@@ -86,6 +135,8 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
         .session
         .db
         .commit_import(library_database::ImportCommit {
+            source_identity: None,
+            byte_checksum: None,
             parent_id: ROOT_DIR_ID,
             file_name: "Book.epub".into(),
             format: book_model::BookFormat::Epub,
@@ -111,7 +162,6 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
         book_sort: BrowseBookSort::DefaultOrder,
         languages: Vec::new(),
         hide_finished: false,
-        include_direct_child_books: false,
     };
     assert!(actor.session.db.browse_contents(&query, false).unwrap().books.is_empty());
     actor.coordination.drain(&actor.session.events);
@@ -125,7 +175,7 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
     assert!(delay <= Duration::from_secs(5) && delay > Duration::from_secs(4));
     assert_eq!(actor.session.db.reading_position(&hash).unwrap().as_deref(), Some("epubcfi(/6/2)"));
     actor.coordination.drain(&actor.session.events);
-    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
+    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::ReadingProgress(hash));
     let recent = actor.session.db.browse_contents(&query, false).unwrap().books;
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].content_hash(), Some(hash));
@@ -139,11 +189,34 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
     // Updates within a chapter must refresh too, without needing a completed chapter.
     prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/4)".into(), progress: Some(20.0), entry: None })).unwrap();
     actor.coordination.drain(&actor.session.events);
-    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
+    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::ReadingProgress(hash));
     assert_eq!(actor.session.db.browse_contents(&query, false).unwrap().books[0].progress, 20.0);
     prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/4)".into(), progress: Some(20.0), entry: None })).unwrap();
     actor.coordination.drain(&actor.session.events);
     assert!(updates.is_empty(), "an unchanged position should not reload the library");
+}
+
+#[tokio::test]
+async fn signing_in_does_not_make_missing_local_only_books_browsable() {
+    let root = tempfile::tempdir().unwrap();
+    let (actor, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    assert!(!actor.session.downloaded_books_only().unwrap(), "a connected cloud-backed library includes remote books");
+    actor.session.db.set_asset_storage_policy(false, false).unwrap();
+    assert!(actor.session.downloaded_books_only().unwrap(), "local-only libraries require local bytes even when signed in");
+}
+
+#[tokio::test]
+async fn storage_copy_checks_capacity_before_mutating_library_contents() {
+    use crate::library::commands::prepare_library_request;
+    let root = tempfile::tempdir().unwrap();
+    let (mut actor, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let before = actor.session.db.storage_copy_plan().unwrap();
+    let error = match prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::CheckStorageCopyCapacity { bytes: u64::MAX })) {
+        Err(error) => error,
+        Ok(_) => panic!("an impossible transfer must fail the free space check"),
+    };
+    assert_eq!(error.failure(), Some(client_runtime::Failure::StorageFull));
+    assert_eq!(actor.session.db.storage_copy_plan().unwrap(), before);
 }
 
 #[tokio::test]
@@ -166,34 +239,6 @@ async fn thumbnails_load_by_hash_without_book_records_or_current_card_variants()
     assert_eq!(session.thumbnail(hash, ThumbnailResolution::Browse).await.unwrap().as_deref(), Some(b"browse card".as_slice()));
     assert_eq!(session.thumbnail(hash, ThumbnailResolution::CardHighDensity).await.unwrap().as_deref(), Some(b"dense card".as_slice()));
     assert_eq!(session.thumbnail(hash, ThumbnailResolution::HighDensity).await.unwrap().as_deref(), Some(master.as_slice()));
-}
-
-#[tokio::test]
-async fn provider_cover_cache_is_local_and_stale_revisions_are_hidden() {
-    use book_model::{BookFormat, BookRecord};
-    use library_replica::{BookAddition, BookFacts, EnrichmentResult, ExternalBook};
-    use sync_common::{ROOT_DIR_ID, storage::{CloudLibraryRoot, CloudProvider, LibraryStorage, ProviderFile, ProviderFileIdentity, ProviderId, ProviderScope}};
-
-    let root = tempfile::tempdir().unwrap();
-    let (actor, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    let library = &actor.session;
-    let scope = ProviderScope { provider: CloudProvider::GoogleDrive, account_id: ProviderId::new("account").unwrap(), container_id: ProviderId::new("my_drive").unwrap() };
-    library.db.set_storage_policy(&LibraryStorage::External(CloudLibraryRoot { scope: scope.clone(), folder_id: ProviderId::new("folder").unwrap() }), false).unwrap();
-    let file = ProviderFile { identity: ProviderFileIdentity { scope, file_id: ProviderId::new("book").unwrap() }, revision: ProviderId::new("1").unwrap(), size_bytes: 100, content_hash: None };
-    let addition = BookAddition { facts: BookFacts { added_at: 1, format: BookFormat::Epub }, record: BookRecord { metadata: Default::default(), description: String::new() }, navigation: None, pdf: None, recording: None, enrichment: Some(EnrichmentResult::NoMatch) };
-    let mut value = ExternalBook { file: file.clone(), addition, thumbnails: None };
-    let id = library.db.admit_external_book(ROOT_DIR_ID, value.clone()).unwrap();
-    library.assets.write_thumbnail_set(&id, b"master", b"browse", b"dense").await.unwrap();
-    assert!(library.thumbnail(id, crate::ThumbnailResolution::Browse).await.unwrap().is_none(), "unverified cache files must not be displayed");
-    library.db.complete_provider_cover_cache(&file, None, true).unwrap();
-    for (resolution, expected) in [(crate::ThumbnailResolution::Browse, b"browse".as_slice()), (crate::ThumbnailResolution::CardHighDensity, b"dense".as_slice()), (crate::ThumbnailResolution::HighDensity, b"master".as_slice())] {
-        assert_eq!(library.thumbnail(id, resolution).await.unwrap().as_deref(), Some(expected));
-    }
-    value.file.revision = ProviderId::new("2").unwrap();
-    library.db.admit_external_book(ROOT_DIR_ID, value.clone()).unwrap();
-    assert!(library.thumbnail(id, crate::ThumbnailResolution::HighDensity).await.unwrap().is_none(), "a replaced book must not show its previous cover");
-    library.db.complete_provider_cover_cache(&value.file, None, false).unwrap();
-    assert!(library.thumbnail(id, crate::ThumbnailResolution::HighDensity).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -362,15 +407,15 @@ async fn mutations_publish_queued_events_before_acknowledgement() {
 
     let events = actor.session.events.clone();
     let (reply, result) = async_channel::bounded(1);
-    actor.submit(OperationKind::Read, PendingReply::new(reply), async move {
+    actor.submit(OperationKind::Read, PendingReply::new(reply), Box::pin(async move {
         events.emit(LibraryEvent::ContentsChanged);
-        Ok(())
-    });
+        Ok(Reply::new(()))
+    }));
     let completion = actor.operations.next().await.unwrap();
     assert!(result.is_empty(), "workers return their result to the actor before replying");
     assert!(updates.is_empty(), "only the actor applies queued coordination events");
     actor.complete_operation(completion);
-    assert!(result.try_recv().unwrap().is_ok());
+    result.try_recv().unwrap().unwrap().take::<()>().unwrap();
     assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
 }
 
@@ -378,7 +423,7 @@ async fn mutations_publish_queued_events_before_acknowledgement() {
 async fn folder_replay_follows_renames_while_the_actor_serves() {
     let root = tempfile::tempdir().unwrap();
     let (actor, handle, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    actor.session.filesystem_scanning.set(false);
+    actor.session.scanning.set(false);
     let folder = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Before").unwrap();
     library_placement::prepare_directory(&actor.session.assets, &actor.session.db, folder.id).await.unwrap();
     assert!(root.path().join("Before").is_dir());
@@ -431,7 +476,6 @@ async fn browser_download_import_appears_on_home_before_enrichment() {
         chip_sort: Default::default(),
         book_sort: Default::default(),
         hide_finished: false,
-        include_direct_child_books: false,
     };
     for downloaded_only in [false, true] {
         let page = actor.session.db.browse(&query, downloaded_only).unwrap();

@@ -2,9 +2,8 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Rems, RenderOnce, Role,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, TextAlign, Window, canvas, div, px, relative,
+    AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Rems, RenderOnce, Role, StatefulInteractiveElement as _, StyleRefinement,
+    Styled, TextAlign, Window, canvas, div, px, relative,
 };
 
 use crate::button::{Button, ButtonVariants as _};
@@ -16,20 +15,11 @@ use crate::{IconName, Size};
 use crate::{Selectable, StyledExt, h_flex};
 use crate::{Sizable, StyleSized};
 
-use super::{
-    InputContentType, InputState, content_type::sync_native_content_type, element::EditorScrollbar,
-};
+use super::{InputContentType, InputState, content_type::sync_native_content_type, element::EditorScrollbar};
 
 /// Returns `(background, foreground)` colors for input-like components.
 pub(crate) fn input_style(disabled: bool, cx: &App) -> (Hsla, Hsla) {
-    if disabled {
-        (
-            cx.theme().input.mix_oklab(cx.theme().transparent, 0.8),
-            cx.theme().muted_foreground,
-        )
-    } else {
-        (cx.theme().input_background(), cx.theme().foreground)
-    }
+    if disabled { (cx.theme().input.mix_oklab(cx.theme().transparent, 0.8), cx.theme().muted_foreground) } else { (cx.theme().input_background(), cx.theme().foreground) }
 }
 
 /// A text input element bind to an [`InputState`].
@@ -184,51 +174,31 @@ impl Input {
     /// Sets a custom context menu builder for the input, shown as a native OS menu.
     ///
     /// If set, this overrides the built-in right-click context menu.
-    pub fn context_menu(
-        mut self,
-        f: impl Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu + 'static,
-    ) -> Self {
+    pub fn context_menu(mut self, f: impl Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu + 'static) -> Self {
         self.context_menu_builder = Some(Rc::new(f));
         self
     }
 
     fn render_toggle_mask_button(state: &Entity<InputState>, cx: &App) -> impl IntoElement {
-        let masked = state.read(cx).masked;
-        Button::new("toggle-mask")
-            .icon(if masked {
-                IconName::Eye
-            } else {
-                IconName::EyeOff
-            })
-            .xsmall()
-            .text()
-            .tab_stop(false)
-            .on_click({
-                let state = state.clone();
-                move |_, window, cx| {
-                    state.update(cx, |state, cx| {
-                        state.set_masked(!state.masked, window, cx);
-                    })
-                }
-            })
+        let masked = state.read(cx).is_masked();
+        Button::new("toggle-mask").icon(if masked { IconName::Eye } else { IconName::EyeOff }).xsmall().text().tooltip(if masked { "Show password" } else { "Hide password" }).on_click({
+            let state = state.clone();
+            move |_, _, cx| {
+                state.update(cx, |state, cx| {
+                    state.set_masked(!state.is_masked(), cx);
+                })
+            }
+        })
     }
 
-    fn mouse_down_handler(
-        state: Entity<InputState>,
-        content_type: Option<InputContentType>,
-        disabled: bool,
-    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    fn mouse_down_handler(state: Entity<InputState>, content_type: Option<InputContentType>, disabled: bool) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
         move |event, window, cx| {
             sync_native_content_type(window, content_type, disabled);
             state.update(cx, |state, cx| state.on_mouse_down(event, window, cx));
         }
     }
 
-    fn accessibility_role(
-        is_multi_line: bool,
-        content_type: Option<InputContentType>,
-        role: Option<Role>,
-    ) -> Role {
+    fn accessibility_role(is_multi_line: bool, content_type: Option<InputContentType>, role: Option<Role>) -> Role {
         if let Some(role) = role {
             return role;
         }
@@ -289,32 +259,15 @@ impl Input {
     }
 
     /// This method must after the refine_style.
-    fn render_editor(
-        paddings: EdgesRefinement<DefiniteLength>,
-        input_state: &Entity<InputState>,
-        state: &InputState,
-        window: &Window,
-    ) -> impl IntoElement {
+    fn render_editor(paddings: EdgesRefinement<DefiniteLength>, input_state: &Entity<InputState>, state: &InputState, window: &Window) -> impl IntoElement {
         let base_size = window.text_style().font_size;
         let rem_size = window.rem_size();
 
         let paddings = Edges {
-            left: paddings
-                .left
-                .map(|v| v.to_pixels(base_size, rem_size))
-                .unwrap_or(px(0.)),
-            right: paddings
-                .right
-                .map(|v| v.to_pixels(base_size, rem_size))
-                .unwrap_or(px(0.)),
-            top: paddings
-                .top
-                .map(|v| v.to_pixels(base_size, rem_size))
-                .unwrap_or(px(0.)),
-            bottom: paddings
-                .bottom
-                .map(|v| v.to_pixels(base_size, rem_size))
-                .unwrap_or(px(0.)),
+            left: paddings.left.map(|v| v.to_pixels(base_size, rem_size)).unwrap_or(px(0.)),
+            right: paddings.right.map(|v| v.to_pixels(base_size, rem_size)).unwrap_or(px(0.)),
+            top: paddings.top.map(|v| v.to_pixels(base_size, rem_size)).unwrap_or(px(0.)),
+            bottom: paddings.bottom.map(|v| v.to_pixels(base_size, rem_size)).unwrap_or(px(0.)),
         };
 
         state.editor_scrollbar_paddings.set(paddings);
@@ -322,14 +275,12 @@ impl Input {
 
         v_flex()
             .size_full()
-            .children(state.search_panel.clone())
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .child(input_state.clone())
-                    .child(EditorScrollbar::new(input_state.clone())),
-            )
+            .map(|container| {
+                #[cfg(feature = "input-search")]
+                let container = container.children(state.search_panel.clone());
+                container
+            })
+            .child(div().relative().flex_1().child(input_state.clone()).child(EditorScrollbar::new(input_state.clone())))
     }
 }
 
@@ -372,25 +323,12 @@ impl RenderOnce for Input {
         };
 
         let (bg, _) = input_style(state.disabled, cx);
-        let bg = if state.mode.is_code_editor() {
-            cx.theme().editor_background()
-        } else {
-            bg
-        };
         let bg = if state.disabled { bg.opacity(0.5) } else { bg };
-        let border_color = if state.disabled {
-            cx.theme().input.opacity(0.5)
-        } else {
-            cx.theme().input
-        };
+        let border_color = if state.disabled { cx.theme().input.opacity(0.5) } else { cx.theme().input };
 
         let prefix = self.prefix;
         let suffix = self.suffix;
-        let show_clear_button = self.cleanable
-            && !state.disabled
-            && !state.loading
-            && state.text.len() > 0
-            && state.mode.is_single_line();
+        let show_clear_button = self.cleanable && !state.disabled && !state.loading && state.text.len() > 0 && state.mode.is_single_line();
         let has_suffix = suffix.is_some() || state.loading || self.mask_toggle || show_clear_button;
 
         div()
@@ -398,9 +336,7 @@ impl RenderOnce for Input {
             .relative()
             .child({
                 let state = self.state.clone();
-                canvas(move |bounds, _, cx| state.read(cx).control_bounds.set(Some(bounds)), |_, _, _, _| {})
-                    .absolute()
-                    .inset_0()
+                canvas(move |bounds, _, cx| state.read(cx).control_bounds.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0()
             })
             .role(accessibility_role)
             .flex()
@@ -410,9 +346,7 @@ impl RenderOnce for Input {
             .when(!state.disabled, |this| {
                 this.on_action(window.listener_for(&self.state, InputState::backspace))
                     .on_action(window.listener_for(&self.state, InputState::delete))
-                    .on_action(
-                        window.listener_for(&self.state, InputState::delete_to_beginning_of_line),
-                    )
+                    .on_action(window.listener_for(&self.state, InputState::delete_to_beginning_of_line))
                     .on_action(window.listener_for(&self.state, InputState::delete_to_end_of_line))
                     .on_action(window.listener_for(&self.state, InputState::delete_previous_word))
                     .on_action(window.listener_for(&self.state, InputState::delete_next_word))
@@ -460,24 +394,16 @@ impl RenderOnce for Input {
             .on_action(window.listener_for(&self.state, InputState::show_character_palette))
             .on_action(window.listener_for(&self.state, InputState::copy))
             .on_action(window.listener_for(&self.state, InputState::open_context_menu))
-            .on_action(window.listener_for(&self.state, InputState::on_action_search))
+            .map(|input| {
+                #[cfg(feature = "input-search")]
+                let input = input.on_action(window.listener_for(&self.state, InputState::on_action_search));
+                input
+            })
             .on_key_down(window.listener_for(&self.state, InputState::on_key_down))
-            .on_mouse_down(
-                MouseButton::Left,
-                Self::mouse_down_handler(self.state.clone(), content_type, disabled),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                Self::mouse_down_handler(self.state.clone(), content_type, disabled),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                window.listener_for(&self.state, InputState::on_mouse_up),
-            )
-            .on_mouse_up(
-                MouseButton::Right,
-                window.listener_for(&self.state, InputState::on_mouse_up),
-            )
+            .on_mouse_down(MouseButton::Left, Self::mouse_down_handler(self.state.clone(), content_type, disabled))
+            .on_mouse_down(MouseButton::Right, Self::mouse_down_handler(self.state.clone(), content_type, disabled))
+            .on_mouse_up(MouseButton::Left, window.listener_for(&self.state, InputState::on_mouse_up))
+            .on_mouse_up(MouseButton::Right, window.listener_for(&self.state, InputState::on_mouse_up))
             .on_scroll_wheel(window.listener_for(&self.state, InputState::on_scroll_wheel))
             .size_full()
             .line_height(LINE_HEIGHT)
@@ -487,36 +413,17 @@ impl RenderOnce for Input {
             .input_text_size(self.size)
             .when(!self.disabled, |this| this.cursor_text())
             .items_center()
-            .when(state.mode.is_multi_line(), |this| {
-                this.h_auto()
-                    .when_some(self.height, |this, height| this.h(height))
-            })
-            .when(self.appearance, |this| {
-                this.bg(bg)
-                    .rounded(cx.theme().radius)
-                    .when(self.bordered, |this| {
-                        this.border_color(border_color)
-                            .border_1()
-                            .when(focused && self.focus_bordered, |this| {
-                                this.focused_border(cx)
-                            })
-                    })
-            })
+            .when(state.mode.is_multi_line(), |this| this.h_auto().when_some(self.height, |this, height| this.h(height)))
+            .when(self.appearance, |this| this.bg(bg).rounded(cx.theme().radius).when(self.bordered, |this| this.border_color(border_color).border_1().when(focused && self.focus_bordered, |this| this.focused_border(cx))))
             .items_center()
             .gap(gap_x)
             .refine_style(&self.style)
-            .children(prefix.map(|p| {
-                div()
-                    .when(state.disabled, |this| this.opacity(0.5))
-                    .child(p)
-            }))
+            .children(prefix.map(|p| div().when(state.disabled, |this| this.opacity(0.5)).child(p)))
             .when(state.mode.is_multi_line(), |mut this| {
                 let paddings = this.style().padding.clone();
                 this.child(Self::render_editor(paddings, &self.state, &state, window))
             })
-            .when(!state.mode.is_multi_line(), |this| {
-                this.child(self.state.clone())
-            })
+            .when(!state.mode.is_multi_line(), |this| this.child(self.state.clone()))
             .when(has_suffix, |this| {
                 this.pr(self.size.input_px()).child(
                     h_flex()
@@ -525,12 +432,8 @@ impl RenderOnce for Input {
                         .items_center()
                         .cursor_default()
                         .when(state.disabled, |this| this.opacity(0.5))
-                        .when(state.loading, |this| {
-                            this.child(Spinner::new().color(cx.theme().muted_foreground))
-                        })
-                        .when(self.mask_toggle, |this| {
-                            this.child(Self::render_toggle_mask_button(&self.state, cx))
-                        })
+                        .when(state.loading, |this| this.child(Spinner::new().color(cx.theme().muted_foreground)))
+                        .when(self.mask_toggle, |this| this.child(Self::render_toggle_mask_button(&self.state, cx)))
                         .when(show_clear_button, |this| {
                             this.child(clear_button(cx).on_click({
                                 let state = self.state.clone();
@@ -575,48 +478,24 @@ mod tests {
             (Some(InputContentType::Sublocality), Role::TextInput),
             (Some(InputContentType::CountryName), Role::TextInput),
             (Some(InputContentType::PostalCode), Role::TextInput),
-            (
-                Some(InputContentType::TelephoneNumber),
-                Role::PhoneNumberInput,
-            ),
+            (Some(InputContentType::TelephoneNumber), Role::PhoneNumberInput),
             (Some(InputContentType::EmailAddress), Role::EmailInput),
             (Some(InputContentType::Url), Role::UrlInput),
             (Some(InputContentType::CreditCardNumber), Role::TextInput),
             (Some(InputContentType::CreditCardName), Role::TextInput),
             (Some(InputContentType::CreditCardGivenName), Role::TextInput),
-            (
-                Some(InputContentType::CreditCardMiddleName),
-                Role::TextInput,
-            ),
-            (
-                Some(InputContentType::CreditCardFamilyName),
-                Role::TextInput,
-            ),
-            (
-                Some(InputContentType::CreditCardSecurityCode),
-                Role::TextInput,
-            ),
-            (
-                Some(InputContentType::CreditCardExpiration),
-                Role::TextInput,
-            ),
-            (
-                Some(InputContentType::CreditCardExpirationMonth),
-                Role::TextInput,
-            ),
-            (
-                Some(InputContentType::CreditCardExpirationYear),
-                Role::TextInput,
-            ),
+            (Some(InputContentType::CreditCardMiddleName), Role::TextInput),
+            (Some(InputContentType::CreditCardFamilyName), Role::TextInput),
+            (Some(InputContentType::CreditCardSecurityCode), Role::TextInput),
+            (Some(InputContentType::CreditCardExpiration), Role::TextInput),
+            (Some(InputContentType::CreditCardExpirationMonth), Role::TextInput),
+            (Some(InputContentType::CreditCardExpirationYear), Role::TextInput),
             (Some(InputContentType::CreditCardType), Role::TextInput),
             (Some(InputContentType::Username), Role::TextInput),
             (Some(InputContentType::Password), Role::PasswordInput),
             (Some(InputContentType::NewPassword), Role::PasswordInput),
             (Some(InputContentType::OneTimeCode), Role::TextInput),
-            (
-                Some(InputContentType::ShipmentTrackingNumber),
-                Role::TextInput,
-            ),
+            (Some(InputContentType::ShipmentTrackingNumber), Role::TextInput),
             (Some(InputContentType::FlightNumber), Role::TextInput),
             (Some(InputContentType::DateTime), Role::DateTimeInput),
             (Some(InputContentType::Birthdate), Role::DateInput),
@@ -634,29 +513,12 @@ mod tests {
 
     #[test]
     fn multiline_inputs_keep_multiline_accessibility_role() {
-        assert_eq!(
-            Input::accessibility_role(true, Some(InputContentType::Password), None),
-            Role::MultilineTextInput
-        );
+        assert_eq!(Input::accessibility_role(true, Some(InputContentType::Password), None), Role::MultilineTextInput);
     }
 
     #[test]
     fn explicit_accessibility_role_overrides_defaults() {
-        assert_eq!(
-            Input::accessibility_role(
-                false,
-                Some(InputContentType::Password),
-                Some(Role::TextInput)
-            ),
-            Role::TextInput
-        );
-        assert_eq!(
-            Input::accessibility_role(
-                true,
-                Some(InputContentType::Password),
-                Some(Role::TextInput)
-            ),
-            Role::TextInput
-        );
+        assert_eq!(Input::accessibility_role(false, Some(InputContentType::Password), Some(Role::TextInput)), Role::TextInput);
+        assert_eq!(Input::accessibility_role(true, Some(InputContentType::Password), Some(Role::TextInput)), Role::TextInput);
     }
 }

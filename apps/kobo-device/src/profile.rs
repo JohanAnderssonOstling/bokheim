@@ -11,7 +11,7 @@ pub fn current() -> io::Result<&'static Profile> {
         Err(error) => return Err(error),
     };
     if !version.is_empty() && !firmware_supported(version.trim().split(',').nth(2).unwrap_or_default()) {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "Bokheim requires Kobo firmware 4.6 or later in the 4.x series"));
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "Requires Kobo firmware 4.6 or later in the 4.x series."));
     }
     Profile::detect(&product, &version).map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error))
 }

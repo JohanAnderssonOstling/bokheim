@@ -1,5 +1,5 @@
 // Keep credential fields in the ordinary DOM, with stable form/field identities.
-// No credential values are mirrored into application state or browser storage.
+// Signup credentials stay in this dialog's memory until PIN verification ends.
 const registeredFonts = new Set();
 
 export function registerAuthenticationFont(family, weight, style, data) {
@@ -15,7 +15,7 @@ export function registerAuthenticationFont(family, weight, style, data) {
     });
 }
 
-export function openAuthentication(themeJson, minimum, submit) {
+export function openAuthentication(themeJson, minimum, submit, resendCooldownSeconds = 60) {
     const theme = JSON.parse(themeJson);
     const previousFocus = document.activeElement;
     const dialog = document.createElement('dialog');
@@ -58,10 +58,13 @@ export function openAuthentication(themeJson, minimum, submit) {
     dialog.append(style, heading, close, content);
     let flow = 'login', busy = false, closed = false;
     let form, links, error, status;
+    let registration = null, resendButton, resendTimer, resendAvailableAt = 0;
     const panel = {destroy};
     function destroy() {
         if (closed) return;
         closed = true;
+        registration = null;
+        clearInterval(resendTimer);
         globalThis.removeEventListener('pagehide', destroy);
         globalThis.removeEventListener('popstate', destroy);
         dialog.close();
@@ -130,7 +133,28 @@ export function openAuthentication(themeJson, minimum, submit) {
     }
     const titles = {login:'Sign in', register:'Create account', verify:'Check your email', 'request-reset':'Reset your password', reset:'Set a new password'};
     const actions = {login:'Sign in', register:'Create account', verify:'Verify email', 'request-reset':'Email me a reset code', reset:'Set new password'};
+    function updateResend() {
+        if (!resendButton) return;
+        const seconds = Math.max(0, Math.ceil((resendAvailableAt - Date.now()) / 1000));
+        resendButton.textContent = seconds ? `Resend PIN (${seconds}s)` : 'Resend PIN';
+        resendButton.disabled = busy || seconds > 0;
+        if (!seconds) clearInterval(resendTimer);
+    }
+    function startResendCooldown() {
+        clearInterval(resendTimer);
+        resendAvailableAt = Date.now() + resendCooldownSeconds * 1000;
+        resendTimer = setInterval(updateResend, 1000);
+        updateResend();
+    }
+    function currentEmail() {
+        return registration?.email ?? form.elements.namedItem('username').value.trim();
+    }
     function render(next, email = '', message = '') {
+        if (next !== 'verify') {
+            registration = null;
+            clearInterval(resendTimer);
+        }
+        resendButton = null;
         flow = next;
         heading.textContent = titles[flow];
         form = document.createElement('form');
@@ -144,7 +168,7 @@ export function openAuthentication(themeJson, minimum, submit) {
         status.setAttribute('role', 'status');
         status.textContent = message;
         form.append(error, status);
-        field('username', 'Email', 'email', 'username', email);
+        if (flow !== 'verify') field('username', 'Email', 'email', 'username', email);
         if (flow === 'login' || flow === 'register' || flow === 'reset') {
             field('password', flow === 'reset' ? 'New password' : 'Password', 'password', flow === 'login' ? 'current-password' : 'new-password');
         }
@@ -153,9 +177,6 @@ export function openAuthentication(themeJson, minimum, submit) {
             pin.inputMode = 'numeric';
             pin.pattern = '[0-9]{6}';
             pin.maxLength = 6;
-            // The PIN proves the mailbox; the registration password proves
-            // the registrant, so the server asks for both.
-            field('password', 'Password you chose', 'password', 'current-password');
         }
         if (flow === 'reset') {
             field('token', 'Reset code from your email', 'text', 'off');
@@ -176,26 +197,27 @@ export function openAuthentication(themeJson, minimum, submit) {
         links = document.createElement('div');
         links.className = 'auth-links';
         const change = (label, next) => links.append(button(label, () => {
-            if (!busy) render(next, form.elements.namedItem('username').value.trim());
+            if (!busy) render(next, currentEmail());
         }));
         if (flow === 'login') {
             change('Forgot your password?', 'request-reset');
         } else if (flow === 'verify') {
-            links.append(button('Resend PIN', () => void perform('resend')));
+            resendButton = button('Resend PIN', () => void perform('resend'));
+            links.append(resendButton);
             change('Use a different email', 'register');
             change('Back to sign in', 'login');
         } else { change('Back to sign in', 'login'); }
         content.replaceChildren(form, links);
-        if (dialog.open) form.elements.namedItem('username').focus();
+        if (dialog.open) form.elements.namedItem(flow === 'verify' ? 'pin' : 'username').focus();
     }
     async function perform(action) {
         if (busy || closed) return;
-        const emailField = form.elements.namedItem('username');
-        if (action === 'resend' ? !emailField.reportValidity() : !form.reportValidity()) return;
+        if (action === 'resend' && Date.now() < resendAvailableAt) return;
+        if (action !== 'resend' && !form.reportValidity()) return;
         // Read DOM values on submit: autofill need not dispatch typing events.
-        const email = emailField.value.trim();
+        const email = currentEmail();
         const value = name => form.elements.namedItem(name)?.value ?? '';
-        const password = value('password');
+        const password = registration?.password ?? value('password');
         if ((action === 'register' || action === 'reset') && Array.from(password).length < minimum) {
             error.textContent = `Use a password with at least ${minimum} characters.`;
             return;
@@ -221,8 +243,15 @@ export function openAuthentication(themeJson, minimum, submit) {
             await submit(request);
             if (closed) return;
             if (action === 'login' || action === 'verify') { destroy(); return; }
-            if (action === 'register') render('verify', email, 'Check your email for a six-digit verification PIN.');
-            if (action === 'resend') status.textContent = 'Verification PIN sent if the address exists.';
+            if (action === 'register') {
+                registration = {email, password};
+                render('verify', email, `Enter the six-digit PIN sent to ${email}.`);
+                startResendCooldown();
+            }
+            if (action === 'resend') {
+                status.textContent = 'A new PIN has been requested. Check your email and use the latest PIN.';
+                startResendCooldown();
+            }
             if (action === 'request-reset') render('reset', email, 'Check your email for a reset code.');
             if (action === 'reset') render('login', email, 'Password updated. Sign in with your new password.');
         } catch (failure) {
@@ -233,6 +262,7 @@ export function openAuthentication(themeJson, minimum, submit) {
                 form.removeAttribute('aria-busy');
                 for (const input of form.querySelectorAll('input')) input.readOnly = false;
                 for (const item of dialog.querySelectorAll('button')) item.disabled = false;
+                updateResend();
             }
         }
     }

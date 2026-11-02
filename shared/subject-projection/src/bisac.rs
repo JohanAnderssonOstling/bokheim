@@ -1,5 +1,5 @@
 use super::bisac_database::with_reference;
-use super::{canonical_subject_system, has_usable_lcc_classification, normalize_path, normalize_term, split_path, BISAC_SYSTEM_ID, UNIFIED_SYSTEM_ID};
+use super::{BISAC_SYSTEM_ID, UNIFIED_SYSTEM_ID, canonical_subject_system, has_usable_lcc_classification, normalize_path, normalize_term, split_path};
 use book_model::BookSubject;
 use rusqlite::{Connection, OptionalExtension, Row};
 use std::cell::Cell;
@@ -22,22 +22,6 @@ impl SubjectNode {
 struct Reference<'a> {
     database: Option<&'a Connection>,
     failed: Cell<bool>,
-}
-
-struct BundledNode {
-    path: &'static str,
-    code: Option<&'static str>,
-    normalized_path: &'static str,
-    tail_component: &'static str,
-    component_count: usize,
-}
-
-const BUNDLED_NODES: &[BundledNode] = include!(concat!(env!("OUT_DIR"), "/bisac-reference-nodes.rs"));
-
-impl BundledNode {
-    fn node(&self) -> SubjectNode {
-        node(self.path.to_owned(), self.code.map(str::to_owned))
-    }
 }
 
 fn read_node(row: &Row<'_>) -> rusqlite::Result<SubjectNode> {
@@ -65,10 +49,8 @@ impl<'a> Reference<'a> {
         match read(db) {
             Ok(value) => Some(value),
             Err(error) => {
-                // Finish this lookup with the identical compiled reference.
-                // Do not treat a broken cache as missing subject evidence.
                 self.failed.set(true);
-                eprintln!("BISAC cache query failed; using compiled reference nodes: {error}");
+                eprintln!("BISAC reference query failed: {error}");
                 None
             }
         }
@@ -77,13 +59,13 @@ impl<'a> Reference<'a> {
     fn node_by_path(&self, path: &str) -> Option<SubjectNode> {
         let path = normalize_path(path);
         self.query(|db| db.prepare_cached("SELECT path,code FROM bisac_node WHERE normalized_path=?1 ORDER BY id DESC LIMIT 1").and_then(|mut query| query.query_row([&path], read_node).optional()).map_err(|error| error.to_string()))
-            .unwrap_or_else(|| BUNDLED_NODES.iter().rev().find(|node| node.normalized_path == path.as_str()).map(BundledNode::node))
+            .flatten()
     }
 
     fn node_by_code(&self, code: &str) -> Option<SubjectNode> {
         let code = code.trim().to_ascii_uppercase();
         self.query(|db| db.prepare_cached("SELECT path,code FROM bisac_node WHERE code=?1 ORDER BY id DESC LIMIT 1").and_then(|mut query| query.query_row([&code], read_node).optional()).map_err(|error| error.to_string()))
-            .unwrap_or_else(|| BUNDLED_NODES.iter().rev().find(|node| node.code == Some(code.as_str())).map(BundledNode::node))
+            .flatten()
     }
 
     fn candidates(&self, components: &HashMap<String, BTreeSet<usize>>, minimum_components: usize) -> Vec<SubjectNode> {
@@ -109,17 +91,7 @@ impl<'a> Reference<'a> {
                 .map_err(|error| error.to_string())?;
             rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())
         })
-        .unwrap_or_else(|| {
-            BUNDLED_NODES
-                .iter()
-                .filter(|node| node.component_count >= minimum_components && components.contains_key(node.tail_component))
-                .map(|bundled| {
-                    let mut node = bundled.node();
-                    node.normalized_components = node.path.split(" / ").map(normalize_term).collect();
-                    node
-                })
-                .collect()
-        })
+        .unwrap_or_default()
     }
 }
 
@@ -231,43 +203,6 @@ pub fn match_bisac_subjects_with_minimum_adjacent(subjects: &[BookSubject], mini
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod compact_reference_tests {
     use super::*;
-
-    #[test]
-    fn failed_cache_queries_keep_bundled_subject_evidence() {
-        let db = Connection::open_in_memory().unwrap();
-        let reference = Reference::new(Some(&db));
-        // There is no bisac_node table: preparation fails before any result.
-        let node = reference.node_by_code(" sci057000 ").unwrap();
-        assert_eq!(node.path, "Science / Physics / Quantum Theory");
-        assert!(reference.failed.get());
-        assert_eq!(reference.node_by_path("science > physics > quantum theory").unwrap().code.as_deref(), Some("SCI057000"));
-        let evidence = HashMap::from([("quantum theory".to_owned(), BTreeSet::from([0]))]);
-        assert!(reference.candidates(&evidence, 3).iter().any(|candidate| candidate.path == node.path));
-        assert!(reference.candidates(&evidence, 4).is_empty());
-    }
-
-    #[test]
-    fn missing_storage_uses_bundled_reference_without_initialization() {
-        let reference = Reference::new(None);
-        assert_eq!(reference.node_by_code("SCI057000").unwrap().path, "Science / Physics / Quantum Theory");
-        assert!(reference.node_by_code("SCI999999").is_none());
-        assert!(reference.node_by_path("not a reference subject").is_none());
-    }
-
-    #[test]
-    fn unreadable_candidate_rows_retry_the_complete_bundled_lookup() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(
-            "CREATE TABLE bisac_node(id INTEGER PRIMARY KEY,path,code,tail_component,component_count);
-                          INSERT INTO bisac_node VALUES(1,NULL,'SCI057000','quantum theory',3);",
-        )
-        .unwrap();
-        let reference = Reference::new(Some(&db));
-        let evidence = HashMap::from([("quantum theory".to_owned(), BTreeSet::from([0]))]);
-        let candidates = reference.candidates(&evidence, 3);
-        assert!(reference.failed.get());
-        assert!(candidates.iter().any(|node| node.code.as_deref() == Some("SCI057000") && node.path == "Science / Physics / Quantum Theory"));
-    }
 
     fn database() -> Connection {
         let file = tempfile::NamedTempFile::new().unwrap();

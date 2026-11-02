@@ -24,7 +24,7 @@ impl BackendWorkerHost {
         for entry in &entries {
             let locator = context.registry.library_database_locator(entry.library_id(), entry.storage_locator());
             let db = library_database::Database::open(&locator).map_err(BackendError::operation)?;
-            db.initialize_library().map_err(BackendError::operation)?;
+            db.initialize_library_for(*entry.library_id()).map_err(BackendError::operation)?;
         }
         let backend = AppBackend::new(context)?;
         for entry in entries {

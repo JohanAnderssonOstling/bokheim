@@ -30,6 +30,20 @@ impl Books {
     }
 }
 
+/// The crumbs from the root down to `route`, root first. Empty when `route`
+/// is not in the displayed tree, which is where compaction left it.
+pub(in crate::browse) fn subject_path(books: Books, route: i64, nodes: &BTreeMap<i64, SubjectNode>) -> Vec<library_model::BrowsePathSegment> {
+    let mut path = Vec::new();
+    let mut current = route;
+    while current != library_model::ROOT_SUBJECT_ROUTE_ID {
+        let Some(node) = nodes.get(&current) else { return Vec::new() };
+        path.push(library_model::BrowsePathSegment { id: books.location(current), name: node.label.clone() });
+        current = node.parent;
+    }
+    path.reverse();
+    path
+}
+
 fn route_of(location: BrowseLocation) -> Option<i64> {
     match location {
         BrowseLocation::Subject(route) | BrowseLocation::Catalog(route) => Some(route),
@@ -47,6 +61,16 @@ pub(super) struct SubjectNode {
 }
 
 impl Database {
+    /// The subjects a book is listed under, as Browse shows them: one path
+    /// per displayed node that holds the book directly. Compaction can have
+    /// lifted the book to an ancestor of its assigned concept, and a concept
+    /// reached by several routes appears at each; both are what Browse lists.
+    /// A book compacted all the way to the root has no subject.
+    pub(crate) fn book_subjects(&self, books: Books, book: i64) -> Result<Vec<Vec<library_model::BrowsePathSegment>>, DatabaseError> {
+        let nodes = self.subject_tree_for(books)?;
+        Ok(nodes.iter().filter(|(route, node)| **route != library_model::ROOT_SUBJECT_ROUTE_ID && node.direct.contains(&book)).map(|(&route, _)| subject_path(books, route, &nodes)).filter(|path| !path.is_empty()).collect())
+    }
+
     #[cfg(test)]
     pub(super) fn browse_subject(
         &self, books: Books, route: i64, query: &library_model::LibraryBrowseQuery, downloaded_only: bool, section_limit: Option<usize>, page: Option<BrowsePageRequest>,
@@ -72,20 +96,7 @@ impl Database {
                 Books::Library => self.library_facets(options)?,
                 Books::Catalog => super::catalog::facets(options)?,
             };
-            let path = {
-                let mut route: i64 = route;
-                let mut path = Vec::new();
-                while route != library_model::ROOT_SUBJECT_ROUTE_ID {
-                    let Some(node) = nodes.get(&route) else {
-                        path.clear();
-                        break;
-                    };
-                    path.push(library_model::BrowsePathSegment { id: books.location(route), name: node.label.clone() });
-                    route = node.parent;
-                }
-                path.reverse();
-                path
-            };
+            let path = subject_path(books, route, nodes);
             let ancestors = self.subject_ancestors(books, &path, nodes, options)?;
             Ok(super::LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, feed: None, page })
         })
@@ -143,11 +154,6 @@ impl Database {
         let Some(root) = nodes.get(&location) else { return BTreeSet::new() };
         let searched = !options.search.is_empty();
         let mut selected_books = if searched { root.members.intersection(&matching.text_matches).copied().collect() } else { root.direct.clone() };
-        if !searched && options.include_direct_child_books {
-            for child in &root.children {
-                selected_books.extend(&nodes[child].direct);
-            }
-        }
         selected_books.retain(|book| matching.books.contains(book));
 
         selected_books
@@ -187,11 +193,8 @@ impl Database {
             }
         }
         super::popularity::sort_rows(&mut children, options.chip_sort, |row| route_of(row.id).and_then(|route| super::popularity::sum(&nodes[&route].members, matching)));
-        if books == Books::Catalog {
-            if options.chip_sort == library_model::BrowseChipSort::Popularity {
-                children.sort_by_cached_key(|row| route_of(row.id).and_then(|route| super::popularity::source_priority(&nodes[&route].members, matching)));
-            }
-            children.sort_by_key(|row| route_of(row.id).is_none_or(|route| nodes[&route].members.is_disjoint(&matching.preferred)));
+        if books == Books::Catalog && options.chip_sort != library_model::BrowseChipSort::Popularity {
+            super::popularity::prefer_rows(&mut children, &|row| route_of(row.id).is_some_and(|route| !nodes[&route].members.is_disjoint(&matching.preferred)));
         }
         children
     }
@@ -228,7 +231,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_subject_popularity_uses_source_tiers_and_shared_observations_after_filters() {
+    fn catalog_subject_popularity_sums_normalized_sources_and_shared_observations_after_filters() {
         use crate::browse::popularity::sum;
         use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery};
 
@@ -244,35 +247,26 @@ mod tests {
             books: BTreeSet::from([10, 11, 12, 13, 14, 15]),
             downloaded: BTreeSet::new(),
             text_matches: BTreeSet::new(),
-            popularity: BTreeMap::from([(10, 100000.0), (11, 1.5), (12, 1.5), (13, 1.0), (14, 0.0)]),
+            popularity: BTreeMap::from([(10, 100.0), (11, 55.0), (12, 55.0), (13, 20.0), (14, 0.0)]),
             preferred: BTreeSet::from([15]),
-            source_priorities: BTreeMap::from([(10, 4), (11, 3), (12, 3), (13, 2), (14, 1), (15, 0)]),
             popularity_groups: BTreeMap::from([(11, "paired".into()), (12, "paired".into())]),
         };
-        let query = LibraryBrowseQuery {
-            location: BrowseLocation::Catalog(0),
-            search: String::new(),
-            file_types: vec![],
-            languages: vec![],
-            chip_sort: BrowseChipSort::Popularity,
-            book_sort: BrowseBookSort::Popularity,
-            hide_finished: false,
-            include_direct_child_books: false,
-        };
+        let query =
+            LibraryBrowseQuery { location: BrowseLocation::Catalog(0), search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::Popularity, book_sort: BrowseBookSort::Popularity, hide_finished: false };
         let options = BrowseOptions::from_query(&query, false);
         let rows = Database::subject_children(Books::Catalog, 0, &nodes, &matching, &options);
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["PDL", "Litteraturbanken", "Unglue", "LoyalBooks", "Gutenberg"]);
-        assert_eq!(sum(&nodes[&2].members, &matching), Some(1.5));
-        assert_eq!(sum(&nodes[&4].members, &matching), Some(0.0));
+        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Gutenberg", "Litteraturbanken", "LoyalBooks", "Unglue", "PDL"]);
+        assert_eq!(sum(&nodes[&2].members, &matching), Some(55.0));
+        assert_eq!(sum(&nodes[&4].members, &matching), Some(100.0));
         matching.books.remove(&14);
         matching.books.remove(&11);
         let rows = Database::subject_children(Books::Catalog, 0, &nodes, &matching, &options);
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["PDL", "Unglue", "LoyalBooks", "Gutenberg", "Litteraturbanken"]);
-        assert_eq!(sum(&nodes[&2].members, &matching), Some(1.5));
+        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Gutenberg", "Litteraturbanken", "LoyalBooks", "Unglue", "PDL"]);
+        assert_eq!(sum(&nodes[&2].members, &matching), Some(55.0));
     }
 
     #[test]
-    fn catalog_subjects_with_preferred_books_lead_after_filters_in_every_sort() {
+    fn catalog_subject_source_preference_does_not_override_popularity() {
         use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery};
 
         let nodes = BTreeMap::from([
@@ -287,24 +281,16 @@ mod tests {
             text_matches: BTreeSet::new(),
             popularity: BTreeMap::from([(10, 100.0), (12, 20.0), (13, 10.0)]),
             preferred: BTreeSet::from([11]),
-            source_priorities: BTreeMap::new(),
             popularity_groups: BTreeMap::new(),
         };
-        let mut query = LibraryBrowseQuery {
-            location: BrowseLocation::Catalog(0),
-            search: String::new(),
-            file_types: vec![],
-            languages: vec![],
-            chip_sort: BrowseChipSort::DefaultOrder,
-            book_sort: BrowseBookSort::DefaultOrder,
-            hide_finished: false,
-            include_direct_child_books: false,
-        };
+        let mut query =
+            LibraryBrowseQuery { location: BrowseLocation::Catalog(0), search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::DefaultOrder, book_sort: BrowseBookSort::DefaultOrder, hide_finished: false };
         for sort in [BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::Popularity, BrowseChipSort::BookCount] {
             query.chip_sort = sort;
             let options = BrowseOptions::from_query(&query, false);
             let rows = Database::subject_children(Books::Catalog, 0, &nodes, &matching, &options);
-            assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Z preferred", "A popular", "M other"]);
+            let expected = if sort == BrowseChipSort::Popularity { ["A popular", "M other", "Z preferred"] } else { ["Z preferred", "A popular", "M other"] };
+            assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), expected);
         }
 
         // The same taxonomy still honors ordinary popularity in the library.
@@ -339,7 +325,6 @@ mod tests {
             chip_sort: Default::default(),
             book_sort: Default::default(),
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let root = db.browse(&query, false).unwrap();
         assert!(root.path.is_empty());

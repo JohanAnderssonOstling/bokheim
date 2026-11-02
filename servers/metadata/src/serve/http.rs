@@ -127,14 +127,14 @@ mod http_tests {
         let temporary = tempfile::tempdir().unwrap();
         let database = crate::build::tests::snapshot_from(temporary.path(), &[], &[], &[]);
         let answers = temporary.path().join("answers.sqlite");
-        build_answers(&database, None, None, None, &answers).unwrap();
+        build_answers_with_ratings(&database, None, None, None, None, &answers).unwrap();
         let service = MetadataService::open(&answers, &temporary.path().join("demand.sqlite")).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v3/books", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             axum::serve(listener, app(service)).await.unwrap();
         });
-        let client = reqwest::Client::new();
+        let client = http_response::client();
         let preflight =
             client.request(reqwest::Method::OPTIONS, &url).header("Origin", "https://app.bokheim.se").header("Access-Control-Request-Method", "POST").header("Access-Control-Request-Headers", "content-type").send().await.unwrap();
         assert!(preflight.status().is_success());

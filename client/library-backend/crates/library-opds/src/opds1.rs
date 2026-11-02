@@ -35,21 +35,18 @@ pub(crate) fn parse(xml: &str, base: &Url) -> Result<Feed, String> {
         }
     }
     for entry in children(&root, "entry") {
-        let links = children(&entry, "link").collect::<Vec<_>>();
+        let links = || children(&entry, "link");
         // Any acquisition makes a publication; only an open one is downloaded.
-        if links.iter().any(|link| link.attribute("rel").is_some_and(|rel| rel.starts_with(ACQUISITION))) {
-            let open = links
-                .iter()
+        if links().any(|link| link.attribute("rel").is_some_and(|rel| rel.starts_with(ACQUISITION))) {
+            let open = links()
                 .filter(|link| matches!(link.attribute("rel"), Some(ACQUISITION | OPEN_ACCESS)))
-                .filter_map(|link| Some((base.join(link.attribute("href")?).ok()?, link.attribute("type").unwrap_or_default().to_owned(), link.attribute("length").and_then(|length| length.parse().ok()))))
-                .collect();
+                .filter_map(|link| Some((base.join(link.attribute("href")?).ok()?, link.attribute("type").unwrap_or_default(), link.attribute("length").and_then(|length| length.parse().ok()))));
             let download = choose_download(open);
-            let buy = links.iter().find(|link| link.attribute("rel") == Some(BUY));
+            let buy = links().find(|link| link.attribute("rel") == Some(BUY));
             // A book offered only with DRM, sold, lent or free, is not listed.
-            let offered_types = links
-                .iter()
+            let offered_types = links()
                 .filter(|link| link.attribute("rel").is_some_and(|rel| rel.starts_with(ACQUISITION)))
-                .flat_map(|link| link.descendants().filter(move |node| *node == *link || is(node, OPDS, "indirectAcquisition")))
+                .flat_map(|link| link.descendants().filter(move |node| *node == link || is(node, OPDS, "indirectAcquisition")))
                 .filter_map(|node| node.attribute("type"));
             if download.is_none() && protected(offered_types) {
                 continue;
@@ -61,12 +58,12 @@ pub(crate) fn parse(xml: &str, base: &Url) -> Result<Feed, String> {
                 authors: children(&entry, "author").map(|author| child_text(&author, "name")).filter(|name| !name.is_empty()).collect(),
                 download,
                 buy: buy.and_then(|link| base.join(link.attribute("href")?).ok()),
-                cover: COVERS.into_iter().find_map(|rel| links.iter().find(|link| link.attribute("rel") == Some(rel))?.attribute("href").and_then(|href| base.join(href).ok())),
+                cover: COVERS.into_iter().find_map(|rel| links().find(|link| link.attribute("rel") == Some(rel))?.attribute("href").and_then(|href| base.join(href).ok())),
                 description: description(&entry, xml),
             });
             continue;
         }
-        let Some(page) = links.iter().find(|link| link.attribute("type").is_some_and(|kind| kind.contains("opds-catalog") || bare_media_type(kind) == "application/atom+xml")) else { continue };
+        let Some(page) = links().find(|link| link.attribute("type").is_some_and(|kind| kind.contains("opds-catalog") || bare_media_type(kind) == "application/atom+xml")) else { continue };
         let Some(href) = page.attribute("href").and_then(|href| base.join(href).ok()) else { continue };
         feed.navigation.push(NavigationLink { title: child_text(&entry, "title"), href, count: page.attribute((THREAD, "count")).and_then(|count| count.parse().ok()) });
     }
@@ -76,9 +73,14 @@ pub(crate) fn parse(xml: &str, base: &Url) -> Result<Feed, String> {
 /// The URL template from an OpenSearch description: the one returning a feed.
 pub fn opensearch_template(xml: &str) -> Result<String, String> {
     let document = roxmltree::Document::parse(xml).map_err(|error| format!("not an OpenSearch description: {error}"))?;
-    let urls = document.root_element().children().filter(|node| is(node, OPENSEARCH, "Url")).collect::<Vec<_>>();
-    let feed = |url: &&Node| url.attribute("type").is_some_and(|kind| kind.contains("atom+xml") || kind.contains("opds"));
-    urls.iter().find(feed).and_then(|url| url.attribute("template")).map(str::to_owned).ok_or_else(|| "the OpenSearch description has no feed template".into())
+    document
+        .root_element()
+        .children()
+        .filter(|node| is(node, OPENSEARCH, "Url"))
+        .find(|url| url.attribute("type").is_some_and(|kind| kind.contains("atom+xml") || kind.contains("opds")))
+        .and_then(|url| url.attribute("template"))
+        .map(str::to_owned)
+        .ok_or_else(|| "the OpenSearch description has no feed template".into())
 }
 
 fn search(link: &Node, base: &Url) -> Option<Search> {

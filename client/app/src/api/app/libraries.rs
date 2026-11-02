@@ -5,13 +5,10 @@ use sync_common::LibraryId;
 use tokio::sync::watch;
 
 impl AppClient {
-    pub async fn google_cloud_accounts(&self) -> Result<Vec<crate::GoogleAccount>, BackendError> { self.request(AppCommand::GoogleCloudAccounts).await }
-    pub async fn begin_google_cloud_login(&self) -> Result<crate::CloudLoginRequest, BackendError> { self.request(AppCommand::BeginGoogleCloudLogin).await }
-    pub async fn wait_google_cloud_login(&self, attempt_id: uuid::Uuid) -> Result<crate::GoogleAccount, BackendError> { self.request(AppCommand::WaitGoogleCloudLogin { attempt_id }).await }
-    pub async fn disconnect_google_cloud_account(&self, account: crate::ProviderId) -> Result<(), BackendError> { self.request(AppCommand::DisconnectGoogleCloudAccount { account }).await }
-    pub async fn cloud_folders(&self, scope: crate::ProviderScope, folder: Option<crate::ProviderId>, page: Option<String>) -> Result<crate::CloudFolderListing, BackendError> { self.request(AppCommand::CloudFolders { scope, folder, page }).await }
-    pub async fn create_cloud_folder(&self, scope: crate::ProviderScope, parent: crate::ProviderId, name: String) -> Result<crate::CloudFolder, BackendError> { self.request(AppCommand::CreateCloudFolder { scope, parent, name }).await }
-    pub async fn create_cloud_library(&self, name: String, root: crate::CloudLibraryRoot) -> Result<LibraryEntry, BackendError> { self.request(AppCommand::CreateCloudLibrary { name, root }).await }
+    pub async fn copy_library_storage(&self, library_id: LibraryId, bokheim: bool) -> Result<LibraryEntry, BackendError> {
+        self.request(AppCommand::CopyLibraryStorage { library_id, bokheim }).await
+    }
+
     /// Subscribe before reading the initial list. Unread changes coalesce;
     /// await `changed()` and fetch `libraries()` for the current entries.
     pub async fn library_list_changes(&self) -> Result<watch::Receiver<()>, BackendError> {

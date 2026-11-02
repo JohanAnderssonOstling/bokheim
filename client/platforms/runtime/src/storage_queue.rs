@@ -359,6 +359,14 @@ pub async fn run<T: crate::executor::BackendOutput>(priority: Priority, operatio
     }
 }
 
+/// Enqueue an already-admitted host state write immediately. Like disposal,
+/// these writes must remain enqueueable under command backpressure. They share
+/// the background FIFO, including the host's final shutdown barrier.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_persistence(operation: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    native::dispatch_cleanup(operation)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

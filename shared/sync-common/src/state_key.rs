@@ -34,7 +34,7 @@ impl StateKey {
 pub(crate) fn book_kind(kind: &str) -> bool {
     // The relay can still carry opaque entries from older clients. Retaining
     // their key encoding does not make the current replica author those kinds.
-    matches!(kind, "book_add" | "external_book" | "enrichment" | "book_lifecycle" | "placement" | "reading_position" | "chapter_read_status" | "book_facts" | "metadata" | "description" | "pdf_reader_metadata" | "book_toc")
+    matches!(kind, "book_add" | "book_content" | "enrichment" | "book_lifecycle" | "placement" | "reading_position" | "chapter_read_status" | "book_facts" | "metadata" | "description" | "pdf_reader_metadata" | "book_toc")
 }
 impl From<BookId> for StateKey {
     fn from(value: BookId) -> Self {

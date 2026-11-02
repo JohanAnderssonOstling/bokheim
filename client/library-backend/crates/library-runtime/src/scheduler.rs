@@ -1,22 +1,12 @@
 //! Wake scheduling for one library's durable workers.
 
 use std::time::Duration;
-use sync_common::BookId;
 
 pub enum SyncRequest {
-    Wake(Vec<BookId>),
+    Wake,
     WakeAfter(Duration),
     RefreshRemote,
     Stop,
-}
-
-/// What one scheduled cycle should do: whether server state needs a refresh,
-/// plus content hashes woken with payload since the previous cycle. Payload
-/// hashes are latency hints only; the database remains the work queue, so a
-/// targeted pass never replaces the bounded drain.
-pub struct CycleInput {
-    pub remote: bool,
-    pub hashes: Vec<BookId>,
 }
 
 #[derive(Clone)]
@@ -31,66 +21,65 @@ impl SyncScheduler {
         let _ = self.0.try_send(SyncRequest::RefreshRemote);
     }
     pub fn wake(&self) {
-        let _ = self.0.try_send(SyncRequest::Wake(Vec::new()));
+        let _ = self.0.try_send(SyncRequest::Wake);
     }
     pub fn wake_after(&self, delay: Duration) {
         let _ = self.0.try_send(SyncRequest::WakeAfter(delay));
-    }
-    pub fn wake_hashes(&self, hashes: Vec<BookId>) {
-        let _ = self.0.try_send(SyncRequest::Wake(hashes));
     }
     pub fn stop(&self) {
         let _ = self.0.try_send(SyncRequest::Stop);
     }
 }
 
-pub async fn run_timed<C>(mut cycle: C, requests: async_channel::Receiver<SyncRequest>, retry: Duration, debounce: Duration)
+/// The cycle callback receives whether a remote refresh is due.
+pub async fn run_timed<C>(cycle: C, requests: async_channel::Receiver<SyncRequest>, retry: Duration, debounce: Duration)
 where
-    C: AsyncFnMut(CycleInput) -> Result<(), ()>,
+    C: AsyncFnMut(bool) -> Result<(), ()>,
+{
+    run_timed_with_backoff(cycle, requests, retry, retry, debounce).await;
+}
+
+/// Battery-sensitive hosts gradually reduce repeated failed work. An explicit
+/// remote refresh bypasses the delay; success restores the initial retry rate.
+pub async fn run_timed_with_backoff<C>(mut cycle: C, requests: async_channel::Receiver<SyncRequest>, retry: Duration, retry_max: Duration, debounce: Duration)
+where
+    C: AsyncFnMut(bool) -> Result<(), ()>,
 {
     let started = web_time::Instant::now();
     let now = || started.elapsed().as_secs_f64() * 1000.0;
-    let mut timing = BackgroundTiming::new(now(), retry.as_secs_f64() * 1000.0, debounce.as_secs_f64() * 1000.0);
-    let mut pending: Vec<BookId> = Vec::new();
+    let mut timing = BackgroundTiming::with_backoff(now(), retry.as_secs_f64() * 1000.0, retry_max.as_secs_f64() * 1000.0, debounce.as_secs_f64() * 1000.0);
     loop {
         while let Ok(request) = requests.try_recv() {
             if matches!(request, SyncRequest::Stop) {
                 return;
             }
-            apply(&mut timing, now(), request, &mut pending);
+            apply(&mut timing, now(), request);
         }
         let Some(remote) = timing.start(now()) else {
             let deadline = timing.deadline();
             let request = if deadline.is_finite() { crate::executor::timeout(Duration::from_secs_f64(((deadline - now()).max(0.0)) / 1000.0), requests.recv()).await } else { Ok(requests.recv().await) };
             match request {
                 Ok(Ok(SyncRequest::Stop)) | Ok(Err(_)) => return,
-                Ok(Ok(request)) => apply(&mut timing, now(), request, &mut pending),
+                Ok(Ok(request)) => apply(&mut timing, now(), request),
                 Err(_) => {}
             }
             continue;
         };
-        let running = cycle(CycleInput { remote, hashes: std::mem::take(&mut pending) });
+        let running = cycle(remote);
         tokio::pin!(running);
         loop {
             tokio::select! {
                 biased;
                 result = &mut running => { timing.finish(now(), result.is_ok()); break; }
-                request = requests.recv() => match request { Ok(SyncRequest::Stop) | Err(_) => return, Ok(request) => apply(&mut timing, now(), request, &mut pending) },
+                request = requests.recv() => match request { Ok(SyncRequest::Stop) | Err(_) => return, Ok(request) => apply(&mut timing, now(), request) },
             }
         }
     }
 }
 
-fn apply(timing: &mut BackgroundTiming, now: f64, request: SyncRequest, pending: &mut Vec<BookId>) {
+fn apply(timing: &mut BackgroundTiming, now: f64, request: SyncRequest) {
     match request {
-        SyncRequest::Wake(hashes) => {
-            timing.wake(now);
-            for hash in hashes {
-                if !pending.contains(&hash) {
-                    pending.push(hash);
-                }
-            }
-        }
+        SyncRequest::Wake => timing.wake(now),
         SyncRequest::WakeAfter(delay) => timing.wake_after(now, delay.as_secs_f64() * 1000.0),
         SyncRequest::RefreshRemote => timing.refresh(now),
         SyncRequest::Stop => {}
@@ -99,6 +88,8 @@ fn apply(timing: &mut BackgroundTiming, now: f64, request: SyncRequest, pending:
 
 pub struct BackgroundTiming {
     retry: f64,
+    retry_max: f64,
+    next_retry: f64,
     debounce: f64,
     next_remote: f64,
     not_before: f64,
@@ -108,7 +99,10 @@ pub struct BackgroundTiming {
 }
 impl BackgroundTiming {
     pub fn new(now: f64, retry: f64, debounce: f64) -> Self {
-        Self { retry, debounce, next_remote: f64::INFINITY, not_before: now, wake_at: f64::INFINITY, refresh_version: 0, active: None }
+        Self::with_backoff(now, retry, retry, debounce)
+    }
+    fn with_backoff(now: f64, retry: f64, retry_max: f64, debounce: f64) -> Self {
+        Self { retry, retry_max: retry_max.max(retry), next_retry: retry, debounce, next_remote: f64::INFINITY, not_before: now, wake_at: f64::INFINITY, refresh_version: 0, active: None }
     }
     pub fn wake(&mut self, now: f64) {
         self.wake_at = self.wake_at.min(now + self.debounce);
@@ -117,6 +111,7 @@ impl BackgroundTiming {
         self.wake_at = self.wake_at.min(now + delay);
     }
     pub fn refresh(&mut self, now: f64) {
+        self.next_retry = self.retry;
         let first = self.active == Some((true, self.refresh_version));
         self.refresh_version += 1;
         self.next_remote = if first { now } else { self.next_remote.min(now) };
@@ -138,13 +133,15 @@ impl BackgroundTiming {
         let Some((remote, version)) = self.active.take() else {
             return;
         };
-        if !ok {
-            self.wake_at = self.wake_at.min(now + self.retry);
-        }
         let changed = version != self.refresh_version;
-        self.not_before = if ok || changed { now } else { now + self.retry };
+        let delay = self.next_retry;
+        self.next_retry = if ok || changed { self.retry } else { (delay * 2.0).min(self.retry_max) };
+        if !ok {
+            self.wake_at = self.wake_at.min(now + delay);
+        }
+        self.not_before = if ok || changed { now } else { now + delay };
         if remote && !changed {
-            self.next_remote = if ok { f64::INFINITY } else { now + self.retry };
+            self.next_remote = if ok { f64::INFINITY } else { now + delay };
         }
     }
 }
@@ -153,6 +150,45 @@ impl BackgroundTiming {
 mod tests {
     use super::*;
 
+    #[test]
+    fn failed_work_backs_off_to_the_limit_and_success_resets_it() {
+        let mut timing = BackgroundTiming::with_backoff(0.0, 30.0, 900.0, 0.0);
+        timing.refresh(0.0);
+        let mut now = 0.0;
+        for delay in [30.0, 60.0, 120.0, 240.0, 480.0, 900.0, 900.0] {
+            assert_eq!(timing.start(now), Some(true));
+            timing.finish(now, false);
+            assert_eq!(timing.deadline(), now + delay);
+            assert_eq!(timing.start(now + delay - 0.5), None);
+            now += delay;
+        }
+        assert_eq!(timing.start(now), Some(true));
+        timing.finish(now, true);
+        assert!(timing.deadline().is_infinite());
+        timing.wake(now);
+        assert_eq!(timing.start(now), Some(false));
+        timing.finish(now, false);
+        assert_eq!(timing.deadline(), now + 30.0);
+    }
+
+    #[test]
+    fn explicit_remote_refresh_bypasses_backoff_even_during_a_failed_pass() {
+        let mut timing = BackgroundTiming::with_backoff(0.0, 30.0, 900.0, 0.0);
+        timing.refresh(0.0);
+        assert_eq!(timing.start(0.0), Some(true));
+        timing.finish(0.0, false);
+        assert_eq!(timing.start(30.0), Some(true));
+        timing.finish(30.0, false);
+        assert_eq!(timing.deadline(), 90.0);
+        timing.refresh(35.0);
+        assert_eq!(timing.start(35.0), Some(true));
+        timing.refresh(36.0);
+        timing.finish(37.0, false);
+        assert_eq!(timing.start(37.0), Some(true));
+        timing.finish(37.0, false);
+        assert_eq!(timing.deadline(), 67.0);
+    }
+
     #[tokio::test]
     async fn a_buffered_stop_prevents_starting_another_cycle() {
         let (scheduler, requests) = SyncScheduler::new();
@@ -160,6 +196,43 @@ mod tests {
         scheduler.stop();
         drop(scheduler);
         run_timed(async |_| panic!("a stopped worker must not start another cycle"), requests, Duration::from_secs(30), Duration::ZERO).await;
+    }
+
+    #[tokio::test]
+    async fn wakes_and_refreshes_coalesce_without_reentering_a_running_cycle() {
+        let (scheduler, requests) = SyncScheduler::new();
+        let (completed, results) = async_channel::unbounded();
+        let (release, released) = async_channel::bounded(1);
+        scheduler.wake();
+        let running = run_timed(
+            async |remote| {
+                completed.send(remote).await.unwrap();
+                released.recv().await.unwrap();
+                Ok(())
+            },
+            requests,
+            Duration::from_secs(30),
+            Duration::ZERO,
+        );
+        let exercise = async {
+            assert!(!results.recv().await.unwrap());
+            scheduler.wake();
+            scheduler.wake();
+            scheduler.wake_after(Duration::ZERO);
+            scheduler.request_remote_refresh();
+            release.send(()).await.unwrap();
+            assert!(results.recv().await.unwrap());
+            scheduler.wake();
+            release.send(()).await.unwrap();
+            assert!(!results.recv().await.unwrap());
+            scheduler.stop();
+        };
+        crate::executor::timeout(Duration::from_secs(5), async {
+            tokio::join!(running, exercise);
+        })
+        .await
+        .expect("scheduler lost a wake or failed to stop");
+        assert!(results.try_recv().is_err(), "coalesced wakes must not start extra cycles");
     }
 
     #[tokio::test]

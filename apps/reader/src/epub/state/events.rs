@@ -3,12 +3,12 @@
 use crate::invalidation::notify;
 use std::sync::Arc;
 
+use dictionary::can_lookup;
 use gpui::{App, Context, Window};
-use html_view_core::RendererEvent;
-use html_view_core::cfi::source_position_cfi;
+use skrift_column_paginator::RendererEvent;
 
 use crate::epub::marks;
-use crate::epub::{LoadState, ReaderView, Selection};
+use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
 use crate::settings::ReaderSettings;
 use crate::shell::persistence::StoredPosition;
@@ -16,7 +16,16 @@ use crate::shell::persistence::StoredPosition;
 impl ReaderView {
     pub(super) fn handle_renderer_event(&mut self, event: &RendererEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            RendererEvent::VisiblePageChanged => {
+                if self.marks.recurring_annotations().next().is_some() {
+                    self.refresh_recurring_annotations(false, cx);
+                }
+            }
+            RendererEvent::NavigationJump { from } => self.history.begin_jump(from.clone()),
             RendererEvent::ReadingPositionChanged(position) => {
+                if self.book.cfi.source_position_cfi(&position.source).is_some_and(|cfi| self.history.settle(&cfi)) {
+                    cx.notify();
+                }
                 if self.reading_position.as_ref() == Some(position) {
                     return;
                 }
@@ -32,7 +41,7 @@ impl ReaderView {
                     self.sync_toc_position(cx);
                 }
                 self.record_current_reading_position(cx);
-                #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
                 self.tts_navigation_changed(cx);
                 notify(cx, Component::ReaderShell, "reading_position_changed");
             }
@@ -46,7 +55,7 @@ impl ReaderView {
                     notify(cx, Component::ReaderShell, "title_changed");
                 }
             }
-            RendererEvent::TocChanged(_) | RendererEvent::HistoryAvailability { .. } => {}
+            RendererEvent::HistoryAvailability { .. } => {}
             RendererEvent::SearchActiveChanged(active) => {
                 if self.search.query.is_some() != *active {
                     if *active {
@@ -57,11 +66,9 @@ impl ReaderView {
                     notify(cx, Component::ReaderShell, "search_visibility_changed");
                 }
             }
-            RendererEvent::FontSizeChanged(font_size) => {
-                if ReaderSettings::update(cx, |preferences| preferences.font_size = *font_size) {
-                    notify(cx, Component::ReaderShell, "font_size_changed");
-                }
-            }
+            // Font controls persist their requested value before reflow. An
+            // initial snapshot or delayed acknowledgement must not revert it.
+            RendererEvent::FontSizeChanged(_) => {}
             RendererEvent::ColumnWidthChanged(column_width) => {
                 if ReaderSettings::update(cx, |preferences| preferences.column_width = *column_width) {
                     notify(cx, Component::ReaderShell, "column_width_changed");
@@ -72,15 +79,19 @@ impl ReaderView {
                     notify(cx, Component::ReaderShell, "scale_changed");
                 }
             }
-            RendererEvent::SelectionFinished { cfi_range, exact_text, .. } => {
+            RendererEvent::SelectionFinished { cfi_range, .. } => {
                 // A released handle can queue several ranges. Ignore snapshots
                 // that were superseded or dismissed before they reach the shell.
                 if let LoadState::Ready(renderer) = &self.load_state {
-                    if renderer.read(cx).selected_passage().is_none_or(|(current, _)| current != *cfi_range) {
+                    if renderer.read(cx).selection_cfi().as_deref() != Some(cfi_range.as_str()) {
                         return;
                     }
                 }
-                if marks::set_selection(&mut self.selection, Selection { cfi_range: cfi_range.clone(), text: exact_text.clone() }) {
+                if marks::set_selection(&mut self.selection, cfi_range.clone()) {
+                    self.touch_selection.lookup_available = match &self.load_state {
+                        LoadState::Ready(renderer) => renderer.read(cx).selected_passage().is_some_and(|(_, text)| can_lookup(&text)),
+                        LoadState::Loading | LoadState::Error(_) => false,
+                    };
                     self.annotation_popup_anchor = Some(window.mouse_position());
                     notify(cx, Component::ReaderShell, "selection_finished");
                 }
@@ -127,13 +138,13 @@ impl ReaderView {
             }
             RendererEvent::OperationFailed { operation, message } => {
                 log::warn!("renderer failed to {operation}: {message}");
-                if *operation == html_view_core::RendererOperation::UpdateDocument {
+                if *operation == skrift_column_paginator::RendererOperation::UpdateDocument {
                     self.page_turn = None;
                     self.swipe_preview.clear();
                     cx.notify();
                 }
-                #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
-                if *operation == html_view_core::RendererOperation::UpdateDocument {
+                #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
+                if *operation == skrift_column_paginator::RendererOperation::UpdateDocument {
                     self.tts_document_failed(message, cx);
                 }
             }
@@ -145,8 +156,9 @@ impl ReaderView {
     pub(super) fn record_current_reading_position(&self, cx: &App) {
         if let Some(position) = &self.reading_position
             && let LoadState::Ready(view) = &self.load_state
+            && let Some(cfi) = self.book.cfi.source_position_cfi(&position.source)
         {
-            self.reading_positions.record(StoredPosition::epub(source_position_cfi(&position.source), position.fraction).within(self.toc.active_link()), view.read(cx).navigation_revision());
+            self.reading_positions.record(StoredPosition::epub(self.book.store_cfi(cfi), position.fraction).within(self.toc.active_link()), view.read(cx).navigation_revision());
         }
     }
 }

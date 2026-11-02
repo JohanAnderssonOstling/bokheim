@@ -107,8 +107,9 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
     let request_limits = server_http::RequestLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let notification_config = server_http::NotificationConfig::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let upload_limits = server_asset_store::UploadLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let catalog = storage.catalog().cloned();
     let (books, thumbnails) = storage.into_parts();
-    let app = sync_server::app(pool, auth, sync_server::AppConfig { books, thumbnails, client_address_source: server.client_address_source(), transfer_limits, request_limits, upload_limits, notification_config }).await?;
+    let app = sync_server::app(pool, auth, sync_server::AppConfig { books, thumbnails, catalog, client_address_source: server.client_address_source(), transfer_limits, request_limits, upload_limits, notification_config }).await?;
     sync_server::transport::serve(server, app).await?;
     Ok(())
 }

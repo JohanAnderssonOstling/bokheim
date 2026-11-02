@@ -2,6 +2,7 @@
 """Prepare verified, bundled Alba and George FP32 speech assets."""
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -14,18 +15,21 @@ SHA256 = "fcd45962906933eec4431d3688f7d74aaac8713c87c6717f91fd3b23463aa1a1"
 # Identify the prepared contents separately from the unchanged upstream archive.
 ASSET_SHA256 = hashlib.sha256(f"{SHA256}:english-only-v1".encode("ascii")).hexdigest()
 GEORGE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"
-GEORGE_SHA256 = "c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298"
+GEORGE_SHA256 = "60703707bc05ccd48d60e1eb723f38b07d6e474795a0b6a588d7220400e0f7a4"
 GEORGE_ASSET_SHA256 = hashlib.sha256(f"{GEORGE_SHA256}:george-english-fp32-v1".encode("ascii")).hexdigest()
 GEORGE_REQUIRED = ("model.onnx", "voices.bin", "tokens.txt", "lexicon-gb-en.txt",
                    "espeak-ng-data/en_dict", "espeak-ng-data/lang/gmw/en", "LICENSE", "VOICE-LICENSE.txt")
+ALBA_REQUIRED = ("en_GB-alba-medium.onnx", "tokens.txt", "espeak-ng-data/en_dict",
+                 "espeak-ng-data/lang/gmw/en", "VOICE-LICENSE.txt")
+ORT_MODELS = ("alba/en_GB-alba-medium.ort", "george/model.ort")
+ORT_MARKER = ".ort-models.json"
 
 
 def is_cached(directory):
     marker = directory / ".archive-sha256"
     return marker.is_file() and marker.read_text().strip() == SHA256 and all(
         (directory / name).exists()
-        for name in ("en_GB-alba-medium.onnx", "tokens.txt", "espeak-ng-data/en_dict",
-                     "espeak-ng-data/lang/gmw/en", "VOICE-LICENSE.txt")
+        for name in ALBA_REQUIRED
     )
 
 
@@ -117,7 +121,7 @@ def prepare_george(destination=None, offline=False, archive=None):
         shutil.copytree(installed, destination, dirs_exist_ok=True)
         return destination
     cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "bokheim/tts"
-    archive = Path(archive) if archive else cache / "kokoro-multi-lang-v1_0.tar.bz2"
+    archive = Path(archive) if archive else cache / f"kokoro-multi-lang-v1_0-{GEORGE_SHA256}.tar.bz2"
     if not archive.is_file():
         if offline:
             raise RuntimeError(f"George archive is not cached: {archive}")
@@ -166,17 +170,94 @@ def prepare_all(destination, offline=False):
     destination = Path(destination)
     prepare(destination / "alba", offline=offline)
     prepare_george(destination / "george", offline=offline)
+    # A legacy/prebuilt runtime must not accidentally select stale ORT graphs
+    # produced for a different, reduced runtime.
+    for name in ORT_MODELS:
+        (destination / name).unlink(missing_ok=True)
+    (destination / ORT_MARKER).unlink(missing_ok=True)
     return destination
+
+
+def digest(path):
+    with Path(path).open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def ort_manifest(directory):
+    """Validate a complete converted bundle before loading or packaging it."""
+    directory = Path(directory)
+    manifest = json.loads((directory / ORT_MARKER).read_text())
+    if manifest.get("format") != "ORT" or set(manifest.get("models", {})) != set(ORT_MODELS):
+        raise RuntimeError(f"Invalid ORT voice bundle: {directory}")
+    for name, checksum in manifest["models"].items():
+        if digest(directory / name) != checksum:
+            raise RuntimeError(f"ORT voice checksum mismatch: {directory / name}")
+    for voice, required, checksum in (("alba", ALBA_REQUIRED, ASSET_SHA256),
+                                      ("george", GEORGE_REQUIRED, GEORGE_ASSET_SHA256)):
+        root = directory / voice
+        if (root / ".assets-sha256").read_text().strip() != checksum or not all(
+                (root / name).is_file() for name in required if not name.endswith(".onnx")):
+            raise RuntimeError(f"Incomplete ORT voice frontend: {root}")
+    return manifest
+
+
+def prepare_ort(destination, runtime_directory, offline=False):
+    """Pair the minimal runtime with its verified, pre-optimized voice graphs."""
+    destination, runtime_directory = Path(destination), Path(runtime_directory)
+    receipt = json.loads((runtime_directory / "receipt.json").read_text())
+    features = receipt["runtime_features"]
+    if not features.get("minimal_build") or features.get("model_format") != "ORT":
+        raise RuntimeError("ORT assets require the corresponding minimal speech runtime")
+    models = {name: entry["sha256"] for name, entry in receipt["operator_analysis"]["converted_models"].items()}
+    if set(models) != set(ORT_MODELS):
+        raise RuntimeError("The native speech cache does not contain both converted voices")
+    manifest = {"format": "ORT", "runtime_fingerprint": receipt["fingerprint"], "models": models}
+    if (destination / ORT_MARKER).is_file() and ort_manifest(destination) == manifest:
+        return destination
+    for name, checksum in models.items():
+        if digest(runtime_directory / "models" / name) != checksum:
+            raise RuntimeError(f"Native speech cache model checksum mismatch: {name}")
+    prepare_all(destination, offline=offline)
+    for name in models:
+        shutil.copy2(runtime_directory / "models" / name, destination / name)
+        (destination / Path(name).with_suffix(".onnx")).unlink()
+    (destination / ORT_MARKER).write_text(json.dumps(manifest, indent=2) + "\n")
+    ort_manifest(destination)
+    return destination
+
+
+def prepare_from_bundle(destination, bundle, offline=False):
+    """Package the model format belonging to an already-built executable."""
+    destination, bundle = Path(destination), Path(bundle)
+    receipt_path = bundle / "RUNTIME-SOURCE.json"
+    receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
+    if (bundle / ORT_MARKER).is_file() or receipt.get("runtime_features", {}).get("minimal_build"):
+        manifest = ort_manifest(bundle)
+        if receipt and manifest["runtime_fingerprint"] != receipt["fingerprint"]:
+            raise RuntimeError("Speech bundle does not match its runtime receipt")
+        if destination.resolve() != bundle.resolve():
+            shutil.copytree(bundle, destination, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("RUNTIME-LICENSE.txt", "RUNTIME-SOURCE.json", "*.onnx"))
+        for name in ORT_MODELS:
+            (destination / Path(name).with_suffix(".onnx")).unlink(missing_ok=True)
+        ort_manifest(destination)
+        return destination
+    return prepare_all(destination, offline=offline)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dest", type=Path)
     parser.add_argument("--archive", type=Path)
+    parser.add_argument("--from-bundle", type=Path, help="Preserve an existing executable's minimal-runtime voice format")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--voice", choices=("alba", "george", "all"), default="alba")
     args = parser.parse_args()
-    if args.voice == "all":
+    if args.from_bundle is not None:
+        if args.voice != "all" or args.dest is None or args.archive is not None:
+            parser.error("--from-bundle requires --voice all and --dest, without --archive")
+        print(prepare_from_bundle(args.dest, args.from_bundle, args.offline))
+    elif args.voice == "all":
         if args.dest is None or args.archive is not None:
             parser.error("--voice all requires --dest and uses the verified per-voice caches")
         print(prepare_all(args.dest, args.offline))

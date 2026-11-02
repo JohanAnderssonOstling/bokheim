@@ -1,12 +1,12 @@
 use super::{crypto, email_taken, internal, issue_token_pair, issued_session, normalized_email, PostgresAccountService, TOKEN_LEN};
 use crate::core::{AccountEmailKind, AuthError, AuthenticatedUser, IssuedSession};
-use account_contract::{PASSWORD_MAX_BYTES, PASSWORD_MIN_CHARACTERS};
+use account_contract::{EMAIL_RESEND_COOLDOWN_SECONDS, PASSWORD_MAX_BYTES, PASSWORD_MIN_CHARACTERS};
 use chrono::{Duration, Utc};
 use sqlx::{Postgres, Transaction};
 
 const REGISTRATION_TTL_HOURS: i64 = 24;
 const PASSWORD_RESET_TTL_MINUTES: i64 = 60;
-const RESEND_COOLDOWN_SECONDS: i64 = 60;
+const RESEND_COOLDOWN_SECONDS: i64 = EMAIL_RESEND_COOLDOWN_SECONDS as i64;
 
 async fn queue_email(service: &PostgresAccountService, transaction: &mut Transaction<'_, Postgres>, recipient: &str, kind: AccountEmailKind, token: &str) -> Result<(), AuthError> {
     let id = uuid::Uuid::new_v4().to_string();

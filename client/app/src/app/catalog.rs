@@ -9,40 +9,57 @@ use std::sync::Arc;
 use update_client::DiscoveryConfig;
 
 /// Snapshot formats this build reads.
-const FORMATS: [u32; 1] = [library_database::catalog::FORMAT_VERSION];
+const FORMATS: [u32; 4] = library_database::catalog::SUPPORTED_FORMATS;
 
-/// Activates the catalog before libraries open, then looks for a newer
-/// release in the background. `BOKHEIM_CATALOG_FILE` names a local snapshot to
-/// use instead, for development before the catalog is hosted (native only).
+/// Activate cached data and fetch updates after foreground startup. Rebuilding
+/// a stored catalog for a new taxonomy must not delay opening the application.
+/// `BOKHEIM_CATALOG_FILE` selects a local snapshot for native development.
 pub(super) fn start(app_data_dir: &Path, executor: &BackendExecutor, libraries: Arc<LibraryDirectory>) {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(local) = std::env::var_os("BOKHEIM_CATALOG_FILE") {
-        match activate_stored(Path::new(&local)) {
-            Ok(0) => log::warn!("BOKHEIM_CATALOG_FILE is not a catalog snapshot this build reads"),
-            Ok(_) => {}
-            Err(error) => log::warn!("BOKHEIM_CATALOG_FILE could not be activated: {error}"),
-        }
-        return;
-    }
-    let path = app_data_dir.join("catalog.sqlite3");
-    let installed = activate_stored(&path).unwrap_or_else(|error| {
-        log::warn!("Stored catalog is unreadable; fetching it again: {error}");
-        0
-    });
+    let local = std::env::var_os("BOKHEIM_CATALOG_FILE").map(PathBuf::from);
+    #[cfg(target_arch = "wasm32")]
+    let local: Option<PathBuf> = None;
+    let path = local.clone().unwrap_or_else(|| app_data_dir.join("catalog.sqlite3"));
+    let cover_cache = app_data_dir.join("catalog-covers-v1.sqlite3");
     executor.spawn_detached(async move {
+        let cache = async {
+            crate::platform::reserve_database_capacity(1).await?;
+            crate::executor::run_blocking(move || library_backend::configure_catalog_cover_cache(&cover_cache, library_backend::CATALOG_COVER_CACHE_MAX_BYTES)).await.map_err(|error| error.to_string())?
+        }
+        .await;
+        if let Err(error) = cache {
+            log::warn!("Catalog cover disk cache is unavailable: {error}");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::executor::library_maintenance_ready().await;
+        let stored_path = path.clone();
+        let installed = crate::executor::run_blocking(move || activate_stored(&stored_path)).await.map_err(|error| error.to_string()).and_then(|result| result).unwrap_or_else(|error| {
+            log::warn!("Stored catalog is unreadable; fetching it again: {error}");
+            0
+        });
+        if installed != 0 {
+            refresh_views(&libraries);
+        }
+        if local.is_some() {
+            return;
+        }
         match refresh(path, installed).await {
-            Ok(true) => match libraries.all() {
-                Ok(libraries) => {
-                    for library in libraries {
-                        library.refresh_catalog();
-                    }
-                }
-                Err(error) => log::warn!("catalog views could not be refreshed: {error}"),
-            },
+            Ok(true) => refresh_views(&libraries),
             Ok(false) => {}
             Err(error) => log::warn!("Catalog update will retry on next start: {error}"),
         }
     });
+}
+
+fn refresh_views(libraries: &LibraryDirectory) {
+    match libraries.all() {
+        Ok(libraries) => {
+            for library in libraries {
+                library.refresh_catalog();
+            }
+        }
+        Err(error) => log::warn!("catalog views could not be refreshed: {error}"),
+    }
 }
 
 /// Opens the stored snapshot for catalog queries and returns its release,

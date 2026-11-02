@@ -1,6 +1,5 @@
 //! Account-wide asset retention, independent of library metadata lifecycle.
 
-use crate::PostgresDatabase;
 use crate::{assets, PostgresSyncRepository, SyncError};
 use sync_common::{LibraryId, BookId, api::libraries::LibraryCloudStorage};
 
@@ -14,9 +13,8 @@ impl PostgresSyncRepository {
 
     pub async fn set_cloud_storage(&self, user: &str, id: &LibraryId, change_id: uuid::Uuid, enabled: bool) -> Result<LibraryCloudStorage, SyncError> {
         let mut tx = self.pool.begin().await.map_err(internal)?;
-        let current: Option<(bool, bool)> = sqlx::query_as(include_str!("sql/cloud_storage/lock.sql")).bind(id.to_string()).bind(user).fetch_optional(&mut *tx).await.map_err(internal)?;
-        let Some((current, external)) = current else { return Err(SyncError::LibraryOwnershipConflict) };
-        if external && enabled { return Err(SyncError::Forbidden); }
+        let current: Option<bool> = sqlx::query_scalar(include_str!("sql/cloud_storage/lock.sql")).bind(id.to_string()).bind(user).fetch_optional(&mut *tx).await.map_err(internal)?;
+        let Some(current) = current else { return Err(SyncError::LibraryOwnershipConflict) };
         let inserted: Option<uuid::Uuid> = sqlx::query_scalar(include_str!("sql/cloud_storage/record_change.sql")).bind(id.to_string()).bind(change_id).fetch_optional(&mut *tx).await.map_err(internal)?;
         if inserted.is_none() {
             tx.commit().await.map_err(internal)?;
@@ -35,6 +33,7 @@ impl PostgresSyncRepository {
             }
         }
         tx.commit().await.map_err(internal)?;
+        if !enabled { self.cleanup.notify_one(); }
         Ok(LibraryCloudStorage { library_id: *id, enabled })
     }
 }

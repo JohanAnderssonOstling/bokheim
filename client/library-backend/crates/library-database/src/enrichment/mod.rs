@@ -1,6 +1,8 @@
 //! Thumbnail jobs, upload preparation, and the metadata server's answers.
 
+use crate::query_methods::{first_column, query_rows};
 pub(crate) use crate::shared_sql::SharedSql;
+use book_model::BookFormat;
 use std::collections::HashSet;
 // ---- enrichment ----
 // Typed thumbnail-work queue operations.
@@ -14,18 +16,12 @@ pub use facts::EnrichmentCandidate;
 
 impl Database {
     pub fn pending_thumbnail_job_count(&self) -> Result<u64, DatabaseError> {
-        let connection = &self.connection;
-        Ok(connection.thumbnail_pending_job_count(|row| row.get::<_, i64>(0))?.max(0) as u64)
+        Ok(self.connection.thumbnail_pending_job_count(|row| row.get::<_, i64>(0))?.max(0) as u64)
     }
 
-    pub fn thumbnail_book_format(&self, hash: BookId) -> Result<Option<book_model::BookFormat>, DatabaseError> {
-        let connection = &self.connection;
-        let mut format = None;
-        connection.thumbnail_local_format(&hash, |row| {
-            format = Some(row.get::<_, Option<i64>>(0)?);
-            Ok(())
-        })?;
-        format.map(|format| format.and_then(book_model::BookFormat::from_code).ok_or_else(|| DatabaseError::message("book format is missing"))).transpose()
+    pub fn thumbnail_book_format(&self, hash: BookId) -> Result<Option<BookFormat>, DatabaseError> {
+        let format = first_column::<Option<i64>>(|read| self.connection.thumbnail_local_format(&hash, read))?;
+        format.map(|format| format.and_then(BookFormat::from_code).ok_or_else(|| DatabaseError::message("book format is missing"))).transpose()
     }
 
     /// Records a cover made on this device, or that the book has none.
@@ -48,17 +44,11 @@ impl Database {
     /// The next page of books with a live placement after `after`, whose
     /// cover presence on the server can be checked.
     pub fn thumbnail_remote_presence_candidates(&self, after: Option<&BookId>) -> Result<Vec<BookId>, DatabaseError> {
-        let mut hashes = Vec::new();
-        self.connection.thumbnail_remote_presence_candidates(after, |row| {
-            hashes.push(row.get::<_, BookId>(0)?);
-            Ok(())
-        })?;
-        Ok(hashes)
+        Ok(query_rows(|read| self.connection.thumbnail_remote_presence_candidates(after, read), |row| row.get::<_, BookId>(0))?)
     }
 
     pub fn request_missing_thumbnail(&self, hash: &BookId) -> Result<(), DatabaseError> {
-        let connection = &self.connection;
-        connection.thumbnail_request_missing(hash)?;
+        self.connection.thumbnail_request_missing(hash)?;
         Ok(())
     }
 
@@ -72,12 +62,7 @@ impl Database {
 
     /// Current thumbnail work state, if any row exists.
     pub fn thumbnail_work_state(&self, hash: &BookId) -> Result<Option<String>, DatabaseError> {
-        let mut state = None;
-        self.connection.thumbnail_work_state(hash, |row| {
-            state = Some(row.get::<_, String>(0)?);
-            Ok(())
-        })?;
-        Ok(state)
+        Ok(first_column(|read| self.connection.thumbnail_work_state(hash, read))?)
     }
 }
 
@@ -98,41 +83,23 @@ impl UploadPreparationBatch {
 }
 
 impl Database {
-    pub fn upload_preparation_snapshot(&self) -> Result<UploadPreparationBatch, DatabaseError> {
-        let mut members = Vec::new();
-        self.connection.upload_preparation_snapshot(|row| {
-            members.push((row.get::<_, BookId>(0)?, row.get::<_, Option<i64>>(1)?));
-            Ok(())
-        })?;
-        Ok(UploadPreparationBatch { members })
-    }
-
-    pub fn prepared_upload_batch(&self, scope: &HashSet<BookId>) -> Result<UploadPreparationBatch, DatabaseError> {
-        let scope_json = serde_json::to_string(scope).map_err(DatabaseError::operation)?;
+    /// Current live books with no physical work outstanding. Membership and
+    /// upload revisions stay fixed while the caller prepares this batch.
+    pub fn prepared_upload_batch(&self) -> Result<UploadPreparationBatch, DatabaseError> {
         let affected_dirs = serde_json::to_string(&crate::placements::pending_work_directories(&self.connection)?).map_err(DatabaseError::operation)?;
-        let mut members = Vec::new();
-        self.connection.prepared_upload_batch(scope_json.as_str(), &affected_dirs, |row| {
-            members.push((row.get::<_, BookId>(0)?, row.get::<_, Option<i64>>(1)?));
-            Ok(())
-        })?;
+        let members = query_rows(|read| self.connection.prepared_upload_batch(&affected_dirs, read), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, Option<i64>>(1)?)))?;
         Ok(UploadPreparationBatch { members })
     }
 
     pub fn finish_upload_preparation(&self, batch: &UploadPreparationBatch) -> Result<(), DatabaseError> {
-        let members: Vec<(String, Option<i64>)> = batch.members.iter().map(|(hash, id)| (hash.to_string(), *id)).collect();
-        let json = serde_json::to_string(&members).map_err(DatabaseError::operation)?;
+        let json = serde_json::to_string(&batch.members).map_err(DatabaseError::operation)?;
         self.connection.finish_upload_preparation(json.as_str())?;
         Ok(())
     }
 
     pub fn upload_thumbnail_candidates(&self, members: &HashSet<BookId>) -> Result<Vec<BookId>, DatabaseError> {
         let scope_json = serde_json::to_string(members).map_err(DatabaseError::operation)?;
-        let mut hashes = Vec::new();
-        self.connection.upload_thumbnail_candidates(scope_json.as_str(), |row| {
-            hashes.push(row.get::<_, BookId>(0)?);
-            Ok(())
-        })?;
-        Ok(hashes)
+        Ok(query_rows(|read| self.connection.upload_thumbnail_candidates(scope_json.as_str(), read), |row| row.get::<_, BookId>(0))?)
     }
 }
 

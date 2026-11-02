@@ -3,7 +3,11 @@
 use crate::evidence::{self, SectionEvidence};
 use book_content::{Book, TocEntry};
 use book_model::BookRecord;
-use quick_xml::{Reader, events::Event};
+use quick_xml::{
+    escape::{resolve_xml_entity, unescape_with},
+    events::Event,
+    Reader, XmlVersion,
+};
 use std::{
     collections::BTreeMap,
     io::{self, BufReader, Read},
@@ -126,8 +130,8 @@ impl Block<'_> {
 
 fn scan(reader: &mut dyn Read, book: &BookRecord, uri: &str, anchors: &BTreeMap<String, bool>) -> io::Result<Vec<SectionEvidence>> {
     let mut xml = Reader::from_reader(BufReader::new(reader));
-    xml.expand_empty_elements(true);
-    xml.check_end_names(false); // EPUBs in the wild include HTML-style void elements.
+    xml.config_mut().expand_empty_elements = true;
+    xml.config_mut().check_end_names = false; // EPUBs in the wild include HTML-style void elements.
     let mut buf = Vec::new();
     let mut paragraph = String::new();
     let mut hidden = 0usize;
@@ -137,8 +141,39 @@ fn scan(reader: &mut dyn Read, book: &BookRecord, uri: &str, anchors: &BTreeMap<
         block.active = true;
     }
     loop {
-        match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+        let event = match xml.read_event_into(&mut buf) {
+            Ok(event) => event,
+            Err(_) => break, // Only previously completed blocks survive malformed input.
+        };
+        let text = if hidden == 0 {
+            match &event {
+                Event::Text(text) => text.decode().ok().map(|text| text.into_owned()),
+                Event::GeneralRef(reference) => {
+                    let raw = format!("&{};", reference.decode().unwrap_or_default());
+                    unescape_with(&raw, |name| match name {
+                        "copy" => Some("©"),
+                        "nbsp" => Some(" "),
+                        _ => resolve_xml_entity(name),
+                    })
+                    .ok()
+                    .map(|text| text.into_owned())
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            if paragraph.len() + text.len() <= BLOCK_BYTES {
+                paragraph.push_str(&text);
+            } else {
+                block.finish();
+                block.eligible = false;
+                paragraph.clear();
+            }
+        }
+        match event {
+            Event::Start(e) | Event::Empty(e) => {
                 let name = String::from_utf8_lossy(e.local_name().as_ref()).to_lowercase();
                 if matches!(name.as_str(), "head" | "script" | "style") {
                     hidden += 1;
@@ -147,7 +182,8 @@ fn scan(reader: &mut dyn Read, book: &BookRecord, uri: &str, anchors: &BTreeMap<
                     buf.clear();
                     continue;
                 }
-                let attrs: Vec<_> = e.attributes().flatten().filter_map(|a| a.unescape_value().ok().map(|v| (String::from_utf8_lossy(a.key.as_ref()).into_owned(), v.into_owned()))).collect();
+                let attrs: Vec<_> =
+                    e.attributes().flatten().filter_map(|a| a.normalized_value_with(XmlVersion::Implicit1_0, 1, resolve_xml_entity).ok().map(|v| (String::from_utf8_lossy(a.key.as_ref()).into_owned(), v.into_owned()))).collect();
                 let anchor = attrs.iter().find(|(k, _)| k == "id" || k == "name").map(|(_, v)| v);
                 let toc_kind = anchor.and_then(|id| anchors.get(id));
                 let copyright_type = attrs.iter().any(|(k, v)| k == "epub:type" && v.split_whitespace().any(|t| t == "copyright-page"));
@@ -168,7 +204,7 @@ fn scan(reader: &mut dyn Read, book: &BookRecord, uri: &str, anchors: &BTreeMap<
                     paragraph.clear();
                 }
             }
-            Ok(Event::End(e)) => {
+            Event::End(e) => {
                 let name = String::from_utf8_lossy(e.local_name().as_ref()).to_lowercase();
                 if matches!(name.as_str(), "head" | "script" | "style") {
                     hidden = hidden.saturating_sub(1);
@@ -178,26 +214,11 @@ fn scan(reader: &mut dyn Read, book: &BookRecord, uri: &str, anchors: &BTreeMap<
                     paragraph.clear();
                 }
             }
-            Ok(Event::Text(e)) if hidden == 0 => {
-                // XML numeric entities are decoded by quick-xml. EPUB HTML named
-                // copyright/nonbreaking-space entities need an explicit mapping.
-                let raw = String::from_utf8_lossy(e.as_ref()).replace("&copy;", "©").replace("&nbsp;", " ");
-                if let Ok(text) = quick_xml::escape::unescape(&raw) {
-                    if paragraph.len() + text.len() <= BLOCK_BYTES {
-                        paragraph.push_str(&text);
-                    } else {
-                        block.finish();
-                        block.eligible = false;
-                        paragraph.clear();
-                    }
-                }
-            }
-            Ok(Event::Eof) => {
+            Event::Eof => {
                 block.paragraph(&paragraph);
                 block.finish();
                 break;
             }
-            Err(_) => break, // Only previously completed blocks survive malformed input.
             _ => {}
         }
         buf.clear();

@@ -1,10 +1,12 @@
-use crate::{LibraryStorageUsage, StorageUsage};
-use server_asset_store::AssetError;
+use crate::cleanup::{lock_catalog_adoption, lock_publication};
+use crate::{BookStorageUsage, LibraryStorageUsage, StorageUsage};
+use server_asset_store::{AssetError, AssetKind, FsAssetStore, PreparedCatalogBook};
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRejectionReason, BlobManifestResponse, RejectedBlobManifestEntry};
 use sync_common::{BookId, LibraryId};
+use content_address::ContentHash;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BookUploadReservation {
@@ -61,12 +63,20 @@ fn size_i64(size: u64) -> Result<i64, AssetError> {
 async fn require_library_owner(transaction: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId) -> Result<(), AssetError> {
     let library_id = library_id.to_string();
     let authorized = sqlx::query_scalar::<_, bool>(include_str!("sql/assets/library_owned_by_user.sql")).bind(library_id).bind(user_id).fetch_one(&mut **transaction).await.map_err(storage)?;
-    if authorized { Ok(()) } else { Err(AssetError::Forbidden) }
+    if authorized {
+        Ok(())
+    } else {
+        Err(AssetError::Forbidden)
+    }
 }
 
 async fn require_cloud_storage(transaction: &mut Transaction<'_, Postgres>, user: &str, library: &LibraryId) -> Result<(), AssetError> {
     let enabled: Option<bool> = sqlx::query_scalar(include_str!("sql/cloud_storage/require_enabled.sql")).bind(library.to_string()).bind(user).fetch_optional(&mut **transaction).await.map_err(storage)?;
-    if enabled == Some(true) { Ok(()) } else { Err(AssetError::Forbidden) }
+    if enabled == Some(true) {
+        Ok(())
+    } else {
+        Err(AssetError::Forbidden)
+    }
 }
 
 async fn account_snapshot(transaction: &mut Transaction<'_, Postgres>, user_id: &str) -> Result<AccountSnapshot, AssetError> {
@@ -126,22 +136,61 @@ pub(super) async fn library_storage_usage(pool: &PgPool, user_id: &str) -> Resul
         .collect()
 }
 
-async fn insert_blob_object(transaction: &mut Transaction<'_, Postgres>, hash: &BookId, size_bytes: i64) -> Result<(), AssetError> {
+pub(super) async fn book_storage_usage(pool: &PgPool, user_id: &str, limit: usize) -> Result<Vec<BookStorageUsage>, AssetError> {
+    let limit = i64::try_from(limit).map_err(storage)?;
+    let rows = sqlx::query(include_str!("sql/assets/book_storage_usage.sql")).bind(user_id).bind(limit).fetch_all(pool).await.map_err(storage)?;
+    rows.into_iter()
+        .map(|row| {
+            let hash: Vec<u8> = row.try_get("content_hash").map_err(storage)?;
+            let content_hash = BookId::try_from(hash.as_slice()).map_err(storage)?;
+            let used_bytes: i64 = row.try_get("used_bytes").map_err(storage)?;
+            Ok(BookStorageUsage { content_hash, used_bytes: used_bytes.max(0) as u64 })
+        })
+        .collect()
+}
+
+async fn insert_blob_object(transaction: &mut Transaction<'_, Postgres>, hash: &BookId, size_bytes: i64, checksum: ContentHash) -> Result<(), AssetError> {
     let hash_str = hash.as_bytes();
-    let inserted = sqlx::query_file_scalar!("src/sql/assets/insert_blob_object.sql", hash_str, size_bytes).fetch_optional(&mut **transaction).await.map_err(storage)?;
+    let canonical: Option<Vec<u8>> = sqlx::query_scalar("INSERT INTO canonical_blob_object(byte_checksum,size_bytes) VALUES($1,$2) ON CONFLICT(byte_checksum) DO UPDATE SET size_bytes=canonical_blob_object.size_bytes WHERE canonical_blob_object.size_bytes=excluded.size_bytes RETURNING byte_checksum")
+        .bind(checksum.as_bytes().as_slice()).bind(size_bytes).fetch_optional(&mut **transaction).await.map_err(storage)?;
+    if canonical.is_none() { return Err(AssetError::HashMismatch); }
+    let inserted: Option<Vec<u8>> = sqlx::query_scalar(include_str!("sql/assets/insert_blob_object.sql"))
+        .bind(hash_str).bind(size_bytes).bind(checksum.as_bytes().as_slice()).fetch_optional(&mut **transaction).await.map_err(storage)?;
     if inserted.is_some() {
         Ok(())
     } else {
         tracing::warn!(%hash, "stored blob size is inconsistent");
-        Err(AssetError::Storage("stored file size is inconsistent".into()))
+        Err(AssetError::HashMismatch)
     }
 }
 
-/// `verified` contains immutable content hashes present in the asset store
-/// before acquiring this transaction's account writer lock.
-pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &LibraryId, blobs: &[BlobManifestEntry], verified: &HashSet<BookId>) -> Result<BlobManifestResponse, AssetError> {
+async fn link_canonical_revision(transaction: &mut Transaction<'_,Postgres>, store: &FsAssetStore, destination: BookId, checksum: ContentHash, size: u64) -> Result<bool,AssetError> {
+    let canonical = BookId::from(checksum);
+    if canonical != destination && store.link_book_revision(&canonical,&destination,checksum,size).await? { return Ok(true); }
+    let sources: Vec<Vec<u8>> = sqlx::query_scalar("SELECT content_hash FROM blob_object WHERE byte_checksum=$1 AND content_hash<>$2 ORDER BY content_hash").bind(checksum.as_bytes().as_slice()).bind(destination.as_bytes()).fetch_all(&mut **transaction).await.map_err(storage)?;
+    for source in sources {
+        let source = BookId::try_from(source.as_slice()).map_err(storage)?;
+        if store.link_book_revision(&source, &destination, checksum, size).await? { return Ok(true); }
+    }
+    Ok(false)
+}
+
+/// Verify physical presence while protected from collection, before taking
+/// this transaction's account writer lock.
+pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &LibraryId, blobs: &[BlobManifestEntry], store: &FsAssetStore, mut catalog: HashMap<BookId, PreparedCatalogBook>) -> Result<BlobManifestResponse, AssetError> {
     let mut transaction = begin_authorized_transaction(pool, user_id, library_id).await?;
+    if catalog.is_empty() {
+        lock_publication(&mut transaction).await?;
+    } else {
+        lock_catalog_adoption(&mut transaction).await?;
+    }
     require_cloud_storage(&mut transaction, user_id, library_id).await?;
+    let mut verified = HashSet::new();
+    for blob in blobs {
+        if store.size(user_id, AssetKind::Book, &blob.content_hash).await?.is_some() {
+            verified.insert(blob.content_hash);
+        }
+    }
     let mut seen = HashSet::with_capacity(blobs.len());
     if blobs.iter().any(|blob| !seen.insert(blob.content_hash.clone())) {
         return Err(AssetError::InvalidInput("book manifest contains a duplicate content hash".to_string()));
@@ -149,6 +198,7 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
     let mut response = BlobManifestResponse::default();
     let mut hashes = Vec::with_capacity(blobs.len());
     let mut sizes = Vec::with_capacity(blobs.len());
+    let mut checksums = Vec::with_capacity(blobs.len());
     for blob in blobs {
         if blob.size_bytes == 0 {
             response.rejected.push(RejectedBlobManifestEntry { content_hash: blob.content_hash.clone(), reason: BlobManifestRejectionReason::InvalidSize });
@@ -156,14 +206,19 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
         }
         hashes.push(blob.content_hash.as_bytes().to_vec());
         sizes.push(size_i64(blob.size_bytes)?);
+        checksums.push(blob.byte_checksum.or_else(|| blob.content_hash.content_hash()).map(|hash| hash.as_bytes().to_vec()));
     }
     if hashes.is_empty() {
         transaction.commit().await.map_err(storage)?;
         return Ok(response);
     }
 
-    let account = prepare_account(&mut transaction, user_id).await?;
-    let rows = sqlx::query(include_str!("sql/assets/inspect_book_manifest.sql")).bind(&hashes).bind(&sizes).bind(user_id).fetch_all(&mut *transaction).await.map_err(storage)?;
+    let _ = prepare_account(&mut transaction, user_id).await?;
+    sqlx::query("SELECT user_id FROM user_storage_account WHERE user_id=$1 FOR UPDATE").bind(user_id).fetch_one(&mut *transaction).await.map_err(storage)?;
+    let account = account_snapshot(&mut transaction, user_id).await?;
+    let rows = sqlx::query(include_str!("sql/assets/inspect_book_manifest.sql")).bind(&hashes).bind(&sizes).bind(user_id).bind(&checksums).fetch_all(&mut *transaction).await.map_err(storage)?;
+    let mut newly_owned = HashSet::new();
+    let mut previewed = HashMap::new();
 
     let mut available = account.limit.saturating_sub(account.used).saturating_sub(account.reserved).max(0);
     for row in rows {
@@ -173,17 +228,55 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
         let owned: bool = row.try_get("owned").map_err(storage)?;
         let reservation_id: Option<String> = row.try_get("reservation_id").map_err(storage)?;
         let hash = BookId::try_from(raw_hash.as_slice()).map_err(storage)?;
+        let mut public = catalog.remove(&hash);
+        let requested_checksum: Option<Vec<u8>> = row.try_get("requested_checksum").map_err(storage)?;
+        let requested_checksum = requested_checksum.map(|bytes| ContentHash::try_from(bytes.as_slice()).map_err(storage)).transpose()?;
+        let canonical_owned: bool = row.try_get("canonical_owned").map_err(storage)?;
+        let canonical_owned = canonical_owned || requested_checksum.is_some_and(|checksum| newly_owned.contains(&checksum));
+        let canonical_size: Option<i64> = row.try_get("canonical_size").map_err(storage)?;
+        let stored_checksum: Option<Vec<u8>> = row.try_get("stored_checksum").map_err(storage)?;
+        let stored_checksum = stored_checksum.map(|bytes| ContentHash::try_from(bytes.as_slice()).map_err(storage)).transpose()?;
+        if public.as_ref().is_some_and(|book| book.size_bytes() != requested_size as u64) {
+            response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
+            continue;
+        }
         // Size validation must not reveal another account's stored objects.
-        if owned && stored_size.is_some_and(|size| size != requested_size) {
+        if owned && !hash.is_local() && requested_checksum == stored_checksum && stored_size.is_some_and(|size| size != requested_size) {
             response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
             continue;
         }
         if owned {
             if verified.contains(&hash) {
                 response.owned.push(hash);
-            } else {
-                response.upload.push(hash);
+            } else if let Some(checksum) = stored_checksum {
+                let size = stored_size.ok_or(AssetError::HashMismatch)? as u64;
+                if public.is_some() && requested_checksum == Some(checksum) {
+                    public.take().expect("checked public source").publish()?;
+                    let source = BookId::from(checksum);
+                    if source != hash { store.link_book_revision(&source,&hash,checksum,size).await?; }
+                    response.owned.push(hash);
+                } else if link_canonical_revision(&mut transaction,store,hash,checksum,size).await? {
+                    response.owned.push(hash);
+                } else { response.upload.push(hash); }
+            } else { response.upload.push(hash); }
+            continue;
+        }
+        if stored_checksum.is_none() && (canonical_owned || public.is_some()) { store.discard_unbound_book_alias(&hash)?; }
+        if canonical_owned {
+            let checksum = requested_checksum.ok_or(AssetError::HashMismatch)?;
+            if canonical_size.is_some_and(|size| size != requested_size) {
+                response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
+                continue;
             }
+            let linked = if let Some(book) = public.take() {
+                book.publish()?;
+                store.link_book_revision(&BookId::from(checksum),&hash,checksum,requested_size as u64).await?
+            } else { link_canonical_revision(&mut transaction,store,hash,checksum,requested_size as u64).await? };
+            if linked {
+                insert_blob_object(&mut transaction,&hash,requested_size,checksum).await?;
+                sqlx::query(include_str!("sql/assets/insert_charge_idempotent.sql")).bind(user_id).bind(hash.as_bytes()).execute(&mut *transaction).await.map_err(storage)?;
+                response.owned.push(hash);
+            } else { response.upload.push(hash); }
             continue;
         }
         if reservation_id.is_some() {
@@ -193,12 +286,29 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
         // Another account's copy is never claimed by hash: knowing a hash is
         // not possessing the file. The upload proves possession; the store
         // then keeps the single existing copy.
-        if requested_size > available {
+        let preview_size = requested_checksum.and_then(|checksum| previewed.get(&checksum).copied());
+        if preview_size.is_some_and(|size| size != requested_size) {
+            response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
+        } else if preview_size.is_none() && requested_size > available {
             response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::QuotaExceeded });
+        } else if let Some(book) = public {
+            let checksum = requested_checksum.ok_or(AssetError::HashMismatch)?;
+            insert_blob_object(&mut transaction, &hash, requested_size, checksum).await?;
+            let charged = sqlx::query(include_str!("sql/assets/insert_charge_idempotent.sql")).bind(user_id).bind(hash.as_bytes()).execute(&mut *transaction).await.map_err(storage)?.rows_affected() == 1;
+            if charged {
+                sqlx::query("UPDATE user_storage_account SET used_bytes=used_bytes+$2 WHERE user_id=$1").bind(user_id).bind(requested_size).execute(&mut *transaction).await.map_err(storage)?;
+                available -= requested_size;
+            }
+            book.publish()?;
+            let source = BookId::from(checksum);
+            if source != hash { store.link_book_revision(&source,&hash,checksum,requested_size as u64).await?; }
+            newly_owned.insert(checksum);
+            response.owned.push(hash);
         } else {
             // This is an admission preview. The ordinary PUT reservation makes
             // the quota decision durable immediately before bytes are accepted.
-            available -= requested_size;
+            if preview_size.is_none() { available -= requested_size; }
+            if let Some(checksum) = requested_checksum { previewed.insert(checksum, requested_size); }
             response.upload.push(hash);
         }
     }
@@ -210,13 +320,14 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
     Ok(response)
 }
 
-pub(super) async fn reserve_book_upload(pool: &PgPool, user_id: &str, library_id: &LibraryId, hash: &BookId, size_bytes: u64) -> Result<BookUploadAdmission, AssetError> {
+pub(super) async fn reserve_book_upload(pool: &PgPool, user_id: &str, library_id: &LibraryId, hash: &BookId, size_bytes: u64, checksum: ContentHash) -> Result<BookUploadAdmission, AssetError> {
     let size_i64 = size_i64(size_bytes)?;
     let mut transaction = begin_authorized_transaction(pool, user_id, library_id).await?;
     require_cloud_storage(&mut transaction, user_id, library_id).await?;
     let _ = prepare_account(&mut transaction, user_id).await?;
     let hash_str = hash.as_bytes();
-    if sqlx::query_file_scalar!("src/sql/assets/charge_exists.sql", user_id, hash_str).fetch_one(&mut *transaction).await.map_err(storage)?.unwrap_or(false) {
+    let owns_canonical: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_canonical_charge WHERE user_id=$1 AND byte_checksum=$2)").bind(user_id).bind(checksum.as_bytes().as_slice()).fetch_one(&mut *transaction).await.map_err(storage)?;
+    if owns_canonical || sqlx::query_file_scalar!("src/sql/assets/charge_exists.sql", user_id, hash_str).fetch_one(&mut *transaction).await.map_err(storage)?.unwrap_or(false) {
         transaction.commit().await.map_err(storage)?;
         return Ok(BookUploadAdmission::AlreadyOwned);
     }
@@ -285,6 +396,12 @@ pub(super) async fn validate_thumbnail_upload(pool: &PgPool, user_id: &str, libr
     transaction.commit().await.map_err(storage)
 }
 
+pub(super) async fn validate_thumbnail_upload_in_transaction(transaction: &mut Transaction<'_, Postgres>, user: &str, library: &LibraryId, hash: &BookId, size: u64) -> Result<(), AssetError> {
+    require_library_owner(transaction, user, library).await?;
+    require_cloud_storage(transaction, user, library).await?;
+    require_thumbnail_book(transaction, library, hash, size).await
+}
+
 /// Applies reference-count changes atomically with a winning lifecycle write.
 /// Placement mutations are deliberately absent: a book may be present in any
 /// number of directories but owns exactly one content blob reference.
@@ -315,33 +432,37 @@ async fn record_library_claim(tx: &mut Transaction<'_, Postgres>, user: &str, li
 }
 
 /// Charge the verified content hash and record its library claim atomically.
-pub(super) async fn finish_book_upload(pool: &PgPool, user: &str, library: &LibraryId, hash: &BookId, admission: &BookUploadAdmission, actual: u64) -> Result<(), AssetError> {
-    let mut transaction = begin_authorized_transaction(pool, user, library).await?;
-    require_cloud_storage(&mut transaction, user, library).await?;
+pub(super) async fn finish_book_upload(transaction: &mut Transaction<'_, Postgres>, user: &str, library: &LibraryId, hash: &BookId, admission: &BookUploadAdmission, actual: u64, checksum: ContentHash) -> Result<(), AssetError> {
+    require_library_owner(transaction, user, library).await?;
+    require_cloud_storage(transaction, user, library).await?;
     // A library deletion cannot pass between authorization and book.
-    let live = sqlx::query("SELECT id FROM libraries WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL FOR SHARE").bind(library.to_string()).bind(user).fetch_optional(&mut *transaction).await.map_err(storage)?.is_some();
+    let live = sqlx::query("SELECT id FROM libraries WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL FOR SHARE").bind(library.to_string()).bind(user).fetch_optional(&mut **transaction).await.map_err(storage)?.is_some();
     if !live {
         return Err(AssetError::Forbidden);
     }
-    let _ = account_snapshot(&mut transaction, user).await?;
+    let _ = account_snapshot(transaction, user).await?;
     let phase_started = Instant::now();
-    sqlx::query("SELECT user_id FROM user_storage_account WHERE user_id=$1 FOR UPDATE").bind(user).fetch_one(&mut *transaction).await.map_err(storage)?;
+    sqlx::query("SELECT user_id FROM user_storage_account WHERE user_id=$1 FOR UPDATE").bind(user).fetch_one(&mut **transaction).await.map_err(storage)?;
     tracing::debug!(target: "sync_performance", phase = "upload_account_lock", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
+    // Bind the logical ID after byte verification, then charge the actual
+    // canonical bytes once regardless of how many logical books use them.
+    insert_blob_object(transaction, hash, size_i64(actual)?, checksum).await?;
+    let charged = sqlx::query(include_str!("sql/assets/insert_charge_idempotent.sql")).bind(user).bind(hash.as_bytes()).execute(&mut **transaction).await.map_err(storage)?.rows_affected() == 1;
     if let BookUploadAdmission::Reserved(reservation) = admission {
-        if actual != reservation.expected_size_bytes {
-            return Err(AssetError::LengthMismatch { expected: reservation.expected_size_bytes, actual });
+        if actual != reservation.expected_size_bytes { return Err(AssetError::LengthMismatch { expected: reservation.expected_size_bytes, actual }); }
+        let released: Option<i64> = sqlx::query_scalar(include_str!("sql/assets/delete_reservation_by_id_and_user_returning_size.sql")).bind(&reservation.id).bind(user).fetch_optional(&mut **transaction).await.map_err(storage)?;
+        let released = released.ok_or_else(|| AssetError::Storage("book upload reservation expired".into()))?;
+        if released != size_i64(actual)? { return Err(AssetError::LengthMismatch { expected: released.max(0) as u64, actual }); }
+        sqlx::query(include_str!("sql/assets/finish_upload_update_account.sql")).bind(user).bind(released).bind(charged).execute(&mut **transaction).await.map_err(storage)?;
+    } else if charged {
+        // Ownership may have been released while the body was streaming.
+        // Recheck capacity before restoring a charge without a reservation.
+        let account = account_snapshot(transaction, user).await?;
+        if size_i64(actual)? > account.limit.saturating_sub(account.used).saturating_sub(account.reserved) {
+            return Err(account.quota_exceeded(actual));
         }
-        let released: Option<i64> = sqlx::query_scalar(include_str!("sql/assets/delete_reservation_by_id_and_user_returning_size.sql")).bind(&reservation.id).bind(user).fetch_optional(&mut *transaction).await.map_err(storage)?;
-        let Some(released) = released else {
-            return Err(AssetError::Storage("book upload reservation expired".into()));
-        };
-        if released != size_i64(actual)? {
-            return Err(AssetError::LengthMismatch { expected: released.max(0) as u64, actual });
-        }
-        insert_blob_object(&mut transaction, hash, released).await?;
-        let charged = sqlx::query(include_str!("sql/assets/insert_charge_idempotent.sql")).bind(user).bind(hash.as_bytes()).execute(&mut *transaction).await.map_err(storage)?.rows_affected() == 1;
-        sqlx::query(include_str!("sql/assets/finish_upload_update_account.sql")).bind(user).bind(released).bind(charged).execute(&mut *transaction).await.map_err(storage)?;
+        sqlx::query("UPDATE user_storage_account SET used_bytes=used_bytes+$2 WHERE user_id=$1").bind(user).bind(size_i64(actual)?).execute(&mut **transaction).await.map_err(storage)?;
     }
-    record_library_claim(&mut transaction, user, library, hash).await?;
-    transaction.commit().await.map_err(storage)
+    record_library_claim(transaction, user, library, hash).await?;
+    Ok(())
 }

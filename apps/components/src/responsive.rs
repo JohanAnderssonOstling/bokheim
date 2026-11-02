@@ -26,6 +26,23 @@ pub fn has_native_back_button() -> bool {
     cfg!(any(target_os = "android", target_os = "ios", all(feature = "mobile", not(feature = "kobo"))))
 }
 
+/// Mouse thumb buttons navigate native desktop and desktop web surfaces.
+/// Web follows the primary pointer, so narrow desktop windows still work
+/// while mobile browsers retain their own Back handling.
+pub fn mouse_navigation_enabled() -> bool {
+    if cfg!(feature = "mobile") {
+        return false;
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        !crate::touch_ui()
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        cfg!(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+    }
+}
+
 /// How far up from the window's bottom edge the phone's own gestures start:
 /// going home, the app switcher, and bringing back system bars a reader has
 /// hidden. In pixels, because the gesture area is the device's, not the UI

@@ -8,17 +8,15 @@
 
 use gpui::prelude::*;
 
-use std::rc::Rc;
-
-use gpui::{AnyElement, Context, Edges, Entity, FocusHandle, Pixels, Point, ScrollHandle, SharedString, Window, px};
-use gpui_component::input::{Input, InputState};
+use gpui::{AnyElement, App, Context, Edges, Entity, Pixels, Point, ScrollHandle, Window, px};
+use gpui_component::Disableable;
+use gpui_component::input::{Enter as InputEnter, Input, InputState};
 use ui_components as components;
 
-use book_model::AnnotationStyle;
 use library_backend::Annotation;
 
-const WIDTH: f32 = 360.0;
-const MAX_HEIGHT: f32 = 420.0;
+const WIDTH: f32 = components::ANNOTATION_EDITOR_WIDTH;
+const MAX_HEIGHT: f32 = components::ANNOTATION_EDITOR_MAX_HEIGHT;
 const MIN_HEIGHT: f32 = 160.0;
 
 /// Distance kept between the panel and the edges of the document area.
@@ -27,10 +25,11 @@ const INSET: f32 = 12.0;
 /// Distance kept between the panel and the point it describes.
 const GAP: f32 = 10.0;
 
-pub(crate) trait AnnotationEditorTarget: Sized + 'static {
-    fn save_annotation_changes(&mut self, style: Option<AnnotationStyle>, color: Option<u32>, cx: &mut Context<Self>);
-    fn dismiss_annotation_editor(&mut self, window: &mut Window, cx: &mut Context<Self>);
-    fn delete_edited_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>);
+pub(crate) use components::AnnotationEditorTarget;
+pub(crate) use components::{EditorBook, RecurringEditorContext};
+
+pub(crate) trait BookmarkEditorTarget: AnnotationEditorTarget {
+    fn save_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>);
 }
 
 /// Creates the note input used by every annotation editor.
@@ -39,7 +38,7 @@ pub(crate) trait AnnotationEditorTarget: Sized + 'static {
 /// written in it. Its ceiling is high enough never to be the binding one — the
 /// panel reaches the room its anchor allows first, and scrolls there.
 pub(crate) fn note_input(window: &mut Window, cx: &mut Context<InputState>) -> InputState {
-    InputState::new(window, cx).placeholder("Add a note").auto_grow(components::READER_NOTE_MIN_ROWS, components::READER_NOTE_MAX_ROWS)
+    components::annotation_note_input(window, cx)
 }
 
 /// Where to place the panel, in pixels relative to the document area.
@@ -137,115 +136,17 @@ pub(crate) fn geometry(passage: Option<Passage>, viewport_width: f32, viewport_h
     Geometry { left, edge_offset: if above { document_height - top + GAP } else { bottom + GAP }, max_height: (if above { room_above } else { room_below }).min(MAX_HEIGHT), above }
 }
 
-/// One style choice in the editor's action rows.
-struct StyleChoice {
-    id: SharedString,
-    label: SharedString,
-    style: AnnotationStyle,
-    /// Whether this is the state the annotation is already in. A style row that
-    /// cannot say which style is on is a row of four questions.
-    selected: bool,
-}
-
-/// One highlight colour. The swatch is the colour, so the name is only what the
-/// tooltip says and what a screen reader hears.
-struct ColorChoice {
-    id: SharedString,
-    color: u32,
-    name: &'static str,
-    selected: bool,
-}
-
-/// Everything the editor can do, grouped the way it is drawn.
-///
-/// Style and colour choices, plus deletion. A note is committed when the
-/// panel closes; clicking the book dismisses it.
-struct EditorChoices {
-    styles: Vec<StyleChoice>,
-    colors: Vec<ColorChoice>,
-    delete_id: Option<SharedString>,
-}
-
-/// The common choices used by both readers. Keeping them here prevents
-/// their labels, colours, or styles from drifting apart.
-///
-/// The colours come from [`ui_components::READER_ANNOTATION_COLORS`], which is
-/// also what the swatch and the renderers read, so a colour is named in exactly
-/// one place.
-fn standard_choices(id_prefix: &'static str, current: &Annotation) -> EditorChoices {
-    let id = |suffix: &str| format!("{id_prefix}-{suffix}");
-    let styles = [(AnnotationStyle::Highlight, "Highlight", "highlight"), (AnnotationStyle::Underline, "Underline", "underline"), (AnnotationStyle::Squiggly, "Squiggly", "squiggly"), (AnnotationStyle::Strikethrough, "Strike", "strike")]
-        .into_iter()
-        .map(|(style, label, suffix)| {
-            let selected = current.style == style;
-            StyleChoice { id: id(suffix).into(), label: label.into(), style, selected }
-        })
-        .collect();
-    // E-ink paints every annotation in one colour; see `reader_annotation_paint_color`.
-    let palette: &[(&str, u32)] = if cfg!(feature = "kobo") { &[] } else { &components::READER_ANNOTATION_COLORS };
-    let colors = palette.iter().map(|&(name, color)| ColorChoice { id: id(&name.to_lowercase()).into(), color, name, selected: current.color == color }).collect();
-    EditorChoices { styles, colors, delete_id: (!current.is_external_pdf_annotation()).then(|| id("delete").into()) }
-}
-
 /// Builds the editor panel, absolutely placed by `geometry`.
 ///
 /// Two rows, quietest last: how the passage is marked, and in which colour.
 /// A click outside saves the note before dismissing the panel.
 fn editor<C: AnnotationEditorTarget>(
-    geometry: Geometry, note: &Entity<InputState>, choices: EditorChoices, target: &Entity<C>, scroll: &ScrollHandle, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>,
+    id_prefix: &'static str, annotation: &Annotation, geometry: Geometry, note: &Entity<InputState>, target: &Entity<C>, scroll: &ScrollHandle, extra: Option<AnyElement>, theme: components::BrowserTheme, window: &mut Window,
+    cx: &mut Context<C>,
 ) -> AnyElement {
     let dismiss_target = target.clone();
-    let mut styles = components::action_row().w_full().min_w_0().flex_none().flex_nowrap().debug_selector(|| "reader-annotation-style-row".into());
-    for choice in choices.styles {
-        let target = target.clone();
-        styles = styles.child(components::reader_annotation_action_button(choice.id, choice.label, choice.selected, theme).flex_grow(1.0).flex_shrink(1.0).min_w_0().on_click(move |_, _, cx| {
-            target.update(cx, |this, cx| this.save_annotation_changes(Some(choice.style.clone()), None, cx));
-        }));
-    }
-    let selected_color = choices.colors.iter().position(|choice| choice.selected).unwrap_or(0);
-    let palette = Rc::new(choices.colors.iter().map(|choice| choice.color).collect::<Vec<_>>());
-    let focus_handles: Rc<Vec<FocusHandle>> =
-        Rc::new(choices.colors.iter().enumerate().map(|(index, choice)| window.use_keyed_state(choice.id.clone(), cx, |_, cx| cx.focus_handle()).read(cx).clone().tab_stop(index == selected_color)).collect());
-    // With no swatches on e-ink, the row holds only Delete, kept at its end.
-    let mut colors = components::reader_annotation_color_group().flex_none().when(cfg!(feature = "kobo"), |row| row.justify_end()).debug_selector(|| "reader-annotation-color-row".into());
-    for (index, choice) in choices.colors.into_iter().enumerate() {
-        let target = target.clone();
-        let keyboard_target = target.clone();
-        let palette = palette.clone();
-        let handles = focus_handles.clone();
-        colors = colors.child(
-            components::reader_annotation_color_swatch(choice.id, choice.color, choice.name, choice.selected, theme)
-                .track_focus(&focus_handles[index])
-                .on_click(move |_, _, cx| {
-                    target.update(cx, |this, cx| this.save_annotation_changes(None, Some(choice.color), cx));
-                })
-                .on_key_down(move |event, window, cx| {
-                    if event.keystroke.modifiers != gpui::Modifiers::default() {
-                        return;
-                    }
-                    let next = match event.keystroke.key.as_str() {
-                        "left" | "up" => (index + palette.len() - 1) % palette.len(),
-                        "right" | "down" => (index + 1) % palette.len(),
-                        "home" => 0,
-                        "end" => palette.len() - 1,
-                        "enter" | "space" => index,
-                        _ => return,
-                    };
-                    keyboard_target.update(cx, |this, cx| this.save_annotation_changes(None, Some(palette[next]), cx));
-                    handles[next].focus(window, cx);
-                    cx.stop_propagation();
-                }),
-        );
-    }
-    let colors = colors.when_some(choices.delete_id, |colors, id| {
-        let target = target.clone();
-        colors.child(components::delete_icon_button(id, "Delete annotation", theme).debug_selector(|| "reader-annotation-editor-delete".into()).on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            target.update(cx, |this, cx| this.delete_edited_annotation(window, cx));
-        }))
-    });
-    let controls = components::column(components::SPACE_SM).w_full().flex_none().child(styles).child(colors);
-    components::reader_annotation_editor(Input::new(note).appearance(false).w_full(), controls, scroll, theme)
+    let controls = components::annotation_editor_controls(id_prefix, annotation, target, theme, window, cx);
+    components::annotation_editor_panel(extra, Input::new(note).appearance(false).w_full(), controls, scroll, theme)
         .debug_selector(|| "reader-annotation-popup".to_owned())
         .absolute()
         .left(px(geometry.left))
@@ -277,13 +178,21 @@ pub(crate) fn standard_editor<C: AnnotationEditorTarget>(
     id_prefix: &'static str, target: &Entity<C>, annotation: &Annotation, geometry: Geometry, note: &Entity<InputState>, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>,
 ) -> AnyElement {
     let scroll = window.use_keyed_state(id_prefix, cx, |_, _| ScrollHandle::default()).read(cx).clone();
-    editor(geometry, note, standard_choices(id_prefix, annotation), target, &scroll, theme, window, cx)
+    editor(id_prefix, annotation, geometry, note, target, &scroll, None, theme, window, cx)
+}
+
+pub(crate) fn recurring_editor<C: AnnotationEditorTarget>(
+    id_prefix: &'static str, target: &Entity<C>, annotation: &Annotation, context: RecurringEditorContext, geometry: Geometry, note: &Entity<InputState>, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>,
+) -> AnyElement {
+    let extra = components::recurring_annotation_editor_controls(annotation, context, target, theme);
+    let scroll = window.use_keyed_state(id_prefix, cx, |_, _| ScrollHandle::default()).read(cx).clone();
+    editor(id_prefix, annotation, geometry, note, target, &scroll, Some(extra), theme, window, cx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use book_model::AnnotationAnchor;
+    use book_model::{AnnotationAnchor, AnnotationStyle};
     use content_address::BookId;
     use gpui::{Render, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, div, point};
 
@@ -335,6 +244,18 @@ mod tests {
         document_clicks: usize,
     }
 
+    impl BookmarkEditorTarget for EditorTest {
+        fn save_bookmark(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+            let name = self.note.read(cx).value();
+            if name.trim().is_empty() {
+                return;
+            }
+            self.annotation.note = name.trim().to_owned();
+            self.open = false;
+            cx.notify();
+        }
+    }
+
     impl AnnotationEditorTarget for EditorTest {
         fn save_annotation_changes(&mut self, style: Option<AnnotationStyle>, color: Option<u32>, cx: &mut Context<Self>) {
             self.annotation.note = self.note.read(cx).value().to_string();
@@ -370,7 +291,11 @@ mod tests {
             if self.open {
                 self.scroll = Some(window.use_keyed_state("test-editor", cx, |_, _| ScrollHandle::default()).read(cx).clone());
                 let geometry = Geometry { left: 120.0, edge_offset: 100.0, max_height: 250.0, above: self.above };
-                surface = surface.child(standard_editor("test-editor", &cx.entity(), &self.annotation, geometry, &self.note, components::browser_theme(cx), window, cx));
+                surface = surface.child(if self.annotation.is_bookmark() {
+                    bookmark_editor(&cx.entity(), geometry, &self.note, components::browser_theme(cx), cx)
+                } else {
+                    standard_editor("test-editor", &cx.entity(), &self.annotation, geometry, &self.note, components::browser_theme(cx), window, cx)
+                });
             }
             surface
         }
@@ -378,27 +303,36 @@ mod tests {
 
     fn setup(cx: &mut TestAppContext, above: bool) -> (Entity<EditorTest>, &mut VisualTestContext) {
         cx.update(gpui_component::init);
-        cx.add_window_view(|window, cx| EditorTest {
-            note: cx.new(|cx| note_input(window, cx)),
-            annotation: Annotation {
-                id: "test-highlight".to_owned(),
-                content_hash: BookId::from_bytes([0; 32]),
-                anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2/1:0)".to_owned()),
-                exact_text: "Highlighted text".to_owned(),
-                style: AnnotationStyle::Highlight,
-                color: components::READER_ANNOTATION_DEFAULT_COLOR,
-                note: String::new(),
-                created_at: 0,
-                toc_ordinal: None,
-                progress: None,
-                modified_at: 0,
-                deleted: false,
-            },
-            open: false,
-            above,
-            scroll: None,
-            document_clicks: 0,
-        })
+        let (root, visual) = cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| {
+                let note = cx.new(|cx| note_input(window, cx));
+                crate::shell::bookmarks::watch_name_validity(&note, cx, |this: &EditorTest| this.annotation.is_bookmark());
+                EditorTest {
+                    note,
+                    annotation: Annotation {
+                        id: "test-highlight".to_owned(),
+                        content_hash: BookId::from_bytes([0; 32]),
+                        anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2/1:0)".to_owned()),
+                        exact_text: "Highlighted text".to_owned(),
+                        style: AnnotationStyle::Highlight,
+                        color: components::READER_ANNOTATION_DEFAULT_COLOR,
+                        note: String::new(),
+                        created_at: 0,
+                        toc_ordinal: None,
+                        progress: None,
+                        modified_at: 0,
+                        deleted: false,
+                    },
+                    open: false,
+                    above,
+                    scroll: None,
+                    document_clicks: 0,
+                }
+            });
+            gpui_component::Root::new(editor, window, cx)
+        });
+        let editor = visual.update(|_, cx| root.read(cx).view().clone().downcast::<EditorTest>().ok().unwrap());
+        (editor, visual)
     }
 
     fn draw(cx: &mut VisualTestContext) {
@@ -453,6 +387,98 @@ mod tests {
         cx.simulate_click(point(px(600.0), px(400.0)), Default::default());
         draw(cx);
         view.read_with(cx, |view, _| assert_eq!(view.document_clicks, clicks_before_dismissal + 1, "subsequent book taps remain available"));
+    }
+
+    #[gpui::test]
+    fn bookmark_popup_saves_when_save_is_pressed(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx, false);
+        view.update_in(cx, |view, window, cx| {
+            view.annotation.id = "bookmark:test".into();
+            view.annotation.exact_text.clear();
+            view.open = true;
+            view.note.update(cx, |input, cx| {
+                input.set_placeholder("Name bookmark", window, cx);
+                input.focus(window, cx);
+            });
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("reader-bookmark-popup").is_some());
+        assert!(cx.debug_bounds("reader-annotation-style-row").is_none());
+        assert!(cx.debug_bounds("reader-annotation-color-row").is_none());
+        assert!(cx.debug_bounds("reader-annotation-editor-delete").is_none());
+        cx.simulate_input("My bookmark");
+        draw(cx);
+        view.read_with(cx, |view, _| {
+            assert!(view.open);
+            assert!(view.annotation.note.is_empty(), "typing does not save bookmarks");
+        });
+        let save = cx.debug_bounds("reader-bookmark-save").unwrap();
+        cx.simulate_click(save.center(), Default::default());
+        draw(cx);
+        view.read_with(cx, |view, _| {
+            assert!(!view.open);
+            assert_eq!(view.annotation.note, "My bookmark");
+        });
+    }
+
+    #[gpui::test]
+    fn enter_saves_bookmark_without_inserting_a_newline(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx, false);
+        view.update_in(cx, |view, window, cx| {
+            view.annotation.id = "bookmark:test".into();
+            view.open = true;
+            view.note.update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
+        });
+        draw(cx);
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |view, cx| {
+            assert!(view.open, "Enter cannot save an empty name");
+            assert!(view.note.read(cx).value().is_empty());
+        });
+        cx.simulate_input("Saved with Enter");
+        // Enter submits the original text regardless of the caret's position.
+        cx.simulate_keystrokes("home enter");
+        draw(cx);
+        view.read_with(cx, |view, cx| {
+            assert!(!view.open);
+            assert_eq!(view.annotation.note, "Saved with Enter");
+            assert_eq!(view.note.read(cx).value(), "Saved with Enter");
+        });
+    }
+
+    #[gpui::test]
+    fn dismissing_bookmark_editor_discards_unsaved_names(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx, false);
+        for (saved, escape) in [("", false), ("Existing bookmark", false), ("Existing bookmark", true)] {
+            view.update_in(cx, |view, window, cx| {
+                view.annotation.id = "bookmark:test".into();
+                view.annotation.note = saved.to_owned();
+                view.open = true;
+                view.note.update(cx, |input, cx| {
+                    input.set_placeholder("Name bookmark", window, cx);
+                    input.set_value("", window, cx);
+                    input.focus(window, cx);
+                });
+                cx.notify();
+            });
+            draw(cx);
+            let save = cx.debug_bounds("reader-bookmark-save").unwrap();
+            cx.simulate_click(save.center(), Default::default());
+            view.read_with(cx, |view, _| assert!(view.open, "blank names cannot be saved"));
+            cx.simulate_input("Unsaved name");
+            if escape {
+                cx.simulate_keystrokes("escape");
+            } else {
+                cx.simulate_click(point(px(600.0), px(400.0)), Default::default());
+            }
+            draw(cx);
+            view.read_with(cx, |view, _| {
+                assert!(!view.open);
+                assert_eq!(view.annotation.note, saved);
+            });
+        }
     }
 
     #[gpui::test]
@@ -558,4 +584,54 @@ mod tests {
             assert!(!view.open);
         });
     }
+}
+
+/// Save or Enter commits the bookmark name. Dismissal discards its edits.
+pub(crate) fn bookmark_editor<C: BookmarkEditorTarget>(target: &Entity<C>, geometry: Geometry, name: &Entity<InputState>, theme: components::BrowserTheme, cx: &App) -> AnyElement {
+    let dismiss = target.clone();
+    let keyboard = target.clone();
+    let enter = target.clone();
+    let save = target.clone();
+    let save_button = components::outlined_text_button("reader-bookmark-save", "Save").primary().disabled(name.read(cx).value().trim().is_empty()).debug_selector(|| "reader-bookmark-save".into()).on_click(move |_, window, cx| {
+        cx.stop_propagation();
+        save.update(cx, |this, cx| this.save_bookmark(window, cx));
+    });
+    components::modal_surface(theme)
+        .id("reader-bookmark-editor")
+        .debug_selector(|| "reader-bookmark-popup".into())
+        .absolute()
+        .w(px(WIDTH))
+        .max_w_full()
+        .max_h(px(geometry.max_height))
+        .left(px(geometry.left))
+        .when(geometry.above, |panel| panel.bottom(px(geometry.edge_offset)))
+        .when(!geometry.above, |panel| panel.top(px(geometry.edge_offset)))
+        .occlude()
+        .p(px(components::SPACE_MD))
+        .rounded(px(components::RADIUS_MD))
+        .border_1()
+        .border_color(theme.rule)
+        .bg(theme.page_bg)
+        .shadow(components::overlay_shadow(theme))
+        .capture_action(move |action: &InputEnter, window, cx| {
+            if action.shift || action.secondary {
+                return;
+            }
+            // Submit before the shared note input can insert a newline.
+            enter.update(cx, |this, cx| this.save_bookmark(window, cx));
+            cx.stop_propagation();
+        })
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down_out(move |_, window, cx| {
+            dismiss.update(cx, |this, cx| this.dismiss_annotation_editor(window, cx));
+            cx.stop_propagation();
+        })
+        .on_key_down(move |event, window, cx| {
+            if event.keystroke.key == "escape" {
+                keyboard.update(cx, |this, cx| this.dismiss_annotation_editor(window, cx));
+                cx.stop_propagation();
+            }
+        })
+        .child(components::column(components::SPACE_SM).w_full().child(Input::new(name).appearance(false).w_full()).child(components::action_row().justify_end().child(save_button)))
+        .into_any_element()
 }

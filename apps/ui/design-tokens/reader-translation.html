@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bokheim · Selection translation</title>
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Bold.ttf');font-weight:700}
+@font-face{font-family:Jost;src:url('../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf')}
+:root{color-scheme:light;--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--border:#8c7f64;--rule:#c5bdac;--hover:#46685314;--selection:#d7dfce;--shadow:#0002}
+:root[data-dark]{color-scheme:dark;--paper:#252420;--ink:#e6e0d5;--muted:#b3ab9d;--border:#847a66;--rule:#514c41;--hover:#ffffff0b;--selection:#455443;--shadow:#0005}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--paper);color:var(--ink);font:18px/1.5 Garamond,Georgia,serif}
+button,select{font:inherit;color:inherit;background:transparent;border:1px solid var(--border);border-radius:0;cursor:pointer}
+button{padding:.25em .65em}button:hover{background:var(--hover)}button:focus-visible,select:focus-visible{outline:1px solid var(--border);outline-offset:3px}
+.preview{position:relative;z-index:5;padding:9px 20px;border-bottom:1px solid var(--rule);font:12px/1.5 Jost,sans-serif;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;background:var(--paper)}
+.preview nav{display:flex;gap:6px;flex-wrap:wrap}.preview button{font:inherit;padding:4px 9px}.preview button[aria-pressed=true]{text-decoration:underline}
+header{border-bottom:1px solid var(--rule);padding:14px 24px;display:flex;justify-content:space-between;align-items:center;gap:20px}.brand{font-size:25px}header>span:last-child{color:var(--muted);font-size:16px}
+.book{max-width:720px;margin:46px auto;padding:0 32px 100px;font-size:24px;line-height:1.65}.chapter{text-align:center;font-size:15px;letter-spacing:.12em;font-variant-caps:all-small-caps;color:var(--muted)}h1{font-size:40px;line-height:1.2;text-align:center;font-weight:400;margin:18px 0 32px}.book p{margin:0 0 22px}
+mark{background:var(--selection);color:inherit;cursor:context-menu;padding:.08em 0;box-decoration-break:clone;-webkit-box-decoration-break:clone}.book p:last-child{margin-top:32px}.book::selection,.book *::selection{background:var(--selection)}
+.scrim{position:fixed;inset:0;z-index:1}
+.popup{position:fixed;z-index:2;width:min(26.25em,calc(100vw - 24px));padding:1em;border:1px solid var(--rule);border-radius:0;background:var(--paper);box-shadow:0 8px 24px var(--shadow);font-size:16px;line-height:1.4;display:flex;flex-direction:column;gap:1em;max-height:calc(100dvh - 24px);overflow:auto}
+.heading,.target{display:flex;align-items:center;gap:.5em}.target{flex:1;min-width:0}.icon{border:0;width:2em;height:2em;padding:.35em;display:grid;place-items:center;flex:none}.icon svg,.icon img{width:1.25em;height:1.25em}.icon svg{fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}:root[data-dark] .icon img{filter:invert(.9)}
+.target label{color:var(--muted);white-space:nowrap}.target select{min-width:0;flex:1;padding:.35em .55em;background:var(--paper)}
+.translated{font-size:19px;line-height:1.5;white-space:pre-wrap;margin:0;user-select:text}.translated[aria-busy=true]{color:var(--muted)}
+#copy-status{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+.source-info{position:fixed;z-index:4;margin:0;width:min(16em,calc(100vw - 24px));padding:1em;border:1px solid var(--rule);border-radius:0;background:var(--paper);color:var(--ink);box-shadow:0 8px 24px var(--shadow);font:16px/1.4 Garamond,Georgia,serif}.source-info h2{font-size:20px;font-weight:400;margin:0 0 .5em}.source-info p{margin:0}.source-info::backdrop{background:transparent}
+.menu{width:min(15em,calc(100vw - 24px));padding:.25em;gap:0}.menu button{width:100%;min-height:2.75em;border:0;text-align:left}.menu .translate-action{display:flex;align-items:center;gap:.65em}.menu svg{width:1.1em;height:1.1em;fill:none;stroke:currentColor;stroke-width:1.4}
+@media(max-width:540px){.book{margin-top:30px;font-size:21px;padding:0 20px 60px}h1{font-size:32px}header{padding:12px 20px}.popup{max-height:calc(100dvh - 32px)}header>span:last-child{max-width:55%;text-align:right}}
+</style>
+<div class="preview">
+  <span>Reader translation · UI preview · Sample translations</span>
+  <nav aria-label="Preview controls">
+    <button id="show-menu" aria-pressed="false">Selection menu</button>
+    <button id="show-translation" aria-pressed="true">Translation</button>
+    <button id="show-too-long" aria-pressed="false">Long selection</button>
+    <button id="theme">Dark appearance</button>
+  </nav>
+</div>
+<header><span class="brand">Bokheim</span><span>A quiet afternoon · Chapter three</span></header>
+<main class="book" id="book" tabindex="-1">
+  <div class="chapter">Chapter three</div>
+  <h1>The shape of a<br>quiet afternoon</h1>
+  <p>There was a certain hour when the light settled on the windowsill and the town seemed to pause. Beyond the garden, the path continued between the trees, turning slowly out of sight.</p>
+  <p>She had brought a book, although she had not yet opened it. <mark id="passage">The river was close enough to hear, a steady sound beneath the movement of the leaves.</mark></p>
+  <p>When she finally turned the first page, the afternoon had become a place of its own. The words and the garden belonged to the same quiet silence.</p>
+  <p>For a while she forgot the time. There was only the page in front of her, the sound of water, and the slow passage of light across the garden.</p>
+</main>
+<div id="scrim" class="scrim"></div>
+<section id="selection-menu" class="popup menu" role="dialog" aria-label="Selected text actions" hidden>
+  <button id="lookup-action">Lookup</button>
+  <button id="translate-action" class="translate-action"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h11M8 3v2M5 8c1 4 4 7 8 9M12 5c0 5-3 10-8 13M13 21l4-11 4 11M14.5 17h5"/></svg>Translate</button>
+  <button id="annotation-action">Annotation</button>
+  <button id="copy-selection">Copy</button>
+  <button id="copy-link">Copy link</button>
+</section>
+<section id="translation" class="popup" role="dialog" aria-label="Translate selected text" tabindex="-1">
+  <div class="heading">
+    <div class="target"><label for="target">Translate to</label><select id="target" aria-label="Translation language"><option value="sv">Swedish</option><option value="en">English</option><option value="de">German</option><option value="fr">French</option><option value="es">Spanish</option><option value="fi">Finnish</option></select></div>
+    <button class="icon" id="copy-translation" aria-label="Copy translation" title="Copy translation"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="1"/><path d="M16 8V4H4v12h4"/></svg></button>
+    <span id="copy-status" role="status"></span>
+    <button class="icon" id="source-info-button" popovertarget="source-info" aria-label="Translation source" title="Translation source"><img src="../../../vendor/gpui-component/crates/assets/assets/icons/info.svg" alt=""></button>
+    <button class="icon" id="close" aria-label="Close translation" title="Close translation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+  </div>
+  <p class="translated" id="translated" aria-live="polite"></p>
+</section>
+<aside id="source-info" class="source-info" popover="auto" aria-labelledby="source-info-title"><h2 id="source-info-title">MyMemory</h2><p>Selected text and the language pair are sent directly to MyMemory. It receives your IP address and says submitted segments are stored long-term.</p></aside>
+<script>
+const $=id=>document.getElementById(id);
+const sample=$('passage').textContent;
+let original=sample;
+const translations={
+  sv:'Floden var tillräckligt nära för att höras, ett stadigt ljud under lövens rörelser.',
+  en:original,
+  de:'Der Fluss war nah genug, um ihn zu hören, ein gleichmäßiges Rauschen unter dem Rascheln der Blätter.',
+  fr:'La rivière était assez proche pour être entendue, un bruit régulier sous le mouvement des feuilles.',
+  es:'El río estaba lo bastante cerca como para oírlo, un sonido constante bajo el movimiento de las hojas.',
+  fi:'Joki oli niin lähellä, että sen saattoi kuulla, tasaisena äänenä lehtien liikkeen alla.'
+};
+let current=$('translation'),generation=0,copyTimer;
+try{$('target').value=localStorage.getItem('bokheim-translation-preview-target')||'sv'}catch{}
+if(!translations[$('target').value])$('target').value='sv';
+function position(){
+  if(!current||current.hidden)return;
+  const bounds=$('passage').getBoundingClientRect(),panel=current.getBoundingClientRect();
+  const mobile=matchMedia('(max-width:540px)').matches;
+  const left=mobile?(innerWidth-panel.width)/2:Math.min(Math.max(12,bounds.left),innerWidth-panel.width-12);
+  const below=innerHeight-bounds.bottom-20,above=bounds.top-20;
+  let top=below>=panel.height?bounds.bottom+8:above>=panel.height?bounds.top-panel.height-8:(innerHeight-panel.height)/2;
+  current.style.left=Math.max(12,left)+'px';current.style.top=Math.max(12,Math.min(top,innerHeight-panel.height-12))+'px';
+  positionSource();
+}
+function positionSource(){
+  const info=$('source-info');if(!info.matches(':popover-open'))return;
+  const button=$('source-info-button').getBoundingClientRect(),panel=info.getBoundingClientRect();
+  info.style.left=Math.max(12,Math.min(button.right-panel.width,innerWidth-panel.width-12))+'px';
+  const top=button.bottom+8+panel.height<=innerHeight-12?button.bottom+8:button.top-panel.height-8;
+  info.style.top=Math.max(12,top)+'px';
+}
+function show(panel){
+  $('source-info').hidePopover();
+  current=panel;$('translation').hidden=panel!==$('translation');$('selection-menu').hidden=panel!==$('selection-menu');$('scrim').hidden=false;
+  $('show-menu').setAttribute('aria-pressed',String(panel===$('selection-menu')));$('show-translation').setAttribute('aria-pressed',String(panel===$('translation')));
+  position();(panel.querySelector('button,select')||panel).focus({preventScroll:true});
+}
+function close(){
+  $('source-info').hidePopover();
+  current=null;$('translation').hidden=true;$('selection-menu').hidden=true;$('scrim').hidden=true;
+  for(const id of ['show-menu','show-translation'])$(id).setAttribute('aria-pressed','false');
+  $('book').focus({preventScroll:true});
+}
+function translate(animate=false){
+  const request=++generation;$('copy-status').textContent='';
+  if(new TextEncoder().encode(original).length>500){
+    $('translated').textContent='Selection is too long. Select up to 500 UTF-8 bytes to translate.';
+    $('translated').lang='en';$('translated').setAttribute('aria-busy','false');$('copy-translation').disabled=true;position();return;
+  }
+  const finish=()=>{if(request!==generation)return;$('translated').textContent=translations[$('target').value];$('translated').lang=$('target').value;$('translated').setAttribute('aria-busy','false');$('copy-translation').disabled=false;position()};
+  if(animate){$('translated').textContent='Translating…';$('translated').setAttribute('aria-busy','true');$('copy-translation').disabled=true;setTimeout(finish,250)}else finish();
+}
+async function copy(text){try{await navigator.clipboard.writeText(text);return true}catch{return false}}
+$('show-menu').onclick=()=>show($('selection-menu'));
+$('show-translation').onclick=()=>{setSelection(false);show($('translation'))};
+$('translate-action').onclick=()=>show($('translation'));
+function setSelection(long){
+  original=long?sample.repeat(8):sample;
+  $('passage').textContent=original;
+  $('show-too-long').setAttribute('aria-pressed',String(long));
+  translate();
+}
+$('show-too-long').onclick=()=>{setSelection(true);show($('translation'))};
+$('passage').oncontextmenu=event=>{event.preventDefault();show($('selection-menu'))};
+$('passage').onclick=()=>show($('selection-menu'));
+$('scrim').onclick=$('close').onclick=close;
+$('source-info').addEventListener('toggle',positionSource);
+$('target').onchange=()=>{try{localStorage.setItem('bokheim-translation-preview-target',$('target').value)}catch{}translate(true)};
+$('copy-translation').onclick=async()=>{if(await copy($('translated').textContent)){$('copy-status').textContent='Copied';clearTimeout(copyTimer);copyTimer=setTimeout(()=>$('copy-status').textContent='',1600)}};
+$('copy-selection').onclick=async()=>{await copy(original);close()};
+for(const id of ['lookup-action','annotation-action','copy-link'])$(id).onclick=()=>{close();$('show-menu').focus()};
+$('theme').onclick=()=>{const dark=document.documentElement.toggleAttribute('data-dark');$('theme').textContent=dark?'Light appearance':'Dark appearance'};
+document.addEventListener('keydown',event=>{
+  if(!current)return;
+  if(event.key==='Escape'){
+    event.preventDefault();
+    if($('source-info').matches(':popover-open')){$('source-info').hidePopover();$('source-info-button').focus()}
+    else close();
+  }
+  if(event.key==='Tab'){
+    const items=[...current.querySelectorAll('button:not([disabled]),select')].filter(element=>!element.hidden);
+    const first=items[0],last=items.at(-1);
+    if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}
+    else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}
+  }
+});
+addEventListener('resize',position);addEventListener('scroll',position,{passive:true});
+translate();document.fonts.ready.then(()=>{position();$('translation').focus({preventScroll:true})});
+</script>
+</html>

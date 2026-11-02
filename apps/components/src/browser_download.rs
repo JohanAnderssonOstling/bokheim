@@ -55,7 +55,7 @@ impl BrowserDownloads {
 
     pub fn progress(&mut self, id: &str, percent: Option<u8>, window: &mut Window, cx: &mut App) {
         let Some(entry) = self.entries.get(id) else { return };
-        self.apply(BrowserDownloadUpdate { download: id.into(), replaces: None, name: entry.name.clone(), phase: BrowserDownloadPhase::Downloading, percent, message: None }, window, cx);
+        self.apply(BrowserDownloadUpdate { download: id.into(), name: entry.name.clone(), phase: BrowserDownloadPhase::Downloading, percent, message: None }, window, cx);
     }
 
     /// Byte counts live inside the existing progress view so frequent updates
@@ -72,29 +72,13 @@ impl BrowserDownloads {
 
     pub fn waiting(&mut self, id: &str, window: &mut Window, cx: &mut App) {
         let Some(entry) = self.entries.get(id) else { return };
-        self.apply(BrowserDownloadUpdate { download: id.into(), replaces: None, name: entry.name.clone(), phase: BrowserDownloadPhase::Waiting, percent: None, message: Some("Waiting for an unmetered connection".into()) }, window, cx);
+        self.apply(BrowserDownloadUpdate { download: id.into(), name: entry.name.clone(), phase: BrowserDownloadPhase::Waiting, percent: None, message: Some("Waiting for an unmetered connection".into()) }, window, cx);
     }
 
     pub fn apply(&mut self, update: BrowserDownloadUpdate, window: &mut Window, cx: &mut App) {
-        let BrowserDownloadUpdate { download, replaces, name, phase, percent, message } = update;
-        if replaces.as_ref().is_some_and(|previous| self.cancelled.contains(previous)) {
-            self.cancelled.insert(download);
-            return;
-        }
+        let BrowserDownloadUpdate { download, name, phase, percent, message } = update;
         if phase != BrowserDownloadPhase::Dismissed && self.cancelled.contains(&download) {
-            if replaces.is_some() {
-                self.cancelled.remove(&download);
-            } else {
-                return;
-            }
-        }
-        let mut renamed = false;
-        if let Some(previous) = replaces.filter(|previous| previous != &download) {
-            if let Some(entry) = self.entries.remove(&previous) {
-                self.entries.entry(download.clone()).or_insert(entry);
-                window.remove_notification1::<BrowserDownloadToast>(SharedString::from(previous), cx);
-                renamed = true;
-            }
+            return;
         }
         if phase == BrowserDownloadPhase::Dismissed {
             if self.entries.remove(&download).is_some() {
@@ -124,7 +108,7 @@ impl BrowserDownloads {
                 });
                 // Progress changes update the existing bar without moving the
                 // toast or bringing back one the reader already dismissed.
-                if !renamed && entry.name == name && entry.phase == phase && entry.message == message {
+                if entry.name == name && entry.phase == phase && entry.message == message {
                     return;
                 }
                 entry.name = name;

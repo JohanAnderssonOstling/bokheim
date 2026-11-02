@@ -1,4 +1,4 @@
-use crate::placements::book_at_path;
+use crate::placements::{book_at_path, stored_book_path_column};
 // ---- io ----
 // Transfer snapshot in, direct writes out.
 //
@@ -13,15 +13,13 @@ use crate::shared_sql::SharedSql;
 use crate::{Database, DatabaseError, NativeBookSnapshot};
 use library_model::{BlobKind, BookUploadIntent, RelativeBookPath};
 use std::collections::HashMap;
-use sync_common::{BookId, DirId};
+use sync_common::BookId;
 
 /// One live placement's transfer inputs, keyed by its stored path.
 #[derive(Clone, Debug)]
 pub struct PlacementTransferEntry {
     pub content_hash: BookId,
     pub rel_path: RelativeBookPath,
-    pub download_directory: Option<DirId>,
-    pub placement_current: bool,
     pub book: Option<NativeBookSnapshot>,
 }
 
@@ -60,47 +58,40 @@ impl Database {
     pub fn transfer_snapshot(&self, hashes: &[BookId]) -> Result<TransferSnapshot, DatabaseError> {
         let database = {
             let transaction = self.connection.unchecked_transaction()?;
-            let requested = serde_json::to_string(&hashes.iter().map(BookId::to_hex).collect::<Vec<_>>()).map_err(DatabaseError::operation)?;
+            let requested = serde_json::to_string(hashes).map_err(DatabaseError::operation)?;
             let mut assets: HashMap<BookId, AssetTransferState> = hashes.iter().map(|hash| (*hash, AssetTransferState { upload: BookUploadSnapshot { local_versions: Vec::new(), intent: None }, upload_paths: Vec::new() })).collect();
 
             // Each live placement, with the local fingerprint an upload records.
-            let mut placements = Vec::new();
             transaction.transfer_snapshot_versions(&requested, |row| {
                 let hash = row.get::<_, BookId>(0)?;
-                let dir_id: String = row.get(1)?;
-                let file_name: String = row.get(2)?;
                 if let Some(asset) = assets.get_mut(&hash) {
-                    asset.upload.local_versions.push((dir_id.clone(), file_name.clone(), row.get(3)?));
+                    asset.upload.local_versions.push((row.get(1)?, row.get(2)?, row.get(3)?));
                 }
-                placements.push((hash, dir_id, file_name));
                 Ok(())
             })?;
             transaction.transfer_snapshot_intents(&requested, |row| {
                 let hash = row.get::<_, BookId>(0)?;
                 if let Some(asset) = assets.get_mut(&hash) {
-                    asset.upload.intent = Some(BookUploadIntent { content_hash: hash, id: row.get(1)?, size_bytes: row.get::<_, i64>(2)? as u64 });
+                    asset.upload.intent = Some(BookUploadIntent { byte_checksum: row.get(3)?, content_hash: hash, id: row.get(1)?, size_bytes: row.get::<_, i64>(2)? as u64 });
                 }
                 Ok(())
             })?;
             // Materialized paths first, then the live placements read below.
-            let mut projected = Vec::new();
             transaction.transfer_snapshot_projection_paths(&requested, |row| {
-                projected.push((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?));
+                let hash = row.get::<_, BookId>(0)?;
+                if let Some(asset) = assets.get_mut(&hash) {
+                    asset.upload_paths.push(stored_book_path_column(row, 1)?);
+                }
                 Ok(())
             })?;
-            for (hash, path) in projected {
-                if let Some(asset) = assets.get_mut(&hash) {
-                    asset.upload_paths.push(crate::placements::stored_book_path(&path)?);
-                }
-            }
             let mut folders = crate::placements::FolderPaths::new(&transaction);
             let mut placement_paths: HashMap<BookId, Vec<RelativeBookPath>> = HashMap::new();
-            for (hash, dir_id, file_name) in placements {
-                let Some(path) = folders.placement(&dir_id, &file_name)? else { continue };
-                if let Some(asset) = assets.get_mut(&hash) {
+            for (hash, asset) in &mut assets {
+                for (dir_id, file_name, _) in &asset.upload.local_versions {
+                    let Some(path) = folders.placement(dir_id, file_name)? else { continue };
                     asset.upload_paths.push(path.clone());
+                    placement_paths.entry(*hash).or_default().push(path);
                 }
-                placement_paths.entry(hash).or_default().push(path);
             }
             transaction.commit()?;
             DatabaseTransferSnapshot { assets, placement_paths }
@@ -109,30 +100,22 @@ impl Database {
         for hash in hashes {
             for rel_path in database.placement_paths.get(hash).into_iter().flatten() {
                 // The path still holds this book, or the placement is stale.
-                let entry = book_at_path(&self.connection, rel_path.as_str())?.filter(|(current, _, _)| current == hash);
-                let book = match &entry {
-                    Some((_, directory, name)) => Some(NativeBookSnapshot {
-                        content_hash: *hash,
-                        format: self.book_format(hash)?.ok_or_else(|| DatabaseError::message("book has no format"))?,
-                        audiobook_track_titles: self.audiobook_download_track_titles(hash)?,
-                        directory: *directory,
-                        name: name.clone(),
-                        relative_path: rel_path.clone(),
-                        occupied_names: ({
-                            use crate::native::*;
-                            let connection: &rusqlite::Connection = &self.connection;
-
-                            let mut names = Vec::new();
-                            connection.shared_occupied_file_names(&directory.to_string(), |row| {
-                                names.push(row.get(0)?);
-                                Ok(())
-                            })?;
-                            names
-                        }),
-                    }),
+                let book = match book_at_path(&self.connection, rel_path.as_str())?.filter(|(current, _, _)| current == hash) {
+                    Some((_, directory, name)) => {
+                        let format = self.book_format(hash)?.ok_or_else(|| DatabaseError::message("book has no format"))?;
+                        Some(NativeBookSnapshot {
+                            content_hash: *hash,
+                            format,
+                            audiobook_track_titles: self.audiobook_download_track_titles(hash, format)?,
+                            directory,
+                            name,
+                            relative_path: rel_path.clone(),
+                            occupied_names: self.shared_occupied_file_names(&directory)?,
+                        })
+                    }
                     None => None,
                 };
-                snapshot.placements.push(PlacementTransferEntry { content_hash: *hash, rel_path: rel_path.clone(), download_directory: entry.as_ref().map(|(_, directory, _)| *directory), placement_current: entry.is_some(), book });
+                snapshot.placements.push(PlacementTransferEntry { content_hash: *hash, rel_path: rel_path.clone(), book });
             }
         }
         Ok(snapshot)
@@ -140,23 +123,21 @@ impl Database {
 
     /// Books the server already holds. Each upload intent still current is
     /// done; one that changed meanwhile is left for the next planning pass.
-    pub fn settle_book_manifest(&self, already_on_server: &[BookUploadIntent]) -> Result<(), DatabaseError> {
+    pub fn settle_book_manifest<'a>(&self, already_on_server: impl IntoIterator<Item = &'a BookUploadIntent>) -> Result<(), DatabaseError> {
         self.write(|transaction| {
             for intent in already_on_server {
                 if Self::upload_intent_of(transaction, &intent.content_hash)?.as_ref() != Some(intent) {
                     continue;
+                }
+                if let Some(checksum) = intent.byte_checksum.or_else(|| intent.content_hash.content_hash()) {
+                    crate::content_identity::freeze_content(transaction, intent.content_hash, checksum, Some(intent.size_bytes))?;
+                    crate::sync::apply::registers::record_local(transaction, library_replica::LibraryStateEntry::BookContent { content_hash: intent.content_hash, checksum, size_bytes: Some(intent.size_bytes), pdf: None })?;
                 }
                 transaction.record_remote_asset(BlobKind::Book.storage(), &intent.content_hash)?;
                 transaction.transfer_complete_upload(intent.id, &intent.content_hash)?;
             }
             Ok(())
         })
-    }
-
-    /// Records an uploaded book. Returns false when its local files changed
-    /// since `local_versions` was read; the upload then stays queued.
-    pub fn complete_book_upload(&self, hash: &BookId, local_versions: &[(String, String, String)], intent: Option<&BookUploadIntent>) -> Result<bool, DatabaseError> {
-        self.write(|transaction| Self::complete_book_upload_in_transaction(transaction, hash, local_versions, intent))
     }
 
     /// Ends a download request without its bytes.
@@ -190,15 +171,14 @@ impl Database {
         })
     }
 
-    /// One validated cover presence response, written atomically.
-    pub fn record_cover_presence(&self, requested: &[BookId], present: &[BookId]) -> Result<(), DatabaseError> {
+    /// Present and missing hashes from one validated response, written atomically.
+    pub fn record_cover_presence(&self, present: &[BookId], missing: &[BookId]) -> Result<(), DatabaseError> {
         self.write(|transaction| {
-            for hash in requested {
-                if present.contains(hash) {
-                    transaction.record_remote_asset(BlobKind::Thumbnail.storage(), hash)?;
-                } else {
-                    transaction.forget_remote_asset(BlobKind::Thumbnail.storage(), hash)?;
-                }
+            for hash in present {
+                transaction.record_remote_asset(BlobKind::Thumbnail.storage(), hash)?;
+            }
+            for hash in missing {
+                transaction.forget_remote_asset(BlobKind::Thumbnail.storage(), hash)?;
             }
             Ok(())
         })

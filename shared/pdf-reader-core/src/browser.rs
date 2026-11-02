@@ -168,6 +168,10 @@ impl BrowserSession {
         self.with_document(move |document| document.page_geometry(page_index, trim_margins)).await
     }
 
+    pub async fn reading_fragments(&self, page_index: usize) -> PdfResult<Vec<PdfReadingFragment>> {
+        self.with_document(move |document| document.extract_reading_fragments(page_index)).await
+    }
+
     pub async fn render_for_display(&self, key: PageRenderKey) -> PdfResult<RenderedPdfBgraPage> {
         self.with_document(move |document| document.render_page_for_display(key)).await
     }

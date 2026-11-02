@@ -8,15 +8,14 @@ create table if not exists book(
     title           TEXT,
     subtitle        TEXT,
     -- Browse text, normalized in Rust whenever the title or credits are
-    -- written (browse/text.rs, contributors::write_credits).
+    -- written (projection/metadata.rs).
     author          TEXT not null default '',
     search_title    TEXT not null default '',
     search_author   TEXT not null default '',
     -- Canonical synchronized bibliographic metadata. Dedicated tables below
     -- are disposable query projections rebuilt from this value.
-    -- book_model::BookFormat code. Fixed for the life of the row: identity is
-    -- derived from the bytes, so the format cannot change without becoming a
-    -- different book. NULL only on a row that has never been observed on any
+    -- book_model::BookFormat code. Fixed for the life of the logical book;
+    -- local PDF annotation writes retain this identity and format. NULL only on a row that has never been observed on any
     -- device's disk.
     format          INTEGER,
     read_pos        TEXT                DEFAULT NULL,
@@ -35,6 +34,8 @@ create table if not exists book(
     -- whole tree. NULL means no navigation document; [] records inspected
     -- files with no entries. Playback facts belong to the same document.
     entry_count     INTEGER check(entry_count >= 0),
+    -- Historical column names/affinity; new projections store binary BLOBs.
+    -- SQLite accepts both BLOBs and the JSON TEXT retained by older caches.
     toc_json        TEXT,
     duration_ms     INTEGER check(duration_ms >= 0),
     tracks_json     TEXT,
@@ -109,8 +110,8 @@ create table if not exists author_identity(
 -- Canonical description storage, kept off the frequently read book row.
 CREATE TABLE IF NOT EXISTS book_description(
     book_row_id INTEGER PRIMARY KEY REFERENCES book(row_id) ON DELETE CASCADE,
-    description TEXT NOT NULL
-);
+    description ANY NOT NULL CHECK(typeof(description) IN('text','blob'))
+) STRICT;
 
 -- Durable synchronization outbox, winning versions, and replica metadata.
 -- A pending row identifies a register. Payload columns are NULL until a

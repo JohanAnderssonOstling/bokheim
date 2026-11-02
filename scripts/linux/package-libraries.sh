@@ -3,6 +3,6 @@
 # Never copy a newer build host's implementation into the portable package.
 LINUX_LIBRARY_OPTIONS=()
 for library in 'libstdc++*' 'libgcc_s*' 'libfontconfig*' 'libfreetype*' \
-               'libasound*' 'libXau*' 'libXdmcp*' 'libxcb*' 'libxkbcommon*'; do
+               'libasound*' 'libXau*' 'libXdmcp*' 'libbsd*' 'libmd*' 'libxcb*' 'libxkbcommon*'; do
     LINUX_LIBRARY_OPTIONS+=(--exclude-library "$library")
 done

@@ -57,7 +57,7 @@ impl LibraryOfCongressClient {
         if (endpoint.scheme() != "https" && !official_http && !test_http) || !endpoint.username().is_empty() || endpoint.password().is_some() || endpoint.query().is_some() || endpoint.fragment().is_some() {
             return Err(MetadataError("Library of Congress SRU endpoint must use HTTPS or the official LC port-210 server, without credentials, query, or fragment".to_owned()));
         }
-        let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(15)).build().map_err(|error| MetadataError(format!("could not create Library of Congress HTTP client: {error}")))?;
+        let client = http_response::client_builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(15)).build().map_err(|error| MetadataError(format!("could not create Library of Congress HTTP client: {error}")))?;
         Ok(Self { client, endpoint, next_request_ms: Arc::new(Mutex::new(0)), cache: None, request_lock: Arc::new(tokio::sync::Mutex::new(())) })
     }
 

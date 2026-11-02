@@ -1,6 +1,6 @@
 //! Bounded image decoding shared by the renderer and its headless checks.
 
-use image::{ImageReader, RgbaImage};
+use image::{DynamicImage, ImageDecoder, ImageReader, RgbaImage};
 use std::io::Cursor;
 
 const MAX_SOURCE_PIXELS: u64 = 24_000_000;
@@ -13,17 +13,21 @@ pub(super) struct DecodedPage {
 }
 
 pub(super) fn decode(bytes: Vec<u8>) -> Result<DecodedPage, String> {
-    let reader = ImageReader::new(Cursor::new(&bytes)).with_guessed_format().map_err(|error| error.to_string())?;
-    let (width, height) = reader.into_dimensions().map_err(|error| error.to_string())?;
+    let mut reader = ImageReader::new(Cursor::new(bytes.as_slice())).with_guessed_format().map_err(|error| error.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder().map_err(|error| error.to_string())?;
+    let (width, height) = decoder.dimensions();
     let pixels = u64::from(width) * u64::from(height);
     if width == 0 || height == 0 || width > 32_000 || height > 32_000 || pixels > MAX_SOURCE_PIXELS {
         return Err("Comic page exceeds the image dimension limit".into());
     }
-    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|error| error.to_string())?;
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    reader.limits(limits);
-    let decoded = reader.decode().map_err(|error| error.to_string())?;
+    // ImageReader::decode also reserves the output buffer before giving the
+    // remaining allocation budget to the decoder.
+    limits.reserve(decoder.total_bytes()).map_err(|error| error.to_string())?;
+    decoder.set_limits(limits).map_err(|error| error.to_string())?;
+    let decoded = DynamicImage::from_decoder(decoder).map_err(|error| error.to_string())?;
     let scale = (MAX_DISPLAY_PIXELS as f64 / pixels as f64).sqrt().min(4096.0 / f64::from(width.max(height))).min(1.0);
     let mut rgba = if scale < 1.0 { decoded.resize((f64::from(width) * scale).round().max(1.0) as u32, (f64::from(height) * scale).round().max(1.0) as u32, image::imageops::FilterType::Triangle).to_rgba8() } else { decoded.to_rgba8() };
     // GPUI's decoded image buffers use BGRA channel order.
@@ -46,5 +50,16 @@ mod tests {
         assert_eq!((decoded.width, decoded.height), (2, 3));
         assert_eq!(&decoded.pixels.as_raw()[..4], &[30, 20, 10, 255]);
         assert!(decode(b"invalid page".to_vec()).is_err());
+    }
+
+    #[test]
+    fn bounds_source_dimensions_and_scales_display_pixels() {
+        let oversized = gpui::Image::from_rgba(&RgbaImage::new(32_001, 1)).unwrap();
+        assert!(decode(oversized.bytes).err().unwrap().contains("image dimension limit"));
+
+        let wide = gpui::Image::from_rgba(&RgbaImage::new(5_000, 1)).unwrap();
+        let decoded = decode(wide.bytes).unwrap();
+        assert_eq!((decoded.width, decoded.height), (4_096, 1));
+        assert_eq!(decoded.pixels.len(), 4_096 * 4);
     }
 }

@@ -48,6 +48,16 @@ pub enum LibraryUpdate {
         progress: crate::CatalogImportProgress,
     },
     Scanning(bool),
+    /// Durable sync progress changed after a completed exchange.
+    SyncStatusChanged,
+    /// Annotation text, anchors or deletion state changed locally.
+    Annotations,
+    /// Device-local annotation export progress or failures changed.
+    AnnotationExportStatusChanged,
+    /// Reading position, progress, or chapter read status changed. Shelf cards
+    /// may need refreshing, while annotations and bookmarks remain unchanged.
+    ReadingProgress(BookId),
+    TextSearchRemoved(crate::TextSearchRemoval),
 }
 
 /// Limits hierarchical library browsing to one broad book family.
@@ -148,6 +158,7 @@ pub enum BrowseLocation {
     Author(Option<AuthorId>),
     Home(Option<HomeShelf>),
     Books,
+    Notebook(crate::NotebookSort),
     Catalog(i64),
     CatalogAuthor(Option<AuthorId>),
     /// `page` is `None` for the feed's root, otherwise a page this session
@@ -159,6 +170,7 @@ pub enum BrowseLocation {
     /// A store's chip at the catalog root. Opening it opens the store's
     /// window; there is nothing to browse.
     Store(StoreId),
+    TextSearch(crate::NotebookSort),
 }
 
 impl BrowseLocation {
@@ -201,6 +213,8 @@ impl std::fmt::Display for BrowseLocation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Books => write!(formatter, "books:"),
+            Self::Notebook(sort) => write!(formatter, "notebook:{sort:?}"),
+            Self::TextSearch(sort) => write!(formatter, "text-search:{sort:?}"),
             Self::Folder(id) => write!(formatter, "folder:{id}"),
             Self::Subject(route) => write!(formatter, "subject:{route}"),
             Self::Author(None) => write!(formatter, "author:"),
@@ -286,7 +300,7 @@ impl Default for BrowsePageRequest {
 }
 
 /// Tree navigation stays complete; flat author headings use a bounded window.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrowsePageState {
     pub section_ids: Vec<BrowseLocation>,
     pub section_offset: usize,
@@ -346,10 +360,6 @@ pub struct LibraryBrowseQuery {
     /// Facet counts continue to describe the location including finished books.
     #[serde(default)]
     pub hide_finished: bool,
-    /// Also shows books assigned directly to the selected subject's immediate
-    /// children. Grandchildren remain represented by their subject chips.
-    #[serde(default)]
-    pub include_direct_child_books: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -404,6 +414,25 @@ pub struct OpdsSource {
     pub id: OpdsSourceId,
     pub name: String,
     pub url: String,
+}
+
+/// Feed-provided facts retained for reading, downloads, and covers; never inspected locally.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpdsPublication {
+    pub entry: CardKey,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub authors: Vec<String>,
+    pub description: String,
+    pub format: Option<book_model::BookFormat>,
+    pub download_url: Option<String>,
+    pub cover_url: Option<String>,
+}
+
+impl OpdsPublication {
+    pub fn book_id(&self) -> BookId {
+        BookId::for_opds_entry(&self.entry.0)
+    }
 }
 
 /// A bookstore added on this device, by the id it was added under.
@@ -498,7 +527,10 @@ pub struct BookCardRow {
 pub struct CardKey(pub [u8; 32]);
 
 impl From<BookId> for CardKey {
-    fn from(id: BookId) -> Self { Self(*id.identity_digest()) }
+    fn from(id: BookId) -> Self {
+        if id.is_local() { Self(*blake3::hash(id.as_bytes()).as_bytes()) }
+        else { Self(*id.identity_digest()) }
+    }
 }
 
 impl From<&BookId> for CardKey {
@@ -601,9 +633,15 @@ pub struct BookDetail {
     /// Navigation entry count for an audiobook, when its contents are known.
     #[serde(default)]
     pub audiobook_chapter_count: Option<usize>,
-    /// The publisher's blurb, as stored (HTML). Only the detail page shows it,
-    /// so browse queries never read it.
+    /// The publisher's blurb, as stored (HTML). Only the detail page and the
+    /// book overlay show it, so browse queries never read it.
     pub description: String,
+    /// Where the book sits in the subject tree Browse shows: the path to each
+    /// subject that lists the book itself, root first, every crumb a subject
+    /// page. Curated taxonomy only — never the file's own subject headings.
+    /// Empty for a feed book and for a book with no curated subject.
+    #[serde(default)]
+    pub subjects: Vec<Vec<BrowsePathSegment>>,
     /// Publication year, when known: the file's own, else the metadata server's.
     #[serde(default)]
     pub year: Option<i32>,
@@ -674,6 +712,12 @@ impl FolderSort {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_and_legacy_books_with_the_same_initial_digest_have_distinct_card_keys() {
+        let digest = content_address::ContentHash::from_bytes([9; 32]);
+        assert_ne!(CardKey::from(BookId::from(digest)), CardKey::from(BookId::for_local_content(&[4;16], digest)));
+    }
 
     #[test]
     fn folder_book_count_sort_uses_name_as_a_deterministic_tie_breaker() {

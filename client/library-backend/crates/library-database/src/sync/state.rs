@@ -1,7 +1,8 @@
 //! Sync cursor and recovery primitives.
 
+use crate::query_methods::query_rows;
 use crate::shared_sql::SharedSql;
-use crate::sync::{SyncStateSql, read_pull_cursor, write_pull_cursor};
+use crate::sync::{SyncStateSql, read_pull_cursor};
 use crate::{Database, DatabaseError};
 use sync_common::StateKey;
 
@@ -24,22 +25,13 @@ impl Database {
 
     /// Whether a rejected cursor still needs recovery.
     pub fn sync_cursor_recovery_pending(&self) -> Result<bool, DatabaseError> {
-        let mut pending: Option<i64> = None;
-        self.connection.sync_cursor_recovery_pending(|row| {
-            pending = row.get(0)?;
-            Ok(())
-        })?;
+        let pending = self.connection.sync_cursor_recovery_pending(|row| row.get::<_, Option<i64>>(0))?;
         Ok(pending == Some(1))
     }
 
     /// Clears the generation and both checkpoints, persisting the recovery marker.
     pub fn sync_begin_cursor_recovery(&self) -> Result<(), DatabaseError> {
         self.connection.sync_begin_cursor_recovery().map(|_| ()).map_err(Into::into)
-    }
-
-    /// Persists the generation and both checkpoints in one transaction.
-    pub fn set_sync_pull_cursor(&self, cursor: &SyncCursor) -> Result<(), DatabaseError> {
-        self.write(|tx| write_pull_cursor(tx, cursor))
     }
 
     /// Writes one explicit sync_metadata column. Only the columns written
@@ -80,12 +72,7 @@ impl Database {
     pub fn sync_inventory_page(&self, after: Option<&StateAddress>) -> Result<Vec<StateAddress>, DatabaseError> {
         let start = StateKey::Text(String::new());
         let (kind, key, subkey) = after.map(|cell| (cell.kind.as_str(), &cell.entity_key, cell.entity_subkey.as_str())).unwrap_or(("", &start, ""));
-        let mut cells = Vec::new();
-        self.connection.sync_state_inventory_page(kind, key, subkey, |row| {
-            cells.push((|row: &rusqlite::Row<'_>| -> rusqlite::Result<StateAddress> { Ok(StateAddress { kind: row.get(0)?, entity_key: row.get(1)?, entity_subkey: row.get(2)? }) })(row)?);
-            Ok(())
-        })?;
-        Ok(cells)
+        Ok(query_rows(|read| self.connection.sync_state_inventory_page(kind, key, subkey, read), |row| Ok(StateAddress { kind: row.get(0)?, entity_key: row.get(1)?, entity_subkey: row.get(2)? }))?)
     }
 
     /// Recreates durable outbox entries for the given state cells, in one

@@ -1,8 +1,9 @@
 //! Durable diagnostics tied to an exact publication, rather than a whole pass.
 use crate::sync::{MutationIssuesSql, storage_i64};
-use crate::sync_status::{LibrarySyncIssue, SyncIssueSummary};
+use crate::query_methods::{blob_column, query_rows};
+use crate::sync_status::{SyncIssueDetail, SyncIssueSummary};
 use crate::{Database, DatabaseError};
-use sync_common::{MutationIssue, ReplicaSeq, StateAddress};
+use sync_common::MutationIssue;
 
 impl Database {
     /// Capture issues before acknowledging submissions. An obsolete response
@@ -39,24 +40,11 @@ impl Database {
         })
     }
 
-    /// Detailed diagnostics remain available even after a rejected row leaves
-    /// the outbox; the settings snapshot only needs the small count summary.
-    pub fn sync_mutation_issues(&self) -> Result<Vec<LibrarySyncIssue>, DatabaseError> {
-        let mut issues = Vec::new();
-        self.connection.sync_issue_rows(|row| {
-            issues.push((row.get::<_, i64>(0)?, StateAddress { kind: row.get(1)?, entity_key: row.get(2)?, entity_subkey: row.get(3)? }, row.get::<_, Vec<u8>>(4)?));
-            Ok(())
-        })?;
-        issues
-            .into_iter()
-            .map(|(sequence, address, bytes)| {
-                let sequence = u64::try_from(sequence).map_err(DatabaseError::operation)?;
-                Ok(LibrarySyncIssue {
-                    publisher_seq: ReplicaSeq::new(sequence).map_err(DatabaseError::operation)?,
-                    address,
-                    issue: sync_common::wire::decode(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?,
-                })
-            })
-            .collect()
+    pub fn sync_issue_details(&self) -> Result<Vec<SyncIssueDetail>, DatabaseError> {
+        Ok(query_rows(|read| self.connection.sync_issue_details(read), |row| {
+            let issue = sync_common::wire::decode(blob_column(row, 2)?, sync_common::wire::MAX_DECODED_REQUEST_BYTES)
+                .map_err(|error| crate::sync::invalid_text_column(2, error.to_string()))?;
+            Ok(SyncIssueDetail { kind: row.get(0)?, item_name: row.get(1)?, issue })
+        })?)
     }
 }

@@ -1,8 +1,8 @@
 //! Native parser bridge borrowing the application’s I/O runtime.
 
-use super::{RemoteFileError, REQUEST_TIMEOUT};
-use crate::range_reader::{validate_prefix, RangeFetcher, RangeReader};
-use crate::{BoxedBookReader, FetchFuture};
+use super::{REQUEST_TIMEOUT, RemoteFileError};
+use crate::range_reader::{RangeFetcher, RangeReader, validate_prefix};
+use crate::{BoxedBookReader, BundleFetch, BundleFetcher, FetchFuture};
 use std::{
     io::{self, Read, Seek, SeekFrom},
     time::Duration,
@@ -41,6 +41,27 @@ where
     F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, RemoteFileError>> + Send + 'static,
 {
     open(length, prefix, Box::new(fetch), REQUEST_TIMEOUT)
+}
+
+/// Construct on the I/O runtime, then invoke only from a parser thread.
+pub fn native_bundle_fetch<F>(fetch: F) -> io::Result<BundleFetch>
+where
+    F: Fn(Vec<(u64, usize)>) -> FetchFuture<'static, Result<Vec<u8>, RemoteFileError>> + Send + Sync + 'static,
+{
+    let handle = Handle::try_current().map_err(io::Error::other)?;
+    let fetch = crate::batch_fetch::native(fetch)?;
+    Ok(Box::new(NativeBundleFetch { handle, fetch }))
+}
+
+struct NativeBundleFetch {
+    handle: Handle,
+    fetch: crate::batch_fetch::BatchFetch,
+}
+
+impl BundleFetcher for NativeBundleFetch {
+    fn fetch(&mut self, ranges: Vec<(u64, usize)>) -> io::Result<Vec<u8>> {
+        self.handle.block_on((self.fetch)(ranges))
+    }
 }
 
 fn open(length: u64, prefix: Vec<u8>, mut fetch: AsyncFetch, timeout: Duration) -> io::Result<BoxedBookReader> {

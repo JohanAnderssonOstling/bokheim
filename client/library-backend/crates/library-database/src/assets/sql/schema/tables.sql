@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS book_transfer(
     -- work has finished, so the upload may start when the two match.
     upload_id INTEGER,
     upload_size INTEGER CHECK(upload_size > 0),
+    upload_checksum BLOB CHECK(upload_checksum IS NULL OR length(upload_checksum)=32),
     upload_prepared INTEGER,
     -- This device's cover. A cover is set once: made here from the book or
     -- its artwork, or downloaded, and never replaced.

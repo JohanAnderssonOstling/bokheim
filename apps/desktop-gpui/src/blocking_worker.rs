@@ -1,29 +1,13 @@
-//! Desktop host support for work that must not block GPUI's event thread.
+//! Routes short desktop writes through the application's ordered storage queue.
 
-use gpui::BackgroundExecutor;
-
-type BlockingJob = Box<dyn FnOnce() + Send + 'static>;
+use client_platform_runtime::storage_queue;
 
 #[derive(Clone)]
-pub(crate) struct BlockingWorker {
-    jobs: async_channel::Sender<BlockingJob>,
-}
+pub(crate) struct BlockingWorker;
 
 impl BlockingWorker {
-    pub(crate) fn new(executor: &BackgroundExecutor, thread_count: usize) -> Self {
-        let (jobs, receiver) = async_channel::unbounded::<BlockingJob>();
-        for _ in 0..thread_count.max(1) {
-            let receiver = receiver.clone();
-            executor
-                .scheduler_executor()
-                .spawn_dedicated(move |_executor| async move {
-                    while let Ok(job) = receiver.recv().await {
-                        job();
-                    }
-                })
-                .detach();
-        }
-        Self { jobs }
+    pub(crate) fn new() -> Self {
+        Self
     }
 
     pub(crate) fn dispatch<T>(&self, work: impl FnOnce() -> T + Send + 'static) -> async_channel::Receiver<T>
@@ -31,14 +15,16 @@ impl BlockingWorker {
         T: Send + 'static,
     {
         let (result_tx, result_rx) = async_channel::bounded(1);
-        let job = Box::new(move || {
+        let queued = storage_queue::dispatch_persistence(move || {
             if result_tx.is_closed() {
                 return;
             }
             let result = work();
             let _ = result_tx.send_blocking(result);
         });
-        assert!(self.jobs.try_send(job).is_ok(), "GPUI blocking worker stopped unexpectedly");
+        if let Err(error) = queued {
+            log::error!("could not queue session write: {error}");
+        }
         result_rx
     }
 }

@@ -59,10 +59,10 @@ export function requiredCapabilities(env = globalThis) {
             issues.push(`${browser.name} ${browser.version} is too old. Update to version ${browser.minimum} or newer.`);
         }
     }
-    if (!env.isSecureContext) issues.push('Open Bokheim over HTTPS (or localhost for local testing).');
-    if (!env.crossOriginIsolated) issues.push('This site is missing the cross-origin isolation required by Bokheim. The site administrator needs to check its COOP and COEP headers.');
-    if (!env.WebAssembly || typeof env.SharedArrayBuffer !== 'function') issues.push('This browser cannot provide the WebAssembly shared memory required by Bokheim.');
-    if (!supportsUnwinding(env.WebAssembly)) issues.push('This browser lacks the WebAssembly exception handling required by Bokheim. Update your browser.');
+    if (!env.isSecureContext) issues.push('Use HTTPS, or localhost for local testing.');
+    if (!env.crossOriginIsolated) issues.push('This site lacks required cross-origin isolation. Ask the site administrator to check COOP and COEP headers.');
+    if (!env.WebAssembly || typeof env.SharedArrayBuffer !== 'function') issues.push("This browser can't provide the required WebAssembly shared memory.");
+    if (!supportsUnwinding(env.WebAssembly)) issues.push('This browser lacks required WebAssembly exception handling. Update your browser.');
     if (typeof env.Atomics?.waitAsync !== 'function') issues.push('This browser cannot wait asynchronously for shared-memory work. Update your browser.');
     if (typeof env.Worker !== 'function') issues.push('This browser does not support background workers.');
     if (typeof env.SharedWorker !== 'function') issues.push('This browser does not support shared background workers. On Android, Chrome 148 or newer is required.');
@@ -93,7 +93,7 @@ export function checkSharedWorkerSupport() {
                 'self.onconnect = ({ports:[port]}) => { port.postMessage(true); self.close(); };',
             ], {type: 'text/javascript'}));
             worker = new SharedWorker(url, {type: 'module'});
-            timer = setTimeout(() => finish('The browser could not start Bokheim’s shared background worker. Check browser restrictions and reload.'), 10000);
+            timer = setTimeout(() => finish("Couldn't start a shared background worker. Check browser restrictions and reload."), 10000);
             worker.onerror = event => {
                 event.preventDefault();
                 finish('The browser could not load a shared module worker. Update your browser or check whether this site blocks workers.');

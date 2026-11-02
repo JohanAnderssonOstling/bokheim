@@ -55,7 +55,7 @@ final class BookDownload {
     private static boolean bookName(String name) {
         if (name == null) return false;
         String lower = name.toLowerCase(Locale.ROOT);
-        for (String extension : new String[]{".fb2.zip", ".fb2", ".fbz", ".cbz", ".epub", ".pdf", ".mobi", ".azw", ".azw3", ".m4b", ".torrent"}) {
+        for (String extension : new String[]{".fb2.zip", ".fb2", ".fbz", ".cbz", ".epub", ".pdf", ".mobi", ".azw", ".azw3", ".m4b"}) {
             if (lower.endsWith(extension)) return true;
         }
         return false;
@@ -82,7 +82,6 @@ final class BookDownload {
                 case "application/vnd.amazon.ebook": extension = ".azw"; break;
                 case "application/x-mobi8-ebook": extension = ".azw3"; break;
                 case "audio/x-m4b": case "audio/mp4": extension = ".m4b"; break;
-                case "application/x-bittorrent": extension = ".torrent"; break;
                 default: throw new IOException("This download is not a supported book file");
             }
             name = (name.isEmpty() ? "book" : name) + extension;

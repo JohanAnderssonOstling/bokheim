@@ -37,6 +37,12 @@ impl Voice {
             Self::George => "model.onnx",
         }
     }
+
+    fn model_path(self, root: &Path) -> PathBuf {
+        let onnx = root.join(self.model_file());
+        let ort = onnx.with_extension("ort");
+        if ort.is_file() { ort } else { onnx }
+    }
 }
 
 type ModelPreparer = dyn Fn(Voice) -> Result<PathBuf, String> + Send + Sync;
@@ -64,7 +70,7 @@ pub fn voice_directory(voice: Voice) -> PathBuf {
     }
     if let Ok(executable) = env::current_exe() {
         let packaged = executable.parent().unwrap_or_else(|| Path::new(".")).join("tts").join(voice.directory_name());
-        if packaged.join(voice.model_file()).is_file() {
+        if voice.model_path(&packaged).is_file() {
             return packaged;
         }
     }
@@ -101,7 +107,7 @@ pub fn load_voice_with_threads(voice: Voice, threads: i32) -> Result<OfflineTts,
         Some(prepare) => prepare(voice)?,
         None => voice_directory(voice),
     };
-    let model = root.join(voice.model_file());
+    let model = voice.model_path(&root);
     let tokens = root.join("tokens.txt");
     let data_dir = root.join("espeak-ng-data");
     for path in [&model, &tokens, &data_dir] {
@@ -164,7 +170,9 @@ pub fn load_voice_with_threads(voice: Voice, threads: i32) -> Result<OfflineTts,
             };
         }
     }
-    let config = OfflineTtsConfig { model: model_config, ..Default::default() };
+    // Deliver completed sentence segments through the synthesis callback,
+    // instead of waiting for all sentences in a reader chunk (notably for Alba).
+    let config = OfflineTtsConfig { model: model_config, max_num_sentences: 1, ..Default::default() };
     OfflineTts::create(&config).ok_or_else(|| "Could not load the speech model.".into())
 }
 

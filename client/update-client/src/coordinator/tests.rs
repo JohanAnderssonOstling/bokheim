@@ -43,6 +43,27 @@ fn signed(manifest: &Manifest) -> Vec<u8> {
     serde_json::to_vec(&SignedManifest { key_id: "test".into(), payload, signature }).unwrap()
 }
 
+#[test]
+fn taxonomy_only_can_publish_in_the_background_without_waiting_for_another_launch() {
+    let (config, device, mut manifest) = fixture();
+    manifest.application = None;
+    let taxonomy = manifest.taxonomy.as_mut().unwrap();
+    taxonomy.minimum_application_version = device.application.clone();
+    taxonomy.minimum_schema_version = device.schema;
+    let mut coordinator = Coordinator::open(Memory::default(), config, device.clone(), "current".into()).unwrap();
+    coordinator.discovered(signed(&manifest), 150).unwrap();
+    coordinator.approve(150).unwrap();
+    assert!(coordinator.is_taxonomy_only());
+    assert!(coordinator.begin_activation().is_err(), "unprepared references cannot activate");
+    coordinator.artifact_prepared(ArtifactKind::Taxonomy).unwrap();
+    assert!(!coordinator.activation_due());
+    coordinator.begin_activation().unwrap();
+    let mut prepared = device;
+    prepared.taxonomy_release = 2;
+    coordinator.activated(prepared).unwrap();
+    assert!(coordinator.record().approved.is_none());
+}
+
 
 #[test]
 fn discovery_failures_are_silent_and_approved_plan_is_pinned() {

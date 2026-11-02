@@ -2,12 +2,17 @@
 
 use async_channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet};
+use std::mem::swap;
 
 use crate::reading_positions::ReadingPositionPolicy;
 use crate::scheduler::SyncScheduler;
 use library_model::{BookDownloadStatus, DownloadState, LibraryUpdate};
 use sync_common::BookId;
 use tokio::sync::watch;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::Notify;
 
 #[derive(Clone, Debug)]
 pub enum LibraryEvent {
@@ -17,7 +22,7 @@ pub enum LibraryEvent {
     ReadingPositionsSelected(Vec<(BookId, u64)>),
     /// Metadata acknowledgement may have made covers uploadable.
     AssetWorkAvailable,
-    /// File replay finished and admitted uploads; enrichment can look again.
+    /// File replay prepared durable uploads; enrichment can look again.
     FilesPrepared,
     ThumbnailGenerated {
         content_hash: BookId,
@@ -55,6 +60,9 @@ pub enum LibraryEvent {
 /// on the owning library thread; emitting an event never accesses that state.
 #[derive(Clone)]
 pub struct LibraryEventRouter {
+    pub text_search: watch::Sender<()>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub annotation_exports: Arc<Notify>,
     sender: Sender<LibraryEvent>,
     pub reading_positions: watch::Receiver<ReadingPositionPolicy>,
     pub sync: SyncScheduler,
@@ -68,8 +76,18 @@ impl LibraryEventRouter {
         let (sender, receiver) = async_channel::unbounded();
         let (position_updates, reading_positions) = watch::channel(ReadingPositionPolicy::default());
         (
-            Self { sender, reading_positions, sync, assets, files, enrichment },
-            LibraryEventState { receiver, position_policy: ReadingPositionPolicy::default(), position_updates, updates: Vec::new(), latest_downloads: HashMap::new(), directory_imports: HashSet::new(), closed: false },
+            Self {
+                #[cfg(not(target_arch = "wasm32"))]
+                annotation_exports: Arc::new(Notify::new()),
+                text_search: watch::channel(()).0,
+                sender,
+                reading_positions,
+                sync,
+                assets,
+                files,
+                enrichment,
+            },
+            LibraryEventState { receiver, position_updates, updates: Vec::new(), latest_downloads: HashMap::new(), directory_imports: HashSet::new(), closed: false },
         )
     }
 
@@ -93,6 +111,13 @@ impl LibraryEventRouter {
     }
 
     fn route(&self, event: &LibraryEvent) {
+        if matches!(event, LibraryEvent::ContentsChanged | LibraryEvent::FilesPrepared | LibraryEvent::ImportComplete { .. } | LibraryEvent::ScanComplete { .. } | LibraryEvent::DownloadStatusChanged { .. }) {
+            self.text_search.send_replace(());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(event, LibraryEvent::ContentsChanged | LibraryEvent::BooksUploaded | LibraryEvent::ImportComplete { .. } | LibraryEvent::ScanComplete { .. } | LibraryEvent::DownloadStatusChanged { state: DownloadState::Downloaded, .. }) {
+            self.annotation_exports.notify_one();
+        }
         match event {
             LibraryEvent::BooksUploaded => self.sync.wake(),
             LibraryEvent::AssetWorkAvailable | LibraryEvent::ThumbnailGenerated { .. } => self.assets.wake(),
@@ -101,8 +126,8 @@ impl LibraryEventRouter {
                 self.assets.wake();
                 self.files.wake();
             }
-            LibraryEvent::DownloadStatusChanged { content_hash, state: DownloadState::Downloaded } => {
-                self.assets.wake_hashes(vec![*content_hash]);
+            LibraryEvent::DownloadStatusChanged { state: DownloadState::Downloaded, .. } => {
+                self.assets.wake();
                 self.files.wake();
             }
             _ => {}
@@ -113,7 +138,6 @@ impl LibraryEventRouter {
 /// Exclusively owned by the library actor. Download observations and import
 /// tracking are operational state, independent of subscriber bookkeeping.
 pub struct LibraryEventState {
-    position_policy: ReadingPositionPolicy,
     position_updates: watch::Sender<ReadingPositionPolicy>,
     receiver: Receiver<LibraryEvent>,
     closed: bool,
@@ -123,9 +147,22 @@ pub struct LibraryEventState {
 }
 
 impl LibraryEventState {
+    /// Keep subscribers and pending reading-position policy when folder recovery
+    /// rebuilds the session's workers and storage handles.
+    pub fn restart(&mut self, mut next: Self) {
+        let position_policy = self.position_updates.borrow().clone();
+        self.receiver.close();
+        swap(&mut self.receiver, &mut next.receiver);
+        swap(&mut self.position_updates, &mut next.position_updates);
+        self.position_updates.send_replace(position_policy);
+        self.latest_downloads.clear();
+        self.directory_imports.clear();
+        send_update(&mut self.updates, LibraryUpdate::Scanning(false));
+        send_update(&mut self.updates, LibraryUpdate::Contents);
+    }
+
     pub fn reading_position_changed(&mut self, hash: BookId, router: &LibraryEventRouter) {
-        self.position_policy.changed(hash, web_time::Instant::now());
-        self.position_updates.send_replace(self.position_policy.clone());
+        self.position_updates.send_modify(|policy| policy.changed(hash, web_time::Instant::now()));
         // Every edit schedules its quiet deadline. An earlier maximum-wait
         // wake is retained by the scheduler; unrelated passes re-arm it.
         router.sync.wake_after(std::time::Duration::from_secs(5));
@@ -193,8 +230,7 @@ impl LibraryEventState {
         }
         let event = match event {
             LibraryEvent::ReadingPositionsSelected(positions) => {
-                self.position_policy.selected(&positions);
-                self.position_updates.send_replace(self.position_policy.clone());
+                self.position_updates.send_modify(|policy| policy.selected(&positions));
                 return;
             }
             LibraryEvent::DirectoryImportStarted { id } => {
@@ -271,6 +307,28 @@ mod tests {
     }
 
     #[test]
+    fn sync_status_reaches_all_subscribers_without_scheduling_another_pass() {
+        let (sync, sync_requests) = SyncScheduler::new();
+        let (assets, asset_requests) = SyncScheduler::new();
+        let (files, file_requests) = SyncScheduler::new();
+        let (enrichment, enrichment_requests) = SyncScheduler::new();
+        let (router, mut state) = LibraryEventRouter::new(sync, assets, files, enrichment);
+        let first = state.subscribe_updates();
+        let second = state.subscribe_updates();
+
+        router.publish_update(LibraryUpdate::SyncStatusChanged);
+        state.drain(&router);
+
+        assert_eq!(first.try_recv().unwrap(), LibraryUpdate::SyncStatusChanged);
+        assert_eq!(second.try_recv().unwrap(), LibraryUpdate::SyncStatusChanged);
+        assert!(first.try_recv().is_err());
+        assert!(second.try_recv().is_err());
+        for requests in [sync_requests, asset_requests, file_requests, enrichment_requests] {
+            assert!(requests.try_recv().is_err());
+        }
+    }
+
+    #[test]
     fn import_bracket_suppresses_commits_and_duplicate_completions() {
         let (router, mut state, sync) = fixture();
         let updates = state.subscribe_updates();
@@ -301,6 +359,31 @@ mod tests {
         router.notify_contents_changed();
         state.drain(&router);
         assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Contents);
+    }
+
+    #[test]
+    fn download_completion_wakes_durable_workers_and_keeps_the_presentation_identity() {
+        let (sync, sync_requests) = SyncScheduler::new();
+        let (assets, asset_requests) = SyncScheduler::new();
+        let (files, file_requests) = SyncScheduler::new();
+        let (enrichment, enrichment_requests) = SyncScheduler::new();
+        let (router, mut state) = LibraryEventRouter::new(sync, assets, files, enrichment);
+        let updates = state.subscribe_updates();
+        let hash = BookId::from_bytes([7; 32]);
+        for _ in 0..2 {
+            router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded });
+        }
+        state.drain(&router);
+        for requests in [asset_requests, file_requests] {
+            for _ in 0..2 {
+                assert!(matches!(requests.try_recv().unwrap(), SyncRequest::Wake));
+            }
+            assert!(requests.try_recv().is_err());
+        }
+        assert!(sync_requests.try_recv().is_err());
+        assert!(enrichment_requests.try_recv().is_err());
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Download(BookDownloadStatus::new(hash, DownloadState::Downloaded)));
+        assert!(updates.try_recv().is_err(), "duplicate completion only wakes workers");
     }
 
     #[test]
@@ -342,6 +425,36 @@ mod tests {
         router.emit(LibraryEvent::ReadingPositionsSelected(current.revisions([hash])));
         state.drain(&router);
         assert!(router.reading_positions.borrow().revisions([hash]).is_empty());
+    }
+
+    #[test]
+    fn restart_preserves_pending_positions_and_late_selection_cannot_clear_new_edits() {
+        let (old_router, mut state, _) = fixture();
+        let updates = state.subscribe_updates();
+        let first = BookId::from_bytes([7; 32]);
+        let second = BookId::from_bytes([8; 32]);
+        state.reading_position_changed(first, &old_router);
+        state.reading_position_changed(second, &old_router);
+        let before_restart = old_router.reading_positions.borrow().clone();
+        let selected = before_restart.revisions([first, second]);
+
+        let (router, next, _) = fixture();
+        state.restart(next);
+        assert!(old_router.sender.is_closed());
+        assert!(old_router.reading_positions.has_changed().is_err());
+        assert_eq!(router.reading_positions.borrow().revisions([first, second]), selected);
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Scanning(false));
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Contents);
+
+        state.reading_position_changed(first, &router);
+        router.emit(LibraryEvent::ReadingPositionsSelected(selected.clone()));
+        state.drain(&router);
+        let current = router.reading_positions.borrow().clone();
+        assert!(current.revisions([second]).is_empty());
+        assert_eq!(current.revisions([first]).len(), 1);
+        assert_ne!(current.revisions([first]), before_restart.revisions([first]));
+        assert_eq!(before_restart.revisions([first, second]), selected);
+        assert!(updates.try_recv().is_err());
     }
 
     #[test]

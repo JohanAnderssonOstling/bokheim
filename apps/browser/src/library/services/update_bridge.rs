@@ -9,7 +9,17 @@ use library_backend::LibraryClient;
 use library_model::LibraryUpdate;
 use sync_common::{BookId, LibraryId};
 
+/// Rows seed availability until the download stream publishes a newer state.
+pub(crate) fn initial_download_state(downloaded: bool, requested: bool) -> DownloadState {
+    match (downloaded, requested) {
+        (true, _) => DownloadState::Downloaded,
+        (false, true) => DownloadState::Queued,
+        (false, false) => DownloadState::NotDownloaded,
+    }
+}
+
 pub(crate) struct LibraryContentsChanged;
+pub(crate) struct LibraryAnnotationsChanged;
 
 pub(crate) struct LibraryScanChanged;
 
@@ -18,9 +28,7 @@ pub(crate) struct LibraryCoversChanged {
 }
 
 /// Library-wide invalidation, emitted only when file availability changes.
-pub(crate) struct LibraryDownloadChanged {
-    pub(crate) status: BookDownloadStatus,
-}
+pub(crate) struct LibraryDownloadChanged;
 
 impl LibraryCoversChanged {
     pub(crate) fn contains(&self, content_hash: &BookId) -> bool {
@@ -50,8 +58,10 @@ pub(crate) struct LibraryUpdateBridge {
 }
 
 impl EventEmitter<LibraryContentsChanged> for LibraryUpdateBridge {}
+impl EventEmitter<LibraryAnnotationsChanged> for LibraryUpdateBridge {}
 impl EventEmitter<LibraryCoversChanged> for LibraryUpdateBridge {}
 impl EventEmitter<LibraryDownloadChanged> for LibraryUpdateBridge {}
+impl EventEmitter<library_model::TextSearchRemoval> for LibraryUpdateBridge {}
 impl EventEmitter<LibraryScanChanged> for LibraryUpdateBridge {}
 
 impl LibraryUpdateBridge {
@@ -145,15 +155,7 @@ impl LibraryUpdateBridge {
     /// stream owns the state; a later browse response cannot roll progress or
     /// completion back to an older row snapshot.
     pub(crate) fn track_download(&mut self, content_hash: BookId, downloaded: bool, requested: bool) {
-        self.downloads.entry(content_hash).or_insert_with(|| {
-            if downloaded {
-                DownloadState::Downloaded
-            } else if requested {
-                DownloadState::Queued
-            } else {
-                DownloadState::NotDownloaded
-            }
-        });
+        self.downloads.entry(content_hash).or_insert_with(|| initial_download_state(downloaded, requested));
     }
 
     fn set_download_state(&mut self, content_hash: BookId, state: DownloadState, cx: &mut Context<Self>) {
@@ -169,7 +171,7 @@ impl LibraryUpdateBridge {
         // Only navigators need library-wide availability invalidation. Progress
         // goes directly to subscribers of this book, without visiting other cards.
         if matches!(state, DownloadState::Downloaded | DownloadState::NotDownloaded) {
-            cx.emit(LibraryDownloadChanged { status: BookDownloadStatus::new(content_hash, state) });
+            cx.emit(LibraryDownloadChanged);
         }
     }
 
@@ -180,9 +182,8 @@ impl LibraryUpdateBridge {
 
     fn refresh_book_count(&mut self, cx: &mut Context<Self>) {
         let library = self.library.clone();
-        let load = async move { library.book_count().await };
         self._book_count_request = Some(cx.spawn(async move |bridge, cx| {
-            let result = load.await;
+            let result = library.book_count().await;
             cx.defer_update(bridge, |bridge, cx| match result {
                 Ok(book_count) => {
                     if bridge.book_count != Some(book_count) {
@@ -211,6 +212,12 @@ impl LibraryUpdateBridge {
         if contents {
             cx.emit(LibraryContentsChanged);
         }
+        if batch.annotations {
+            cx.emit(LibraryAnnotationsChanged);
+        }
+        for removal in batch.text_search_removals {
+            cx.emit(removal);
+        }
         if !covers.is_empty() {
             cx.emit(LibraryCoversChanged { content_hashes: covers.into() });
         }
@@ -225,6 +232,8 @@ impl LibraryUpdateBridge {
 #[derive(Default)]
 struct UpdateBatch {
     contents: bool,
+    annotations: bool,
+    text_search_removals: Vec<library_model::TextSearchRemoval>,
     covers: Vec<BookId>,
     /// Kept per book: each status names a different book, or supersedes an
     /// earlier status for the same one.
@@ -236,7 +245,9 @@ struct UpdateBatch {
 impl UpdateBatch {
     fn absorb(&mut self, update: LibraryUpdate) {
         match update {
-            LibraryUpdate::Contents => self.contents = true,
+            LibraryUpdate::Contents | LibraryUpdate::ReadingProgress(_) => self.contents = true,
+            LibraryUpdate::Annotations => self.annotations = true,
+            LibraryUpdate::TextSearchRemoved(removal) => self.text_search_removals.push(removal),
             LibraryUpdate::Covers(content_hashes) => self.covers.extend(content_hashes),
             LibraryUpdate::Download(status) => {
                 self.downloads.retain(|existing| existing.content_hash != status.content_hash);
@@ -247,8 +258,8 @@ impl UpdateBatch {
                 self.download_failures.push((content_hash, failure));
             }
             LibraryUpdate::Scanning(scanning) => self.scanning = Some(scanning),
-            // Catalog imports own their progress subscriptions and toasts.
-            LibraryUpdate::CatalogImport { .. } => {}
+            // These have their own subscribers and do not change book views.
+            LibraryUpdate::CatalogImport { .. } | LibraryUpdate::SyncStatusChanged | LibraryUpdate::AnnotationExportStatusChanged => {}
         }
     }
 }
@@ -259,7 +270,15 @@ mod tests {
     use crate::navigation::LibrarySession;
     use gpui::TestAppContext;
     use library_model::DownloadProgress;
-    use std::cell::{Cell, RefCell};
+    use std::cell::Cell;
+
+    #[test]
+    fn reading_progress_refreshes_shelf_cards_without_invalidating_annotations() {
+        let mut batch = UpdateBatch::default();
+        batch.absorb(LibraryUpdate::ReadingProgress(BookId::from_bytes([1; 32])));
+        assert!(batch.contents);
+        assert!(!batch.annotations);
+    }
 
     #[test]
     fn download_alerts_survive_progress_coalescing_and_keep_each_books_failure() {
@@ -283,16 +302,16 @@ mod tests {
         let notifications = Rc::new(Cell::new(0));
         let observed = notifications.clone();
         let _observation = cx.update(|cx| cx.observe(&updates, move |_, _| observed.set(observed.get() + 1)));
-        let events = Rc::new(RefCell::new(Vec::new()));
+        let events = Rc::new(Cell::new(0));
         let received = events.clone();
-        let _subscription = cx.update(|cx| cx.subscribe(&updates, move |_, event: &LibraryDownloadChanged, _| received.borrow_mut().push(event.status.clone())));
+        let _subscription = cx.update(|cx| cx.subscribe(&updates, move |_, _: &LibraryDownloadChanged, _| received.set(received.get() + 1)));
         let hash = BookId::from_bytes([9; 32]);
-        let states = [DownloadState::Queued, DownloadState::Downloading(DownloadProgress::new(0.5).unwrap()), DownloadState::Downloaded];
+        let states = [DownloadState::Queued, DownloadState::Downloading(DownloadProgress::new(0.5).unwrap()), DownloadState::Downloaded, DownloadState::Downloaded, DownloadState::NotDownloaded, DownloadState::NotDownloaded];
         for state in states.iter().cloned() {
             updates.update(cx, |updates, cx| updates.set_download_state(hash, state, cx));
         }
         assert_eq!(notifications.get(), 0);
-        assert_eq!(*events.borrow(), vec![BookDownloadStatus::new(hash, DownloadState::Downloaded)]);
+        assert_eq!(events.get(), 2, "only availability changes invalidate library-wide contents");
         updates.update(cx, |updates, cx| updates.apply(UpdateBatch { scanning: Some(true), ..Default::default() }, cx));
         assert_eq!(notifications.get(), 1, "scan/loading changes must still reach the session");
     }

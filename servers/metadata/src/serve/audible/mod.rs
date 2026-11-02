@@ -46,7 +46,7 @@ pub(crate) fn client() -> &'static AudibleClient {
 impl AudibleClient {
     pub(crate) fn new() -> Self {
         Self {
-            http: reqwest::Client::builder().timeout(Duration::from_secs(8)).redirect(reqwest::redirect::Policy::none()).user_agent("Bokheim metadata enrichment").build().expect("HTTP client"),
+            http: http_response::client_builder().timeout(Duration::from_secs(8)).redirect(reqwest::redirect::Policy::none()).user_agent("Bokheim metadata enrichment").build().expect("HTTP client"),
             origins: Arc::new(vec![("us".into(), "https://api.audible.com".into(), "https://www.audible.com".into()), ("uk".into(), "https://api.audible.co.uk".into(), "https://www.audible.co.uk".into())]),
             audnexus_origin: "https://api.audnex.us".into(),
             cache: Arc::default(),

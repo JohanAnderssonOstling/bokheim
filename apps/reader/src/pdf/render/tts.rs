@@ -48,6 +48,9 @@ impl PdfReaderView {
 }
 
 impl TtsReader for PdfReaderView {
+    fn narration(&self) -> &tts::Narration {
+        &self.tts
+    }
     fn narration_mut(&mut self) -> &mut tts::Narration {
         &mut self.tts
     }
@@ -56,7 +59,12 @@ impl TtsReader for PdfReaderView {
         self.toc.chapter_at(self.pdf.read(cx).current_page())
     }
 
+    fn chapter_label(&self, _cx: &App) -> String {
+        self.toc.narration_chapter_label(self.tts_page)
+    }
+
     fn skip_tts_element(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.tts_navigation_changed(cx);
         if !self.tts.playing || self.tts.needs_restart {
             return;
         }
@@ -127,19 +135,20 @@ impl TtsReader for PdfReaderView {
                             // PDF fragments are geometry-based reading blocks.
                             let (rects, passages) = fragments.into_iter().map(|fragment| (fragment.rects, SpeechPassage::new(fragment.text, true))).unzip();
                             reader.tts_fragments = rects;
+                            reader.tts.set_chapter(reader.chapter_label(cx));
                             match reader.tts.start(passages, start) {
                                 Ok(Some(events)) => reader.tts.events_task = Some(tts::listen(events, cx)),
                                 Ok(None) => {}
                                 Err(error) => {
                                     reader.stop_tts(cx);
-                                    reader.tts.status = user_facing_error(&error, "Read aloud could not continue. Check your audio output and try again.").to_owned();
+                                    reader.tts.status = error.user_message().to_owned();
                                 }
                             }
                         }
                     }
                     Err(error) => {
                         reader.stop_tts(cx);
-                        reader.tts.status = user_facing_error(&error.to_string(), "Read aloud could not continue. Check your audio output and try again.").to_owned();
+                        reader.tts.status = user_facing_error(&error.to_string(), "Couldn't read this PDF page's text. Try another page or reopen the book.").to_owned();
                     }
                 }
                 cx.notify();
@@ -216,9 +225,9 @@ impl TtsReader for PdfReaderView {
                     self.advance_tts_page(cx);
                 }
             }
-            SpeechEvent::Failed { message, .. } => {
+            SpeechEvent::Failed { failure, message, .. } => {
                 self.stop_tts(cx);
-                self.tts.status = user_facing_error(&message, "Read aloud could not continue. Check your audio output and try again.").to_owned();
+                self.tts.status = tts::speech_error_message(failure, &message).to_owned();
             }
         }
         cx.notify();

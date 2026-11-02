@@ -10,6 +10,7 @@ autotests = false
 scanner = []
 
 [dependencies]
+description-storage = { path = "../../../../shared/description-storage" }
 blake3 = "1"
 content-address = { path = "../../../../shared/content-address", features = ["sqlite"] }
 client-runtime = { path = "../../../client-runtime" }
@@ -23,7 +24,7 @@ subject-projection = { path = "../../../../shared/subject-projection" }
 metadata-contract = { path = "../../../../shared/metadata-contract" }
 book-inspection = { path = "../book-inspection" }
 pdf-view-common = { path = "../../../../shared/pdf-view-common" }
-rusqlite = { version = "0.40.0", features = ["backup", "bundled", "functions", "hooks"] }
+rusqlite = { version = "0.40.0", features = ["backup", "bundled", "functions", "limits"] }
 include-sqlite-sql = "0.2.1"
 log = "0.4"
 serde_json = "1"
@@ -38,11 +39,8 @@ client-platform-web = { path = "../../../platforms/web" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 client-platform-native = { path = "../../../platforms/native" }
 
-
-
-[[test]]
-name = "versioned_state"
-path = "tests/versioned_state.rs"
+[dev-dependencies]
+rusqlite = { version = "0.40.0", features = ["hooks"] }
 
 [[test]]
 name = "catalog_pagination"

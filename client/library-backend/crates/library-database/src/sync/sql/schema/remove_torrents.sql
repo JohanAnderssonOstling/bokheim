@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS book_torrent;
+DROP TABLE IF EXISTS torrent_file;
+DROP TABLE IF EXISTS torrent;

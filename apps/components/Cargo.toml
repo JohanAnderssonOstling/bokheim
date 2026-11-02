@@ -9,6 +9,7 @@ kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-profile"]
 mobile = []
 
 [dependencies]
+book-model = { path = "../../shared/book-model", default-features = false }
 kobo-profile = { path = "../../shared/kobo-profile", optional = true }
 log = "0.4"
 web-time = "1"
@@ -26,13 +27,16 @@ unicode-normalization.workspace = true
 # Configure GPUI's shared decoder dependencies explicitly instead of enabling
 # its broad image-formats feature. Keep the same UI formats on every platform,
 # including raster images embedded inside SVGs.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 resvg = { version = "0.46", default-features = false, features = ["raster-images"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+gpui_wgpu.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["Window", "MediaQueryList"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

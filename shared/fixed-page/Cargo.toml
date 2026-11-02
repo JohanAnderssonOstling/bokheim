@@ -9,4 +9,4 @@ gpui = ["dep:gpui", "dep:image"]
 
 [dependencies]
 gpui = { workspace = true, optional = true }
-image = { version = "0.25", default-features = false, optional = true }
+image = { workspace = true, optional = true }

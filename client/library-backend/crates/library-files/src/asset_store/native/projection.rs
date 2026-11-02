@@ -1,19 +1,23 @@
-use client_platform_native::filesystem::parent_directory;
 pub(crate) use super::*;
+use client_platform_native::filesystem::parent_directory;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 pub(crate) use sync_common::DirId;
 // Native asset-store projections. The shared model owns paths;
 // these snapshots remember which physical paths this device has materialized.
 pub(crate) fn readable_path(handle: &Handle, name: String) -> Result<Option<PathBuf>, AssetStoreError> {
-    if !handle.enabled.load(std::sync::atomic::Ordering::Acquire) {
+    if !handle.enabled {
         return Ok(None);
     }
     if name.starts_with("book/") {
         return Err(AssetStoreError::operation("native books require explicit paths"));
     }
     let path = handle.assets_root.join(name);
-    Ok(path.is_file().then_some(path))
+    if path.is_file() {
+        return Ok(Some(path));
+    }
+    root_available(handle);
+    Ok(None)
 }
 
 pub(crate) fn evict_book_files(handle: &Handle, relative_paths: &[RelativeBookPath], hash: &BookId) -> Result<(), AssetStoreError> {
@@ -21,11 +25,15 @@ pub(crate) fn evict_book_files(handle: &Handle, relative_paths: &[RelativeBookPa
         let path = placement_path(handle, relative);
         if (path.is_file() || path.is_dir()) && content_matches(&path, hash)? {
             if path.is_dir() {
+                let sidecars = [audiobook_folder::discover_nfo(&path)?, audiobook_folder::discover_cue(&path)?, audiobook_folder::discover_cover(&path)?].into_iter().flatten().collect::<Vec<_>>();
                 for track in audiobook_folder::discover(&path)? {
                     std::fs::remove_file(&track.path)?;
                     if let Some(parent) = track.path.parent().filter(|parent| *parent != path.as_path()) {
                         let _ = std::fs::remove_dir(parent);
                     }
+                }
+                for sidecar in sidecars {
+                    std::fs::remove_file(sidecar.path)?;
                 }
                 let mapping = path.join(audiobook_folder::PATH_MAPPING_FILE);
                 if mapping.try_exists()? {
@@ -71,9 +79,7 @@ pub(crate) struct PreparedDirectory {
 
 impl PreparedDirectory {
     pub(crate) fn inspect(handle: &Handle, id: DirId, relative: &str, projected: Option<&str>, name: &str, sibling_names: &[String]) -> Result<Self, AssetStoreError> {
-        let relative = relative.to_owned();
-        let old = projected.map(str::to_owned);
-        let mut destination = library_path(handle, &relative);
+        let mut destination = library_path(handle, relative);
         let mut inspected = Vec::new();
         let mut record = |path: &Path| -> Result<bool, AssetStoreError> {
             let stamp = directory_entry_stamp(path)?;
@@ -86,9 +92,8 @@ impl PreparedDirectory {
         let marker_exists = record(&marker)?;
         let owned = marker_exists && std::fs::read_to_string(&marker)?.trim() == id.to_string();
         let chosen = if exists && !owned {
-            let mut occupied = std::fs::read_dir(parent_directory(&destination)?)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
-            occupied.extend(sibling_names.iter().cloned());
-            let chosen = library_replica::unique_folder_name(name, occupied.iter().map(String::as_str));
+            let occupied = std::fs::read_dir(parent_directory(&destination)?)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
+            let chosen = library_replica::unique_folder_name(name, occupied.iter().chain(sibling_names).map(String::as_str));
             destination.set_file_name(&chosen);
             exists = record(&destination)?;
             if exists {
@@ -98,9 +103,9 @@ impl PreparedDirectory {
         } else {
             None
         };
-        let missing_external = old.as_deref() == Some(relative.as_str()) && !exists && chosen.is_none();
+        let missing_external = projected == Some(relative) && !exists && chosen.is_none();
         let source = if !exists && !missing_external {
-            if let Some(old) = old.as_ref().filter(|old| *old != &relative || chosen.is_some()) {
+            if let Some(old) = projected.filter(|old| *old != relative || chosen.is_some()) {
                 let source = library_path(handle, old);
                 let source_exists = record(&source)?;
                 if source_exists && source.is_dir() {
@@ -134,7 +139,7 @@ impl PreparedDirectory {
             return Ok(true);
         }
         if let Some(source) = &self.source {
-            std::fs::rename(source, &self.destination)?;
+            crate::filesystem::rename_entry(source, &self.destination)?;
             sync_parent(source)?;
             sync_parent(&self.destination)?;
         } else if !self.exists {
@@ -169,9 +174,13 @@ pub(crate) fn create_directory(handle: &Handle, relative: &str, id: DirId) -> Re
         // than risk removing contents created concurrently by another process.
         let mut marker = OpenOptions::new().write(true).create_new(true).open(destination.join(".biblos_uuid"))?;
         marker.write_all(id.to_string().as_bytes())?;
-        marker.sync_all()?;
-        sync_parent(&destination.join(".biblos_uuid"))?;
-        sync_parent(&destination)?;
+        if handle.import_batch.is_some() {
+            sync_import_file(handle, &destination.join(".biblos_uuid"))?;
+        } else {
+            marker.sync_all()?;
+            sync_parent(&destination.join(".biblos_uuid"))?;
+            sync_parent(&destination)?;
+        }
         return Ok(chosen);
     }
     unreachable!("numeric name suffix space is unbounded")

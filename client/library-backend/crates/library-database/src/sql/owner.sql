@@ -32,9 +32,10 @@ UPDATE book_transfer SET server_has_book = 0 WHERE server_has_book;
 -- name: owner_cloud_storage_candidates?
 -- Verified local placements; Rust keeps one live placement per content hash
 -- and queues its immutable bytes for upload.
-SELECT b.content_hash, bd.dir_id, bd.size_bytes
+SELECT b.content_hash, bd.dir_id, COALESCE(c.size_bytes,bd.size_bytes)
 FROM book_dir bd
 JOIN book b ON b.row_id = bd.book_row_id AND b.deleted_at IS NULL
+LEFT JOIN book_content c ON c.book_id=b.content_hash
 WHERE bd.deleted_at IS NULL AND bd.size_bytes > 0
 ORDER BY b.content_hash, bd.dir_id;
 

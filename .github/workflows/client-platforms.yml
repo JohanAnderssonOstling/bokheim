@@ -89,7 +89,9 @@ jobs:
           python shared/pdfium/prepare.py --target "$target"
       - name: UI panic lint checks
         if: inputs.fixture_only != true
-        run: cargo clippy --release --locked --no-deps --lib -p browser-ui -p reader-ui -p ui-components -p application-shell -p audiobook-player -p html-gpui
+        run: |
+          cargo clippy --release --locked --no-deps --lib -p browser-ui -p reader-ui -p ui-components -p application-shell -p audiobook-player
+          cargo clippy --release --locked --no-deps --lib --manifest-path ../HtmlEngine/adapters/Cargo.toml -p html-gpui
       - name: Windows standalone PDF runtime
         if: inputs.fixture_only != true
         run: cargo test --release -p pdf-reader-core --test packaged_runtime

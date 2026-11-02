@@ -8,16 +8,25 @@
 use std::{collections::HashMap, sync::Arc};
 
 use book_model::{BookTocEntry, ChapterReadStatus};
+use gpui_component::tree::TreeItem;
 use html::document::{MarkupSyntax, decode_html_bytes, parse_document};
 use html::resources::ResourceProvider;
-use html_view_core::cfi::parse_source_position;
-use html_view_core::{SourcePosition, TocEntry};
+use skrift_column_paginator::cfi::PublicationCfi;
+#[cfg(test)]
+use skrift_column_paginator::cfi::parse_source_position;
+use skrift_column_paginator::{SourcePosition, TocEntry};
 
 use crate::shell::annotation_tree::{AnnotationBranch, AnnotationTree};
 
 /// Where a TOC link points, as `(document index, optional anchor)`.
 pub(crate) type Resolution = (usize, Option<String>);
 pub(crate) type SourcePositions = HashMap<usize, Vec<(Vec<usize>, usize)>>;
+
+const TOC_ID_PREFIX: &str = "epub-toc-";
+
+fn toc_id(order: usize) -> String {
+    format!("{TOC_ID_PREFIX}{order}")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedTocEntry {
@@ -28,28 +37,72 @@ pub(crate) struct ResolvedTocEntry {
 
 #[derive(Default)]
 pub(crate) struct TocState {
+    pub(crate) cfi: PublicationCfi,
     entries: Arc<Vec<TocEntry>>,
+    /// Navigation targets in the same preorder as sidebar row IDs.
+    sidebar_targets: Vec<String>,
     read_entries: Vec<BookTocEntry>,
     pub(crate) read_status: ChapterReadStatus,
     resolutions: Vec<ResolvedTocEntry>,
     /// The link the reader is currently inside, if any.
     active_link: Option<String>,
+    active_sidebar_id: Option<String>,
     position: Option<SourcePosition>,
     source_positions: SourcePositions,
     document_count: usize,
+    loaded: bool,
 }
 
 impl TocState {
-    pub(crate) fn set(&mut self, entries: Vec<TocEntry>, resolutions: Vec<ResolvedTocEntry>) {
-        fn convert(entries: &[TocEntry]) -> Vec<BookTocEntry> {
-            entries.iter().map(|entry| BookTocEntry { title: entry.title.clone(), target: entry.link.clone(), children: convert(&entry.children) }).collect()
+    /// Sidebar identity uses the full publisher tree's preorder position,
+    /// including unresolved headings and repeated destinations.
+    pub(crate) fn tree_items(&self) -> Vec<TreeItem> {
+        fn visit(entries: &[TocEntry], next: &mut usize) -> Vec<TreeItem> {
+            entries
+                .iter()
+                .map(|entry| {
+                    let id = toc_id(*next);
+                    *next += 1;
+                    TreeItem::new(id, entry.title.clone()).children(visit(&entry.children, next))
+                })
+                .collect()
         }
-        self.read_entries = convert(&entries);
+        visit(&self.entries, &mut 0)
+    }
+
+    /// Hrefs stay navigation targets rather than sidebar row identities.
+    pub(crate) fn link_for_id(&self, id: &str) -> Option<&str> {
+        let order = id.strip_prefix(TOC_ID_PREFIX)?.parse::<usize>().ok()?;
+        self.sidebar_targets.get(order).map(String::as_str)
+    }
+
+    pub(crate) fn active_id(&self) -> Option<&str> {
+        self.active_sidebar_id.as_deref()
+    }
+
+    pub(crate) fn is_read(&self, id: &str) -> bool {
+        self.link_for_id(id).is_some_and(|link| self.read_status.completed.contains(link))
+    }
+
+    pub(crate) fn set(&mut self, entries: Vec<TocEntry>, resolutions: Vec<ResolvedTocEntry>) {
+        self.loaded = false;
+        fn convert(entries: &[TocEntry], targets: &mut Vec<String>) -> Vec<BookTocEntry> {
+            entries
+                .iter()
+                .map(|entry| {
+                    targets.push(entry.link.clone());
+                    BookTocEntry { title: entry.title.clone(), target: entry.link.clone(), children: convert(&entry.children, targets) }
+                })
+                .collect()
+        }
+        self.sidebar_targets.clear();
+        self.read_entries = convert(&entries, &mut self.sidebar_targets);
         self.entries = Arc::new(entries);
         self.resolutions = resolutions;
         self.source_positions.clear();
         self.document_count = self.resolutions.iter().map(|entry| entry.document + 1).max().unwrap_or(0);
         self.refresh_position();
+        self.update_active_sidebar_id();
     }
 
     /// Retain early renderer positions even when the TOC is still loading.
@@ -99,13 +152,29 @@ impl TocState {
     }
 
     pub(crate) fn install_source_positions(&mut self, positions: SourcePositions, document_count: usize) {
+        self.loaded = true;
         self.source_positions = positions;
         self.document_count = document_count;
         self.refresh_position();
     }
 
+    pub(crate) fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    /// Before the first chapter, use the first entry. With no TOC, ordinal
+    /// zero represents the whole book and remains in the ungrouped sidebar.
+    pub(crate) fn bookmark_ordinal_for_cfi(&self, cfi: &str) -> usize {
+        self.ordinal_for_cfi(cfi).unwrap_or(0)
+    }
+
     pub(crate) fn ordinal_for_cfi(&self, cfi: &str) -> Option<usize> {
-        self.ordinal_for_position(&parse_source_position(cfi)?)
+        self.ordinal_for_position(&self.cfi.parse_source_position(cfi)?)
+    }
+
+    /// Resolve a document without inventing a CFI location inside it.
+    pub(crate) fn ordinal_for_document(&self, document: usize) -> Option<usize> {
+        self.ordinal_for_position(&SourcePosition { document, path: Vec::new(), utf16_offset: None })
     }
 
     pub(crate) fn ordinal_for_position(&self, position: &SourcePosition) -> Option<usize> {
@@ -139,20 +208,20 @@ impl TocState {
         result
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
     pub(crate) fn chapter_for_cfi(&self, cfi: &str) -> Option<usize> {
         let ordinal = self.ordinal_for_cfi(cfi)?;
         self.chapter_ordinals().into_iter().rev().find(|chapter| *chapter <= ordinal)
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn chapter_for_document(&self, document: usize) -> Option<usize> {
-        self.chapter_for_cfi(&format!("epubcfi(/6/{}!/0)", (document + 1) * 2))
+        let ordinal = self.ordinal_for_document(document)?;
+        self.chapter_ordinals().into_iter().rev().find(|chapter| *chapter <= ordinal)
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn narration_excludes_cfi(&self, cfi: &str) -> bool {
-        let Some(position) = parse_source_position(cfi) else { return false };
+        let Some(position) = self.cfi.parse_source_position(cfi) else { return false };
         let Some(ordinal) = self.ordinal_for_position(&position) else { return false };
         let entry = &self.resolutions[ordinal];
         // The sidebar falls back to an earlier entry across documents and
@@ -178,7 +247,12 @@ impl TocState {
             return false;
         }
         self.active_link = active_link;
+        self.update_active_sidebar_id();
         true
+    }
+
+    fn update_active_sidebar_id(&mut self) {
+        self.active_sidebar_id = self.active_link.as_ref().and_then(|active| self.sidebar_targets.iter().position(|link| link == active)).map(toc_id);
     }
 
     /// Resolves every link depth-first, preserving the publisher's TOC order
@@ -319,6 +393,49 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_ordinals_wait_for_source_positions_and_support_books_without_a_toc() {
+        let mut toc = TocState::default();
+        assert!(!toc.is_loaded());
+        toc.set(vec![], vec![]);
+        assert!(!toc.is_loaded());
+        toc.install_source_positions(HashMap::new(), 1);
+        assert!(toc.is_loaded());
+        assert_eq!(toc.bookmark_ordinal_for_cfi("epubcfi(/6/2!/4/2/1:0)"), 0);
+        assert_eq!(toc.annotation_tree([Some(0)]).other, vec![0]);
+    }
+
+    #[test]
+    fn sidebar_positions_include_unresolved_headings_and_repeated_names_and_links() {
+        let mut toc = toc(vec![entry("Part", vec![entry("Chapter", vec![]), entry("Chapter", vec![])]), entry("Last", vec![])]);
+        let items = toc.tree_items();
+        assert_eq!(items[0].id, "epub-toc-0");
+        assert_eq!(items[0].children[0].id, "epub-toc-1");
+        assert_eq!(items[0].children[1].id, "epub-toc-2");
+        assert_eq!(items[1].id, "epub-toc-3");
+        assert_eq!(toc.link_for_id("epub-toc-0"), Some("Part.xhtml"));
+        assert_eq!(toc.link_for_id("epub-toc-1"), Some("Chapter.xhtml"));
+        assert_eq!(toc.link_for_id("epub-toc-2"), Some("Chapter.xhtml"));
+        assert_eq!(toc.link_for_id("epub-toc-3"), Some("Last.xhtml"));
+        assert_eq!(toc.link_for_id("Chapter.xhtml"), None);
+        assert_eq!(toc.link_for_id("epub-toc-4"), None);
+        assert_eq!(toc.link_for_id("epub-toc-invalid"), None);
+
+        toc.set_active_link(Some("Chapter.xhtml".into()));
+        assert_eq!(toc.active_id().as_deref(), Some("epub-toc-1"));
+        toc.read_status.completed.insert("Chapter.xhtml".into());
+        assert!(toc.is_read("epub-toc-1"));
+        assert!(toc.is_read("epub-toc-2"));
+        assert!(!toc.is_read("epub-toc-0"));
+        let target = toc.link_for_id("epub-toc-2").unwrap().to_owned();
+        toc.reset_chapter_read_status(&target);
+        assert!(!toc.is_read("epub-toc-1"));
+        assert!(!toc.is_read("epub-toc-2"));
+        // Sidebar positions include Part, while persisted annotation ordinals
+        // still refer to the resolved entries only.
+        assert_eq!(toc.ordinal_of_active(), Some(0));
+    }
+
+    #[test]
     fn narration_skips_named_sections_without_leaking_before_or_after_them() {
         let entries = vec![TocEntry { title: "Contents".into(), link: "contents".into(), children: vec![] }, TocEntry { title: "Chapter One".into(), link: "one".into(), children: vec![] }];
         let resolutions = TocState::resolve(&entries, |link| Some((0, Some(link.into()))));
@@ -358,6 +475,26 @@ mod tests {
         state.install_source_positions(HashMap::from([(0, positions)]), 1);
         assert_eq!(state.chapter_for_cfi(&section_cfi), Some(0));
         assert_eq!(state.chapter_for_cfi(&second_cfi), Some(2));
+    }
+
+    #[test]
+    fn document_lookup_preserves_chapter_fallbacks_without_a_source_path() {
+        let entries =
+            vec![TocEntry { title: "One".into(), link: "one".into(), children: vec![TocEntry { title: "Section".into(), link: "section".into(), children: vec![] }] }, TocEntry { title: "Two".into(), link: "two".into(), children: vec![] }];
+        let resolutions = TocState::resolve(&entries, |link| Some((1, Some(link.into()))));
+        let mut state = TocState::default();
+        state.set(entries, resolutions);
+        state.install_source_positions(HashMap::from([(1, vec![(vec![4, 2], 0), (vec![4, 6], 1), (vec![4, 10], 2)])]), 3);
+
+        // A document-only target cannot distinguish its anchors, so use the
+        // first entry; a precise CFI still selects the later chapter.
+        assert_eq!(state.ordinal_for_document(1), Some(0));
+        assert_eq!(state.chapter_for_document(1), Some(0));
+        assert_eq!(state.chapter_for_cfi("epubcfi(/6/4!/4/10/1:0)"), Some(2));
+        assert_eq!(state.chapter_for_document(0), None);
+        assert_eq!(state.chapter_for_document(2), Some(2));
+        assert_eq!(state.chapter_for_document(3), None);
+        assert_eq!(state.chapter_for_document(usize::MAX), None);
     }
 
     #[test]
@@ -517,7 +654,7 @@ mod tests {
         let text = html::document::DocumentTextIndex::from_parsed(&parsed).unwrap();
         let start = text.text().find("Annotated text").unwrap();
         let position = text.source_position_in(start..start + 9).unwrap();
-        let cfi = html_view_core::cfi::generate_cfi_from_source_position(0, &position);
+        let cfi = skrift_column_paginator::cfi::generate_cfi_from_source_position(0, &position);
         assert_eq!(state.ordinal_for_cfi(&cfi), Some(1));
         let tree = state.annotation_tree([state.ordinal_for_cfi(&cfi)]);
         assert!(tree.other.is_empty());

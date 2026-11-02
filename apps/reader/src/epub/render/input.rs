@@ -12,7 +12,7 @@ use crate::shell::state_panel::SidebarTab;
 use crate::shell::toolbar::SidebarTarget;
 use crate::{
     CloseSearch, DecreaseColumnWidth, DecreaseFont, DecreaseScale, FocusReaderSearch, IncreaseColumnWidth, IncreaseFont, IncreaseScale, NextLine, NextPage, NextSection, NextSidebarTab, PreviousLine, PreviousPage, PreviousSection,
-    PreviousSidebarTab, ReturnToLibrary, ToggleFullscreen, ToggleSearch, ToggleSidebar, ToggleToc,
+    PreviousSidebarTab, ReturnToLibrary, RevealReaderChrome, ToggleFullscreen, ToggleSearch, ToggleSidebar, ToggleToc,
 };
 
 impl CommandTarget<PreviousPage> for ReaderView {
@@ -24,8 +24,8 @@ impl CommandTarget<PreviousPage> for ReaderView {
 impl ReaderView {
     /// Every page navigation source shares one transition, including taps,
     /// keys, wheel bursts and completed Android swipes.
-    fn turn_page(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_touch_selection(cx);
+    pub(super) fn turn_page(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_selection(cx);
         self.chrome.hide_for_motion(window, cx);
         let LoadState::Ready(renderer) = &self.load_state else { return };
         let renderer = renderer.clone();
@@ -42,14 +42,22 @@ impl ReaderView {
     }
 
     pub(crate) fn native_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dictionary.take().is_some() {
+            self.dismiss_selection(cx);
+            self.focus_document(window, cx);
+            cx.notify();
+            return;
+        }
         if self.image_preview.take().is_some() || self.footnote.take().is_some() || self.context_sheet.take().is_some() {
             cx.notify();
         } else if self.marks.selected().is_some() {
             self.close_annotation_popup(cx);
             self.focus_document(window, cx);
-        } else if !self.dismiss_touch_selection(cx) {
+        } else if !self.dismiss_selection(cx) {
             if self.sidebar.is_visible() && self.chrome.is_visible() {
                 self.hide_sidebar(window, cx);
+            } else if self.history.availability().0 {
+                self.navigate_history(false, window, cx);
             } else {
                 self.close_reader(window, cx);
             }
@@ -68,7 +76,7 @@ impl CommandTarget<PreviousLine> for ReaderView {
         self.page_turn = None;
         self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
-        self.dismiss_touch_selection(cx);
+        self.dismiss_selection(cx);
         self.with_renderer(cx, |renderer, cx| {
             if !renderer.step_reading_ruler(false, cx) {
                 renderer.previous_line(cx);
@@ -82,7 +90,7 @@ impl CommandTarget<NextLine> for ReaderView {
         self.page_turn = None;
         self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
-        self.dismiss_touch_selection(cx);
+        self.dismiss_selection(cx);
         self.with_renderer(cx, |renderer, cx| {
             if !renderer.step_reading_ruler(true, cx) {
                 renderer.next_line(cx);
@@ -93,7 +101,7 @@ impl CommandTarget<NextLine> for ReaderView {
 
 impl CommandTarget<PreviousSection> for ReaderView {
     fn execute(&mut self, _: &PreviousSection, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_touch_selection(cx);
+        self.dismiss_selection(cx);
         self.page_turn = None;
         self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
@@ -103,7 +111,7 @@ impl CommandTarget<PreviousSection> for ReaderView {
 
 impl CommandTarget<NextSection> for ReaderView {
     fn execute(&mut self, _: &NextSection, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_touch_selection(cx);
+        self.dismiss_selection(cx);
         self.page_turn = None;
         self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
@@ -149,6 +157,12 @@ impl CommandTarget<ToggleSidebar> for ReaderView {
 impl CommandTarget<ToggleToc> for ReaderView {
     fn execute(&mut self, _: &ToggleToc, window: &mut Window, cx: &mut Context<Self>) {
         self.select_sidebar_tab(SidebarTab::Contents, window, cx);
+    }
+}
+
+impl CommandTarget<RevealReaderChrome> for ReaderView {
+    fn execute(&mut self, _: &RevealReaderChrome, _: &mut Window, cx: &mut Context<Self>) {
+        self.chrome.show(cx);
     }
 }
 
@@ -214,7 +228,7 @@ impl CommandTarget<ToggleFullscreen> for ReaderView {
 /// toolbar's library button both go through `close_reader`.
 impl CommandTarget<ReturnToLibrary> for ReaderView {
     fn execute(&mut self, _: &ReturnToLibrary, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.dismiss_touch_selection(cx) {
+        if !self.dismiss_selection(cx) {
             self.close_reader(window, cx);
         }
     }

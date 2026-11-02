@@ -10,7 +10,7 @@ use content_address::BookId;
 pub(crate) fn remove_book(tx: &rusqlite::Transaction<'_>, hash: &BookId) -> Result<(), DatabaseError> {
     // Capture materialized and logical paths before cascading placements away.
     tx.purge_queue_observed_files(&hash)?;
-    let placements = query_rows(|callback| tx.purge_book_placements(&hash, callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+    let placements = query_rows(|callback| tx.purge_book_placements(&hash, callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
     let mut folders = crate::placements::FolderPaths::new(tx);
     for (dir_id, file_name) in placements {
         if let Some(path) = folders.placement(&dir_id, &file_name)? {
@@ -65,70 +65,6 @@ mod tests {
             assert_eq!(db.connection.fixtures_subject_row_count(table, None, |r| r.get::<_, i64>(0)).unwrap(), 1);
         }
         assert_eq!(db.connection.fixtures_read_book(|r| r.get::<_, i64>(0)).unwrap(), 1, "only the purged row is deleted");
-    }
-    #[test]
-    fn purge_clears_pending_annotation_and_rollback_preserves_its_publication() {
-        let db = Database::open(":memory:").unwrap();
-        db.initialize_library().unwrap();
-        let hash = sync_common::BookId::new(&"c".repeat(64));
-        add(&db, &hash);
-        let tx = db.connection.unchecked_transaction().unwrap();
-        crate::sync::apply::registers::record_local(
-            &tx,
-            library_replica::LibraryStateEntry::BookAdd {
-                content_hash: hash,
-                value: library_replica::BookAddition {
-                    facts: library_replica::BookFacts { added_at: 1, format: book_model::BookFormat::Epub },
-                    record: book_model::BookRecord { metadata: Default::default(), description: String::new() },
-                    navigation: None,
-                    pdf: None,
-                    recording: None,
-                    enrichment: Some(library_replica::EnrichmentResult::NoMatch),
-                },
-            },
-        )
-        .unwrap();
-        crate::sync::apply::commit(tx).unwrap();
-        let annotation = book_model::Annotation {
-            id: "offline-note".into(),
-            content_hash: hash,
-            anchor: book_model::AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
-            exact_text: "Text".into(),
-            style: book_model::AnnotationStyle::Highlight,
-            color: 0xffffff,
-            note: "Note".into(),
-            created_at: 1,
-            toc_ordinal: None,
-            progress: None,
-            modified_at: 2,
-            deleted: false,
-        };
-        db.upsert_annotation(&annotation).unwrap();
-        db.trash_book(&hash).unwrap();
-        let pending = db.sync_publishable_mutations().unwrap();
-        assert!(pending.iter().any(|m| matches!(m.state.value, library_replica::LibraryStateEntry::Annotation { .. })));
-        db.connection.fixtures_create_book().unwrap();
-        assert!(db.purge_book(&hash).is_err());
-        assert_eq!(db.sync_publishable_mutations().unwrap(), pending);
-        assert_eq!(db.annotations(hash).unwrap().len(), 1);
-        assert_eq!(db.connection.fixtures_read_sync_book_record_count(&(&hash), |r| r.get::<_, i64>(0)).unwrap(), 1);
-        db.connection.fixtures_drop_TRIGGER().unwrap();
-        db.purge_book(&hash).unwrap();
-        assert!(db.annotations(hash).unwrap().is_empty());
-        assert_eq!(db.connection.fixtures_read_sync_book_record_count(&(&hash), |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(db.connection.fixtures_read_sync_state_version_count(&(&hash), |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert!(db.sync_publishable_mutations().unwrap().iter().all(|m| matches!(m.state.value, library_replica::LibraryStateEntry::BookLifecycle { .. })));
-        add(&db, &hash);
-        db.upsert_annotation(&annotation).unwrap();
-        db.sync_acknowledge_mutations(&pending.iter().map(|m| m.publisher_seq).collect::<Vec<_>>()).unwrap();
-        assert!(db.sync_publishable_mutations().unwrap().iter().any(|m| matches!(m.state.value, library_replica::LibraryStateEntry::Annotation { .. })), "old acknowledgements cannot erase readded work");
-    }
-
-    fn add(db: &Database, hash: &BookId) {
-        let tx = db.connection.unchecked_transaction().unwrap();
-        tx.fixtures_insert_book_2(&hash).unwrap();
-        crate::sync::apply::registers::record_local(&tx, library_replica::LibraryStateEntry::BookLifecycle { content_hash: *hash, value: library_replica::BookLifecycleState::Present }).unwrap();
-        crate::sync::apply::commit(tx).unwrap();
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::extract::{asset_error, sync_error, AuthUser};
 use crate::state::AppState;
-use account_contract::{AccountSnapshotResponse, LibraryStorageUsage, StorageUsageResponse};
+use account_contract::{AccountSnapshotResponse, BookStorageUsage, LibraryStorageUsage, StorageUsageResponse, MAX_ACCOUNT_STORAGE_BOOKS};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
@@ -16,4 +16,10 @@ pub(crate) async fn get_snapshot(State(state): State<AppState>, user: AuthUser, 
     let storage = StorageUsageResponse { used_bytes: storage.used_bytes, reserved_bytes: storage.reserved_bytes, quota_bytes: storage.quota_bytes };
     let library_storage = library_storage.into_iter().map(|entry| LibraryStorageUsage { library_id: entry.library_id.to_string(), used_bytes: entry.used_bytes }).collect();
     server_wire_http::response(&headers, AccountSnapshotResponse { libraries, deleted_library_ids, storage, library_storage })
+}
+
+pub(crate) async fn get_book_storage(State(state): State<AppState>, user: AuthUser, headers: HeaderMap) -> Result<Response, StatusCode> {
+    let books = state.assets.book_storage_usage(&user.user_id, MAX_ACCOUNT_STORAGE_BOOKS).await.map_err(asset_error)?;
+    let books: Vec<_> = books.into_iter().map(|book| BookStorageUsage { content_hash: book.content_hash, used_bytes: book.used_bytes }).collect();
+    server_wire_http::response(&headers, books)
 }

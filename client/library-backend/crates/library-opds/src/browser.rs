@@ -87,42 +87,10 @@ pub struct StoreRequest {
 pub enum StoreEvent {
     Opened,
     Downloaded { path: PathBuf, #[serde(default)] download: Option<String> },
-    Magnet { url: String },
     CancelDownload { download: String },
-    TorrentFile { path: PathBuf, #[serde(default)] download: Option<String> },
 }
 
 pub use library_model::BrowserDownloadUpdate as BrowserFeedback;
-
-/// Recognize metadata even when a store gives an opaque URL or filename.
-pub fn torrent_download(path: &Path) -> bool {
-    if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("torrent")) { return true; }
-    if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() <= 16 * 1024 * 1024) {
-        if let Ok(bytes) = std::fs::read(path) {
-            return bytes.first() == Some(&b'd') && librqbit_core::torrent_metainfo::torrent_from_bytes(&bytes).is_ok();
-        }
-    }
-    false
-}
-
-#[cfg(test)]
-mod torrent_tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn recognizes_torrent_metadata_with_an_opaque_filename() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("download");
-        fs::write(&path, b"d4:infod6:lengthi3e4:name8:book.txt12:piece lengthi16384e6:pieces20:12345678901234567890ee").unwrap();
-        assert!(torrent_download(&path));
-        fs::write(&path, b"ordinary book download").unwrap();
-        assert!(!torrent_download(&path));
-        fs::write(&path, b"dinvalid metadata").unwrap();
-        assert!(!torrent_download(&path));
-        assert!(torrent_download(&directory.path().join("Books.TORRENT")));
-    }
-}
 
 #[cfg(not(target_os = "android"))]
 #[derive(Clone)]
@@ -160,14 +128,6 @@ impl StoreWindow {
         }
     }
 
-    /// The next book the store downloaded; `None` once its window is closed.
-    pub async fn next_download(&mut self) -> Option<PathBuf> {
-        loop {
-            if let StoreEvent::Downloaded { path, .. } = self.next_event().await? {
-                return Some(path);
-            }
-        }
-    }
 }
 
 #[cfg(not(target_os = "android"))]

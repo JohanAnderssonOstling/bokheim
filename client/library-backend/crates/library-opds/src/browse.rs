@@ -95,6 +95,7 @@ fn card(source: OpdsSourceId, publication: &Publication) -> BookCardRow {
 /// A stable card key for a publication: its feed and OPDS id, or its title
 /// where the feed gives no id.
 fn entry_key(source: OpdsSourceId, publication: &Publication) -> CardKey {
-    let id = if publication.id.is_empty() { &publication.title } else { &publication.id };
+    let fallback = publication.download.as_ref().map(|download| download.href.as_str()).unwrap_or(&publication.title);
+    let id = if publication.id.is_empty() { fallback } else { &publication.id };
     CardKey(*blake3::Hasher::new().update(source.as_bytes()).update(id.as_bytes()).finalize().as_bytes())
 }

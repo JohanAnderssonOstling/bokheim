@@ -36,7 +36,7 @@ impl WindowsHost {
             } else if !self.accept_trial(&journal, trial)? {
                 return Ok(WindowsStartup::Helper);
             }
-        } else if self.coordinator.activation_due() {
+        } else if self.coordinator.activation_due() && !self.coordinator.is_taxonomy_only() {
             return Ok(WindowsStartup::Helper);
         }
         if !self.trial {
@@ -72,7 +72,7 @@ impl WindowsHost {
             }
             return Ok(None);
         }
-        if !self.coordinator.activation_due() {
+        if !self.coordinator.activation_due() || self.coordinator.is_taxonomy_only() {
             return Ok(None);
         }
         match self.promote(&lock, prepare) {

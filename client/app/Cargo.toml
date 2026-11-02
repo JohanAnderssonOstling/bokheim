@@ -11,25 +11,30 @@ autotests = false
 crate-type = ["rlib"]
 
 [features]
-kobo = ["client-platform-kobo/device"]
+linux-network-cost = ["client-platform-runtime/linux-network-cost"]
+kobo = ["client-platform-kobo/device", "library-backend/kobo"]
 
 [dependencies]
+http-response = { workspace = true }
+dictionary-catalog = { path = "../../shared/dictionary-catalog", features = ["download"] }
+content-address = { path = "../../shared/content-address" }
+dictionary = { path = "crates/dictionary", features = ["store"] }
 client-runtime = { path = "../client-runtime", features = ["http"] }
 cpu-host = { path = "../library-backend/crates/cpu-host" }
 thumbnail = { path = "../library-backend/crates/thumbnail" }
 client-platform-desktop = { path = "crates/platform-desktop" }
 library-runtime = { path = "../library-backend/crates/library-runtime" }
-cloud-storage = { path = "../library-backend/crates/cloud-storage" }
 client-platform-runtime = { path = "../platforms/runtime" }
 account-contract = { path = "../../shared/account-contract" }
 library-registry = { path = "crates/library-registry" }
 app-preferences = { path = "../preferences" }
 library-backend = { path = "../library-backend" }
 library-database = { path = "../library-backend/crates/library-database" }
+rusqlite = "0.40.0"
 library-model = { path = "../library-model" }
 account-client = { path = "../account-client" }
 log = "0.4"
-env_logger = "0.11"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_bytes = "0.11"
@@ -42,6 +47,7 @@ sync-common = { path = "../../shared/sync-common" }
 update-client = { path = "../update-client" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { workspace = true, features = ["stream"] }
 library-sync = { path = "../library-backend/crates/library-sync" }
 client-platform-web = { path = "../platforms/web" }
 subject-projection = { path = "../../shared/subject-projection" }
@@ -55,6 +61,7 @@ wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["console", "Event", "EventTarget", "File", "DedicatedWorkerGlobalScope", "MessageChannel", "MessageEvent", "MessageEventInit", "MessagePort", "Response", "WorkerGlobalScope", "SharedWorker", "Worker", "WorkerOptions", "WorkerType"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, features = ["rustls-no-provider", "stream"] }
 client-platform-native = { path = "../platforms/native", features = ["websocket"] }
 client-platform-kobo = { path = "../platforms/kobo" }
 # OPDS feeds are native only: a browser may fetch only from servers that
@@ -66,7 +73,10 @@ tempfile = "3"
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+zip.workspace = true
 tempfile = "3"
+book-content = { path = "../book-content" }
+futures-lite = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }

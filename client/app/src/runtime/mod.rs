@@ -2,7 +2,7 @@
 //!
 //! Browser hosts keep SQLite and its synchronous OPFS VFS behind an
 //! origin-wide shared worker and use a serialized RPC protocol. Native hosts
-//! send typed jobs to one application-owned backend thread.
+//! send concrete commands to one application-owned backend thread.
 
 use crate::BackendError;
 use sync_common::LibraryId;
@@ -31,7 +31,7 @@ pub use protocol::*;
 #[cfg(target_arch = "wasm32")]
 mod host;
 #[cfg(target_arch = "wasm32")]
-mod taxonomy;
+pub(crate) mod taxonomy;
 #[cfg(target_arch = "wasm32")]
 pub use host::BackendWorkerHost;
 

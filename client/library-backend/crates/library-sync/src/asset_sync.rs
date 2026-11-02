@@ -1,5 +1,6 @@
 //! One database-driven asset pass per library. Cursors advance before execution;
 //! failed work stays durable and cannot hold later pages behind it.
+use client_runtime::Failure;
 use super::{error::SyncResult, library_sync::LibrarySync};
 use asset_transfer::{TransferError, transfer::AssetExecutor};
 use library_model::TransferJobKind;
@@ -44,7 +45,6 @@ impl LibrarySync {
     /// File inspection checks presence before extracting covers. This retains
     /// that ordering while sharing validation and credential renewal with assets.
     pub async fn record_remote_thumbnail_presence(&self, hashes: Vec<BookId>) -> SyncResult<()> {
-        if self.database.storage_policy()?.external().is_some() { return Ok(()); }
         if !self.is_signed_in() {
             return Ok(());
         }
@@ -56,14 +56,12 @@ impl LibrarySync {
     }
 
     pub async fn run_asset_pass(&self) -> Result<(), TransferError> {
-        // External bytes are handled by the library's provider worker. Even
-        // thumbnail presence discovery must never hit Bokheim asset endpoints.
-        if self.database.storage_policy()?.external().is_some() { return Ok(()); }
         if !self.is_signed_in() {
             return Ok(());
         }
         let executor = self.asset_executor();
         let mut failed = false;
+        let mut quota_failure = None;
         for kind in [
             #[cfg(not(target_arch = "wasm32"))]
             TransferJobKind::DownloadBook,
@@ -71,15 +69,26 @@ impl LibrarySync {
             TransferJobKind::UploadThumbnail,
             TransferJobKind::DownloadThumbnail,
         ] {
-            let result = self.asset_phase(&executor, kind, &mut failed).await;
+            let result = self.asset_phase(&executor, kind, &mut failed, &mut quota_failure).await;
+            if let Err(error) = &result {
+                if error.failure() == Some(Failure::CloudStorageFull) {
+                    quota_failure = Some(error.clone());
+                }
+            }
             let result = Self::asset_result(kind, &mut failed, result);
             executor.flush_availability_changes();
             result?;
         }
-        if failed { Err(TransferError::retryable("asset pass has pending failures")) } else { Ok(()) }
+        if let Some(error) = quota_failure {
+            Err(error)
+        } else if failed {
+            Err(TransferError::retryable("asset pass has pending failures"))
+        } else {
+            Ok(())
+        }
     }
 
-    async fn asset_phase(&self, executor: &AssetExecutor, kind: TransferJobKind, failed: &mut bool) -> Result<(), TransferError> {
+    async fn asset_phase(&self, executor: &AssetExecutor, kind: TransferJobKind, failed: &mut bool, quota_failure: &mut Option<TransferError>) -> Result<(), TransferError> {
         match kind {
             #[cfg(not(target_arch = "wasm32"))]
             TransferJobKind::DownloadBook => {
@@ -98,18 +107,19 @@ impl LibrarySync {
                     let page = self.database.pending_book_uploads(after, BOOK_PAGE)?;
                     let Some(last) = page.last() else { break };
                     after = last.id;
-                    match executor.upload_books(&page).await {
-                        Ok(results) => {
-                            if results.iter().any(Result::is_ok) {
-                                if let Some(events) = &self.events {
-                                    let _ = events.emit(LibraryEvent::BooksUploaded);
-                                }
-                            }
-                            for result in results {
-                                Self::asset_result(kind, failed, result)?;
+                    let results = executor.upload_books(&page).await.unwrap_or_else(|error| vec![Err(error)]);
+                    if results.iter().any(Result::is_ok) {
+                        if let Some(events) = &self.events {
+                            events.emit(LibraryEvent::BooksUploaded);
+                        }
+                    }
+                    for result in results {
+                        if let Err(error) = &result {
+                            if error.failure() == Some(Failure::CloudStorageFull) {
+                                *quota_failure = Some(error.clone());
                             }
                         }
-                        Err(error) => Self::asset_result(kind, failed, Err(error))?,
+                        Self::asset_result(kind, failed, result)?;
                     }
                     tokio::task::yield_now().await;
                 }
@@ -130,13 +140,9 @@ impl LibrarySync {
                     let page = self.database.pending_cover_uploads(after.as_ref(), COVER_PAGE)?;
                     let Some(last) = page.last() else { break };
                     after = Some(*last);
-                    match executor.upload_covers(&page).await {
-                        Ok(results) => {
-                            for result in results {
-                                Self::asset_result(kind, failed, result)?;
-                            }
-                        }
-                        Err(error) => Self::asset_result(kind, failed, Err(error))?,
+                    let results = executor.upload_covers(&page).await.unwrap_or_else(|error| vec![Err(error)]);
+                    for result in results {
+                        Self::asset_result(kind, failed, result)?;
                     }
                     tokio::task::yield_now().await;
                 }

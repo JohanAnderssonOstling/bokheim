@@ -1,5 +1,5 @@
 //! Shared lookup representations. Display text and persisted identity keys stay unchanged.
-use super::{author_match_keys, author_names_compatible, bibliographic_match_key, bibliographic_title_match_key, title_qualifiers, title_substring_keys};
+use super::{author_match_keys, author_words_compatible, bibliographic_match_key, bibliographic_title_match_key, omitted_given_names, title_qualifiers, title_substring_keys};
 use std::collections::BTreeSet;
 
 pub fn author_suffix(word: &str) -> Option<&'static str> {
@@ -58,6 +58,21 @@ impl NormalizedAuthor {
             .collect();
         Self { keys, variants }
     }
+
+    pub(super) fn compatible(&self, other: &Self, allow_omitted_names: bool) -> bool {
+        if !self.keys.is_disjoint(&other.keys) {
+            return true;
+        }
+        self.variants.iter().any(|a| {
+            other.variants.iter().any(|b| {
+                if a.suffix.is_some() && b.suffix.is_some() && a.suffix != b.suffix {
+                    return false;
+                }
+                author_words_compatible(&a.words, &b.words) || (allow_omitted_names && omitted_given_names(&a.words, &b.words))
+            })
+        })
+    }
+
     pub fn candidate_tokens(&self) -> BTreeSet<String> {
         self.keys.iter().flat_map(|key| key.split_whitespace()).filter(|word| word.len() > 1 && author_suffix(word).is_none()).map(str::to_owned).collect()
     }
@@ -65,13 +80,12 @@ impl NormalizedAuthor {
 
 /// Number of distinct compatible author credits. Extra or missing credits do not
 /// veto a match; each credit can contribute at most one vote.
-pub fn matching_author_count(local: &[String], remote: &[String]) -> usize {
-    matching_author_count_using(local, remote, author_names_compatible)
+pub fn matching_author_count(local: &[impl AsRef<str>], remote: &[impl AsRef<str>]) -> usize {
+    matching_author_count_inner(local, remote, false)
 }
 
-pub fn matching_author_count_with_title(local: &[String], remote: &[String], title: &str, remote_title: &str) -> usize {
-    let compatible = if author_titles_agree(title, remote_title) { super::author_names_with_omitted_names } else { author_names_compatible };
-    matching_author_count_using(local, remote, compatible)
+pub fn matching_author_count_with_title(local: &[impl AsRef<str>], remote: &[impl AsRef<str>], title: &str, remote_title: &str) -> usize {
+    matching_author_count_inner(local, remote, author_titles_agree(title, remote_title))
 }
 
 pub(super) fn author_titles_agree(title: &str, remote_title: &str) -> bool {
@@ -82,16 +96,16 @@ pub(super) fn author_titles_agree(title: &str, remote_title: &str) -> bool {
         && (key(&local.full) == key(&remote.full) || (local.subtitle.is_none() && key(&local.full) == key(&remote.main)))
 }
 
-fn matching_author_count_using(local: &[String], remote: &[String], compatible: fn(&str, &str) -> bool) -> usize {
-    fn unique(values: &[String]) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
+fn matching_author_count_inner(local: &[impl AsRef<str>], remote: &[impl AsRef<str>], allow_omitted_names: bool) -> usize {
+    fn unique(values: &[impl AsRef<str>]) -> Vec<NormalizedAuthor> {
+        let mut names: Vec<NormalizedAuthor> = Vec::new();
         for name in super::author_credits(values) {
             let normalized = NormalizedAuthor::new(&name);
             if normalized.keys.is_empty() || matches!(name.trim().to_ascii_lowercase().as_str(), "unknown" | "untitled") {
                 continue;
             }
-            if !names.iter().any(|old| !NormalizedAuthor::new(old).keys.is_disjoint(&normalized.keys)) {
-                names.push(name);
+            if !names.iter().any(|old| !old.keys.is_disjoint(&normalized.keys)) {
+                names.push(normalized);
             }
         }
         names
@@ -113,7 +127,7 @@ fn matching_author_count_using(local: &[String], remote: &[String], compatible: 
     }
     let local = unique(local);
     let remote = unique(remote);
-    let edges = local.iter().map(|a| remote.iter().enumerate().filter_map(|(i, b)| compatible(a, b).then_some(i)).collect()).collect::<Vec<Vec<usize>>>();
+    let edges = local.iter().map(|a| remote.iter().enumerate().filter_map(|(i, b)| a.compatible(b, allow_omitted_names).then_some(i)).collect()).collect::<Vec<Vec<usize>>>();
     let mut owners = vec![None; remote.len()];
     (0..local.len()).filter(|&i| assign(i, &edges, &mut vec![false; remote.len()], &mut owners)).count()
 }

@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bokheim · Dictionary settings preview</title>
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Bold.ttf');font-weight:700}
+@font-face{font-family:Jost;src:url('../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf')}
+:root{color-scheme:light;--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--accent:#466853;--border:#8c7f64;--rule:#c5bdac;--hover:#46685314}
+[data-dark]{color-scheme:dark;--paper:#11100d;--ink:#efe6d0;--muted:#a69c86;--accent:#d3b271;--border:#786640;--rule:#4e4334;--hover:#d3b27114}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.4 Garamond,Georgia,serif}button{font:inherit;color:inherit;background:transparent;border:1px solid var(--border);border-radius:4px;padding:5px 12px;cursor:pointer;white-space:nowrap}button:hover{background:var(--hover)}button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}button:disabled{opacity:.45;cursor:default}[hidden]{display:none!important}
+.preview{padding:9px 20px;border-bottom:1px solid var(--rule);font:12px/1.5 Jost,sans-serif;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:16px}.preview button{font:inherit;padding:3px 9px}.shell-header{border-bottom:1px solid var(--rule);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;gap:20px}.brand{font-size:25px;letter-spacing:.02em}.shell-header span:last-child{color:var(--muted)}main{max-width:640px;margin:0 auto;padding:24px 16px 48px}h1{font-size:28px;font-weight:400;margin:0 0 22px}h2{font-size:19px;font-weight:400;margin:0;padding:8px 0;font-variant-caps:all-small-caps;letter-spacing:.04em}.row{min-height:76px;border-top:1px solid var(--rule);padding:12px 0;display:flex;gap:20px;align-items:center}.row:first-of-type{border-top:0}.copy{flex:1;min-width:0}.name{font-size:18px;margin:0 0 4px}.description{font-size:14px;color:var(--muted);overflow-wrap:anywhere}.note{padding:12px;color:var(--muted)}.browse{padding:12px}.controls{display:flex;flex-wrap:wrap;gap:4px}.details{padding:12px;color:var(--muted);overflow-wrap:anywhere;font-size:14px}.installed-title{padding-top:20px}#status{padding:12px;color:var(--accent)}a{color:var(--accent)}
+.actions{display:flex;flex-wrap:wrap;gap:8px;padding:12px 0}.empty{padding:12px 0;color:var(--muted)}dialog{width:min(640px,calc(100vw - 32px));height:min(640px,calc(100dvh - 32px));padding:16px;background:var(--paper);color:var(--ink);border:1px solid var(--rule);border-radius:8px;box-shadow:0 12px 48px #0003}dialog[open]{display:flex;flex-direction:column;gap:16px}dialog::backdrop{background:#0006}.dialog-header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex:none}.dialog-header h2{font-variant-caps:normal;letter-spacing:0;padding:0;font-size:18px}#catalog{overflow-y:auto;min-height:0;flex:1}.dialog-header button{flex:none}
+.download-row{min-height:48px;padding:8px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-top:1px solid var(--rule)}.download-name{flex:1;min-width:80px}.download-actions{flex:none;display:flex;align-items:center;gap:8px}.download-size{font-size:14px;color:var(--muted);width:68px;text-align:right}.info{width:32px;height:32px;border:0;padding:6px;display:grid;place-items:center;color:var(--muted)}.info svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.5}.info[aria-expanded="true"]{color:var(--accent);background:var(--hover)}.source-details{padding:12px;background:var(--hover);font-size:14px;display:flex;flex-direction:column;gap:4px}.source-details h3{font:inherit;margin:0;font-weight:700}.source-links{display:flex;gap:16px;margin-top:4px}.edition{color:var(--muted)}
+@media(max-width:540px){.preview{align-items:flex-start}.shell-header{padding:12px 16px}main{padding-top:20px}.row{gap:12px}.row.installed{flex-wrap:wrap}.installed .controls{width:100%}.description{font-size:13px}}
+</style>
+<div class="preview"><span>UI preview · Current catalog and controls · Downloads and imports are simulated</span></div>
+<header class="shell-header"><span class="brand">Bokheim</span><span>Settings</span></header>
+<main>
+<h1>Settings</h1>
+<section aria-labelledby="dictionary-heading">
+<h2 id="dictionary-heading">Dictionaries</h2>
+<div class="actions"><button id="import">Import</button><button id="download-dictionary">Download dictionary</button></div>
+<div id="status" role="status" aria-live="polite" hidden></div>
+<div id="empty" class="empty">No dictionaries installed.</div>
+<div id="installed"></div>
+</section>
+</main>
+<dialog id="picker" aria-labelledby="picker-heading"><div class="dialog-header"><h2 id="picker-heading">Download dictionary</h2><button id="close">Close</button></div><div id="catalog"></div></dialog>
+<script id="dictionary-data" type="application/json">[
+  {
+    "id": "ar-wiktionary-1.2.0",
+    "language": "ar",
+    "name": "Arabic",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-3.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/ar-ar.zip",
+    "bytes": 1120837,
+    "sha256": "6d1b548cdf69f50ca0aa91aec5e348820f329483a33669db3d1f51c97784dd4e"
+  },
+  {
+    "id": "zh-wiktionary-1.2.0",
+    "language": "zh",
+    "name": "Chinese",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/zh-zh.zip",
+    "bytes": 5497534,
+    "sha256": "d7f92e36e436ccdbfe45daf88230f745ce42874e890b79900838036a9ce9f710"
+  },
+  {
+    "id": "cs-wiktionary-1.2.0",
+    "language": "cs",
+    "name": "Czech",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/cs-cs.zip",
+    "bytes": 5575828,
+    "sha256": "9fb4b668981527475832d9becb7f166e8c7e18671f8667bbae54b33da6c8f8b3"
+  },
+  {
+    "id": "nl-wiktionary-1.2.0",
+    "language": "nl",
+    "name": "Dutch",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/nl-nl.zip",
+    "bytes": 29226855,
+    "sha256": "adac4804d3dfb35e91c7bff384366b48a252d8bb1005b67e974a0950e3f476e1"
+  },
+  {
+    "id": "en-wiktionary-1.2.0",
+    "language": "en",
+    "name": "English",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/en-en.zip",
+    "bytes": 91941511,
+    "sha256": "142327769b0f4e2cd0e442a826bc6e561e5246a7796934ff23618c1c6984ab3c"
+  },
+  {
+    "id": "fr-wiktionary-1.2.0",
+    "language": "fr",
+    "name": "French",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/fr-fr.zip",
+    "bytes": 73065038,
+    "sha256": "66362d0fa6379276c62f6e5fbfab78217e20ea333ded873dd53a1c41bf4428d4"
+  },
+  {
+    "id": "de-wiktionary-1.2.0",
+    "language": "de",
+    "name": "German",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/de-de.zip",
+    "bytes": 33607127,
+    "sha256": "a882dd03107ce3d8c564ee3a743ca5dde686b34463af7540870d229cd0cc49ce"
+  },
+  {
+    "id": "el-wiktionary-1.2.0",
+    "language": "el",
+    "name": "Greek",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/el-el.zip",
+    "bytes": 18908898,
+    "sha256": "19bca17f13d78ff5aa2566c50523029dcd35504f3a2bc6f75f67d9799599f5eb"
+  },
+  {
+    "id": "id-wiktionary-1.2.0",
+    "language": "id",
+    "name": "Indonesian",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/id-id.zip",
+    "bytes": 3024038,
+    "sha256": "81c47cd9c565cf5b6ee9fe4adce8cf48bca01f49a716083a0247f199d90652d9"
+  },
+  {
+    "id": "it-wiktionary-1.2.0",
+    "language": "it",
+    "name": "Italian",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/it-it.zip",
+    "bytes": 6543346,
+    "sha256": "25ca5cf2347b225f10a9c013e550f8ab358f53011319ffcaed21381f49bee2b2"
+  },
+  {
+    "id": "ja-wiktionary-1.2.0",
+    "language": "ja",
+    "name": "Japanese",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/ja-ja.zip",
+    "bytes": 8847744,
+    "sha256": "af3e9f6d4675ff2167ec6a71cda8c722e21121b5e034cf83ff168ea1cdf4a355"
+  },
+  {
+    "id": "ko-wiktionary-1.2.0",
+    "language": "ko",
+    "name": "Korean",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/ko-ko.zip",
+    "bytes": 3615561,
+    "sha256": "df231132bf576b30bac5be0fa7d4a28558f512b174b4e4b547c2a842b7d70e30"
+  },
+  {
+    "id": "pl-wiktionary-1.2.0",
+    "language": "pl",
+    "name": "Polish",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/pl-pl.zip",
+    "bytes": 13119955,
+    "sha256": "95cf085dce0d6be7149ebeae8a562c35305cedf9a428145261daf3fe58373811"
+  },
+  {
+    "id": "pt-wiktionary-1.2.0",
+    "language": "pt",
+    "name": "Portuguese",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/pt-pt.zip",
+    "bytes": 6641354,
+    "sha256": "75bcc638fb3ab30f91247a5cab21759fccd55334d7c9d4c9d4a9c2f1027a9ae5"
+  },
+  {
+    "id": "ru-wiktionary-1.2.0",
+    "language": "ru",
+    "name": "Russian",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/ru-ru.zip",
+    "bytes": 47638244,
+    "sha256": "f34020bd911b49ac91928975794b57271647c4de0f5d81474eb2a88b7f2597ee"
+  },
+  {
+    "id": "es-wiktionary-1.2.0",
+    "language": "es",
+    "name": "Spanish",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/es-es.zip",
+    "bytes": 11743165,
+    "sha256": "d6856818b4982ac849c1b924c70b11bea0fb06f30da18a5127622195894a7c9b"
+  },
+  {
+    "id": "sv-wiktionary-2026-10-02",
+    "language": "sv",
+    "name": "Swedish",
+    "version": "2026-10-02",
+    "source": "reader.dict / Swedish Wiktionary",
+    "source_url": "https://www.reader-dict.com/download/sv",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://www.reader-dict.com/file/sv/dict-sv-sv-noetym.zip",
+    "bytes": 5747152,
+    "sha256": "43aa9a687a276cb98bd86724265acb8f098a9b391911647d49f7e74e3fb77baa"
+  },
+  {
+    "id": "tr-wiktionary-1.2.0",
+    "language": "tr",
+    "name": "Turkish",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/tr-tr.zip",
+    "bytes": 14888871,
+    "sha256": "47609ad3b631abade5bcf9bb9f84ca51422e39fa904b5393e4b8601763c8bd12"
+  }
+]
+</script>
+<script>
+const catalog=JSON.parse(document.querySelector('#dictionary-data').textContent);
+const installed=[];
+let active=null,details=null,downloadDetails=null;
+const element=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node};
+function button(label,action,disabled=false){const node=element('button','',label);node.disabled=disabled;node.addEventListener('click',action);return node}
+function row(title,description,control,className=''){const node=element('div','row '+className),copy=element('div','copy');copy.append(element('div','name',title),element('div','description',description));node.append(copy,control);return node}
+function sourceDetails(spec){
+ const panel=element('div','source-details');panel.id=`source-${spec.id}`;
+ panel.append(element('h3','', 'Source and license'),element('div','',spec.source),element('div','edition',`Edition ${spec.version} · ${spec.license}`));
+ const links=element('div','source-links');
+ for(const [label,url] of [['Source',spec.source_url],['License',`https://creativecommons.org/licenses/by-sa/${spec.license.replace('CC-BY-SA-','')}/`]]){const link=element('a','',label);link.href=url;link.target='_blank';link.rel='noreferrer';links.append(link)}
+ panel.append(links);return panel;
+}
+function render(){
+ const list=document.querySelector('#catalog');list.replaceChildren();
+ for(const spec of catalog){
+  const exists=installed.some(item=>item.spec.id===spec.id);
+  const control=button(exists?'Installed':active===spec.id?'Downloading…':'Download',()=>download(spec),exists||active!==null);
+  control.setAttribute('aria-label',`${exists?'Installed':active===spec.id?'Downloading':'Download'} ${spec.name} dictionary`);
+  const item=element('div','download-row');
+  const infoId=`info-${spec.id}`;
+  const info=button('',()=>{downloadDetails=downloadDetails===spec.id?null:spec.id;render();document.getElementById(infoId).focus({preventScroll:true})});
+  info.className='info';info.id=infoId;info.title=`Source and license for ${spec.name}`;info.setAttribute('aria-label',info.title);info.setAttribute('aria-expanded',String(downloadDetails===spec.id));info.setAttribute('aria-controls',`source-${spec.id}`);
+  info.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.5" r=".5" fill="currentColor"/></svg>';
+  const actions=element('div','download-actions');actions.append(element('span','download-size',`${(spec.bytes/(1024*1024)).toFixed(1)} MiB`),info,control);
+  item.append(element('span','download-name',spec.name),actions);list.append(item);
+  if(downloadDetails===spec.id)list.append(sourceDetails(spec));
+ }
+ document.querySelector('#empty').hidden=installed.length>0;
+ document.querySelector('#import').disabled=active!==null;
+ document.querySelector('#download-dictionary').disabled=active!==null;
+ const installedList=document.querySelector('#installed');installedList.replaceChildren();
+ for(const [index,item] of installed.entries()){
+  const controls=element('div','controls');
+  controls.append(button(item.enabled?'Enabled':'Disabled',()=>{item.enabled=!item.enabled;render()}),button('Move up',()=>move(index,-1),index===0),button('Move down',()=>move(index,1),index===installed.length-1),button('Remove',()=>{installed.splice(index,1);render()}),button('Details',()=>{details=details===item.spec.id?null:item.spec.id;render()}));
+  installedList.append(row(item.spec.name,`${(item.spec.bytes/(1024*1024)).toFixed(1)} MiB download · searched in this order`,controls,'installed'));
+  if(details===item.spec.id)installedList.append(sourceDetails(item.spec));
+ }
+}
+function download(spec){
+ if(active!==null)return;
+ document.querySelector('#picker').close();
+ active=spec.id;
+ const status=document.querySelector('#status');status.hidden=false;status.textContent=`Downloading ${spec.name} dictionary… (preview simulation)`;render();
+ setTimeout(()=>{installed.push({spec,enabled:true});active=null;status.textContent=`${spec.name} dictionary installed in this preview. No files were downloaded.`;render()},900);
+}
+function move(index,direction){const next=index+direction;[installed[index],installed[next]]=[installed[next],installed[index]];render()}
+document.querySelector('#download-dictionary').addEventListener('click',()=>{downloadDetails=null;render();document.querySelector('#picker').showModal()});
+document.querySelector('#close').addEventListener('click',()=>document.querySelector('#picker').close());
+document.querySelector('#picker').addEventListener('click',event=>{if(event.target.id==='picker'){const bounds=event.target.getBoundingClientRect();if(event.clientX<bounds.left||event.clientX>bounds.right||event.clientY<bounds.top||event.clientY>bounds.bottom)event.target.close()}});
+document.querySelector('#import').addEventListener('click',()=>{const status=document.querySelector('#status');status.hidden=false;status.textContent='In the app, this opens a file picker for your StarDict ZIP or matching .ifo, .idx, .dict and optional .syn files.'});
+render();
+if(location.hash==='#download')document.querySelector('#picker').showModal();
+</script>
+</html>

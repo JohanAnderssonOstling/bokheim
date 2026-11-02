@@ -10,7 +10,7 @@ use std::path::Path;
 use audiobook_archive::{Cover, Cue, MAX_COVER_BYTES, MAX_CUE_BYTES, MAX_NFO_BYTES, MAX_TRACKS, Nfo, Track, audio_file, natural_cmp, valid_sidecar_name};
 
 mod local_names;
-pub use local_names::{PATH_MAPPING_FILE, copy_path_mapping, extract_download, extract_for_windows, resolve_track_path};
+pub use local_names::{PATH_MAPPING_FILE, copy_path_mapping, extract_download, resolve_track_path};
 
 #[derive(Default)]
 pub struct Mp3Facts {
@@ -366,7 +366,7 @@ pub fn write_folder_archive<W: io::Write + io::Seek>(folder: &Path, writer: W, t
 #[cfg(test)]
 mod tests {
     use super::*;
-    use audiobook_archive::{archive_hash, archived_tracks, extract_archive, write_archive, write_archive_with_sidecars};
+    use audiobook_archive::{archive_hash, archived_tracks, extract_archive_with_names, write_archive, write_archive_with_sidecars};
 
     fn tagged_mp3(frames: &[(&str, &str)]) -> Vec<u8> {
         let mut body = Vec::new();
@@ -456,7 +456,7 @@ mod tests {
             assert_eq!(&bytes[entry.offset as usize..][..entry.length as usize], expected);
         }
         let destination = tempfile::tempdir().unwrap();
-        extract_archive(io::Cursor::new(&bytes), destination.path()).unwrap();
+        extract_archive_with_names(io::Cursor::new(&bytes), destination.path(), |name| Ok(name.to_owned())).unwrap();
         assert_eq!(folder_hash(destination.path()).unwrap(), original_identity);
         assert_eq!(fs::read(destination.path().join("book.nfo")).unwrap(), b"Title: A Book\n");
         assert_eq!(fs::read(destination.path().join("book.cue")).unwrap(), b"FILE \"Disc 1/1 Start.mp3\" MP3\n");

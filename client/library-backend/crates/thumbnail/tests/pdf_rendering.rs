@@ -56,13 +56,13 @@ fn complex_pdf_uses_supplied_renderer_with_rewound_reader() {
 fn pdfium_preserves_page_margins_and_vector_overlay() {
     for overlay in [true] {
         let versions = generate_thumbnail_versions_with_pdf_renderer("pdf", Cursor::new(pdf(overlay)), render_pdf_cover).unwrap().unwrap();
-        for (bytes, width) in [(&versions.browse, 300), (&versions.high_density, 600)] {
+        for (bytes, width, height) in [(&versions.browse, 300, 480), (&versions.card_high_density, 600, 960), (&versions.high_density, 600, 900)] {
             let image = image::load_from_memory(bytes).unwrap().to_rgb8();
-            assert_eq!(image.dimensions(), (width, width * 3 / 2));
+            assert_eq!(image.dimensions(), (width, height));
             assert!(image.get_pixel(5, 5).0.iter().all(|c| *c > 250));
-            let red = image.get_pixel(width / 4, width / 2);
+            let red = image.get_pixel(width / 4, height / 3);
             assert!(red[0] > 250 && red[1] < 5 && red[2] < 5);
-            let center = image.get_pixel(width / 2, width * 3 / 4);
+            let center = image.get_pixel(width / 2, height / 2);
             assert!(if overlay { center[2] > 250 && center[0] < 5 } else { center[0] > 250 && center[2] < 5 });
         }
     }

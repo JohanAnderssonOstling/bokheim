@@ -1,14 +1,14 @@
 //! The storage worker owns connections; cloneable handles carry only IDs and
 //! immutable locators. Every request returns values, never a SQLite borrow.
-use super::{join_locator, LibraryEntry, LocalRegistry, RegistryResult, DATABASE_FILENAME};
+use super::{DATABASE_FILENAME, LibraryEntry, LocalRegistry, RegistryResult, join_locator};
 use client_platform_runtime::storage_queue::{self, Priority};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use sync_common::LibraryId;
 use uuid::Uuid;
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 thread_local! {
     static REGISTRIES: RefCell<HashMap<Uuid, LocalRegistry>> = RefCell::new(HashMap::new());
@@ -50,6 +50,70 @@ mod tests {
         drop(registry);
         // Background FIFO ensures the disposal has run before this check.
         assert!(!storage_queue::run_sync(Priority::Background, move || REGISTRIES.with_borrow(|registries| registries.contains_key(&id)))?);
+        Ok(())
+    }
+
+    #[test]
+    fn account_ownership_survives_restart_and_local_removal_without_hiding_libraries() -> RegistryResult<()> {
+        let root = tempfile::tempdir()?;
+        let registry = LibraryRegistry::open(root.path().to_string_lossy())?;
+        let entry = registry.create("Books", None)?;
+        let id = *entry.library_id();
+        registry.bind_unowned_libraries("server|first")?;
+        registry.bind_unowned_libraries("server|second")?;
+        assert!(registry.accessible_to_account(&id, Some("server|first"))?);
+        assert!(!registry.accessible_to_account(&id, Some("server|second"))?);
+        assert!(!registry.accessible_to_account(&id, Some("other-server|first"))?);
+        assert_eq!(registry.entries()?.len(), 1);
+        assert!(registry.bind_library_account(&id, "server|second").is_err());
+        drop(registry);
+
+        let registry = LibraryRegistry::open(root.path().to_string_lossy())?;
+        assert!(registry.accessible_to_account(&id, Some("server|first"))?);
+        registry.begin_local_removal(&id)?;
+        assert_eq!(registry.pending_server_deletions()?, [id]);
+        assert!(!registry.accessible_to_account(&id, Some("server|second"))?, "pending deletion retains its original account");
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_caches_wait_for_discovery_before_using_an_account() -> RegistryResult<()> {
+        let root = tempfile::tempdir()?;
+        let registry = LibraryRegistry::open(root.path().to_string_lossy())?;
+        let id = *registry.create("Legacy cache", None)?.library_id();
+        registry.run(move |local| {
+            local.connection.execute("DELETE FROM library_account WHERE library_id=?1", [id.to_string()])?;
+            Ok(())
+        })?;
+        registry.bind_unowned_libraries("server|second")?;
+        assert_eq!(registry.entries()?.len(), 1, "legacy caches remain available locally");
+        assert!(!registry.accessible_to_account(&id, Some("server|second"))?);
+        // Only discovery of this ID under the owning account establishes it.
+        registry.bind_library_account(&id, "server|first")?;
+        assert!(registry.accessible_to_account(&id, Some("server|first"))?);
+        assert!(!registry.accessible_to_account(&id, Some("server|second"))?);
+        Ok(())
+    }
+
+    #[test]
+    fn account_filter_keeps_signed_out_caches_and_local_only_libraries_after_restart() -> RegistryResult<()> {
+        let root = tempfile::tempdir()?;
+        let registry = LibraryRegistry::open(root.path().to_string_lossy())?;
+        let cloud = registry.create("Cloud", None)?;
+        registry.bind_library_account(cloud.library_id(), "server|owner")?;
+        let local = registry.create_with_asset_storage("Local", None, false)?;
+        registry.make_device_only(local.library_id())?;
+        registry.bind_unowned_libraries("server|other")?;
+        assert_eq!(registry.entries_for_account(None)?.len(), 2);
+        assert_eq!(registry.entries_for_account(Some("server|owner"))?.len(), 2);
+        assert_eq!(registry.entries_for_account(Some("server|other"))?.iter().map(|entry| *entry.library_id()).collect::<Vec<_>>(), [*local.library_id()]);
+        assert!(!registry.has_account(local.library_id())?);
+        assert!(registry.bind_library_account(local.library_id(), "server|other").is_err());
+        drop(registry);
+        let registry = LibraryRegistry::open(root.path().to_string_lossy())?;
+        assert_eq!(registry.entries_for_account(None)?.len(), 2);
+        assert_eq!(registry.entries_for_account(Some("server|other"))?.len(), 1);
+        assert!(registry.device_only(local.library_id())?);
         Ok(())
     }
 }
@@ -135,9 +199,68 @@ impl LibraryRegistry {
         self.run(move |registry| registry.entries())
     }
 
+    pub fn entries_for_account(&self, account: Option<&str>) -> RegistryResult<Vec<LibraryEntry>> {
+        let account = account.map(str::to_owned);
+        self.run(move |registry| {
+            registry
+                .entries()?
+                .into_iter()
+                .filter_map(|entry| match registry.accessible_to_account(entry.library_id(), account.as_deref()) {
+                    Ok(true) => Some(Ok(entry)),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect()
+        })
+    }
+
+    pub fn device_only(&self, id: &LibraryId) -> RegistryResult<bool> {
+        let id = *id;
+        self.run(move |registry| registry.device_only(&id))
+    }
+
+    pub fn has_account(&self, id: &LibraryId) -> RegistryResult<bool> {
+        let id = *id;
+        self.run(move |registry| registry.has_account(&id))
+    }
+
+    pub fn make_device_only(&self, id: &LibraryId) -> RegistryResult<()> {
+        let id = *id;
+        self.run(move |registry| registry.make_device_only(&id))
+    }
+
+    pub fn accessible_to_account(&self, id: &LibraryId, account: Option<&str>) -> RegistryResult<bool> {
+        let id = *id;
+        let account = account.map(str::to_owned);
+        self.run(move |registry| registry.accessible_to_account(&id, account.as_deref()))
+    }
+
+    pub fn bind_library_account(&self, id: &LibraryId, account: &str) -> RegistryResult<()> {
+        let id = *id;
+        let account = account.to_owned();
+        self.run(move |registry| registry.bind_library_account(&id, &account))
+    }
+
+    pub fn bind_unowned_libraries(&self, account: &str) -> RegistryResult<()> {
+        let account = account.to_owned();
+        self.run(move |registry| registry.bind_unowned_libraries(&account))
+    }
+
     pub fn entry(&self, id: &LibraryId) -> RegistryResult<Option<LibraryEntry>> {
         let id = *id;
         self.run(move |registry| registry.entry(&id))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn recover_library_root(&self, id: &LibraryId) -> RegistryResult<super::LibraryRootRecovery> {
+        let id = *id;
+        self.run(move |registry| registry.recover_library_root(&id))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn remember_library_root(&self, id: &LibraryId) -> RegistryResult<()> {
+        let id = *id;
+        self.run(move |registry| registry.remember_library_root(&id))
     }
 
     pub fn asset_storage_enabled(&self, id: &LibraryId) -> RegistryResult<bool> {
@@ -265,7 +388,9 @@ impl LibraryRegistry {
         self.run(move |registry| {
             let tx = registry.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let current: Option<Vec<u8>> = tx.query_row("SELECT value FROM app_value WHERE key=?1", [&key], |row| row.get(0)).optional()?;
-            let Some(value) = update(current.as_deref())? else { return Ok(false); };
+            let Some(value) = update(current.as_deref())? else {
+                return Ok(false);
+            };
             tx.execute(include_str!("sql/set_sync_disabled.sql"), params![key, value])?;
             tx.commit()?;
             Ok(true)

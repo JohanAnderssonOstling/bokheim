@@ -35,3 +35,10 @@ crate-type = ["cdylib"]
 [[example]]
 name = "cpu_worker"
 crate-type = ["cdylib"]
+
+[[example]]
+name = "startup_probe"
+crate-type = ["cdylib"]
+
+[dev-dependencies]
+wasm-callback = { path = "../../shared/wasm-callback" }

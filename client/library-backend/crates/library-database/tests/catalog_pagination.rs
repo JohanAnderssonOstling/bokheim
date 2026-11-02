@@ -16,7 +16,7 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
     let revision = format!("{}:{}", content.as_deref().unwrap_or(subject_projection::BUNDLED_UNIFIED_TAXONOMY_REVISION_ID), subject_projection::UNIFIED_MATCHER_VERSION);
     let source = Connection::open_in_memory().unwrap();
     source.execute_batch(include_str!("sql/catalog_pagination.sql")).unwrap();
-    source.execute_batch("INSERT INTO snapshot VALUES(1,8,1); INSERT INTO description VALUES(1,'Description unused by cards'); INSERT INTO source VALUES(1,'publicdomainlibrary.org'),(2,'gutenberg.org');").unwrap();
+    source.execute_batch("INSERT INTO snapshot VALUES(1,11,1); INSERT INTO description VALUES(1,'Description unused by cards'); INSERT INTO source VALUES(1,'publicdomainlibrary.org'),(2,'gutenberg.org');").unwrap();
     source.execute("INSERT INTO subject_projection VALUES(1,?1)", [&revision]).unwrap();
     for id in 1_i64..=2 {
         source.execute("INSERT INTO author VALUES(?1,?2,?3)", params![id, uuid::Uuid::from_u128(id as u128).as_bytes().as_slice(), format!("Writer {id}")]).unwrap();
@@ -39,6 +39,7 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         source.execute("INSERT INTO book_source VALUES(?1,?2)", params![id, source_id]).unwrap();
         source.execute("INSERT INTO book_concept VALUES(?1,?2)", params![id, concepts[usize::from(id > 7)]]).unwrap();
     }
+    source.execute_batch("INSERT INTO book_language VALUES(4,'en-US'),(6,'en-GB'),(10,'en'),(10,'de');").unwrap();
     source
         .execute_batch(
             "CREATE TABLE book_audiobook_duration(book_row_id INTEGER PRIMARY KEY REFERENCES book(row_id),duration_ms INTEGER NOT NULL CHECK(duration_ms>0)) STRICT;
@@ -73,13 +74,32 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
             chip_sort: BrowseChipSort::Alphabetical,
             book_sort: BrowseBookSort::Alphabetical,
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let initial_headings = db.browse_page(&heading_query, false, BrowsePageRequest::default()).unwrap();
         assert_eq!(initial_headings.contents.children.len(), 24);
         assert_eq!(initial_headings.sections.len(), 24);
         assert_eq!(initial_headings.page.as_ref().unwrap().section_ids.len(), 24);
         assert_eq!(initial_headings.page.unwrap().heading_count(), 38);
+        // A multilingual edition requires every one of its languages to be
+        // selected. Additional selected languages still allow monolingual books.
+        for location in [BrowseLocation::Catalog(0), BrowseLocation::CatalogAuthor(None)] {
+            for (languages, expected) in [
+                (vec![], vec![1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]),
+                (vec!["en"], vec![1, 3, 5, 7, 9, 11, 13]),
+                (vec!["sv"], vec![8, 12, 14]),
+                (vec!["en", "sv"], vec![1, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14]),
+                (vec!["en", "eng", "sv", "swe"], vec![1, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14]),
+                (vec!["en", "eng", "sv", "swe", "de"], vec![1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]),
+                (vec!["fr"], vec![]),
+            ] {
+                let query = LibraryBrowseQuery { location, languages: languages.into_iter().map(str::to_owned).collect(), ..heading_query.clone() };
+                let full = db.browse(&query, false).unwrap();
+                let mut actual = full.contents.books.iter().chain(full.sections.iter().flat_map(|section| &section.books)).map(|card| card.key().0[0]).collect::<Vec<_>>();
+                actual.sort_unstable();
+                actual.dedup();
+                assert_eq!(actual, expected, "{location:?}: {:?}", query.languages);
+            }
+        }
         for search in ["", "writer", "writer 3", "missing"] {
             heading_query.search = search.into();
             let complete = db.browse(&heading_query, false).unwrap();
@@ -96,16 +116,19 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         }
         for location in [BrowseLocation::Catalog(0), BrowseLocation::CatalogAuthor(None)] {
             for sort in [BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical, BrowseBookSort::Popularity] {
-                for languages in [vec![], vec!["en".to_owned()], vec!["sv".to_owned()]] {
+                for languages in [vec![], vec!["en".to_owned()], vec!["sv".to_owned()], vec!["en".to_owned(), "eng".to_owned(), "sv".to_owned(), "swe".to_owned()]] {
                     for file_types in [vec![], vec![LibraryFileTypeFilter::Book], vec![LibraryFileTypeFilter::Audiobook]] {
-                        let mut query =
-                            LibraryBrowseQuery { location, search: String::new(), file_types, languages: languages.clone(), chip_sort: BrowseChipSort::Popularity, book_sort: sort, hide_finished: false, include_direct_child_books: false };
+                        let mut query = LibraryBrowseQuery { location, search: String::new(), file_types, languages: languages.clone(), chip_sort: BrowseChipSort::Popularity, book_sort: sort, hide_finished: false };
                         let full = db.browse(&query, false).unwrap();
                         for card in full.contents.books.iter().chain(full.sections.iter().flat_map(|section| &section.books)) {
                             let expected_duration = (card.key() == audio_key).then_some(27_789_000);
                             assert_eq!(card.audiobook_duration_ms, expected_duration);
                         }
-                        let window_full = db.browse_sections(&query, false, library_model::BROWSE_SECTION_BOOK_LIMIT).unwrap();
+                        let mut window_full = full.clone();
+                        for section in &mut window_full.sections {
+                            section.book_count = Some(section.books.len());
+                            section.books.truncate(library_model::BROWSE_SECTION_BOOK_LIMIT);
+                        }
                         let mut panels = Vec::new();
                         for offset in 0..window_full.sections.len() {
                             let page = db.browse_page(&query, false, BrowsePageRequest { section_offset: offset, section_limit: 1, book_offset: 0, book_limit: 0 }).unwrap();
@@ -141,13 +164,8 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
                             let cards = db.browse_result_books(&query, false, result_revision, section.parent.id, 0, 2).unwrap().unwrap();
                             assert_eq!(cards.books, all.books[..all.books.len().min(2)]);
                         }
-                        let first = db.browse_sections(&query, false, 2).unwrap();
-                        assert_eq!(first.contents, full.contents);
-                        assert_eq!(first.sections.len(), full.sections.len());
-                        for (initial, complete) in first.sections.iter().zip(&full.sections) {
-                            assert_eq!(initial.book_count, Some(complete.books.len()));
-                            assert_eq!(initial.books, complete.books[..complete.books.len().min(2)]);
-                            query.location = initial.parent.id;
+                        for complete in &full.sections {
+                            query.location = complete.parent.id;
                             for offset in (0..complete.books.len()).step_by(2) {
                                 let page = db.browse_page(&query, false, BrowsePageRequest { section_offset: 0, section_limit: 0, book_offset: offset, book_limit: 2 }).unwrap();
                                 assert_eq!(page.page.unwrap().book_total, complete.books.len());
@@ -190,10 +208,10 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         let attached = Connection::open_in_memory().unwrap();
         attached.execute("ATTACH DATABASE ?1 AS catalog", [catalog_path.to_str().unwrap()]).unwrap();
         let stable_id: i64 = attached.query_row("SELECT row_id FROM catalog.catalog_browse_book WHERE key=?1", [[1_u8; 32].as_slice()], |row| row.get(0)).unwrap();
-        // Older format-8 snapshots omit the optional duration table entirely.
+        // Snapshots may omit the optional duration table entirely.
         source.execute_batch("DROP TABLE book_audiobook_duration").unwrap();
         source.execute("UPDATE book SET title='Retitled' WHERE row_id=1", []).unwrap();
-        catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, 8)).unwrap();
+        catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, catalog::FORMAT_VERSION)).unwrap();
         assert_eq!(catalog::entry(audio_key).unwrap().unwrap().audiobook_duration_ms, None);
         let published: (i64, String) = attached
             .query_row("SELECT browse.row_id,source.title FROM catalog.catalog_hosted source JOIN catalog.catalog_browse_book browse ON source.identity=browse.key WHERE browse.key=?1", [[1_u8; 32].as_slice()], |row| {
@@ -210,7 +228,7 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         let fresh_revision = fresh.page.as_ref().unwrap().result_revision.as_ref().unwrap();
         source.pragma_update(None, "foreign_keys", false).unwrap();
         source.execute("DELETE FROM description WHERE row_id=1", []).unwrap();
-        assert!(catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, 8)).is_err(), "invalid foreign keys must roll the whole snapshot back");
+        assert!(catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, catalog::FORMAT_VERSION)).is_err(), "invalid foreign keys must roll the whole snapshot back");
         let retained = db.browse_result_page(&heading_query, false, fresh_revision, BrowsePageRequest::default()).unwrap().unwrap();
         assert_eq!(retained.contents, fresh.contents);
         assert_eq!(retained.sections, fresh.sections);

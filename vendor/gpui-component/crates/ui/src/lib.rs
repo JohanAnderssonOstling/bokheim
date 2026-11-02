@@ -1,7 +1,6 @@
 use gpui::{App, SharedString};
 use std::ops::Deref;
 
-mod async_util;
 mod element_ext;
 mod event;
 mod focus_trap;
@@ -27,7 +26,6 @@ pub mod button;
 pub mod checkbox;
 pub mod clipboard;
 pub mod dialog;
-pub mod highlighter;
 pub mod history;
 pub mod input;
 pub mod kbd;

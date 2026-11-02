@@ -5,13 +5,15 @@ edition = "2024"
 publish = false
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 ui-components = { path = "../../../../components" }
 gpui.workspace = true
-gpui-image-eviction = { path = "../../../../../shared/gpui-image-eviction" }
+gpui-image-eviction = { path = "../../../../../../HtmlEngine/adapters/gpui-image-eviction" }
 gpui-component.workspace = true
-image = { version = "0.25", default-features = false }
+image = { workspace = true }
 log = "0.4"
 pdf-reader-core = { path = "../../../../../shared/pdf-reader-core" }
+pdf-view-common = { path = "../../../../../shared/pdf-view-common" }
 fixed-page = { path = "../../../../../shared/fixed-page", features = ["gpui"] }
 smallvec = "1"
 web-time = "1"

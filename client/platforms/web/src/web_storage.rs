@@ -1,14 +1,73 @@
 //! Browser SQLite VFS bootstrap. All higher-level behavior remains in the
 //! regular backend; this module only installs durable browser file semantics.
 
+use sqlite_wasm_vfs::sahpool::{OpfsSAHError, OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil, install};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Error, SeekFrom};
-use std::time::Duration;
-use sqlite_wasm_vfs::sahpool::{install, OpfsSAHError, OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil};
-use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
+use operation_failure::Failure;
+use rusqlite::OptionalExtension;
+use sync_common::BookId;
 use wasm_bindgen::prelude::*;
+
+#[derive(Debug)]
+pub struct StorageError {
+    message: String,
+    failure: Option<Failure>,
+}
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+impl std::error::Error for StorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.failure.as_ref().map(|failure| failure as _)
+    }
+}
+impl From<String> for StorageError {
+    fn from(message: String) -> Self {
+        Self { message, failure: None }
+    }
+}
+impl From<&str> for StorageError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl From<StorageError> for String {
+    fn from(error: StorageError) -> Self {
+        error.to_string()
+    }
+}
+impl From<rusqlite::Error> for StorageError {
+    fn from(error: rusqlite::Error) -> Self {
+        let failure = match &error {
+            rusqlite::Error::SqliteFailure(code, _) => match code.code {
+                rusqlite::ErrorCode::DiskFull => Some(Failure::StorageFull),
+                rusqlite::ErrorCode::ReadOnly => Some(Failure::ReadOnlyStorage),
+                rusqlite::ErrorCode::PermissionDenied => Some(Failure::PermissionDenied),
+                _ => None,
+            },
+            _ => None,
+        };
+        Self { message: error.to_string(), failure }
+    }
+}
+
+fn storage_js_error(error: JsValue) -> StorageError {
+    let name = js_sys::Reflect::get(&error, &"name".into()).ok().and_then(|name| name.as_string());
+    let failure = match name.as_deref() {
+        Some("QuotaExceededError") => Some(Failure::StorageFull),
+        Some("NotAllowedError" | "SecurityError") => Some(Failure::PermissionDenied),
+        Some("NoModificationAllowedError") => Some(Failure::StorageBusy),
+        _ => None,
+    };
+    StorageError { message: js_error(error), failure }
+}
 #[wasm_bindgen(module = "/src/staged_assets.js")]
 extern "C" {
     #[wasm_bindgen(catch, js_name = removeAsset)]
@@ -83,6 +142,7 @@ pub async fn initialize() -> Result<(), StorageInitError> {
         let error = storage_error(error);
         if busy { StorageInitError::Busy(error) } else { StorageInitError::Failed(error) }
     })?;
+    super::reference_storage::recover(&storage)?;
     // SQLite can synchronously create short-lived journal files. Keep eight
     // unused handles available without permanently growing the pool on every
     // launch, and clean up surplus handles left by older builds.
@@ -125,12 +185,31 @@ async fn reclaim_unreferenced_objects() -> Result<(), String> {
     Ok(())
 }
 
-pub fn is_thumbnail(name: &str) -> bool {
-    matches!(name.split('/').collect::<Vec<_>>().as_slice(), ["assets", _, "thumbnail", _])
-}
-
 pub fn database_exists(name: &str) -> Result<bool, String> {
     storage()?.exists(name).map_err(storage_error)
+}
+
+/// Bulk-install a closed, disposable reference cache, never a user database.
+/// A pending pool entry lets the next startup discard an interrupted import.
+pub fn import_reference_database(name: &str, image: &[u8]) -> Result<(), String> {
+    let storage = storage()?;
+    super::reference_storage::import(&storage, name, image)
+}
+
+pub fn reference_database(name: &str) -> Result<Option<String>, String> {
+    with_index(|index| index.query_row("SELECT filename FROM reference_selection WHERE name=?1", [name], |row| row.get(0)).optional())
+}
+
+/// Publish a completed immutable file for the next startup. Open readers keep
+/// their original file; publication never replaces an active reference.
+pub fn publish_reference_database(name: &str, filename: &str) -> Result<(), String> {
+    with_index(|index| index.execute("INSERT INTO reference_selection(name,filename) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET filename=excluded.filename WHERE filename<>excluded.filename", [name, filename]).map(|_| ()))
+}
+
+/// Call only during startup, before any library opens an attached reference.
+pub fn prune_reference_databases(legacy: &str, prefix: &str, selected: &str) -> Result<(), String> {
+    let storage = storage()?;
+    super::reference_storage::prune(&storage, legacy, prefix, selected)
 }
 
 pub async fn reserve_database_capacity(additional_databases: usize) -> Result<(), String> {
@@ -140,7 +219,7 @@ pub async fn reserve_database_capacity(additional_databases: usize) -> Result<()
     storage.reserve_minimum_capacity(required_capacity).await.map_err(|error| error.to_string())
 }
 
-fn storage_error(error: OpfsSAHError) -> String {
+pub(super) fn storage_error(error: OpfsSAHError) -> String {
     let detail = match &error {
         OpfsSAHError::GetDirHandle(value)
         | OpfsSAHError::GetFileHandle(value)
@@ -176,9 +255,13 @@ fn storage() -> Result<Rc<OpfsSAHPoolUtil>, String> {
 }
 
 fn with_index<T>(operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>) -> Result<T, String> {
+    with_index_typed(operation).map_err(Into::into)
+}
+
+fn with_index_typed<T>(operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>) -> Result<T, StorageError> {
     ASSET_INDEX.with(|slot| {
         let index = slot.borrow();
-        operation(index.as_ref().ok_or("browser asset index has not been initialized")?).map_err(|error| error.to_string())
+        operation(index.as_ref().ok_or("browser asset index has not been initialized")?).map_err(Into::into)
     })
 }
 
@@ -206,7 +289,7 @@ pub struct FileWriter {
     _source: FileReader,
 }
 
-pub async fn begin_write(name: &str) -> Result<FileWriter, String> {
+pub async fn begin_write(name: &str) -> Result<FileWriter, StorageError> {
     let mut parts = name.split('/');
     let (Some("assets"), Some(library), Some(kind), Some(_asset), None) = (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) else {
         return Err("Invalid library asset name".into());
@@ -218,16 +301,16 @@ pub async fn begin_write(name: &str) -> Result<FileWriter, String> {
     create_asset_writer(name.to_owned(), format!("__libraries/{library}/{kind}/{}", uuid::Uuid::new_v4())).await
 }
 
-async fn create_asset_writer(name: String, physical: String) -> Result<FileWriter, String> {
+async fn create_asset_writer(name: String, physical: String) -> Result<FileWriter, StorageError> {
     // The task retains ownership across cancellation and closes/removes any late handle.
     let (sender, receiver) = tokio::sync::oneshot::channel();
     wasm_bindgen_futures::spawn_local(async move {
         let source = FileReader::new(physical.clone(), 0);
         let writer = FileWriter { name, physical, length: 0, committed: false, _source: source };
-        let result = create_asset(&writer.physical).await.map_err(js_error).map(|()| writer);
+        let result = create_asset(&writer.physical).await.map_err(storage_js_error).map(|()| writer);
         let _ = sender.send(result);
     });
-    receiver.await.map_err(|_| "book creation stopped".to_owned())?
+    receiver.await.map_err(|_| StorageError::from("book creation stopped"))?
 }
 
 /// A reader pins a generation name, so replacing a logical file cannot change
@@ -239,14 +322,9 @@ pub struct FileReader {
 }
 
 impl FileReader {
-    /// Opens another cursor over the same pinned storage generation.
-    pub fn fork(&self) -> Self {
-        Self::new(self.physical.clone(), self.length)
-    }
-
-    pub fn content_hash(&self) -> Result<Option<sync_common::BookId>, String> {
+    pub fn content_hash(&self) -> Result<Option<BookId>, String> {
         use rusqlite::OptionalExtension;
-        let value: Option<sync_common::BookId> = with_index(|index| index.query_row(include_str!("sql/web_storage/content_hash_select.sql"), [&self.physical], |row| row.get(0)).optional())?;
+        let value: Option<BookId> = with_index(|index| index.query_row(include_str!("sql/web_storage/content_hash_select.sql"), [&self.physical], |row| row.get(0)).optional())?;
         Ok(value)
     }
 
@@ -288,11 +366,7 @@ impl Drop for FileReader {
                 return readers.remove(&self.physical);
             };
             state.count = count;
-            if state.count == 0 {
-                readers.remove(&self.physical)
-            } else {
-                None
-            }
+            if state.count == 0 { readers.remove(&self.physical) } else { None }
         });
         if let Some(state) = finished {
             if state.delete_on_close {
@@ -348,35 +422,41 @@ pub async fn open_reader(name: &str) -> Result<Option<FileReader>, String> {
 }
 
 impl FileWriter {
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+
     pub fn open_reader(&self) -> FileReader {
         FileReader::new(self.physical.clone(), self.length)
     }
 
-    pub fn publish_as(mut self, name: String) -> Result<(), String> {
-        self.name = name;
-        self.commit()
-    }
-
-    pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), String> {
-        write_staged(&self.physical, self.length as f64, bytes).map_err(js_error)?;
+    pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), StorageError> {
+        write_staged(&self.physical, self.length as f64, bytes).map_err(storage_js_error)?;
         self.length = self.length.checked_add(bytes.len() as u64).ok_or("asset length overflow")?;
         Ok(())
     }
 
-    pub fn publish_verified_as(mut self, name: String, content_hash: sync_common::BookId) -> Result<(), String> {
+    pub fn publish_verified_as(mut self, name: String, content_hash: BookId) -> Result<(), StorageError> {
         self.name = name;
         self.commit_verified(content_hash)
     }
-    pub fn commit(self) -> Result<(), String> {
+    /// Retain the published physical generation until the owning database has
+    /// accepted or rejected it. Rejection cannot remove a later replacement.
+    pub fn publish_pinned_as(self, name: String, content_hash: BookId) -> Result<PublishedFile, StorageError> {
+        let reader = self.open_reader();
+        self.publish_verified_as(name.clone(), content_hash)?;
+        Ok(PublishedFile { name, reader })
+    }
+    pub fn commit(self) -> Result<(), StorageError> {
         self.commit_revision(None)
     }
-    pub fn commit_verified(self, content_hash: sync_common::BookId) -> Result<(), String> {
+    pub fn commit_verified(self, content_hash: BookId) -> Result<(), StorageError> {
         self.commit_revision(Some(content_hash))
     }
-    fn commit_revision(mut self, content_hash: Option<sync_common::BookId>) -> Result<(), String> {
+    fn commit_revision(mut self, content_hash: Option<BookId>) -> Result<(), StorageError> {
         let previous = physical_name(&self.name)?;
-        flush_staged(&self.physical).map_err(js_error)?;
-        with_index(|index| {
+        flush_staged(&self.physical).map_err(storage_js_error)?;
+        with_index_typed(|index| {
             let tx = index.unchecked_transaction()?;
             super::asset_index::publish(&tx, &self.name, &self.physical, self.length)?;
             if let Some(content_hash) = content_hash {
@@ -393,6 +473,20 @@ impl FileWriter {
     }
 }
 
+pub struct PublishedFile {
+    name: String,
+    reader: FileReader,
+}
+impl PublishedFile {
+    pub fn discard(self) -> Result<(), String> {
+        let removed = with_index(|index| index.execute(include_str!("sql/web_storage/discard_publication.sql"), rusqlite::params![self.name, self.reader.physical]))?;
+        if removed != 0 {
+            retire(self.reader.physical.clone());
+        }
+        Ok(())
+    }
+}
+
 impl Drop for FileWriter {
     fn drop(&mut self) {
         if !self.committed {
@@ -404,7 +498,7 @@ impl Drop for FileWriter {
 pub async fn write_file(name: &str, bytes: &[u8]) -> Result<(), String> {
     let mut writer = begin_write(name).await?;
     writer.write_all(bytes)?;
-    writer.commit()
+    writer.commit().map_err(Into::into)
 }
 
 pub fn remove_file(name: &str) -> Result<bool, String> {
@@ -421,10 +515,6 @@ pub fn remove_file(name: &str) -> Result<bool, String> {
 pub fn file_exists(name: &str) -> Result<bool, String> {
     // Book flushes bytes before committing the index entry.
     Ok(physical_name(name)?.is_some())
-}
-
-pub fn list_files_page(prefix: &str, after: &str) -> Result<Vec<String>, String> {
-    with_index(|index| super::asset_index::page(index, prefix, after)).map(|page| page.into_iter().map(|(name, _)| name).collect())
 }
 
 pub async fn total_file_bytes(prefix: &str) -> Result<u64, String> {

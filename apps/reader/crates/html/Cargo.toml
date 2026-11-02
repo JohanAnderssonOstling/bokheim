@@ -10,6 +10,8 @@ futures-lite = "2"
 scraper.workspace = true
 lightningcss.workspace = true
 book-content = { path = "../../../../client/book-content" }
+book-model = { path = "../../../../shared/book-model" }
+skrift-column-paginator.workspace = true
 html.workspace = true
 
 [[bin]]

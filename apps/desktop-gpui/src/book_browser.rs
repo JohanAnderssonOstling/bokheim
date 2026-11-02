@@ -8,8 +8,6 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::progress::Progress;
 use gpui_component::{ActiveTheme, IconName, Root};
-#[cfg(not(test))]
-use reqwest_client::ReqwestClient;
 use serde::Deserialize;
 use serde_json::{Value, from_str, json};
 use std::path::PathBuf;
@@ -73,8 +71,6 @@ enum NativeEvent {
         download: String,
         name: String,
         error: Option<String>,
-        #[serde(default)]
-        torrent: bool,
     },
     Status {
         message: String,
@@ -184,17 +180,15 @@ impl<V: Render + 'static> BrowserRoot<V> {
             Message::Native { id, event } => match event {
                 NativeEvent::DownloadStarted { download, name } => {
                     self.downloads.start(&format!("{id}:{download}"));
-                    self.download_update(id, BrowserDownloadUpdate { replaces: None, download, name, phase: BrowserDownloadPhase::Downloading, percent: None, message: None }, window, cx);
+                    self.download_update(id, BrowserDownloadUpdate { download, name, phase: BrowserDownloadPhase::Downloading, percent: None, message: None }, window, cx);
                 }
-                NativeEvent::CancelDownload { download } => self.download_update(id, BrowserDownloadUpdate { replaces: None, download, name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }, window, cx),
+                NativeEvent::CancelDownload { download } => self.download_update(id, BrowserDownloadUpdate { download, name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }, window, cx),
                 NativeEvent::DownloadProgress { download, percent } => self.downloads.progress(&format!("{id}:{download}"), percent, window, cx),
                 NativeEvent::DownloadWaiting { download } => self.downloads.waiting(&format!("{id}:{download}"), window, cx),
-                NativeEvent::DownloadFinished { download, name, error, torrent } => {
-                    // Torrent metadata hands this same entry to the backend's
-                    // progress publisher; it is not a completed payload yet.
+                NativeEvent::DownloadFinished { download, name, error } => {
                     // HTTP books wait for the backend's import result before
                     // reporting completion while this browser is open.
-                    if (!torrent || error.is_some()) && self.downloads.get(&format!("{id}:{download}")).is_some() {
+                    if self.downloads.get(&format!("{id}:{download}")).is_some() {
                         // The platform webview reports download failures only as text.
                         if let Some(error) = &error {
                             log::warn!("browser download {download} failed: {error}");
@@ -202,7 +196,6 @@ impl<V: Render + 'static> BrowserRoot<V> {
                         self.download_update(
                             id,
                             BrowserDownloadUpdate {
-                                replaces: None,
                                 download,
                                 name,
                                 phase: if error.is_some() { BrowserDownloadPhase::Failed(None) } else { BrowserDownloadPhase::Preparing },
@@ -231,8 +224,7 @@ impl<V: Render + 'static> BrowserRoot<V> {
 
     fn download_update(&mut self, id: u64, mut update: BrowserDownloadUpdate, window: &mut Window, cx: &mut Context<Self>) {
         update.download = format!("{id}:{}", update.download);
-        update.replaces = update.replaces.map(|previous| format!("{id}:{previous}"));
-        if self.browser.as_ref().is_some_and(|browser| browser.read(cx).id == id) || self.downloads.get(&update.download).is_some() || update.replaces.as_ref().is_some_and(|previous| self.downloads.get(previous).is_some()) {
+        if self.browser.as_ref().is_some_and(|browser| browser.read(cx).id == id) || self.downloads.get(&update.download).is_some() {
             self.downloads.apply(update, window, cx);
         }
     }
@@ -330,8 +322,6 @@ struct Browser {
 
 impl Browser {
     fn new(id: u64, mut request: Value, native: Arc<Transport>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        #[cfg(not(test))]
-        cx.set_http_client(Arc::new(ReqwestClient::new()));
         let url = request["url"].as_str().unwrap_or("about:blank").to_owned();
         let history = request["history_file"].as_str().map(PathBuf::from).or_else(|| request["data_directory"].as_str().map(|path| PathBuf::from(path).join("address-history.json"))).map(AddressHistory::load);
         let page = history.as_ref().and_then(|history| history.page(&url)).cloned().unwrap_or_else(|| PageMetadata::for_url(&url));
@@ -591,7 +581,7 @@ impl Render for Browser {
             .p(px(components::SPACE_SM))
             .capture_any_mouse_down(cx.listener(|browser, _, _, _| browser.send("focus_controls", json!({}))))
             .child(components::browser_address_control(&self.address, self.editing, self.page.display_name().to_owned(), self.page.icon.as_deref(), theme).debug_selector(|| "android-browser-address".into()))
-            .child(components::outlined_icon_button("browser-close", "Close browser", IconName::Close, theme).debug_selector(|| "android-browser-close".into()).on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))));
+            .child(components::outlined_icon_button("browser-close", "Close browser", IconName::Close).debug_selector(|| "android-browser-close".into()).on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))));
         div()
             .size_full()
             .flex()
@@ -757,7 +747,7 @@ mod tests {
             send(
                 Message::Command(Command::Feedback {
                     id,
-                    feedback: BrowserDownloadUpdate { download: "failed".into(), replaces: None, name: "Broken book".into(), phase: BrowserDownloadPhase::Failed(None), percent: None, message: None },
+                    feedback: BrowserDownloadUpdate { download: "failed".into(), name: "Broken book".into(), phase: BrowserDownloadPhase::Failed(None), percent: None, message: None },
                 }),
                 cx,
             );
@@ -788,7 +778,7 @@ mod tests {
         send(
             Message::Command(Command::Feedback {
                 id: 7,
-                feedback: BrowserDownloadUpdate { download: "cancelled".into(), replaces: None, name: "Cancel this book".into(), phase: BrowserDownloadPhase::Completed, percent: None, message: None },
+                feedback: BrowserDownloadUpdate { download: "cancelled".into(), name: "Cancel this book".into(), phase: BrowserDownloadPhase::Completed, percent: None, message: None },
             }),
             cx,
         );
@@ -796,22 +786,6 @@ mod tests {
 
         root.update(cx, |root, _| root.cancel_download("7:cancelled"));
         assert_eq!(commands.lock().unwrap().iter().filter(|command| command["command"] == "cancel_download").count(), 1, "duplicate close actions must cancel only once");
-        send(
-            Message::Command(Command::Feedback {
-                id: 7,
-                feedback: BrowserDownloadUpdate { download: "torrent:cancelled".into(), replaces: Some("cancelled".into()), name: "Cancelled torrent".into(), phase: BrowserDownloadPhase::Downloading, percent: Some(10), message: None },
-            }),
-            cx,
-        );
-        send(
-            Message::Command(Command::Feedback {
-                id: 7,
-                feedback: BrowserDownloadUpdate { download: "torrent:cancelled".into(), replaces: None, name: "Cancelled torrent".into(), phase: BrowserDownloadPhase::Completed, percent: None, message: None },
-            }),
-            cx,
-        );
-        assert_eq!(count(cx), 1, "renaming a cancelled transfer must retain its cancellation");
-
         // Clear both terminal/status toasts and active download tracking.
         fail(7, cx);
         send(Message::Native { id: 7, event: NativeEvent::Status { message: "Browser status".into() } }, cx);
@@ -823,7 +797,7 @@ mod tests {
         assert!(root.read_with(cx, |root, _| root.browser.is_none() && root.downloads.is_empty()));
         assert_eq!(count(cx), 1);
         fail(7, cx);
-        send(Message::Native { id: 7, event: NativeEvent::DownloadFinished { download: "active".into(), name: "Active book".into(), error: Some("HTTP 500".into()), torrent: false } }, cx);
+        send(Message::Native { id: 7, event: NativeEvent::DownloadFinished { download: "active".into(), name: "Active book".into(), error: Some("HTTP 500".into()) } }, cx);
         assert_eq!(count(cx), 1);
         assert_eq!(commands.lock().unwrap().iter().filter(|command| command["command"] == "cancel_download").count(), 1, "closing the browser must not cancel active transfers");
 
@@ -931,7 +905,7 @@ mod tests {
         }
         receive(7, r#"{"kind":"page_visited","url":"https://gutenberg.org/","title":"Project Gutenberg","icon":null}"#);
         cx.run_until_parked();
-        assert_eq!(AddressHistory::load(history_file.clone()).most_visited()[0].visits, 2);
+        assert_eq!(AddressHistory::load(history_file.clone()).start_page_shortcuts().next().unwrap().visits, 2);
         let suggestions = cx.debug_bounds("android-browser-address-suggestions").unwrap();
         assert!(suggestions.top() >= cx.debug_bounds("android-browser-address").unwrap().bottom());
         assert!(suggestions.bottom() <= cx.debug_bounds("android-browser-page").unwrap().top());
@@ -993,35 +967,6 @@ mod tests {
         cx.run_until_parked();
         assert!(!root.read_with(cx, |root, _| root.downloads.get("7:one").unwrap().phase == BrowserDownloadPhase::Waiting));
         assert_eq!(cx.update(|window, cx| Root::read(window, cx).notification.read(cx).notifications().len()), 2);
-        // A .torrent HTTP download keeps its entry and progress entity when
-        // the library takes over the payload transfer.
-        let metadata_bar = root.read_with(cx, |root, _| root.downloads.get("7:two").unwrap().progress.entity_id());
-        receive(7, r#"{"kind":"download_finished","download":"two","name":"two.torrent","torrent":true}"#);
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"two","name":"two.torrent","phase":"preparing"}}"#).unwrap();
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"torrent:metadata","replaces":"two","name":"Bundle","phase":"downloading","percent":12}}"#).unwrap();
-        cx.run_until_parked();
-        cx.background_executor.advance_clock(Duration::from_millis(200));
-        cx.run_until_parked();
-        assert_eq!(root.read_with(cx, |root, _| root.downloads.get("7:torrent:metadata").unwrap().progress.entity_id()), metadata_bar);
-        assert_eq!(root.read_with(cx, |root, cx| root.downloads.get("7:torrent:metadata").unwrap().progress.read(cx).percent), Some(12));
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"torrent:first","name":"First torrent","phase":"downloading","percent":43}}"#).unwrap();
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"torrent:second","name":"Second torrent","phase":"preparing"}}"#).unwrap();
-        command(r#"{"command":"feedback","id":99,"feedback":{"download":"torrent:stale","name":"Another session","phase":"downloading","percent":90}}"#).unwrap();
-        cx.run_until_parked();
-        assert_eq!(root.read_with(cx, |root, cx| root.downloads.get("7:torrent:first").unwrap().progress.read(cx).percent), Some(43));
-        assert_eq!(root.read_with(cx, |root, cx| root.downloads.get("7:torrent:second").unwrap().progress.read(cx).percent), None);
-        assert!(root.read_with(cx, |root, _| root.downloads.get("99:torrent:stale").is_none()));
-        assert_eq!(cx.update(|window, cx| Root::read(window, cx).notification.read(cx).notifications().len()), 4);
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"torrent:first","name":"First torrent","phase":"downloading","percent":58}}"#).unwrap();
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"torrent:second","name":"Second torrent","phase":"waiting","message":"Waiting for an unmetered connection"}}"#).unwrap();
-        cx.run_until_parked();
-        assert_eq!(root.read_with(cx, |root, cx| root.downloads.get("7:torrent:first").unwrap().progress.read(cx).percent), Some(58));
-        assert_eq!(root.read_with(cx, |root, cx| root.downloads.get("7:torrent:metadata").unwrap().progress.read(cx).percent), Some(12));
-        assert_eq!(cx.update(|window, cx| Root::read(window, cx).notification.read(cx).notifications().len()), 4);
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"torrent:first","name":"First torrent","phase":"completed","message":"Added to library; seeding continues"}}"#).unwrap();
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"torrent:second","name":"Second torrent","phase":"failed","message":"Tracker unavailable"}}"#).unwrap();
-        cx.run_until_parked();
-        assert!(root.read_with(cx, |root, _| root.downloads.get("7:torrent:first").is_none() && root.downloads.get("7:torrent:second").is_none()));
         cx.update(|window, cx| {
             let notifications = Root::read(window, cx).notification.clone();
             notifications.update(cx, |list, cx| list.clear(window, cx));
@@ -1064,7 +1009,6 @@ mod tests {
         assert!(root.read_with(cx, |root, _| root.downloads.is_empty()));
         command(r#"{"command":"feedback","id":7,"feedback":{"download":"one","name":"one.epub","phase":"completed","message":"Added to library"}}"#).unwrap();
         receive(7, r#"{"kind":"download_finished","download":"two","name":"two.pdf","error":"HTTP 500"}"#);
-        command(r#"{"command":"feedback","id":7,"feedback":{"download":"torrent:metadata","name":"Bundle","phase":"failed","message":"HTTP 500"}}"#).unwrap();
         cx.run_until_parked();
         assert!(root.read_with(cx, |root, _| root.downloads.is_empty()));
         assert_eq!(cx.update(|window, cx| Root::read(window, cx).notification.read(cx).notifications().len()), 0);

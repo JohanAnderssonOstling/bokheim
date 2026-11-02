@@ -8,6 +8,7 @@ publish = false
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 audiobook-folder = { path = "../audiobook-folder" }
 blake3 = "1"
+content-address = { path = "../../../../shared/content-address" }
 book-inspection = { path = "../book-inspection" }
 book-model = { path = "../../../../shared/book-model" }
 client-platform-runtime = { path = "../../../platforms/runtime" }

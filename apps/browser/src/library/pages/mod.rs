@@ -7,6 +7,8 @@ use ui_components::BrowserTheme;
 
 pub(crate) mod browse;
 pub(crate) mod trash;
+pub(crate) mod notebook;
+mod pagination;
 
 /// Keeps existing page content visible alongside a failed request and its retry.
 pub(crate) fn with_retry_banner(body: AnyElement, error: Option<SharedString>, retry_id: impl Into<ElementId>, theme: BrowserTheme, on_retry: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {

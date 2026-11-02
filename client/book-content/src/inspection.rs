@@ -33,6 +33,15 @@ impl<'a> DocumentInspection<'a> {
         &self.documents
     }
 
+    /// Use the same XHTML declaration as the reading resource provider.
+    pub fn media_type(&self, uri: &str) -> io::Result<Option<String>> {
+        let uri = local_resource_uri("", uri)?;
+        match &self.source {
+            DocumentSource::Epub(epub) => Ok(Some(if epub.package.resource_media_type(&uri).is_some_and(|kind| kind.eq_ignore_ascii_case("application/xhtml+xml")) { "application/xhtml+xml".to_owned() } else { "text/html".to_owned() })),
+            DocumentSource::Prepared(resources) => resources.media_type(&uri),
+        }
+    }
+
     pub fn toc(&self) -> &[TocEntry] {
         &self.toc
     }

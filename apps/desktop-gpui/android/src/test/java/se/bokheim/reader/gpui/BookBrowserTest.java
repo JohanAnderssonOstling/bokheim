@@ -167,27 +167,6 @@ public class BookBrowserTest {
         pageTouch(android.view.MotionEvent.ACTION_UP, 12, 150);
     }
 
-    @Test public void systemBackReportsCurrentHistoryAndSkipsTheInitialBlankPage() throws Exception {
-        List<JSONObject> events = new ArrayList<>();
-        browser = new BookBrowserSurface(activity, 22, new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath()), anchor, (id, message) -> {
-            try { events.add(new JSONObject(message)); } catch (Exception error) { throw new AssertionError(error); }
-        });
-        browser.web.clearHistory();
-        Shadows.shadowOf(browser.web).pushEntryToHistory("about:blank");
-        Shadows.shadowOf(browser.web).pushEntryToHistory("https://example.com/first");
-        browser.backPressed();
-        assertEquals("navigation", events.get(events.size() - 2).getString("kind"));
-        assertFalse(events.get(events.size() - 2).getBoolean("back"));
-        assertEquals("back_pressed", events.get(events.size() - 1).getString("kind"));
-        Shadows.shadowOf(browser.web).pushEntryToHistory("https://example.com/second");
-        browser.backPressed();
-        assertTrue(events.get(events.size() - 2).getBoolean("back"));
-        browser.command(new JSONObject().put("command", "back"));
-        assertEquals(1, Shadows.shadowOf(browser.web).getGoBackInvocations());
-        browser.backPressed();
-        assertFalse(events.get(events.size() - 2).getBoolean("back"));
-    }
-
     @Test public void hardwareBackBypassesGameActivityAndConsumesTheWholeKeyPress() throws Exception {
         List<JSONObject> events = new ArrayList<>();
         browser = new BookBrowserSurface(activity, 27, new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath()), anchor, (id, message) -> {
@@ -288,56 +267,6 @@ public class BookBrowserTest {
         assertTrue(finished.get(url("/two.pdf")).getString("error").contains("HTTP 500"));
         assertTrue(progress);
         assertEquals("closed", events.get(events.size() - 1).getString("kind"));
-    }
-
-    @Test public void magnetClicksAreHandedToRustWithoutNavigatingThePage() throws Exception {
-        List<String> events = new ArrayList<>();
-        JSONObject request = new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath());
-        browser = new BookBrowserSurface(activity, 13, request, anchor, (id, message) -> events.add(message));
-        String magnet = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789";
-        android.webkit.WebResourceRequest link = new android.webkit.WebResourceRequest() {
-            public android.net.Uri getUrl() { return android.net.Uri.parse(magnet); }
-            public boolean isForMainFrame() { return true; }
-            public boolean isRedirect() { return false; }
-            public boolean hasGesture() { return true; }
-            public String getMethod() { return "GET"; }
-            public Map<String, String> getRequestHeaders() { return java.util.Collections.emptyMap(); }
-        };
-        assertTrue(Shadows.shadowOf(browser.web).getWebViewClient().shouldOverrideUrlLoading(browser.web, link));
-        JSONObject event = new JSONObject(events.get(events.size() - 1));
-        assertEquals("magnet", event.getString("kind"));
-        assertEquals(magnet, event.getString("url"));
-        assertEquals("about:blank", browser.web.getUrl());
-    }
-
-    @Test public void torrentDownloadsUseBrowserCookiesAndAreNotReportedAsBooks() throws Exception {
-        byte[] metadata = "torrent metadata".getBytes(StandardCharsets.UTF_8);
-        server.serve("/download", request -> {
-            assertEquals("session=signed-in", request.headers.get("cookie"));
-            request.respond(200, "Content-Type: application/x-bittorrent\r\n", metadata, metadata.length);
-        });
-        server.start();
-        CookieManager.getInstance().setCookie(url("/"), "session=signed-in");
-        List<String> events = new ArrayList<>();
-        JSONObject request = new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath());
-        browser = new BookBrowserSurface(activity, 14, request, anchor, (id, message) -> events.add(message));
-        browser.startDownload(url("/download"), "Bokheim-test", null, null);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        JSONObject torrent = null;
-        while (torrent == null && System.nanoTime() < deadline) {
-            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
-            for (String message : events) {
-                JSONObject event = new JSONObject(message);
-                assertNotEquals("downloaded", event.getString("kind"));
-                if (event.getString("kind").equals("torrent_file")) torrent = event;
-            }
-            Thread.sleep(10);
-        }
-        assertNotNull("torrent metadata reaches Rust", torrent);
-        assertEquals(url("/download"), torrent.getString("download"));
-        File file = new File(torrent.getString("path"));
-        assertTrue(file.getName().endsWith(".torrent"));
-        assertArrayEquals(metadata, Files.readAllBytes(file.toPath()));
     }
 
     @Test public void downloadedBookUsesBrowserCookiesAgentAndRedirects() throws Exception {

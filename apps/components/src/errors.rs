@@ -12,25 +12,34 @@ pub fn user_facing_error(error: &(impl Classified + ?Sized), fallback: &'static 
 
 fn recovery(failure: Failure) -> Option<&'static str> {
     Some(match failure {
-        Failure::StorageFull => "There isn't enough free space. Free up space on the device or drive that holds your library, then try again.",
-        Failure::ReadOnlyStorage => "Bokheim can't save changes here. Allow changes to the library folder or choose a writable library location, then try again.",
-        Failure::PermissionDenied => "Bokheim can't access the files it needs. Check that you have permission to use the folder, then try again.",
-        Failure::StorageBusy => "Another Bokheim tab is using browser storage. Close your other Bokheim tabs, then reload this page.",
-        Failure::WebViewMissing => "The system browser component is missing. Install WebKitGTK 4.1, then reopen Bokheim and try again.",
+        Failure::StorageFull => "Not enough storage. Free up space on the device or drive holding your library, then retry.",
+        Failure::CloudStorageFull => "Cloud storage is full. Free up space in your account, then retry.",
+        Failure::ReadOnlyStorage => "This location is read-only. Allow changes or choose a writable library folder.",
+        Failure::PermissionDenied => "Access denied. Check that you have permission to use the folder.",
+        Failure::StorageBusy => "Another tab is using browser storage. Close other app tabs, then reload.",
+        Failure::WebViewMissing => "The system browser component is missing. Install WebKitGTK 4.1, then reopen the app.",
         Failure::InvalidAddress => "Enter a complete web address starting with https:// or http://.",
-        Failure::NotACatalog => "This address doesn't provide a supported book catalog. Check the catalog's feed address and try again.",
-        Failure::CatalogCredentialsRejected => "The catalog didn't accept those sign-in details. Check your username and password, then try again.",
+        Failure::NotACatalog => "No supported catalog at this address. Check the feed address and retry.",
+        Failure::CatalogCredentialsRejected => "Catalog sign-in failed. Check your username and password, then retry.",
         Failure::Unauthorized | Failure::SignInRequired => "Sign in again, then retry the action.",
-        Failure::Forbidden => "Access was refused. Check that you're signed in with an account that has access, then try again.",
-        Failure::NotFound => "This item is no longer available. Refresh the page or choose another item.",
-        Failure::RateLimited => "Too many requests were made. Please wait a few minutes, then try again.",
-        Failure::ServiceUnavailable => "The service is temporarily unavailable. Please try again later.",
-        Failure::TimedOut => "The request took too long. Check your connection, then try again.",
-        Failure::Offline => "Bokheim couldn't connect. Check your internet connection, then try again.",
-        Failure::LibraryFolderUnavailable => "The library folder isn't available. Reconnect its drive or choose an available library, then try again.",
-        Failure::AccountChanged => "Your account changed while this was in progress. Please try again.",
-        Failure::DrmProtected => "This file is not supported. Bokheim cannot read DRM-protected books.",
-        Failure::UnreadableBook => "This book's file couldn't be read. Try downloading it again or choose another edition.",
+        Failure::Forbidden => "Access denied. Check your account's permissions, then retry.",
+        Failure::NotFound => "Item unavailable. Refresh or choose another item.",
+        Failure::RateLimited => "Too many requests. Please wait a few minutes, then retry.",
+        Failure::ServiceUnavailable => "Service unavailable. Please try again later.",
+        Failure::ClientUpgradeRequired => "This client and server are incompatible. Reload the web app or check for app updates. If it persists, report the problem.",
+        Failure::PasswordTooLong => "Password too long. Use a shorter one.",
+        Failure::TimedOut => "Request timed out. Check your connection and retry.",
+        Failure::Offline => "Couldn't connect. Check your internet connection and retry.",
+        Failure::LibraryFolderUnavailable => "Library folder unavailable. Reconnect its drive or choose another library.",
+        Failure::AccountChanged => "Your account changed during this action. Retry.",
+        Failure::DrmProtected => "DRM-protected books aren't supported.",
+        Failure::UnreadableBook => "Couldn't read the book file. Download it again or try another edition.",
+        Failure::BookFileUnavailable => "Couldn't access this book's file. Check the library folder and drive, or download it again.",
+        Failure::InvalidBookContainer => "Couldn't open the book's archive or file headers. It may be incomplete or unsupported. Download it again or try another edition.",
+        Failure::InvalidBookContent => "Couldn't read the book's chapters or reading order. Try another edition or repair the file.",
+        Failure::BookDocumentFailed => "A chapter couldn't be prepared for display. Try another chapter or edition.",
+        Failure::BookRendererFailed => "The reader couldn't display the prepared book. Reopen the app. If it persists, report the problem.",
+        Failure::ReadingPositionUnavailable => "Couldn't load your saved reading position. Reopen the book; its file may still be intact.",
         Failure::Wifi(failure) => wifi_message(failure),
         Failure::Rejected => return None,
     })
@@ -41,22 +50,22 @@ pub fn wifi_error_message(error: &(impl Classified + ?Sized)) -> &'static str {
     log::warn!("Wi-Fi request failed: {error}");
     match error.failure() {
         Some(Failure::Wifi(failure)) => wifi_message(failure),
-        _ => "Could not update Wi-Fi. Try again, or restart Bokheim if the problem continues.",
+        _ => "Couldn't update Wi-Fi. Retry or restart the app.",
     }
 }
 
 fn wifi_message(failure: WifiFailure) -> &'static str {
     match failure {
         WifiFailure::InvalidPassword => "Enter the network password using 8 to 63 standard keyboard characters.",
-        WifiFailure::AuthenticationFailed => "The Wi-Fi password wasn't accepted. Check the network password and try again.",
-        WifiFailure::UnsupportedSecurity => "This network uses a security type Bokheim doesn't support. Try another Wi-Fi network.",
-        WifiFailure::NetworkGone => "This Wi-Fi network is no longer available. Tap Refresh and choose an available network.",
+        WifiFailure::AuthenticationFailed => "Wi-Fi password rejected. Check the network password and retry.",
+        WifiFailure::UnsupportedSecurity => "This network's security type isn't supported. Try another network.",
+        WifiFailure::NetworkGone => "Wi-Fi network unavailable. Tap Refresh and choose another network.",
         WifiFailure::InvalidNetworkName => "Enter a network name. If you've already entered one, try a shorter name.",
-        WifiFailure::ScanTimedOut => "The Wi-Fi scan took too long. Tap Refresh to try again.",
-        WifiFailure::NoAddress => "Could not get a network address. Try connecting again, or check your router.",
-        WifiFailure::ConnectTimedOut => "Could not connect to Wi-Fi in time. Check the network password and move closer to the router, then try again.",
-        WifiFailure::Sleeping => "Wi-Fi is unavailable while your Kobo is going to sleep. Wake the device before trying again.",
-        WifiFailure::PowerControlUnavailable => "Bokheim can't switch Wi-Fi on or off on this device. Use the device's Wi-Fi controls instead.",
+        WifiFailure::ScanTimedOut => "Wi-Fi scan timed out. Tap Refresh to retry.",
+        WifiFailure::NoAddress => "Couldn't get a network address. Reconnect or check your router.",
+        WifiFailure::ConnectTimedOut => "Wi-Fi connection timed out. Check the password, move closer to the router, then retry.",
+        WifiFailure::Sleeping => "Wi-Fi is unavailable during sleep. Wake the device and retry.",
+        WifiFailure::PowerControlUnavailable => "Couldn't switch Wi-Fi on or off. Use the device's Wi-Fi controls.",
     }
 }
 
@@ -80,25 +89,25 @@ pub fn authentication_error(error: &(impl Classified + ?Sized), action: AccountA
     let refused = matches!(failure, Some(Failure::Unauthorized | Failure::Rejected));
     let explained = match action {
         AccountAction::DeleteAccount => match failure {
-            Some(Failure::Unauthorized) => Some("The password is incorrect. Check your current password and try again."),
-            Some(Failure::NotFound) => Some("Account deletion is not available on the server yet. Please try again later."),
-            Some(Failure::AccountChanged) => Some("Your account changed. Reopen account deletion and try again."),
+            Some(Failure::Unauthorized) => Some("The password is incorrect. Check your current password and retry."),
+            Some(Failure::NotFound) => Some("Account deletion is not available on the server. Try again later."),
+            Some(Failure::AccountChanged) => Some("Your account changed. Reopen account deletion and retry."),
             _ => None,
         },
-        AccountAction::Login if refused => Some("Could not sign in. Check your email and password, then try again. You can reset your password if you've forgotten it."),
-        AccountAction::Verify if refused => Some("Could not verify your email. Check the PIN from your email and the password you chose, or request a new PIN and try again."),
-        AccountAction::Reset if refused => Some("Could not reset your password. Request a new reset code and use a password that meets the length requirement."),
-        AccountAction::Register if refused => Some("Could not create the account. Check your email and password. If you already have an account, sign in or reset your password."),
+        AccountAction::Login if refused => Some("Couldn't sign in. Check your email and password, or reset a forgotten password."),
+        AccountAction::Verify if refused => Some("Couldn't verify your email. Enter the latest emailed PIN or request a new PIN. If it persists, restart account creation."),
+        AccountAction::Reset if refused => Some("Couldn't reset your password. Request a new reset code and use a password that meets the length requirement."),
+        AccountAction::Register if refused => Some("Couldn't create the account. Check your email and password. If you have an account, sign in or reset its password."),
         _ => None,
     };
     let fallback = match action {
-        AccountAction::DeleteAccount => "Could not confirm account deletion. Check your connection and account status before trying again.",
-        AccountAction::Login => "Could not sign in. Please try again.",
-        AccountAction::Verify => "Could not verify your email. Please try again.",
-        AccountAction::Reset => "Could not reset your password. Please try again.",
-        AccountAction::Register => "Could not create the account. Please try again.",
-        AccountAction::Resend => "Could not send a verification PIN. Check your email address and try again.",
-        AccountAction::RequestReset => "Could not send a password reset email. Check your email address and try again.",
+        AccountAction::DeleteAccount => "Couldn't confirm account deletion. Check your connection and account status, then retry.",
+        AccountAction::Login => "Couldn't sign in. Try again.",
+        AccountAction::Verify => "Couldn't verify your email. Try again.",
+        AccountAction::Reset => "Couldn't reset your password. Try again.",
+        AccountAction::Register => "Couldn't create the account. Try again.",
+        AccountAction::Resend => "Couldn't send a verification PIN. Check your email address and retry.",
+        AccountAction::RequestReset => "Couldn't send a password reset email. Check your email address and retry.",
     };
     explained.or_else(|| failure.and_then(recovery)).unwrap_or(fallback)
 }
@@ -138,6 +147,23 @@ mod tests {
     }
 
     #[test]
+    fn book_opening_messages_distinguish_content_display_and_saved_state() {
+        let fallback = "Could not open this book.";
+        for (failure, expected) in [
+            (Failure::BookFileUnavailable, "access this book's file"),
+            (Failure::InvalidBookContainer, "archive or file headers"),
+            (Failure::InvalidBookContent, "chapters or reading order"),
+            (Failure::BookDocumentFailed, "chapter couldn't be prepared"),
+            (Failure::BookRendererFailed, "reader couldn't display"),
+            (Failure::ReadingPositionUnavailable, "saved reading position"),
+        ] {
+            let message = user_facing_error(&Failed(Some(failure)), fallback);
+            assert!(message.contains(expected), "{failure:?}: {message}");
+            assert!(!message.contains("private"));
+        }
+    }
+
+    #[test]
     fn authentication_recovery_depends_on_the_action() {
         let refused = Failed(Some(Failure::Unauthorized));
         assert!(authentication_error(&refused, AccountAction::Login).contains("Check your email and password"));
@@ -153,6 +179,6 @@ mod tests {
         assert!(wifi_error_message(&Failed(Some(Failure::Wifi(WifiFailure::ScanTimedOut)))).contains("Tap Refresh"));
         let message = wifi_error_message(&Failed(None));
         assert!(!message.contains("private"));
-        assert!(message.contains("restart Bokheim"));
+        assert!(message.contains("restart the app"));
     }
 }

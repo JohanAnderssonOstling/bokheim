@@ -36,15 +36,13 @@ mod native;
 pub async fn run_file_jobs(assets: &AssetStore, database: &Database) -> Result<(), BackendError> {
     let mut failure = None;
     #[cfg(not(target_arch = "wasm32"))]
-    if let Err(error) = async {
+    if let Err(error) = (|| {
         let books = database.native_book_replay_work_ids()?;
-        native::replay_directories(assets, database, None).await?;
+        replay_directories(database, assets)?;
         native::reconcile_file_jobs(assets, database, database.native_file_work()?)?;
         database.complete_book_replay(&books)?;
         Ok::<_, BackendError>(())
-    }
-    .await
-    {
+    })() {
         failure = Some(error);
     }
     let mut after = None;
@@ -94,7 +92,21 @@ pub async fn run_file_jobs_for(assets: &AssetStore, database: &Database, hash: &
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn prepare_directory(assets: &AssetStore, database: &Database, id: DirId) -> Result<(), BackendError> {
-    native::replay_directories(assets, database, Some(id)).await
+    prepare_directories(assets, database, &[id]).await
+}
+
+/// Recover a set of destinations together, visiting shared ancestors once.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn prepare_directories(assets: &AssetStore, database: &Database, ids: &[DirId]) -> Result<(), BackendError> {
+    if ids.is_empty() { return Ok(()); }
+    native::replay_directories(assets, database, Some(ids))
+}
+
+/// Replay all pending folder changes after sync. Each step re-reads the
+/// database, so a folder changed meanwhile is retried or skipped.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn replay_directories(database: &Database, assets: &AssetStore) -> Result<(), BackendError> {
+    native::replay_directories(assets, database, None)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -104,17 +116,17 @@ async fn import_path(assets: &AssetStore, database: &Database, parent: DirId, na
 }
 
 /// Resolve placement policy before handing raw import bytes to storage.
-pub async fn stage_import(assets: &AssetStore, database: &Database, parent: DirId, name: String, source: Box<dyn std::io::Read + Send>, options: ImportOptions) -> Result<(String, CopiedBook), BackendError> {
+pub async fn stage_import(assets: &AssetStore, database: &Database, parent: DirId, name: &str, source: Box<dyn std::io::Read + Send>, options: ImportOptions) -> Result<(String, CopiedBook), BackendError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let relative = import_path(assets, database, parent, &name).await?;
+        let relative = import_path(assets, database, parent, name).await?;
         let occupied = database.shared_occupied_file_names(&parent)?;
         Ok(assets.copy_import(relative, source, occupied, options).await?)
     }
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (database, parent);
-        Ok(assets.copy_import(library_model::RelativeBookPath::parse(&name).map_err(BackendError::operation)?, source, Vec::new(), options).await?)
+        Ok(assets.copy_import(library_model::RelativeBookPath::parse(name).map_err(BackendError::operation)?, source, Vec::new(), options).await?)
     }
 }
 

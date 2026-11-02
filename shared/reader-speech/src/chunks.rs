@@ -15,6 +15,11 @@ pub fn next_chunk(text: &str, start: usize) -> Option<Range<usize>> {
 /// Select a shorter opening chunk without changing source offsets or splitting
 /// a UTF-8 character. Later chunks use the normal sentence/word limit.
 pub fn next_chunk_with_limit(text: &str, start: usize, max_chars: usize) -> Option<Range<usize>> {
+    next_chunk_with_language(text, start, max_chars, "en")
+}
+
+/// Use the selected local voice's language for sentence and abbreviation boundaries.
+pub fn next_chunk_with_language(text: &str, start: usize, max_chars: usize, language: &str) -> Option<Range<usize>> {
     let tail = text.get(start..)?;
     let start = start + tail.len() - tail.trim_start().len();
     if start == text.len() {
@@ -24,14 +29,13 @@ pub fn next_chunk_with_limit(text: &str, start: usize, max_chars: usize) -> Opti
     // extra character lets selection distinguish a complete node from overflow.
     let tail = &text[start..];
     let end = tail.char_indices().nth(max_chars.max(1).saturating_add(1)).map_or(tail.len(), |(offset, _)| offset);
-    let tree = parse_text_with_language(&tail[..end], ParseLanguage::English);
-    let span = next_chunk_in_tree(&tree, 0, max_chars)?;
+    let language = ParseLanguage::from_bcp47(&crate::language_base(language));
+    let tree = parse_text_with_language(&tail[..end], language);
+    let span = next_chunk_in_language_tree(&tree, 0, max_chars, language)?;
     Some(start + span.start..start + span.end)
 }
 
-/// Select from parsed source nodes, retaining semantic spans as chunk boundaries.
-/// A single node longer than the limit is split at a UTF-8 character boundary.
-pub fn next_chunk_in_tree(tree: &SegmentTree, start: usize, max_chars: usize) -> Option<Range<usize>> {
+fn next_chunk_in_language_tree(tree: &SegmentTree, start: usize, max_chars: usize, language: ParseLanguage) -> Option<Range<usize>> {
     let text = tree.text();
     let tail = text.get(start..)?;
     let start = start + tail.len() - tail.trim_start().len();
@@ -39,7 +43,7 @@ pub fn next_chunk_in_tree(tree: &SegmentTree, start: usize, max_chars: usize) ->
         return None;
     }
     let limit = text[start..].char_indices().nth(max_chars.max(1)).map_or(text.len(), |(offset, _)| start + offset);
-    let abbreviation_periods = terminal_compatible_abbreviation_periods(tree, ParseLanguage::English);
+    let abbreviation_periods = terminal_compatible_abbreviation_periods(tree, language);
     let mut last_space = None;
     let mut terminal = false;
     // Walk top-level nodes: their children include the individual periods of
@@ -89,9 +93,9 @@ mod tests {
         for sentence in ["Use e. g. apples and pears.", "At 12:30 p.m. we left.", "Visit https://example.com/a...b for details.", "He paid 3.14 dollars."] {
             let text = format!("{sentence} Next.");
             let tree = parse_text_with_language(&text, ParseLanguage::English);
-            let first = next_chunk_in_tree(&tree, 0, MAX_CHUNK_CHARS).unwrap();
+            let first = next_chunk_in_language_tree(&tree, 0, MAX_CHUNK_CHARS, ParseLanguage::English).unwrap();
             assert_eq!(&text[first.clone()], sentence);
-            assert_eq!(&text[next_chunk_in_tree(&tree, first.end, MAX_CHUNK_CHARS).unwrap()], "Next.");
+            assert_eq!(&text[next_chunk_in_language_tree(&tree, first.end, MAX_CHUNK_CHARS, ParseLanguage::English).unwrap()], "Next.");
         }
     }
 
@@ -99,7 +103,7 @@ mod tests {
     fn limits_prefer_the_start_of_a_semantic_node() {
         let text = "Wait at 12:30 p.m. tomorrow.";
         let tree = parse_text_with_language(text, ParseLanguage::English);
-        let span = next_chunk_in_tree(&tree, 0, 16).unwrap();
+        let span = next_chunk_in_language_tree(&tree, 0, 16, ParseLanguage::English).unwrap();
         assert_eq!(&text[span], "Wait at");
     }
 
@@ -119,7 +123,7 @@ mod tests {
         for limit in [0, 1, 2, 8, 16, 32, 400] {
             let mut offset = 0;
             let mut recovered = String::new();
-            while let Some(span) = next_chunk_in_tree(&tree, offset, limit) {
+            while let Some(span) = next_chunk_in_language_tree(&tree, offset, limit, ParseLanguage::English) {
                 assert!(span.end > offset);
                 assert!(text[span.clone()].chars().count() <= limit.max(1));
                 offset = span.end;
@@ -127,8 +131,8 @@ mod tests {
             }
             assert_eq!(recovered.chars().filter(|c| !c.is_whitespace()).collect::<String>(), text.chars().filter(|c| !c.is_whitespace()).collect::<String>());
         }
-        assert_eq!(next_chunk_in_tree(&tree, text.len() + 1, 400), None);
-        assert_eq!(next_chunk_in_tree(&tree, 3, 400), None); // Inside å's UTF-8 bytes.
+        assert_eq!(next_chunk_in_language_tree(&tree, text.len() + 1, 400, ParseLanguage::English), None);
+        assert_eq!(next_chunk_in_language_tree(&tree, 3, 400, ParseLanguage::English), None); // Inside å's UTF-8 bytes.
     }
 
     #[test]

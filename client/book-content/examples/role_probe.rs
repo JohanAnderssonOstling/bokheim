@@ -120,7 +120,7 @@ fn package_path(archive: &mut ZipArchive<File>) -> Result<String, Box<dyn Error>
     };
     if read_container {
         let mut reader = quick_xml::Reader::from_str(&container);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
         let mut buffer = Vec::new();
         loop {
             match reader.read_event_into(&mut buffer) {
@@ -141,7 +141,7 @@ fn package_path(archive: &mut ZipArchive<File>) -> Result<String, Box<dyn Error>
 
 fn parse_package_roles(package: &str) -> (Vec<Credit>, Vec<RoleRefinement>) {
     let mut reader = quick_xml::Reader::from_str(package);
-    reader.trim_text(false);
+    reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut capture = None;
     let mut credits = Vec::new();
@@ -173,7 +173,15 @@ fn parse_package_roles(package: &str) -> (Vec<Credit>, Vec<RoleRefinement>) {
             }
             Ok(Event::Text(text)) => {
                 if let Some(capture) = &mut capture {
-                    let decoded = text.unescape().map(|value| value.into_owned()).unwrap_or_default();
+                    let decoded = text.decode().map(|value| value.into_owned()).unwrap_or_default();
+                    match capture {
+                        Capture::Credit { text, .. } | Capture::RoleRefinement { text, .. } => text.push_str(&decoded),
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(text)) => {
+                if let Some(capture) = &mut capture {
+                    let decoded = quick_xml::escape::unescape_with(&format!("&{};", text.decode().unwrap_or_default()), quick_xml::escape::resolve_xml_entity).map(|value| value.into_owned()).unwrap_or_default();
                     match capture {
                         Capture::Credit { text, .. } | Capture::RoleRefinement { text, .. } => text.push_str(&decoded),
                     }

@@ -14,17 +14,30 @@ use library_placement::LibraryPlacement;
 use library_runtime::events::LibraryEventRouter;
 
 mod catalog;
-mod import;
-pub mod import_status;
-pub mod import_workflow;
+mod completion;
 #[cfg(not(target_arch = "wasm32"))]
-mod dropped_paths;
+mod filesystem_import;
+mod import;
 #[cfg(not(target_arch = "wasm32"))]
 mod import_native;
+mod import_status;
 #[cfg(not(target_arch = "wasm32"))]
-mod provider_uploads;
+mod native_move;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_move::NativeMoveResult;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod foliate;
+#[cfg(not(target_arch = "wasm32"))]
+mod reader_batch;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod reader_import;
+#[cfg(not(target_arch = "wasm32"))]
+mod reader_transfer;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod readest;
 #[cfg(target_arch = "wasm32")]
 mod selected;
+mod transfer;
 
 pub use import_status::{ImportFailure, ImportFailureKind};
 
@@ -35,9 +48,6 @@ pub use client_platform_web::transport::import_io::{ImportReader as DirectoryImp
 
 pub struct LibraryImport {
     pub library_id: sync_common::LibraryId,
-    pub cloud: cloud_storage::connections::CloudConnections,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub provider_upload_lock: tokio::sync::Mutex<()>,
     pub database: Arc<Database>,
     pub assets: AssetStore,
     pub cpu: Arc<dyn cpu_host::CpuHost>,
@@ -65,6 +75,6 @@ pub struct DirectoryImportFile {
 /// The folders created for a selected tree, by path, before any file is opened.
 #[cfg(target_arch = "wasm32")]
 pub(crate) struct PreparedDirectoryImport {
-    pub(crate) directories: Vec<(Vec<String>, sync_common::DirId)>,
+    pub(crate) directories: std::collections::HashMap<Vec<String>, sync_common::DirId>,
     pub(crate) failures: Vec<ImportFailure>,
 }

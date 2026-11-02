@@ -10,14 +10,17 @@
 //! as something *a library* is doing, and a list beneath the libraries made the
 //! reader match names between two lists to find that out.
 
-use ui_components::user_facing_error;
 use super::*;
 use crate::services::format_storage_bytes;
 use gpui_component::Disableable;
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
+use sync_common::{MutationIssue, MutationRejectionReason};
+#[cfg(not(target_arch = "wasm32"))]
+use gpui_component::menu::DropdownMenu as _;
+#[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
 use std::path::Path;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+use ui_components::Button;
 
 const LEGEND_LIBRARY_LIMIT: usize = 4;
 
@@ -56,16 +59,16 @@ impl Render for AccountIdentityView {
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
             let password = self.page.clone();
-            actions.push(components::link_button("account-change-password", "Change password", theme, false).on_click(move |_, window, cx| {
-                password.update(cx, |page, cx| page.open_password_change(window, cx));
+            actions.push(components::link_button("account-change-password", "Change password", false).on_click(move |_, _, cx| {
+                password.update(cx, |page, cx| page.open_password_change(cx));
             }));
         }
         let logout = self.page.clone();
-        actions.push(components::link_button("account-log-out", "Log out", theme, false).on_click(move |_, _, cx| {
+        actions.push(components::link_button("account-log-out", "Log out", false).on_click(move |_, _, cx| {
             logout.update(cx, |page, cx| page.start_logout(cx));
         }));
         let delete = self.page.clone();
-        actions.push(components::link_button("account-delete", "Delete account", theme, false).on_click(move |_, window, cx| {
+        actions.push(components::link_button("account-delete", "Delete account", false).on_click(move |_, window, cx| {
             delete.update(cx, |page, cx| page.open_account_deletion(window, cx));
         }));
         components::account_identity(account_initial(&email), email, actions, theme)
@@ -97,7 +100,7 @@ impl Render for LibrariesView {
         let compact = components::WindowWidthClass::for_window(window).is_compact();
         let page = self.page.clone();
         let rows = page.read(cx).library_rows(cx);
-        SyncPage::libraries_section(page.read(cx), &page, &rows, compact, theme)
+        SyncPage::libraries_section(page.read(cx), &page, &rows, compact, theme, cx)
     }
 }
 
@@ -108,6 +111,7 @@ impl Render for LibrariesView {
 /// meter is built from; `local_bytes` is what has been downloaded here. They
 /// answer different questions and are never mixed.
 struct LibraryRow {
+    opds: bool,
     #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     local_path: Option<String>,
     name: String,
@@ -154,12 +158,13 @@ impl SyncPage {
                 // reporting zero; an unsupported server reports nothing at all.
                 let server_bytes = state.server_storage_usage.as_ref().map(|usage| usage.iter().find(|entry| entry.library_id == *library.library_id()).map(|entry| entry.used_bytes).unwrap_or_default());
                 LibraryRow {
+                    opds: library.is_opds(),
                     name: library.library_name().to_owned(),
                     status,
                     server_bytes,
                     local_bytes,
                     #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-                    local_path: library.local_path().map(str::to_owned),
+                    local_path: Some(library.storage_locator().to_owned()),
                 }
             })
             .collect();
@@ -169,25 +174,6 @@ impl SyncPage {
         rows
     }
 
-    /// A password field whose reveal stays on until it is pressed again.
-    ///
-    /// The input's own `mask_toggle` unmasks only while the mouse button is
-    /// held, which cannot be used to check a password as it is typed and does
-    /// not survive a touch at all.
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    fn password_input(&self, state: &Entity<InputState>, id: &'static str, entity: &Entity<Self>) -> Input {
-        let revealed = self.password_revealed;
-        let toggle = entity.clone();
-        let toggled_state = state.clone();
-        Input::new(state).suffix(components::base_button(id).icon(if revealed { IconName::EyeOff } else { IconName::Eye }).xsmall().ghost().tooltip(if revealed { "Hide password" } else { "Show password" }).on_click(move |_, window, cx| {
-            toggled_state.update(cx, |state, cx| state.set_masked(revealed, window, cx));
-            toggle.update(cx, |page, cx| {
-                page.password_revealed = !revealed;
-                cx.notify();
-            });
-        }))
-    }
-
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     fn access_action(&self, entity: &Entity<Self>, id: &'static str, label: &'static str, icon: IconName, action: fn(&mut Self, &mut Context<Self>)) -> Button {
         let page = entity.clone();
@@ -195,9 +181,9 @@ impl SyncPage {
     }
 
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    fn access_link(&self, entity: &Entity<Self>, id: &'static str, label: &'static str, flow: AccountFlow, theme: components::BrowserTheme) -> Button {
+    fn access_link(&self, entity: &Entity<Self>, id: &'static str, label: &'static str, flow: AccountFlow) -> Button {
         let page = entity.clone();
-        components::link_button(id, label, theme, self.is_busy()).on_click(move |_, window, cx| page.update(cx, |page, cx| page.set_flow(flow, window, cx)))
+        components::link_button(id, label, self.is_busy()).on_click(move |_, _, cx| page.update(cx, |page, cx| page.set_flow(flow, cx)))
     }
 
     /// The sign-in, registration, verification and password-reset forms.
@@ -219,20 +205,16 @@ impl SyncPage {
             AccountFlow::SignIn => {
                 let register = entity.clone();
                 let mut actions = components::action_row().child(self.access_action(entity, "account-sign-in", "Sign in", IconName::Globe, Self::start_login));
-                actions = actions.child(components::secondary_action_button("account-register", "Create account", IconName::User, self.is_busy()).on_click(move |_, window, cx| {
-                    register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, window, cx));
+                actions = actions.child(components::secondary_action_button("account-register", "Create account", IconName::User, self.is_busy()).on_click(move |_, _, cx| {
+                    register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, cx));
                 }));
-                let mut form = form
-                    .child(components::section_header("Sign in", "", theme))
-                    .children(feedback)
-                    .child(Input::new(&self.authentication.login_email))
-                    .child(self.password_input(&self.authentication.password, "toggle-sign-in-password", entity))
-                    .child(actions);
+                let mut form =
+                    form.child(components::section_header("Sign in", "", theme)).children(feedback).child(Input::new(&self.authentication.login_email)).child(Input::new(&self.authentication.password).mask_toggle()).child(actions);
                 // Recovery is offered once a sign-in has actually failed, so
                 // the screen a returning user sees carries one action, not
                 // three. It stays a link: it is the way out, not the way on.
                 if self.login_failed {
-                    form = form.child(self.access_link(entity, "account-request-reset", "Forgot your password?", AccountFlow::RequestPasswordReset, theme));
+                    form = form.child(self.access_link(entity, "account-request-reset", "Forgot your password?", AccountFlow::RequestPasswordReset));
                 }
                 form
             }
@@ -240,30 +222,24 @@ impl SyncPage {
                 .child(components::section_header("Create account", "", theme))
                 .children(feedback)
                 .child(Input::new(&self.authentication.email))
-                .child(self.password_input(&self.authentication.registration_password, "toggle-registration-password", entity))
+                .child(Input::new(&self.authentication.registration_password).mask_toggle())
                 .child(components::form_hint(format!("At least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS), theme))
                 .child(components::action_row().child(self.access_action(entity, "account-register", "Create account", IconName::User, Self::start_registration)))
-                .child(self.access_link(entity, "account-sign-in", "Already have an account? Sign in", AccountFlow::SignIn, theme)),
+                .child(self.access_link(entity, "account-sign-in", "Already have an account? Sign in", AccountFlow::SignIn)),
             AccountFlow::VerifyEmail => {
                 let resend = entity.clone();
                 let mut actions = components::action_row().child(self.access_action(entity, "account-verify", "Verify email", IconName::ArrowRight, Self::start_verify_email));
-                actions = actions.child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
+                let seconds = self.authentication.resend_seconds_remaining;
+                let resend_label = if seconds > 0 { format!("Resend PIN ({seconds}s)") } else { "Resend PIN".to_owned() };
+                actions = actions.child(components::secondary_action_button("account-resend", resend_label, IconName::Redo2, self.is_busy() || seconds > 0).on_click(move |_, _, cx| {
                     resend.update(cx, |page, cx| page.start_resend_verification(cx));
                 }));
-                // The PIN proves the mailbox; the password chosen at
-                // registration proves this registrant, so it is asked again.
-                form.child(components::section_header("Check your email", "", theme))
-                    .children(feedback)
-                    .child(OtpInput::new(&self.authentication.verification_pin))
-                    .child(self.password_input(&self.authentication.registration_password, "toggle-verification-password", entity))
-                    .child(components::form_hint("The password you chose for this account.", theme))
-                    .child(actions)
-                    .child(self.access_link(
+                // The existing signup inputs supply the email and password.
+                form.child(components::section_header("Check your email", "", theme)).children(feedback).child(OtpInput::new(&self.authentication.verification_pin)).child(actions).child(self.access_link(
                     entity,
                     "account-restart-registration",
                     "Wrong address? Start over",
                     AccountFlow::Register,
-                    theme,
                 ))
             }
             AccountFlow::RequestPasswordReset => form
@@ -271,7 +247,7 @@ impl SyncPage {
                 .children(feedback)
                 .child(Input::new(&self.authentication.email))
                 .child(components::action_row().child(self.access_action(entity, "account-request-reset", "Email me a reset code", IconName::Redo2, Self::start_password_reset_request)))
-                .child(self.access_link(entity, "account-sign-in", "Back to sign in", AccountFlow::SignIn, theme)),
+                .child(self.access_link(entity, "account-sign-in", "Back to sign in", AccountFlow::SignIn)),
             AccountFlow::ResetPassword => {
                 // The token is a pasted string, not the six-digit PIN, so it is
                 // a plain input rather than the OTP boxes — drawing them alike
@@ -279,10 +255,10 @@ impl SyncPage {
                 form.child(components::section_header("Set a new password", "Paste the full reset code from your email. This is different from the six-digit verification PIN.", theme))
                     .children(feedback)
                     .child(Input::new(&self.authentication.reset_token))
-                    .child(self.password_input(&self.authentication.new_password, "toggle-new-password", entity))
+                    .child(Input::new(&self.authentication.new_password).mask_toggle())
                     .child(components::form_hint(format!("At least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS), theme))
                     .child(components::action_row().child(self.access_action(entity, "account-reset-password", "Set new password", IconName::Redo2, Self::start_password_reset)))
-                    .child(self.access_link(entity, "account-sign-in", "Back to sign in", AccountFlow::SignIn, theme))
+                    .child(self.access_link(entity, "account-sign-in", "Back to sign in", AccountFlow::SignIn))
             }
         }
     }
@@ -300,14 +276,8 @@ impl SyncPage {
         ))
     }
 
-    /// Splits the quota into the parts that explain it: what each library holds
-    /// on this device, what the account holds that this device does not, and
-    /// what uploads have reserved.
-    ///
-    /// Local copies can exceed what the server stores — books imported here but
-    /// never uploaded — so library shares are taken from the used bytes in
-    /// descending order and stop once those are accounted for. The remainder of
-    /// the track is free space.
+    /// Show the account's largest library shares, group smaller libraries, and
+    /// include space reserved by uploads. Sizes come from the cloud account.
     fn storage_segments(&self, usage: StorageUsageResponse, theme: components::BrowserTheme, state: &SyncState) -> Vec<(SharedString, u64, gpui::Hsla)> {
         let mut segments: Vec<(SharedString, u64, gpui::Hsla)> = Vec::new();
         let mut other_bytes = 0_u64;
@@ -349,11 +319,11 @@ impl SyncPage {
         };
 
         let signed_in = self.state.read(cx).account_status.signed_in();
-        if signed_in && self.deletion.is_some() {
-            return components::browser_settings_fieldset("Account", theme).child(components::browser_settings_block(theme).child(self.account_deletion_form(&entity, feedback, theme)));
+        if signed_in && let Some(form) = self.deletion.as_ref() {
+            return components::browser_settings_fieldset("Account", theme).child(components::browser_settings_block().child(self.account_deletion_form(form, &entity, feedback, theme)));
         }
         let account = if signed_in {
-            components::browser_settings_fieldset("Account", theme).child(components::browser_settings_block(theme).child(self.identity.clone()).child(self.storage_body(theme, cx)))
+            components::browser_settings_fieldset("Account", theme).child(components::browser_settings_block().child(self.identity.clone()).child(self.storage_body(theme, cx)))
         } else {
             components::browser_settings_fieldset_with_actions("Account", self.account_access_actions(&entity, theme), theme)
         };
@@ -367,13 +337,13 @@ impl SyncPage {
             // it is finished with there is no other way back to the account the
             // group is about.
             let close = entity.clone();
-            let form = self.account_access_form(&entity, feedback, theme).child(components::link_button("account-close", "Close", theme, self.is_busy()).on_click(move |_, _, cx| {
+            let form = self.account_access_form(&entity, feedback, theme).child(components::link_button("account-close", "Close", self.is_busy()).on_click(move |_, _, cx| {
                 close.update(cx, |page, cx| page.close_account_access(cx));
             }));
-            return account.child(components::browser_settings_block(theme).child(form));
+            return account.child(components::browser_settings_block().child(form));
         }
 
-        account.children(feedback.map(|feedback| components::browser_settings_block(theme).child(feedback)))
+        account.children(feedback.map(|feedback| components::browser_settings_block().child(feedback)))
     }
 
     /// The quota as a line and a shape, and what each library holds of it.
@@ -388,6 +358,9 @@ impl SyncPage {
             format!("{} available", format_storage_bytes(usage.available_bytes())),
             theme,
         ));
+        if let Some(pending) = state.pending_cloud_bytes.filter(|bytes| *bytes > 0) {
+            storage = storage.child(components::form_hint(format!("{} waiting to upload", format_storage_bytes(pending)), theme));
+        }
         if usage.quota_bytes > 0 {
             let segments = self.storage_segments(usage, theme, state);
             let share = |bytes: u64| bytes as f32 / usage.quota_bytes as f32;
@@ -396,11 +369,56 @@ impl SyncPage {
             if !cfg!(feature = "kobo") {
                 storage = storage.child(components::storage_meter(segments.iter().map(|(_, bytes, color)| (share(*bytes), *color)), theme));
             }
-            storage = storage.child(components::storage_breakdown(
-                segments.into_iter().map(|(label, bytes, color)| components::storage_breakdown_row(color, label, format!("{}%", (share(bytes) * 100.0).round() as u32), format_storage_bytes(bytes), theme)),
-            ));
         }
-        storage
+        let tabs = components::browser_settings_button_group(theme)
+            .child(components::settings_choice_button("account-storage-libraries-tab", "Largest libraries", self.storage_tab == StorageBreakdownTab::Libraries, theme).on_click(cx.listener(|page, _, _, cx| {
+                page.storage_tab = StorageBreakdownTab::Libraries;
+                cx.notify();
+            })))
+            .child(components::settings_choice_button("account-storage-books-tab", "Largest books", self.storage_tab == StorageBreakdownTab::Books, theme).on_click(cx.listener(|page, _, _, cx| {
+                page.storage_tab = StorageBreakdownTab::Books;
+                cx.notify();
+            })));
+        let mut breakdown = components::storage_breakdown(std::iter::empty());
+        match self.storage_tab {
+            StorageBreakdownTab::Libraries => match &state.server_storage_usage {
+                None => breakdown = breakdown.child(components::form_hint("Library storage details are unavailable.", theme)),
+                Some(libraries) => {
+                    let mut has_rows = false;
+                    for (index, library) in libraries.iter().filter(|library| library.used_bytes > 0).enumerate() {
+                        has_rows = true;
+                        let share = if usage.quota_bytes == 0 { 0.0 } else { library.used_bytes as f64 * 100.0 / usage.quota_bytes as f64 };
+                        breakdown = breakdown.child(components::storage_breakdown_row(
+                            components::usage_segment_color(index.min(LEGEND_LIBRARY_LIMIT), theme),
+                            library.library_name.clone(),
+                            format!("{share:.0}%"),
+                            format_storage_bytes(library.used_bytes),
+                            theme,
+                        ));
+                    }
+                    if !has_rows {
+                        breakdown = breakdown.child(components::form_hint("No libraries use cloud storage yet.", theme));
+                    }
+                }
+            },
+            StorageBreakdownTab::Books => match &state.server_book_storage_usage {
+                None => breakdown = breakdown.child(components::form_hint("Book storage details are unavailable. Try refreshing your account.", theme)),
+                Some(books) if books.is_empty() => breakdown = breakdown.child(components::form_hint("No books use cloud storage yet.", theme)),
+                Some(books) => {
+                    for book in books {
+                        breakdown = breakdown.child(components::storage_book_row(book.title.clone(), format_storage_bytes(book.used_bytes), theme));
+                    }
+                    if books.len() == account_contract::MAX_ACCOUNT_STORAGE_BOOKS {
+                        breakdown = breakdown.child(components::form_hint(format!("Showing the {} largest books.", account_contract::MAX_ACCOUNT_STORAGE_BOOKS), theme));
+                    }
+                }
+            },
+        }
+        let list_id = match self.storage_tab {
+            StorageBreakdownTab::Libraries => "account-storage-libraries",
+            StorageBreakdownTab::Books => "account-storage-books",
+        };
+        storage.child(tabs).child(breakdown.id(list_id).max_h(gpui::px(280.0)).overflow_y_scroll())
     }
 
     /// The account group's header control while signed out: the two ways in.
@@ -416,11 +434,11 @@ impl SyncPage {
             .flex_row()
             .items_center()
             .gap(px(components::SPACE_SM))
-            .child(components::browser_settings_header_button("account-open-register", "Create account", false, theme).on_click(move |_, window, cx| {
-                register.update(cx, |page, cx| page.open_account_access(true, window, cx));
+            .child(components::browser_settings_header_button("account-open-register", "Create account", false, theme).on_click(move |_, _, cx| {
+                register.update(cx, |page, cx| page.open_account_access(true, cx));
             }))
-            .child(components::browser_settings_header_button("account-open-sign-in", "Log in", true, theme).on_click(move |_, window, cx| {
-                login.update(cx, |page, cx| page.open_account_access(false, window, cx));
+            .child(components::browser_settings_header_button("account-open-sign-in", "Log in", true, theme).on_click(move |_, _, cx| {
+                login.update(cx, |page, cx| page.open_account_access(false, cx));
             }))
     }
 
@@ -430,8 +448,8 @@ impl SyncPage {
     /// account picker there is no form to reveal, so the same press opens that
     /// instead — the header reads the same everywhere, and what it opens is the
     /// platform's business.
-    pub(super) fn open_account_access(&mut self, register: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = (register, &window);
+    pub(super) fn open_account_access(&mut self, register: bool, cx: &mut Context<Self>) {
+        let _ = register;
         #[cfg(target_arch = "wasm32")]
         self.open_web_authentication(cx);
         #[cfg(target_os = "android")]
@@ -439,7 +457,7 @@ impl SyncPage {
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
             self.access_open = true;
-            self.set_flow(if register { AccountFlow::Register } else { AccountFlow::SignIn }, window, cx);
+            self.set_flow(if register { AccountFlow::Register } else { AccountFlow::SignIn }, cx);
         }
         cx.notify();
     }
@@ -450,9 +468,9 @@ impl SyncPage {
     /// reset is the only one the server offers — so this is that flow, reached
     /// from the account menu instead of from a failed sign-in.
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    pub(super) fn open_password_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_password_change(&mut self, cx: &mut Context<Self>) {
         self.access_open = true;
-        self.set_flow(AccountFlow::RequestPasswordReset, window, cx);
+        self.set_flow(AccountFlow::RequestPasswordReset, cx);
         cx.notify();
     }
 
@@ -472,16 +490,14 @@ impl SyncPage {
     /// is about this list — it decides where the next row in it will live — and
     /// a "Library storage" group of its own separated it from the only thing it
     /// refers to.
-    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], compact: bool, theme: components::BrowserTheme) -> Div {
+    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], compact: bool, theme: components::BrowserTheme, cx: &gpui::App) -> Div {
         let mut libraries = components::browser_settings_fieldset("Libraries", theme);
         let mut has_rows = false;
 
         #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
         if let Some(path) = self.default_library_location.clone() {
             let page = page.clone();
-            let choose = components::browser_settings_path_button("default-library-location", components::library_path_label(Path::new(&path)), theme)
-                .tooltip(path)
-                .on_click(move |_, _, cx| page.update(cx, |page, cx| page.choose_library_location(cx)));
+            let choose = components::browser_settings_path_button("default-library-location", components::library_path_label(Path::new(&path)), theme).on_click(move |_, _, cx| page.update(cx, |page, cx| page.choose_library_location(cx)));
             libraries = libraries.child(components::browser_settings_compact_row("Default location for new libraries", choose, theme).border_t_0());
             has_rows = true;
         }
@@ -490,7 +506,10 @@ impl SyncPage {
             return libraries.child(components::library_usage_empty("No local libraries", theme).when(!has_rows, |row| row.border_t_0()));
         }
         if !compact {
-            libraries = libraries.child(components::library_table_header(theme).when(!has_rows, |row| row.border_t_0()));
+            let header = components::library_table_header(theme);
+            #[cfg(not(target_arch = "wasm32"))]
+            let header = header.child(div().w(gpui::rems(components::topbar_action_height_rem())).flex_none());
+            libraries = libraries.child(header.when(!has_rows, |row| row.border_t_0()));
             has_rows = true;
         }
         for row in rows {
@@ -500,21 +519,22 @@ impl SyncPage {
             } else if row.status.issues.untransmittable != 0 {
                 ("Some changes are too large to sync", theme.warning)
             } else if row.status.issues.retryable != 0 {
-                ("Waiting to retry changes", theme.warning)
-            } else { match row.status.state {
-                LibrarySyncState::Checking => ("Loading status…", theme.text_muted),
-                LibrarySyncState::Unavailable => ("Unavailable", theme.warning),
-                LibrarySyncState::Receiving => ("Receiving library…", theme.accent),
-                LibrarySyncState::Synced => ("Up to date", theme.accent),
-                LibrarySyncState::SyncPending if row.status.last_synced_at.is_none() => ("Sync pending", theme.warning),
-                LibrarySyncState::SyncPending => ("Changes pending", theme.warning),
-                LibrarySyncState::RemoteMissing => ("Not on server", theme.warning),
-                LibrarySyncState::LocalOnly => ("On this device", theme.text_muted),
-            }};
-            let (status, status_color) = if row.status.pending_provider_uploads != 0 && !row.status.issues.has_issues() {
-                let count = row.status.pending_provider_uploads;
-                (format!("{count} {} waiting for upload", if count == 1 { "book" } else { "books" }), theme.warning)
-            } else { (status.to_owned(), status_color) };
+                ("Some changes are pending", theme.warning)
+            } else {
+                match row.status.state {
+                    LibrarySyncState::Checking => ("Loading status…", theme.text_muted),
+                    LibrarySyncState::Unavailable => ("Unavailable", theme.warning),
+                    LibrarySyncState::Receiving => ("Receiving library…", theme.accent),
+                    LibrarySyncState::Synced => ("Up to date", theme.accent),
+                    LibrarySyncState::SyncPending if row.status.last_synced_at.is_none() => ("Sync pending", theme.warning),
+                    LibrarySyncState::SyncPending => ("Changes pending", theme.warning),
+                    LibrarySyncState::RemoteMissing => ("Not on server", theme.warning),
+                    LibrarySyncState::AccountRequired => ("Sign in to library account", theme.warning),
+                    LibrarySyncState::CloudStorageFull => ("Cloud storage full · books on disk were not added", theme.warning),
+                    LibrarySyncState::LocalOnly => ("On this device", theme.text_muted),
+                }
+            };
+            let (status, status_color) = (status.to_owned(), status_color);
             let library_id = row.status.library_id;
             // The folder is the button that opens it, labelled with its path.
             #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -523,7 +543,6 @@ impl SyncPage {
                 components::browser_settings_path_button(SharedString::from(format!("library-path-{library_id}")), components::library_path_label(&destination), theme)
                     .max_w_full()
                     .overflow_hidden()
-                    .tooltip(path.clone())
                     .on_click(move |_, _, cx| cx.open_with_system(&destination))
                     .into_any_element()
             });
@@ -532,23 +551,65 @@ impl SyncPage {
             // The column heading names the switch; stacked, with no heading,
             // the switch names itself.
             let cloud_page = page.clone();
-            let cloud = if let Some(root) = row.status.storage.external() {
-                let provider = match root.scope.provider {
-                    app::CloudProvider::GoogleDrive => "Google Drive",
-                    app::CloudProvider::Dropbox => "Dropbox",
-                    app::CloudProvider::OneDrive => "OneDrive",
-                    app::CloudProvider::WebDav => "WebDAV",
-                    app::CloudProvider::S3 => "S3",
-                };
-                div().text_color(theme.text_muted).child(provider).into_any_element()
-            } else {
+            let cloud_blocker = self.state.read(cx).library_cloud_storage_blocker(library_id);
+            let cloud = {
                 Checkbox::new(SharedString::from(format!("asset-storage-{library_id}")))
                     .when(compact, |checkbox| checkbox.label("Bokheim"))
                     .checked(row.status.asset_storage_enabled)
-                    .disabled(self.asset_storage_pending.contains(&library_id))
-                    .on_click(move |enabled, _, cx| cloud_page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx))).into_any_element()
+                    .disabled(self.asset_storage_pending.contains(&library_id) || (!row.status.asset_storage_enabled && cloud_blocker.is_some()))
+                    .on_click(move |enabled, _, cx| cloud_page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx)))
+                    .into_any_element()
             };
-            libraries = libraries.child(components::library_table_row(row.name.clone(), path, local_bytes, (status, status_color), cloud, compact, theme).when(!has_rows, |row| row.border_t_0()));
+            let cloud = gpui::div()
+                .flex()
+                .flex_col()
+                .gap(gpui::px(components::SPACE_XS))
+                .child(cloud)
+                .children((self.state.read(cx).account_status.signed_in() && !row.status.asset_storage_enabled).then_some(cloud_blocker).flatten().map(|message| components::form_hint(message, theme)))
+                .into_any_element();
+            let cloud = if row.opds { components::form_hint("OPDS", theme).into_any_element() } else { cloud };
+            let library_row = components::library_table_row(row.name.clone(), path, local_bytes, (status, status_color), cloud, compact, theme).when(!has_rows, |row| row.border_t_0());
+            #[cfg(not(target_arch = "wasm32"))]
+            let library_row = {
+                let libraries = self.active_library.clone();
+                let more = components::library_switcher_menu_button(format!("settings-library-menu-{library_id}"), row.name.clone(), false, theme).dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                    let libraries = libraries.clone();
+                    menu.touch_friendly(compact || components::touch_ui()).item(components::menu_item("Export annotations…", move |_, window, cx| {
+                        libraries.update(cx, |libraries, cx| libraries.open_annotation_export(library_id, window, cx));
+                    }))
+                });
+                library_row.children((!row.opds).then_some(more))
+            };
+            libraries = libraries.child(library_row);
+            for detail in &row.status.issue_details {
+                let kind = match detail.kind.as_str() {
+                    "reading_position" => "Reading position",
+                    "chapter_read_status" => "Chapter read status",
+                    "annotation" => "Annotation",
+                    "directory_name" => "Folder name",
+                    "directory_parent" => "Folder location",
+                    "directory_lifecycle" => "Folder addition or removal",
+                    "placement" => "Book location",
+                    "book_lifecycle" => "Book addition or removal",
+                    "metadata" | "enrichment" | "book_facts" | "description" => "Book details",
+                    "book_toc" | "pdf_reader_metadata" => "Book navigation",
+                    _ => "Library change",
+                };
+                let subject = detail.item_name.as_deref().filter(|name| !name.trim().is_empty()).map(|name| format!("“{name}” · {kind}")).unwrap_or_else(|| kind.to_owned());
+                let recovery = match &detail.issue {
+                    MutationIssue::Retryable(rejection) | MutationIssue::Rejected(rejection) => match rejection.reason {
+                        MutationRejectionReason::TimestampTooFarFuture => "This change is too far ahead of the server's clock. Check your device's date and time; syncing may need to wait for the server's clock to catch up.",
+                        MutationRejectionReason::InvalidPayload => "Inconsistent book information prevented syncing. Report the problem.",
+                    },
+                    MutationIssue::Untransmittable(_) => "This change is too large to sync. Report the problem.",
+                };
+                libraries = libraries.child(components::form_hint(format!("{subject}: {recovery}"), theme));
+            }
+            let issue_count = row.status.issues.rejected.saturating_add(row.status.issues.retryable).saturating_add(row.status.issues.untransmittable);
+            let remaining = issue_count.saturating_sub(row.status.issue_details.len() as u64);
+            if remaining > 0 {
+                libraries = libraries.child(components::form_hint(format!("{remaining} more changes need attention."), theme));
+            }
             has_rows = true;
         }
         libraries

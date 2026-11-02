@@ -30,7 +30,7 @@ test('failed startup exposes its cause as text and retains manual reload', async
     assert.equal(result, false);
     assert.equal(reloads, 0);
     const [message, details, button] = panel.children;
-    assert.equal(message.textContent, 'Bokheim could not start. Reload to try again.');
+    assert.equal(message.textContent, "Couldn't start the app. Reload to retry.");
     assert.equal(details.tagName, 'details');
     assert.equal(details.children[0].textContent, 'Error details');
     assert.equal(details.children[1].textContent, `Error: ${cause}`);
@@ -49,7 +49,7 @@ test('storage contention retains the instruction to close other tabs', async t =
         throw new Error('BOKHEIM_STORAGE_BUSY');
     }, {storage: null});
     assert.equal(result, false);
-    assert.equal(panel.children[0].textContent, 'Close other Bokheim tabs, then reload.');
+    assert.equal(panel.children[0].textContent, 'Close other app tabs, then reload.');
     assert.match(panel.children[1].children[1].textContent, /BOKHEIM_STORAGE_BUSY/);
 });
 
@@ -62,4 +62,16 @@ test('successful startup waits for backend readiness and clears retry state', as
     assert.equal(result, true);
     assert.equal(panel.removed, true);
     assert.deepEqual(removedKeys, ['bokheim-startup-retry-v1']);
+});
+
+test('UI loading failure releases its early backend before retrying', async t => {
+    t.mock.method(console, 'error', () => {});
+    const panel = new Element('main');
+    const events = [];
+    assert.equal(await startApplication(panel, async () => { throw new Error('UI download failed'); }, {
+        storage: {getItem: () => null, setItem() {}},
+        onFailure: () => events.push('backend released'),
+        reload: () => events.push('reload'),
+    }), false);
+    assert.deepEqual(events, ['backend released', 'reload']);
 });

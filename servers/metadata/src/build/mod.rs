@@ -51,11 +51,6 @@ pub struct BuildReport {
     pub queue_seconds: f64,
 }
 
-/// OUT must be a new file. Publish it only after all tables and the manifest are complete.
-pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, output: &Path) -> Result<BuildReport, MetadataError> {
-    build_answers_with_ratings(snapshot, providers, demand, descriptions, None, output)
-}
-
 pub fn build_answers_with_ratings(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, ratings: Option<&Path>, output: &Path) -> Result<BuildReport, MetadataError> {
     if output.exists() {
         return Err(MetadataError("answer output already exists; build to a new dated file".into()));
@@ -330,7 +325,7 @@ mod wanted_tests {
             &[],
         );
         let out = dir.path().join("answers.sqlite");
-        build_answers(&source, None, None, None, &out).unwrap();
+        build_answers_with_ratings(&source, None, None, None, None, &out).unwrap();
         assert_eq!(Connection::open(out).unwrap().query_row("SELECT work_id FROM wanted WHERE isbn13=9780131103627", [], |r| r.get::<_, i64>(0)).unwrap(), 20);
     }
 }

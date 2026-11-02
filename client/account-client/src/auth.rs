@@ -1,7 +1,7 @@
 use crate::http::{decode_response, post_empty, request, send, with_body};
 use crate::session::{AuthError, Session};
 use crate::Url;
-use account_contract::{AuthResponse, DeleteAccountRequest, EmailRequest, EmailVerificationRequest, LoginRequest, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest};
+use account_contract::{AuthResponse, DeleteAccountRequest, EmailRequest, EmailVerificationRequest, LoginRequest, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, PASSWORD_MAX_BYTES};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 
@@ -15,6 +15,7 @@ pub async fn login(server_url: &Url, email: &str, password: &str) -> Result<Sess
 }
 
 pub async fn request_public_registration(server_url: &Url, email: &str, password: &str) -> Result<(), AuthError> {
+    validate_password_length(password)?;
     post_empty(server_url, "api/auth/register", &PublicRegistrationRequest { email: email.to_owned(), password: password.to_owned() }).await
 }
 
@@ -23,6 +24,7 @@ pub async fn resend_verification(server_url: &Url, email: &str) -> Result<(), Au
 }
 
 pub async fn verify_email(server_url: &Url, email: &str, pin: &str, password: &str) -> Result<Session, AuthError> {
+    validate_password_length(password)?;
     post_auth(server_url, "api/auth/verify-email", &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned(), password: password.to_owned() }).await
 }
 
@@ -31,7 +33,15 @@ pub async fn request_password_reset(server_url: &Url, email: &str) -> Result<(),
 }
 
 pub async fn reset_password(server_url: &Url, token: &str, new_password: &str) -> Result<(), AuthError> {
+    validate_password_length(new_password)?;
     post_empty(server_url, "api/auth/reset-password", &ResetPasswordRequest { token: token.to_owned(), new_password: new_password.to_owned() }).await
+}
+
+fn validate_password_length(password: &str) -> Result<(), AuthError> {
+    if password.len() > PASSWORD_MAX_BYTES {
+        return Err(AuthError::PasswordTooLong);
+    }
+    Ok(())
 }
 
 pub async fn logout(session: &Session) -> Result<(), AuthError> {

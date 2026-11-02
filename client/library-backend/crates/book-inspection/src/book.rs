@@ -5,7 +5,8 @@
 use crate::{MetadataResult, inspect_epub_reader, inspect_pdf_reader};
 use book_content::{Book, BookFormat as ContainerFormat, TocEntry, comic::ComicBook};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AudiobookChapter, BookFormat, BookMetadataError, BookRecord, ChapterOrigin, Contributor};
-use content_address::BookId;
+use content_address::{BookId, hash_file};
+use metadata_contract::audible::LookupRequest;
 use std::collections::HashSet;
 #[cfg(target_arch = "wasm32")]
 use std::io::Cursor;
@@ -32,14 +33,8 @@ pub struct AudiobookMetadata {
 
 impl AudiobookMetadata {
     /// Original recording evidence used for lookup and enrichment invalidation.
-    pub fn audible_lookup_request(&self) -> metadata_contract::audible::LookupRequest {
-        metadata_contract::audible::LookupRequest {
-            title: self.title.clone(),
-            authors: self.authors.iter().map(|author| author.name().to_owned()).collect(),
-            duration_ms: self.duration_ms,
-            recording: self.recording.clone(),
-            chapters: self.chapters.clone(),
-        }
+    pub fn into_audible_lookup_request(self) -> LookupRequest {
+        LookupRequest { title: self.title, authors: self.authors.iter().map(|author| author.name().to_owned()).collect(), duration_ms: self.duration_ms, recording: self.recording, chapters: self.chapters }
     }
 }
 
@@ -59,16 +54,40 @@ pub struct InspectedBook {
     pub toc: Vec<book_model::BookTocEntry>,
 }
 
+/// Geometry and navigation remain valid when only bibliographic extraction changes.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CachedPdfReader {
+    pub metadata: pdf_view_common::PdfReaderMetadata,
+    pub toc: Vec<book_model::BookTocEntry>,
+}
+
 /// Inspects a seekable book using the same validation on every platform.
 pub fn inspect_book_reader(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static) -> MetadataResult<InspectedBook> {
     inspect_book_reader_with_hash(source_name, format, reader, None)
 }
 
 pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static, content_hash: Option<BookId>) -> MetadataResult<InspectedBook> {
+    inspect_book_reader_with_cached_pdf(source_name, format, reader, content_hash, None)
+}
+
+pub fn inspect_book_reader_with_cached_pdf(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static, content_hash: Option<BookId>, cached_pdf: Option<CachedPdfReader>) -> MetadataResult<InspectedBook> {
     let mut pdf = None;
     let mut pdf_toc = Vec::new();
     let reader = if format == BookFormat::Pdf {
-        let (reader, extracted, outline) = pdf_reader_core::inspect_reader_metadata(reader)?;
+        let (reader, extracted, outline) = match cached_pdf.filter(|cached| content_hash.is_some_and(|identity| cached.metadata.valid_for(&identity.to_hex()))) {
+            Some(mut cached) => {
+                // Retired optional fields remain decode-compatible, but new
+                // inspections never retain or use their old analysis results.
+                cached.metadata.skippable_pages = None;
+                cached.metadata.annotations.clear();
+                cached.metadata.dependencies = None;
+                (reader, cached.metadata, cached.toc)
+            }
+            None => match content_hash {
+                Some(identity) => pdf_reader_core::inspect_reader_metadata_with_identity(reader, identity.to_hex())?,
+                _ => pdf_reader_core::inspect_reader_metadata(reader)?,
+            },
+        };
         pdf = extracted.valid_for(&extracted.content_hash).then_some(extracted);
         pdf_toc = outline;
         reader
@@ -97,9 +116,9 @@ pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, rea
         BookFormat::Cbz => {
             let book = ComicBook::open_reader(reader)?;
             let metadata = crate::metadata_from_declared(source_name, book.metadata)?;
-            let toc = crate::book_toc_entries(book.pages.iter().enumerate().filter_map(|(index, page)| page.bookmark.as_ref().map(|title| TocEntry {
-                title: title.clone(), link: book_model::cbz_toc_target(index), children: Vec::new(),
-            })).collect());
+            let toc = crate::book_toc_entries(
+                book.pages.iter().enumerate().filter_map(|(index, page)| page.bookmark.as_ref().map(|title| TocEntry { title: title.clone(), link: book_model::cbz_toc_target(index), children: Vec::new() })).collect(),
+            );
             (metadata, None, toc)
         }
         BookFormat::Pdf => (inspect_pdf_reader(source_name, reader)?.metadata, None, pdf_toc),
@@ -172,40 +191,18 @@ pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, rea
                     recording_release_year: None,
                 }
             };
-            let audiobook = AudiobookMetadata {
-                title,
-                authors: authors.into_iter().map(author_credit).collect::<Result<Vec<_>, _>>()?,
-                description,
-                duration_ms: duration_ms(duration),
-                chapters,
-                tracks: Vec::new(),
-                chapter_origin,
-                recording,
-            };
+            let audiobook =
+                AudiobookMetadata { title, authors: authors.into_iter().map(author_credit).collect::<Result<Vec<_>, _>>()?, description, duration_ms: duration_ms(duration), chapters, tracks: Vec::new(), chapter_origin, recording };
             let subtitle = audiobook.recording.subtitle.as_deref().filter(|value| !value.trim().is_empty()).map(str::to_owned);
-            let metadata = BookRecord {
-                metadata: book_model::BookDetails { title: audiobook.title.clone(), subtitle, contributors: audiobook.authors.clone(), book: recording_book(&audiobook.recording)? },
-                description: audiobook.description.clone(),
-            };
+            let metadata =
+                BookRecord { metadata: book_model::BookDetails { title: audiobook.title.clone(), subtitle, contributors: audiobook.authors.clone(), book: recording_book(&audiobook.recording)? }, description: audiobook.description.clone() };
             (metadata, Some(audiobook), Vec::new())
         }
         BookFormat::Mp3Folder => {
             let (audiobook, book) = {
                 let content_hash = match content_hash {
                     Some(content_hash) => content_hash,
-                    None => {
-                        reader.seek(std::io::SeekFrom::Start(0))?;
-                        let mut hasher = blake3::Hasher::new();
-                        let mut buffer = [0u8; 64 * 1024];
-                        loop {
-                            let count = reader.read(&mut buffer)?;
-                            if count == 0 {
-                                break;
-                            }
-                            hasher.update(&buffer[..count]);
-                        }
-                        BookId::from(hasher.finalize())
-                    }
+                    None => BookId::from(hash_file(&mut reader)?),
                 };
                 let tracks = audiobook_archive::archived_tracks(&mut reader)?;
                 let mut archive = zip::ZipArchive::new(reader)?;
@@ -296,10 +293,8 @@ pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, rea
                 }
                 (audiobook, book)
             };
-            let metadata = BookRecord {
-                metadata: book_model::BookDetails { title: audiobook.title.clone(), subtitle: audiobook.recording.subtitle.clone(), contributors: audiobook.authors.clone(), book },
-                description: audiobook.description.clone(),
-            };
+            let metadata =
+                BookRecord { metadata: book_model::BookDetails { title: audiobook.title.clone(), subtitle: audiobook.recording.subtitle.clone(), contributors: audiobook.authors.clone(), book }, description: audiobook.description.clone() };
             (metadata, Some(audiobook), Vec::new())
         }
     };
@@ -373,8 +368,13 @@ mod tests {
     fn cbz_import_keeps_comicinfo_bookmarks_as_page_targets() {
         use std::io::{Cursor, Write};
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for (name, bytes) in [("1.jpg", b"page".as_slice()), ("2.jpg", b"page".as_slice()), ("ComicInfo.xml", br#"<ComicInfo><Title>Issue One</Title><Writer>Ada Writer</Writer><Pages><Page Image="1" Bookmark="Second part"/></Pages></ComicInfo>"#.as_slice())] {
-            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap(); zip.write_all(bytes).unwrap();
+        for (name, bytes) in [
+            ("1.jpg", b"page".as_slice()),
+            ("2.jpg", b"page".as_slice()),
+            ("ComicInfo.xml", br#"<ComicInfo><Title>Issue One</Title><Writer>Ada Writer</Writer><Pages><Page Image="1" Bookmark="Second part"/></Pages></ComicInfo>"#.as_slice()),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
         }
         let inspected = inspect_book_reader(Path::new("issue.cbz"), BookFormat::Cbz, zip.finish().unwrap()).unwrap();
         assert_eq!(inspected.metadata.metadata.title, "Issue One");

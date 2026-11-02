@@ -3,6 +3,8 @@
 use crate::invalidation::notify;
 use std::rc::Rc;
 
+use crate::opening_error::opening_error;
+use app::{BackendError, Failure};
 use gpui::prelude::*;
 use gpui::{Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState};
@@ -11,6 +13,7 @@ use library_backend::BoxedBookReader;
 use library_backend::LibraryClient;
 use library_model::BookLocator;
 use pdf_view_gpui::{PdfView, PdfViewEvent};
+use ui_components as components;
 
 use crate::invalidation::Component;
 use crate::pdf::search::renderer_query;
@@ -27,34 +30,36 @@ use super::PdfReaderView;
 
 impl PdfReaderView {
     pub(crate) fn new(
-        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, reader: BoxedBookReader, metadata: Option<pdf_reader_core::PdfReaderMetadata>,
-        page_source: Option<std::sync::Arc<dyn pdf_reader_core::PdfPageSource>>, initial_page: usize, initial_full_page_position: f32, close_reader: crate::CloseReader, window: &mut Window, cx: &mut Context<Self>,
+        locator: BookLocator, title: String, app: app::AppClient, library: Rc<LibraryClient>, reader: BoxedBookReader, metadata: Option<pdf_reader_core::PdfReaderMetadata>, initial_page: usize, initial_full_page_position: f32,
+        save_progress: bool, close_reader: crate::CloseReader, #[cfg(feature = "kobo")] device_controls: Option<gpui::AnyView>, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         let preferences = ReaderSettings::preferences(cx);
         let zoom_mode = stored_zoom_mode(preferences);
         let trim_margins = preferences.pdf_trim_margins;
-        let direction = preferences.pdf_reading_direction;
         let source_name = title.clone();
         let interaction_style = library_interaction_style(cx);
-        let imported = crate::pdf::marks::imported_annotations(locator.content_hash(), metadata.as_ref());
         let pdf = cx.new(|cx| {
-            let mut pdf = PdfView::from_reader_with_page_source(source_name, reader, metadata, page_source, initial_page, window, cx);
+            let mut pdf = PdfView::from_reader_with_metadata(source_name, reader, metadata, initial_page, window, cx);
             pdf.set_interaction_style(interaction_style, cx);
             pdf.set_zoom_mode(zoom_mode, cx);
             pdf.set_trim_margins(trim_margins, cx);
-            pdf.set_direction_override(direction.override_right_to_left(), cx);
             pdf.set_full_page_position(initial_full_page_position, cx);
             pdf
         });
+        let bookmark_filter_input = crate::shell::bookmarks::filter_input(window, cx);
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let toc_tree = cx.new(|cx| TreeState::new(cx));
+        let toc_filter = cx.new(|cx| crate::shell::toc_filter::TocFilter::new(toc_tree.clone(), window, cx));
         let annotation_note_input = cx.new(|cx| crate::shell::annotation_editor::note_input(window, cx));
+        crate::shell::bookmarks::watch_name_validity(&annotation_note_input, cx, |this| this.marks.selected().is_some_and(library_backend::Annotation::is_bookmark));
         let pdf_subscription = cx.subscribe_in(&pdf, window, |this, pdf, event, window, cx| this.handle_pdf_event(pdf, event, window, cx));
         let pdf_for_search = pdf.clone();
         let search_subscription = cx.subscribe_in(&search_input, window, move |this, input, event: &InputEvent, _window, cx| match event {
             InputEvent::Change => {
                 let query = renderer_query(&input.read(cx).value());
+                this.search_list.clear();
                 pdf_for_search.update(cx, |pdf, cx| pdf.search(query, cx));
+                cx.notify();
             }
             InputEvent::PressEnter { shift, .. } => this.search_navigate(if *shift { -1 } else { 1 }, cx),
             _ => {}
@@ -63,42 +68,59 @@ impl PdfReaderView {
         // Page elements establish `PdfReaderDocument`; until one is laid out,
         // the shell owns keyboard focus.
         focus.focus(window, cx);
-        let positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone());
-        let mut marks = MarkSession::new(cx, library.clone());
-        marks.merge_loaded(imported);
-        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        let positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone()).with_saving_enabled(save_progress);
+        let marks = MarkSession::new(cx, library.clone());
+        let bookmark_updates = marks.watch_bookmarks(cx, Self::update_bookmarks);
+        #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
         let tts = crate::shell::tts::Narration::default()
             .with_title(title.clone())
             .with_rate(ReaderSettings::preferences(cx).audiobook_speed)
             .with_pauses(ReaderSettings::preferences(cx).narration_pauses)
-            .with_voice(ReaderSettings::preferences(cx).narration_voice);
-        let reader = Self {
+            .with_voice(ReaderSettings::preferences(cx).narration_voice)
+            .with_device_voice(ReaderSettings::preferences(cx).narration_device_voice.clone())
+            .with_voice_preferences(ReaderSettings::preferences(cx))
+            .with_availability(cx);
+        let mut reader = Self {
+            app,
+            dictionary: None,
             #[cfg(feature = "kobo")]
-            brightness: cx.new(|cx| crate::shell::brightness::BrightnessControls::new(_app.clone(), window, cx)),
+            device_controls,
             locator,
             title,
             library,
             pdf,
             search_input,
             search_match: None,
+            history: Default::default(),
+            search_list: Default::default(),
             toc_tree,
+            toc_filter,
             toc: PdfTocState::default(),
+            _toc_load: None,
             sidebar: SidebarState::from_preferences(cx),
-            chrome: crate::shell::chrome::ChromeState::from_preferences(Component::PdfShell, cx),
+            chrome: crate::shell::chrome::ChromeState::from_preferences(Component::PdfShell, ui_components::uses_mobile_reader_controls(window), cx),
             marks,
+            recurring: Default::default(),
+            annotation_load_generation: 0,
+            _annotation_updates: None,
+            _bookmark_updates: bookmark_updates,
+            annotation_list: Default::default(),
+            bookmark_list: Default::default(),
+            bookmark_filter_input,
             annotation_note_input,
             annotation_popup_anchor: None,
+            pending_open_annotation: None,
             context_sheet: None,
             current_page: 0,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_fragments: Vec::new(),
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_request: 0,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_page: 0,
-            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts_navigation_revision: 0,
             page_count: 0,
             positions,
@@ -109,24 +131,42 @@ impl PdfReaderView {
             settings_navigation: SettingsNavigation::new(window, cx),
             _subscriptions: vec![pdf_subscription, search_subscription],
         };
+        #[cfg(all(feature = "native-tts", target_os = "android"))]
+        crate::shell::tts::load_media_metadata(reader.library.clone(), reader.locator.clone(), cx);
+        reader.refresh_bookmark_rows(cx);
+        reader.refresh_annotation_overlays(cx);
         reader.load_reader_state(cx);
+        reader.watch_annotation_updates(cx);
         reader.load_database_toc(cx);
         reader
     }
 
-    fn handle_pdf_event(&mut self, _pdf: &Entity<PdfView>, event: &PdfViewEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_pdf_event(&mut self, pdf: &Entity<PdfView>, event: &PdfViewEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            PdfViewEvent::TextLayersChanged => self.refresh_annotation_overlays(cx),
+            PdfViewEvent::EmbeddedAnnotations(annotations) => {
+                let content_hash = self.locator.content_hash();
+                self.marks.merge_loaded(annotations.iter().filter_map(|value| library_model::stored_pdf_annotation(content_hash, value)).collect());
+                self.refresh_annotation_overlays(cx);
+            }
+            PdfViewEvent::NavigationJump { from } => self.history.begin_jump(*from),
             PdfViewEvent::PositionChanged { position, total } => {
                 if *total == 0 {
                     return;
+                }
+                if self.history.settle(position) {
+                    cx.notify();
                 }
                 let current_page = position.page_index();
                 let full_page_position = position.page_y();
                 let unchanged = self.current_page == current_page && self.page_count == *total;
                 self.current_page = current_page;
                 self.page_count = *total;
+                if let Some(anchor) = self.pending_open_annotation.take() {
+                    self.open_annotation_anchor(anchor, cx);
+                }
                 self.update_active_toc(current_page, cx);
-                #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
                 self.tts_navigation_changed(cx);
                 self.positions.record(StoredPosition::pdf_page(current_page, full_page_position, *total), self.pdf.read(cx).navigation_revision());
                 if unchanged {
@@ -135,21 +175,42 @@ impl PdfReaderView {
                 notify(cx, Component::PdfShell, "page_changed");
             }
             PdfViewEvent::SearchChanged { current, total } => {
+                if *total < self.search_list.hit_count() {
+                    self.search_list.clear();
+                }
+                let indexed = self.search_list.hit_count();
+                self.search_list.extend_pages(pdf.read(cx).search_hits().iter().skip(indexed).map(|hit| hit.page_index()));
+                if self.search_match.is_none_or(|(previous, _)| previous != *current) {
+                    self.search_list.reveal_match(*current);
+                }
                 let Some(match_position) = self.search_match.as_mut() else { return };
-                if *match_position != (*current, *total) {
+                if *match_position != (*current, *total) || indexed != self.search_list.hit_count() {
                     *match_position = (*current, *total);
                     notify(cx, Component::PdfShell, "match_changed");
                 }
             }
             PdfViewEvent::PageTapped => self.toggle_mobile_controls(window, cx),
+            PdfViewEvent::WordSelected { selection, position } => {
+                if !components::touch_ui() {
+                    self.annotation_popup_anchor = Some(*position);
+                    self.lookup_selection(selection.clone(), window, cx);
+                }
+            }
+            PdfViewEvent::PassageBoundsChanged { bounds } => {
+                if let Some(dictionary) = &self.dictionary {
+                    dictionary.update(cx, |dictionary, cx| dictionary.set_anchor(*bounds, cx));
+                }
+            }
             PdfViewEvent::AnnotationActivated { id, position } => {
-                crate::shell::state_panel::select_tab(&mut self.sidebar, SidebarTab::Notes, cx);
                 self.annotation_popup_anchor = Some(*position);
                 self.select_annotation(id.clone(), window, cx);
+                if self.marks.selected().is_some_and(|annotation| annotation.content_hash == self.locator.content_hash()) {
+                    crate::shell::state_panel::select_tab(&mut self.sidebar, SidebarTab::Notes, cx);
+                }
             }
             PdfViewEvent::LoadFailed(error) => {
                 log::error!("failed to load PDF reader for book {}: {error}", self.title);
-                cx.emit(crate::BookOpenFailed(error.clone()));
+                cx.emit(crate::BookOpenFailed(opening_error(BackendError::message(error.clone()), "pdf_renderer", Failure::BookRendererFailed)));
             }
         }
     }

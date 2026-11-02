@@ -23,7 +23,7 @@ async fn readers_and_availability_use_only_selected_paths() {
     let mut actual = Vec::new();
     reader.read_to_end(&mut actual).unwrap();
     assert_eq!(actual, bytes);
-    assert!(assets.verified_book_reader(hash, paths).await.unwrap().is_some());
+    assert!(assets.verified_book_reader_with_checksum(hash, paths, None).await.unwrap().is_some());
     std::fs::remove_file(root.path().join("book.epub")).unwrap();
     assert!(!assets.book_exists(&hash, &[path("book.epub")]).unwrap());
     assert!(assets.open_book_reader(&hash, vec![path("book.epub")]).await.unwrap().is_none());

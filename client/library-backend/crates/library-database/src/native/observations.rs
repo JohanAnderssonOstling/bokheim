@@ -1,6 +1,8 @@
 //! Local file facts shared by import, scan, download, and physical reconciliation.
 pub(crate) use crate::DatabaseError;
 use crate::SqlParam;
+use content_address::ContentHash;
+use rusqlite::OptionalExtension;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use rusqlite::Connection;
 pub(crate) use sync_common::BookId;
@@ -20,13 +22,13 @@ pub(crate) fn record_file(connection: &Connection, directory: &str, hash: &BookI
     let _ = path;
     match revision {
         Revision::Local { size } => {
-            let mut seen = false;
-            connection.shared_bytes_seen(hash, |row| {
-                seen = row.get(0)?;
-                Ok(())
-            })?;
-            if !seen {
-                connection.shared_scanner_enqueue_upload(hash, size)?;
+            if !connection.shared_bytes_seen(hash, |row| row.get::<_, bool>(0))? {
+                let canonical_size: Option<i64> = connection.query_row("SELECT size_bytes FROM book_content WHERE book_id=?1", [hash], |row| row.get(0)).optional()?.flatten();
+                connection.shared_scanner_enqueue_upload(hash, canonical_size.unwrap_or(size))?;
+                let checksum = crate::content_identity::expected_hash(connection, *hash)?
+                    .or(connection.query_row("SELECT byte_hash FROM local_file_content WHERE book_id=?1 AND dir_id=?2", rusqlite::params![hash, directory], |row| row.get::<_, ContentHash>(0)).optional()?)
+                    .or_else(|| hash.content_hash());
+                connection.execute("UPDATE book_transfer SET upload_checksum=?2 WHERE content_hash=?1", rusqlite::params![hash, checksum])?;
             }
             connection.shared_record_size(directory, hash, size)?;
         }

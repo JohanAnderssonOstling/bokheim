@@ -47,6 +47,38 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
     let _ = path;
     Ok(())
 }
+
+/// Flush a whole Linux filesystem at a bulk-import durability boundary.
+/// syncfs has been available since glibc 2.14 (our baseline is 2.17).
+#[cfg(target_os = "linux")]
+pub fn sync_filesystem(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    retry_transient(|| {
+        // SAFETY: the borrowed file owns this descriptor for the entire call.
+        if unsafe { libc::syncfs(file.as_raw_fd()) } == 0 { Ok(()) } else { Err(Error::last_os_error()) }
+    })
+}
+
+/// Start writing dirty file pages without waiting for durable storage. This
+/// neither flushes metadata nor replaces the final sync at a commit boundary.
+/// sync_file_range has been available since glibc 2.6 (our baseline is 2.17).
+#[cfg(target_os = "linux")]
+pub fn start_file_writeback(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    retry_transient(|| {
+        // SAFETY: the borrowed file owns this descriptor throughout the call.
+        // Zero offset and length cover the whole file without changing its cursor.
+        if unsafe { libc::sync_file_range(file.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE) } == 0 {
+            Ok(())
+        } else {
+            let error = Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ENOSYS | libc::EOPNOTSUPP | libc::EINVAL) => Err(Error::new(ErrorKind::Unsupported, error)),
+                _ => Err(error),
+            }
+        }
+    })
+}
 pub fn persist_noclobber(temporary: tempfile::TempPath, destination: &Path) -> Result<(), tempfile::PathPersistError> {
     persist_with_retry(temporary, |temporary| temporary.persist_noclobber(destination))
 }
@@ -119,6 +151,27 @@ fn rename_noclobber_once(source: &Path, destination: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writeback_preserves_file_bytes_and_cursor() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut file = tempfile::tempfile().unwrap();
+        let bytes = vec![42; 256 * 1024];
+        file.write_all(&bytes).unwrap();
+        let position = file.stream_position().unwrap();
+        match start_file_writeback(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::Unsupported => {}
+            Err(error) => panic!("writeback failed: {error}"),
+        }
+        assert_eq!(file.stream_position().unwrap(), position);
+        file.sync_all().unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes);
+    }
 
     #[test]
     fn transient_failures_recover_without_restarting_the_caller() {

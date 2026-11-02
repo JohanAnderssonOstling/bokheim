@@ -13,11 +13,6 @@ const MAGIC: &[u8; 4] = b"BKHM";
 const VERSION: u8 = 17;
 const HEADER_BYTES: usize = MAGIC.len() + 1;
 
-/// The magic+version header bytes prefixing every persisted value.
-pub const fn header_bytes() -> [u8; HEADER_BYTES] {
-    [MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], VERSION]
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum WireError {
     Encode(String),

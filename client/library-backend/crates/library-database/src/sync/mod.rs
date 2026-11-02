@@ -1,19 +1,19 @@
 //! Replica sync: pull commits, cursors, outbox, sync functions.
 
 use crate::SqlParam;
-pub(crate) use crate::shared_sql::SharedSql;
+use crate::query_methods::query_last;
+pub(crate) use crate::query_methods::{invalid_integer_column, invalid_text_column, parse_uuid_column};
 use content_address::BookId;
 use std::io::{Error, ErrorKind};
 use sync_common::{LibraryRevision, StateKey, SyncCursor, SyncGeneration};
 pub(crate) mod apply;
+pub use apply::pull::SyncPullChanges;
 pub(crate) mod outbox;
 pub use outbox::OutboxScan;
 mod issues;
 pub(crate) mod reading_positions;
 pub(crate) mod state;
 pub use state::CURSOR_RECOVERY_PENDING_KEY;
-#[cfg(test)]
-mod convergence_tests;
 
 pub(crate) use crate::DatabaseError;
 pub(crate) use include_sqlite_sql::include_sql;
@@ -27,24 +27,12 @@ include_sql!("src/sync/sql/mutation_issues.sql");
 
 include_sql!("src/sync/sql/sync_outbox.sql");
 
-pub(crate) fn invalid_text_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
-}
-
-pub(crate) fn invalid_integer_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Integer, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
-}
-
 pub(crate) fn nonnegative_u64(value: i64, column: usize, name: &str) -> rusqlite::Result<u64> {
     u64::try_from(value).map_err(|_| invalid_integer_column(column, format!("{name} must not be negative")))
 }
 
 pub(crate) fn storage_i64(value: u64, name: &str) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|_| rusqlite::Error::ToSqlConversionFailure(Box::new(Error::new(ErrorKind::InvalidData, format!("{name} exceeds the database integer range")))))
-}
-
-pub(crate) fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<uuid::Uuid> {
-    uuid::Uuid::parse_str(&value).map_err(|error| invalid_text_column(column, error.to_string()))
 }
 
 pub(crate) fn toc_entry_count(entries: &[library_model::BookTocEntry]) -> usize {
@@ -62,11 +50,7 @@ pub(crate) fn parse_revision(value: Option<String>) -> Result<Option<LibraryRevi
 
 /// Reads the generation and both revisions from the same SQLite statement.
 pub(crate) fn read_pull_cursor(conn: &rusqlite::Connection) -> Result<SyncCursor, DatabaseError> {
-    let mut raw = None;
-    conn.sync_pull_cursor(|row| {
-        raw = Some((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?));
-        Ok(())
-    })?;
+    let raw = query_last(|read| conn.sync_pull_cursor(read), |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)))?;
     let (generation, lifecycle, field) = raw.ok_or_else(|| DatabaseError::message("sync metadata row is missing"))?;
     Ok(SyncCursor { generation: generation.map(|value| SyncGeneration::parse_str(&value).map_err(DatabaseError::operation)).transpose()?, lifecycle_revision: parse_revision(lifecycle)?, field_revision: parse_revision(field)? })
 }

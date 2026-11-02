@@ -16,14 +16,8 @@ DELETE FROM local_book_work WHERE id IN (SELECT value FROM json_each(:ids))
 AND NOT EXISTS(SELECT 1 FROM local_file_work f WHERE f.content_hash=local_book_work.content_hash)
 AND NOT EXISTS(SELECT 1 FROM local_directory_work);
 
--- name: native_directory_work_ids?
-SELECT dir_id FROM local_directory_work ORDER BY id;
-
 -- name: local_book_work_hashes?
 SELECT content_hash FROM local_book_work ORDER BY id;
-
--- name: clear_local_directory_work!
-DELETE FROM local_directory_work;
 
 -- name: native_book_work_directory_ids?
 SELECT DISTINCT bd.dir_id
@@ -147,7 +141,7 @@ ON CONFLICT(content_hash) DO UPDATE SET server_has_book=1;
 -- param: content_hash: &BookId
 INSERT INTO local_book_work(content_hash) VALUES(:content_hash) ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
 
--- name: native_has_pending_purge_work?
+-- name: native_has_pending_purge_work ->
 SELECT EXISTS(SELECT 1 FROM local_purge_work);
 
 -- name: native_move_file_work_paths!

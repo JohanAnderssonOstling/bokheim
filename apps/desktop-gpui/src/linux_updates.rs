@@ -27,9 +27,10 @@ pub fn initialize(data: &Path) -> Result<Startup, String> {
 
 /// Parent waits only during a new launch, while no previous user session exists.
 /// Failure returns to the old process, whose next startup recovers the journal.
-pub fn launch(data: &Path, executable: &Path, trial: Option<&str>) -> Result<bool, String> {
+pub fn launch(data: &Path, executable: &Path, trial: Option<&str>, startup_arguments: &[String]) -> Result<bool, String> {
     let mut command = std::process::Command::new(executable);
     command.env_remove("APPIMAGE").env_remove("APPDIR");
+    command.args(startup_arguments);
     if let Some(id) = trial {
         command.arg("--bokheim-update-trial").arg(id);
     }

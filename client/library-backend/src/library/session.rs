@@ -1,14 +1,23 @@
 //! Coordination state owned by one library session.
 
+use crate::BookId;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use crate::BookId;
 use std::rc::Rc;
 
 /// Mutable coordination state for one open library, independent of app policy
 /// and of the storage implementation used by that library.
 #[derive(Default)]
 pub struct LibraryRuntime {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) automatic_export: super::automatic_annotation_export::AutomaticExport,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) annotation_export_lock: tokio::sync::Mutex<()>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) annotation_exports: super::job_registry::JobRegistry<library_model::AnnotationExportProgress, library_annotation_export::ExportControl>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) reader_imports: super::job_registry::JobRegistry<library_import::reader_import::ReaderImportProgress, Rc<Cell<bool>>>,
+    pub(crate) upload_quota_blocked: Cell<bool>,
     local_work_running: Cell<bool>,
     thumbnail_work_running: Cell<bool>,
     catalog_cover_refreshes: RefCell<HashSet<BookId>>,
@@ -22,7 +31,6 @@ impl LibraryRuntime {
     pub(crate) fn retry_catalog_cover_refresh(&self, hash: &BookId) {
         self.catalog_cover_refreshes.borrow_mut().remove(hash);
     }
-
 
     /// Starts the one thumbnail batch; None while another batch runs.
     pub fn begin_thumbnail_work(self: &Rc<Self>) -> Option<LibraryActivity> {

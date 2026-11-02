@@ -7,14 +7,12 @@
 //! reader has.
 
 use book_model::AnnotationStyle;
-use html_view_core::{AnnotationStyle as RendererAnnotationStyle, RendererAnnotation};
 use library_backend::Annotation;
-
-use crate::epub::Selection;
+use skrift_column_paginator::{AnnotationStyle as RendererAnnotationStyle, RendererAnnotation};
 
 /// Records a new selection, reporting whether it differs from the last one so
 /// an unchanged re-report does not repaint.
-pub(in crate::epub) fn set_selection(current: &mut Option<Selection>, selection: Selection) -> bool {
+pub(in crate::epub) fn set_selection(current: &mut Option<String>, selection: String) -> bool {
     if current.as_ref() == Some(&selection) {
         return false;
     }
@@ -23,16 +21,25 @@ pub(in crate::epub) fn set_selection(current: &mut Option<Selection>, selection:
 }
 
 /// Overlays for every annotation the renderer can place.
-pub(crate) fn overlays(annotations: &[Annotation]) -> Vec<RendererAnnotation> {
-    annotations.iter().filter_map(renderer_annotation).collect()
+pub(crate) fn overlays(annotations: &[Annotation], book: &crate::book::NativeBook) -> Vec<RendererAnnotation> {
+    annotations.iter().filter_map(|annotation| renderer_annotation(annotation, book)).collect()
 }
 
 /// Translates a stored annotation into a renderer overlay.
 ///
 /// Returns `None` for annotations anchored to something other than an EPUB CFI
 /// — PDF annotations share the same table and must be skipped here.
-pub(crate) fn renderer_annotation(annotation: &Annotation) -> Option<RendererAnnotation> {
-    let cfi_range = annotation.anchor.epub_cfi_value()?.to_owned();
+pub(crate) fn renderer_annotation(annotation: &Annotation, book: &crate::book::NativeBook) -> Option<RendererAnnotation> {
+    let cfi_range = book.annotation_cfi(&annotation.anchor)?;
+    Some(renderer_annotation_at(annotation, annotation.id.clone(), cfi_range, annotation.exact_text.clone()))
+}
+
+pub(crate) fn renderer_annotation_at(annotation: &Annotation, id: String, cfi_range: String, exact_text: String) -> RendererAnnotation {
+    let (style, color) = renderer_appearance(annotation);
+    RendererAnnotation { id, cfi_range, exact_text, prefix: None, suffix: None, style, color }
+}
+
+pub(crate) fn renderer_appearance(annotation: &Annotation) -> (RendererAnnotationStyle, [u8; 4]) {
     let style = match annotation.style {
         AnnotationStyle::Highlight => RendererAnnotationStyle::Highlight,
         AnnotationStyle::Underline => RendererAnnotationStyle::Underline,
@@ -43,7 +50,7 @@ pub(crate) fn renderer_annotation(annotation: &Annotation) -> Option<RendererAnn
     if annotation.style != AnnotationStyle::Highlight {
         color[3] = 255;
     }
-    Some(RendererAnnotation { id: annotation.id.clone(), cfi_range, exact_text: annotation.exact_text.clone(), prefix: None, suffix: None, style, color })
+    (style, color)
 }
 
 /// An annotation's `0xRRGGBB` as a translucent RGBA fill. Highlights are drawn

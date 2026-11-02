@@ -7,8 +7,8 @@ mod state;
 
 pub use api::SyncCredentials;
 pub use assets::{
-    blob_endpoint, classify_asset_status, download_thumbnail_batch, negotiate_blobs, thumbnail_batch_endpoint, thumbnail_endpoint, thumbnail_presence, thumbnail_presence_endpoint, upload_book_stream, upload_thumbnail_batch,
-    validate_streaming_asset_response, AssetResponseError, AssetStatus,
+    blob_endpoint, classify_asset_status, download_thumbnail_batch, negotiate_blobs, thumbnail_batch_endpoint, thumbnail_presence, upload_book_stream_with_checksum,
+    upload_thumbnail_batch, validate_streaming_asset_response, AssetResponseError, AssetStatus,
 };
 pub use url::Url;
 pub use state::{exchange_changes, SyncRequestError};

@@ -81,13 +81,18 @@ pub enum AppWorkerClientMessage {
 pub struct AccountSnapshot {
     pub account: AccountStatus,
     pub storage_usage: Option<account_contract::StorageUsageResponse>,
+    #[serde(default)]
+    pub pending_cloud_bytes: Option<u64>,
     pub sync_statuses: Vec<LibrarySyncStatus>,
     pub server_storage_usage: Option<Vec<crate::ServerLibraryStorageUsage>>,
+    #[serde(default)]
+    pub server_book_storage_usage: Option<Vec<crate::ServerBookStorageUsage>>,
 }
 
 pub enum WorkerSubscription {
     Library(LibraryEvents),
     LibraryList(watch::Receiver<()>),
+    Dictionary(watch::Receiver<()>),
     Unit(async_channel::Receiver<()>),
 }
 
@@ -95,7 +100,7 @@ impl WorkerSubscription {
     pub async fn next_value(&mut self) -> Option<WorkerPayload> {
         match self {
             Self::Library(events) => events.next_value().await,
-            Self::LibraryList(receiver) => receiver.changed().await.ok().and_then(|()| encode_reply(()).ok()),
+            Self::LibraryList(receiver) | Self::Dictionary(receiver) => receiver.changed().await.ok().and_then(|()| encode_reply(()).ok()),
             Self::Unit(receiver) => receiver.recv().await.ok().and_then(|()| encode_reply(()).ok()),
         }
     }

@@ -34,7 +34,7 @@ impl LibraryThingClient {
         if key.trim().is_empty() {
             return Err(MetadataError("LibraryThing key is empty".into()));
         }
-        let client = reqwest::Client::builder().user_agent("BokheimMetadata/1.0").redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(15)).build().map_err(error)?;
+        let client = http_response::client_builder().user_agent("BokheimMetadata/1.0").redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(15)).build().map_err(error)?;
         Ok(Self { client, key: Arc::new(key.trim().into()), endpoint: ENDPOINT.into(), cache: Arc::new(Mutex::new(crate::crawl::open_provider(provider_file)?)), requests: Arc::new(tokio::sync::Mutex::new(())) })
     }
     pub(crate) async fn lookup_isbn(&self, id: Isbn13) -> Result<(), MetadataError> {

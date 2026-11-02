@@ -56,17 +56,14 @@ pub struct LibraryBrowseData {
 impl crate::Database {
     /// Complete projection and paged UI reads share the same selection semantics.
     pub fn browse(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<LibraryBrowseData, DatabaseError> {
-        self.browse_result_complete(query, downloaded_only, None, true)
-    }
-
-    pub fn browse_sections(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool, book_limit: usize) -> Result<LibraryBrowseData, DatabaseError> {
-        self.browse_result_complete(query, downloaded_only, Some(book_limit.clamp(1, library_model::MAX_BROWSE_SECTION_BOOK_LIMIT)), true)
+        self.browse_result_complete(query, downloaded_only, true)
     }
 
     /// Complete browse page, including facets and breadcrumbs, from one snapshot.
     #[cfg(test)]
     pub(crate) fn legacy_browse(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<LibraryBrowseData, DatabaseError> {
         match query.location {
+            library_model::BrowseLocation::Notebook(_) | library_model::BrowseLocation::TextSearch(_) => self.browse(query, downloaded_only),
             library_model::BrowseLocation::Books => self.browse_all_books(query, downloaded_only, None),
             library_model::BrowseLocation::Folder(directory) => self.browse_folder(directory, query, downloaded_only),
             library_model::BrowseLocation::Subject(route) => self.browse_subject(subjects::Books::Library, route, query, downloaded_only, None, None),
@@ -98,6 +95,8 @@ impl crate::Database {
     pub fn browse_page(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool, page: BrowsePageRequest) -> Result<LibraryBrowseData, DatabaseError> {
         match query.location {
             library_model::BrowseLocation::Books
+            | library_model::BrowseLocation::Notebook(_)
+            | library_model::BrowseLocation::TextSearch(_)
             | library_model::BrowseLocation::Subject(_)
             | library_model::BrowseLocation::Catalog(_)
             | library_model::BrowseLocation::Author(_)
@@ -114,7 +113,7 @@ impl crate::Database {
 
     /// Complete direct identities and navigation for recursive operations.
     pub fn browse_contents(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<library_model::BrowseContents, DatabaseError> {
-        self.browse_result_complete(query, downloaded_only, None, false).map(|result| result.contents)
+        self.browse_result_complete(query, downloaded_only, false).map(|result| result.contents)
     }
 }
 
@@ -130,11 +129,7 @@ include_sql!("src/browse/sql/books.sql");
 impl crate::Database {
     /// Books with a live placement, as the carousels display them.
     pub fn book_count(&self) -> Result<usize, DatabaseError> {
-        let mut count = 0_i64;
-        self.connection.count_all_books(|row| {
-            count = row.get(0)?;
-            Ok(())
-        })?;
+        let count = self.connection.count_all_books(|row| row.get::<_, i64>(0))?;
         usize::try_from(count).map_err(|_| DatabaseError::message("library book count must not be negative"))
     }
 }

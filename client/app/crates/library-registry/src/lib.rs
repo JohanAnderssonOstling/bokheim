@@ -3,7 +3,7 @@
 //! Registry and key/value behavior is identical on every target. Native code
 //! supplies real directory roots; the browser supplies SQLite VFS filenames.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -22,6 +22,10 @@ const SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS detached_library (
         library_id TEXT PRIMARY KEY NOT NULL
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS library_account (
+        library_id TEXT PRIMARY KEY NOT NULL,
+        account TEXT
+    ) STRICT;
     CREATE TABLE IF NOT EXISTS pending_local_purge (
         library_id TEXT PRIMARY KEY NOT NULL,
         storage_path TEXT NOT NULL
@@ -39,11 +43,17 @@ pub struct LibraryEntry {
     library_id: LibraryId,
     library_name: String,
     storage_locator: String,
+    #[serde(default)]
+    opds: bool,
 }
 
 impl LibraryEntry {
     fn new(library_id: LibraryId, name: &str, storage_locator: impl Into<String>) -> RegistryResult<Self> {
-        Ok(Self { library_id, library_name: validate_name(name)?, storage_locator: storage_locator.into() })
+        Ok(Self { library_id, library_name: validate_name(name)?, storage_locator: storage_locator.into(), opds: false })
+    }
+
+    pub fn is_opds(&self) -> bool {
+        self.opds
     }
 
     pub fn library_id(&self) -> &LibraryId {
@@ -59,6 +69,10 @@ impl LibraryEntry {
 
 mod owner;
 pub use owner::LibraryRegistry;
+#[cfg(not(target_arch = "wasm32"))]
+mod recovery;
+#[cfg(not(target_arch = "wasm32"))]
+pub use recovery::LibraryRootRecovery;
 
 struct LocalRegistry {
     #[cfg(not(target_arch = "wasm32"))]
@@ -90,12 +104,14 @@ impl LocalRegistry {
 
     pub fn entries(&mut self) -> RegistryResult<Vec<LibraryEntry>> {
         let connection = &mut self.connection;
-        let mut statement = connection.prepare("SELECT library_id,library_name,storage_path FROM library_registry ORDER BY library_name COLLATE NOCASE,library_id")?;
+        let mut statement = connection.prepare("SELECT library_id,library_name,storage_path,EXISTS(SELECT 1 FROM app_value WHERE key='opds-library:' || library_id) FROM library_registry ORDER BY library_name COLLATE NOCASE,library_id")?;
         let entries = statement
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?)))?
             .map(|row| {
-                let (id, name, path) = row?;
-                LibraryEntry::new(LibraryId::parse_str(&id)?, &name, path)
+                let (id, name, path, opds) = row?;
+                let mut entry = LibraryEntry::new(LibraryId::parse_str(&id)?, &name, path)?;
+                entry.opds = opds;
+                Ok(entry)
             })
             .collect();
         entries
@@ -103,7 +119,63 @@ impl LocalRegistry {
 
     pub fn entry(&mut self, id: &LibraryId) -> RegistryResult<Option<LibraryEntry>> {
         let row = self.connection.query_row("SELECT library_name,storage_path FROM library_registry WHERE library_id=?1", [id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()?;
-        row.map(|(name, path)| LibraryEntry::new(*id, &name, path)).transpose()
+        row.map(|(name, path)| {
+            let mut entry = LibraryEntry::new(*id, &name, path)?;
+            entry.opds = self.read_value(&format!("opds-library:{id}"))?.is_some();
+            Ok(entry)
+        })
+        .transpose()
+    }
+
+    fn accessible_to_account(&self, id: &LibraryId, account: Option<&str>) -> RegistryResult<bool> {
+        let owner: Option<Option<String>> = self.connection.query_row("SELECT account FROM library_account WHERE library_id=?1", [id.to_string()], |row| row.get(0)).optional()?;
+        // A NULL owner marks a newly created local library. Older registry
+        // entries have no ownership row: discovery must identify their account
+        // before remote workers can use them with the current credentials.
+        Ok(match owner {
+            Some(None) => true,
+            Some(Some(owner)) => account.is_none_or(|account| account == owner),
+            None => account.is_none(),
+        })
+    }
+
+    fn device_only(&self, id: &LibraryId) -> RegistryResult<bool> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM app_value WHERE key=?1)", [format!("device-only-library:{id}")], |row| row.get(0))?)
+    }
+
+    fn has_account(&self, id: &LibraryId) -> RegistryResult<bool> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM library_account WHERE library_id=?1 AND account IS NOT NULL)", [id.to_string()], |row| row.get(0))?)
+    }
+
+    fn make_device_only(&mut self, id: &LibraryId) -> RegistryResult<()> {
+        self.entry(id)?.ok_or("library not found")?;
+        let tx = self.connection.transaction()?;
+        write_storage_policy(&tx, id, &LibraryStorage::Local)?;
+        tx.execute("INSERT INTO library_account(library_id,account) VALUES(?1,NULL) ON CONFLICT(library_id) DO UPDATE SET account=NULL", [id.to_string()])?;
+        tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("device-only-library:{id}"), b"1".as_slice()])?;
+        tx.execute("DELETE FROM app_value WHERE key=?1", [format!("pending-cloud-storage:{id}")])?;
+        tx.execute("DELETE FROM app_value WHERE key=?1", [format!("pending-library-rename/{id}")])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn bind_library_account(&mut self, id: &LibraryId, account: &str) -> RegistryResult<()> {
+        if self.device_only(id)? {
+            return Err("this library is kept only on this device".into());
+        }
+        let owner: Option<String> = self.connection.query_row("SELECT account FROM library_account WHERE library_id=?1", [id.to_string()], |row| row.get(0)).optional()?.flatten();
+        if let Some(owner) = owner {
+            return if owner == account { Ok(()) } else { Err("library belongs to another account".into()) };
+        }
+        self.connection.execute("INSERT INTO library_account(library_id,account) VALUES(?1,?2) ON CONFLICT(library_id) DO UPDATE SET account=excluded.account", params![id.to_string(), account])?;
+        Ok(())
+    }
+
+    /// Libraries created while signed out join the first account used to sync
+    /// them. Keep ownership after removal so queued deletions use that account.
+    fn bind_unowned_libraries(&mut self, account: &str) -> RegistryResult<()> {
+        self.connection.execute("UPDATE library_account SET account=?1 WHERE account IS NULL AND NOT EXISTS(SELECT 1 FROM app_value WHERE key='device-only-library:' || library_account.library_id)", [account])?;
+        Ok(())
     }
 
     /// Read the explicit selection, retaining the original choice for existing
@@ -120,13 +192,14 @@ impl LocalRegistry {
     }
 
     pub fn cache_remote_storage(&mut self, id: &LibraryId, storage: LibraryStorage) -> RegistryResult<()> {
-        if self.entry(id)?.is_none() { return Err("library not found".into()); }
-        let current = self.storage(id)?;
-        if current.external().is_some() && current != storage {
-            return Err("remote storage selection conflicts with this external library".into());
+        if self.entry(id)?.is_none() {
+            return Err("library not found".into());
         }
+
         // Offline changes to Bokheim storage remain queued until acknowledged.
-        if storage.external().is_none() && self.read_value(&format!("pending-cloud-storage:{id}"))?.is_some() { return Ok(()); }
+        if self.read_value(&format!("pending-cloud-storage:{id}"))?.is_some() {
+            return Ok(());
+        }
         let tx = self.connection.transaction()?;
         write_storage_policy(&tx, id, &storage)?;
         tx.commit()?;
@@ -134,12 +207,10 @@ impl LocalRegistry {
     }
 
     fn storage_for_bokheim_change(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<LibraryStorage> {
-        if self.entry(id)?.is_none() { return Err("library not found".into()); }
-        match self.storage(id)? {
-            LibraryStorage::External(root) if !enabled => Ok(LibraryStorage::External(root)),
-            LibraryStorage::External(_) => Err("external libraries cannot use Bokheim file storage".into()),
-            _ => Ok(if enabled { LibraryStorage::Bokheim } else { LibraryStorage::Local }),
+        if self.entry(id)?.is_none() {
+            return Err("library not found".into());
         }
+        Ok(if enabled { LibraryStorage::Bokheim } else { LibraryStorage::Local })
     }
 
     pub fn set_asset_storage_enabled(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
@@ -187,11 +258,6 @@ impl LocalRegistry {
     }
 
     pub fn create_with_storage(&mut self, name: &str, locator: Option<String>, storage: LibraryStorage) -> RegistryResult<LibraryEntry> {
-        if let Some(root) = storage.external() {
-            for entry in self.entries()? {
-                if self.storage(entry.library_id())?.external() == Some(root) { return Err("this cloud folder is already registered as a library".into()); }
-            }
-        }
         let generated_id = LibraryId::new_v4();
         let requested_name = if name.trim().is_empty() { "Library" } else { name };
         let requested_locator = match locator {
@@ -210,14 +276,13 @@ impl LocalRegistry {
         if self.is_detached(entry.library_id())? {
             return Err("library is pending deletion".into());
         }
-        if self.entry(entry.library_id())?.is_some() && self.storage(entry.library_id())?.external().is_some() {
-            return Err("external library is already registered; its storage cannot be replaced by opening its download folder".into());
-        }
+
         let asset_storage_enabled = storage.uses_bokheim_assets();
         let connection = &mut self.connection;
         let tx = connection.transaction()?;
         write_storage_policy(&tx, entry.library_id(), &storage)?;
         tx.execute(include_str!("sql/create_library.sql"), params![entry.library_id.to_string(), entry.library_name, entry.storage_locator])?;
+        tx.execute("INSERT OR IGNORE INTO library_account(library_id,account) VALUES(?1,NULL)", [entry.library_id.to_string()])?;
         if !asset_storage_enabled {
             let pending = format!("{}:0", uuid::Uuid::new_v4());
             tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("pending-cloud-storage:{}", entry.library_id), pending.as_bytes()])?;
@@ -381,11 +446,7 @@ fn validate_name(value: &str) -> RegistryResult<String> {
 
 fn join_locator(root: &str, child: &str) -> String {
     let root = root.trim_end_matches('/');
-    if root.is_empty() {
-        child.to_owned()
-    } else {
-        format!("{root}/{child}")
-    }
+    if root.is_empty() { child.to_owned() } else { format!("{root}/{child}") }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -623,49 +684,13 @@ mod platform {
             let delete = (*vfs).xDelete.ok_or("SQLite VFS does not support database deletion")?;
             delete(vfs, filename.as_ptr(), 1)
         };
-        if result == rusqlite::ffi::SQLITE_OK || result == rusqlite::ffi::SQLITE_IOERR_DELETE_NOENT {
-            Ok(())
-        } else {
-            Err(format!("SQLite VFS could not delete {locator}: error {result}").into())
-        }
+        if result == rusqlite::ffi::SQLITE_OK || result == rusqlite::ffi::SQLITE_IOERR_DELETE_NOENT { Ok(()) } else { Err(format!("SQLite VFS could not delete {locator}: error {result}").into()) }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn external_storage_persists_and_rejects_bokheim_enablement() {
-        use sync_common::storage::{CloudLibraryRoot, CloudProvider, ProviderId, ProviderScope};
-        let temp = tempfile::tempdir().unwrap();
-        let app_data = temp.path().join("app").to_string_lossy().into_owned();
-        let downloads = temp.path().join("downloads").to_string_lossy().into_owned();
-        std::fs::create_dir_all(&app_data).unwrap();
-        let storage = LibraryStorage::External(CloudLibraryRoot {
-            scope: ProviderScope {
-                provider: CloudProvider::GoogleDrive,
-                account_id: ProviderId::new("account").unwrap(),
-                container_id: ProviderId::new("my_drive").unwrap(),
-            },
-            folder_id: ProviderId::new("folder").unwrap(),
-        });
-        let mut registry = LocalRegistry::open_with_library_root(app_data.clone(), downloads.clone()).unwrap();
-        let entry = registry.create_with_storage("Audio", None, storage.clone()).unwrap();
-        let id = *entry.library_id();
-        assert!(!registry.asset_storage_enabled(&id).unwrap());
-        assert!(registry.set_asset_storage_enabled(&id, true).is_err());
-        assert!(registry.queue_cloud_storage(&id, true).is_err());
-        assert!(registry.cache_cloud_storage_with_reset(&id, true).is_err());
-        registry.cache_cloud_storage_with_reset(&id, false).unwrap();
-        registry.queue_cloud_storage(&id, false).unwrap();
-        assert_eq!(registry.storage(&id).unwrap(), storage);
-        assert!(registry.read_value(&format!("pending-cloud-storage:{id}")).unwrap().unwrap().ends_with(b":0"));
-        drop(registry);
-        let mut reopened = LocalRegistry::open_with_library_root(app_data, downloads).unwrap();
-        assert_eq!(reopened.storage(&id).unwrap(), storage);
-        assert!(reopened.create_with_asset_storage("Audio", Some(entry.storage_locator().to_owned()), true).is_err());
-    }
 
     #[test]
     fn legacy_storage_choice_migrates_when_changed() {

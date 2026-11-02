@@ -66,6 +66,8 @@ def architecture(args, version, source):
         shutil.copy2(binary, executable(app))
         shutil.copy2(binary.parent / "taxonomy.sqlite3", resources / "taxonomy.sqlite3")
         (executable(app).parent / "taxonomy.sqlite3").symlink_to("../Resources/taxonomy.sqlite3")
+        shutil.copytree(binary.parent / "fonts", resources / "fonts")
+        (executable(app).parent / "fonts").symlink_to("../Resources/fonts", target_is_directory=True)
         shutil.copy2(binary.with_name("bokheim-opds-webview"), browser_helper(app))
         pdfium(app).parent.mkdir()
         shutil.copy2(prepared / "libpdfium.dylib", pdfium(app))
@@ -97,7 +99,8 @@ def architecture(args, version, source):
                     CFBundlePackageType="APPL", CFBundleIconFile="Bokheim.icns",
                     CFBundleShortVersionString=version, CFBundleVersion=version,
                     LSMinimumSystemVersion="13.0", NSHighResolutionCapable=True,
-                    NSPrincipalClass="NSApplication")
+                    NSPrincipalClass="NSApplication",
+                    CFBundleURLTypes=[dict(CFBundleURLName="se.bokheim.reader", CFBundleURLSchemes=["bokheim"], CFBundleTypeRole="Viewer")])
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
         for path in (executable(app), browser_helper(app), pdfium(app)):
             verify_arches(path, [args.arch])

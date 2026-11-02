@@ -46,18 +46,11 @@ WHERE cover_state IS NULL OR cover_state = 'ready';
 -- param: content_hash: &BookId
 SELECT cover_state FROM book_transfer WHERE content_hash = :content_hash AND cover_state IS NOT NULL;
 
--- name: upload_preparation_snapshot?
-SELECT b.content_hash, u.upload_id
-FROM book b LEFT JOIN book_transfer u ON u.content_hash = b.content_hash
-WHERE b.deleted_at IS NULL
-ORDER BY b.content_hash;
-
 -- name: prepared_upload_batch?
--- param: scope: &str
 -- param: affected_dirs: &str
 -- `affected_dirs`: folders with queued physical work and everything below them.
 SELECT b.content_hash, u.upload_id
-FROM json_each(:scope) members JOIN book b ON b.content_hash = unhex(members.value)
+FROM book b
 LEFT JOIN book_transfer u ON u.content_hash = b.content_hash
 WHERE b.deleted_at IS NULL
   AND NOT EXISTS(SELECT 1 FROM local_book_work w WHERE w.content_hash = b.content_hash)

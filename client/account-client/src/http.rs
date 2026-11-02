@@ -1,10 +1,10 @@
 use crate::{AuthError, Session, Url};
-use reqwest::{header, Client, Method, RequestBuilder, Response};
+use reqwest::{header, Method, RequestBuilder, Response};
 use serde::{de::DeserializeOwned, Serialize};
 use sync_common::transport as wire;
 
 pub(crate) fn request(server_url: &Url, method: Method, endpoint: &str) -> Result<RequestBuilder, AuthError> {
-    Ok(Client::builder().build()?.request(method, server_url.join(endpoint)?).header(header::ACCEPT, wire::MEDIA_TYPE))
+    Ok(http_response::client_builder().build()?.request(method, server_url.join(endpoint)?).header(header::ACCEPT, wire::MEDIA_TYPE))
 }
 
 pub(crate) fn authenticated_request(session: &Session, method: Method, endpoint: &str) -> Result<RequestBuilder, AuthError> {

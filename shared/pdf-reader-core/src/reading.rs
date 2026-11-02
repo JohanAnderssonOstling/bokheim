@@ -14,9 +14,6 @@ impl LocalDocumentSession {
         if let Some(analysis) = cached {
             return Ok(analysis.text.reading_fragments());
         }
-        if let Some(source) = &self.page_source {
-            source.prepare_page(page_index).map_err(PdfError::new)?;
-        }
         let page = self.document.pages().get(page_index as i32).map_err(|error| PdfError::new(error.to_string()))?;
         self.page_analysis(&page, page_index).map(|analysis| analysis.text.reading_fragments())
     }

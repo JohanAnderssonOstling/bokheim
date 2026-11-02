@@ -4,6 +4,14 @@
 //! events, and retry decisions belong to `LibrarySession`.
 
 use crate::BackendError;
+#[cfg(not(target_arch = "wasm32"))]
+use filesystem_scanner::filesystem_scan::ScanBookIndex;
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+use filesystem_scanner::filesystem_scan::inspect_files;
+#[cfg(not(target_arch = "wasm32"))]
+use library_database::{InspectedFilesystemScan, ScanFileObservation, ScanSnapshot};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 #[derive(Clone)]
 pub(crate) struct LibraryScanner {
     pub(crate) root: String,
@@ -30,15 +38,16 @@ impl LibraryScanner {
         }
     }
 
-    pub(crate) async fn inspect(&self, scan: &library_database::FilesystemScan, snapshot: &library_database::ScanSnapshot, host: &std::sync::Arc<dyn cpu_host::CpuHost>) -> library_database::InspectedFilesystemScan {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn inspect(&self, files: &[ScanFileObservation], readable: bool, snapshot: &ScanSnapshot, known: &ScanBookIndex, host: &Arc<dyn cpu_host::CpuHost>) -> InspectedFilesystemScan {
         #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
         {
-            filesystem_scanner::filesystem_scan::inspect(&self.root, scan, snapshot, host).await
+            inspect_files(&self.root, files, readable, snapshot, known, host).await
         }
         #[cfg(not(all(feature = "scanner", not(target_arch = "wasm32"))))]
         {
-            let _ = (scan, snapshot, host);
-            library_database::InspectedFilesystemScan { readable: false, ..library_database::InspectedFilesystemScan::default() }
+            let _ = (files, readable, snapshot, known, host);
+            InspectedFilesystemScan { readable: false, ..InspectedFilesystemScan::default() }
         }
     }
 }

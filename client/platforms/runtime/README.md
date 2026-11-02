@@ -12,10 +12,13 @@ workers use `try_run` to defer blocked work without occupying the worker.
 Opening and reading books (including remote reads and audiobook streaming),
 explicit downloads, cross-library copies and approved app updates bypass this
 restriction. Queued book downloads persist their `UserInitiated` origin so
-retries and restarts preserve the exemption. Pending torrents are explicit
-downloads; their completed seeding remains automatic. User pause/seeding choices
-remain independent of automatic suspension. The app's registry owns the setting;
+retries and restarts preserve the exemption. The app's registry owns the setting;
 `transfer-policy.json` remains its atomic mirror for native workers.
+
+The desktop application and OPDS browser enable `linux-network-cost` for
+NetworkManager monitoring. Kobo omits that feature and its D-Bus dependency;
+it does not expose the metered-transfer setting or write the preference mirror.
+Kobo transfers remain unrestricted by network cost.
 
 `coordinator` owns bounded payload queues:
 

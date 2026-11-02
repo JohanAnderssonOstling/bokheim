@@ -1,6 +1,6 @@
 const RETRY_KEY = 'bokheim-startup-retry-v1';
 
-export async function startApplication(panel, initialize, {reload = () => location.reload(), storage} = {}) {
+export async function startApplication(panel, initialize, {reload = () => location.reload(), storage, onFailure = () => {}} = {}) {
     // Accessing sessionStorage itself can throw when browser storage is blocked.
     // In that case retain the manual Reload action without an automatic loop.
     if (storage === undefined) {
@@ -19,6 +19,7 @@ export async function startApplication(panel, initialize, {reload = () => locati
         panel.remove();
         return true;
     } catch (error) {
+        onFailure();
         console.error('Bokheim startup failed', error);
         const busy = /BOKHEIM_STORAGE_BUSY|creating sync access handle/.test(String(error));
         let retry = false;
@@ -34,7 +35,7 @@ export async function startApplication(panel, initialize, {reload = () => locati
             return false;
         }
         const message = document.createElement('p');
-        message.textContent = busy ? 'Close other Bokheim tabs, then reload.' : 'Bokheim could not start. Reload to try again.';
+        message.textContent = busy ? 'Close other app tabs, then reload.' : "Couldn't start the app. Reload to retry.";
         const details = document.createElement('details');
         const summary = document.createElement('summary');
         summary.textContent = 'Error details';
