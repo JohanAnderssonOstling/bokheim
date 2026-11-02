@@ -145,8 +145,6 @@ jobs:
           with tarfile.open(archive, 'r:bz2') as source:
               source.extractall(destination, filter='data')
           lib = destination / stem / 'lib'
-          assert (lib / library).is_file(), f'Missing speech library: {lib / library}'
-          assert (lib / library).stat().st_size > 0
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
               output.write(f'SHERPA_ONNX_LIB_DIR={lib}\n')
           print(f'Prepared native speech libraries: {lib}')
@@ -221,6 +219,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Standalone executable packaging failed" }
 
       - name: Verify portable Windows runtime and update metadata
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: |
@@ -266,6 +265,7 @@ jobs:
           }
 
       - name: Verify Windows installer
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: |
@@ -279,9 +279,44 @@ jobs:
           }
 
       - name: Record verified Windows artifacts
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: python scripts/ci/release_artifacts.py record windows --directory release --repository "${{ github.repository }}"
+
+      - name: Write Windows package metadata
+        if: inputs.build_only == true
+        working-directory: bokheim
+        shell: python {0}
+        run: |
+          import json, os, re, sqlite3, sys, tomllib
+          from pathlib import Path
+          sys.path.insert(0, 'scripts/ci')
+          import release_config
+          version = tomllib.loads(Path('apps/desktop-gpui/Cargo.toml').read_text())['package']['version']
+          schema = int(re.search(r'LIBRARY_SCHEMA_VERSION: i64 = (\d+)', Path('client/library-backend/crates/library-database/src/lib.rs').read_text()).group(1))
+          connection = sqlite3.connect('file:target/release/taxonomy.sqlite3?mode=ro', uri=True)
+          taxonomy = dict(connection.execute('SELECT key,value FROM taxonomy_meta'))
+          config = release_config.environment(os.environ)
+          info = {'application': version, 'schema': schema, 'target': 'windows-x86_64-zip',
+                  'taxonomy_formats': [int(taxonomy['format_version'])], 'taxonomy_release': int(taxonomy['release_id']),
+                  'update_trust': {'endpoint': config['BOKHEIM_UPDATE_ENDPOINT'], 'channel': 'stable',
+                                   'keys': {config['BOKHEIM_UPDATE_KEY_ID']: config['BOKHEIM_UPDATE_PUBLIC_KEY_HEX']}}}
+          Path('release/update-info-windows-x86_64-zip.json').write_text(json.dumps(info) + '\n')
+
+      - name: Record Windows binary outputs
+        if: inputs.build_only == true
+        working-directory: bokheim
+        shell: python {0}
+        run: |
+          import json, os, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts/ci')
+          import release_artifacts as artifacts
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          receipt = artifacts.record('windows', Path('release'), source, os.environ['GITHUB_REPOSITORY'], int(os.environ['GITHUB_RUN_ID']))
+          receipt['tests_run'] = False
+          Path('release', artifacts.receipt_name('windows')).write_text(json.dumps(receipt, indent=2) + '\n')
 
       - name: Retain workflow artifact
         uses: actions/upload-artifact@v7

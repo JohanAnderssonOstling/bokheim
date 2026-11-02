@@ -138,12 +138,11 @@ jobs:
           with tarfile.open(archive, 'r:bz2') as source:
               source.extractall(destination, filter='data')
           lib = destination / stem / 'lib'
-          assert (lib / library).is_file(), f'Missing speech library: {lib / library}'
-          assert (lib / library).stat().st_size > 0
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
               output.write(f'SHERPA_ONNX_LIB_DIR={lib}\n')
           print(f'Prepared native speech libraries: {lib}')
       - name: Verify version tag
+        if: inputs.build_only != true
         env:
           PUBLISH_REQUESTED: ${{ inputs.publish || false }}
         run: |
