@@ -253,8 +253,6 @@ final class AccountDialog extends Dialog {
         header.addView(close, new LinearLayout.LayoutParams(-2, -2));
         form.addView(header);
         if (android.os.Build.VERSION.SDK_INT >= 28) heading.setAccessibilityHeading(true);
-        TextView identity = text("Bokheim · app.bokheim.se", 16);
-        identity.setTextColor(colors[MUTED]);
         feedback = text(message, 16);
         feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         feedback(message, false);

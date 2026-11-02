@@ -554,7 +554,7 @@ impl SyncPage {
             let cloud_blocker = self.state.read(cx).library_cloud_storage_blocker(library_id);
             let cloud = {
                 Checkbox::new(SharedString::from(format!("asset-storage-{library_id}")))
-                    .when(compact, |checkbox| checkbox.label("Bokheim"))
+                    .when(compact, |checkbox| checkbox.label("Cloud books"))
                     .checked(row.status.asset_storage_enabled)
                     .disabled(self.asset_storage_pending.contains(&library_id) || (!row.status.asset_storage_enabled && cloud_blocker.is_some()))
                     .on_click(move |enabled, _, cx| cloud_page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx)))
