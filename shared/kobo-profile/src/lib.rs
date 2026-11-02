@@ -1,4 +1,4 @@
-//! Kobo hardware descriptions shared by installation, runtime and host simulation.
+//! Kobo hardware descriptions shared by installation and runtime.
 //!
 //! Model properties are cross-checked against reference/plato/crates/core/src/device.rs.
 //! Display refresh and framebuffer identification remain FBInk's responsibility.

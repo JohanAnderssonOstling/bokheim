@@ -137,45 +137,9 @@ use the application's grayscale rendering path.
 
 For startup diagnostics, run `desktop-gpui-kobo --check-device` on the reader.
 It reads the firmware and model marker, prints the detected profile, and exits
-before opening the display or application databases. This also checks the real
-marker parser under ARM QEMU; `--no-display --device-model` bypasses that parser.
-
-Build and capture the real application on the host:
-
-```sh
-cargo build --release -p desktop-gpui --no-default-features --features kobo --bin desktop-gpui-kobo
-python3 apps/desktop-gpui/scripts/test-kobo-profiles.py
-```
-
-The runner uses separate application data for each model and writes PGM frames,
-logs and a JSON report under `target/kobo-profile-verification`. Add
-`--models 310 376 388 390` for a smaller sample. Touch protocol, lighting and
-package compatibility tests run in the shared suite. Headless captures test
-layout and capability selection. QEMU user mode can additionally exercise the
-ARM binary and bundled loader; it uses the host kernel and does not emulate
-Kobo hardware. Neither method validates e-ink waveforms, real touch coordinates,
-sensor orientation, suspend, battery use or performance on a physical reader.
-
-On a Linux host with QEMU user emulation, extract the package and supply the
-private interpreter at its compiled path inside a QEMU prefix:
-
-```sh
-arm_root="$PWD/target/kobo-arm-verification"
-mkdir -p "$arm_root"
-tar -xzf apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz -C "$arm_root"
-mkdir -p "$arm_root/sysroot/mnt/onboard/.adds/bokheim"
-ln -sfn "$arm_root/.adds/bokheim/runtime" "$arm_root/sysroot/mnt/onboard/.adds/bokheim/runtime"
-python3 apps/desktop-gpui/scripts/test-kobo-profiles.py \
-  --binary "$arm_root/.adds/bokheim/desktop-gpui-kobo" \
-  --qemu "$(command -v qemu-arm-static)" --qemu-root "$arm_root/sysroot" \
-  --output target/kobo-arm-profiles
-```
-
-This runs all declared profiles and restricts CPU instructions to Cortex-A8
-while retaining the host's kernel. Add `--models 310 388` for a smaller sample.
-Each run requires newly generated, nonblank frames at the model's exact screen
-resolution. A successful JSON report is written only after every selected
-profile passes; a failed run removes any previous success report.
+before opening the display or application databases. Touch protocol, lighting
+and package compatibility tests run in the shared suite. Rendering and hardware
+behavior must be checked on a physical reader.
 
 Automatic eject uses `udisksctl` on Linux, `diskutil` on macOS, and volume
 control calls on Windows. If host permissions or open files prevent eject,
@@ -192,7 +156,7 @@ automatic mounting.
 ## Local development
 
 The sibling `GPUI-Fork` checkout must include the Kobo input-profile, density
-scaling and capture-settling changes in `crates/gpui_kobo`. Include those fork
+scaling changes in `crates/gpui_kobo`. Include those fork
 changes and update the pinned fork revision when preparing a source release.
 
 Set `BOKHEIM_KOBO_ARCHIVE` to a package produced by

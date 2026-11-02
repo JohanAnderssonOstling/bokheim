@@ -24,8 +24,6 @@ def commands():
         ['cargo', 'test', '--release', '--no-default-features', '--manifest-path', 'apps/kobo-installer/Cargo.toml', '--lib'],
         ['python3', 'shared/pdfium/prepare.py', '--target', 'x86_64-unknown-linux-gnu'],
         ['cargo', 'test', '--release', '--manifest-path', '../GPUI-Fork/crates/gpui_kobo/Cargo.toml', '--target-dir', 'target', '--lib'],
-        ['cargo', 'build', '--release', '-p', 'desktop-gpui', '--no-default-features', '--features', 'kobo', '--bin', 'desktop-gpui-kobo'],
-        ['python3', 'apps/desktop-gpui/scripts/test-kobo-profiles.py'],
         ['cargo', 'test', '--release', '--no-fail-fast', '--features', 'dictionary/store', *sum((['-p', p] for p in packages), [])],
         ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-protocol', '-p', 'update-client', '--features', 'update-client/native-state'],
         ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-publisher'],
