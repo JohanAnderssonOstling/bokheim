@@ -97,6 +97,7 @@ jobs:
           ref: ${{ env.SOURCE_COMMIT }}
 
       - name: Check the committed Kobo package
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: bash
         run: |
@@ -147,6 +148,7 @@ jobs:
           Copy-Item apps/kobo-installer/target/release/bokheim-kobo-installer.exe release/Bokheim-Kobo-Installer-Windows-x86_64.exe
 
       - name: Verify and checksum Windows installer
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: |
@@ -159,6 +161,17 @@ jobs:
           if ($signature[0] -ne 0x4d -or $signature[1] -ne 0x5a) {
             throw "The installer is not a Windows PE executable"
           }
+          $name = Split-Path $installer -Leaf
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          "$hash  $name" | Out-File -FilePath "$installer.sha256" -Encoding ascii
+          $env:SOURCE_COMMIT | Set-Content -Encoding ascii "release/kobo-windows-source-commit.txt"
+
+      - name: Write Windows installer checksum
+        if: inputs.build_only == true
+        working-directory: bokheim
+        shell: pwsh
+        run: |
+          $installer = "release/Bokheim-Kobo-Installer-Windows-x86_64.exe"
           $name = Split-Path $installer -Leaf
           $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           "$hash  $name" | Out-File -FilePath "$installer.sha256" -Encoding ascii
@@ -191,6 +204,7 @@ jobs:
           python-version: '3.12'
 
       - name: Check the committed Kobo package
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: bash
         run: |
@@ -281,6 +295,7 @@ jobs:
           LINUXDEPLOY="$RUNNER_TEMP/linuxdeploy-compat" apps/kobo-installer/linux/build-appimage.sh
 
       - name: Verify Linux installer AppImage
+        if: inputs.build_only != true
         working-directory: bokheim
         run: |
           release/Bokheim-Kobo-Installer-Linux-x86_64.AppImage --appimage-version
