@@ -1,6 +1,5 @@
 # Sync server integration checks
 
-
 Run from the repository root:
 
 ```sh

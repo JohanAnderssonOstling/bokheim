@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 
 ROOT = Path(os.environ.get("BOKHEIM_PACKAGE_SOURCE_ROOT", Path(__file__).resolve().parents[3])).resolve()
@@ -144,8 +145,18 @@ def universal(args, version, source):
             "Privacy & Security > Open Anyway and confirm Open.\n"
             "This download is not notarized by Apple.\n")
         image = args.output / "Bokheim-macOS-universal.dmg"
-        run("hdiutil", "create", "-volname", "Bokheim", "-srcfolder", staging,
-            "-format", "UDZO", image)
+        command = ["hdiutil", "create", "-volname", "Bokheim", "-srcfolder", str(staging),
+                   "-format", "UDZO", str(image)]
+        for attempt in range(3):
+            result = subprocess.run(command, capture_output=True, text=True)
+            print(result.stdout, end="")
+            print(result.stderr, end="", file=sys.stderr)
+            if result.returncode == 0:
+                break
+            if "Resource busy" not in result.stderr or attempt == 2:
+                result.check_returncode()
+            image.unlink(missing_ok=True)
+            time.sleep(2 * (attempt + 1))
         run("hdiutil", "verify", image)
         sha = digest(image)
         image.with_suffix(".dmg.sha256").write_text(f"{sha}  {image.name}\n")
