@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import release_artifacts as artifacts
+from checkout_layout import prepare_checkout
 
 ROOT = artifacts.ROOT
 
@@ -34,6 +35,7 @@ def main():
               build=['bash', 'scripts/ci/local-platform.sh', args.platform, str(output)],
               upload=args.upload, tag=args.tag, deploy=args.deploy), indent=2))
         return
+    prepare_checkout()
     sha = artifacts.command('git', 'rev-parse', 'HEAD')
     artifacts.clean_revision(sha)
     env = {**os.environ, 'RUSTUP_TOOLCHAIN': 'stable', 'RUSTC_BOOTSTRAP': '1'}

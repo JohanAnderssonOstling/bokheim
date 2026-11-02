@@ -34,17 +34,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/GPUI-Fork
-          ref: c186a827d40ba6b3f85789138dabe55554e2a4c0
+          ref: 94bb2c5b15b7c4ebe0ecfc0864d166d72e17d82b
           path: GPUI-Fork
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlEngine
-          ref: fbdc9748d7ddb339d23b8f3cd65e54c16f371fad
+          ref: 95acf739a41a5dcb395ff30f2da04906e75bb852
           path: HtmlEngine
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlViewCore
-          ref: e34aba1f7d91f5e4ce95d5d9141f97c74d42f6a9
+          ref: c74e5eb0a30ba7a9fff2eb8e349d3b17d24d8b5a
           path: HtmlViewCore
       - name: Install latest stable Rust
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal

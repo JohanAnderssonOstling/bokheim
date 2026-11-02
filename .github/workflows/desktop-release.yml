@@ -75,6 +75,12 @@ jobs:
           path: bokheim
           ref: ${{ inputs.source_commit || github.sha }}
 
+      - name: Prepare sibling checkout layout
+        shell: python
+        run: |
+          import runpy
+          runpy.run_path("bokheim/scripts/ci/checkout_layout.py", run_name="__main__")
+
       - name: Check out GPUI-Fork
         uses: actions/checkout@v6
         with:
