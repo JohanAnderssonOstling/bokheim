@@ -7,22 +7,22 @@ use crate::*;
 
 pub(crate) mod authority_ingestion;
 pub(crate) mod batch;
+mod edition_index;
 pub(crate) mod enrichment;
 pub(crate) mod identity;
 pub(crate) mod import;
 pub(crate) mod incremental;
-mod reclassify;
-mod edition_index;
 pub(crate) mod loc_dump;
 pub(crate) mod openlibrary;
 mod popularity;
 mod providers;
+mod reclassify;
 mod work_classification;
 mod work_lookup;
-pub use work_lookup::index_work_classifications;
+pub use edition_index::{extend_edition_index, EditionIndexReport};
 pub use incremental::build_answers_incremental;
 pub use reclassify::reclassify_answers;
-pub use edition_index::{extend_edition_index, EditionIndexReport};
+pub use work_lookup::index_work_classifications;
 pub(crate) mod service;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -235,7 +235,7 @@ fn put_authority(out: &Connection, m: metadata_contract::AuthoritySubjectMatch, 
 fn build_authorities(source: &Connection, out: &Connection) -> Result<(), MetadataError> {
     work_lookup::build_work_lookup(source, out)?;
     use metadata_contract::matching::NormalizedTitle;
-    use metadata_contract::{AuthoritySubjectMatch, ClassificationEvidence};
+    use metadata_contract::{AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod, ClassificationProvider};
     if has_table(source, "lc_title")? {
         #[derive(Deserialize)]
         struct Record {
@@ -254,7 +254,7 @@ fn build_authorities(source: &Connection, out: &Connection) -> Result<(), Metada
                 .map_err(error)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(error)?;
-            let classifications = authority_codes(&codes, format!("library_of_congress_title_author:{id}"));
+            let classifications = authority_codes(&codes, ClassificationMethod::TitleAuthor { provider: ClassificationProvider::LibraryOfCongress, record_id: id.clone() });
             if classifications.is_empty() {
                 continue;
             }
@@ -279,7 +279,7 @@ fn build_authorities(source: &Connection, out: &Connection) -> Result<(), Metada
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)?;
-        let classifications = authority_codes(&codes, format!("wikidata_title_author:Q{}", -id));
+        let classifications = authority_codes(&codes, ClassificationMethod::TitleAuthor { provider: ClassificationProvider::Wikidata, record_id: format!("Q{}", -id) });
         if classifications.is_empty() {
             continue;
         }
@@ -287,7 +287,7 @@ fn build_authorities(source: &Connection, out: &Connection) -> Result<(), Metada
         let keys = NormalizedTitle::new(&full).lookup_keys();
         put_authority(out, AuthoritySubjectMatch { main_title: title, title: full, authors, provider_id: "wikidata".into(), record_ids: vec![format!("Q{}", -id)], classifications }, keys)?;
     }
-    fn authority_codes(codes: &[String], method: String) -> Vec<Classification> {
+    fn authority_codes(codes: &[String], method: ClassificationMethod) -> Vec<Classification> {
         codes
             .iter()
             .filter_map(|n| metadata_contract::classification_consensus_notation(ClassificationScheme::LibraryOfCongress, n))

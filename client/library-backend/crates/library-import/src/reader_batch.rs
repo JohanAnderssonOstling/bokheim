@@ -71,7 +71,7 @@ impl ReaderImportBatch {
     }
 
     pub fn destination_name(&self, parent: DirId, book: BookId) -> Option<&str> {
-        self.imports.iter().find(|(import, _)| import.parent_id == parent && import.content_hash == book).map(|(import, _)| import.published.name.as_str())
+        self.imports.iter().find(|(import, _)| import.parent_id == parent && import.book_id == book).map(|(import, _)| import.published.name.as_str())
     }
 
     pub fn available_name(&self, parent: DirId, requested: &str, mut occupied: Vec<String>) -> String {
@@ -258,7 +258,7 @@ mod tests {
         let mut repeat = ReaderImportBatch::new(&importer, ImportMode::Copy).unwrap().unwrap();
         let result = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, ImportMode::Copy, Some(&mut repeat)).await.unwrap();
         repeat.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
-        assert_eq!(importer.database.annotations(result.content_hash).unwrap().len(), 1);
+        assert_eq!(importer.database.annotations(result.book_id).unwrap().len(), 1);
         let published = destination.path().join("book.epub");
         let modified = fs::metadata(&published).unwrap().modified().unwrap();
         fs::write(&published, vec![b'x'; FIRST.len()]).unwrap();
@@ -268,7 +268,7 @@ mod tests {
         let mut report = ReaderImportReport::default();
         repair.finish(&importer, &mut report).await.unwrap();
         assert_eq!(report.already_present, 1);
-        let repaired = importer.database.book_paths(&result.content_hash).unwrap();
+        let repaired = importer.database.book_paths(&result.book_id).unwrap();
         assert_eq!(fs::read(destination.path().join(repaired[0].as_str().trim_start_matches('/'))).unwrap(), FIRST);
         assert_eq!(importer.database.book_count().unwrap(), 1);
     }

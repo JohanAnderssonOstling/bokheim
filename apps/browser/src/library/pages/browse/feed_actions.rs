@@ -1,8 +1,8 @@
-//! The catalog's OPDS feed commands: adding a feed by its address, signing
-//! in to one, and removing one. Feeds belong to the account, so adding and
-//! removing reach every device; what is typed to sign in stays on this one.
-//! Also opens the browser and the catalog's saved stores. A store is kept
-//! on this device only, where its sign-in is.
+//! Device-local catalog feeds, synchronized OPDS libraries, and device credentials.
+//! Also opens the embedded browser.
+
+use library_backend::catalog_sources::CatalogClient;
+use ui_text::text;
 
 use ui_components::user_facing_error;
 
@@ -10,22 +10,16 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, Focusable, SharedString, Subscription, Window, div, px, rems};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Disableable, IconName};
-use library_model::{AddOpdsFeedResult, BrowseLocation, OpdsCredentials, OpdsSourceId, StoreId};
+use library_model::{AddOpdsFeedResult, BrowseLocation, OpdsCredentials, OpdsSourceId};
 use ui_components as components;
 
 use crate::library::services::LibraryContext;
 use crate::library::widgets::SelectionAction;
 use crate::services::{notify_error, notify_info};
 
-/// A feed or store was added or removed, or credentials saved for a feed:
+/// A feed was added or removed, or credentials saved for a feed:
 /// what the page lists from them is stale.
 pub(crate) struct FeedsChanged;
-
-#[derive(Clone, Copy)]
-enum CatalogSource {
-    Feed(OpdsSourceId),
-    Store(StoreId),
-}
 
 struct FeedDialog {
     /// The feed being signed in to, or `None` when adding one.
@@ -63,26 +57,32 @@ impl FeedDialog {
     }
 }
 
+#[derive(Clone, Copy)]
+enum FeedTarget {
+    Catalog,
+    Library,
+}
+
 pub(crate) struct FeedActions {
     app: app::AppClient,
+    catalog: CatalogClient,
+    target: FeedTarget,
     library_id: uuid::Uuid,
     dialog: Option<FeedDialog>,
-    /// Whether this system can open a store window; stores are not offered
-    /// until it is known that it can.
-    stores_available: bool,
+    /// Whether this system can open the embedded browser.
+    browser_available: bool,
 }
 
 impl EventEmitter<FeedsChanged> for FeedActions {}
 
 impl FeedActions {
     pub(crate) fn new(ui: LibraryContext, cx: &mut Context<Self>) -> Self {
-        let actions = Self::for_app(ui.app().clone(), *ui.backend().id(), cx);
+        let actions = Self { target: FeedTarget::Catalog, ..Self::for_app(ui.app().clone(), *ui.backend().id(), cx) };
         if !ui.is_opds() {
-            let app = ui.app().clone();
             cx.spawn(async move |actions, cx| {
-                let available = app.stores_available().await.unwrap_or(false);
+                let available = crate::services::browser::available().await;
                 let _ = actions.update(cx, |actions, cx| {
-                    actions.stores_available = available;
+                    actions.browser_available = available;
                     cx.notify();
                 });
             })
@@ -91,8 +91,8 @@ impl FeedActions {
         actions
     }
 
-    pub(crate) fn for_app(app: app::AppClient, library_id: uuid::Uuid, _cx: &mut Context<Self>) -> Self {
-        Self { app, library_id, dialog: None, stores_available: false }
+    pub(crate) fn for_app(app: app::AppClient, library_id: uuid::Uuid, cx: &mut Context<Self>) -> Self {
+        Self { app, catalog: crate::services::catalog_client(cx), target: FeedTarget::Library, library_id, dialog: None, browser_available: false }
     }
 
     pub(crate) fn has_modal(&self) -> bool {
@@ -120,9 +120,9 @@ impl FeedActions {
             return;
         }
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://example.org/opds"));
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name (optional)"));
-        let username = cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
-        let password = cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(text!(browse::name_optional)));
+        let username = cx.new(|cx| InputState::new(window, cx).placeholder(text!(browse::username)));
+        let password = cx.new(|cx| InputState::new(window, cx).placeholder(text!(common::password)).masked(true));
         let submit_on_enter = |actions: &mut Self, _: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 actions.submit(window, cx);
@@ -144,17 +144,24 @@ impl FeedActions {
         }
         let credentials = dialog.credentials(cx);
         let submitted_url = dialog.url.read(cx).value().trim().to_owned();
-        let app = self.app.clone();
+        let libraries = self.app.management.clone();
+        let catalog = self.catalog.clone();
         let name = Some(dialog.name.read(cx).value().trim().to_owned()).filter(|name| !name.is_empty());
         let request: futures_util::future::LocalBoxFuture<'static, Result<AddOpdsFeedResult, app::BackendError>> = match (&dialog.sign_in, credentials) {
             (Some((source, _)), Some(credentials)) => {
                 let source = *source;
-                Box::pin(async move { app.set_opds_credentials(source, credentials).await.map(|_| AddOpdsFeedResult::Added) })
+                Box::pin(async move { catalog.set_credentials(source, credentials).await.map(|_| AddOpdsFeedResult::Added) })
             }
             (Some(_), None) => return,
             (None, credentials) => {
                 let url = submitted_url.clone();
-                Box::pin(async move { app.add_opds_feed(url, name, credentials).await })
+                let target = self.target;
+                Box::pin(async move {
+                    match target {
+                        FeedTarget::Catalog => catalog.add(url, name, credentials).await,
+                        FeedTarget::Library => libraries.add_opds_library(url, name, credentials).await,
+                    }
+                })
             }
         };
         if let Some(dialog) = self.dialog.as_mut() {
@@ -182,7 +189,7 @@ impl FeedActions {
                     Err(error) => {
                         if let Some(dialog) = actions.dialog.as_mut() {
                             dialog.busy = false;
-                            dialog.error = Some(user_facing_error(&error, "Could not add or sign in to the catalog. Check its address and sign-in details, then try again.").into());
+                            dialog.error = Some(user_facing_error(&error, text!(browse::could_not_add_or_sign_in_to_the_catalog_check_its_address)).into());
                         }
                     }
                 }
@@ -192,81 +199,65 @@ impl FeedActions {
         .detach();
     }
 
-    /// Only a feed's root chip or a saved store can remove its source.
+    /// Only a feed's root chip can remove its source.
     pub(super) fn removal_action(actions: Entity<Self>, location: BrowseLocation, name: String) -> Option<SelectionAction> {
-        let (source, label) = match location {
-            BrowseLocation::Opds { source, page: None } => (CatalogSource::Feed(source), "Remove feed"),
-            BrowseLocation::Store(id) => (CatalogSource::Store(id), "Remove store"),
-            _ => return None,
+        let BrowseLocation::Opds { source, page: None } = location else {
+            return None;
         };
-        Some(SelectionAction::new("remove-source", label, components::navigation_icon(components::NavigationIcon::Trash2), move |window, cx| actions.update(cx, |actions, cx| actions.remove(source, name.clone(), window, cx))))
+        Some(SelectionAction::new("remove-source", text!(browse::remove_feed), components::navigation_icon(components::NavigationIcon::Trash2), move |window, cx| {
+            actions.update(cx, |actions, cx| actions.remove(source, name.clone(), window, cx))
+        }))
     }
 
-    fn remove(&mut self, source: CatalogSource, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let app = self.app.clone();
+    fn remove(&mut self, source: OpdsSourceId, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let catalog = self.catalog.clone();
         cx.spawn_in(window, async move |actions, cx| {
-            let (result, success_id, error_id) = match source {
-                CatalogSource::Feed(id) => (app.remove_opds_feed(id).await, "feed-removed", "feed-remove-error"),
-                CatalogSource::Store(id) => (app.remove_store(id).await, "store-removed", "store-remove-error"),
-            };
+            let result = catalog.remove(source).await;
             let _ = actions.update_in(cx, |_, window, cx| match result {
                 Ok(()) => {
-                    notify_info(success_id, format!("Removed “{name}”"), window, cx);
+                    notify_info("feed-removed", format!(text!(browse::removed_name), name = name), window, cx);
                     cx.emit(FeedsChanged);
                 }
-                Err(error) => notify_error(error_id, format!("Could not remove “{name}”. {}", user_facing_error(&error, "Please try again.")), window, cx),
+                Err(error) => notify_error("feed-remove-error", format!(text!(browse::could_not_remove), user_facing_error(&error, text!(common::please_try_again)), name = name), window, cx),
             });
         })
         .detach();
     }
 
-    /// Opens the store's window, where what is bought goes into this
-    /// library's root.
-    pub(crate) fn open_store(&mut self, id: StoreId, window: &mut Window, cx: &mut Context<Self>) {
-        let (app, library_id) = (self.app.clone(), self.library_id);
-        cx.spawn_in(window, async move |actions, cx| {
-            if let Err(error) = app.open_store(id, library_id).await {
-                let _ = actions.update_in(cx, |_, window, cx| notify_error("store-open-error", format!("Could not open the store. {}", user_facing_error(&error, "Please try again.")), window, cx));
-            }
-        })
-        .detach();
-    }
-
     fn open_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (app, library_id) = (self.app.clone(), self.library_id);
+        let library = self.app.management.library(self.library_id);
+        let preferences = crate::stores::preferences::current_browsing_preferences(cx);
         cx.spawn_in(window, async move |actions, cx| {
-            if let Err(error) = app.open_browser(library_id).await {
-                let _ = actions.update_in(cx, |_, window, cx| notify_error("browser-open-error", format!("Could not open the browser. {}", user_facing_error(&error, "Please try again.")), window, cx));
+            if let Err(error) = crate::services::browser::open(library, preferences).await {
+                let _ = actions.update_in(cx, |_, window, cx| notify_error("browser-open-error", format!(text!(browse::could_not_open_the_browser), user_facing_error(&error, text!(common::please_try_again))), window, cx));
             }
         })
         .detach();
     }
 
     pub(crate) fn render_trigger(actions: Entity<Self>) -> AnyElement {
-        components::outlined_icon_button("catalog-add-feed", "Add OPDS feed", IconName::Plus).on_click(move |_, window, cx| actions.update(cx, |actions, cx| actions.open_add(window, cx))).into_any_element()
+        components::outlined_icon_button("catalog-add-feed", text!(browse::add_opds_feed), IconName::Plus).on_click(move |_, window, cx| actions.update(cx, |actions, cx| actions.open_add(window, cx))).into_any_element()
     }
 
     /// Opens the browser directly where a browser window is available.
-    pub(crate) fn render_store_trigger(actions: Entity<Self>, cx: &App) -> Option<AnyElement> {
-        actions.read(cx).stores_available.then(||
-            components::outlined_icon_button("catalog-open-browser", "Open browser", IconName::Globe)
-                .on_click(move |_, window, cx| actions.update(cx, |actions, cx| actions.open_browser(window, cx)))
-                .into_any_element()
-        )
+    pub(crate) fn render_browser_trigger(actions: Entity<Self>, cx: &App) -> Option<AnyElement> {
+        actions.read(cx).browser_available.then(|| {
+            components::outlined_icon_button("catalog-open-browser", text!(browse::open_browser), IconName::Globe).on_click(move |_, window, cx| actions.update(cx, |actions, cx| actions.open_browser(window, cx))).into_any_element()
+        })
     }
 
     /// What a feed page that refused this device shows in place of its
     /// listing: a way to sign in.
     pub(crate) fn render_sign_in(actions: Entity<Self>, source: OpdsSourceId, name: String, cx: &App) -> AnyElement {
         let theme = components::browser_theme(cx);
-        let button = components::base_button("feed-sign-in").primary().label("Sign in").on_click(move |_, window, cx| actions.update(cx, |actions, cx| actions.open_sign_in(source, name.clone(), window, cx)));
+        let button = components::base_button("feed-sign-in").primary().label(text!(common::sign_in)).on_click(move |_, window, cx| actions.update(cx, |actions, cx| actions.open_sign_in(source, name.clone(), window, cx)));
         components::absolute_full_size()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
             .gap(px(components::SPACE_MD))
-            .child(div().text_color(theme.text).child("This feed asks for a username and password."))
+            .child(div().text_color(theme.text).child(text!(browse::this_feed_asks_for_a_username_and_password)))
             .child(button)
             .into_any_element()
     }
@@ -275,8 +266,11 @@ impl FeedActions {
         let (title, adding, authenticating, inputs, error, busy, ready) = {
             let dialog = actions.read(cx).dialog.as_ref()?;
             let title = match &dialog.sign_in {
-                Some((_, name)) => format!("Sign in to {name}"),
-                None => "Add OPDS feed".to_owned(),
+                Some((_, name)) => format!(text!(browse::sign_in_to), name = name),
+                None => match actions.read(cx).target {
+                    FeedTarget::Catalog => text!(browse::add_opds_feed).to_owned(),
+                    FeedTarget::Library => text!(browse::add_opds_library).to_owned(),
+                },
             };
             let inputs = [dialog.url.clone(), dialog.name.clone(), dialog.username.clone(), dialog.password.clone()];
             (title, dialog.sign_in.is_none(), dialog.requires_credentials(cx), inputs, dialog.error.clone(), dialog.busy, dialog.ready(cx))
@@ -284,8 +278,8 @@ impl FeedActions {
         let [url, name, username, password] = inputs;
         let theme = components::browser_theme(cx);
         let (cancel_actions, dismiss_actions, submit_actions) = (actions.clone(), actions.clone(), actions);
-        let cancel = components::dialog_cancel_button("cancel-feed-dialog", "Cancel").disabled(busy).on_click(move |_, _, cx| cancel_actions.update(cx, |actions, cx| actions.dismiss_modal(cx)));
-        let (idle, working) = if adding { ("Add", "Adding…") } else { ("Sign in", "Signing in…") };
+        let cancel = components::dialog_cancel_button("cancel-feed-dialog", text!(common::cancel)).disabled(busy).on_click(move |_, _, cx| cancel_actions.update(cx, |actions, cx| actions.dismiss_modal(cx)));
+        let (idle, working) = if adding { (text!(browse::add), text!(browse::adding)) } else { (text!(common::sign_in), text!(account::signing_in)) };
         let submit = components::base_button("confirm-feed-dialog")
             .primary()
             .label(if busy { working } else { idle })
@@ -299,10 +293,10 @@ impl FeedActions {
             .when(adding, |panel| panel.child(Input::new(&url).h(input_height)).child(Input::new(&name).h(input_height)))
             .when(authenticating, |panel| {
                 panel
-                    .when(adding, |panel| panel.child(div().text_color(theme.text_muted).text_size(rems(0.875)).child("This feed requires a username and password.")))
+                    .when(adding, |panel| panel.child(div().text_color(theme.text_muted).text_size(rems(0.875)).child(text!(browse::this_feed_requires_a_username_and_password))))
                     .child(Input::new(&username).h(input_height))
                     .child(Input::new(&password).mask_toggle().h(input_height))
-                    .child(div().text_color(theme.text_muted).text_size(rems(0.875)).child("Kept on this device only."))
+                    .child(div().text_color(theme.text_muted).text_size(rems(0.875)).child(text!(browse::kept_on_this_device_only)))
             })
             .children(error.map(|error| components::error_text(theme).child(error)))
             .child(div().flex().items_center().justify_end().gap(px(components::SPACE_SM)).child(cancel).child(submit));
@@ -328,7 +322,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn removal_actions_refresh_the_catalog_and_keep_source_feedback_separate(cx: &mut TestAppContext) {
+    async fn removal_actions_refresh_the_catalog_and_replace_feedback(cx: &mut TestAppContext) {
         let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_directory, _session, library) = LibrarySession::test_context(cx).await;
         let actions = cx.new(|cx| FeedActions::new(library, cx));
@@ -339,10 +333,10 @@ mod tests {
             Root::new(content, window, cx)
         });
         let id = Uuid::new_v4();
-        // Deletion is idempotent for already-removed sources. Use one ID in
-        // both namespaces and repeat the feed command to check toast replacement.
+        // Deletion is idempotent for already-removed feeds. Repeat the
+        // command to check toast replacement.
         let feed = BrowseLocation::Opds { source: id, page: None };
-        for (location, notifications) in [(feed, 1), (BrowseLocation::Store(id), 2), (feed, 2)] {
+        for (location, notifications) in [(feed, 1), (feed, 1)] {
             let action = FeedActions::removal_action(actions.clone(), location, "Source".into()).unwrap();
             visual.update(|window, cx| action.run(window, cx));
             received.recv().await.unwrap();

@@ -1,17 +1,11 @@
 use scraper::ElementRef;
 
-/// Navigation shared by every supported book container.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TocEntry {
-    pub title: String,
-    pub link: String,
-    pub children: Vec<TocEntry>,
-}
+use book_model::BookTocEntry;
 
 /// Build a hierarchy from ordered entries whose nesting is described by levels.
-pub(crate) fn nest_entries(entries: impl IntoIterator<Item = (usize, TocEntry)>) -> Vec<TocEntry> {
+pub(crate) fn nest_entries(entries: impl IntoIterator<Item = (usize, BookTocEntry)>) -> Vec<BookTocEntry> {
     let mut roots = Vec::new();
-    let mut path: Vec<(usize, Vec<TocEntry>)> = Vec::new();
+    let mut path: Vec<(usize, Vec<BookTocEntry>)> = Vec::new();
     for (level, entry) in entries {
         let level = level.min(31);
         while path.last().is_some_and(|(depth, _)| *depth >= level) {
@@ -25,7 +19,7 @@ pub(crate) fn nest_entries(entries: impl IntoIterator<Item = (usize, TocEntry)>)
     roots
 }
 
-fn finish_level(path: &mut Vec<(usize, Vec<TocEntry>)>, roots: &mut Vec<TocEntry>) {
+fn finish_level(path: &mut Vec<(usize, Vec<BookTocEntry>)>, roots: &mut Vec<BookTocEntry>) {
     let Some((_, mut children)) = path.pop() else { return };
     if let Some((_, parent)) = path.last_mut() {
         if let Some(last) = parent.last_mut() {
@@ -36,7 +30,7 @@ fn finish_level(path: &mut Vec<(usize, Vec<TocEntry>)>, roots: &mut Vec<TocEntry
     }
 }
 
-pub(crate) fn html_entries(root: ElementRef<'_>, resolve: impl Fn(ElementRef<'_>) -> Option<String>) -> Vec<TocEntry> {
+pub(crate) fn html_entries(root: ElementRef<'_>, resolve: impl Fn(ElementRef<'_>) -> Option<String>) -> Vec<BookTocEntry> {
     nest_entries(
         root.descendants()
             .filter_map(ElementRef::wrap)
@@ -48,7 +42,7 @@ pub(crate) fn html_entries(root: ElementRef<'_>, resolve: impl Fn(ElementRef<'_>
                     return None;
                 }
                 let level = element.ancestors().take_while(|node| node.id() != root.id()).filter_map(ElementRef::wrap).filter(|element| matches!(element.value().name(), "ol" | "ul")).count();
-                Some((level, TocEntry { title, link, children: Vec::new() }))
+                Some((level, BookTocEntry { title, target: link, children: Vec::new() }))
             })
             .take(8192),
     )

@@ -7,7 +7,7 @@ use std::{
 use gpui::{Bounds, Context, Modifiers, MouseButton, MouseMoveEvent, Render, RenderImage, TestAppContext, Window, black, div, linear_color_stop, linear_gradient, point, prelude::*, px, size, transparent_black, white};
 use image::{Frame, Rgba, RgbaImage};
 use ui_components::{
-    BOOK_COVER_BADGE_INSET, BOOK_COVER_PROGRESS_HEIGHT, BOOK_COVER_PROGRESS_SCRIM_HEIGHT, BrowserTheme, DOWNLOAD_ACTION_SIZE_REM, TOUCH_TARGET_REM, book_cover_add_badge, book_cover_buy_badge, book_cover_download_badge, book_cover_frame,
+    BOOK_COVER_BADGE_INSET, BOOK_COVER_PROGRESS_HEIGHT, BOOK_COVER_PROGRESS_SCRIM_HEIGHT, BrowserTheme, DOWNLOAD_ACTION_SIZE_REM, TOUCH_TARGET_REM, book_cover_add_badge, book_cover_download_badge, book_cover_frame,
     book_cover_generated, book_cover_in_library_badge, book_cover_play_button, book_cover_progress, book_cover_queued_badge, book_cover_with_generated_art, book_cover_with_image, touch_ui,
 };
 
@@ -59,7 +59,6 @@ impl Render for BadgeFixture {
             ("pending", book_cover_download_badge("pending", true, theme)),
             ("queued", book_cover_queued_badge("queued", theme)),
             ("add", book_cover_add_badge("add", false, theme)),
-            ("buy", book_cover_buy_badge("buy", theme)),
             ("held", book_cover_in_library_badge("held", theme)),
         ];
         div().size_full().flex().flex_col().children(badges.into_iter().enumerate().map(|(index, (selector, badge))| div().relative().w(px(200.0)).h(px(100.0)).flex_none().child(badge.debug_selector(move || selector.into())).id(index)))
@@ -73,7 +72,7 @@ fn badges_preserve_plate_geometry_hover_and_pointer_or_touch_targets(cx: &mut Te
         let window = cx.open_window(size(px(200.0), px(700.0)), |_, _| BadgeFixture(rem));
         let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         visual.run_until_parked();
-        for (index, selector) in ["idle", "pending", "queued", "add", "buy", "held"].into_iter().enumerate() {
+        for (index, selector) in ["idle", "pending", "queued", "add", "held"].into_iter().enumerate() {
             let bounds = visual.debug_bounds(selector).expect("badge target");
             let target_size = rem * if touch_ui() { TOUCH_TARGET_REM } else { DOWNLOAD_ACTION_SIZE_REM };
             assert_eq!(bounds.size, size(px(target_size), px(target_size)), "{selector} target at {rem}px/rem");
@@ -81,7 +80,7 @@ fn badges_preserve_plate_geometry_hover_and_pointer_or_touch_targets(cx: &mut Te
                 Bounds::new(point(px(200.0 - BOOK_COVER_BADGE_INSET - rem * DOWNLOAD_ACTION_SIZE_REM), px(index as f32 * 100.0 + BOOK_COVER_BADGE_INSET)), size(px(rem * DOWNLOAD_ACTION_SIZE_REM), px(rem * DOWNLOAD_ACTION_SIZE_REM)));
             let check_plate = |window: &Window, hovered: bool| {
                 let theme = BrowserTheme::default();
-                let background = if hovered && matches!(selector, "idle" | "add" | "buy") { theme.page_bg.blend(theme.hover) } else { theme.page_bg };
+                let background = if hovered && matches!(selector, "idle" | "add") { theme.page_bg.blend(theme.hover) } else { theme.page_bg };
                 let quads = window.painted_quads();
                 let quad = quads.iter().find(|quad| quad.bounds == plate.scale(window.scale_factor())).expect("badge plate");
                 assert_eq!(quad.background, background.into(), "{selector} hover={hovered}");

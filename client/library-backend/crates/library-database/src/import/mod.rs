@@ -11,9 +11,9 @@ use crate::transfer::BookTransferState;
 use crate::{CreatedDirectory, Database, DatabaseError};
 use book_inspection::{InspectedBook, PdfSourceIdentity};
 use content_address::ContentHash;
+use include_sqlite_sql::include_sql;
 use library_model::PublishedStagedBook;
 use rusqlite::Transaction;
-use include_sqlite_sql::include_sql;
 
 // ---- commit ----
 // Import commits share transaction-scoped identity and projection primitives.
@@ -39,7 +39,7 @@ pub struct ImportCommit {
     pub parent_id: DirId,
     pub file_name: String,
     pub format: book_model::BookFormat,
-    pub content_hash: BookId,
+    pub book_id: BookId,
     pub size_bytes: u64,
     pub inspection_version: i64,
     pub inspection: Option<InspectedBook>,
@@ -59,15 +59,21 @@ pub(crate) struct PreparedInspection {
 
 impl PreparedInspection {
     pub(crate) fn with_identity(mut self, identity: BookId) -> Self {
-        if let Some(pdf) = &mut self.pdf { pdf.content_hash = identity.to_hex(); }
+        if let Some(pdf) = &mut self.pdf {
+            pdf.book_id = identity.to_hex();
+        }
         if let Some(tracks) = self.navigation.as_mut().and_then(|navigation| navigation.tracks.as_mut()) {
-            for track in tracks { if track.archive_hash.is_some() { track.archive_hash = Some(identity); } }
+            for track in tracks {
+                if track.archive_hash.is_some() {
+                    track.archive_hash = Some(identity);
+                }
+            }
         }
         self
     }
 }
 
-pub(crate) fn prepare_inspection(inspection: InspectedBook, content_hash: &BookId, format: book_model::BookFormat) -> Result<PreparedInspection, DatabaseError> {
+pub(crate) fn prepare_inspection(inspection: InspectedBook, book_id: &BookId, format: book_model::BookFormat) -> Result<PreparedInspection, DatabaseError> {
     let InspectedBook { mut metadata, pdf, mut audiobook, toc } = inspection;
     metadata.description = normalized_description(&metadata.description);
     // Empty navigation still records that inspection found no entries.
@@ -83,11 +89,11 @@ pub(crate) fn prepare_inspection(inspection: InspectedBook, content_hash: &BookI
     if let Some(navigation) = &navigation {
         i64::try_from(toc_entry_count(&navigation.entries)).map_err(|_| DatabaseError::message("table of contents entry count exceeds SQLite integer range"))?;
     }
-    if pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&content_hash.to_hex())) {
+    if pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&book_id.to_hex())) {
         return Err(DatabaseError::message("PDF ingestion content hash or metadata is invalid"));
     }
     let recording = audiobook.map(|audio| audio.into_audible_lookup_request());
-    Ok(PreparedInspection { metadata, navigation, recording, pdf }.with_identity(*content_hash))
+    Ok(PreparedInspection { metadata, navigation, recording, pdf }.with_identity(*book_id))
 }
 
 impl Database {
@@ -110,11 +116,11 @@ impl Database {
 
     /// Save matching catalog metadata before the imported draft can be enriched.
     pub fn commit_import_with_catalog_answer(&self, mut import: ImportCommit, matcher: Option<ContributorNameMatcher>, catalog_record: Option<BookRecord>) -> Result<(), DatabaseError> {
-        let content_hash = import.content_hash;
+        let book_id = import.book_id;
         // Pure CPU work (normalization, navigation, PDF validation) runs before
         // reserving the writer. The commit helper validates destination liveness
         // inside the transaction: another connection may delete it meanwhile.
-        let prepared = import.inspection.take().map(|inspection| prepare_inspection(inspection, &content_hash, import.format)).transpose()?;
+        let prepared = import.inspection.take().map(|inspection| prepare_inspection(inspection, &book_id, import.format)).transpose()?;
         self.write(|tx| {
             tx.pragma_update(None, "defer_foreign_keys", "ON").map_err(DatabaseError::operation)?;
             let current = first_column::<Option<String>>(|read| tx.shared_scanner_sequence(read)).map_err(DatabaseError::operation)?.flatten();
@@ -123,7 +129,7 @@ impl Database {
             tx.scan_seq_update(scan_id).map_err(DatabaseError::operation)?;
             commit_one(tx, import, prepared, matcher)?;
             if let Some(record) = catalog_record {
-                crate::enrichment::facts::record_catalog_answer(tx, &content_hash, record)?;
+                crate::enrichment::facts::record_catalog_answer(tx, &book_id, record)?;
             }
             Ok(())
         })
@@ -137,7 +143,7 @@ impl Database {
     /// version or the distinct metadata-only PDF version. General transfers do
     /// not establish either admission contract merely by carrying metadata.
     pub fn commit_inspected_transfer_import(&self, import: ImportCommit, source: BookTransferState) -> Result<bool, DatabaseError> {
-        let (hash, format, version) = (import.content_hash, import.format, import.inspection_version);
+        let (hash, format, version) = (import.book_id, import.format, import.inspection_version);
         self.write(|tx| {
             let created = commit_one_with_transfer(tx, import, None, None, Some(source))?;
             tx.record_import_inspection(&hash, format as i64, version).map_err(DatabaseError::operation)?;
@@ -148,7 +154,9 @@ impl Database {
     /// The caller has flushed folder markers, book bytes and proofs together.
     /// Folder registration and every book merge succeed or roll back together.
     pub fn commit_inspected_transfer_batch_with_directories(&self, imports: Vec<(ImportCommit, BookTransferState)>, sources: Vec<(String, u64, ContentHash)>, directories: Vec<CreatedDirectory>) -> Result<Vec<bool>, DatabaseError> {
-        if imports.is_empty() && directories.is_empty() { return Ok(Vec::new()); }
+        if imports.is_empty() && directories.is_empty() {
+            return Ok(Vec::new());
+        }
         self.write(|tx| {
             for directory in &directories {
                 if !crate::placements::can_recover_import_directory(tx, directory.id)? {
@@ -159,30 +167,38 @@ impl Database {
             let mut pending = Vec::with_capacity(imports.len());
             let mut books = HashSet::new();
             let mut names = HashSet::new();
-            let created = imports.into_iter().map(|(import, source)| {
-                let (hash, format, version) = (import.content_hash, import.format, import.inspection_version);
-                let name = (import.parent_id, library_replica::portable_name_key(&import.published.name));
-                // A repeated book needs the previous annotation projection for
-                // Foliate reconciliation. A repeated destination name needs
-                // live conflict checks, including books restored in this batch.
-                if books.contains(&hash) || names.contains(&name) {
-                    crate::projection::project_dirty(tx)?;
-                    books.clear();
-                    names.clear();
-                }
-                books.insert(hash);
-                names.insert(name);
-                let (created, observation) = admit_import(tx, import, None, None, Some(source))?;
-                pending.push(observation);
-                tx.record_import_inspection(&hash, format as i64, version)?;
-                Ok(created)
-            }).collect::<Result<Vec<_>, DatabaseError>>()?;
+            let created = imports
+                .into_iter()
+                .map(|(import, source)| {
+                    let (hash, format, version) = (import.book_id, import.format, import.inspection_version);
+                    let name = (import.parent_id, library_replica::portable_name_key(&import.published.name));
+                    // A repeated book needs the previous annotation projection for
+                    // Foliate reconciliation. A repeated destination name needs
+                    // live conflict checks, including books restored in this batch.
+                    if books.contains(&hash) || names.contains(&name) {
+                        crate::projection::project_dirty(tx)?;
+                        books.clear();
+                        names.clear();
+                    }
+                    books.insert(hash);
+                    names.insert(name);
+                    let (created, observation) = admit_import(tx, import, None, None, Some(source))?;
+                    pending.push(observation);
+                    tx.record_import_inspection(&hash, format as i64, version)?;
+                    Ok(created)
+                })
+                .collect::<Result<Vec<_>, DatabaseError>>()?;
             // Project the complete metadata set together. File observations
             // depend on live placement rows, so record them after projection.
             crate::projection::project_dirty(tx)?;
-            for observation in pending { observation.record(tx)?; }
+            for observation in pending {
+                observation.record(tx)?;
+            }
             for (path, fingerprint, checksum) in sources {
-                tx.execute("INSERT INTO local_import_source(path,fingerprint,byte_hash) VALUES(?1,?2,?3) ON CONFLICT(path) DO UPDATE SET fingerprint=excluded.fingerprint,byte_hash=excluded.byte_hash", rusqlite::params![path, fingerprint.to_string(), checksum])?;
+                tx.execute(
+                    "INSERT INTO local_import_source(path,fingerprint,byte_hash) VALUES(?1,?2,?3) ON CONFLICT(path) DO UPDATE SET fingerprint=excluded.fingerprint,byte_hash=excluded.byte_hash",
+                    rusqlite::params![path, fingerprint.to_string(), checksum],
+                )?;
             }
             Ok(created)
         })
@@ -193,7 +209,7 @@ impl Database {
     /// the writer) and hands the restore set back to the commit.
     pub fn import_restore_candidates(&self, hash: &BookId) -> Result<Vec<(library_model::RelativeBookPath, Option<String>)>, DatabaseError> {
         let rows = query_rows(|read| self.connection.restore_candidates_select(hash, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))).map_err(DatabaseError::operation)?;
-        let mut folders = crate::placements::FolderPaths::new(&self.connection);
+        let mut folders = crate::placements::FolderPaths::for_directories(&self.connection, rows.iter().map(|(id, _, _)| id.as_str()))?;
         let mut candidates = Vec::new();
         for (dir_id, file_name, projected) in rows {
             if let Some(path) = folders.placement(&dir_id, &file_name)? {
@@ -220,9 +236,9 @@ fn commit_one_with_transfer(tx: &Transaction<'_>, import: ImportCommit, prepared
 
 /// Admit canonical state without rebuilding derived rows after every book.
 fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared: Option<PreparedInspection>, matcher: Option<ContributorNameMatcher>, transfer: Option<BookTransferState>) -> Result<(bool, ImportObservation), DatabaseError> {
-    let ImportCommit { source_identity, byte_checksum, parent_id, file_name: _file_name, format, content_hash, size_bytes, inspection_version, inspection: _inspection, published, request_thumbnail, restore_paths } = import;
-    let hash = &content_hash;
-    if content_hash.is_local() && byte_checksum.is_none() {
+    let ImportCommit { source_identity, byte_checksum, parent_id, file_name: _file_name, format, book_id, size_bytes, inspection_version, inspection: _inspection, published, request_thumbnail, restore_paths } = import;
+    let hash = &book_id;
+    if book_id.is_local() && byte_checksum.is_none() {
         return Err(DatabaseError::message("a local book identity requires a separate byte checksum"));
     }
     if directory_relative_path(tx, &parent_id)?.is_none() {
@@ -238,21 +254,21 @@ fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared: Option<Pre
     )?;
     if let Some(mut source) = transfer {
         crate::transfer::reconcile_reader_annotations(tx, &mut source)?;
-        let BookTransferState { content_hash: source_hash, addition, reading, chapter_read, annotations, .. } = source;
-        if source_hash != content_hash || addition.facts.format != format {
+        let BookTransferState { book_id: source_hash, addition, reading, chapter_read, annotations, .. } = source;
+        if source_hash != book_id || addition.facts.format != format {
             return Err(DatabaseError::message("transferred book identity does not match its bytes"));
         }
         let has_facts: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_book_draft WHERE content_hash=?1) OR EXISTS(SELECT 1 FROM sync_book_record WHERE state_kind='book_add' AND content_hash=?1)", [hash], |row| row.get(0))?;
         tx.ingestion_ensure_book(hash)?;
-        record_local(tx, LibraryStateEntry::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present })?;
+        record_local(tx, LibraryStateEntry::BookLifecycle { book_id, value: library_replica::BookLifecycleState::Present })?;
         if !has_facts {
             if addition.enrichment.is_some() {
-                record_local(tx, LibraryStateEntry::BookAdd { content_hash, value: addition })?;
+                record_local(tx, LibraryStateEntry::BookAdd { book_id, value: addition })?;
             } else {
                 crate::sync::apply::records::stage(tx, hash, addition)?;
             }
         }
-        crate::transfer::merge_transfer_progress(tx, content_hash, reading, chapter_read, annotations)?;
+        crate::transfer::merge_transfer_progress(tx, book_id, reading, chapter_read, annotations)?;
     }
     if let Some(prepared) = prepared {
         // The first inspection supplies the draft. Projection owns all
@@ -262,7 +278,7 @@ fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared: Option<Pre
         // placement remain independently mutable.
         tx.ingestion_ensure_book(&hash)?;
         let added_at: i64 = tx.ingestion_added_at(&hash, &(unix_millis()?), |row| row.get(0))?;
-        record_local(tx, LibraryStateEntry::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present })?;
+        record_local(tx, LibraryStateEntry::BookLifecycle { book_id, value: library_replica::BookLifecycleState::Present })?;
         // Re-imports may change placements and local observations, but cannot
         // rewrite the immutable addition for the same file hash.
         if canonical_body(tx, "book_add", &StateKey::Book(*hash), "")?.is_none() {
@@ -283,11 +299,11 @@ fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared: Option<Pre
         }
     }
     crate::projection::place_book(tx, &parent_id, hash, &published.name)?;
-    Ok((placement_created, ImportObservation { content_hash, parent_id, source_identity, byte_checksum, size_bytes, published, request_thumbnail, restore_paths }))
+    Ok((placement_created, ImportObservation { book_id, parent_id, source_identity, byte_checksum, size_bytes, published, request_thumbnail, restore_paths }))
 }
 
 struct ImportObservation {
-    content_hash: BookId,
+    book_id: BookId,
     parent_id: DirId,
     source_identity: Option<PdfSourceIdentity>,
     byte_checksum: Option<ContentHash>,
@@ -299,11 +315,11 @@ struct ImportObservation {
 
 impl ImportObservation {
     fn record(self, tx: &Transaction<'_>) -> Result<(), DatabaseError> {
-        let Self { content_hash, parent_id, source_identity, byte_checksum, size_bytes, published, request_thumbnail, restore_paths } = self;
-        let hash = &content_hash;
-        crate::content_identity::record_origin(tx, content_hash, source_identity)?;
-        if let Some(checksum) = byte_checksum.or_else(|| content_hash.content_hash()) {
-            crate::content_identity::observe_content(tx, content_hash, parent_id, checksum)?;
+        let Self { book_id, parent_id, source_identity, byte_checksum, size_bytes, published, request_thumbnail, restore_paths } = self;
+        let hash = &book_id;
+        crate::content_identity::record_origin(tx, book_id, source_identity)?;
+        if let Some(checksum) = byte_checksum.or_else(|| book_id.content_hash()) {
+            crate::content_identity::observe_content(tx, book_id, parent_id, checksum)?;
         }
         let revision = if published.published {
             crate::native::observations::Revision::Local { size: i64::try_from(size_bytes).map_err(|_| DatabaseError::message("book size exceeds SQLite range"))? }
@@ -315,7 +331,11 @@ impl ImportObservation {
             tx.shared_request_thumbnail(hash).map_err(DatabaseError::operation)?;
         }
         for path in &restore_paths {
-            tx.shared_placements_queue_file_work("materialize", hash, path).map_err(DatabaseError::operation)?;
+            if let Some((book, directory, _)) = crate::placements::book_at_path(tx, path)? {
+                if book == *hash {
+                    crate::placements::queue_materialization(tx, hash, &directory)?;
+                }
+            }
         }
         Ok(())
     }
@@ -326,9 +346,9 @@ include_sqlite_sql::include_sql!("src/import/sql/ingestion.sql");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transfer::ReaderAnnotationSource;
     use book_model::{Annotation, AnnotationAnchor, AnnotationStyle, BookFormat};
     use library_replica::{BookFacts, EnrichmentResult};
-    use crate::transfer::ReaderAnnotationSource;
     use sync_common::ROOT_DIR_ID;
 
     fn database() -> Database {
@@ -343,31 +363,44 @@ mod tests {
         let mut record = BookRecord { metadata: Default::default(), description: String::new() };
         record.title = name.into();
         let source = BookTransferState {
-            content_hash: hash,
+            book_id: hash,
             byte_checksum: Some(checksum),
             addition: BookAddition { facts: BookFacts { added_at: 1, format: BookFormat::Epub }, record, navigation: Some(BookTocDocument::entries(Vec::new())), pdf: None, recording: None, enrichment: Some(EnrichmentResult::NoMatch) },
             reading: None,
             chapter_read: None,
             annotations: vec![Annotation {
                 id: note_id.into(),
-                content_hash: hash,
+                book_id: hash,
                 anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2,/1:0,/1:1)"),
-                exact_text: "Text".into(), style: AnnotationStyle::Underline,
-                color: 0xffffff, note: "Keep original note".into(),
-                created_at: 7, modified_at: 9, toc_ordinal: None, progress: Some(42.0), deleted: false,
+                exact_text: "Text".into(),
+                style: AnnotationStyle::Underline,
+                color: 0xffffff,
+                note: "Keep original note".into(),
+                created_at: 7,
+                modified_at: 9,
+                toc_ordinal: None,
+                progress: Some(42.0),
+                deleted: false,
             }],
             annotation_source: Some(ReaderAnnotationSource::Foliate),
         };
-        (ImportCommit {
-            source_identity: None, byte_checksum: Some(checksum), parent_id: ROOT_DIR_ID,
-            file_name: name.into(), format: BookFormat::Epub, content_hash: hash,
-            size_bytes: bytes.len() as u64, inspection_version: -2, inspection: None,
-            published: PublishedStagedBook {
-                name: name.into(), relative_path: format!("/{name}"),
-                published: true, fingerprint: Some("1".into()),
+        (
+            ImportCommit {
+                source_identity: None,
+                byte_checksum: Some(checksum),
+                parent_id: ROOT_DIR_ID,
+                file_name: name.into(),
+                format: BookFormat::Epub,
+                book_id: hash,
+                size_bytes: bytes.len() as u64,
+                inspection_version: -2,
+                inspection: None,
+                published: PublishedStagedBook { name: name.into(), relative_path: format!("/{name}"), published: true, fingerprint: Some("1".into()) },
+                request_thumbnail: true,
+                restore_paths: Vec::new(),
             },
-            request_thumbnail: true, restore_paths: Vec::new(),
-        }, source)
+            source,
+        )
     }
 
     #[test]

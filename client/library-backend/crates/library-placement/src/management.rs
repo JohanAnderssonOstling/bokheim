@@ -28,26 +28,26 @@ impl LibraryPlacement {
 
     /// Removes one placement. Returns `true` when the final placement
     /// is removed and the book consequently moves to Trash.
-    pub fn remove_book_from_directory(&self, content_hash: &BookId, source_id: &DirId) -> Result<bool, BackendError> {
-        let orphaned = self.database.remove_book_placement(content_hash, source_id)?;
+    pub fn remove_book_from_directory(&self, book_id: &BookId, source_id: &DirId) -> Result<bool, BackendError> {
+        let orphaned = self.database.remove_book_placement(book_id, source_id)?;
         self.events.notify_contents_changed();
         Ok(orphaned)
     }
 
-    pub fn move_book_to_trash(&self, content_hash: &BookId) -> Result<(), BackendError> {
-        self.database.trash_book(content_hash)?;
+    pub fn move_book_to_trash(&self, book_id: &BookId) -> Result<(), BackendError> {
+        self.database.trash_book(book_id)?;
         self.events.notify_contents_changed();
         Ok(())
     }
 
-    pub fn restore_book(&self, content_hash: &BookId) -> Result<(), BackendError> {
-        self.database.restore_book(content_hash)?;
+    pub fn restore_book(&self, book_id: &BookId) -> Result<(), BackendError> {
+        self.database.restore_book(book_id)?;
         self.events.notify_contents_changed();
         Ok(())
     }
 
-    pub fn purge_book(&self, content_hash: &BookId) -> Result<(), BackendError> {
-        self.database.purge_book(content_hash)?;
+    pub fn purge_book(&self, book_id: &BookId) -> Result<(), BackendError> {
+        self.database.purge_book(book_id)?;
         self.events.notify_contents_changed();
         Ok(())
     }
@@ -83,8 +83,8 @@ impl LibraryPlacement {
         Ok(copy)
     }
 
-    pub fn restore_book_placement_metadata(&self, content_hash: &BookId, directory_id: &DirId) -> Result<(), BackendError> {
-        self.database.restore_book_placement(content_hash, directory_id)?;
+    pub fn restore_book_placement_metadata(&self, book_id: &BookId, directory_id: &DirId) -> Result<(), BackendError> {
+        self.database.restore_book_placement(book_id, directory_id)?;
         self.events.notify_contents_changed();
         Ok(())
     }

@@ -310,8 +310,8 @@ async fn lifecycle_rejections_defer_fields_on_later_storage_pages_in_both_modes(
         requests.lock().unwrap().clear();
         let replica = ReplicaId::from_u128(8);
         let mut outbox: Vec<_> = (1..=MAX_PUSH_MUTATIONS as u64 + 4).map(|seq| LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(seq.into()), name: format!("Shelf {seq}") }.publication(replica, 1, ReplicaSeq::new(seq).unwrap())).collect();
-        outbox.push(LibraryStateEntry::BookLifecycle { content_hash: book, value: BookLifecycleState::Present }.publication(replica, 1, rejected_id));
-        outbox.push(LibraryStateEntry::Placement { dir_id: sync_common::ROOT_DIR_ID, content_hash: book, present: true, origin_folder_id: None }.publication(replica, 1, field_id));
+        outbox.push(LibraryStateEntry::BookLifecycle { book_id: book, value: BookLifecycleState::Present }.publication(replica, 1, rejected_id));
+        outbox.push(LibraryStateEntry::Placement { dir_id: sync_common::ROOT_DIR_ID, book_id: book, present: true, origin_folder_id: None }.publication(replica, 1, field_id));
         let store = MemoryStore(RefCell::new(MemoryState { events: Vec::new(), issues: Vec::new(), cursor: SyncCursor::default(), recovering: false, canonical: Vec::new(), outbox }));
         let engine = SyncEngine::new(SyncEngineConfig { store: &store, http_client: &client, library_id: LibraryId::from_u128(11), replica_id: ReplicaId::from_u128(12), credentials: Some(SyncCredentials::new(url.clone(), "test-token")) });
         let outcome = if active { engine.synchronize().await } else { engine.drain_outbox().await }.unwrap();

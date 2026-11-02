@@ -1,5 +1,7 @@
 //! EPUB contents, annotation, and settings sidebar tabs.
 
+use ui_text::text;
+
 use crate::invalidation::notify;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, IntoElement, Window, div};
@@ -84,7 +86,7 @@ impl ReaderView {
                 }
             },
         );
-        let reset = components::topbar_action_button("reset-chapter-read-status", "Reset read status", gpui_component::IconName::Undo2, theme).on_click(move |_, _, cx| {
+        let reset = components::topbar_action_button("reset-chapter-read-status", text!(common::reset_read_status), gpui_component::IconName::Undo2, theme).on_click(move |_, _, cx| {
             entity.update(cx, |this, cx| {
                 this.reading_positions.reset_read_status();
                 this.toc.read_status.reset();
@@ -106,7 +108,7 @@ impl ReaderView {
         let selected_id = self.marks.selected_id();
         let selected_index = self.marks.annotations().iter().position(|annotation| Some(annotation.id.as_str()) == selected_id);
         self.annotation_tree.reveal_selected(&tree, selected_id, selected_index);
-        let empty_message = if self.marks.annotations().is_empty() { "No notes yet. Select text, then choose Annotation to add a note." } else { "No annotations match your filter." };
+        let empty_message = if self.marks.annotations().is_empty() { text!(reader::no_notes_yet_select_text_then_choose_annotation_to_add_a_note) } else { text!(reader::no_annotations_match_your_filter) };
         self.annotation_tree.prepare_list(&tree, self.marks.annotations(), selected_id, empty_message);
         let rows = sidebar_list::panel("epub-annotation-list", &cx.entity(), &self.annotation_tree.list.state, theme, |this, row, target, theme, _| {
             this.annotation_tree.render_row(target, row, this.marks.annotations(), this.marks.selected_id(), theme)
@@ -142,10 +144,10 @@ impl BookmarkTarget for ReaderView {
         self.save_selected_annotation(None, None, cx);
         self.close_annotation_popup(cx);
         let ordinal = self.toc.bookmark_ordinal_for_cfi(&cfi);
-        let bookmark = bookmarks::bookmark(self.locator.content_hash(), self.book.annotation_anchor(cfi), ordinal, book_model::layout_fraction_progress(self.progress.fraction));
+        let bookmark = bookmarks::bookmark(self.locator.book_id(), self.book.annotation_anchor(cfi), ordinal, book_model::layout_fraction_progress(self.progress.fraction));
         self.marks.start_bookmark(bookmark);
         self.annotation_note_input.update(cx, |input, cx| {
-            input.set_placeholder("Name bookmark", window, cx);
+            input.set_placeholder(text!(reader::name_bookmark), window, cx);
             input.set_value("", window, cx);
             input.focus(window, cx);
         });

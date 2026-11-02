@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use crate::settings::{ReaderSettings, SidebarTab};
 mod document;
 mod input;
@@ -16,6 +18,7 @@ use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent};
 use crate::{DecreaseColumnWidth, DecreaseFont, IncreaseColumnWidth, IncreaseFont, NextLine, NextPage, NextSection, PreviousLine, PreviousPage, PreviousSection, ToggleFullscreen};
 use gpui::prelude::*;
 use gpui::{App, Context, Div, FocusHandle, Focusable, IntoElement, Pixels, Point, Render, ScrollDelta, Window};
+use skrift_column_paginator::RendererCommand;
 use ui_components as components;
 
 impl Focusable for ReaderView {
@@ -46,19 +49,26 @@ impl Render for ReaderView {
         if let LoadState::Ready(renderer) = &self.load_state {
             let selected = cx.try_global::<components::theme::SelectedPalette>().copied();
             let renderer_changed = self.last_column_viewport_plan.is_none_or(|plan| plan.0 != renderer.entity_id());
-            if renderer_changed {
+            let font_size = ReaderSettings::preferences(cx).synchronized.font_size_px();
+            if renderer_changed || self.applied_font_size != Some(font_size) {
                 // Preferences can change while the book is still preparing.
-                let font_size = ReaderSettings::preferences(cx).font_size;
-                renderer.update(cx, |view, cx| view.queue_appearance(skrift_column_paginator::RendererCommand::SetFontSize(font_size), cx));
+                self.applied_font_size = Some(font_size);
+                renderer.update(cx, |view, cx| view.queue_appearance(RendererCommand::SetFontSize(font_size), cx));
             }
-            if renderer_changed || self.applied_palette != selected {
+            let scale = ReaderSettings::preferences(cx).synchronized.zoom();
+            if renderer_changed || self.applied_scale != Some(scale) {
+                self.applied_scale = Some(scale);
+                renderer.update(cx, |view, cx| view.queue_appearance(RendererCommand::SetScale(scale), cx));
+            }
+            let appearance = crate::settings::library_theme_adaptation(cx);
+            let overrides = ReaderSettings::preferences(cx).style_overrides_for_book(self.cjk_font, Some(appearance), crate::settings::library_link_foreground(cx));
+            if renderer_changed || self.applied_palette != selected || self.applied_style_overrides.as_ref() != Some(&overrides) {
                 self.applied_palette = selected;
-                let appearance = crate::settings::library_theme_adaptation(cx);
-                let overrides = ReaderSettings::preferences(cx).style_overrides_for_book(self.cjk_font, Some(appearance), crate::settings::library_link_foreground(cx));
+                self.applied_style_overrides = Some(overrides.clone());
                 let paint = crate::settings::library_paint_palette(cx);
                 renderer.update(cx, |renderer, cx| {
-                    renderer.queue_appearance(skrift_column_paginator::RendererCommand::SetReaderStyleOverrides(overrides), cx);
-                    renderer.queue_appearance(skrift_column_paginator::RendererCommand::SetReaderPaintPalette(paint), cx);
+                    renderer.queue_appearance(RendererCommand::SetReaderStyleOverrides(overrides), cx);
+                    renderer.queue_appearance(RendererCommand::SetReaderPaintPalette(paint), cx);
                 });
             }
         }
@@ -81,10 +91,10 @@ impl Render for ReaderView {
         let ruler_style = preferences.reading_ruler;
         let ruler_lines = preferences.reading_ruler_lines;
         let (split_sidebar_width, horizontal_margin, available_width) = Self::horizontal_layout(window, cx, sidebar_visible);
-        let vertical_margin = preferences.vertical_margin_px.min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
+        let vertical_margin = preferences.synchronized.vertical_margin_px().min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
         let max_columns = self.max_columns_for_gap(f64::from(available_width), cx);
         let fitted_column_width = self.fitted_column_width(f64::from(available_width), cx);
-        let column_gap = f64::from(preferences.min_column_gap_px) / preferences.scale.max(0.1);
+        let column_gap = f64::from(preferences.synchronized.min_column_gap_px()) / preferences.synchronized.zoom().max(0.1);
         if let LoadState::Ready(renderer) = &self.load_state {
             renderer.update(cx, |view, cx| {
                 view.set_reading_ruler_accent(theme.accent, cx);
@@ -93,7 +103,7 @@ impl Render for ReaderView {
             let plan = (renderer.entity_id(), f64::from(available_width), fitted_column_width, max_columns, column_gap);
             if self.last_column_viewport_plan != Some(plan) {
                 renderer.update(cx, |renderer, cx| {
-                    renderer.queue_appearance(skrift_column_paginator::RendererCommand::SetColumnViewportPlan { available_width: plan.1, column_width: plan.2, column_count: plan.3, column_gap: plan.4 }, cx);
+                    renderer.queue_appearance(RendererCommand::SetColumnViewportPlan { available_width: plan.1, column_width: plan.2, column_count: plan.3, column_gap: plan.4 }, cx);
                 });
                 self.last_column_viewport_plan = Some(plan);
             }
@@ -149,7 +159,7 @@ impl Render for ReaderView {
         }
 
         #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
-        let dock = self.tts.dock_open.then(|| crate::shell::tts::dock(&self.tts, mobile, theme, cx));
+        let dock = self.tts.dock_open().then(|| crate::shell::tts::dock(&self.tts, mobile, theme, cx));
         #[cfg(not(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
         let dock: Option<gpui::AnyElement> = None;
         let sidebar = active_tab.filter(|_| sidebar_visible).map(|active| {
@@ -170,7 +180,7 @@ impl Render for ReaderView {
         let document_ready = self.document_focus(cx).is_some();
         self.chrome.sync_system_bars(chrome_visible, cx);
         let surface = ReaderSurface {
-            document: document_body.into_any_element(),
+            document: self.marks.with_persistence_notice(self.reading_positions.with_notice(document_body.into_any_element(), theme), theme),
             dock,
             sidebar,
             active_tab,
@@ -421,14 +431,14 @@ const DOCUMENT_CONTEXT: &str = "ReaderDocument";
 pub(crate) fn bind_keys(cx: &mut App) {
     shell_input::bind_document_keys(cx, DOCUMENT_CONTEXT);
     use ui_components::{ShortcutPage::Reader, bind_shortcut};
-    bind_shortcut(cx, Reader, "reader.previous_section", "Previous section", &["secondary-left"], PreviousSection, DOCUMENT_CONTEXT);
-    bind_shortcut(cx, Reader, "reader.next_section", "Next section", &["secondary-right"], NextSection, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.previous_section", text!(reader::previous_section), &["secondary-left"], PreviousSection, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.next_section", text!(reader::next_section), &["secondary-right"], NextSection, DOCUMENT_CONTEXT);
     #[cfg(not(target_os = "macos"))]
-    bind_shortcut(cx, Reader, "reader.fullscreen", "Toggle fullscreen", &["f11"], ToggleFullscreen, "Reader");
+    bind_shortcut(cx, Reader, "reader.fullscreen", text!(reader::toggle_fullscreen), &["f11"], ToggleFullscreen, "Reader");
     #[cfg(target_os = "macos")]
-    bind_shortcut(cx, Reader, "reader.fullscreen", "Toggle fullscreen", &["ctrl-cmd-f"], ToggleFullscreen, "Reader");
-    bind_shortcut(cx, Reader, "reader.font_increase", "Increase book font size", &["alt-="], IncreaseFont, DOCUMENT_CONTEXT);
-    bind_shortcut(cx, Reader, "reader.font_decrease", "Decrease book font size", &["alt--"], DecreaseFont, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.fullscreen", text!(reader::toggle_fullscreen), &["ctrl-cmd-f"], ToggleFullscreen, "Reader");
+    bind_shortcut(cx, Reader, "reader.font_increase", text!(reader::increase_book_font_size), &["alt-="], IncreaseFont, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.font_decrease", text!(reader::decrease_book_font_size), &["alt--"], DecreaseFont, DOCUMENT_CONTEXT);
 }
 
 #[cfg(test)]

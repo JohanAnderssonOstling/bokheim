@@ -489,7 +489,7 @@ mod tests {
                 parent_id: ROOT_DIR_ID,
                 file_name: "Book.epub".into(),
                 format: BookFormat::Epub,
-                content_hash: book,
+                book_id: book,
                 size_bytes: bytes.len() as u64,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: "Book".into(), ..Default::default() }, description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
@@ -501,7 +501,7 @@ mod tests {
         database
             .upsert_annotation(&Annotation {
                 id: "bokheim-note".into(),
-                content_hash: book,
+                book_id: book,
                 anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:3)"),
                 exact_text: "From Bokheim".into(),
                 note: "Own note".into(),

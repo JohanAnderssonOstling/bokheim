@@ -1,5 +1,7 @@
 //! Persistent pages owned by one library session.
 
+use ui_text::text;
+
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -45,9 +47,9 @@ impl LibrarySession {
             }
         })
         .detach();
-        let library_backend = Rc::new(app_backend.library(library_id));
+        let library_backend = Rc::new(app_backend.management.library(library_id));
         let updates = LibraryUpdateBridge::create(app_backend.clone(), library_id, cx);
-        let library = LibraryContext::new(app_backend, library_backend, open_book, updates, cx.entity().downgrade(), now_playing).with_opds(opds);
+        let library = LibraryContext::new(app_backend, crate::services::catalog_client(cx), library_backend, open_book, updates, cx.entity().downgrade(), now_playing).with_opds(opds);
         let library_updates = library.updates();
         let library_updates_subscription = cx.observe(&library_updates, |_, _, cx| cx.notify());
         let mut session = Self {
@@ -173,12 +175,12 @@ impl LibrarySession {
         self.current_browse_page()?.read(cx).shown_book_detail(cx)
     }
 
-    pub(super) fn open_book_detail(&mut self, content_hash: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_book_detail(&mut self, book_id: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(LibraryRoute::Folders, window, cx);
         let backend = self.library.backend().clone();
         let page = self.browse_page(BrowseKind::Folder, cx);
         cx.spawn(async move |session, cx| {
-            let result = backend.book_detail(content_hash).await;
+            let result = backend.book_detail(book_id).await;
             cx.defer_update(session, move |_session, cx| {
                 if let Ok(detail) = result {
                     page.update(cx, |page, cx| page.open_book_detail(detail.book, detail.path, cx));
@@ -255,11 +257,25 @@ impl LibrarySession {
         cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
-        let (backend, _) = AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("UI regression fixture".into(), true).await.unwrap();
+        let (backend, startup) = AppClient::start_native(launch).unwrap();
+        let library = backend.management.create_library_with_asset_storage("UI regression fixture".into(), true).await.unwrap();
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);
+        });
+        cx.update(|cx| {
+            crate::AppServices::new(
+                backend.clone(),
+                crate::AppStartup {
+                    default_library_root: startup.default_library_root,
+                    dictionary_storage_root: startup.dictionary_storage_root,
+                    preference_storage_root: startup.preference_storage_root,
+                    libraries: startup.libraries,
+                    browsing_preferences: startup.browsing_preferences,
+                    account_status: startup.account_status,
+                },
+            )
+            .configure(cx);
         });
         let session = cx.new(|cx| Self::new(Rc::new(backend), Rc::new(|_, _, _, _, _| {}), *library.library_id(), cx));
         let context = cx.read_entity(&session, |session, _| session.library.clone());
@@ -291,10 +307,10 @@ impl Render for LibrarySession {
                 .justify_center()
                 .when(ui_components::uses_mobile_navigation(window), |actions| actions.flex_col())
                 .gap(px(ui_components::SPACE_SM))
-                .child(ui_components::primary_action_button("empty-library-add-book", "Add book from device", IconName::Plus, false).on_click(move |_, _, cx| {
+                .child(ui_components::primary_action_button("empty-library-add-book", text!(browse::add_book_from_device), IconName::Plus, false).on_click(move |_, _, cx| {
                     session.update(cx, |session, cx| session.library.choose_and_import_book(ROOT_DIR_ID, cx));
                 }))
-                .child(ui_components::secondary_action_button("empty-library-catalog", "Go to catalog", IconName::BookOpen, false).on_click(|_, window, cx| {
+                .child(ui_components::secondary_action_button("empty-library-catalog", text!(browse::go_to_catalog), IconName::BookOpen, false).on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(crate::OpenLibraryView(LibraryRoute::Catalog)), cx);
                 }));
             // The browse page's own heading, which an empty view still needs to
@@ -303,7 +319,7 @@ impl Render for LibrarySession {
             ui_components::library_section_content()
                 .debug_selector(|| "library-session-empty".into())
                 .children(heading)
-                .child(ui_components::remaining_space_column().child(ui_components::browser_actionable_empty("No books in this library", actions, theme).size_full()))
+                .child(ui_components::remaining_space_column().child(ui_components::browser_actionable_empty(text!(browse::no_books_in_this_library), actions, theme).size_full()))
                 .into_any_element()
         };
         ui_components::library_section_content()
@@ -387,11 +403,25 @@ mod tests {
         cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
-        let (backend, _) = AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Empty".into(), false).await.unwrap();
+        let (backend, startup) = AppClient::start_native(launch).unwrap();
+        let library = backend.management.create_library_with_asset_storage("Empty".into(), false).await.unwrap();
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);
+        });
+        cx.update(|cx| {
+            crate::AppServices::new(
+                backend.clone(),
+                crate::AppStartup {
+                    default_library_root: startup.default_library_root,
+                    dictionary_storage_root: startup.dictionary_storage_root,
+                    preference_storage_root: startup.preference_storage_root,
+                    libraries: startup.libraries,
+                    browsing_preferences: startup.browsing_preferences,
+                    account_status: startup.account_status,
+                },
+            )
+            .configure(cx);
         });
         let window = cx.add_window(|_, cx| LibrarySession::new(Rc::new(backend), Rc::new(|_, _, _, _, _| {}), *library.library_id(), cx));
         let updates = window.read_with(cx, |session, _| session.library.updates().clone()).unwrap();
@@ -423,11 +453,25 @@ mod tests {
         cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
-        let (backend, _) = AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Undo".into(), true).await.unwrap();
+        let (backend, startup) = AppClient::start_native(launch).unwrap();
+        let library = backend.management.create_library_with_asset_storage("Undo".into(), true).await.unwrap();
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);
+        });
+        cx.update(|cx| {
+            crate::AppServices::new(
+                backend.clone(),
+                crate::AppStartup {
+                    default_library_root: startup.default_library_root,
+                    dictionary_storage_root: startup.dictionary_storage_root,
+                    preference_storage_root: startup.preference_storage_root,
+                    libraries: startup.libraries,
+                    browsing_preferences: startup.browsing_preferences,
+                    account_status: startup.account_status,
+                },
+            )
+            .configure(cx);
         });
         let window = cx.add_window(|_, cx| LibrarySession::new(Rc::new(backend), Rc::new(|_, _, _, _, _| {}), *library.library_id(), cx));
         let context = window.update(cx, |session, _, _| session.library.clone()).unwrap();

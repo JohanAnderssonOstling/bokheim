@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bokheim · Language filter finding</title>
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Raleway;src:url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf')}
+*{box-sizing:border-box}[hidden]{display:none!important}
+:root{--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--rule:#c5bdac;--accent:#466853;--wash:#d9e8de}
+body{margin:0;background:#eae5dc;color:var(--ink);font:14px/1.55 Raleway,sans-serif}
+main{max-width:1450px;margin:auto;padding:28px 32px 40px}
+header{display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;border-bottom:1px solid #bcb4a6;padding-bottom:18px}
+h1{font:400 36px/1.15 Garamond,Georgia,serif;margin:0}header span{color:var(--muted);font-size:13px}
+.intro{max-width:870px;margin:23px 0 28px;font-size:16px}
+.examples{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:26px}
+figure{margin:0;min-width:0}figcaption{min-height:57px;margin-bottom:10px;font-size:14px}figcaption strong{display:block;font-weight:500}figcaption span{color:var(--muted);font-size:12px}
+.app{background:var(--paper);border:1px solid #b6ad9c;min-height:355px;font:18px/1.4 Garamond,Georgia,serif}
+.toolbar{display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--rule);height:65px;padding:10px 12px;position:relative}
+.heading{flex:1;font-size:23px;min-width:0}.count{font-size:14px;color:var(--muted);margin-left:5px}
+button{font:inherit;color:inherit;cursor:pointer;background:transparent;border:0}button:hover{background:#46685314}button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.trigger{display:flex;align-items:center;justify-content:center;gap:7px;min-width:38px;height:38px;padding:7px}.trigger img{width:23px;height:23px}.trigger.active{background:var(--accent);color:#fffdfa}.trigger.active img{filter:brightness(0) invert(1)}.trigger span{font-size:16px}
+
+.books{padding:4px 16px}.book{padding:17px 0;border-bottom:1px solid var(--rule);display:flex;align-items:center;gap:12px}.book:last-child{border:0}.cover{width:35px;height:49px;background:#d7d0c0;display:grid;place-items:center;font-size:23px;flex:none}.book:nth-child(2) .cover{background:#c8d0c5}.book:nth-child(3) .cover{background:#dfc7ac}.book small{display:block;color:var(--muted);font-size:14px}.author{font-style:italic}
+.explanation{border-left:2px solid #8c7f64;padding-left:12px;margin-top:15px;color:#514b42;font-size:13px;min-height:65px}.explanation strong{color:var(--ink);font-weight:500}
+.menu{position:absolute;z-index:3;right:12px;top:57px;width:235px;background:var(--paper);border:1px solid #8c7f64;box-shadow:0 5px 12px #22201d1a;padding:6px;font:17px/1.4 Garamond,Georgia,serif}.menu h2{font:14px Raleway,sans-serif;color:var(--muted);padding:8px 10px;margin:0}.option{display:flex;width:100%;text-align:left;align-items:center;gap:10px;min-height:38px;padding:6px 10px}.check{width:16px;flex:none}.option[aria-checked=true]{background:var(--wash)}
+.purpose{margin-top:33px;border-top:1px solid #bcb4a6;padding-top:20px;display:flex;align-items:center;gap:18px}.purpose img{width:44px;height:44px}.purpose p{margin:0;max-width:900px}.purpose strong{font-weight:500}.footnote{font-size:12px;color:var(--muted);margin:20px 0 0}
+@media(max-width:1050px){.examples{grid-template-columns:1fr}.app{min-height:320px}figure{max-width:680px}figcaption{min-height:0}.explanation{min-height:0}main{padding:24px 20px}}
+</style>
+</head>
+<body>
+<main>
+<header><h1>The language-filter finding</h1><span>Earlier behavior and the approved fill-only change</span></header>
+<p class="intro">Compare the earlier A and B: <strong>the books change, but the language button looks identical.</strong> C shows the implemented change: active fill on the same icon, with no added label. Click a language button to try it.</p>
+<div class="examples" id="examples"></div>
+<div class="purpose"><img src="assets/phosphor-light/translate.svg" alt="Current language-filter icon"><p><strong>What this icon does:</strong> it filters books by the language recorded in their metadata. It does not translate a book or change the interface language. The existing symbol is retained; fill now indicates that a language filter is active.</p></div>
+<p class="footnote">Illustrative HTML reconstruction of the earlier and updated controls; not a live application screenshot. Book names and counts are sample data. C reflects the approved active-fill change in the application. This is a usability finding, not evidence of AI authorship.</p>
+</main>
+<script>
+const books=[
+ {title:'Pride and Prejudice',author:'Jane Austen',language:'English',initial:'P'},
+ {title:'Gösta Berlings saga',author:'Selma Lagerlöf',language:'Swedish',initial:'G'},
+ {title:'Le Petit Prince',author:'Antoine de Saint-Exupéry',language:'French',initial:'L'},
+ {title:'The Secret Garden',author:'Frances Hodgson Burnett',language:'English',initial:'S'}
+];
+const cases=[
+ {title:'A · Before — all languages',sub:'No language filter',selected:[],proposed:false,explanation:'The language icon is neutral. All four sample books are visible.'},
+ {title:'B · Before — English selected',sub:'An active filter, with the same neutral icon',selected:['English'],proposed:false,explanation:'<strong>Same icon and same appearance as A.</strong> Swedish and French books are now hidden. You must open the menu to discover why.'},
+ {title:'C · Updated — English selected',sub:'Active fill only; same icon and dimensions',selected:['English'],proposed:true,explanation:'<strong>Fill shows that the filter is active.</strong> There is no added language label or button. Choose Any in the menu to return to the neutral state.'}
+];
+for(const item of cases){
+ const figure=document.createElement('figure');
+ figure.innerHTML=`<figcaption><strong>${item.title}</strong><span>${item.sub}</span></figcaption><section class="app"><div class="toolbar"><span class="heading">Library <span class="count"></span></span><button class="trigger" aria-label="Languages" aria-expanded="false" title="Languages"><img src="assets/phosphor-light/translate.svg" alt=""><span class="filter-label"></span></button><div class="menu" role="menu" aria-label="Book languages" hidden><h2>Languages</h2><div class="options"></div></div></div><div class="books"></div></section><p class="explanation">${item.explanation}</p>`;
+ const trigger=figure.querySelector('.trigger'),menu=figure.querySelector('.menu');
+ function render(){
+  const visible=books.filter(book=>!item.selected.length||item.selected.includes(book.language));
+  figure.querySelector('.count').textContent=visible.length;
+  figure.querySelector('.books').innerHTML=visible.map(book=>`<div class="book"><div class="cover">${book.initial}</div><div>${book.title}<small><span class="author">${book.author}</span> · ${book.language}</small></div></div>`).join('');
+  trigger.classList.toggle('active',item.proposed&&!!item.selected.length);
+  figure.querySelector('.filter-label').textContent='';
+  
+  const options=figure.querySelector('.options');options.replaceChildren();
+  for(const language of ['Any','English','Swedish','French']){
+   const checked=language==='Any'?!item.selected.length:item.selected.includes(language);
+   const option=document.createElement('button');option.className='option';option.setAttribute('role','menuitemcheckbox');option.setAttribute('aria-checked',String(checked));option.innerHTML=`<span class="check">${checked?'✓':''}</span>${language}`;
+   option.addEventListener('click',event=>{event.stopPropagation();item.selected=language==='Any'?[]:checked?item.selected.filter(value=>value!==language):[...item.selected,language];render();});options.append(option);
+  }
+ }
+ function close(){menu.hidden=true;trigger.setAttribute('aria-expanded','false');}
+ trigger.addEventListener('click',()=>{const show=menu.hidden;menu.hidden=!show;trigger.setAttribute('aria-expanded',String(show));});
+ 
+ 
+ document.addEventListener('click',event=>{if(!figure.contains(event.target))close();});
+ figure.addEventListener('keydown',event=>{if(event.key==='Escape'){close();trigger.focus();}});
+ render();document.querySelector('#examples').append(figure);
+}
+</script>
+</body>
+</html>

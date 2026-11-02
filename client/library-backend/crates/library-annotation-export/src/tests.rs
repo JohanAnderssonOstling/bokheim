@@ -12,7 +12,7 @@ fn book() -> AnnotationExportBook {
         toc: vec![BookTocEntry { title: "Part".into(), target: "a.xhtml".into(), children: vec![BookTocEntry { title: "Child".into(), target: "a.xhtml#child".into(), children: vec![] }] }],
         annotations: vec![Annotation {
             id: "one".into(),
-            content_hash: id,
+            book_id: id,
             anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/8/12!/4/2,/1:0,/1:7)"),
             exact_text: "a quote\n\na second line".into(),
             style: AnnotationStyle::Underline,

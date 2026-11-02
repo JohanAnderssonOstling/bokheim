@@ -1296,7 +1296,7 @@ mod tests {
             let session = PdfDocumentSession::from_bytes("direction", bytes.clone())?;
             assert_eq!(session.info().right_to_left(), expected, "{name}");
             let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes))?;
-            let hash = metadata.content_hash.clone();
+            let hash = metadata.book_id.clone();
             let cached = PdfDocumentSession::from_reader_with_metadata("cached-direction", reader, &hash, Some(metadata))?;
             assert_eq!(cached.info().right_to_left(), expected, "cached {name}");
         }
@@ -1552,8 +1552,8 @@ mod tests {
                         assert_eq!(cover.pixel_width(), 320);
                         let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
                         assert_eq!(metadata.pages.len(), 2);
-                        let content_hash = metadata.content_hash.clone();
-                        let session = PdfDocumentSession::from_reader_with_metadata("concurrent", reader, &content_hash, Some(metadata))?;
+                        let book_id = metadata.book_id.clone();
+                        let session = PdfDocumentSession::from_reader_with_metadata("concurrent", reader, &book_id, Some(metadata))?;
                         assert!(!session.search_page(0, "searchable")?.is_empty());
                         session.render_page(0, Some(320))?;
                     }
@@ -1596,22 +1596,22 @@ mod tests {
         let bytes = fs::read(&path).map_err(|e| PdfError::new(e.to_string()))?;
         let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
         assert_eq!(reader.position(), 0);
-        assert_eq!(metadata.content_hash, blake3::hash(&bytes).to_hex().to_string());
+        assert_eq!(metadata.book_id, blake3::hash(&bytes).to_hex().to_string());
         assert_eq!(metadata.pages.len(), 2);
-        let content_hash = metadata.content_hash.clone();
+        let book_id = metadata.book_id.clone();
         let expected = PdfDocumentSession::from_bytes("fixture", bytes.clone())?;
-        let cached = PdfDocumentSession::from_reader_with_metadata("fixture", reader, &content_hash, Some(metadata.clone()))?;
+        let cached = PdfDocumentSession::from_reader_with_metadata("fixture", reader, &book_id, Some(metadata.clone()))?;
         assert_eq!(cached.info().pages(), expected.info().pages());
         assert_eq!(cached.info().outline(), expected.info().outline());
         assert_eq!(cached.render_page(0, Some(320))?.rgba, expected.render_page(0, Some(320))?.rgba);
         let mut wrong = metadata.clone();
-        wrong.content_hash = "0".repeat(64);
+        wrong.book_id = "0".repeat(64);
         wrong.pages[0].width = 999.0;
-        let fallback = PdfDocumentSession::from_reader_with_metadata("fixture", Cursor::new(bytes), &content_hash, Some(wrong))?;
+        let fallback = PdfDocumentSession::from_reader_with_metadata("fixture", Cursor::new(bytes), &book_id, Some(wrong))?;
         assert_eq!(fallback.info(), expected.info());
         let mut invalid = metadata;
         invalid.pages[0].width = f32::NAN;
-        assert!(!invalid.valid_for(&content_hash));
+        assert!(!invalid.valid_for(&book_id));
         let _ = fs::remove_file(path);
         Ok(())
     }

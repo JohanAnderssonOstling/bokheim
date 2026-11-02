@@ -23,7 +23,7 @@ SELECT p.relative_path
 FROM local_file_projection p
 JOIN pending USING(content_hash)
 UNION ALL
-SELECT relative_path FROM local_file_work;
+SELECT relative_path FROM local_file_work WHERE operation='remove' AND source_root IS NULL;
 
 -- name: scanner_pending_placements?
 -- Live placements of books with queued work; Rust adds each one's path.
@@ -39,6 +39,17 @@ JOIN book_dir bd ON bd.book_row_id = b.row_id
 WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL;
 
 -- Scanner inventory and apply operations.
+
+-- name: scanner_directory_projection_retained ->
+-- param: dir_id: &str
+-- param: parent_id: &str
+-- param: relative_path: &str
+SELECT EXISTS(
+    SELECT 1 FROM dir d
+    JOIN local_directory_projection p ON p.dir_id=d.id
+    WHERE d.id=:dir_id AND d.parent_id=:parent_id AND d.deleted_at IS NULL
+      AND trim(p.relative_path,'/')=trim(:relative_path,'/')
+);
 
 -- name: scanner_set_sequence!
 -- param: value: &str

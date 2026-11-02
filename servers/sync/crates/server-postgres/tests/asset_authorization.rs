@@ -31,7 +31,7 @@ async fn another_accounts_book_requires_upload_even_with_a_forged_lifecycle() {
     let alice_library = LibraryId::new_v4();
     let bob_library = LibraryId::new_v4();
     for (user, library) in [("alice", alice_library), ("bob", bob_library)] {
-        sync.create_library(user, &LibraryNameRequest { library_id: library, library_name: "Private".into(), storage: Default::default() }).await.unwrap();
+        sync.create_library(user, &LibraryNameRequest { library_id: library, library_name: "Private".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
     }
     let root = std::env::temp_dir().join(&schema);
     let store = Arc::new(FsAssetStore::new(root.join("books"), root.join("thumbnails")));
@@ -41,13 +41,13 @@ async fn another_accounts_book_requires_upload_even_with_a_forged_lifecycle() {
     let hash: BookId = "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85".parse().unwrap();
     assets.put_book("alice", &alice_library, &hash, 3, Box::new(Cursor::new(b"abc"))).await.unwrap();
     assert!(assets.open_from("bob", &bob_library, AssetKind::Book, &hash, 0).await.unwrap().is_none());
-    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await.unwrap();
+    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes: 3 }]).await.unwrap();
     assert!(manifest.owned.is_empty());
     assert_eq!(manifest.upload, vec![hash]);
     assert!(assets.open_from("bob", &bob_library, AssetKind::Book, &hash, 0).await.unwrap().is_none());
 
     // A wrong length must not disclose whether another account stores a hash.
-    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 4 }]).await.unwrap();
+    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes: 4 }]).await.unwrap();
     assert!(manifest.owned.is_empty());
     assert!(manifest.rejected.is_empty());
     assert_eq!(manifest.upload, vec![hash]);
@@ -77,7 +77,7 @@ async fn another_accounts_book_requires_upload_even_with_a_forged_lifecycle() {
     assert!(result.push.rejected.is_empty());
     assert!(assets.open_from("bob", &bob_library, AssetKind::Book, &hash, 0).await.unwrap().is_none());
     assert!(assets.audiobook_track("bob", &bob_library, &hash, 0).await.unwrap().is_none());
-    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await.unwrap();
+    let manifest = assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes: 3 }]).await.unwrap();
     assert!(manifest.owned.is_empty());
     assert_eq!(manifest.upload, vec![hash]);
 
@@ -93,11 +93,11 @@ async fn another_accounts_book_requires_upload_even_with_a_forged_lifecycle() {
     // including when this user already owns the requested bytes elsewhere.
     let local_library = LibraryId::new_v4();
     let storage = LibraryStorage::Local;
-    sync.create_library("alice", &LibraryNameRequest { library_id: local_library, library_name: "Local".into(), storage }).await.unwrap();
+    sync.create_library("alice", &LibraryNameRequest { library_id: local_library, library_name: "Local".into(), storage, kind: Default::default() }).await.unwrap();
     let before = assets.storage_usage("alice").await.unwrap();
     assert!(matches!(assets.open_from("alice", &local_library, AssetKind::Book, &hash, 0).await, Err(AssetError::Forbidden)));
     assert!(matches!(assets.audiobook_track("alice", &local_library, &hash, 0).await, Err(AssetError::Forbidden)));
-    assert!(matches!(assets.negotiate_books("alice", &local_library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await, Err(AssetError::Forbidden)));
+    assert!(matches!(assets.negotiate_books("alice", &local_library, vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes: 3 }]).await, Err(AssetError::Forbidden)));
     assert!(matches!(assets.put_book("alice", &local_library, &hash, 3, Box::new(Cursor::new(b"abc"))).await, Err(AssetError::Forbidden)));
     assert!(matches!(assets.thumbnail_presence("alice", &local_library, &[hash]).await, Err(AssetError::Forbidden)));
     assert!(matches!(assets.thumbnail_pair("alice", &local_library, &hash).await, Err(AssetError::Forbidden)));

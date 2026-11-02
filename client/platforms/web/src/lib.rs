@@ -20,8 +20,6 @@ mod reader;
 #[cfg(target_arch = "wasm32")]
 pub mod sqlite;
 #[cfg(target_arch = "wasm32")]
-pub mod dictionary_files;
-#[cfg(target_arch = "wasm32")]
 mod reference_storage;
 #[cfg(target_arch = "wasm32")]
 pub mod transport;

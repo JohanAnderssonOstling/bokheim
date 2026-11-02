@@ -9,6 +9,8 @@
 //! shows progress; devices without native Back also get a library button. The
 //! bar below the page opens the other sheets and drives reading aloud.
 
+use ui_text::text;
+
 use std::{cell::Cell, rc::Rc};
 
 use super::search::{self, SearchBarTarget};
@@ -224,20 +226,17 @@ fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: Si
     let header = components::reader_panel_header(panel_destination(active).label(), theme)
         .key_context("ReaderSidebarHeader")
         .when(active == SidebarTab::Search, |header| header.child(search::header_controls(owner.search_position, target, theme)))
-        .children(content.header_action)
-        .child(components::outlined_icon_button("reader-sidebar-close", components::shortcut_tooltip("Close sidebar", "escape"), IconName::Close).debug_selector(|| "reader-sidebar-close".into()).on_click(move |_, window, cx| {
+        .children(content.header_action);
+    #[cfg(feature = "kobo")]
+    let header = header.when(active == SidebarTab::Settings, |header| {
+        header.h(gpui::rems(components::topbar_height_rem())).when_some(owner.device_controls.clone(), |header, controls| header.child(div().key_context("ReaderDeviceControls").flex_none().child(controls)))
+    });
+    let header = header.child(components::outlined_icon_button("reader-sidebar-close", components::shortcut_tooltip(text!(reader::close_sidebar), "escape"), IconName::Close).debug_selector(|| "reader-sidebar-close".into()).on_click(
+        move |_, window, cx| {
             cx.stop_propagation();
             close_target.execute(ChromeCommand::HideSidebar, window, cx);
-        }));
-
-    #[cfg(feature = "kobo")]
-    let header = div()
-        .flex_none()
-        .w_full()
-        .flex()
-        .flex_col()
-        .child(header)
-        .when(active == SidebarTab::Settings, |header| header.when_some(owner.device_controls.clone(), |header, controls| header.child(div().key_context("ReaderDeviceControls").border_b_1().border_color(theme.rule).child(controls))));
+        },
+    ));
 
     let panel = div().flex_1().min_w_0().h_full().min_h_0().flex().flex_col().when(mobile, |panel| panel.child(components::reader_sheet_grab(theme))).child(header).child(
         div()
@@ -366,12 +365,38 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
 fn history_button(owner: &ChromePresentation, target: &ChromeTarget, forward: bool, cx: &App) -> components::Button {
     let (back_available, forward_available) = owner.history;
     let (id, label, shortcut, icon, available) =
-        if forward { ("reader-history-forward", "Forward", "reader.forward", IconName::ArrowRight, forward_available) } else { ("reader-history-back", "Back", "reader.back", IconName::ArrowLeft, back_available) };
+        if forward { ("reader-history-forward", text!(common::forward), "reader.forward", IconName::ArrowRight, forward_available) } else { ("reader-history-back", text!(common::back), "reader.back", IconName::ArrowLeft, back_available) };
     let target = target.clone();
     components::outlined_icon_button(id, components::configured_shortcut_tooltip(label, shortcut, cx), icon).debug_selector(move || id.into()).disabled(!available).on_click(move |_, window, cx| {
         cx.stop_propagation();
         target.execute(ChromeCommand::History(forward), window, cx);
     })
+}
+
+/// Kobo exposes available reading-history directions at the page edges while
+/// the controls are showing, without putting a hit target over the text.
+#[cfg(feature = "kobo")]
+pub(crate) fn reader_history_controls<C: SidebarTarget>(owner: &C, target: &Entity<C>, theme: components::BrowserTheme, window: &Window, cx: &App) -> Vec<AnyElement> {
+    let presentation = ChromePresentation::new(owner);
+    let target = ChromeTarget::new(target);
+    let insets = window.insets().effective();
+    [false, true]
+        .into_iter()
+        .filter(|forward| if *forward { presentation.history.1 } else { presentation.history.0 })
+        .map(|forward| {
+            let button = history_button(&presentation, &target, forward, cx).size(gpui::rems(components::TOUCH_TARGET_REM)).rounded_full().border_1().border_color(theme.rule).bg(theme.page_bg).occlude();
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .when(forward, |edge| edge.right(insets.right + px(components::SPACE_SM)))
+                .when(!forward, |edge| edge.left(insets.left + px(components::SPACE_SM)))
+                .child(button)
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// The desktop rail: library, panels and reading history, then settings,
@@ -402,7 +427,7 @@ fn render_rail(owner: &ChromePresentation, target: &ChromeTarget, active: Option
         .when(active.is_some(), |rail| rail.key_context("ReaderSidebar"))
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .track_focus(&rail_focus)
-        .child(components::reader_rail_item("reader-rail-library", ReaderDestination::Library, "Return to library", ReaderRailMark::None, theme, cx).on_click(move |_, window, cx| {
+        .child(components::reader_rail_item("reader-rail-library", ReaderDestination::Library, text!(common::return_to_library), ReaderRailMark::None, theme, cx).on_click(move |_, window, cx| {
             library_target.execute(ChromeCommand::CloseReader, window, cx);
         }))
         .child(div().flex_none().h(px(components::SPACE_SM)));
@@ -417,7 +442,7 @@ fn render_rail(owner: &ChromePresentation, target: &ChromeTarget, active: Option
     }
     if let Some(mark) = owner.tts {
         let tts_target = target.clone();
-        rail = rail.child(components::reader_rail_item("reader-rail-tts", ReaderDestination::Tts, "Read aloud", mark, theme, cx).on_click(move |_, window, cx| tts_target.execute(ChromeCommand::Tts, window, cx)));
+        rail = rail.child(components::reader_rail_item("reader-rail-tts", ReaderDestination::Tts, text!(reader::read_aloud), mark, theme, cx).on_click(move |_, window, cx| tts_target.execute(ChromeCommand::Tts, window, cx)));
     }
     let percent = progress_label.trim_end_matches('%').to_owned();
     rail.child(components::reader_progress_ring(progress_fraction, percent, progress_detail, theme))
@@ -445,8 +470,7 @@ fn render_top_bar(owner: &ChromePresentation, target: &ChromeTarget, title: Stri
                 search_target.execute(ChromeCommand::ToggleTab(SidebarTab::Search), window, cx);
             }))
         })
-        .child(history_button(owner, target, false, cx))
-        .child(history_button(owner, target, true, cx))
+        .when(!cfg!(feature = "kobo"), |bar| bar.child(history_button(owner, target, false, cx)).child(history_button(owner, target, true, cx)))
         .into_any_element()
 }
 
@@ -763,6 +787,7 @@ mod tests {
                 cx.notify();
             });
             cx.simulate_keystrokes(key);
+            cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse(key).unwrap(), key_location: gpui::KeyLocation::Standard });
             view.read_with(cx, |view, _| {
                 assert_eq!(view.header_presses, presses);
                 assert_eq!(view.document_keys, 0);

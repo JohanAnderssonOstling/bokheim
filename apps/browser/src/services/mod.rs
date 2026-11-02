@@ -2,6 +2,7 @@
 
 mod app;
 mod book_command;
+pub(crate) mod browser;
 pub(crate) use book_command::{BookCommand, open_book_windows};
 pub(crate) mod updates;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,3 +27,4 @@ pub(crate) use notifications::{notify_error, notify_info, notify_undoable, notif
 #[cfg(feature = "kobo")]
 pub use app::SaveKoboAutoRotate;
 pub use app::{AppServices, AppStartup};
+pub(crate) use app::{catalog_client, preference_client};

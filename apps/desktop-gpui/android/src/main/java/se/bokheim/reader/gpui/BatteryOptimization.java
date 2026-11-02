@@ -27,13 +27,13 @@ final class BatteryOptimization {
         if (preferences.getBoolean(PROMPT_HANDLED, false)) return null;
         Runnable remember = () -> preferences.edit().putBoolean(PROMPT_HANDLED, true).apply();
         return new AlertDialog.Builder(activity)
-                .setTitle("Allow uninterrupted background playback")
-                .setMessage("Allow Bokheim to ignore battery optimization to help audiobooks and read-aloud keep playing with the screen off. This may use more battery. You can change this later in Android's battery settings.")
-                .setPositiveButton("Continue", (dialog, which) -> {
+                .setTitle(UiText.ANDROID_ALLOW_UNINTERRUPTED_BACKGROUND_PLAYBACK)
+                .setMessage(UiText.ANDROID_ALLOW_BOKHEIM_TO_IGNORE_BATTERY_OPTIMIZATION_TO_HELP_AUDIOBOOKS_AND_READ_ALOUD)
+                .setPositiveButton(UiText.BROWSE_CONTINUE, (dialog, which) -> {
                     remember.run();
                     requestExemption(activity);
                 })
-                .setNegativeButton("Not now", (dialog, which) -> remember.run())
+                .setNegativeButton(UiText.ANDROID_NOT_NOW, (dialog, which) -> remember.run())
                 .setOnCancelListener(dialog -> remember.run())
                 .show();
     }
@@ -47,7 +47,7 @@ final class BatteryOptimization {
             try {
                 activity.startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
             } catch (ActivityNotFoundException | SecurityException missingSettings) {
-                Toast.makeText(activity, "Battery settings are unavailable on this device. Playback can still continue.", Toast.LENGTH_LONG).show();
+                Toast.makeText(activity, UiText.ANDROID_BATTERY_SETTINGS_ARE_UNAVAILABLE_ON_THIS_DEVICE_PLAYBACK_CAN_STILL_CONTINUE, Toast.LENGTH_LONG).show();
             }
         }
     }

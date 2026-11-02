@@ -27,7 +27,7 @@ fn draw(window: WindowHandle<CardFixture>, cx: &TestAppContext) {
 
 fn row() -> BookCardRow {
     BookCardRow {
-        source: BookSource::Library { content_hash: BookId::from_bytes([7; 32]) },
+        source: BookSource::Library { book_id: BookId::from_bytes([7; 32]) },
         title: "A book title".into(),
         subtitle: Some("A subtitle".into()),
         author: "Writer".into(),
@@ -37,6 +37,7 @@ fn row() -> BookCardRow {
         format_category: LibraryFileTypeFilter::Book,
         audiobook_duration_ms: None,
         added_at: 0,
+        description: String::new(),
         source_directory: None,
     }
 }
@@ -59,7 +60,7 @@ async fn reader_entry_releases_hidden_covers_without_resetting_another_browse_wi
     let mut cards = Vec::new();
     let mut images = Vec::new();
     for index in 0..3 {
-        let book = BookCardRow { source: BookSource::Library { content_hash: BookId::from_bytes([index + 1; 32]) }, ..row() };
+        let book = BookCardRow { source: BookSource::Library { book_id: BookId::from_bytes([index + 1; 32]) }, ..row() };
         let card = cx.new(|cx| BookCardView::new(book, library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
         let image = Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(2, 3))]));
         images.push(Arc::downgrade(&image));
@@ -126,8 +127,8 @@ async fn cover_loads_decode_and_keep_existing_art_with_source_specific_retries(c
     image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode(&[10, 20, 30], 1, 1, image::ExtendedColorType::Rgb8).unwrap();
     let sources = [
         row().source,
-        BookSource::Catalog { content_hash: row().content_hash().unwrap() },
-        BookSource::Opds { source: Uuid::new_v4(), entry: CardKey([2; 32]), downloadable: true, buyable: false },
+        BookSource::Catalog { book_id: row().book_id().unwrap() },
+        BookSource::Opds { source: Uuid::new_v4(), entry: CardKey([2; 32]), downloadable: true },
         BookSource::ExternalCatalog { entry: CardKey([3; 32]), downloadable: true },
     ];
     for source in sources {
@@ -210,7 +211,7 @@ async fn placement_commands_preserve_folder_sources_and_flat_selection_order(cx:
         cards.push(card);
     }
     let second = BookId::from_bytes([8; 32]);
-    let other = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Library { content_hash: second }, ..book }, library, events, false, true, cx));
+    let other = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Library { book_id: second }, ..book }, library, events, false, true, cx));
     let copy = cx.update(|cx| BookCardView::selection_actions(&[cards[1].clone(), other, cards[1].clone()], cx).into_iter().find(|action| action.id == "copy").unwrap());
     window.update(cx, |_, window, cx| copy.run(window, cx)).unwrap();
     assert_eq!(*received.borrow(), [(vec![hash], Some(source), FolderPlacement::Copy), (vec![hash], Some(source), FolderPlacement::Move), (vec![hash], None, FolderPlacement::Copy), (vec![hash, second], None, FolderPlacement::Copy),]);
@@ -226,7 +227,7 @@ async fn import_feedback_replaces_progress_and_marks_only_successful_adds(cx: &m
     let (_directory, _session, library) = LibrarySession::test_context(cx).await;
     let book = row();
     let hash = book.library_file().unwrap();
-    let cached = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Catalog { content_hash: hash }, ..book.clone() }, library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
+    let cached = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Catalog { book_id: hash }, ..book.clone() }, library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
     assert!(!cx.update(|cx| BookCardView::selection_actions(from_ref(&cached), cx)[0].is_disabled()));
     let window = cx.add_window(|window, cx| {
         let empty = cx.new(|_| gpui::Empty);
@@ -339,7 +340,7 @@ async fn library_selection_download_only_enables_for_missing_books(cx: &mut Test
     let (_directory, _session, library) = LibrarySession::test_context(cx).await;
     let available = cx.new(|cx| BookCardView::new(row(), library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
     let missing_hash = BookId::from_bytes([8; 32]);
-    let missing = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Library { content_hash: missing_hash }, downloaded: false, ..row() }, library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
+    let missing = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Library { book_id: missing_hash }, downloaded: false, ..row() }, library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
     let selected = [available, missing];
     assert!(!cx.update(|cx| BookCardView::download_selection_action(&selected, cx).unwrap().is_disabled()), "a mixed selection must offer Download");
     for state in [DownloadState::Queued, DownloadState::Downloading(DownloadProgress::ZERO), DownloadState::Downloaded] {
@@ -348,7 +349,7 @@ async fn library_selection_download_only_enables_for_missing_books(cx: &mut Test
     }
     library.updates().update(cx, |updates, cx| updates.set_download_state_for_test(missing_hash, DownloadState::NotDownloaded, cx));
     assert!(!cx.update(|cx| BookCardView::download_selection_action(&selected, cx).unwrap().is_disabled()), "a removed or failed download must be available again");
-    let catalog = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Catalog { content_hash: BookId::from_bytes([9; 32]) }, ..row() }, library, Rc::new(|_, _, _| {}), false, false, cx));
+    let catalog = cx.new(|cx| BookCardView::new(BookCardRow { source: BookSource::Catalog { book_id: BookId::from_bytes([9; 32]) }, ..row() }, library, Rc::new(|_, _, _| {}), false, false, cx));
     assert!(cx.update(|cx| BookCardView::download_selection_action(&[catalog], cx).is_none()), "catalog imports use their own download operation");
 }
 
@@ -363,10 +364,11 @@ async fn play_opens_books_directly_and_shows_audiobook_detail_before_playback(cx
     let library_id = *library.backend().id();
     let library = LibraryContext::new(
         Rc::new(library.app().clone()),
+        library.catalog().clone(),
         Rc::new(library.backend().clone()),
         Rc::new(move |locator, title, target, _, _| {
             assert_eq!(*locator.library_id(), library_id);
-            assert_eq!(locator.content_hash(), hash);
+            assert_eq!(locator.book_id(), hash);
             assert_eq!(title, row().title);
             assert_eq!(target, None);
             opened.borrow_mut().push("open");
@@ -484,7 +486,7 @@ async fn progress_percentages_do_not_invalidate_cards_but_phase_changes_do(cx: &
     let notifications = Rc::new(Cell::new(0));
     let observed = notifications.clone();
     let _subscription = cx.update(|cx| cx.observe(&card, move |_, _| observed.set(observed.get() + 1)));
-    let hash = row().content_hash().unwrap();
+    let hash = row().book_id().unwrap();
     for state in [DownloadState::Queued, DownloadState::Downloading(DownloadProgress::ZERO), DownloadState::Downloading(DownloadProgress::new(0.5).unwrap()), DownloadState::Downloaded] {
         updates.update(cx, |updates, cx| updates.set_download_state_for_test(hash, state, cx));
     }
@@ -532,7 +534,7 @@ async fn profile_offscreen_presentation_views(cx: &mut TestAppContext) {
             let mut hash = [0; 32];
             hash[..8].copy_from_slice(&(index as u64).to_le_bytes());
             cx.new(|cx| {
-                BookCardView::new(BookCardRow { source: BookSource::Library { content_hash: BookId::from_bytes(hash) }, downloaded: false, download_requested: true, ..row() }, library.clone(), Rc::new(|_, _, _| {}), false, false, cx)
+                BookCardView::new(BookCardRow { source: BookSource::Library { book_id: BookId::from_bytes(hash) }, downloaded: false, download_requested: true, ..row() }, library.clone(), Rc::new(|_, _, _| {}), false, false, cx)
             })
         })
         .collect();

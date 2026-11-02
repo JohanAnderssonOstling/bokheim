@@ -62,17 +62,7 @@
                 <data android:scheme="bokheim" android:host="open" />
             </intent-filter>
 
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="application/epub+zip" />
-                <data android:mimeType="application/pdf" />
-                <data android:mimeType="application/x-mobipocket-ebook" />
-                <data android:mimeType="application/vnd.amazon.ebook" />
-                <data android:mimeType="application/x-mobi8-ebook" />
-                <data android:mimeType="audio/x-m4b" />
-                <data android:mimeType="audio/mp4" />
-            </intent-filter>
+            <!-- Book VIEW MIME types are generated from shared/book-model/formats.json. -->
         </activity>
     </application>
 </manifest>

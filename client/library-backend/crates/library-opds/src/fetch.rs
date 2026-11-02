@@ -55,7 +55,7 @@ async fn get(url: &Url, access: &Access<'_>) -> Result<(Vec<u8>, Option<String>,
             use base64::{engine::general_purpose::STANDARD, Engine};
             let served = response.url();
             let authorization = access.credentials.filter(|_| served.origin() == access.origin).map(|credentials| format!("Basic {}", STANDARD.encode(format!("{}:{}", credentials.username, credentials.password))));
-            let (status, bytes, content_type, served) = crate::browser::get(served, authorization, access.root).await.map_err(|error| blocked(&error))?;
+            let (status, bytes, content_type, served) = embedded_browser::verification::get(served, authorization, access.root).await.map_err(|error| blocked(&error))?;
             if status == 401 {
                 return Err(BackendError::classified(Failure::Unauthorized, format!("{url} asks to sign in")));
             }

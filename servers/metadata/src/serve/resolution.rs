@@ -1,10 +1,10 @@
 //! Pure subject and author resolution for enrichment results.
+use crate::MetadataError;
 use book_model::BookSubject;
 use metadata_contract::matching::author_match_keys;
-use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, LookupStatus, RichWorkMetadataMatch, SiblingSubjectConsensus, SIBLING_SUBJECT_CONSENSUS_METHOD};
-use crate::MetadataError;
-use subject_projection::{EDITION_SUBTREE_CONSENSUS_SOURCE, UNIFIED_SYSTEM_ID};
+use metadata_contract::{ClassificationMethod, ClassificationProvider, ClassificationScheme, ClassificationSource, EditionIdentityQuery, LookupStatus, RichWorkMetadataMatch, SiblingSubjectConsensus};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use subject_projection::{EDITION_SUBTREE_CONSENSUS_SOURCE, UNIFIED_SYSTEM_ID};
 
 pub fn merge_rich_matches(matches: &[RichWorkMetadataMatch]) -> RichWorkMetadataMatch {
     metadata_contract::merge_rich_work_matches(matches, classification_similarity_keys)
@@ -26,22 +26,30 @@ pub fn rich_subjects(matched: &RichWorkMetadataMatch) -> Result<Vec<BookSubject>
         subjects.push(BookSubject::new(heading.authority_uri.clone(), name, &heading.source, Some(heading.authority.clone()), None).map_err(|error| error.to_string())?);
     }
     for classification in &matched.classifications {
-        if let Some(ratio) = classification.evidence.iter().find_map(|e| e.method.strip_prefix(SIBLING_SUBJECT_CONSENSUS_METHOD)) {
+        if let Some(ratio) = classification.evidence.iter().find_map(|e| match &e.method {
+            ClassificationMethod::SiblingSubjectConsensus { support } => Some(support),
+            _ => None,
+        }) {
             let name = format!("{} (edition consensus: {ratio})", classification.notation);
-            let donors = classification.evidence.iter().filter(|e| e.method.starts_with(SIBLING_SUBJECT_CONSENSUS_METHOD) && !e.open_library_edition_id.is_empty()).map(|e| format!("https://openlibrary.org/books/{}", e.open_library_edition_id)).collect::<BTreeSet<_>>();
+            let donors = classification
+                .evidence
+                .iter()
+                .filter(|e| matches!(e.method, ClassificationMethod::SiblingSubjectConsensus { .. }) && !e.open_library_edition_id.is_empty())
+                .map(|e| format!("https://openlibrary.org/books/{}", e.open_library_edition_id))
+                .collect::<BTreeSet<_>>();
             for donor in donors {
                 subjects.push(BookSubject::new(Some(donor), &name, "metadata:edition-subject-consensus", Some("lcc".into()), Some(classification.notation.clone())).map_err(|error| error.to_string())?);
             }
             continue;
         }
-        if classification.evidence.iter().any(|e| e.method.starts_with("openlibrary_work_title_author:") || e.method == "openlibrary_declared_work_lcc") {
+        if classification.evidence.iter().any(|e| matches!(e.method, ClassificationMethod::TitleAuthor { provider: ClassificationProvider::OpenLibraryWork, .. } | ClassificationMethod::OpenLibraryDeclaredWorkLcc)) {
             let works = classification.evidence.iter().filter(|e| !e.open_library_work_id.is_empty()).map(|e| format!("https://openlibrary.org/works/{}", e.open_library_work_id)).collect::<BTreeSet<_>>();
             for work in works {
                 subjects.push(BookSubject::new(Some(work), &classification.notation, "openlibrary:metadata:declared-work", Some("lcc".into()), Some(classification.notation.clone())).map_err(|error| error.to_string())?);
             }
             continue;
         }
-        if classification.evidence.iter().any(|e| e.method.starts_with("librarything_isbn:")) {
+        if classification.evidence.iter().any(|e| matches!(e.method, ClassificationMethod::LibraryThingIsbn { .. })) {
             let authority = match classification.scheme {
                 ClassificationScheme::LibraryOfCongress => "lcc",
                 ClassificationScheme::DeweyDecimal => "ddc",
@@ -50,15 +58,15 @@ pub fn rich_subjects(matched: &RichWorkMetadataMatch) -> Result<Vec<BookSubject>
             subjects.push(BookSubject::new(None, &classification.notation, "librarything:metadata:isbn", Some(authority.into()), Some(classification.notation.clone())).map_err(|error| error.to_string())?);
             continue;
         }
-        if classification.evidence.iter().any(|e| e.method.starts_with(metadata_contract::authority_subjects::METHOD_PREFIX)) {
+        if classification.evidence.iter().any(|e| matches!(e.method, ClassificationMethod::TitleAuthor { provider: ClassificationProvider::LibraryOfCongress, .. })) {
             subjects.push(BookSubject::new(None, &classification.notation, "library_of_congress:metadata:title-author", Some("lcc".into()), Some(classification.notation.clone())).map_err(|error| error.to_string())?);
             continue;
         }
-        if classification.evidence.iter().any(|e| e.method == metadata_contract::subject_consensus::METHOD) {
+        if classification.evidence.iter().any(|e| e.method == ClassificationMethod::VerifiedMatchingEditions) {
             subjects.push(BookSubject::new(None, &classification.notation, "metadata:shared-edition-classification", Some("lcc".into()), Some(classification.notation.clone())).map_err(|error| error.to_string())?);
             continue;
         }
-        if classification.evidence.iter().any(|e| e.method == metadata_contract::year_consensus::METHOD) {
+        if classification.evidence.iter().any(|e| e.method == ClassificationMethod::VerifiedYearVariants) {
             subjects.push(BookSubject::new(None, &classification.notation, "metadata:year-only-edition-consensus", Some("lcc".into()), Some(classification.notation.clone())).map_err(|error| error.to_string())?);
             continue;
         }
@@ -195,7 +203,7 @@ pub fn classification_only_fallback(query: &EditionIdentityQuery, matched: metad
     for classification in &mut classifications {
         classification.source = ClassificationSource::Work;
         classification.evidence.push(metadata_contract::ClassificationEvidence {
-            method: "local_title_author_after_isbn_miss".into(),
+            method: ClassificationMethod::LocalTitleAuthorAfterIsbnMiss,
             isbn13: matched.canonical_isbn13.clone(),
             open_library_work_id: matched.open_library_work_id.clone().unwrap_or_default(),
             open_library_edition_id: matched.open_library_edition_id.clone(),

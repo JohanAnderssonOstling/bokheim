@@ -1,5 +1,9 @@
 //! Filterable language choices using the shared list and touch popover.
+use ui_text::text;
+
 use book_model::normalize_search_text;
+use language_tags::LanguageTag;
+use reader_lookups::parse_language_tag;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, IntoElement, Task, Window, div, px, rems};
 use gpui_component::{
@@ -11,21 +15,20 @@ use ui_components as components;
 
 use super::TranslationPopup;
 
-fn language_label(code: &str) -> String {
-    if let Some((_, name)) = LANGUAGES.iter().find(|(key, _)| *key == code) {
+fn language_label(tag: &LanguageTag) -> String {
+    if let Some((_, name)) = LANGUAGES.iter().find(|(key, _)| key.eq_ignore_ascii_case(tag.as_str())) {
         return (*name).into();
     }
-    if let Some((base, variant)) = code.split_once('-') {
-        if let Some((_, name)) = LANGUAGES.iter().find(|(key, _)| *key == base) {
-            return format!("{name} ({})", variant.to_ascii_uppercase());
-        }
+    if let Some((_, name)) = LANGUAGES.iter().find(|(key, _)| *key == tag.primary_language()) {
+        let variant = tag.extended_language_subtags().chain(tag.script()).chain(tag.region()).chain(tag.variant_subtags()).chain(tag.extension()).chain(tag.private_use()).collect::<Vec<_>>().join("-");
+        return format!(text!(reader::language_variant), variant.to_ascii_uppercase(), name = name);
     }
-    code.into()
+    tag.to_string()
 }
 
-pub(super) fn picker(source: bool, current: Option<&str>, window: &mut Window, cx: &mut Context<TranslationPopup>) -> AnyElement {
-    let label = current.map(language_label).unwrap_or_else(|| "Choose language".into());
-    let current = current.map(str::to_owned);
+pub(super) fn picker(source: bool, current: Option<&LanguageTag>, window: &mut Window, cx: &mut Context<TranslationPopup>) -> AnyElement {
+    let label = current.map(language_label).unwrap_or_else(|| text!(reader::choose_language).into());
+    let current = current.cloned();
     let owner = cx.entity().downgrade();
     let id = if source { "translation-source" } else { "translation-target" };
     let list_state = window.use_keyed_state((id, 0usize), cx, |_, _| None::<Entity<ListState<LanguageList>>>);
@@ -59,7 +62,7 @@ pub(super) fn picker(source: bool, current: Option<&str>, window: &mut Window, c
                         .subscribe(&list, cx, move |list, event: &ListEvent, window, cx| {
                             match event {
                                 ListEvent::Confirm(index) => {
-                                    if let Some(code) = list.read(cx).delegate().code(*index).map(str::to_owned) {
+                                    if let Some(code) = list.read(cx).delegate().code(*index).cloned() {
                                         let _ = owner.update(cx, |owner, cx| owner.select_language(source, code, cx));
                                     }
                                 }
@@ -82,28 +85,28 @@ pub(super) fn picker(source: bool, current: Option<&str>, window: &mut Window, c
                 .h(px(320.0).min((viewport.height - insets.top - insets.bottom - px(24.0)).max(px(1.0))))
                 .p_0()
                 .gap_0()
-                .child(List::new(&list).search_placeholder("Filter languages"))
+                .child(List::new(&list).search_placeholder(text!(reader::filter_languages)))
         })
         .into_any_element()
 }
 
 struct LanguageList {
-    choices: Vec<(String, String)>,
+    choices: Vec<(LanguageTag, String)>,
     filtered: Vec<usize>,
-    current: Option<String>,
+    current: Option<LanguageTag>,
 }
 
 impl LanguageList {
-    fn new(current: Option<String>) -> Self {
-        let mut choices = LANGUAGES.iter().map(|(code, label)| ((*code).to_owned(), (*label).to_owned())).collect::<Vec<_>>();
-        if let Some(code) = current.as_deref().filter(|code| !LANGUAGES.iter().any(|(key, _)| key == code)) {
-            choices.push((code.into(), language_label(code)));
+    fn new(current: Option<LanguageTag>) -> Self {
+        let mut choices = LANGUAGES.iter().filter_map(|(code, label)| Some((parse_language_tag(code)?, (*label).to_owned()))).collect::<Vec<_>>();
+        if let Some(code) = current.as_ref().filter(|code| !choices.iter().any(|(key, _)| key == *code)) {
+            choices.push((code.clone(), language_label(code)));
         }
         Self { filtered: (0..choices.len()).collect(), choices, current }
     }
 
-    fn code(&self, index: IndexPath) -> Option<&str> {
-        self.filtered.get(index.row).map(|index| self.choices[*index].0.as_str())
+    fn code(&self, index: IndexPath) -> Option<&LanguageTag> {
+        self.filtered.get(index.row).map(|index| &self.choices[*index].0)
     }
 }
 
@@ -123,72 +126,72 @@ impl ListDelegate for LanguageList {
 
     fn render_item(&mut self, index: IndexPath, _: &mut Window, _: &mut Context<ListState<Self>>) -> Option<Self::Item> {
         let (code, label) = &self.choices[*self.filtered.get(index.row)?];
-        Some(ListItem::new(code.clone()).h(rems(components::settings_control_size_rem())).check_icon(IconName::Check).confirmed(self.current.as_ref() == Some(code)).child(label.clone()))
+        Some(ListItem::new(code.to_string()).h(rems(components::settings_control_size_rem())).check_icon(IconName::Check).confirmed(self.current.as_ref() == Some(code)).child(label.clone()))
     }
 
     fn set_selected_index(&mut self, _: Option<IndexPath>, _: &mut Window, _: &mut Context<ListState<Self>>) {}
 
     fn render_empty(&mut self, _: &mut Window, _: &mut Context<ListState<Self>>) -> impl IntoElement {
-        div().p(px(16.0)).child("No languages found.")
+        div().p(px(16.0)).child(text!(reader::no_languages_found))
     }
 }
 
 const LANGUAGES: &[(&str, &str)] = &[
-    ("af", "Afrikaans"),
-    ("sq", "Albanian"),
-    ("ar", "Arabic"),
-    ("hy", "Armenian"),
-    ("bn", "Bengali"),
-    ("bg", "Bulgarian"),
-    ("ca", "Catalan"),
-    ("zh", "Chinese"),
-    ("zh-cn", "Chinese (Simplified)"),
-    ("zh-tw", "Chinese (Traditional)"),
-    ("hr", "Croatian"),
-    ("cs", "Czech"),
-    ("da", "Danish"),
-    ("nl", "Dutch"),
-    ("en", "English"),
-    ("et", "Estonian"),
-    ("fi", "Finnish"),
-    ("fr", "French"),
-    ("ka", "Georgian"),
-    ("de", "German"),
-    ("el", "Greek"),
-    ("he", "Hebrew"),
-    ("hi", "Hindi"),
-    ("hu", "Hungarian"),
-    ("is", "Icelandic"),
-    ("id", "Indonesian"),
-    ("ga", "Irish"),
-    ("it", "Italian"),
-    ("ja", "Japanese"),
-    ("ko", "Korean"),
-    ("la", "Latin"),
-    ("lv", "Latvian"),
-    ("lt", "Lithuanian"),
-    ("ms", "Malay"),
-    ("nb", "Norwegian Bokmål"),
-    ("nn", "Norwegian Nynorsk"),
-    ("fa", "Persian"),
-    ("pl", "Polish"),
-    ("pt", "Portuguese"),
-    ("pt-br", "Portuguese (Brazil)"),
-    ("pt-pt", "Portuguese (Portugal)"),
-    ("ro", "Romanian"),
-    ("ru", "Russian"),
-    ("sr", "Serbian"),
-    ("sk", "Slovak"),
-    ("sl", "Slovenian"),
-    ("es", "Spanish"),
-    ("sw", "Swahili"),
-    ("sv", "Swedish"),
-    ("tl", "Tagalog"),
-    ("ta", "Tamil"),
-    ("th", "Thai"),
-    ("tr", "Turkish"),
-    ("uk", "Ukrainian"),
-    ("ur", "Urdu"),
-    ("vi", "Vietnamese"),
-    ("cy", "Welsh"),
+    ("af", text!(reader::afrikaans)),
+    ("sq", text!(reader::albanian)),
+    ("ar", text!(common::arabic)),
+    ("hy", text!(reader::armenian)),
+    ("bn", text!(reader::bengali)),
+    ("bg", text!(common::bulgarian)),
+    ("ca", text!(reader::catalan)),
+    ("zh", text!(common::chinese)),
+    ("zh-cn", text!(reader::chinese_simplified)),
+    ("zh-tw", text!(reader::chinese_traditional)),
+    ("hr", text!(reader::croatian)),
+    ("cs", text!(reader::czech)),
+    ("da", text!(common::danish)),
+    ("nl", text!(common::dutch)),
+    ("en", text!(common::english)),
+    ("et", text!(reader::estonian)),
+    ("fi", text!(common::finnish)),
+    ("fr", text!(common::french)),
+    ("ka", text!(reader::georgian)),
+    ("de", text!(common::german)),
+    ("el", text!(common::greek)),
+    ("he", text!(common::hebrew)),
+    ("hi", text!(common::hindi)),
+    ("hu", text!(reader::hungarian)),
+    ("is", text!(common::icelandic)),
+    ("id", text!(reader::indonesian)),
+    ("ga", text!(reader::irish)),
+    ("it", text!(common::italian)),
+    ("ja", text!(common::japanese)),
+    ("ko", text!(reader::korean)),
+    ("la", text!(common::latin)),
+    ("lv", text!(reader::latvian)),
+    ("lt", text!(reader::lithuanian)),
+    ("ms", text!(reader::malay)),
+    ("nb", text!(common::norwegian_bokmal)),
+    ("nn", text!(common::norwegian_nynorsk)),
+    ("fa", text!(reader::persian)),
+    ("pl", text!(common::polish)),
+    ("pt", text!(common::portuguese)),
+    ("pt-br", text!(reader::portuguese_brazil)),
+    ("pt-pt", text!(reader::portuguese_portugal)),
+    ("ro", text!(reader::romanian)),
+    ("ru", text!(common::russian)),
+    ("sr", text!(reader::serbian)),
+    ("sk", text!(reader::slovak)),
+    ("sl", text!(reader::slovenian)),
+    ("es", text!(common::spanish)),
+    ("sw", text!(reader::swahili)),
+    ("sv", text!(common::swedish)),
+    ("tl", text!(common::tagalog)),
+    ("ta", text!(common::tamil)),
+    ("th", text!(reader::thai)),
+    ("tr", text!(reader::turkish)),
+    ("uk", text!(common::ukrainian)),
+    ("ur", text!(reader::urdu)),
+    ("vi", text!(reader::vietnamese)),
+    ("cy", text!(reader::welsh)),
 ];

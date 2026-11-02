@@ -1,4 +1,6 @@
 //! Annotations and book text share book rows, controls and page loading.
+use ui_text::text;
+
 mod overlay;
 mod row;
 
@@ -234,7 +236,7 @@ impl NotebookPage {
                                 });
                                 let stale = cx.subscribe(&row, |page: &mut Self, _, _: &row::Stale, cx| {
                                     if page.content_search {
-                                        page.error = Some("Search again to refresh these results.".into());
+                                        page.error = Some(text!(browse::search_again_to_refresh_these_results).into());
                                         cx.notify();
                                     } else {
                                         page.invalidate(cx);
@@ -253,12 +255,14 @@ impl NotebookPage {
                             page.remove_snapshot_books(removal, cx);
                         }
                     }
-                    Ok(None) if content_search => page.error = Some("Search again to refresh these results.".into()),
+                    Ok(None) if content_search => page.error = Some(text!(browse::search_again_to_refresh_these_results).into()),
                     Ok(None) => {
                         page.load(None, cx);
                         return;
                     }
-                    Err(error) => page.error = Some(components::user_facing_error(&error, if content_search { "Could not search book text. Please try again." } else { "Could not load annotations. Please try again." }).into()),
+                    Err(error) => {
+                        page.error = Some(components::user_facing_error(&error, if content_search { text!(browse::could_not_search_book_text_please_try_again) } else { text!(browse::could_not_load_annotations_please_try_again) }).into())
+                    }
                 }
                 cx.notify();
             });
@@ -308,7 +312,7 @@ impl NotebookPage {
     fn search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
         self.search
             .get_or_insert_with(|| {
-                let input = cx.new(|cx| InputState::new(window, cx).placeholder(if self.content_search { "Search book text" } else { "Search notes" }));
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder(if self.content_search { text!(browse::search_book_text) } else { text!(browse::search_notes) }));
                 let subscription = cx.subscribe(&input, |page, input, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         page.query.search = input.read(cx).value().to_string();
@@ -351,7 +355,7 @@ impl NotebookPage {
 
     fn options_menu(menu: PopupMenu, page: Entity<Self>, cx: &mut Context<PopupMenu>) -> PopupMenu {
         let query = page.read(cx).query.clone();
-        let mut menu = menu.dismiss_on_select(false).item(components::menu_section("Sort by"));
+        let mut menu = menu.dismiss_on_select(false).item(components::menu_section(text!(browse::sort_by)));
         for (label, choice, checked) in choices(&query, page.read(cx).content_search) {
             let page = page.clone();
             let rebuild = cx.weak_entity();
@@ -369,7 +373,7 @@ impl NotebookPage {
                 .checked(checked),
             );
             if matches!(choice, Choice::Sort(NotebookSort::BookName)) {
-                menu = menu.separator().item(components::menu_section("Format"));
+                menu = menu.separator().item(components::menu_section(text!(browse::format)));
             }
         }
         menu
@@ -377,14 +381,14 @@ impl NotebookPage {
 
     fn options_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
-        let mut rows = div().flex().flex_col().child(components::bottom_sheet_section("Sort by", theme));
+        let mut rows = div().flex().flex_col().child(components::bottom_sheet_section(text!(browse::sort_by), theme));
         for (index, (label, choice, checked)) in choices(&self.query, self.content_search).into_iter().enumerate() {
             rows = rows.child(components::bottom_sheet_row(("notebook-option", index), label, checked, theme).on_click(cx.listener(move |page, _, _, cx| page.choose(choice, cx))));
             if matches!(choice, Choice::Sort(NotebookSort::BookName)) {
-                rows = rows.child(components::bottom_sheet_divider(theme)).child(components::bottom_sheet_section("Format", theme));
+                rows = rows.child(components::bottom_sheet_divider(theme)).child(components::bottom_sheet_section(text!(browse::format), theme));
             }
         }
-        let header = components::bottom_sheet_header("Sort & filter", theme).child(components::bottom_sheet_close_button("notebook-options-close", theme).on_click(cx.listener(|page, _, _, cx| {
+        let header = components::bottom_sheet_header(text!(browse::sort_filter), theme).child(components::bottom_sheet_close_button("notebook-options-close", theme).on_click(cx.listener(|page, _, _, cx| {
             page.options_open = false;
             cx.notify();
         })));
@@ -407,11 +411,11 @@ enum Choice {
 
 fn choices(query: &NotebookQuery, content_search: bool) -> Vec<(&'static str, Choice, bool)> {
     vec![
-        (if content_search { "Most recently added" } else { "Most recent annotations" }, Choice::Sort(NotebookSort::Recent), query.sort == NotebookSort::Recent),
-        ("Book name", Choice::Sort(NotebookSort::BookName), query.sort == NotebookSort::BookName),
-        ("Books", Choice::Format(LibraryFileTypeFilter::Book), query.formats.contains(&LibraryFileTypeFilter::Book)),
-        ("PDF", Choice::Format(LibraryFileTypeFilter::Pdf), query.formats.contains(&LibraryFileTypeFilter::Pdf)),
-        ("Clear filters", Choice::Clear, false),
+        (if content_search { text!(browse::most_recently_added) } else { text!(browse::most_recent_annotations) }, Choice::Sort(NotebookSort::Recent), query.sort == NotebookSort::Recent),
+        (text!(browse::book_name), Choice::Sort(NotebookSort::BookName), query.sort == NotebookSort::BookName),
+        (text!(browse::books), Choice::Format(LibraryFileTypeFilter::Book), query.formats.contains(&LibraryFileTypeFilter::Book)),
+        (text!(browse::pdf), Choice::Format(LibraryFileTypeFilter::Pdf), query.formats.contains(&LibraryFileTypeFilter::Pdf)),
+        (text!(browse::clear_filters), Choice::Clear, false),
     ]
 }
 
@@ -436,7 +440,7 @@ impl Render for NotebookPage {
         let theme = components::browser_theme(cx);
         let input = self.search_input(window, cx);
         let compact = components::WindowWidthClass::for_window(window).is_compact();
-        let trigger = components::selectable_button(components::outlined_icon_button("notebook-options", "Sort & filter", IconName::Settings2), !self.query.formats.is_empty(), theme);
+        let trigger = components::selectable_button(components::outlined_icon_button("notebook-options", text!(browse::sort_filter), IconName::Settings2), !self.query.formats.is_empty(), theme);
         let options = if compact || components::touch_ui() || cfg!(feature = "kobo") {
             trigger
                 .on_click(cx.listener(|page, _, _, cx| {
@@ -472,7 +476,7 @@ impl Render for NotebookPage {
             .child(topbar)
             .child(div().flex_1().min_h_0().px(rems(0.5)).child(self.flow.clone()));
         if let Some(error) = self.error.clone() {
-            body = body.child(div().p(rems(1.0)).child(components::error_text(theme).child(error)).child(components::outlined_text_button("notebook-retry", "Retry").on_click(cx.listener(|page, _, _, cx| page.load(None, cx)))));
+            body = body.child(div().p(rems(1.0)).child(components::error_text(theme).child(error)).child(components::outlined_text_button("notebook-retry", text!(common::retry)).on_click(cx.listener(|page, _, _, cx| page.load(None, cx)))));
         }
         if self.options_open {
             body = body.child(self.options_sheet(cx));

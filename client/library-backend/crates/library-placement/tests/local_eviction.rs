@@ -27,7 +27,7 @@ fn local_book() -> (TempDir, AssetStore, Database, BookId) {
             parent_id: ROOT_DIR_ID,
             file_name: "book.epub".into(),
             format: BookFormat::Epub,
-            content_hash: hash,
+            book_id: hash,
             size_bytes: BOOK_BYTES.len() as u64,
             inspection_version: 1,
             inspection: Some(InspectedBook { pdf: None, audiobook: None, metadata: record.clone(), toc: vec![] }),
@@ -42,12 +42,12 @@ fn local_book() -> (TempDir, AssetStore, Database, BookId) {
     (root, assets, database, hash)
 }
 
-#[test]
-fn unfinished_upload_keeps_its_file_and_queued_changes() {
+#[tokio::test]
+async fn unfinished_upload_keeps_its_file_and_queued_changes() {
     let (root, assets, database, hash) = local_book();
     let before = database.transfer_snapshot(&[hash]).unwrap();
 
-    let error = evict_local_book(&assets, &database, &hash).unwrap_err();
+    let error = evict_local_book(&assets, &database, &hash).await.unwrap_err();
 
     assert!(error.to_string().contains("upload it before removing the download"));
     assert_eq!(fs::read(root.path().join("book.epub")).unwrap(), BOOK_BYTES);
@@ -56,27 +56,27 @@ fn unfinished_upload_keeps_its_file_and_queued_changes() {
     assert!(database.stored_sync_status().unwrap().has_unsynced_changes);
 }
 
-#[test]
-fn uploaded_cover_does_not_allow_removing_the_only_book_copy() {
+#[tokio::test]
+async fn uploaded_cover_does_not_allow_removing_the_only_book_copy() {
     let (root, assets, database, hash) = local_book();
     database.record_remote_asset(BlobKind::Thumbnail, &hash).unwrap();
 
-    assert!(evict_local_book(&assets, &database, &hash).is_err());
+    assert!(evict_local_book(&assets, &database, &hash).await.is_err());
     assert_eq!(fs::read(root.path().join("book.epub")).unwrap(), BOOK_BYTES);
     assert!(database.is_book_downloaded(&hash).unwrap());
 }
 
-#[test]
-fn server_backed_book_can_remove_its_file_and_keep_its_entry() {
+#[tokio::test]
+async fn server_backed_book_can_remove_its_file_and_keep_its_entry() {
     let (root, assets, database, hash) = local_book();
     database.record_remote_asset(BlobKind::Book, &hash).unwrap();
     let path = database.book_paths(&hash).unwrap().first().unwrap().clone();
 
-    evict_local_book(&assets, &database, &hash).unwrap();
+    evict_local_book(&assets, &database, &hash).await.unwrap();
 
     assert!(!root.path().join("book.epub").exists());
     assert!(!database.is_book_downloaded(&hash).unwrap());
     assert_eq!(database.book_paths(&hash).unwrap(), vec![path]);
     assert_eq!(database.browse_book_detail(&hash).unwrap().book.title, "Book");
-    evict_local_book(&assets, &database, &hash).unwrap();
+    evict_local_book(&assets, &database, &hash).await.unwrap();
 }

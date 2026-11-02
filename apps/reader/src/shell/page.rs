@@ -10,8 +10,8 @@ use crate::shell::input::{self, CommonReaderCommands};
 use crate::shell::state_panel::SidebarTab;
 use crate::shell::toolbar::{SidebarTarget, reader_bottom_bar, reader_rail, reader_top_bar};
 use crate::{
-    CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NavigateBack, NavigateForward, NextLine, NextPage, NextSidebarTab, OpenReaderSettings, PreviousLine, PreviousPage, PreviousSidebarTab, ReturnToLibrary, ToggleNotes,
-    RevealReaderChrome, ToggleSearch, ToggleSidebar, ToggleToc, ToggleTts,
+    CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NavigateBack, NavigateForward, NextLine, NextPage, NextSidebarTab, OpenReaderSettings, PreviousLine, PreviousPage, PreviousSidebarTab, ReturnToLibrary, RevealReaderChrome,
+    ToggleNotes, ToggleSearch, ToggleSidebar, ToggleToc, ToggleTts,
 };
 
 /// The phone's chrome around the page.
@@ -56,6 +56,13 @@ struct ReaderPage {
 pub(crate) fn reader_surface<C: CommonReaderCommands + SidebarTarget>(owner: &C, surface: ReaderSurface, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>) -> Div {
     let ReaderSurface { document, dock, sidebar, active_tab, chrome_visible, document_ready, loading_focus, title, chapter, progress_label, progress_fraction, progress_detail, bottom_bar_id } = surface;
     let document = if window.supports_region_capture() { super::screenshot::document(document, cx.entity_id(), theme) } else { document };
+    #[cfg(feature = "kobo")]
+    let document = div()
+        .relative()
+        .size_full()
+        .child(document)
+        .when(chrome_visible && document_ready && sidebar.is_none(), |document| document.children(super::toolbar::reader_history_controls(owner, &cx.entity(), theme, window, cx)))
+        .into_any_element();
     if !components::uses_mobile_reader_controls(window) {
         let rail = reader_rail(owner, &cx.entity(), active_tab.filter(|_| sidebar.is_some()), progress_fraction, progress_label, progress_detail, theme, window, cx);
         let document = div().size_full().min_h_0().min_w_0().flex().flex_col().child(document).children(dock).into_any_element();

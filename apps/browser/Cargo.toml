@@ -6,17 +6,20 @@ edition = "2024"
 [features]
 default = []
 filesystem-libraries = []
-kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "dep:kobo-update", "ui-components/kobo", "gpui-image-eviction/kobo"]
+kobo = ["mobile", "app/kobo", "dep:gpui_kobo", "dep:kobo-device", "dep:kobo-update", "ui-components/kobo", "gpui-image-eviction/kobo"]
 mobile = ["ui-components/mobile"]
 
 [dependencies]
+ui-text = { path = "../ui-text" }
 dictionary-settings = { path = "../dictionary-settings" }
 update-client = { path = "../../client/update-client" }
 library-backend = { path = "../../client/library-backend" }
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"
 account-contract = { path = "../../shared/account-contract" }
-app-preferences = { path = "../../client/preferences" }
+account-client = { path = "../../client/account-client" }
+app-preferences = { path = "../../client/preferences", features = ["store"] }
+dictionary = { path = "../../client/app/crates/dictionary", features = ["store"] }
 app = { path = "../../client/app", default-features = false }
 ui-components = { path = "../components" }
 gpui.workspace = true
@@ -37,6 +40,9 @@ uuid = { version = "1", features = ["v4"] }
 web-time = "1"
 zune-core = "0.5"
 zune-jpeg = "0.5"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+embedded-browser = { path = "../../client/embedded-browser" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 gpui_android = { workspace = true }

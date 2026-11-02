@@ -43,7 +43,7 @@ impl Fixture {
     }
     async fn library(&self, user: &str) -> LibraryId {
         let library = LibraryId::new_v4();
-        PostgresSyncRepository::new(self.database.clone()).create_library(user, &LibraryNameRequest { library_id: library, library_name: "Books".into(), storage: Default::default() }).await.unwrap();
+        PostgresSyncRepository::new(self.database.clone()).create_library(user, &LibraryNameRequest { library_id: library, library_name: "Books".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
         library
     }
     async fn put(&self, user: &str, library: LibraryId, book: BookId, bytes: Vec<u8>) {
@@ -98,14 +98,14 @@ async fn canonical_bytes_are_charged_once_and_remain_until_the_last_reference() 
     let checksum = ContentHash::from(blake3::hash(&bytes));
     let length = bytes.len() as u64;
     server_postgres::configure_user_storage_quota(&f.database, "alice", length as i64).await.unwrap();
-    let preview = f.assets.negotiate_books("alice", &first_library, [first, second, third].into_iter().map(|content_hash| BlobManifestEntry { content_hash, size_bytes: length, byte_checksum: Some(checksum) }).collect()).await.unwrap();
+    let preview = f.assets.negotiate_books("alice", &first_library, [first, second, third].into_iter().map(|book_id| BlobManifestEntry { book_id, size_bytes: length, byte_checksum: Some(checksum) }).collect()).await.unwrap();
     assert_eq!(preview.upload.len(), 3);
     assert!(preview.owned.is_empty() && preview.rejected.is_empty());
     f.put("alice", first_library, first, bytes.clone()).await;
     // Even at a full quota, another logical identity for already-owned bytes
     // can be uploaded/verified or adopted through manifest negotiation.
     f.put("alice", second_library, second, bytes.clone()).await;
-    let response = f.assets.negotiate_books("alice", &third_library, vec![BlobManifestEntry { content_hash: third, size_bytes: length, byte_checksum: Some(checksum) }]).await.unwrap();
+    let response = f.assets.negotiate_books("alice", &third_library, vec![BlobManifestEntry { book_id: third, size_bytes: length, byte_checksum: Some(checksum) }]).await.unwrap();
     assert_eq!(response.owned, vec![third]);
     assert!(response.upload.is_empty() && response.rejected.is_empty());
     let usage = f.assets.storage_usage("alice").await.unwrap();
@@ -123,7 +123,7 @@ async fn canonical_bytes_are_charged_once_and_remain_until_the_last_reference() 
     // own ownership while sharing the same immutable physical bytes.
     let bob_library = f.library("bob").await;
     let bob = BookId::for_local_content(bob_library.as_bytes(), initial);
-    let response = f.assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { content_hash: bob, size_bytes: length, byte_checksum: Some(checksum) }]).await.unwrap();
+    let response = f.assets.negotiate_books("bob", &bob_library, vec![BlobManifestEntry { book_id: bob, size_bytes: length, byte_checksum: Some(checksum) }]).await.unwrap();
     assert_eq!(response.upload, vec![bob]);
     assert!(response.owned.is_empty());
     f.put("bob", bob_library, bob, bytes.clone()).await;

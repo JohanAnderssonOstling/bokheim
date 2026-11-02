@@ -6,6 +6,9 @@ publish = false
 autobins = false
 
 [dependencies]
+html-pipeline = { package = "skrift-pipeline", path = "../../../../../HtmlEngine/crates/html-pipeline" }
+html-style = { package = "skrift-style", path = "../../../../../HtmlEngine/crates/03-html-style" }
+
 futures-lite = "2"
 scraper.workspace = true
 lightningcss.workspace = true

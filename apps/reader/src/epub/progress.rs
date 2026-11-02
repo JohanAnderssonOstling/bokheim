@@ -4,6 +4,8 @@
 //! numbers. Folding that here keeps repaints and database writes tied to real
 //! movement rather than to layout churn.
 
+use ui_text::text;
+
 use crate::epub::{ProgressState, ProgressSummary};
 
 impl Default for ProgressState {
@@ -30,7 +32,7 @@ impl ProgressSummary {
     /// weights are useful for relative progress, not as synthetic page or
     /// location numbers.
     pub(crate) fn tooltip(self) -> String {
-        format!("{}% through book", self.percent)
+        format!(text!(reader::through_book), self.percent)
     }
 }
 

@@ -3,7 +3,9 @@ mod bundled;
 mod catalog;
 pub use catalog::{FontCatalog, FontCatalogTarget, load_font_catalog, observe_font_catalog};
 
-use std::{borrow::Cow, cell::RefCell, rc::Rc};
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+use std::borrow::Cow;
+use std::{cell::RefCell, rc::Rc};
 
 use bundled::FAMILIES;
 
@@ -72,11 +74,12 @@ pub fn equal_choice_group_width(labels: &[&str], size_rem: f32, inset: f32, gap:
     (widest + px(inset)) * labels.len() as f32 + px(gap * labels.len().saturating_sub(1) as f32)
 }
 
-type FontSource = Rc<dyn Fn(&str) -> Result<Cow<'static, [u8]>, String>>;
+type FontSource = Rc<dyn Fn(&str, &TextSystem) -> Result<(), String>>;
 
 struct BundledFonts {
     loaded: [bool; FAMILIES.len()],
     source: FontSource,
+    interface_family: Option<String>,
 }
 
 impl BundledFonts {
@@ -85,8 +88,9 @@ impl BundledFonts {
         if self.loaded[index] {
             return Ok(false);
         }
-        let fonts = FAMILIES[index].files.iter().map(|name| (self.source)(name)).collect::<Result<Vec<_>, _>>().map_err(std::io::Error::other)?;
-        text_system.add_fonts(fonts)?;
+        for name in FAMILIES[index].files {
+            (self.source)(name, text_system).map_err(std::io::Error::other)?;
+        }
         self.loaded[index] = true;
         Ok(true)
     }
@@ -99,7 +103,7 @@ fn bundled_fonts(cx: &mut App) -> Rc<RefCell<BundledFonts>> {
     if let Some(fonts) = cx.try_global::<RegisteredBundledFonts>() {
         return fonts.0.clone();
     }
-    let fonts = Rc::new(RefCell::new(BundledFonts { loaded: [false; FAMILIES.len()], source: Rc::new(load_bundled_font) }));
+    let fonts = Rc::new(RefCell::new(BundledFonts { loaded: [false; FAMILIES.len()], source: Rc::new(register_bundled_font), interface_family: None }));
     html_gpui::backend::configure_font_loader(loader_for_fonts(fonts.clone()), cx);
     cx.set_global(RegisteredBundledFonts(fonts.clone()));
     fonts
@@ -108,7 +112,7 @@ fn bundled_fonts(cx: &mut App) -> Rc<RefCell<BundledFonts>> {
 /// Android reads a requested face directly from APK assets; no eager extraction.
 #[cfg(target_os = "android")]
 pub fn configure_bundled_font_source(source: impl Fn(&str) -> Result<Cow<'static, [u8]>, String> + 'static, cx: &mut App) {
-    bundled_fonts(cx).borrow_mut().source = Rc::new(source);
+    bundled_fonts(cx).borrow_mut().source = Rc::new(move |name, text_system| text_system.add_fonts(vec![source(name)?]).map_err(|error| error.to_string()));
 }
 
 /// A host-provided catalog of installed families, without GPUI's synthetic
@@ -129,9 +133,15 @@ pub fn register_interface_fonts(preferences: &BrowsingPreferences, cx: &mut App)
     // generic font must exist even when widgets request .SystemUIFont.
     #[cfg(target_os = "android")]
     fonts.register("Noto Sans", cx.text_system())?;
-    fonts.register(configured_ui_font_name(preferences, cx), cx.text_system())?;
+    let family = configured_ui_font_name(preferences, cx);
+    fonts.register(family, cx.text_system())?;
     if !preferences.custom_ui_font_active() && preferences.ui_font_family() == UiFontFamily::Serif {
         fonts.register(crate::DISPLAY_FONT_FAMILY, cx.text_system())?;
+    }
+    if fonts.interface_family.as_deref() != Some(family) {
+        // Old previews and the previous UI face can be reloaded by their stable IDs.
+        cx.text_system().release_font_data();
+        fonts.interface_family = Some(family.to_owned());
     }
     Ok(())
 }
@@ -168,7 +178,7 @@ fn loader_for_fonts(fonts: Rc<RefCell<BundledFonts>>) -> html_gpui::backend::Fon
             }
         } else {
             #[cfg(not(target_arch = "wasm32"))]
-            if !fonts.loaded[3] && !text.is_ascii() && text.chars().any(html::style::is_cjk_character) {
+            if !fonts.loaded[3] && !text.is_ascii() && text.chars().any(html::text::is_cjk_character) {
                 return match fonts.register(CJK_FONT_FAMILY, text_system) {
                     Ok(loaded) => loaded,
                     Err(error) => {
@@ -198,7 +208,7 @@ pub fn ensure_text_fonts(text: &str, cx: &App) {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(fonts) = cx.try_global::<RegisteredBundledFonts>() {
         let mut fonts = fonts.0.borrow_mut();
-        if !fonts.loaded[3] && !text.is_ascii() && text.chars().any(html::style::is_cjk_character) {
+        if !fonts.loaded[3] && !text.is_ascii() && text.chars().any(html::text::is_cjk_character) {
             if let Err(error) = fonts.register(CJK_FONT_FAMILY, cx.text_system()) {
                 log::error!("failed to install CJK glyph fallback: {error}");
             }
@@ -243,12 +253,17 @@ pub async fn ensure_cjk_fonts(cx: &mut AsyncApp) -> Result<(), String> {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-fn load_bundled_font(name: &str) -> Result<Cow<'static, [u8]>, String> {
+fn register_bundled_font(name: &str, text_system: &TextSystem) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| format!("locate bundled fonts: {error}"))?;
     let directory = executable.parent().ok_or("executable has no parent directory")?;
     let directory = if matches!(directory.file_name().and_then(|name| name.to_str()), Some("deps" | "examples")) { directory.parent().unwrap_or(directory) } else { directory };
     let path = directory.join("fonts").join(name);
-    std::fs::read(&path).map(Cow::Owned).map_err(|error| format!("read bundled font {}: {error}", path.display()))
+    text_system.add_font_file(&path).map_err(|error| format!("register bundled font {}: {error}", crate::path_label(&path)))
+}
+
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+fn register_bundled_font(name: &str, text_system: &TextSystem) -> Result<(), String> {
+    text_system.add_fonts(vec![load_bundled_font(name)?]).map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "android")]

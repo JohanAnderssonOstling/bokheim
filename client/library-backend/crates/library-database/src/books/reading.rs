@@ -48,7 +48,7 @@ impl Database {
             if status == previous {
                 return Ok(false);
             }
-            record_local(transaction, LibraryStateEntry::ChapterReadStatus { content_hash: *hash, value: status })?;
+            record_local(transaction, LibraryStateEntry::ChapterReadStatus { book_id: *hash, value: status })?;
             Ok(true)
         })
     }
@@ -70,11 +70,11 @@ impl Database {
             // An unopened book is unread already; it gets no position for it.
             let position_changed = (read || previous_position.is_some()) && (previous_position.is_none() || previous != progress);
             if chapters_changed {
-                record_local(transaction, LibraryStateEntry::ChapterReadStatus { content_hash: *hash, value: chapters })?;
+                record_local(transaction, LibraryStateEntry::ChapterReadStatus { book_id: *hash, value: chapters })?;
             }
             if position_changed {
                 let position = previous_position.unwrap_or_else(|| ReadingPosition::start(format));
-                record_local(transaction, LibraryStateEntry::ReadingPosition { content_hash: *hash, value: ReadingPositionState { location: position, progress } })?;
+                record_local(transaction, LibraryStateEntry::ReadingPosition { book_id: *hash, value: ReadingPositionState { location: position, progress } })?;
             }
             Ok(position_changed || chapters_changed)
         })
@@ -120,9 +120,9 @@ impl Database {
             let chapters_changed = previous_chapters != chapters;
             let changed = previous_position.as_ref() != Some(&position) || previous.unwrap_or(0.0) != progress || chapters_changed;
             if chapters_changed {
-                record_local(transaction, LibraryStateEntry::ChapterReadStatus { content_hash: *hash, value: chapters })?;
+                record_local(transaction, LibraryStateEntry::ChapterReadStatus { book_id: *hash, value: chapters })?;
             }
-            record_local(transaction, LibraryStateEntry::ReadingPosition { content_hash: *hash, value: ReadingPositionState { location: position, progress } })?;
+            record_local(transaction, LibraryStateEntry::ReadingPosition { book_id: *hash, value: ReadingPositionState { location: position, progress } })?;
             if let Some(entry) = entry.map(str::trim).filter(|entry| !entry.is_empty()) {
                 transaction.reading_upsert_toc_entry(hash, entry)?;
             }

@@ -3,7 +3,7 @@
 use crate::book::PreparedText;
 use crate::epub::EpubSession;
 use crate::resource_path::local_resource_uri;
-use crate::{PreparedResources, TocEntry};
+use crate::{BookTocEntry, PreparedResources};
 use futures_lite::future::block_on;
 use std::io;
 
@@ -16,12 +16,12 @@ enum DocumentSource<'a> {
 /// EPUB documents remain in the archive; MOBI exposes its prepared virtual HTML.
 pub struct DocumentInspection<'a> {
     documents: Vec<String>,
-    toc: Vec<TocEntry>,
+    toc: Vec<BookTocEntry>,
     source: DocumentSource<'a>,
 }
 
 impl<'a> DocumentInspection<'a> {
-    pub(crate) fn from_epub(epub: &'a mut EpubSession, documents: Vec<String>, toc: Vec<TocEntry>) -> Self {
+    pub(crate) fn from_epub(epub: &'a mut EpubSession, documents: Vec<String>, toc: Vec<BookTocEntry>) -> Self {
         Self { documents, toc, source: DocumentSource::Epub(epub) }
     }
 
@@ -42,7 +42,7 @@ impl<'a> DocumentInspection<'a> {
         }
     }
 
-    pub fn toc(&self) -> &[TocEntry] {
+    pub fn toc(&self) -> &[BookTocEntry] {
         &self.toc
     }
 

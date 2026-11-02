@@ -48,7 +48,7 @@ pub(crate) async fn install() -> Result<(), String> {
             let path = bundled_path;
             if !web_storage::database_exists(&path)? {
                 let image = download_bundle().await?;
-                crate::platform::reserve_database_capacity(1).await?;
+                client_platform_web::reserve_database_capacity(1).await?;
                 web_storage::import_reference_database(&path, &image)?;
             }
             (path, bundled)
@@ -102,7 +102,7 @@ async fn download_newer(installed: u64) -> Result<(), String> {
         let snapshot = update_client::fetch::download(&release.artifact).await?;
         let source = serde_json::to_string(&release.artifact).map_err(|e| e.to_string())?;
         let image = installed::prepare_image(&snapshot, (release.release_id, release.format_version), &source)?;
-        crate::platform::reserve_database_capacity(1).await?;
+        client_platform_web::reserve_database_capacity(1).await?;
         web_storage::import_reference_database(&path, &image)?;
     }
     web_storage::publish_reference_database(STORED, &path)

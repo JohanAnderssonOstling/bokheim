@@ -1,7 +1,7 @@
 //! Exact source headings can supply classification even without an indexed ISBN.
 use book_model::{BookRecord, BookSubject};
 use metadata_contract::matching::bibliographic_match_key;
-use subject_projection::{has_usable_lcc_classification, project_subject_codes, reviewed_source_heading_subject, unified_subject_paths, BISAC_SYSTEM_ID};
+use subject_projection::{BISAC_SYSTEM_ID, has_usable_lcc_classification, is_broad_literature_classification, project_subject_codes, reviewed_source_heading_subject, unified_subject_paths};
 
 const HEADINGS: &[(&str, &str)] = &[
     ("science fiction", "FIC028000"),
@@ -144,7 +144,7 @@ pub(super) fn recover(record: &mut BookRecord) -> bool {
         };
         let Some(code) = code else { continue };
         let paths = unified_subject_paths(BISAC_SYSTEM_ID, code);
-        if paths.is_empty() || paths.iter().all(|path| path == "Literature / Genres") {
+        if paths.is_empty() || is_broad_literature_classification(BISAC_SYSTEM_ID, code) {
             continue;
         }
         let projected = BookSubject::new(None, subject.name(), format!("metadata:source-heading:{}", subject.source()), Some(BISAC_SYSTEM_ID.into()), Some(code.into())).expect("reviewed source heading must be valid");
@@ -167,6 +167,8 @@ pub(super) fn recover(record: &mut BookRecord) -> bool {
 mod tests {
     use super::*;
     use book_model::BookDetails;
+    use std::collections::BTreeSet;
+    use subject_projection::unified_concept_id;
 
     fn record(name: &str) -> BookRecord {
         let subject = BookSubject::new(None, name, "dc:subject", None, None).unwrap();
@@ -183,7 +185,14 @@ mod tests {
         assert_eq!(book.title, original.title);
         assert_eq!(book.description, original.description);
         assert_eq!(book.book.subjects[0], original.book.subjects[0]);
-        assert_eq!(book.book.subjects[1].code(), Some("Literature / Genres / Speculative / Science Fiction"));
+        let expected = unified_subject_paths(BISAC_SYSTEM_ID, "FIC028000").iter().filter_map(|path| unified_concept_id(path)).collect::<BTreeSet<_>>();
+        let recovered = book.book.subjects[1..]
+            .iter()
+            .flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default()))
+            .filter_map(|path| unified_concept_id(&path))
+            .collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert_eq!(recovered, expected);
         assert!(!recover(&mut book));
     }
 
@@ -194,15 +203,29 @@ mod tests {
         }
         let mut criticism = record("Science fiction -- History and criticism");
         assert!(recover(&mut criticism));
-        assert_eq!(criticism.book.subjects[1].code(), Some("LIT000000"));
+        let scope_paths = unified_subject_paths(BISAC_SYSTEM_ID, "LIT000000");
+        let recovered = criticism.book.subjects[1..]
+            .iter()
+            .flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default()))
+            .collect::<Vec<_>>();
+        assert!(!scope_paths.is_empty());
+        assert!(!recovered.is_empty());
+        assert!(recovered.iter().all(|path| scope_paths.iter().any(|scope| path == scope || path.starts_with(&format!("{scope} / ")))), "{recovered:?}");
     }
 
     #[test]
     fn juvenile_and_adult_headings_keep_their_declared_scope() {
-        for (name, code) in [("Detective and mystery stories", "Literature / Genres / Mystery & Thrillers / Mystery & Detective"), ("Adventure and adventurers -- Juvenile fiction", "JUV001000")] {
+        for (name, scope) in [("Detective and mystery stories", "FIC022000"), ("Adventure and adventurers -- Juvenile fiction", "JUV000000")] {
             let mut book = record(name);
             assert!(recover(&mut book));
-            assert_eq!(book.book.subjects[1].code(), Some(code));
+            let scope_paths = unified_subject_paths(BISAC_SYSTEM_ID, scope);
+            assert!(!scope_paths.is_empty(), "{scope}");
+            let recovered = book.book.subjects[1..]
+                .iter()
+                .flat_map(|subject| unified_subject_paths(subject.authority().unwrap_or_default(), subject.code().unwrap_or_default()))
+                .collect::<Vec<_>>();
+            assert!(!recovered.is_empty(), "{name}");
+            assert!(recovered.iter().all(|path| scope_paths.iter().any(|scope| path == scope || path.starts_with(&format!("{scope} / ")))), "{name}: {recovered:?}");
         }
         for (_, code) in HEADINGS {
             assert!(!unified_subject_paths(BISAC_SYSTEM_ID, code).is_empty(), "{code}");

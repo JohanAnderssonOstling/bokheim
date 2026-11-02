@@ -1,3 +1,5 @@
+use ui_text::text;
+
 mod ruler;
 mod session;
 pub use ruler::ReadingRulerStyle;
@@ -416,8 +418,8 @@ impl PdfView {
         let mut view = Self::empty(initial_page, window, cx);
         view.start_load(
             move || {
-                let content_hash = metadata.as_ref().map(|m| m.content_hash.clone()).unwrap_or_default();
-                PdfDocumentSession::from_reader_with_metadata(source_name, reader, &content_hash, metadata)
+                let book_id = metadata.as_ref().map(|m| m.book_id.clone()).unwrap_or_default();
+                PdfDocumentSession::from_reader_with_metadata(source_name, reader, &book_id, metadata)
             },
             cx,
         );
@@ -916,7 +918,7 @@ impl PdfView {
         let hits = match chunk {
             Ok(hits) => hits,
             Err(error) => {
-                self.error = Some(components::user_facing_error(&error.to_string(), "Could not display this PDF page. Try reopening the book.").to_owned());
+                self.error = Some(components::user_facing_error(&error.to_string(), text!(reader::could_not_display_this_pdf_page_try_reopening_the_book)).to_owned());
                 cx.notify();
                 return false;
             }
@@ -1215,7 +1217,7 @@ impl PdfView {
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        this.error = Some(components::user_facing_error(&message, "Could not open this PDF. Try reopening it or download another copy.").to_owned());
+                        this.error = Some(components::user_facing_error(&message, text!(reader::could_not_open_this_pdf_try_reopening_it_or_download_another_copy)).to_owned());
                         cx.emit(PdfViewEvent::LoadFailed(message));
                     }
                 }
@@ -1312,7 +1314,7 @@ impl PdfView {
                             }
                             Err(error) => {
                                 if this.render_generation == generation {
-                                    this.error = Some(components::user_facing_error(&error.to_string(), "Could not analyze this PDF page. Try reopening the book.").to_owned());
+                                    this.error = Some(components::user_facing_error(&error.to_string(), text!(reader::could_not_analyze_this_pdf_page_try_reopening_the_book)).to_owned());
                                     cx.notify();
                                 }
                                 false
@@ -1438,7 +1440,7 @@ impl PdfView {
             Ok(rendered) => rendered,
             Err(error) => {
                 if self.render_generation == generation {
-                    self.error = Some(components::user_facing_error(&error.to_string(), "Could not display this PDF page. Try reopening the book.").to_owned());
+                    self.error = Some(components::user_facing_error(&error.to_string(), text!(reader::could_not_display_this_pdf_page_try_reopening_the_book)).to_owned());
                     cx.notify();
                 }
                 return false;
@@ -1448,7 +1450,7 @@ impl PdfView {
             Ok(page) => Arc::new(page),
             Err(error) => {
                 if self.render_generation == generation {
-                    self.error = Some(components::user_facing_error(&error, "Could not display this PDF page. Try reopening the book.").to_owned());
+                    self.error = Some(components::user_facing_error(&error, text!(reader::could_not_display_this_pdf_page_try_reopening_the_book)).to_owned());
                     cx.notify();
                 }
                 return false;
@@ -2593,8 +2595,8 @@ impl Render for PdfView {
         if self.pages.is_empty() && self.page_turn.is_none() {
             return match self.error.clone() {
                 Some(message) => components::reader_document_message(message, theme).into_any_element(),
-                None if self.session.is_none() => components::reader_document_message("Opening PDF…", theme).into_any_element(),
-                None => components::reader_document_message("Rendering PDF page…", theme).into_any_element(),
+                None if self.session.is_none() => components::reader_document_message(text!(reader::opening_pdf), theme).into_any_element(),
+                None => components::reader_document_message(text!(reader::rendering_pdf_page), theme).into_any_element(),
             };
         }
         let view = cx.entity();

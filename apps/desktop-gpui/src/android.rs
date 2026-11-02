@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use app::host::defer_library_maintenance;
 use app::host::startup_profile::StartupProfile;
 use app::{AppDataLocation, host::BackendLaunch};
@@ -125,7 +127,10 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
             let force_opengl = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
             Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, profiling, defer_background, defer_maintenance, load_system_fonts, cache_gpu_pipelines, force_opengl))
         })
-        .map_err(|error| format!("could not initialize Android audiobook bridge: {error}"))?;
+        .map_err(|error| {
+            log::error!("could_not_initialize_android_audiobook_bridge: {error}");
+            text!(startup::could_not_initialize_android_audiobook_bridge).to_owned()
+        })?;
     if profiling {
         StartupProfile::enable();
         gpui::profiler::startup::StartupProfile::enable();
@@ -140,8 +145,10 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
     subject_projection::bundled::set_path(Path::new(&taxonomy)).map_err(|error| format!("could not configure bundled taxonomy: {error}"))?;
     profile.mark("taxonomy_prepare");
     let speech_vm = audio_vm.clone();
-    let (speech_class, speech_context) =
-        audio_vm.attach_current_thread(|env| Ok::<_, jni::errors::Error>((env.new_global_ref(&audio_class)?, env.new_global_ref(&audio_context)?))).map_err(|error| format!("could not retain Android speech context: {error}"))?;
+    let (speech_class, speech_context) = audio_vm.attach_current_thread(|env| Ok::<_, jni::errors::Error>((env.new_global_ref(&audio_class)?, env.new_global_ref(&audio_context)?))).map_err(|error| {
+        log::error!("could_not_retain_android_speech_context: {error}");
+        text!(startup::could_not_retain_android_speech_context).to_owned()
+    })?;
     let speech_refs = Arc::new((speech_class, speech_context));
     let model_refs = speech_refs.clone();
     let model_vm = speech_vm.clone();
@@ -239,7 +246,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
             env.new_global_ref(class)
         })
         .map_err(|error| format!("could not initialize Android book browser bridge: {error}"))?;
-    crate::book_browser::initialize(
+    embedded_browser_ui::android::initialize(
         move |command| {
             browser_vm
                 .attach_current_thread(|env| {
@@ -249,9 +256,9 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                 })
                 .map_err(|error| error.to_string())
         },
-        app::host::android_browser::receive,
+        embedded_browser::android::receive,
     );
-    app::host::android_browser::initialize(crate::book_browser::command);
+    embedded_browser::android::initialize(embedded_browser_ui::android::command);
     profile.mark("browser_and_network");
     gpui_platform::android_init(app.clone());
     profile.mark("platform_init");
@@ -265,7 +272,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
     });
     log::info!("Bokheim Android entry point started");
 
-    app::host::configure_opds_browser(data_dir.join("opds-webview"));
+    embedded_browser::configure(data_dir.join("opds-webview"));
     let update_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
     let (update_class, update_context, play_store, self_updates_enabled) = update_vm
         .attach_current_thread(|env| {
@@ -278,7 +285,10 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
             let context = env.call_method(activity.as_ref(), jni::jni_str!("getApplicationContext"), jni::jni_sig!("()Landroid/content/Context;"), &[])?.l()?;
             Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, play_store, self_updates_enabled))
         })
-        .map_err(|error| format!("could not initialize Android update bridge: {error}"))?;
+        .map_err(|error| {
+            log::error!("could_not_initialize_android_update_bridge: {error}");
+            text!(startup::could_not_initialize_android_update_bridge).to_owned()
+        })?;
     let update_trial = if !self_updates_enabled {
         // No update host means no feed requests, APK staging or update controls.
         false
@@ -330,7 +340,10 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
         })
         .map_err(|error| format!("failed to start incoming book worker: {error}"))?;
     log::info!("initializing backend in {}", data_dir.display());
-    let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).map_err(|error| format!("failed to initialize Android app-data directory: {error}"))?;
+    let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).map_err(|error| {
+        log::error!("failed_to_initialize_android_app_data_directory: {error}");
+        text!(startup::failed_to_initialize_android_app_data_directory).to_owned()
+    })?;
     let backend_context = if play_store { backend_context.with_private_library_storage() } else { backend_context };
     let backend_context = if defer_maintenance { backend_context.with_libraries_after_first_frame() } else { backend_context };
     profile.mark("staging_and_launch_config");
@@ -339,21 +352,26 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
     log::info!("constructing GPUI application");
     // Start the UI with bundled fonts. Device font I/O and registration run
     // in the background after the application window has been installed.
-    let platform =
-        AndroidPlatform::new_with_options(false, AndroidPlatformOptions { load_system_fonts: false, system_font_fallback: "Noto Sans".into(), cache_gpu_pipelines, graphics_backends: force_opengl.then_some(gpui_android::wgpu::Backends::GL) });
+    let platform = AndroidPlatform::new_with_options(
+        false,
+        AndroidPlatformOptions { load_system_fonts: false, system_font_fallback: "Noto Sans".into(), cache_gpu_pipelines, graphics_backends: force_opengl.then_some(gpui_android::wgpu::Backends::GL) },
+    );
     let font_text_system = load_system_fonts.then(|| platform.text_system());
     let application = gpui::Application::with_platform(Rc::new(platform)).with_assets(ui_components::Assets);
     profile.mark("application_construct");
     log::info!("running GPUI application");
     let font_assets = app.asset_manager();
     application.run(move |cx| {
-        ui_components::configure_bundled_font_source(move |name| {
-            let path = CString::new(format!("fonts/{name}")).map_err(|error| error.to_string())?;
-            let mut asset = font_assets.open(&path).ok_or_else(|| format!("bundled font asset is missing: {name}"))?;
-            let mut bytes = Vec::with_capacity(asset.length());
-            asset.read_to_end(&mut bytes).map_err(|error| format!("read bundled font {name}: {error}"))?;
-            Ok(Cow::Owned(bytes))
-        }, cx);
+        ui_components::configure_bundled_font_source(
+            move |name| {
+                let path = CString::new(format!("fonts/{name}")).map_err(|error| error.to_string())?;
+                let mut asset = font_assets.open(&path).ok_or_else(|| format!("bundled font asset is missing: {name}"))?;
+                let mut bytes = Vec::with_capacity(asset.length());
+                asset.read_to_end(&mut bytes).map_err(|error| format!("read bundled font {name}: {error}"))?;
+                Ok(Cow::Owned(bytes))
+            },
+            cx,
+        );
         cx.set_global(ui_components::SystemFontFamilies(if load_system_fonts { Vec::new() } else { vec!["NV Garamond".into(), "Raleway".into(), "Bodoni Moda".into()] }));
         let pending_fonts = font_text_system.map(|text_system| {
             let (ready, receiver) = async_channel::bounded::<()>(1);
@@ -564,9 +582,9 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeOpenBook<'call
                     let request = match error {
                         TrySendError::Full(request) | TrySendError::Disconnected(request) => request,
                     };
-                    deliver_incoming_file(Err(app::BackendError::message(format!("could not queue {}: incoming book queue is full or stopped", request.name))));
+                    deliver_incoming_file(Err(app::BackendError::message(format!(text!(startup::could_not_queue_incoming_book_queue_is_full_or_stopped), request.name))));
                 }
-                None => deliver_incoming_file(Err(app::BackendError::message("incoming book worker is not initialized"))),
+                None => deliver_incoming_file(Err(app::BackendError::message(text!(startup::incoming_book_worker_is_not_initialized)))),
             }
             Ok(())
         })
@@ -809,7 +827,7 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeAuthentication
 extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeBookBrowserEvent<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: jni::objects::JClass<'caller>, id: jlong, message: JString<'caller>) {
     unowned_env
         .with_env(|env| -> jni::errors::Result<()> {
-            crate::book_browser::receive(id as u64, &message.try_to_string(env)?);
+            embedded_browser_ui::android::receive(id as u64, &message.try_to_string(env)?);
             Ok(())
         })
         .resolve::<jni::errors::LogErrorAndDefault>();

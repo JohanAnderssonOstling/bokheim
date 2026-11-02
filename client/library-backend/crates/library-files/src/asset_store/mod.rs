@@ -6,24 +6,29 @@
 
 use book_access::BoxedBookReader;
 #[cfg(not(target_arch = "wasm32"))]
-use client_platform_runtime::startup_profile::StartupProfile;
-#[cfg(not(target_arch = "wasm32"))]
 use client_platform_native::file_fingerprint::file_fingerprint;
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_native::filesystem::parent_directory;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::startup_profile::StartupProfile;
+#[cfg(target_arch = "wasm32")]
+use client_platform_web::web_storage::PublishedFile;
 use library_model::BlobKind;
 use library_model::RelativeBookPath;
 use std::fmt;
 use std::fs::File;
-use std::io::{ErrorKind, SeekFrom};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
+
 use std::time::Duration;
 pub(crate) use sync_common::BookId;
 
-mod import;
+pub(crate) const RESERVED_STORAGE_BYTES: u64 = 128 * 1024 * 1024;
+
 #[cfg(target_arch = "wasm32")]
 mod browser_transfer;
+mod import;
 #[cfg(not(target_arch = "wasm32"))]
 mod import_batch;
 pub use import::ImportOptions;
@@ -60,7 +65,14 @@ pub struct AssetStore(imp::Handle);
 
 impl AssetStore {
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn native_library_root(&self) -> &Path { &self.0.library_root }
+    pub fn native_library_root(&self) -> &Path {
+        &self.0.library_root
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn native_storage_identity(&self) -> &str {
+        &self.0.storage_identity
+    }
 
     /// Returns a sibling cover from database-selected M4B paths.
     pub async fn m4b_sidecar_cover(&self, paths: Vec<RelativeBookPath>) -> Result<Option<Vec<u8>>, AssetStoreError> {
@@ -155,11 +167,14 @@ impl AssetStore {
     }
 
     pub async fn verified_book_reader_with_checksum(&self, hash: BookId, paths: Vec<RelativeBookPath>, checksum: Option<content_address::ContentHash>) -> Result<Option<VerifiedBook>, AssetStoreError> {
+        // Keep publication and deletion out while checking the bytes, while
+        // allowing other readers. Wait outside the blocking pool so a
+        // concurrent import can finish and release its publication lease.
+        let lease = self.lease_book(&hash).await?;
         #[cfg(target_arch = "wasm32")]
         {
             let _ = paths;
             use std::io::{Read as _, Seek as _};
-            let lease = imp::lease(&self.0, hash.to_hex().as_str(), true)?.ok_or_else(|| AssetStoreError::operation("book is in use; retry verification"))?;
             let Some(mut reader) = imp::open_verified_reader(&self.0, &hash).await? else { return Ok(None) };
             let mut hasher = self.0.hash_service.start().await.map_err(AssetStoreError::operation)?;
             let mut length = 0_u64;
@@ -177,14 +192,13 @@ impl AssetStore {
                 return Ok(None);
             }
             reader.seek(SeekFrom::Start(0))?;
-            Ok(Some(VerifiedBook { reader, length, content_hash: actual, _lease: BookLease::new(lease) }))
+            Ok(Some(VerifiedBook { reader, length, book_id: actual, _lease: lease }))
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let store = self.clone();
             client_platform_runtime::executor::run_blocking(move || {
                 use std::io::Seek as _;
-                let lease = imp::lease(&store.0, hash.to_hex().as_str(), true)?.ok_or_else(|| AssetStoreError::operation("book is in use; retry verification"))?;
                 for relative_path in paths {
                     let Some(mut reader): Option<BoxedBookReader> = imp::open_book_at_path(&store.0, &relative_path)? else { continue };
                     let mut hasher = blake3::Hasher::new();
@@ -195,7 +209,7 @@ impl AssetStore {
                         continue;
                     }
                     reader.seek(SeekFrom::Start(0))?;
-                    return Ok(Some(VerifiedBook { reader, length: hasher.count(), content_hash: actual, _lease: BookLease::new(lease) }));
+                    return Ok(Some(VerifiedBook { reader, length: hasher.count(), book_id: actual, _lease: lease }));
                 }
                 Ok(None)
             })
@@ -205,8 +219,8 @@ impl AssetStore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn read(&self, kind: BlobKind, content_hash: &BookId) -> Result<Option<Vec<u8>>, AssetStoreError> {
-        imp::read(&self.0, asset_name(kind, content_hash))
+    pub fn read(&self, kind: BlobKind, book_id: &BookId) -> Result<Option<Vec<u8>>, AssetStoreError> {
+        imp::read(&self.0, asset_name(kind, book_id))
     }
 
     pub async fn read_bytes(&self, kind: BlobKind, hash: &BookId) -> Result<Option<Vec<u8>>, AssetStoreError> {
@@ -265,8 +279,12 @@ impl AssetStore {
                 Ok(file) => Ok(Some(file)),
                 Err(error) => {
                     store.root_available();
-                    if error.kind() == ErrorKind::NotFound { Ok(None) } else { Err(AssetStoreError::from(error)) }
-                },
+                    if error.kind() == ErrorKind::NotFound {
+                        Ok(None)
+                    } else {
+                        Err(AssetStoreError::from(error))
+                    }
+                }
             };
             profile.mark("file_open");
             (file, profile)
@@ -279,11 +297,11 @@ impl AssetStore {
         source
     }
 
-    pub async fn write(&self, kind: BlobKind, content_hash: &BookId, bytes: &[u8]) -> Result<(), AssetStoreError> {
-        imp::write(&self.0, asset_name(kind, content_hash), bytes).await?;
+    pub async fn write(&self, kind: BlobKind, book_id: &BookId, bytes: &[u8]) -> Result<(), AssetStoreError> {
+        imp::write(&self.0, asset_name(kind, book_id), bytes).await?;
         if kind == BlobKind::Thumbnail {
-            imp::remove(&self.0, thumbnail_variant_name(content_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH))?;
-            imp::remove(&self.0, thumbnail_variant_name(content_hash, thumbnail::THUMBNAIL_WIDTH))?;
+            imp::remove(&self.0, thumbnail_variant_name(book_id, thumbnail::BROWSE_THUMBNAIL_WIDTH))?;
+            imp::remove(&self.0, thumbnail_variant_name(book_id, thumbnail::THUMBNAIL_WIDTH))?;
         }
         Ok(())
     }
@@ -334,6 +352,25 @@ impl AssetStore {
         Ok(StagedBook { inner: imp::stage_browser_file(&self.0, file).await? })
     }
 
+    /// Space available to new books after the storage adapter's reserve.
+    pub async fn available_write_capacity(&self) -> Result<Option<u64>, AssetStoreError> {
+        imp::available_write_capacity(&self.0).await
+    }
+
+    pub async fn stored_book_bytes(&self, book: BookId, paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
+        imp::stored_book_bytes(&self.0, book, paths).await
+    }
+
+    /// Bytes retained after publication and extra temporary bytes needed while publishing.
+    pub fn book_download_space(&self, bytes: u64, paths: &[RelativeBookPath], audiobook_archive: bool) -> (u64, u64) {
+        imp::book_download_space(bytes, paths, audiobook_archive)
+    }
+
+    /// Bytes in exactly the files that book eviction can remove.
+    pub async fn evictable_book_bytes(&self, book: BookId, paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
+        imp::evictable_book_bytes(&self.0, book, paths).await
+    }
+
     /// Capacity is an adapter capability; unknown capacity relies on I/O quota errors.
     pub fn check_write_capacity(&self, additional_bytes: u64) -> Result<(), AssetStoreError> {
         if let Some(available) = imp::write_capacity(&self.0)? {
@@ -344,8 +381,8 @@ impl AssetStore {
         Ok(())
     }
 
-    pub async fn write_thumbnail_variant(&self, content_hash: &BookId, width: u32, bytes: &[u8]) -> Result<(), AssetStoreError> {
-        imp::write(&self.0, thumbnail_variant_name(content_hash, width), bytes).await
+    pub async fn write_thumbnail_variant(&self, book_id: &BookId, width: u32, bytes: &[u8]) -> Result<(), AssetStoreError> {
+        imp::write(&self.0, thumbnail_variant_name(book_id, width), bytes).await
     }
 
     /// Hold one exclusive lease across the master and both card variants, including blocking writes
@@ -364,23 +401,21 @@ impl AssetStore {
         }
     }
 
-    pub fn thumbnail_set_exists(&self, content_hash: &BookId) -> Result<bool, AssetStoreError> {
-        Ok(self.exists(BlobKind::Thumbnail, content_hash)?
-            && imp::exists(&self.0, thumbnail_variant_name(content_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH))?
-            && imp::exists(&self.0, thumbnail_variant_name(content_hash, thumbnail::THUMBNAIL_WIDTH))?)
+    pub fn thumbnail_set_exists(&self, book_id: &BookId) -> Result<bool, AssetStoreError> {
+        Ok(self.exists(BlobKind::Thumbnail, book_id)? && imp::exists(&self.0, thumbnail_variant_name(book_id, thumbnail::BROWSE_THUMBNAIL_WIDTH))? && imp::exists(&self.0, thumbnail_variant_name(book_id, thumbnail::THUMBNAIL_WIDTH))?)
     }
 
-    pub fn remove(&self, kind: BlobKind, content_hash: &BookId) -> Result<bool, AssetStoreError> {
-        let removed = imp::remove(&self.0, asset_name(kind, content_hash))?;
+    pub fn remove(&self, kind: BlobKind, book_id: &BookId) -> Result<bool, AssetStoreError> {
+        let removed = imp::remove(&self.0, asset_name(kind, book_id))?;
         if kind == BlobKind::Thumbnail {
-            imp::remove(&self.0, thumbnail_variant_name(content_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH))?;
-            imp::remove(&self.0, thumbnail_variant_name(content_hash, thumbnail::THUMBNAIL_WIDTH))?;
+            imp::remove(&self.0, thumbnail_variant_name(book_id, thumbnail::BROWSE_THUMBNAIL_WIDTH))?;
+            imp::remove(&self.0, thumbnail_variant_name(book_id, thumbnail::THUMBNAIL_WIDTH))?;
         }
         Ok(removed)
     }
 
-    pub fn exists(&self, kind: BlobKind, content_hash: &BookId) -> Result<bool, AssetStoreError> {
-        imp::exists(&self.0, asset_name(kind, content_hash))
+    pub fn exists(&self, kind: BlobKind, book_id: &BookId) -> Result<bool, AssetStoreError> {
+        imp::exists(&self.0, asset_name(kind, book_id))
     }
 
     /// Whether a library-relative placement path is a readable file. Lets the
@@ -402,9 +437,10 @@ impl AssetStore {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn evict_book_files(&self, relative_paths: &[RelativeBookPath], hash: &BookId) -> Result<(), AssetStoreError> {
-        imp::evict_book_files(&self.0, relative_paths, hash)
+    /// Removes local book bytes through the storage adapter, without changing
+    /// database availability. Native filesystem work runs off the actor thread.
+    pub async fn evict_book_files(&self, book: BookId, paths: Vec<RelativeBookPath>) -> Result<(), AssetStoreError> {
+        imp::evict_book_files(&self.0, book, paths).await
     }
 
     /// Try to hold a book exclusively while publishing or removing bytes.
@@ -429,25 +465,7 @@ impl AssetStore {
     /// database policy and deliberately belongs to the caller.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn book_bytes_at_paths(&self, relative_paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
-        let store = self.clone();
-        client_platform_runtime::executor::run_blocking(move || {
-            let mut total = 0_u64;
-            let mut counted = std::collections::HashSet::new();
-            for relative in relative_paths {
-                let path = imp::placement_path(&store.0, &relative);
-                if counted.insert(path.clone()) {
-                    match std::fs::metadata(path) {
-                        Ok(metadata) if metadata.is_file() => total = total.saturating_add(metadata.len()),
-                        Ok(_) => {}
-                        Err(error) if error.kind() == ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-            }
-            Ok(total)
-        })
-        .await
-        .map_err(AssetStoreError::operation)?
+        imp::book_bytes_at_paths(&self.0, relative_paths).await
     }
 }
 
@@ -457,7 +475,7 @@ pub struct VerifiedBook {
     #[cfg(target_arch = "wasm32")]
     reader: client_platform_web::web_storage::FileReader,
     pub length: u64,
-    pub content_hash: BookId,
+    pub book_id: BookId,
     _lease: BookLease,
 }
 
@@ -473,14 +491,12 @@ impl VerifiedBook {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl std::io::Read for VerifiedBook {
+impl Read for VerifiedBook {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         self.reader.read(buffer)
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
-impl std::io::Seek for VerifiedBook {
+impl Seek for VerifiedBook {
     fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
         self.reader.seek(position)
     }
@@ -493,7 +509,9 @@ impl CopiedBook {
     }
 
     pub async fn verify_transfer_bytes(self, expected: Option<content_address::ContentHash>, expected_size: Option<u64>) -> Result<StagedBook, AssetStoreError> {
-        if expected.is_none() && expected_size.is_none() { return Err(AssetStoreError::operation("transfer has no verified byte source")); }
+        if expected.is_none() && expected_size.is_none() {
+            return Err(AssetStoreError::operation("transfer has no verified byte source"));
+        }
         client_platform_runtime::executor::run_blocking(move || {
             let (checksum, size) = match self.inner.copied_digest {
                 Some((checksum, size, fingerprint)) => {
@@ -579,7 +597,7 @@ impl VerifiedAssetWriter {
         let checksum = content_address::ContentHash::from(self.0.hasher.finalize());
         // Byte verification already matched the requested content hash.
         let temporary_path = self.0.inner.finish_book().await?;
-        Ok(StagedBook { inner: imp::StagedBook { byte_checksum: checksum, temporary_path, content_hash: self.0.expected_hash, size_bytes: self.0.hasher.count(), direct: None } })
+        Ok(StagedBook { inner: imp::StagedBook { byte_checksum: checksum, temporary_path, book_id: self.0.expected_hash, size_bytes: self.0.hasher.count(), direct: None } })
     }
 }
 
@@ -612,27 +630,43 @@ impl CopiedBook {
         Ok(Box::new(File::open(self.path())?))
     }
 
-    pub fn into_staged(self, content_hash: BookId, size_bytes: u64) -> StagedBook {
-        StagedBook { inner: imp::StagedBook { byte_checksum: content_hash.content_hash().expect("copied bytes require an explicit checksum before assigning a book identity"), temporary_path: self.inner.temporary_path, direct: self.inner.direct, content_hash, size_bytes } }
+    pub fn into_staged(self, book_id: BookId, size_bytes: u64) -> StagedBook {
+        StagedBook {
+            inner: imp::StagedBook {
+                byte_checksum: book_id.content_hash().expect("copied bytes require an explicit checksum before assigning a book identity"),
+                temporary_path: self.inner.temporary_path,
+                direct: self.inner.direct,
+                book_id,
+                size_bytes,
+            },
+        }
     }
 }
 
 pub use library_model::PublishedStagedBook;
 
 impl StagedBook {
-    pub fn byte_checksum(&self) -> content_address::ContentHash { self.inner.byte_checksum }
+    pub fn byte_checksum(&self) -> content_address::ContentHash {
+        self.inner.byte_checksum
+    }
 
     /// Assign the logical book identity. Native publication durably records
     /// its byte checksum before making the staged file permanent.
     pub async fn with_local_identity(mut self, store: &AssetStore, identity: BookId) -> Result<Self, AssetStoreError> {
-        if identity == self.inner.content_hash { return Ok(self); }
+        if identity == self.inner.book_id {
+            return Ok(self);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !store.root_available() { return Err(AssetStoreError::operation("library folder is unavailable")); }
+            if !store.root_available() {
+                return Err(AssetStoreError::operation("library folder is unavailable"));
+            }
         }
         #[cfg(target_arch = "wasm32")]
-        { self.inner.destination = imp::name(&store.0, format!("book/{identity}")); }
-        self.inner.content_hash = identity;
+        {
+            self.inner.destination = imp::name(&store.0, format!("book/{identity}"));
+        }
+        self.inner.book_id = identity;
         Ok(self)
     }
 
@@ -640,7 +674,7 @@ impl StagedBook {
     /// per publication or retained upload rather than during intermediate steps.
     #[cfg(not(target_arch = "wasm32"))]
     fn remember_content_proof(&self, store: &AssetStore) -> Result<(), AssetStoreError> {
-        let hash = self.content_hash();
+        let hash = self.book_id();
         if hash.content_hash().is_none() {
             imp::remember_local_checksum(&store.0, &hash, self.byte_checksum())?;
         }
@@ -734,8 +768,8 @@ impl StagedBook {
         }
     }
 
-    pub fn content_hash(&self) -> BookId {
-        self.inner.content_hash
+    pub fn book_id(&self) -> BookId {
+        self.inner.book_id
     }
     pub fn size_bytes(&self) -> u64 {
         self.inner.size_bytes
@@ -746,7 +780,14 @@ impl StagedBook {
     }
     #[cfg(target_arch = "wasm32")]
     pub async fn commit(self) -> Result<(), AssetStoreError> {
-        self.inner.commit().await
+        self.publish_pinned().map(drop)
+    }
+
+    /// Keep this exact published revision available for rejection until its
+    /// database acknowledgement succeeds.
+    #[cfg(target_arch = "wasm32")]
+    pub fn publish_pinned(self) -> Result<PublishedFile, AssetStoreError> {
+        self.inner.writer.publish_pinned_as(self.inner.destination, self.inner.book_id).map_err(AssetStoreError::operation)
     }
 }
 
@@ -776,12 +817,12 @@ fn published_fingerprint(path: &Path) -> Result<Option<String>, AssetStoreError>
     }
 }
 
-fn asset_name(kind: BlobKind, content_hash: &BookId) -> String {
-    format!("{}/{content_hash}", kind.storage())
+fn asset_name(kind: BlobKind, book_id: &BookId) -> String {
+    format!("{}/{book_id}", kind.storage())
 }
 
-pub fn thumbnail_variant_name(content_hash: &BookId, width: u32) -> String {
-    format!("thumbnail/{content_hash}.{}", thumbnail::card_thumbnail_suffix(width))
+pub fn thumbnail_variant_name(book_id: &BookId, width: u32) -> String {
+    format!("thumbnail/{book_id}.{}", thumbnail::card_thumbnail_suffix(width))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -877,20 +918,13 @@ mod tests {
         let digest = content_address::ContentHash::from(blake3::hash(bytes));
         let wrong = content_address::ContentHash::from(blake3::hash(b"different bytes"));
         let length = bytes.len() as u64;
-        for (checksum, size, accepted) in [
-            (Some(digest), Some(length), true),
-            (Some(digest), None, true),
-            (None, Some(length), true),
-            (Some(wrong), Some(length), false),
-            (Some(digest), Some(length + 1), false),
-            (None, None, false),
-        ] {
+        for (checksum, size, accepted) in [(Some(digest), Some(length), true), (Some(digest), None, true), (None, Some(length), true), (Some(wrong), Some(length), false), (Some(digest), Some(length + 1), false), (None, None, false)] {
             let copied = store.stage_book(path("book.epub"), Box::new(std::io::Cursor::new(bytes))).await.unwrap();
             let temporary = copied.path().to_owned();
             let result = copied.verify_transfer_bytes(checksum, size).await;
             assert_eq!(result.is_ok(), accepted);
             if let Ok(staged) = result {
-                assert_eq!(staged.content_hash().content_hash(), Some(digest));
+                assert_eq!(staged.book_id().content_hash(), Some(digest));
                 assert_eq!(staged.size_bytes(), length);
             }
             assert!(!temporary.exists(), "finished verification must release the temporary file");
@@ -1037,7 +1071,7 @@ mod tests {
         assert!(store.book_exists(&hash, &[path("Story")]).unwrap());
         let verified = store.verified_book_reader_with_checksum(hash, vec![path("Story")], None).await.unwrap().unwrap();
         assert_eq!(verified.length, archive.len() as u64);
-        assert_eq!(verified.content_hash, hash);
+        assert_eq!(verified.book_id, hash);
         use futures_util::StreamExt as _;
         let result = verified.into_upload_stream().collect::<Vec<_>>().await.into_iter().collect::<Result<Vec<_>, _>>().unwrap().concat();
         assert_eq!(result, archive);
@@ -1057,7 +1091,7 @@ mod tests {
         }
         let staged = writer.verify().await.unwrap().finish_book().await.unwrap();
         assert_eq!(staged.size_bytes(), bytes.len() as u64);
-        assert_eq!(staged.content_hash(), hash);
+        assert_eq!(staged.book_id(), hash);
         staged.publish_snapshot(&store, &relative, &[], false).unwrap();
         assert_eq!(std::fs::read(library.path().join("chunked.epub")).unwrap(), bytes);
     }

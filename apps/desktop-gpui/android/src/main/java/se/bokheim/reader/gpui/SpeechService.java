@@ -87,7 +87,7 @@ public final class SpeechService extends Service {
     @Override public void onCreate() {
         super.onCreate();
         instance = this;
-        NotificationChannel channel = new NotificationChannel(CHANNEL, "Read aloud", NotificationManager.IMPORTANCE_LOW);
+        NotificationChannel channel = new NotificationChannel(CHANNEL, UiText.READER_READ_ALOUD, NotificationManager.IMPORTANCE_LOW);
         channel.setSound(null, null);
         channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         getSystemService(NotificationManager.class).createNotificationChannel(channel);
@@ -147,7 +147,7 @@ public final class SpeechService extends Service {
         cover = null;
         session.setActive(true);
         // Promote before requesting focus (required when targeting Android 15+).
-        promote(notification("Read aloud", false));
+        promote(notification(UiText.READER_READ_ALOUD, false));
         updateState();
     }
 
@@ -186,8 +186,8 @@ public final class SpeechService extends Service {
     }
 
     private String title() {
-        try { return new JSONObject(stateProvider.apply(id)).optString("title", "Read aloud"); }
-        catch (Exception ignored) { return "Read aloud"; }
+        try { return new JSONObject(stateProvider.apply(id)).optString("title", UiText.READER_READ_ALOUD); }
+        catch (Exception ignored) { return UiText.READER_READ_ALOUD; }
     }
 
     void updateState() {
@@ -197,7 +197,7 @@ public final class SpeechService extends Service {
             if (encoded == null || encoded.isEmpty()) { finishSession(); return; }
             JSONObject state = new JSONObject(encoded);
             boolean paused = state.getBoolean("paused");
-            String title = state.optString("title", "Read aloud");
+            String title = state.optString("title", UiText.READER_READ_ALOUD);
             if (!paused && !hasFocus) {
                 promote(notification(title, false));
                 if (!requestFocus()) return;
@@ -248,9 +248,9 @@ public final class SpeechService extends Service {
         return new Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(title).setContentText(author).setSubText(chapter).setLargeIcon(cover).setContentIntent(openReader())
             .setVisibility(Notification.VISIBILITY_PUBLIC).setOnlyAlertOnce(true).setOngoing(!paused)
-            .addAction(action(android.R.drawable.ic_media_rew, "Previous passage", "back", 1043))
-            .addAction(action(paused ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause, paused ? "Play" : "Pause", paused ? "resume" : "pause", 1044))
-            .addAction(action(android.R.drawable.ic_media_ff, "Next passage", "forward", 1045))
+            .addAction(action(android.R.drawable.ic_media_rew, UiText.COMMON_PREVIOUS_PASSAGE, "back", 1043))
+            .addAction(action(paused ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause, paused ? UiText.COMMON_PLAY : UiText.COMMON_PAUSE, paused ? "resume" : "pause", 1044))
+            .addAction(action(android.R.drawable.ic_media_ff, UiText.COMMON_NEXT_PASSAGE, "forward", 1045))
             .setStyle(new Notification.MediaStyle().setMediaSession(session.getSessionToken()).setShowActionsInCompactView(0, 1, 2)).build();
     }
 

@@ -2,6 +2,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+use ui_text::text;
+
 use std::path::PathBuf;
 mod audiobook_footer;
 mod keyboard;
@@ -121,17 +123,17 @@ impl ApplicationPane {
                 let backend = self.backend.clone();
                 let sender = self.sync_sender.clone();
                 cx.spawn(async move |_, _| {
-                    let result = backend.account_snapshot().await;
+                    let result = backend.account.account_snapshot().await;
                     let _ = sender.try_send(SyncEvent::AccountSnapshot { generation, result });
                 })
                 .detach();
             }
             SyncEvent::LocalStorageUsageRequested => {
                 let generation = self.account_generation;
-                let backend = self.backend.clone();
+                let libraries = self.backend.management.clone();
                 let sender = self.sync_sender.clone();
                 cx.spawn(async move |_, _| {
-                    let result = backend.local_storage_usage().await;
+                    let result = libraries.local_storage_usage().await;
                     let _ = sender.try_send(SyncEvent::LocalStorageUsage { generation, result });
                 })
                 .detach();
@@ -142,8 +144,8 @@ impl ApplicationPane {
                 let backend = self.backend.clone();
                 let sender = self.sync_sender.clone();
                 cx.spawn(async move |_, _| {
-                    let result = backend.logout().await;
-                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: "Signed out", reveal_password_reset_on_error: false });
+                    let result = backend.account.logout().await;
+                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: text!(account::signed_out), reveal_password_reset_on_error: false });
                 })
                 .detach();
             }
@@ -153,8 +155,8 @@ impl ApplicationPane {
                 let backend = self.backend.clone();
                 let sender = self.sync_sender.clone();
                 cx.spawn(async move |_, _| {
-                    let result = backend.delete_account(email, password).await;
-                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: "Your account has been deleted. Books saved on this device have been kept.", reveal_password_reset_on_error: false });
+                    let result = backend.account.delete_account(email, password).await;
+                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: text!(account::your_account_has_been_deleted_books_saved_on_this_device_have_been), reveal_password_reset_on_error: false });
                 })
                 .detach();
             }
@@ -212,7 +214,7 @@ impl ApplicationPane {
     pub fn open_window_target(&mut self, target: browser_ui::NewWindowTarget, window: &mut Window, cx: &mut Context<Self>) {
         match target {
             browser_ui::NewWindowTarget::Book { locator, .. } => {
-                self.browser.update(cx, |browser, cx| browser.open_book_detail(*locator.library_id(), locator.content_hash(), window, cx));
+                self.browser.update(cx, |browser, cx| browser.open_book_detail(*locator.library_id(), locator.book_id(), window, cx));
             }
             browser_ui::NewWindowTarget::Folder { library_id, directory_id, title } => {
                 self.browser.update(cx, |browser, cx| browser.open_folder(library_id, directory_id, title, window, cx));
@@ -301,7 +303,7 @@ impl ApplicationPane {
             #[cfg(target_arch = "wasm32")]
             account_generation: 0,
             #[cfg(feature = "kobo")]
-            device_bar: cx.new(|cx| kobo_bar::KoboDeviceBar::new(backend.clone(), kobo_bar_services, kobo_auto_rotate, window, cx)),
+            device_bar: cx.new(|cx| kobo_bar::KoboDeviceBar::new(kobo_bar_services, kobo_auto_rotate, window, cx)),
             pending_reader: session.initial.reader.filter(|reader| browser.read(cx).contains_library(reader.locator.library_id(), cx)),
             save_navigation_session: session.save,
             last_saved_navigation: None,
@@ -354,10 +356,10 @@ impl ApplicationPane {
         if self.reader.is_some() || self.opening || self.pending_reader.as_ref() != Some(&reader) {
             return;
         }
-        let library = self.backend.library(*reader.locator.library_id());
+        let library = self.backend.management.library(*reader.locator.library_id());
         self.begin_opening(window, cx);
         self.open_task = Some(cx.spawn(async move |root, cx| {
-            let format = library.book_format(reader.locator.content_hash()).await;
+            let format = library.book_format(reader.locator.book_id()).await;
             let _ = root.update_in(cx, |root, window, cx| match format {
                 Ok(Some(format)) if !matches!(format, book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder) => {
                     // No explicit target: the reader loads the latest durable EPUB/PDF position.
@@ -402,11 +404,11 @@ impl ApplicationPane {
         self.open_task = Some(cx.spawn(async move |root, cx| {
             let result = async {
                 let library_id = *link.locator.library_id();
-                if !backend.libraries().await?.iter().any(|entry| *entry.library_id() == library_id) {
-                    return Err(BackendError::message("This link refers to a library that is not configured on this device."));
+                if !backend.management.libraries().await?.iter().any(|entry| *entry.library_id() == library_id) {
+                    return Err(BackendError::message(text!(common::this_link_refers_to_a_library_that_is_not_configured_on_this)));
                 }
-                let library = backend.library(library_id);
-                let book = link.locator.content_hash();
+                let library = backend.management.library(library_id);
+                let book = link.locator.book_id();
                 let mut anchor = link.anchor;
                 if let Some(id) = link.annotation_id {
                     match library.annotation(book, id).await {
@@ -430,7 +432,7 @@ impl ApplicationPane {
                     return Ok(());
                 }
                 let title = library.book_detail(book).await?.book.title;
-                let target = anchor.open_target().ok_or_else(|| BackendError::message("The linked passage has an invalid location."))?;
+                let target = anchor.open_target().ok_or_else(|| BackendError::message(text!(common::the_linked_passage_has_an_invalid_location)))?;
                 root.update_in(cx, |root, window, cx| {
                     root.opening = false;
                     root.open_book(link.locator, title, Some(target), window, cx);
@@ -442,7 +444,7 @@ impl ApplicationPane {
             if let Err(error) = result {
                 let _ = root.update_in(cx, |root, window, cx| {
                     root.opening = false;
-                    window.push_notification(Notification::error(ui_components::user_facing_error(&error, "Could not open this reader link.")), cx);
+                    window.push_notification(Notification::error(ui_components::user_facing_error(&error, text!(common::could_not_open_this_reader_link))), cx);
                     cx.notify();
                 });
             }
@@ -463,11 +465,11 @@ impl ApplicationPane {
             self.return_to_library(window, cx);
             return;
         }
-        let library = self.backend.library(*locator.library_id());
+        let library = self.backend.management.library(*locator.library_id());
         self.pending_audiobook = None;
         self.begin_opening(window, cx);
         self.open_task = Some(cx.spawn(async move |root, cx| {
-            let audio = match library.book_format(locator.content_hash()).await {
+            let audio = match library.book_format(locator.book_id()).await {
                 Ok(format) => matches!(format, Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder)),
                 Err(error) => {
                     let _ = root.update_in(cx, |root, window, cx| root.book_open_failed(&title, error, window, cx));
@@ -485,14 +487,14 @@ impl ApplicationPane {
                     return None;
                 }
                 root.opening = false;
-                root.pending_audiobook = Some("Opening audiobook…".into());
+                root.pending_audiobook = Some(text!(audiobook::opening_audiobook).into());
                 root.sync_playback(window, cx);
                 cx.notify();
                 Some(root.playback.read(cx).generation)
             }) else {
                 return;
             };
-            let result = library.resolve_book(locator.content_hash()).await;
+            let result = library.resolve_book(locator.book_id()).await;
             let _ = root.update_in(cx, |root, window, cx| {
                 if root.playback.read(cx).generation != generation {
                     return;
@@ -528,14 +530,14 @@ impl ApplicationPane {
             controller.reserve_open()
         });
         self.sync_playback(window, cx);
-        let library = Rc::new(self.backend.library(*locator.library_id()));
+        let library = Rc::new(self.backend.management.library(*locator.library_id()));
         let audio_locator = locator.clone();
         let audio_title = title.clone();
         let saved_title = title.clone();
         let reader = cx.new(|cx| {
             let reader = reader_ui::ReaderView::new(locator.clone(), title, initial_target, self.backend.clone(), library, window, cx);
             #[cfg(feature = "kobo")]
-            let reader = reader.with_device_controls(self.device_bar.clone());
+            let reader = reader.with_device_controls(cx.new(|cx| kobo_bar::KoboDeviceHeader::new(self.device_bar.clone(), cx)));
             reader
         });
         cx.subscribe_in(&reader, window, |root, reader, _: &reader_ui::CloseRequested, window, cx| {
@@ -568,12 +570,12 @@ impl ApplicationPane {
             root.return_to_library(window, cx);
         })
         .detach();
+        let cache_owner = self.backend.management.library(*locator.library_id());
         self.reader = Some(ReaderSurface { locator, title: saved_title, view: reader });
         self.pending_reader = None;
         browser_ui::evict_covers(window);
-        let backend = self.backend.clone();
         cx.spawn(async move |_, _| {
-            if let Err(error) = backend.evict_cover_caches().await {
+            if let Err(error) = cache_owner.evict_cover_caches().await {
                 log::warn!("could not evict retained cover bytes: {error}");
             }
         })
@@ -618,8 +620,8 @@ impl ApplicationPane {
     fn book_open_failed(&mut self, title: &str, error: app::BackendError, window: &mut Window, cx: &mut Context<Self>) {
         log::error!("could not open {title:?}: {error}");
         self.return_to_library(window, cx);
-        let message = ui_components::user_facing_error(&error, "Try opening the book again. If it still won't open, download it again or try another edition.");
-        window.push_notification(Notification::error(format!("Could not open “{title}”. {message}")).id1::<Self>("book-open-error").autohide(false).close_button_always_visible(true), cx);
+        let message = ui_components::user_facing_error(&error, text!(common::try_opening_the_book_again_if_it_still_won_t_open_download));
+        window.push_notification(Notification::error(format!(text!(common::could_not_open), message = message, title = title)).id1::<Self>("book-open-error").autohide(false).close_button_always_visible(true), cx);
     }
 
     pub fn audiobook_session(&self) -> Option<Entity<reader_ui::PlaybackSession>> {
@@ -636,7 +638,7 @@ impl ApplicationPane {
         }
         if let Some(audio) = &self.audiobook {
             let locator = audio.locator.clone();
-            self.browser.update(cx, |browser, cx| browser.open_book_detail(*locator.library_id(), locator.content_hash(), window, cx));
+            self.browser.update(cx, |browser, cx| browser.open_book_detail(*locator.library_id(), locator.book_id(), window, cx));
             cx.notify();
         }
     }
@@ -696,8 +698,8 @@ impl ApplicationPane {
         self.notification_mode = mode;
         self.notification_task.take();
         if let Some(browsing) = mode {
-            let backend = self.backend.clone();
-            self.notification_task = Some(cx.spawn(async move |_, _| match backend.notification_interest(browsing).await {
+            let libraries = self.backend.management.clone();
+            self.notification_task = Some(cx.spawn(async move |_, _| match libraries.notification_interest(browsing).await {
                 Ok(interest) => {
                     let _interest = interest;
                     std::future::pending::<()>().await;
@@ -793,8 +795,8 @@ impl Render for ApplicationPane {
                 .justify_center()
                 .bg(theme.page_bg)
                 .text_color(theme.text)
-                .child("Opening…")
-                .child(ui_components::outlined_text_button("cancel-book-opening", "Cancel").on_click(cx.listener(|root, _, window, cx| root.return_to_library(window, cx))))
+                .child(text!(common::opening))
+                .child(ui_components::outlined_text_button("cancel-book-opening", text!(common::cancel)).on_click(cx.listener(|root, _, window, cx| root.return_to_library(window, cx))))
         });
         let root = gpui::div()
             .size_full()
@@ -1019,8 +1021,19 @@ mod navigation_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Back edge cases".into(), true).await.unwrap();
-        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let library = backend.management.create_library_with_asset_storage("Back edge cases".into(), true).await.unwrap();
+        let services = AppServices::new(
+            backend.clone(),
+            AppStartup {
+                libraries: backend.management.libraries().await.unwrap(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::register_fonts(cx).unwrap();
@@ -1056,7 +1069,7 @@ mod navigation_tests {
             cover: Vec::new(),
         };
         let record = reader_ui::ActiveAudiobook::new(locator.clone(), 45_000, 1.0, metadata);
-        let session = cx.update(|cx| reader_ui::restore_audiobook(&record, backend.library(library_id), cx));
+        let session = cx.update(|cx| reader_ui::restore_audiobook(&record, backend.management.library(library_id), cx));
         window
             .update(cx, |_, window, cx| {
                 root.update(cx, |root, cx| {
@@ -1089,7 +1102,7 @@ mod navigation_tests {
                 Root::dismiss_active_overlay(window, cx);
                 root.update(cx, |root, cx| {
                     let locator = BookLocator::new(library_id, BookId::from_bytes([43; 32]));
-                    let view = cx.new(|cx| reader_ui::ReaderView::new(locator.clone(), "Other reader".into(), None, backend.clone(), Rc::new(backend.library(library_id)), window, cx));
+                    let view = cx.new(|cx| reader_ui::ReaderView::new(locator.clone(), "Other reader".into(), None, backend.clone(), Rc::new(backend.management.library(library_id)), window, cx));
                     root.reader = Some(ReaderSurface { locator, title: "Other reader".into(), view });
                     cx.notify();
                 });
@@ -1185,7 +1198,7 @@ mod navigation_tests {
     #[gpui::test]
     async fn native_back_with_focus_behind_a_dialog_does_not_navigate_the_folder(cx: &mut TestAppContext) {
         let (_directory, services, backend, library_id) = back_fixture(cx).await;
-        let client = backend.library(library_id);
+        let client = backend.management.library(library_id);
         client.create_directory(ROOT_DIR_ID, "Folder".into()).await.unwrap();
         let folder = client.folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Folder").unwrap().id;
         let (window, root) = back_window(services, backend, library_id, LibraryRoute::Folders, cx);
@@ -1235,7 +1248,7 @@ mod navigation_tests {
     #[gpui::test]
     async fn native_back_with_focus_behind_library_switcher_preserves_the_folder(cx: &mut TestAppContext) {
         let (_directory, services, backend, library_id) = back_fixture(cx).await;
-        let client = backend.library(library_id);
+        let client = backend.management.library(library_id);
         client.create_directory(ROOT_DIR_ID, "Folder".into()).await.unwrap();
         let folder = client.folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Folder").unwrap().id;
         let (window, root) = back_window(services, backend, library_id, LibraryRoute::Folders, cx);
@@ -1292,13 +1305,24 @@ mod navigation_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Back navigation".into(), true).await.unwrap();
-        let client = backend.library(*library.library_id());
+        let library = backend.management.create_library_with_asset_storage("Back navigation".into(), true).await.unwrap();
+        let client = backend.management.library(*library.library_id());
         client.create_directory(ROOT_DIR_ID, "Parent".into()).await.unwrap();
         let parent = client.folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Parent").unwrap().id;
         client.create_directory(parent, "Child".into()).await.unwrap();
         let child = client.folder_destinations().await.unwrap().into_iter().find(|folder| folder.label == "Child").unwrap().id;
-        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let services = AppServices::new(
+            backend.clone(),
+            AppStartup {
+                libraries: backend.management.libraries().await.unwrap(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::register_fonts(cx).unwrap();
@@ -1348,8 +1372,19 @@ mod navigation_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Back dialog".into(), true).await.unwrap();
-        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let library = backend.management.create_library_with_asset_storage("Back dialog".into(), true).await.unwrap();
+        let services = AppServices::new(
+            backend.clone(),
+            AppStartup {
+                libraries: backend.management.libraries().await.unwrap(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::register_fonts(cx).unwrap();
@@ -1377,8 +1412,19 @@ mod navigation_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Opening failure".into(), true).await.unwrap();
-        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let library = backend.management.create_library_with_asset_storage("Opening failure".into(), true).await.unwrap();
+        let services = AppServices::new(
+            backend.clone(),
+            AppStartup {
+                libraries: backend.management.libraries().await.unwrap(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::register_fonts(cx).unwrap();
@@ -1470,8 +1516,19 @@ mod navigation_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Session".into(), true).await.unwrap();
-        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let library = backend.management.create_library_with_asset_storage("Session".into(), true).await.unwrap();
+        let services = AppServices::new(
+            backend.clone(),
+            AppStartup {
+                libraries: backend.management.libraries().await.unwrap(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);

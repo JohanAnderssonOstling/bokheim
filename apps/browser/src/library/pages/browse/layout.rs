@@ -1,5 +1,7 @@
 //! Conversion from a listing to paginator groups.
 
+use ui_text::text;
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -111,7 +113,7 @@ pub(super) fn download_mark(row: &BrowseRow, events: CardEvents, theme: componen
             .debug_selector(move || format!("chip-download-{location}"))
             .flex_none()
             .cursor_pointer()
-            .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Download remaining books to this device").build(window, cx))
+            .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new(text!(browse::download_remaining_books_to_this_device)).build(window, cx))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click({
                 let location = row.id;
@@ -203,8 +205,9 @@ pub(super) fn book_child(
 
 fn dispatch_book_clipboard(book: &Entity<BookCardView>, cut: bool, window: &mut Window, cx: &mut App) {
     let book = book.read(cx);
-    if book.can_drag()
-        && let Some(id) = book.content_hash()
+    if book.can_copy()
+        && (!cut || book.can_drag(cx))
+        && let Some(id) = book.book_id()
     {
         window.dispatch_action(Box::new(FocusedBookClipboard { book: id, source: book.source_directory(), cut }), cx);
     }
@@ -216,8 +219,8 @@ pub(super) fn paginator_groups(
     chips: Rc<Vec<BrowseRow>>,
     kind: BrowseKind,
     books: Rc<Vec<Entity<BookCardView>>>,
-    // The folder being browsed. Present only for listings whose children are
-    // real directories, which are the only ones that can be dragged.
+    // The folder being browsed. Query listings carry book identities without
+    // a source folder.
     source: Option<DirId>,
     section_cards: &HashMap<library_model::BrowseLocation, Entity<SectionCard>>,
     items: BrowseItems,
@@ -243,10 +246,9 @@ pub(super) fn paginator_groups(
             if headings.is_some_and(|headings| headings.cards) {
                 return (true, placeholder);
             } else {
-                return (false, placeholder.with_intrinsic_width(components::HierarchyItemWidth { icon: chip_icon, label: "Loading authors…".into(), count: None, show_download: false }));
+                return (false, placeholder.with_intrinsic_width(components::HierarchyItemWidth { icon: chip_icon, label: text!(browse::loading_authors).into(), count: None, show_download: false }));
             }
         };
-        let chip_icon = if matches!(chip.id, library_model::BrowseLocation::Store(_)) { components::NavigationIcon::Storefront } else { chip_icon };
         let width_label = SharedString::from(chip.name.clone());
         let child_count = shown_count(&chip);
         let show_download = shows_download_mark(&chip);
@@ -447,7 +449,7 @@ mod heading_tests {
             (0..3)
                 .map(|index| {
                     let row = BookCardRow {
-                        source: BookSource::Catalog { content_hash: BookId::from_bytes([index + 10; 32]) },
+                        source: BookSource::Catalog { book_id: BookId::from_bytes([index + 10; 32]) },
                         title: format!("Catalog book {index}"),
                         subtitle: None,
                         author: "Writer".into(),
@@ -457,6 +459,7 @@ mod heading_tests {
                         format_category: LibraryFileTypeFilter::Book,
                         audiobook_duration_ms: None,
                         added_at: 0,
+                        description: String::new(),
                         source_directory: None,
                     };
                     BookCardView::create_in_grid(row, library.clone(), Rc::new(|_, _, _| {}), false, false, cx)
@@ -465,7 +468,7 @@ mod heading_tests {
         );
         let hash = BookId::from_bytes([250; 32]);
         let mut row = books[0].read_with(cx, |book, _| book.detail_source().0);
-        row.source = BookSource::Library { content_hash: hash };
+        row.source = BookSource::Library { book_id: hash };
         let library_book = BookCardView::create_in_grid(row, library.clone(), Rc::new(|_, _, _| {}), false, false, cx);
         let folder_id = DirId::from_u128(778);
         let folder = BrowseItem::Child { row: BrowseRow { id: BrowseLocation::Folder(folder_id), name: "Folder".into(), path: None, book_count: 0, downloaded_book_count: 0 }, parent: None };
@@ -555,7 +558,7 @@ mod heading_tests {
     #[test]
     fn sparse_author_headings_preserve_distant_positions_and_leave_feed_chips_first() {
         let row = |id| BrowseRow { id: BrowseLocation::CatalogAuthor(Some(uuid::Uuid::from_u128(id))), name: format!("Writer {id}"), path: None, book_count: 2, downloaded_book_count: 0 };
-        let feed = BrowseRow { id: BrowseLocation::Store(uuid::Uuid::nil()), name: "Store".into(), path: None, book_count: 0, downloaded_book_count: 0 };
+        let feed = BrowseRow { id: BrowseLocation::Opds { source: uuid::Uuid::nil(), page: None }, name: "Feed".into(), path: None, book_count: 0, downloaded_book_count: 0 };
         let first = row(1);
         let distant = row(28);
         let loaded = BTreeMap::from([(0, first.clone()), (27, distant.clone())]);

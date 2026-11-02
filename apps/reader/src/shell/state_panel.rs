@@ -1,5 +1,7 @@
 //! Shared reader widgets used by EPUB and PDF readers.
 
+use ui_text::text;
+
 use std::{collections::HashMap, rc::Rc};
 
 use gpui::prelude::*;
@@ -181,7 +183,7 @@ where
     }
     let mut rows = Vec::new();
     if !recurring.is_empty() {
-        rows.push(AnnotationRow::Heading("Recurring notes".into()));
+        rows.push(AnnotationRow::Heading(text!(reader::recurring_notes).into()));
         rows.extend(recurring.into_iter().map(|index| AnnotationRow::card(index, 0, &annotations[index])));
     }
     for (title, mut indices) in groups {
@@ -230,14 +232,14 @@ pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity
     let keyboard_annotation = annotation.clone();
     let copy_target = target.clone();
     let copy_annotation = annotation.clone();
-    let copy = components::outlined_text_button(("reader-annotation-copy", index), "Copy link").debug_selector(move || format!("reader-annotation-copy-{index}")).on_click(move |_, _, cx| {
+    let copy = components::outlined_text_button(("reader-annotation-copy", index), text!(reader::copy_link)).debug_selector(move || format!("reader-annotation-copy-{index}")).on_click(move |_, _, cx| {
         cx.stop_propagation();
         copy_target.update(cx, |this, cx| this.copy_sidebar_annotation(&copy_annotation, cx));
     });
     let actions = if editable {
         let delete_target = target.clone();
         let delete_id = annotation.id.clone();
-        Some(components::delete_icon_button(("reader-state-annotation-delete", index), "Delete annotation", theme).debug_selector(move || format!("reader-annotation-delete-{index}")).on_click(move |_, _, cx| {
+        Some(components::delete_icon_button(("reader-state-annotation-delete", index), text!(common::delete_annotation), theme).debug_selector(move || format!("reader-annotation-delete-{index}")).on_click(move |_, _, cx| {
             cx.stop_propagation();
             delete_target.update(cx, |this, cx| this.delete_sidebar_annotation(delete_id.clone(), cx));
         }))
@@ -265,7 +267,7 @@ pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity
             go_target.update(cx, |this, cx| this.go_to_annotation(&annotation, cx));
         })
         .child(components::reader_annotation_color_bar(annotation.color))
-        .when_some(annotation.anchor.recurring_scope(), |card, scope| card.child(components::reader_state_note(format!("Recurring · {}", scope.label()), theme)))
+        .when_some(annotation.anchor.recurring_scope(), |card, scope| card.child(components::reader_state_note(format!(text!(reader::recurring), scope.label()), theme)))
         .when(!annotation.exact_text.is_empty(), |card| card.child(components::reader_state_quote(highlighted_text(format!("“{}”", annotation.exact_text), query, options), theme)))
         .when(!note.is_empty(), |card| card.child(components::reader_state_note(highlighted_text(note, query, options), theme).text_color(theme.text)))
         .child(

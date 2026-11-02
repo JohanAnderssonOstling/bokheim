@@ -18,7 +18,7 @@ impl ReaderLink {
     pub fn to_url(&self) -> String {
         let mut pairs = url::form_urlencoded::Serializer::new(String::new());
         pairs.append_pair("library", &self.locator.library_id().to_string());
-        pairs.append_pair("book", &self.locator.content_hash().to_string());
+        pairs.append_pair("book", &self.locator.book_id().to_string());
         if let Some(id) = &self.annotation_id {
             pairs.append_pair("annotation", id);
         }

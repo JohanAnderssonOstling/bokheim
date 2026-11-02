@@ -1,5 +1,7 @@
 //! EPUB annotation loading, editing, and renderer projection.
 
+use ui_text::text;
+
 use crate::invalidation::notify;
 use book_model::{AnnotationAnchor, AnnotationStyle};
 use gpui::{Context, Window};
@@ -12,9 +14,9 @@ use crate::invalidation::Component;
 impl ReaderView {
     pub(crate) fn open_annotation_anchor(&mut self, anchor: &AnnotationAnchor, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         if !matches!(self.load_state, crate::epub::LoadState::Ready(_)) {
-            return Err("This reader could not load the book. Reopen the book to follow this link.".to_owned());
+            return Err(text!(reader::this_reader_could_not_load_the_book_reopen_the_book_to_follow).to_owned());
         }
-        let cfi = self.book.annotation_cfi(anchor).ok_or_else(|| "The linked passage could not be located in this book.".to_owned())?;
+        let cfi = self.book.annotation_cfi(anchor).ok_or_else(|| text!(reader::the_linked_passage_could_not_be_located_in_this_book).to_owned())?;
         self.page_turn = None;
         self.swipe_preview.clear();
         self.navigate_to_cfi(cfi, cx);
@@ -25,11 +27,11 @@ impl ReaderView {
     }
 
     pub(super) fn load_reader_state(&mut self, cx: &mut Context<Self>) {
-        let content_hash = self.locator.content_hash();
+        let book_id = self.locator.book_id();
         let revision = self.marks.revision();
         self.annotation_load_generation = self.annotation_load_generation.wrapping_add(1);
         let generation = self.annotation_load_generation;
-        crate::shell::marks::load_annotations(cx, self.library.clone(), content_hash, &self.marks, move |this, cx, (mut annotations, inherited)| {
+        crate::shell::marks::load_annotations(cx, self.library.clone(), book_id, &self.marks, move |this, cx, (mut annotations, inherited)| {
             if this.annotation_load_generation != generation {
                 return;
             }
@@ -62,13 +64,13 @@ impl ReaderView {
         }
         let toc_ordinal = self.toc.ordinal_for_cfi(&cfi_range).or_else(|| self.toc.ordinal_of_active()).map(|ordinal| ordinal as i64);
         self.annotation_note_input.update(cx, |input, cx| {
-            input.set_placeholder("Add a note", window, cx);
+            input.set_placeholder(text!(common::add_a_note), window, cx);
             input.set_value(String::new(), window, cx);
         });
         let now = crate::shell::marks::now_millis();
         let annotation = Annotation {
             id: uuid::Uuid::new_v4().to_string(),
-            content_hash: self.locator.content_hash(),
+            book_id: self.locator.book_id(),
             anchor: self.book.annotation_anchor(cfi_range),
             exact_text,
             style: AnnotationStyle::Highlight,
@@ -106,14 +108,14 @@ impl ReaderView {
             self.recurring.editor_passage = self
                 .marks
                 .annotation(&id)
-                .filter(|annotation| annotation.content_hash == self.locator.content_hash())
+                .filter(|annotation| annotation.book_id == self.locator.book_id())
                 .and_then(|annotation| Some(Selection { cfi_range: self.book.annotation_cfi(&annotation.anchor)?, text: annotation.exact_text.clone() }));
             id
         };
         let bookmark = self.marks.annotation(&id).is_some_and(Annotation::is_bookmark);
         let note = self.marks.select(id);
         self.annotation_note_input.update(cx, |input, cx| {
-            input.set_placeholder(if bookmark { "Name bookmark" } else { "Add a note" }, window, cx);
+            input.set_placeholder(if bookmark { text!(reader::name_bookmark) } else { text!(common::add_a_note) }, window, cx);
             input.set_value(note, window, cx);
             if bookmark {
                 input.focus(window, cx);

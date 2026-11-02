@@ -4,7 +4,6 @@
 //! origin-wide shared worker and use a serialized RPC protocol. Native hosts
 //! send concrete commands to one application-owned backend thread.
 
-use crate::BackendError;
 use sync_common::LibraryId;
 use tokio::sync::oneshot;
 
@@ -14,7 +13,7 @@ pub(crate) mod native;
 pub(crate) use native::Transport;
 mod protocol;
 pub(crate) mod requests;
-pub(crate) use library_backend::library::commands::LibraryReply;
+pub(crate) use client_runtime::reply::WireReply;
 pub use requests::AppCommand;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod bisac;
@@ -34,10 +33,3 @@ mod host;
 pub(crate) mod taxonomy;
 #[cfg(target_arch = "wasm32")]
 pub use host::BackendWorkerHost;
-
-// Shared subscription API; transports own delivery and cancellation.
-impl Transport {
-    pub(crate) async fn notification_interest_transport(&self, browsing: bool) -> Result<async_channel::Receiver<()>, BackendError> {
-        self.unit_subscription(AppCommand::SubscribeNotifications { browsing }).await
-    }
-}

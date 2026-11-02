@@ -17,7 +17,7 @@ use crate::reader_transfer::{ImportMetadata, ReaderPreparation, ingest_import_fi
 
 #[derive(Debug)]
 pub struct NativeMoveResult {
-    pub content_hash: BookId,
+    pub book_id: BookId,
     pub created: bool,
     /// The move committed; only private staging cleanup failed.
     pub cleanup_error: Option<String>,
@@ -67,9 +67,9 @@ impl LibraryImport {
             })
             .await
             .map_err(BackendError::operation)??;
-            let checksum = ingested.content_hash.content_hash().ok_or("import has no byte checksum")?;
+            let checksum = ingested.book_id.content_hash().ok_or("import has no byte checksum")?;
             let content = self.resolve_import_content(checksum, ingested.size_bytes, ingested.source_identity)?;
-            let identity = content.content_hash;
+            let identity = content.book_id;
             let assets = self.assets.clone();
             run_blocking(move || assets.remember_local_content(identity, checksum)).await.map_err(BackendError::operation)??;
             let _lease = self.lease_import_content(&content).await?;
@@ -147,7 +147,7 @@ impl LibraryImport {
         }
         .await;
         match operation {
-            Ok((content_hash, created, warnings)) => {
+            Ok((book_id, created, warnings)) => {
                 let claim = claimed.take().unwrap();
                 let cleanup_error = match run_blocking(move || claim.commit()).await {
                     Ok(result) => result.err().map(|error| error.to_string()),
@@ -156,7 +156,7 @@ impl LibraryImport {
                 if let Some(error) = &cleanup_error {
                     log::warn!("import committed: {error}");
                 }
-                Ok((NativeMoveResult { content_hash, created, cleanup_error }, warnings))
+                Ok((NativeMoveResult { book_id, created, cleanup_error }, warnings))
             }
             Err(error) => {
                 if let Some(mut claim) = claimed.take() {

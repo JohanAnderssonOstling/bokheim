@@ -1,6 +1,6 @@
 //! A durable, single-worker sitemap acquisition. HTML stays in memory.
 use super::{add, add_fetched, now as unix_time, request_delay, selector, source_url, Popularity, SOURCE};
-use crate::{get, publish};
+use crate::{get, publish, IngestError};
 use reqwest::{blocking::Client, Url};
 use rusqlite::{params, Connection, OptionalExtension};
 use scraper::Html;
@@ -184,7 +184,7 @@ fn apply_observations(db: &Connection, id: &str) -> Result<(), String> {
 
 struct Prefetch {
     url: String,
-    worker: JoinHandle<Result<String, String>>,
+    worker: JoinHandle<Result<String, IngestError>>,
 }
 
 impl Prefetch {
@@ -193,12 +193,12 @@ impl Prefetch {
         let target = url.to_owned();
         let worker = spawn(move || {
             let url = Url::parse(&target).map_err(|e| e.to_string())?;
-            String::from_utf8(get(&client, &url)?).map_err(|e| e.to_string())
+            Ok(String::from_utf8(get(&client, &url)?).map_err(|e| e.to_string())?)
         });
         Self { url: url.to_owned(), worker }
     }
 
-    fn finish(self, url: &str) -> Option<Result<String, String>> {
+    fn finish(self, url: &str) -> Option<Result<String, IngestError>> {
         // Join even when discovery changed the next task, keeping at most one
         // background fetch alive. No queue state advances until acquisition.
         let result = self.worker.join().unwrap_or_else(|_| Err("source prefetch worker panicked".into()));
@@ -206,7 +206,7 @@ impl Prefetch {
     }
 }
 
-fn acquire(db: &Connection, dir: &Path, http: &Client, id: &str, kind: &str, url: &str, fetched: Option<Result<String, String>>) -> Result<&'static str, String> {
+fn acquire(db: &Connection, dir: &Path, http: &Client, id: &str, kind: &str, url: &str, fetched: Option<Result<String, IngestError>>) -> Result<&'static str, IngestError> {
     if kind == "listing" {
         let url = source_url(url, "/")?;
         let raw = match fetched {
@@ -347,15 +347,16 @@ pub fn run(dir: &Path, db: &Connection, http: &Client, retry: bool) -> Result<()
         let _timing = crate::timing::measure("crawl_acquire", &url);
         let result = acquire(db, dir, http, &id, &kind, &url, fetched);
         drop(_timing);
+        let pause_for_source = result.as_ref().err().is_some_and(IngestError::needs_source_pause);
         let (state, message) = match result {
             Ok(state) => (state, None),
-            Err(error) => ("failed", Some(error)),
+            Err(error) => ("failed", Some(error.to_string())),
         };
         let next_attempt = if matches!(state, "failed" | "partial") { now() + 3600 } else { 0 };
         db.execute("UPDATE source_crawl_page SET state=?3,attempts=attempts+1,checked_at=?4,next_attempt=?5,message=?6 WHERE source=?1 AND entry_id=?2", params![SOURCE, id, state, now(), next_attempt, message])
             .map_err(|e| e.to_string())?;
         eprintln!("{state}: {url}{}", message.as_ref().map(|error| format!(": {error}")).unwrap_or_default());
-        if message.as_ref().is_some_and(|error| error.contains("429") || error.contains("503") || error.contains("timed out")) {
+        if pause_for_source {
             update_run(db, "waiting_for_source", message.as_deref())?;
             sleep(Duration::from_secs(900));
         }

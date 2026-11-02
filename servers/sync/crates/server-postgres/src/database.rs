@@ -80,7 +80,7 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
         .map(PostgresDatabase::from_pool)
 }
 
-const SCHEMA_VERSION: i32 = 14;
+const SCHEMA_VERSION: i32 = 15;
 
 /// Applies the initial schema to an empty database. Files are
 /// applied in filename order -- `01_core.sql` before the domain files that
@@ -145,6 +145,9 @@ pub async fn upgrade_existing(database: &PostgresDatabase) -> Result<(), sqlx::E
     }
     if version <= 13 {
         sqlx::raw_sql(include_str!("../schema/migrations/stable_book_content.sql")).execute(&mut *transaction).await?;
+    }
+    if version <= 14 {
+        sqlx::raw_sql(include_str!("../schema/migrations/library_kind.sql")).execute(&mut *transaction).await?;
     }
     transaction.commit().await?;
     Ok(())

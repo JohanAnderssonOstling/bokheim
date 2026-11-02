@@ -9,10 +9,12 @@
 //! These functions style, lay out and measure. What a command does, and which
 //! commands a book has, are the card's business.
 
+use ui_text::text;
+
+use crate::Button;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, AvailableSpace, Bounds, Div, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId, Pixels, Refineable, SharedString, Stateful, Style, StyleRefinement, Window, div, point, px, relative, rems, size};
 use gpui_component::Icon;
-use crate::Button;
 
 use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, base_button, topbar_action_height_rem};
 
@@ -177,7 +179,7 @@ pub fn book_overlay_subjects() -> Div {
 
 /// "More details →", to the book's own page.
 pub fn book_overlay_more_details(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
-    div().id(id).flex_none().pt(px(SPACE_XS)).cursor_pointer().text_size(rems(TEXT_XS)).text_color(theme.text_accent).hover(|style| style.underline()).child("More details →")
+    div().id(id).flex_none().pt(px(SPACE_XS)).cursor_pointer().text_size(rems(TEXT_XS)).text_color(theme.text_accent).hover(|style| style.underline()).child(text!(common::more_details))
 }
 
 /// The commands that are not about opening the book, in one row under a rule.
@@ -249,7 +251,7 @@ fn separator(theme: BrowserTheme) -> Div {
 /// The folded run, saying what it hides when the pointer rests on it.
 fn fold(hidden: SharedString, theme: BrowserTheme) -> Stateful<Div> {
     let tooltip = hidden.clone();
-    crumb_text("…".into(), theme)
+    crumb_text(text!(common::ellipsis).into(), theme)
         .id(SharedString::from(format!("subject-fold-{hidden}")))
         .flex_none()
         .text_color(theme.text_muted)

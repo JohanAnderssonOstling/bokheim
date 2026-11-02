@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ApplicationRelease, SignedManifest, TaxonomyRelease, SIGNATURE_CONTEXT};
+use crate::{ApplicationRelease, SIGNATURE_CONTEXT, SignedManifest, TaxonomyRelease};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
@@ -50,7 +50,7 @@ fn taxonomy_only_can_publish_in_the_background_without_waiting_for_another_launc
     let taxonomy = manifest.taxonomy.as_mut().unwrap();
     taxonomy.minimum_application_version = device.application.clone();
     taxonomy.minimum_schema_version = device.schema;
-    let mut coordinator = Coordinator::open(Memory::default(), config, device.clone(), "current".into()).unwrap();
+    let mut coordinator = Coordinator::open(Memory::default(), config, device.clone(), "current".into(), ApplicationActivation::Restart).unwrap();
     coordinator.discovered(signed(&manifest), 150).unwrap();
     coordinator.approve(150).unwrap();
     assert!(coordinator.is_taxonomy_only());
@@ -64,11 +64,10 @@ fn taxonomy_only_can_publish_in_the_background_without_waiting_for_another_launc
     assert!(coordinator.record().approved.is_none());
 }
 
-
 #[test]
 fn discovery_failures_are_silent_and_approved_plan_is_pinned() {
     let (config, device, mut manifest) = fixture();
-    let mut coordinator = Coordinator::open(Memory::default(), config, device, "first".into()).unwrap();
+    let mut coordinator = Coordinator::open(Memory::default(), config, device, "first".into(), ApplicationActivation::Restart).unwrap();
     coordinator.discovery_failed("offline".into()).unwrap();
     assert_eq!(coordinator.view(100), UpdateView::Hidden);
     coordinator.discovered(signed(&manifest), 150).unwrap();
@@ -89,7 +88,7 @@ fn discovery_failures_are_silent_and_approved_plan_is_pinned() {
 #[test]
 fn expired_offer_cannot_be_approved_but_existing_authorization_survives_expiry() {
     let (config, device, manifest) = fixture();
-    let mut coordinator = Coordinator::open(Memory::default(), config.clone(), device.clone(), "first".into()).unwrap();
+    let mut coordinator = Coordinator::open(Memory::default(), config.clone(), device.clone(), "first".into(), ApplicationActivation::Restart).unwrap();
     coordinator.discovered(signed(&manifest), 150).unwrap();
     assert_eq!(coordinator.view(1001), UpdateView::Hidden);
     assert!(coordinator.approve(1001).is_err());
@@ -102,8 +101,8 @@ fn expired_offer_cannot_be_approved_but_existing_authorization_survives_expiry()
 fn rejects_stale_writers_and_equal_sequence_mutation() {
     let (config, device, mut manifest) = fixture();
     let store = Memory::default();
-    let mut a = Coordinator::open(store.clone(), config.clone(), device.clone(), "a".into()).unwrap();
-    let mut b = Coordinator::open(store, config, device, "b".into()).unwrap();
+    let mut a = Coordinator::open(store.clone(), config.clone(), device.clone(), "a".into(), ApplicationActivation::Restart).unwrap();
+    let mut b = Coordinator::open(store, config, device, "b".into(), ApplicationActivation::Restart).unwrap();
     a.discovered(signed(&manifest), 150).unwrap();
     assert!(b.discovered(signed(&manifest), 150).is_err());
     b.reload().unwrap();
@@ -114,14 +113,13 @@ fn rejects_stale_writers_and_equal_sequence_mutation() {
     assert!(a.discovered(signed(&manifest), 151).is_err());
 }
 
-
 #[cfg(all(feature = "native-state", not(target_arch = "wasm32")))]
 #[test]
 fn sqlite_state_and_verified_staging_survive_restart_without_network() {
     use crate::native_state::{SqliteStore, UpdateLock};
     let root = tempfile::tempdir().unwrap();
     let (config, device, manifest) = fixture();
-    let mut a = Coordinator::open(SqliteStore::open(root.path()).unwrap(), config.clone(), device.clone(), "a".into()).unwrap();
+    let mut a = Coordinator::open(SqliteStore::open(root.path()).unwrap(), config.clone(), device.clone(), "a".into(), ApplicationActivation::Restart).unwrap();
     a.discovered(signed(&manifest), 150).unwrap();
     a.approve(150).unwrap();
     let id = a.record().approved.as_ref().unwrap().id.clone();
@@ -138,7 +136,7 @@ fn sqlite_state_and_verified_staging_survive_restart_without_network() {
     assert!(!a.activation_due());
     assert_eq!(a.record().approved.as_ref().unwrap().completed.len(), 2);
     drop(a);
-    let mut b = Coordinator::open(SqliteStore::open(root.path()).unwrap(), config.clone(), device.clone(), "b".into()).unwrap();
+    let mut b = Coordinator::open(SqliteStore::open(root.path()).unwrap(), config.clone(), device.clone(), "b".into(), ApplicationActivation::Restart).unwrap();
     b.prepare(root.path(), &lock, &client, 160, 0, 0).unwrap();
     assert!(b.activation_due());
     assert_eq!(b.staged_paths(root.path(), &lock).unwrap().len(), 2);
@@ -155,7 +153,7 @@ fn preparation_stops_at_a_blocker_and_resumes_on_the_next_launch() {
 
     let root = tempfile::tempdir().unwrap();
     let (config, device, manifest) = fixture();
-    let mut first = Coordinator::open(SqliteStore::open(root.path()).unwrap(), config.clone(), device.clone(), "first".into()).unwrap();
+    let mut first = Coordinator::open(SqliteStore::open(root.path()).unwrap(), config.clone(), device.clone(), "first".into(), ApplicationActivation::Restart).unwrap();
     first.discovered(signed(&manifest), 150).unwrap();
     first.approve(150).unwrap();
     let folder = root.path().join("staging").join(&first.record().approved.as_ref().unwrap().id);
@@ -170,7 +168,7 @@ fn preparation_stops_at_a_blocker_and_resumes_on_the_next_launch() {
     drop(first);
 
     std::fs::write(folder.join(ArtifactKind::Taxonomy.filename()), b"abc").unwrap();
-    let mut next = Coordinator::open(SqliteStore::open(root.path()).unwrap(), config, device, "next".into()).unwrap();
+    let mut next = Coordinator::open(SqliteStore::open(root.path()).unwrap(), config, device, "next".into(), ApplicationActivation::Restart).unwrap();
     // Old retry deadlines must not block startup or an explicit retry.
     let mut record = next.record().clone();
     record.approved.as_mut().unwrap().retry_at = u64::MAX;
@@ -183,7 +181,7 @@ fn preparation_stops_at_a_blocker_and_resumes_on_the_next_launch() {
 #[test]
 fn quarantined_release_requires_corrected_bytes_and_new_approval() {
     let (config, device, mut manifest) = fixture();
-    let mut coordinator = Coordinator::open(Memory::default(), config, device, "a".into()).unwrap();
+    let mut coordinator = Coordinator::open(Memory::default(), config, device, "a".into(), ApplicationActivation::Restart).unwrap();
     coordinator.discovered(signed(&manifest), 150).unwrap();
     coordinator.approve(150).unwrap();
     coordinator.quarantine_after_recovery("invalid package; old version retained".into()).unwrap();
@@ -198,12 +196,11 @@ fn quarantined_release_requires_corrected_bytes_and_new_approval() {
     assert!(!coordinator.needs_preparation());
 }
 
-
 #[test]
 fn modified_durable_plan_cannot_redirect_an_approved_download() {
     let (config, device, manifest) = fixture();
     let store = Memory::default();
-    let mut coordinator = Coordinator::open(store.clone(), config, device, "a".into()).unwrap();
+    let mut coordinator = Coordinator::open(store.clone(), config, device, "a".into(), ApplicationActivation::Restart).unwrap();
     coordinator.discovered(signed(&manifest), 150).unwrap();
     coordinator.approve(150).unwrap();
     store.0.borrow_mut().approved.as_mut().unwrap().artifacts[0].artifact.url = "https://different.example.org/file".into();
@@ -216,14 +213,14 @@ fn modified_durable_plan_cannot_redirect_an_approved_download() {
 fn adding_a_rotation_key_preserves_approval_and_replay_floor() {
     let (mut config, device, manifest) = fixture();
     let store = Memory::default();
-    let mut a = Coordinator::open(store.clone(), config.clone(), device.clone(), "a".into()).unwrap();
+    let mut a = Coordinator::open(store.clone(), config.clone(), device.clone(), "a".into(), ApplicationActivation::Restart).unwrap();
     a.discovered(signed(&manifest), 150).unwrap();
     a.approve(150).unwrap();
     let id = a.record().approved.as_ref().unwrap().id.clone();
     config.trusted_keys.insert("next-key".into(), [8; 32]);
-    let b = Coordinator::open(store.clone(), config.clone(), device.clone(), "b".into()).unwrap();
+    let b = Coordinator::open(store.clone(), config.clone(), device.clone(), "b".into(), ApplicationActivation::Restart).unwrap();
     assert_eq!(b.record().highest_sequence, manifest.sequence);
     assert_eq!(b.record().approved.as_ref().unwrap().id, id);
     config.trusted_keys.remove("test");
-    assert!(Coordinator::open(store, config, device, "c".into()).is_err());
+    assert!(Coordinator::open(store, config, device, "c".into(), ApplicationActivation::Restart).is_err());
 }

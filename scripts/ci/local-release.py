@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import release_artifacts as artifacts
+import release_config
 
 ROOT = artifacts.ROOT
 
@@ -36,13 +37,9 @@ def main():
         return
     sha = artifacts.command('git', 'rev-parse', 'HEAD')
     artifacts.clean_revision(sha)
-    env = {**os.environ, 'RUSTUP_TOOLCHAIN': 'stable', 'RUSTC_BOOTSTRAP': '1'}
+    release_environment = release_config.environment(os.environ)
+    env = {**os.environ, **release_environment, 'RUSTUP_TOOLCHAIN': release_environment['RUST_VERSION'], 'RUSTC_BOOTSTRAP': '1'}
     env.setdefault('CARGO_BUILD_JOBS', '1')
-    # Use the same public update trust as the Windows build; never load a private feed key.
-    import re
-    workflow = (ROOT / '.github/workflows/desktop-release.yml').read_text()
-    for key in ['BOKHEIM_UPDATE_PUBLIC_KEY_HEX', 'BOKHEIM_UPDATE_KEY_ID', 'BOKHEIM_UPDATE_ENDPOINT']:
-        env.setdefault(key, re.search(rf"^  {key}: .*?\|\| '([^']+)'", workflow, re.M).group(1))
     gate = [sys.executable, 'scripts/ci/require-shared-tests.py', args.repository, sha]
     if subprocess.run(gate, cwd=ROOT, env=env).returncode:
         subprocess.run([sys.executable, 'scripts/ci/shared-tests.py', '--report', args.repository], cwd=ROOT, env=env, check=True)

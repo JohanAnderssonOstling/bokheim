@@ -143,9 +143,9 @@ impl Render for PdfReaderView {
         let toc_width = chrome::sidebar_width(sidebar_visible, window, cx);
         let available_width = (f32::from(window.viewport_size().width) - toc_width).max(0.0);
         let preferences = ReaderSettings::preferences(cx);
-        let horizontal_margin = preferences.pdf_horizontal_margin_px.min(((available_width - 100.0) / 2.0).max(0.0));
-        let vertical_margin = preferences.pdf_vertical_margin_px.min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
-        let page_gap = preferences.pdf_page_gap_px;
+        let horizontal_margin = preferences.synchronized.pdf_horizontal_margin_px().min(((available_width - 100.0) / 2.0).max(0.0));
+        let vertical_margin = preferences.synchronized.pdf_vertical_margin_px().min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
+        let page_gap = preferences.synchronized.pdf_page_gap_px();
         let ruler_style = preferences.pdf_reading_ruler;
         let ruler_lines = preferences.pdf_reading_ruler_lines;
         self.pdf.update(cx, |pdf, cx| {
@@ -197,7 +197,7 @@ impl Render for PdfReaderView {
             // that is not on screen.
             let passage = self.pdf.read(cx).passage_bounds().map(annotation_editor::Passage::from_bounds).or_else(|| self.annotation_popup_anchor.map(annotation_editor::Passage::from_point));
             #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
-            let dock_height = if mobile && self.tts.dock_open { components::player_dock_height_px(window) } else { 0.0 };
+            let dock_height = if mobile && self.tts.dock_open() { components::player_dock_height_px(window) } else { 0.0 };
             #[cfg(not(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
             let dock_height = 0.0;
             let mut insets = window.insets().effective();
@@ -208,7 +208,7 @@ impl Render for PdfReaderView {
         }
         self.chrome.sync_system_bars(chrome_visible, cx);
         #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
-        let dock = self.tts.dock_open.then(|| crate::shell::tts::dock(&self.tts, mobile, theme, cx));
+        let dock = self.tts.dock_open().then(|| crate::shell::tts::dock(&self.tts, mobile, theme, cx));
         #[cfg(not(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
         let dock: Option<gpui::AnyElement> = None;
         let sidebar = active_tab.filter(|_| sidebar_visible).map(|active| {
@@ -233,7 +233,7 @@ impl Render for PdfReaderView {
         // way, so `Reader` bindings keep firing.
         let document_ready = self.page_count > 0;
         let surface = ReaderSurface {
-            document: body.into_any_element(),
+            document: self.marks.with_persistence_notice(self.positions.with_notice(body.into_any_element(), theme), theme),
             dock,
             sidebar,
             active_tab,
@@ -304,11 +304,7 @@ impl PdfReaderView {
         self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(None, cx));
         let anchor = self.pdf.read(cx).passage_bounds().or_else(|| self.annotation_popup_anchor.map(|position| gpui::Bounds::new(position, gpui::size(px(1.0), px(1.0)))));
         let dictionary = cx.new(|cx| {
-            if translate {
-                DictionaryPopup::translate(self.app.clone(), self.locator.content_hash(), selection.text.clone(), Vec::new(), anchor, window, cx)
-            } else {
-                DictionaryPopup::new(self.app.clone(), selection.text.clone(), Vec::new(), anchor, window, cx)
-            }
+            if translate { DictionaryPopup::translate(self.locator.book_id(), selection.text.clone(), Vec::new(), anchor, window, cx) } else { DictionaryPopup::new(selection.text.clone(), Vec::new(), anchor, window, cx) }
         });
         cx.subscribe_in(&dictionary, window, |this, _, _: &Closed, window, cx| {
             this.dictionary = None;

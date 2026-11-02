@@ -6,7 +6,7 @@ use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use book_content::{Book, BookFormat as ContainerFormat};
-use book_model::{Annotation, BookFormat, EpubCfi, PUBLICATION_CFI_PREFIX, ReadingPosition};
+use book_model::{Annotation, BookFormat, EpubCfi, ReadingPosition, PUBLICATION_CFI_PREFIX};
 use client_runtime::BackendError;
 use filesystem_scanner::ingestion::IngestedFile;
 use library_database::transfer::{BookTransferState, ReaderAnnotationSource};
@@ -17,12 +17,12 @@ use serde_json::Value;
 use sync_common::DirId;
 use url::Url;
 
-use crate::LibraryImport;
 use crate::reader_batch::ReaderImportBatch;
-use crate::reader_import::{ImportMode, ReaderBookCounts, ReaderImportBook, ReaderImportOptions, ReaderImportProgress, ReaderImportReport, ReaderImportSource, ReaderLibrarySummary, import_books};
-use crate::reader_transfer::{ReaderBookResult, ReaderMetadata, ReaderPreparation, import_reader_book, metadata_values, reading_progress};
+use crate::reader_import::{import_books, ImportMode, ReaderBookCounts, ReaderImportBook, ReaderImportOptions, ReaderImportProgress, ReaderImportReport, ReaderImportSource, ReaderLibrarySummary};
+use crate::reader_transfer::{import_reader_book, metadata_values, reading_progress, ReaderBookResult, ReaderMetadata, ReaderPreparation};
+use crate::LibraryImport;
 
-use reader_formats::{ReaderFormat, annotation_id, decode_annotation, encoded_identifier};
+use reader_formats::{annotation_id, decode_annotation, encoded_identifier, ReaderFormat};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,13 +200,13 @@ fn fallback_identifier(path: &Path) -> Result<String, BackendError> {
 
 fn prepare_state(book: &FoliateBook, data: &FoliateData, ingested: &IngestedFile, path: &Path, warnings: &mut Vec<String>) -> Result<BookTransferState, BackendError> {
     let mut state = ReaderMetadata { title: &book.title, author: "", language: "", tags: &[], metadata: &data.metadata, source: "Foliate" }.transfer_state(ingested, warnings)?;
-    state.reading = reading_state(data, ingested.content_hash, book.format)?;
-    state.annotations = annotations(data, &book.identifier, ingested.content_hash, book.format)?;
+    state.reading = reading_state(data, ingested.book_id, book.format)?;
+    state.annotations = annotations(data, &book.identifier, ingested.book_id, book.format)?;
     state.annotation_source = Some(ReaderAnnotationSource::Foliate);
     if book.format == BookFormat::Epub && !state.annotations.is_empty() && !ingested.inspection.toc.is_empty() {
         let index = {
             let cfis = state.annotations.iter().filter_map(|annotation| annotation.anchor.epub_cfi_value()).collect::<Vec<_>>();
-            File::open(path).and_then(|reader| Book::open_reader(ContainerFormat::Epub, reader)).and_then(|mut book| book.annotation_toc_index_for_cfis(&ingested.inspection.toc, &cfis))
+            File::open(path).and_then(|reader| Book::open_reader(ContainerFormat::Epub, reader)).and_then(|mut book| book.toc_for_cfis(&ingested.inspection.toc, &cfis))
         };
         match index {
             Ok(toc) => {
@@ -234,7 +234,7 @@ fn reading_state(data: &FoliateData, hash: sync_common::BookId, format: BookForm
         ReadingPosition::parse(&format!("{PUBLICATION_CFI_PREFIX}{cfi}")).map_err(BackendError::operation)?
     };
     let progress = reading_progress(data.progress, "Foliate")?;
-    Ok(Some(LibraryStateEntry::ReadingPosition { content_hash: hash, value: ReadingPositionState { location, progress } }))
+    Ok(Some(LibraryStateEntry::ReadingPosition { book_id: hash, value: ReadingPositionState { location, progress } }))
 }
 
 fn annotations(data: &FoliateData, identifier: &str, hash: sync_common::BookId, format: BookFormat) -> Result<Vec<Annotation>, BackendError> {
@@ -287,7 +287,7 @@ mod tests {
     }
     fn epub_with_identifier(bytes: &[u8], identifier: &str) -> Vec<u8> {
         use std::io::{Cursor, Write};
-        use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
+        use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
         let mut source = ZipArchive::new(Cursor::new(bytes)).unwrap();
         let mut output = ZipWriter::new(Cursor::new(Vec::new()));
         for index in 0..source.len() {
@@ -470,7 +470,7 @@ mod tests {
 
     #[tokio::test]
     async fn imported_cfis_match_nested_toc_sections_and_export_under_their_headings() {
-        use library_annotation_export::{ExportControl, export};
+        use library_annotation_export::{export, ExportControl};
         use library_model::{AnnotationExportConflict, AnnotationExportFormat, AnnotationExportOptions, AnnotationExportOutcome};
         let root = tempfile::tempdir().unwrap();
         let destination = tempfile::tempdir().unwrap();
@@ -501,7 +501,7 @@ mod tests {
             conflict: AnnotationExportConflict::Replace,
             overrides: vec![],
         };
-        let report = export(&importer.database, &importer.assets, importer.library_id, export_options.clone(), ExportControl::default(), |_| {}).await.unwrap();
+        let report = export(&importer.database, &importer.assets, ROOT_DIR_ID, export_options.clone(), ExportControl::default(), |_| {}).await.unwrap();
         assert_eq!(report.results.len(), 2);
         assert!(report.results.iter().all(|result| matches!(result.outcome, AnnotationExportOutcome::Written)), "{report:?}");
         let markdown_path = &report.results.iter().find(|result| result.destination.format == AnnotationExportFormat::Markdown).unwrap().destination.path;
@@ -517,7 +517,7 @@ mod tests {
         let mut external: Value = serde_json::from_slice(&fs::read(foliate_path).unwrap()).unwrap();
         external["annotations"].as_array_mut().unwrap().push(json!({"value":"epubcfi(/8/4!/4/6/2,/1:0,/1:6)","text":"New external quote","note":"New external note","color":"yellow"}));
         fs::write(foliate_path, serde_json::to_vec(&external).unwrap()).unwrap();
-        let refreshed = export(&importer.database, &importer.assets, importer.library_id, export_options, ExportControl::default(), |_| {}).await.unwrap();
+        let refreshed = export(&importer.database, &importer.assets, ROOT_DIR_ID, export_options, ExportControl::default(), |_| {}).await.unwrap();
         assert!(refreshed.results.iter().all(|result| matches!(result.outcome, AnnotationExportOutcome::Written)), "{refreshed:?}");
         let imported = importer.database.annotations(book).unwrap().into_iter().find(|note| note.exact_text == "New external quote").unwrap();
         assert_eq!(imported.toc_ordinal, Some(1));

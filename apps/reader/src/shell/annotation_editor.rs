@@ -6,6 +6,8 @@
 //! and takes whichever vertical side has more room. Each reader implements
 //! the operations for saving and dismissing its editor.
 
+use ui_text::text;
+
 use gpui::prelude::*;
 
 use gpui::{AnyElement, App, Context, Edges, Entity, Pixels, Point, ScrollHandle, Window, px};
@@ -311,7 +313,7 @@ mod tests {
                     note,
                     annotation: Annotation {
                         id: "test-highlight".to_owned(),
-                        content_hash: BookId::from_bytes([0; 32]),
+                        book_id: BookId::from_bytes([0; 32]),
                         anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2/1:0)".to_owned()),
                         exact_text: "Highlighted text".to_owned(),
                         style: AnnotationStyle::Highlight,
@@ -592,10 +594,11 @@ pub(crate) fn bookmark_editor<C: BookmarkEditorTarget>(target: &Entity<C>, geome
     let keyboard = target.clone();
     let enter = target.clone();
     let save = target.clone();
-    let save_button = components::outlined_text_button("reader-bookmark-save", "Save").primary().disabled(name.read(cx).value().trim().is_empty()).debug_selector(|| "reader-bookmark-save".into()).on_click(move |_, window, cx| {
-        cx.stop_propagation();
-        save.update(cx, |this, cx| this.save_bookmark(window, cx));
-    });
+    let save_button =
+        components::outlined_text_button("reader-bookmark-save", text!(reader::save)).primary().disabled(name.read(cx).value().trim().is_empty()).debug_selector(|| "reader-bookmark-save".into()).on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            save.update(cx, |this, cx| this.save_bookmark(window, cx));
+        });
     components::modal_surface(theme)
         .id("reader-bookmark-editor")
         .debug_selector(|| "reader-bookmark-popup".into())

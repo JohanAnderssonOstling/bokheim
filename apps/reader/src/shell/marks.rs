@@ -5,6 +5,8 @@
 //! lives here rather than beside one of them. How a mark is anchored, and how
 //! it becomes something painted over the page, is the reader's own business.
 
+use ui_text::text;
+
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -15,7 +17,7 @@ use gpui::{App, Context, Task};
 use library_backend::{Annotation, LibraryClient, LibraryUpdate};
 use library_model::RecurringAnnotation;
 
-use crate::shell::persistence::MutationWriter;
+use crate::shell::persistence::{MutationWriter, PersistenceSubject};
 use crate::shell::recurring::RecurringMatcher;
 use html::text::TextPatternMatch;
 
@@ -100,18 +102,23 @@ pub(crate) struct MarkSession {
 impl MarkSession {
     pub(crate) fn new(cx: &App, library: Rc<LibraryClient>) -> Self {
         let (bookmark_changes, bookmark_updates) = async_channel::bounded(1);
-        Self { state: MarksState::default(), inherited: Vec::new(), recurring: RecurringMatcher::default(), writes: MutationWriter::new(cx, library), revision: 0, bookmark_changes, bookmark_updates }
+        Self { state: MarksState::default(), inherited: Vec::new(), recurring: RecurringMatcher::default(), writes: MutationWriter::new(cx, library, PersistenceSubject::Annotations), revision: 0, bookmark_changes, bookmark_updates }
     }
 
     /// The sidebar observes its model once. Changes in one UI turn coalesce
     /// into one update using the latest in-memory state.
     pub(crate) fn watch_bookmarks<V: 'static>(&self, cx: &Context<V>, apply: fn(&mut V, BookmarkChange, &mut Context<V>)) -> Task<()> {
         let updates = self.bookmark_updates.clone();
+        let persistence = self.writes.changes();
         cx.spawn(async move |this, cx| {
-            while let Ok(change) = updates.recv().await {
+            loop {
+                let change = futures_lite::future::race(async { updates.recv().await.map(Some) }, async { persistence.recv().await.map(|_| None) }).await;
+                let Ok(change) = change else { break };
                 if this
                     .update(cx, |this, cx| {
-                        apply(this, change, cx);
+                        if let Some(change) = change {
+                            apply(this, change, cx);
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -120,6 +127,10 @@ impl MarkSession {
                 }
             }
         })
+    }
+
+    pub(crate) fn with_persistence_notice(&self, document: gpui::AnyElement, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
+        self.writes.with_notice(document, theme)
     }
 
     fn notify_bookmarks(&self, change: BookmarkChange) {
@@ -185,6 +196,7 @@ impl MarkSession {
         if self.state.annotation(&id).is_none() && !self.state.deleted_annotation_ids.contains(&id) {
             self.writes.record("upgrade EPUB annotation location", move |library| {
                 let library = library.clone();
+                let (id, legacy_cfi, publication_cfi) = (id.clone(), legacy_cfi.clone(), publication_cfi.clone());
                 Box::pin(async move { library.migrate_epub_annotation(id, legacy_cfi, publication_cfi).await })
             });
         }
@@ -337,6 +349,7 @@ impl MarkSession {
         let modified_at = now_millis() as i64;
         self.writes.record(what, move |library| {
             let library = library.clone();
+            let id = id.clone();
             Box::pin(async move { library.delete_annotation(id, modified_at).await })
         });
         closed_editor
@@ -387,6 +400,7 @@ impl MarkSession {
     fn persist(&self, annotation: Annotation, what: &'static str) {
         self.writes.record(what, move |library| {
             let library = library.clone();
+            let annotation = annotation.clone();
             Box::pin(async move { library.upsert_annotation(annotation).await })
         });
     }
@@ -404,19 +418,19 @@ fn build_editor_context(
     let mut books = Vec::new();
     let local = annotations.iter().filter(|annotation| local_ids.contains(&annotation.id)).map(|annotation| (annotation.id.clone(), annotation.note.clone())).collect::<Vec<_>>();
     if !local.is_empty() {
-        books.push(EditorBook { id: book, title: "This book".into(), annotations: local });
+        books.push(EditorBook { id: book, title: text!(reader::this_book).into(), annotations: local });
     }
     for item in inherited {
         if item.annotation.anchor.recurring_scope() != Some(RecurringScope::Library) || !matching_ids.contains(item.annotation.id.as_str()) {
             continue;
         }
-        let index = books.iter().position(|entry| entry.id == item.annotation.content_hash).unwrap_or_else(|| {
-            books.push(EditorBook { id: item.annotation.content_hash, title: item.book_title.clone(), annotations: Vec::new() });
+        let index = books.iter().position(|entry| entry.id == item.annotation.book_id).unwrap_or_else(|| {
+            books.push(EditorBook { id: item.annotation.book_id, title: item.book_title.clone(), annotations: Vec::new() });
             books.len() - 1
         });
         books[index].annotations.push((item.annotation.id.clone(), item.annotation.note.clone()));
     }
-    RecurringEditorContext { books, chapter_available, scope_editable: selected.is_some_and(|annotation| annotation.content_hash == book) }
+    RecurringEditorContext { books, chapter_available, scope_editable: selected.is_some_and(|annotation| annotation.book_id == book) }
 }
 
 pub(crate) fn now_millis() -> u64 {
@@ -436,7 +450,7 @@ pub(crate) fn load_annotations<V: 'static>(cx: &Context<V>, library: Rc<LibraryC
         move |library| {
             let library = library.clone();
             Box::pin(async move {
-                let _ = flushed.recv().await;
+                flushed.recv().await.map_err(|_| library_backend::BackendError::message("Reader annotation flush was interrupted"))??;
                 Ok((library.annotations(book).await?, library.library_recurring_annotations(book).await?))
             })
         },
@@ -475,7 +489,7 @@ mod recurring_tests {
     fn annotation(id: &str, book: BookId, scope: Option<RecurringScope>, text: &str) -> Annotation {
         Annotation {
             id: id.into(),
-            content_hash: book,
+            book_id: book,
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2/1:0)").with_recurring_scope(scope),
             exact_text: text.into(),
             note: format!("Note {id}"),

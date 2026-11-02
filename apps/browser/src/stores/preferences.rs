@@ -1,6 +1,6 @@
 //! Universal preference state.
 //!
-//! The backend stores browsing preferences in local application state, shared
+//! Browsing preferences live in local application state, shared
 //! across libraries and windows. One application store owns the live value.
 //! Settings edits it, and appearance refreshes all windows.
 
@@ -49,6 +49,11 @@ struct PreferencesStore(Entity<Preferences>);
 
 impl gpui::Global for PreferencesStore {}
 
+/// Current appearance and browser preferences for native browser windows.
+pub(crate) fn current_browsing_preferences(cx: &App) -> BrowsingPreferences {
+    cx.try_global::<PreferencesStore>().map(|store| store.0.read(cx).browsing()).unwrap_or_default()
+}
+
 /// The catalog's grouping as last chosen.
 pub(crate) fn current_catalog_grouping(cx: &App) -> CatalogGrouping {
     cx.try_global::<PreferencesStore>().map(|store| store.0.read(cx).browsing().catalog_grouping()).unwrap_or_default()
@@ -79,6 +84,7 @@ pub(crate) fn save_catalog_languages(languages: Option<Vec<String>>, cx: &mut Ap
 
 pub(crate) struct Preferences {
     backend: Rc<app::AppClient>,
+    persistence: app_preferences::Client,
     browsing: BrowsingPreferences,
 }
 
@@ -88,6 +94,7 @@ impl Preferences {
     }
     /// Initialized once for the application; every window observes this owner.
     pub(crate) fn shared(services: &AppServices, cx: &mut App) -> Entity<Self> {
+        services.configure(cx);
         if let Some(store) = cx.try_global::<PreferencesStore>() {
             return store.0.clone();
         }
@@ -109,7 +116,7 @@ impl Preferences {
             .detach();
             #[cfg(not(target_os = "android"))]
             let _ = cx;
-            Self { backend, browsing }
+            Self { backend, persistence: services.preferences.clone(), browsing }
         });
         cx.set_global(PreferencesStore(store.clone()));
         let shortcut_preferences = store.clone();
@@ -151,9 +158,9 @@ impl Preferences {
     }
 
     pub(crate) fn save_keyboard_shortcuts(&mut self, shortcuts: app_preferences::KeyboardShortcuts, cx: &mut Context<Self>) -> Task<Result<(), app::BackendError>> {
-        let backend = self.backend.clone();
+        let persistence = self.persistence.clone();
         cx.spawn(async move |preferences, cx| {
-            let saved = backend.update_browsing_preference(BrowsingPreferencePatch::KeyboardShortcuts(shortcuts)).await?;
+            let saved = persistence.update_browsing(BrowsingPreferencePatch::KeyboardShortcuts(shortcuts)).await.map_err(app::BackendError::operation)?;
             preferences
                 .update(cx, |preferences, cx| {
                     let shortcuts = saved.keyboard_shortcuts().clone();
@@ -197,11 +204,15 @@ impl Preferences {
     /// Applies a browsing patch. Returns the error text on failure so the
     /// Settings page can surface it without this store knowing about pages.
     pub(crate) fn update_browsing(&mut self, patch: BrowsingPreferencePatch, cx: &mut Context<Self>) -> Result<(), String> {
-        if let BrowsingPreferencePatch::AllowMeteredTransfers(enabled) = patch {
-            let saved = self.save_metered_transfers(enabled, cx);
+        let coordinated = match &patch {
+            BrowsingPreferencePatch::TextSearch(enabled) => Some(self.save_text_search(*enabled, cx)),
+            BrowsingPreferencePatch::AllowMeteredTransfers(enabled) => Some(self.save_metered_transfers(*enabled, cx)),
+            _ => None,
+        };
+        if let Some(saved) = coordinated {
             cx.spawn(async move |_, _| {
                 if let Err(error) = saved.await {
-                    log::error!("failed to save the transfer setting: {error}");
+                    log::error!("failed to save the backend preference: {error}");
                 }
             })
             .detach();
@@ -234,9 +245,9 @@ impl Preferences {
         if cx.global::<gpui_kobo::KoboKeyboardLayouts>().0.as_slice() != browsing.keyboard_layouts() {
             cx.set_global(gpui_kobo::KoboKeyboardLayouts(browsing.keyboard_layouts().to_vec()));
         }
-        let backend = self.backend.clone();
+        let persistence = self.persistence.clone();
         cx.spawn(async move |_preferences, _cx| {
-            if let Err(error) = backend.update_browsing_preference(patch).await {
+            if let Err(error) = persistence.update_browsing(patch).await {
                 log::error!("failed to save browsing preference: {error}");
             }
         })

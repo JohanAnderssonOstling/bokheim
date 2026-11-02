@@ -28,7 +28,7 @@ async fn download_browse_preserves_filters_across_nested_placements_and_keeps_ex
     let (shelf, keep, skip) = nested_books(session).await;
     for hash in [keep, skip] {
         session.db.record_remote_asset(BlobKind::Book, &hash).unwrap();
-        session.remove_local_book_copy(hash).unwrap();
+        session.remove_local_book_copy(hash).await.unwrap();
     }
     let mut query = query(shelf);
     query.search = session.db.browse_book_detail(&keep).unwrap().book.title;
@@ -51,10 +51,10 @@ async fn folder_eviction_counts_unique_books_and_keeps_device_only_bytes_and_rea
     session.db.record_remote_asset(BlobKind::Book, &remote).unwrap();
     session.db.update_reading_position(&remote, "epubcfi(/6/2)", Some(42.0), None).unwrap();
     let reading = session.db.reading_position(&remote).unwrap();
-    assert_eq!(session.evict_folder_downloads(&shelf).unwrap(), 1);
+    assert_eq!(session.evict_folder_downloads(&shelf).await.unwrap(), 1);
     assert!(!session.assets.book_exists(&remote, &session.db.book_paths(&remote).unwrap()).unwrap());
     assert!(session.assets.book_exists(&local, &session.db.book_paths(&local).unwrap()).unwrap());
     assert_eq!(session.db.reading_position(&remote).unwrap(), reading);
     assert!(session.db.book_format(&remote).unwrap().is_some());
-    assert_eq!(session.evict_folder_downloads(&shelf).unwrap(), 0);
+    assert_eq!(session.evict_folder_downloads(&shelf).await.unwrap(), 0);
 }

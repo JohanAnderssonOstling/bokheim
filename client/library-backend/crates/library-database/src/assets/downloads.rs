@@ -1,12 +1,33 @@
 pub(crate) use super::TransfersSql;
+use crate::content_identity::freeze_content;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::query_methods::query_rows;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::*;
+use content_address::ContentHash;
 pub(crate) use library_model::DownloadState;
 pub(crate) use sync_common::BookId;
 
 impl Database {
+    /// A shared book object belongs to the identity, regardless of where its
+    /// live placements moved while the bytes were being downloaded.
+    pub fn complete_stored_book_download(&self, hash: BookId, checksum: ContentHash, size_bytes: u64, thumbnail_set_exists: bool) -> Result<(), DatabaseError> {
+        self.write(|transaction| {
+            let stored_size = i64::try_from(size_bytes).map_err(DatabaseError::operation)?;
+            if transaction.transfer_mark_stored_book(&hash, stored_size)? == 0 {
+                return Err(DatabaseError::message("book no longer has a live placement"));
+            }
+            freeze_content(transaction, hash, checksum, Some(size_bytes))?;
+            transaction.transfer_observe_stored_book(&hash, &checksum)?;
+            transaction.record_remote_asset(library_model::BlobKind::Book.storage(), &hash)?;
+            transaction.shared_transfer_complete_download(&hash)?;
+            if !thumbnail_set_exists {
+                transaction.shared_request_thumbnail(&hash)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn is_book_downloaded(&self, hash: &BookId) -> Result<bool, DatabaseError> {
         Ok(self.download_flags(hash)?.0)
     }
@@ -48,11 +69,8 @@ impl Database {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn complete_local_book_request_on(connection: &rusqlite::Connection, hash: &BookId) -> Result<(), DatabaseError> {
         let placements = query_rows(|read| connection.shared_live_book_placements(hash, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-        let mut folders = crate::placements::FolderPaths::new(connection);
-        for (dir_id, file_name) in placements {
-            if let Some(path) = folders.placement(&dir_id, &file_name)? {
-                connection.transfer_queue_materialization(hash, path.as_str())?;
-            }
+        for (dir_id, _) in placements {
+            connection.transfer_queue_materialization(hash, &dir_id)?;
         }
         connection.shared_transfer_complete_download(hash)?;
         Ok(())

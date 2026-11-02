@@ -1,5 +1,7 @@
 //! The browser owns the visible authentication form so autofill and keyboard
 //! focus operate on real fields. Credentials go straight to the existing client.
+use ui_text::text;
+
 use super::SyncPage;
 use gpui::Context;
 use wasm_bindgen::prelude::*;
@@ -31,7 +33,7 @@ impl SyncPage {
         let submit = Closure::own_aborting(move |request: String| {
             let events = events.clone();
             wasm_bindgen_futures::future_to_promise(async move {
-                let request = serde_json::from_str::<super::AuthenticationRequest>(&request).map_err(|_| JsValue::from_str("Could not read the sign-in form. Reload the page and try again."))?;
+                let request = serde_json::from_str::<super::AuthenticationRequest>(&request).map_err(|_| JsValue::from_str(text!(account::could_not_read_the_sign_in_form_reload_the_page_and_try)))?;
                 let (reply, result) = async_channel::bounded(1);
                 events.try_send(super::SyncEvent::Authenticate { request, reply }).map_err(|_| JsValue::from_str("The application window is closed"))?;
                 result.recv().await.map_err(|_| JsValue::from_str("The application window is closed"))?.map_err(JsValue::from_str)?;
@@ -63,7 +65,7 @@ impl SyncPage {
                 self.web_authentication = Some(WebAuthentication { panel, _submit: submit });
             }
             Err(_) => {
-                self.error = Some("Could not open the sign-in form".into());
+                self.error = Some(text!(account::could_not_open_the_sign_in_form).into());
                 cx.notify();
             }
         }

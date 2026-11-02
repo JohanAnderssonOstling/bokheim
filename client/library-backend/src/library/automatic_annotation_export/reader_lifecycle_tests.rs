@@ -51,7 +51,7 @@ async fn native_reader_lifecycle() {
     let book = session.import.import_downloaded_book(ROOT_DIR_ID, "Book.epub", source.to_vec()).await.unwrap();
     let mut annotation = Annotation {
         id: "lifecycle-note".into(),
-        content_hash: book,
+        book_id: book,
         anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2,/1:0,/1:5)"),
         exact_text: "Quote".into(),
         note: "First note".into(),

@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use app::{Failure, LibraryFolderError, LibraryFolderStep};
 use ui_components::user_facing_error;
 
@@ -6,10 +8,10 @@ pub(super) fn folder_add_message(failures: &[LibraryFolderError]) -> String {
         .iter()
         .map(|failure| {
             let heading = match &failure.folder_name {
-                Some(name) => format!("Could not add “{name}”."),
-                None => "Could not add the selected folders.".into(),
+                Some(name) => format!(text!(browse::could_not_add), name = name),
+                None => text!(browse::could_not_add_the_selected_folders).into(),
             };
-            format!("{heading} {}", folder_recovery(failure))
+            format!(text!(browse::heading), folder_recovery(failure), heading = heading)
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -19,14 +21,14 @@ fn folder_recovery(failure: &LibraryFolderError) -> &'static str {
     let LibraryFolderError { step, error, .. } = failure;
     if *step == LibraryFolderStep::SaveLibraryInfo && matches!(error.failure(), Some(Failure::PermissionDenied | Failure::ReadOnlyStorage)) {
         log::warn!("Could not save library information: {error}");
-        return "The app can read this folder, but couldn't save its library information. Allow write access to the folder and app storage, then retry.";
+        return text!(browse::the_app_can_read_this_folder_but_couldn_t_save_its_library);
     }
     let fallback = match step {
-        LibraryFolderStep::CheckFolder => "Couldn't read this folder. Check its drive connection and your access permissions.",
-        LibraryFolderStep::NotAFolder => "The selected item is a file. Choose the folder containing your books instead.",
-        LibraryFolderStep::ReadLibraryInfo => "Couldn't read this folder's library information. If a newer app version created it, update the app; otherwise, restore that information from backup.",
-        LibraryFolderStep::SaveLibraryInfo => "Couldn't save this folder's library information. Check write access to the folder and app storage, then retry.",
-        LibraryFolderStep::OpenLibrary => "Couldn't prepare this library's local data. Restart the app; if it persists, check for app updates.",
+        LibraryFolderStep::CheckFolder => text!(browse::couldn_t_read_this_folder_check_its_drive_connection_and_your_access),
+        LibraryFolderStep::NotAFolder => text!(browse::the_selected_item_is_a_file_choose_the_folder_containing_your_books),
+        LibraryFolderStep::ReadLibraryInfo => text!(browse::couldn_t_read_this_folder_s_library_information_if_a_newer_app),
+        LibraryFolderStep::SaveLibraryInfo => text!(browse::couldn_t_save_this_folder_s_library_information_check_write_access_to),
+        LibraryFolderStep::OpenLibrary => text!(browse::couldn_t_prepare_this_library_s_local_data_restart_the_app_if),
     };
     user_facing_error(error, fallback)
 }

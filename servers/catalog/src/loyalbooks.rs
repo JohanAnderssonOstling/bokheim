@@ -1,6 +1,7 @@
 //! On-demand source ingestion: metadata goes to SQLite, EPUBs and covers to disk.
 //! Audiobook downloads remain linked to their source.
-use crate::{cover_from_image, curation, enrich, get, gutenberg, has_cover, links, manifest::SourceMetadata, source_cover, store_book};
+use crate::{covers::CoverAssets, IngestError};
+use crate::{curation, enrich, get, gutenberg, links, manifest::SourceMetadata, source_cover, store_book};
 use book_model::{agent_id_from_migration_seed, BookDetails, BookFormat, BookRecord, Contributor, LanguageTag, AUTHOR_MARC_RELATOR_CODE};
 use reqwest::blocking::Client;
 use reqwest::Url;
@@ -9,7 +10,6 @@ use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, from_value, to_string, Value};
 use std::collections::{BTreeMap, HashSet};
-use std::fs::copy;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -213,7 +213,7 @@ fn gutenberg_epub(base: &Url, href: &str) -> Option<Url> {
     gutenberg::book_page(&url)
 }
 
-fn retain_epub(dir: &Path, tx: &mut Transaction<'_>, http: &Client, page: &Page, url: &Url) -> Result<(String, Url), String> {
+fn retain_epub(dir: &Path, tx: &mut Transaction<'_>, http: &Client, page: &Page, url: &Url) -> Result<(String, Url), IngestError> {
     let gutenberg::Acquisition { epub: url, metadata } = gutenberg::resolve_acquisition(http, url)?;
     let mut record = page.record.clone();
     metadata.retain_evidence(&mut record);
@@ -309,11 +309,11 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-pub fn add(dir: &Path, db: &Connection, http: &Client, page_url: &str, listing_url: Option<&str>) -> Result<(), String> {
+pub fn add(dir: &Path, db: &Connection, http: &Client, page_url: &str, listing_url: Option<&str>) -> Result<(), IngestError> {
     add_with_epub(dir, db, http, page_url, listing_url, None)
 }
 
-pub fn add_with_epub(dir: &Path, db: &Connection, http: &Client, page_url: &str, listing_url: Option<&str>, epub_url: Option<&str>) -> Result<(), String> {
+pub fn add_with_epub(dir: &Path, db: &Connection, http: &Client, page_url: &str, listing_url: Option<&str>, epub_url: Option<&str>) -> Result<(), IngestError> {
     let _timing = crate::timing::measure("source_ingest", page_url);
     let url = source_url(page_url, "/book/")?;
     let raw = String::from_utf8(get(http, &url)?).map_err(|e| e.to_string())?;
@@ -322,12 +322,12 @@ pub fn add_with_epub(dir: &Path, db: &Connection, http: &Client, page_url: &str,
 
 /// Consumes a prefetched source page; admission and every database mutation
 /// still happen on the serialized writer. Prefetching never fetches audio.
-pub(super) fn add_fetched(dir: &Path, db: &Connection, http: &Client, page_url: &str, raw: String) -> Result<(), String> {
+pub(super) fn add_fetched(dir: &Path, db: &Connection, http: &Client, page_url: &str, raw: String) -> Result<(), IngestError> {
     let _timing = crate::timing::measure("source_ingest", page_url);
     ingest_page(dir, db, http, source_url(page_url, "/book/")?, raw, None, None)
 }
 
-fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String, listing_url: Option<&str>, epub_url: Option<&str>) -> Result<(), String> {
+fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String, listing_url: Option<&str>, epub_url: Option<&str>) -> Result<(), IngestError> {
     let page_url = url.as_str().to_owned();
     let parsing_timing = crate::timing::measure("source_parse_and_discovery", &page_url);
     if CRAWL_ACTIVE.load(Ordering::Relaxed) {
@@ -360,12 +360,12 @@ fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String
     let hash = if let Some(url) = page.epub.clone() {
         let result = retain_epub(dir, &mut tx, http, &page, &url);
         let result = match result {
-            Err(error) if !error.contains("enrichment failed") && page.fallback_epub.as_ref().is_some_and(|fallback| fallback != &url) => {
+            Err(error) if error.can_try_alternative() && page.fallback_epub.as_ref().is_some_and(|fallback| fallback != &url) => {
                 let fallback = page.fallback_epub.clone().unwrap();
                 eprintln!("source EPUB unavailable; trying its linked Gutenberg edition: {error}");
                 match retain_epub(dir, &mut tx, http, &page, &fallback) {
                     Ok(result) => Ok(result),
-                    Err(fallback_error) => Err(format!("{error}; linked EPUB also failed: {fallback_error}")),
+                    Err(fallback_error) => Err(IngestError::Alternative { primary: Box::new(error), alternative: Box::new(fallback_error) }),
                 }
             }
             other => other,
@@ -376,7 +376,7 @@ fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String
                 Some(hash)
             }
             Err(error) if page.audio.is_some() => {
-                page.epub_import_error = Some(error);
+                page.epub_import_error = Some(error.to_string());
                 None
             }
             Err(error) => return Err(error),
@@ -400,7 +400,7 @@ fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String
     let enriched = if hash.is_none() && page.audio.is_some() {
         let key = links::entry_key(SOURCE, &page.id)?;
         let local_cover = source_cover(dir, &key, http, page.cover.as_ref());
-        let (record, _, found) = enrich(http, page.record.clone(), &format!("{}.audiobook", page.id), !local_cover)?;
+        let (record, _, found) = enrich(http, page.record.clone(), &format!("{}.audiobook", page.id), !local_cover).map_err(IngestError::Enrichment)?;
         Some((record, found))
     } else {
         None
@@ -410,14 +410,14 @@ fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String
     let external: Option<String> = tx.query_row("SELECT entry_key FROM external_book WHERE source=?1 AND entry_id=?2", params![SOURCE, page.id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     drop(persist_timing);
-    if let Some(entry) = external.filter(|entry| !has_cover(dir, entry)) {
+    if let Some(entry) = external.filter(|entry| !CoverAssets::new(dir, entry).exists()) {
         let _timing = crate::timing::measure("audio_covers", &page_url);
         // A cover can be retained even when the recording stays on its source.
-        let reused = hash.as_ref().is_some_and(|hash| has_cover(dir, hash));
+        let reused = hash.as_ref().is_some_and(|hash| CoverAssets::new(dir, hash).exists());
         let result = if reused {
-            ["card", "detail"].iter().try_for_each(|size| copy(dir.join(format!("covers/{}-{size}.jpg", hash.as_ref().unwrap())), dir.join(format!("covers/{entry}-{size}.jpg"))).map(|_| ()).map_err(|e| e.to_string()))
+            CoverAssets::new(dir, &entry).copy_missing_from(&CoverAssets::new(dir, hash.as_ref().unwrap()))
         } else if let Some(cover) = &page.cover {
-            get(http, cover).and_then(|bytes| cover_from_image(dir, &entry, &bytes))
+            get(http, cover).map_err(String::from).and_then(|bytes| CoverAssets::new(dir, &entry).store_image(&bytes))
         } else {
             Ok(())
         };

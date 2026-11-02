@@ -33,15 +33,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "1"
-  RUST_VERSION: stable
-  GPUI_FORK_REF: ee2460ecfcc7c3b485c839924d36c6c6c83ece79
-  HTML_ENGINE_REF: 0b5befffa0479a8ccf6148687fe734cfa6086585
-  HTML_VIEW_CORE_REF: c74e5eb0a30ba7a9fff2eb8e349d3b17d24d8b5a
   LINUXDEPLOY_VERSION: 1-alpha-20251107-1
   APPIMAGETOOL_VERSION: 1.9.1
-  BOKHEIM_UPDATE_PUBLIC_KEY_HEX: ${{ vars.BOKHEIM_UPDATE_PUBLIC_KEY_HEX || 'f9e4a3504b65243b84d497bc3b0434793803c794c0db129701ea563d0a51efa3' }}
-  BOKHEIM_UPDATE_KEY_ID: ${{ vars.BOKHEIM_UPDATE_KEY_ID || 'release-1' }}
-  BOKHEIM_UPDATE_ENDPOINT: ${{ vars.BOKHEIM_UPDATE_ENDPOINT || 'https://updates.bokheim.se/v1/stable' }}
 
 jobs:
   windows-checks:
@@ -75,6 +68,25 @@ jobs:
           path: bokheim
           ref: ${{ inputs.source_commit || github.sha }}
 
+      - name: Check out release configuration
+        uses: actions/checkout@v6
+        with:
+          path: release-tools
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            scripts/ci/release_config.py
+            scripts/ci/release-config.json
+      - name: Load release configuration
+        shell: python {0}
+        env:
+          BOKHEIM_UPDATE_PUBLIC_KEY_HEX: ${{ vars.BOKHEIM_UPDATE_PUBLIC_KEY_HEX }}
+          BOKHEIM_UPDATE_KEY_ID: ${{ vars.BOKHEIM_UPDATE_KEY_ID }}
+          BOKHEIM_UPDATE_ENDPOINT: ${{ vars.BOKHEIM_UPDATE_ENDPOINT }}
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          source = Path(os.environ['GITHUB_WORKSPACE']) / 'release-tools'
+          subprocess.run([sys.executable, str(source / 'scripts/ci/release_config.py'), '--github-env'], check=True)
       - name: Check out GPUI-Fork
         uses: actions/checkout@v6
         with:
@@ -193,12 +205,18 @@ jobs:
           python apps/desktop-gpui/windows/package-update.py --binary target/release/bokheim.exe --icon apps/ui/design-tokens/assets/icon/favicon.ico --output release/Bokheim-Windows-x86_64-Update.zip --portable-output release/Bokheim-Windows-x86_64-Portable.zip
           if ($LASTEXITCODE -ne 0) { throw "Windows update packaging failed" }
 
-      - name: Build and test single-file Windows app
+      - name: Test single-file Windows launcher
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: |
           cargo test --release --locked --manifest-path apps/desktop-gpui/windows/standalone/Cargo.toml --target-dir target/windows-standalone
           if ($LASTEXITCODE -ne 0) { throw "Standalone launcher tests failed" }
+
+      - name: Build single-file Windows app
+        working-directory: bokheim
+        shell: pwsh
+        run: |
           python apps/desktop-gpui/windows/package-standalone.py --archive release/Bokheim-Windows-x86_64-Portable.zip --output release/Bokheim-Windows-x86_64-Standalone.exe
           if ($LASTEXITCODE -ne 0) { throw "Standalone executable packaging failed" }
 
@@ -226,6 +244,7 @@ jobs:
           $info | Set-Content -Encoding utf8 "release/update-info-windows-x86_64-zip.json"
 
       - name: Verify first and cached standalone launches
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: |

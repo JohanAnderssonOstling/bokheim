@@ -10,16 +10,18 @@ use client_platform_runtime::{
 use futures_util::io::{AsyncReadExt, AsyncSeekExt};
 use library_backend::{
     integration::LibraryAccountSession,
-    library::{DocumentSource, LibraryCommand, LibraryHandle, LibraryOpenConfig, LibraryRuntimeSpec, PendingCommand, RemoteFile},
+    library::{DocumentSource, LibraryHandle, LibraryOpenConfig, LibraryRuntimeSpec, RemoteFile},
     BookId, DownloadState, LibraryClient, LibraryId, ThumbnailResolution, ROOT_DIR_ID,
 };
 use library_database::{Database, ImportCommit};
 use library_model::{BlobKind, PublishedStagedBook, TransferOrigin};
+use library_placement::LibraryPlacement;
+use library_runtime::{account::LibraryAuthentication, events::LibraryEventRouter, scheduler::SyncScheduler};
 use std::{
     io::SeekFrom,
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -60,8 +62,7 @@ fn open_library(root: &Path, server: &str, executor: &BackendExecutor) -> (Libra
                 metadata_server_url: server.into(),
                 storage: sync_common::storage::LibraryStorage::Bokheim,
                 reset_cloud_presence: false,
-                opds: None,
-            },
+                opds_credentials: None, kind: Default::default() },
             account: account.library_account(),
             notification_interest: Default::default(),
             root_failures: None,
@@ -90,7 +91,7 @@ async fn explicit_reading_and_downloads_bypass_metering_while_automatic_download
             parent_id: ROOT_DIR_ID,
             file_name: "book.epub".into(),
             format: BookFormat::Epub,
-            content_hash: hash,
+            book_id: hash,
             size_bytes: bytes.len() as u64,
             inspection_version: 1,
             inspection: Some(book_inspection::InspectedBook { pdf: None, audiobook: None, toc: vec![], metadata: BookRecord { metadata: BookDetails { title: "Remote book".into(), ..Default::default() }, description: String::new() } }),
@@ -178,26 +179,15 @@ async fn explicit_reading_and_downloads_bypass_metering_while_automatic_download
     assert!(requests.load(Ordering::SeqCst) > before_page, "the page read must exercise HTTP access after opening");
 
     let source = RemoteFile { hash, length: bytes.len() as u64, revision: None };
-    let bundle: serde_bytes::ByteBuf =
-        timeout(Duration::from_secs(5), client.request(LibraryCommand::Pending(PendingCommand::ReadFileBundle { source, ranges: vec![(32, 128), (96 * 1024, 256)] }))).await.expect("PDF range bundles must bypass metering").unwrap();
-    assert_eq!(bundle.as_ref(), [bytes[32..160].to_vec(), bytes[96 * 1024..96 * 1024 + 256].to_vec()].concat());
+    let bundle = timeout(Duration::from_secs(5), client.read_file_bundle(source, vec![(32, 128), (96 * 1024, 256)])).await.expect("PDF range bundles must bypass metering").unwrap();
+    assert_eq!(bundle, [bytes[32..160].to_vec(), bytes[96 * 1024..96 * 1024 + 256].to_vec()].concat());
     assert_eq!(client.download_state(hash).await.unwrap(), DownloadState::NotDownloaded, "reading must not install a complete downloaded copy");
 
     let database = Arc::new(Database::open(root.path().join("library.sqlite")).unwrap());
     let account = LibraryAccountSession::load(Account(Session::try_new(address.parse().unwrap(), "user".into(), "reader@example.com".into(), "a".repeat(43)).unwrap()), address.parse().unwrap()).unwrap().library_account();
-    let assets = AssetExecutor {
-        asset_storage_enabled: Arc::new(AtomicBool::new(true)),
-        assets: library_files::AssetStore::open(root.path().to_str().unwrap()).unwrap(),
-        http_client: http_response::client(),
-        library_id: handle.id(),
-        events: None,
-        credentials: account.credentials(),
-        account: Some(account),
-        notification_interest: Default::default(),
-        availability_changed: Arc::new(AtomicBool::new(false)),
-        database: database.clone(),
-        cpu: Arc::new(client_platform_native::cpu_host::NativeHost::default()),
-    };
+    let (events, _) = LibraryEventRouter::new(SyncScheduler::new().0, SyncScheduler::new().0, SyncScheduler::new().0, SyncScheduler::new().0);
+    let placement = Arc::new(LibraryPlacement::new(database.clone(), library_files::AssetStore::open(root.path().to_str().unwrap()).unwrap(), events));
+    let assets = AssetExecutor::new(placement, handle.id(), LibraryAuthentication::Account(account), Default::default(), Arc::new(client_platform_native::cpu_host::NativeHost::default()));
     database.sync_request_book_downloads(&[hash], TransferOrigin::Background).unwrap();
     let before = requests.load(Ordering::SeqCst);
     assert!(timeout(Duration::from_secs(1), assets.download_book(hash)).await.expect("automatic work must release the worker").is_err());

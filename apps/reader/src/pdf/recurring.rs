@@ -43,7 +43,7 @@ pub(super) fn matched_page_occurrences<'a>(matches: impl Iterator<Item = (&'a An
         if rects.is_empty() {
             continue;
         }
-        if annotation.content_hash == current_book && annotation.anchor.pdf_anchor().is_some_and(|anchor| anchor.page_index as usize == page && anchor.rects.first().is_some_and(|origin| (origin.left - rects[0].left()).abs() < 0.005 && (origin.top - rects[0].top()).abs() < 0.005)) {
+        if annotation.book_id == current_book && annotation.anchor.pdf_anchor().is_some_and(|anchor| anchor.page_index as usize == page && anchor.rects.first().is_some_and(|origin| (origin.left - rects[0].left()).abs() < 0.005 && (origin.top - rects[0].top()).abs() < 0.005)) {
             continue;
         }
         let overlay = super::marks::annotation_overlay_at(annotation, format!("recurring:{}:{page}:{start}", annotation.id), page, rects);
@@ -69,7 +69,7 @@ mod tests {
     fn annotation(page: u32, scope: RecurringScope) -> Annotation {
         Annotation {
             id: "name".into(),
-            content_hash: BookId::from_bytes([1; 32]),
+            book_id: BookId::from_bytes([1; 32]),
             anchor: AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(page, vec![PdfAnnotationRect::new(0.1, 0.2, 0.09, 0.02)], None)).with_recurring_scope(Some(scope)),
             exact_text: "Elizabeth".into(),
             style: AnnotationStyle::Highlight,
@@ -87,7 +87,7 @@ mod tests {
     fn recurring_pdf_matches_skip_originals_and_partial_words_and_respect_chapters() {
         let text = "Elizabeth ELIZABETH Elizabethan".chars().enumerate().map(|(index, character)| (character, Some(NormalizedRect::new(0.1 + index as f32 * 0.01, 0.2, 0.01, 0.02)))).collect::<Vec<_>>();
         let note = annotation(0, RecurringScope::Book);
-        let matches = page_occurrences(&[&note], note.content_hash, 0, &text, |page| page / 2);
+        let matches = page_occurrences(&[&note], note.book_id, 0, &text, |page| page / 2);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].annotation_id, note.id);
         assert_eq!(matches[0].exact_text, "ELIZABETH");
@@ -98,8 +98,8 @@ mod tests {
         let library = annotation(0, RecurringScope::Library);
         assert_eq!(page_occurrences(&[&library], BookId::from_bytes([2; 32]), 0, &text, |page| page / 2).len(), 2);
         let chapter = annotation(2, RecurringScope::Chapter);
-        assert!(page_occurrences(&[&chapter], chapter.content_hash, 0, &text, |page| page / 2).is_empty());
-        assert_eq!(page_occurrences(&[&chapter], chapter.content_hash, 3, &text, |page| page / 2).len(), 2);
+        assert!(page_occurrences(&[&chapter], chapter.book_id, 0, &text, |page| page / 2).is_empty());
+        assert_eq!(page_occurrences(&[&chapter], chapter.book_id, 3, &text, |page| page / 2).len(), 2);
     }
 
     #[test]

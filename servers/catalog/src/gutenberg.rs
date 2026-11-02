@@ -1,4 +1,5 @@
 //! Gutenberg acquisitions use the EPUB3 advertised by the selected book page.
+use crate::IngestError;
 use crate::{curation, get, manifest::SourceMetadata, store_book};
 use book_model::{from_text, unique_book_year, BookDetails, BookRecord, BookSubject, Identifier, Scheme, Scope};
 use reqwest::{blocking::Client, Url};
@@ -279,13 +280,13 @@ pub fn backfill_subjects(db: &Connection, path: &Path) -> Result<(), String> {
 
 /// Other sources keep their acquisition URLs. Gutenberg links always resolve
 /// through the book page, including when an OPDS feed offers an older EPUB.
-pub fn resolve_acquisition(http: &Client, url: &Url) -> Result<Acquisition, String> {
+pub fn resolve_acquisition(http: &Client, url: &Url) -> Result<Acquisition, IngestError> {
     if !is_gutenberg(url) {
         return Ok(Acquisition { epub: url.clone(), metadata: SourceMetadata::default() });
     }
-    let page = book_page(url).ok_or_else(|| format!("cannot identify the Gutenberg book page for {url}"))?;
-    let raw = String::from_utf8(get(http, &page)?).map_err(|error| format!("{page}: {error}"))?;
-    Ok(Acquisition { epub: page_epub3(&page, &raw)?, metadata: page_metadata(&raw)? })
+    let page = book_page(url).ok_or_else(|| IngestError::Source(format!("cannot identify the Gutenberg book page for {url}")))?;
+    let raw = String::from_utf8(get(http, &page)?).map_err(|error| IngestError::Source(format!("{page}: {error}")))?;
+    Ok(Acquisition { epub: page_epub3(&page, &raw).map_err(IngestError::Source)?, metadata: page_metadata(&raw).map_err(IngestError::Source)? })
 }
 
 pub fn add(dir: &Path, db: &Connection, http: &Client, value: &str) -> Result<(), String> {

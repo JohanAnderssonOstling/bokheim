@@ -33,7 +33,7 @@ pub(crate) fn project_annotation(tx: &Transaction<'_>, annotation: &Annotation) 
             "INSERT INTO notebook_annotation(id,book_row_id,body,search_text,created_at,external,toc_ordinal,progress)
             SELECT ?1,row_id,?3,?4,?5,?6,?7,?8 FROM book WHERE content_hash=?2
             ON CONFLICT(id) DO UPDATE SET book_row_id=excluded.book_row_id,body=excluded.body,search_text=excluded.search_text,created_at=excluded.created_at,external=excluded.external,toc_ordinal=excluded.toc_ordinal,progress=excluded.progress",
-            params![annotation.id, annotation.content_hash, body, search, created, annotation.is_external_pdf_annotation(), annotation.toc_ordinal, annotation.progress],
+            params![annotation.id, annotation.book_id, body, search, created, annotation.is_external_pdf_annotation(), annotation.toc_ordinal, annotation.progress],
         )?;
     }
     Ok(())

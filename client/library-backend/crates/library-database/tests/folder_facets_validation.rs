@@ -62,7 +62,7 @@ fn direct_descendants_and_directory_counts_follow_mutations() {
             }
         }
         // Both cards and counts reflect the committed writes immediately.
-        let mut hashes = db.browse_contents(&query(TARGET, "book"), false).unwrap().books.iter().map(|b| b.content_hash().unwrap().to_string()).collect::<Vec<_>>();
+        let mut hashes = db.browse_contents(&query(TARGET, "book"), false).unwrap().books.iter().map(|b| b.book_id().unwrap().to_string()).collect::<Vec<_>>();
         hashes.sort();
 
         let expected = query_rows(|callback| db.connection.fixtures_read_dir_subtree_id_id(&TARGET, callback), |r| r.get::<_, String>(0)).unwrap();

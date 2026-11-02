@@ -38,7 +38,7 @@ impl<S: Storage> DictionaryStore<S> {
         let _download = self.download_lock.lock().await;
         {
             let _guard = self.storage.lock().await;
-            let installed = self.catalog()?;
+            let installed = self.catalog().await?;
             if installed.iter().any(|item| item.curated_id.as_deref() == Some(&id)) {
                 return Ok(installed);
             }

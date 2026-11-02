@@ -11,12 +11,12 @@ use sync_common::ROOT_DIR_ID;
 async fn notebook_pages_share_browse_refresh_and_preserve_view_state(cx: &mut TestAppContext) {
     let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_directory, session, original) = LibrarySession::test_context(cx).await;
-    let entry = original.app().create_library_with_asset_storage("Local notebook fixture".into(), false).await.unwrap();
+    let entry = original.app().management.create_library_with_asset_storage("Local notebook fixture".into(), false).await.unwrap();
     let library = cx.update(|cx| {
         let app = Rc::new(original.app().clone());
-        let backend = Rc::new(app.library(*entry.library_id()));
+        let backend = Rc::new(app.management.library(*entry.library_id()));
         let updates = crate::library::LibraryUpdateBridge::create(app.clone(), *entry.library_id(), cx);
-        LibraryContext::new(app, backend, Rc::new(|_, _, _, _, _| {}), updates, session.downgrade(), cx.new(|_| crate::NowPlaying::default()))
+        LibraryContext::new(app, original.catalog().clone(), backend, Rc::new(|_, _, _, _, _| {}), updates, session.downgrade(), cx.new(|_| crate::NowPlaying::default()))
     });
     let backend = library.backend().clone();
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/library-backend/crates/book-inspection/tests/fixtures");
@@ -53,7 +53,7 @@ async fn notebook_pages_share_browse_refresh_and_preserve_view_state(cx: &mut Te
     for (index, book) in books.iter().enumerate() {
         let annotation = Annotation {
             id: format!("notebook-integration-{index}"),
-            content_hash: book.library_file().unwrap(),
+            book_id: book.library_file().unwrap(),
             anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:0)"),
             exact_text: "A searchable passage".into(),
             note: if index < 2 { "Original note".into() } else { "Other note".into() },
@@ -130,7 +130,7 @@ async fn notebook_pages_share_browse_refresh_and_preserve_view_state(cx: &mut Te
         let _ = window.draw(cx);
     });
     assert_eq!(flow.read_with(cx, |flow, _| flow.visible_child_range().unwrap().start), 1);
-    let edited = page.read_with(cx, |page, _| annotations.iter().position(|annotation| page.cached[&annotation.content_hash].0 == rows[0]).unwrap());
+    let edited = page.read_with(cx, |page, _| annotations.iter().position(|annotation| page.cached[&CardKey::from(annotation.book_id)].0 == rows[0]).unwrap());
     annotations[edited].note = "Updated in the reader".into();
     annotations[edited].modified_at = 10;
     backend.upsert_annotation(annotations[edited].clone()).await.unwrap();

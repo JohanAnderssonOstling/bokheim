@@ -1,8 +1,6 @@
-use std::io::{Read, Seek, SeekFrom};
-
 use flate2::{Decompress, FlushDecompress};
 
-use crate::{MAX_ENTRY_BYTES, Result, read_at};
+use crate::{MAX_ENTRY_BYTES, ReadAt, Result};
 
 struct Chunks {
     length: u64,
@@ -16,21 +14,21 @@ pub struct Body<R> {
     decoded: Option<(usize, Vec<u8>)>,
 }
 
-impl<R: Read + Seek> Body<R> {
-    pub fn open(mut reader: R, compressed: bool) -> Result<Self> {
-        let file_size = reader.seek(SeekFrom::End(0)).map_err(|error| error.to_string())?;
+impl<R: ReadAt> Body<R> {
+    pub async fn open(mut reader: R, compressed: bool) -> Result<Self> {
+        let file_size = reader.size().await?;
         if !compressed {
             return Ok(Self { reader, size: file_size, chunks: None, decoded: None });
         }
         if file_size < 20 {
             return Err("Truncated dictzip file".into());
         }
-        let header = read_at(&mut reader, 0, 12)?;
+        let header = reader.read_at(0, 12).await?;
         if header[..3] != [0x1f, 0x8b, 8] || header[3] & 4 == 0 || header[3] & 0xe0 != 0 {
             return Err("The .dict.dz file must use dictzip random-access compression".into());
         }
         let extra_length = u16::from_le_bytes([header[10], header[11]]) as usize;
-        let extra = read_at(&mut reader, 12, extra_length)?;
+        let extra = reader.read_at(12, extra_length).await?;
         let mut cursor = 0;
         let mut table = None;
         while cursor < extra.len() {
@@ -60,7 +58,7 @@ impl<R: Read + Seek> Body<R> {
                     if offset >= file_size - 8 || count == 65536 {
                         return Err("Invalid dictzip header string".into());
                     }
-                    let byte = read_at(&mut reader, offset, 1)?[0];
+                    let byte = reader.read_at(offset, 1).await?[0];
                     offset += 1;
                     count += 1;
                     if byte == 0 {
@@ -80,7 +78,7 @@ impl<R: Read + Seek> Body<R> {
             offsets.push((offset, size));
             offset += size as u64;
         }
-        let trailer = read_at(&mut reader, file_size - 4, 4)?;
+        let trailer = reader.read_at(file_size - 4, 4).await?;
         let size = u64::from(u32::from_le_bytes(trailer.try_into().map_err(|_| "Invalid dictzip trailer")?));
         if size == 0 || size.div_ceil(length) != offsets.len() as u64 {
             return Err("Dictzip size does not match its chunk table".into());
@@ -92,12 +90,12 @@ impl<R: Read + Seek> Body<R> {
         self.size
     }
 
-    pub fn read_entry(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
+    pub async fn read_entry(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
         if size > MAX_ENTRY_BYTES || offset.checked_add(u64::from(size)).is_none_or(|end| end > self.size) {
             return Err("Invalid dictionary entry range".into());
         }
         let Some(chunks) = &self.chunks else {
-            return read_at(&mut self.reader, offset, size as usize);
+            return self.reader.read_at(offset, size as usize).await;
         };
         if size == 0 {
             return Ok(Vec::new());
@@ -109,7 +107,7 @@ impl<R: Read + Seek> Body<R> {
             let expected = chunks.length.min(self.size - index * chunks.length) as usize;
             if self.decoded.as_ref().is_none_or(|(cached, _)| *cached != chunk_index) {
                 let (file_offset, compressed_size) = chunks.offsets[chunk_index];
-                let compressed = read_at(&mut self.reader, file_offset, compressed_size)?;
+                let compressed = self.reader.read_at(file_offset, compressed_size).await?;
                 let mut decoded = vec![0; expected + 1];
                 let mut inflater = Decompress::new(false);
                 inflater.decompress(&compressed, &mut decoded, FlushDecompress::Sync).map_err(|error| format!("Invalid dictzip chunk: {error}"))?;

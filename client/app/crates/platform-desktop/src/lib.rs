@@ -13,7 +13,3 @@ pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// Exported documents live beside the default library root, outside its scan.
-pub fn default_annotation_export_folder() -> Result<PathBuf,String> {
-    Ok(dirs::document_dir().or_else(||dirs::home_dir().map(|home|home.join("Documents"))).ok_or("could not locate the Documents directory")?.join("Bokheim annotations"))
-}

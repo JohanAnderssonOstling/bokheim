@@ -22,7 +22,7 @@ const MAX_PACKAGE_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MARKUP_RESOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 65_536;
 
-use crate::TocEntry;
+use crate::BookTocEntry;
 
 use crate::metadata::*;
 

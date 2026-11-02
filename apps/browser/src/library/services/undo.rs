@@ -52,6 +52,14 @@ pub(crate) struct UndoEntry {
     steps: Vec<UndoAction>,
 }
 
+/// A failed reversal retains the failed step and every step not yet attempted.
+/// Successfully reversed steps are removed so retrying cannot repeat them.
+#[derive(Debug)]
+pub(crate) struct UndoFailure {
+    pub(crate) error: BackendError,
+    pub(crate) remaining: UndoEntry,
+}
+
 #[derive(Clone)]
 struct UndoAction {
     library: Option<LibraryClient>,
@@ -129,9 +137,12 @@ impl UndoStack {
 
     /// Steps run in reverse: the last change made is the first undone, so a
     /// move that displaced something is put back before whatever displaced it.
-    pub(crate) async fn apply(entry: UndoEntry, library: &LibraryClient) -> Result<(), BackendError> {
-        for action in entry.steps.into_iter().rev() {
-            action.step.apply(action.library.as_ref().unwrap_or(library)).await?;
+    pub(crate) async fn apply(mut entry: UndoEntry, library: &LibraryClient) -> Result<(), UndoFailure> {
+        while let Some(action) = entry.steps.last() {
+            if let Err(error) = action.step.clone().apply(action.library.as_ref().unwrap_or(library)).await {
+                return Err(UndoFailure { error, remaining: entry });
+            }
+            entry.steps.pop();
         }
         Ok(())
     }

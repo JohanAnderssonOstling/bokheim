@@ -63,3 +63,8 @@ CJK metadata those controls stay hidden and the usual book font choices apply.
 Chapter text is never scanned to guess a language.
 CJK typeface overrides and installed font names are device-local preferences,
 separate from Latin book settings.
+
+On Kobo, copy custom TTF, OTF, TTC or OTC files into `/mnt/onboard/fonts`
+(`fonts/` on the USB drive), then restart Bokheim. Subdirectories are included.
+These fonts appear under Custom in both interface and reader typeface settings.
+They are registered before saved font preferences are applied on startup.

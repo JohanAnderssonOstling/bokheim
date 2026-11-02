@@ -2,7 +2,6 @@
 //! The crate has no renderer dependency; consumers adapt its prepared resources.
 
 mod book;
-mod annotation_toc;
 pub mod comic;
 mod epub;
 mod fb2;
@@ -16,10 +15,12 @@ mod resource_path;
 mod resources;
 mod source;
 mod toc;
+mod toc_index;
+mod toc_source;
 mod xml;
 
 pub use book::{Book, BookFormat, ReadingBook};
-pub use annotation_toc::AnnotationTocIndex;
+pub use book_model::BookTocEntry;
 pub use epub::opening::EpubOpeningPlan;
 pub use inspection::DocumentInspection;
 pub use metadata::{CreatorRole, DeclaredMetadata, IdentifierScheme, MetadataCredit, MetadataDate, MetadataIdentifier, MetadataIdentifierType, MetadataProperty, MetadataSubject, MetadataTitle};
@@ -27,4 +28,4 @@ pub use profile::{PreparationProfile, PreparationStage, PreparationTiming, Resou
 pub use resource_path::resolve_resource_href;
 pub use resources::PreparedResources;
 pub use source::BookReader;
-pub use toc::TocEntry;
+pub use toc_index::{BookToc, ResolvedTocEntry, TocResolution, TocSourcePositions, toc_entries};

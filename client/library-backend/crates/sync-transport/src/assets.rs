@@ -78,15 +78,15 @@ pub fn classify_asset_status(status: u16) -> AssetStatus {
     }
 }
 
-pub fn blob_endpoint(server_url: &Url, library_id: &LibraryId, content_hash: &BookId) -> Result<Url, ParseError> {
-    server_url.join(&format!("api/libraries/{library_id}/blobs/{content_hash}"))
+pub fn blob_endpoint(server_url: &Url, library_id: &LibraryId, book_id: &BookId) -> Result<Url, ParseError> {
+    server_url.join(&format!("api/libraries/{library_id}/blobs/{book_id}"))
 }
 
 pub fn thumbnail_batch_endpoint(server_url: &Url, library_id: &LibraryId) -> Result<Url, ParseError> {
     server_url.join(&format!("api/libraries/{library_id}/thumbnail-batch"))
 }
-pub async fn thumbnail_presence(client: &reqwest::Client, credentials: &SyncCredentials, library_id: &LibraryId, content_hashes: Vec<BookId>) -> Result<ThumbnailPresenceResponse, SyncRequestError> {
-    send(client.post(credentials.server_url().join(&format!("api/libraries/{library_id}/thumbnails/presence"))?).bearer_auth(credentials.access_token()), &ThumbnailPresenceRequest { content_hashes }).await
+pub async fn thumbnail_presence(client: &reqwest::Client, credentials: &SyncCredentials, library_id: &LibraryId, book_ids: Vec<BookId>) -> Result<ThumbnailPresenceResponse, SyncRequestError> {
+    send(client.post(credentials.server_url().join(&format!("api/libraries/{library_id}/thumbnails/presence"))?).bearer_auth(credentials.access_token()), &ThumbnailPresenceRequest { book_ids }).await
 }
 
 pub async fn negotiate_blobs(client: &reqwest::Client, credentials: &SyncCredentials, library_id: &LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, SyncRequestError> {
@@ -137,9 +137,9 @@ pub async fn upload_thumbnail_batch(client: &reqwest::Client, server_url: &Url, 
     Ok(())
 }
 
-pub async fn download_thumbnail_batch(client: &reqwest::Client, server_url: &Url, access_token: &str, library_id: &LibraryId, content_hashes: Vec<BookId>) -> Result<ThumbnailBatchDownloadResponse, AssetResponseError> {
+pub async fn download_thumbnail_batch(client: &reqwest::Client, server_url: &Url, access_token: &str, library_id: &LibraryId, book_ids: Vec<BookId>) -> Result<ThumbnailBatchDownloadResponse, AssetResponseError> {
     let request =
-        encoded_request(client.post(thumbnail_batch_endpoint(server_url, library_id).map_err(AssetResponseError::Url)?).bearer_auth(access_token), &ThumbnailBatchDownloadRequest { content_hashes }).map_err(AssetResponseError::Wire)?;
+        encoded_request(client.post(thumbnail_batch_endpoint(server_url, library_id).map_err(AssetResponseError::Url)?).bearer_auth(access_token), &ThumbnailBatchDownloadRequest { book_ids }).map_err(AssetResponseError::Wire)?;
     let response = request.send().await.map_err(AssetResponseError::Retryable)?;
     let response = validate_streaming_asset_response(response)?;
     let bytes = crate::body::read(response, sync_common::api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).await.map_err(AssetResponseError::from)?;
@@ -197,14 +197,14 @@ mod tests {
             assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), wire::MEDIA_TYPE);
         }
         fn thumbnail() -> ThumbnailBatchEntry {
-            ThumbnailBatchEntry { content_hash: BookId::from_bytes([0xab; 32]), bytes: vec![0, 128, 255], browse_bytes: vec![1, 2] }
+            ThumbnailBatchEntry { book_id: BookId::from_bytes([0xab; 32]), bytes: vec![0, 128, 255], browse_bytes: vec![1, 2] }
         }
         let app = Router::new().route(
             "/api/libraries/:id/thumbnail-batch",
             post(|headers: HeaderMap, body: Bytes| async move {
                 check_headers(&headers);
                 let request: ThumbnailBatchDownloadRequest = wire::decode(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
-                assert_eq!(request.content_hashes, vec![thumbnail().content_hash]);
+                assert_eq!(request.book_ids, vec![thumbnail().book_id]);
                 wire::encode(&ThumbnailBatchDownloadResponse { thumbnails: vec![thumbnail()], missing: Vec::new() }).unwrap()
             })
             .put(|headers: HeaderMap, body: Bytes| async move {
@@ -220,7 +220,7 @@ mod tests {
         let client = http_response::client();
         let library_id = LibraryId::from_u128(1);
         upload_thumbnail_batch(&client, &origin, "test-token", &library_id, vec![thumbnail()]).await.unwrap();
-        let response = download_thumbnail_batch(&client, &origin, "test-token", &library_id, vec![thumbnail().content_hash]).await.unwrap();
+        let response = download_thumbnail_batch(&client, &origin, "test-token", &library_id, vec![thumbnail().book_id]).await.unwrap();
         assert_eq!(response, ThumbnailBatchDownloadResponse { thumbnails: vec![thumbnail()], missing: Vec::new() });
         server.abort();
     }

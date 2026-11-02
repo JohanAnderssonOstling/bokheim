@@ -2,15 +2,39 @@
 
 use std::{fmt, ops::Deref, sync::Arc};
 
-use account_client::{AccountSession, Session, SessionFuture, SessionPersistence};
+use account_client::{AccountSession, Session, SessionAuthority, SessionFuture, SessionPersistence};
 use sync_common::LibraryId;
-use sync_common::storage::LibraryStorage;
+use sync_common::storage::{LibraryKind, LibraryStorage};
 use sync_transport::{CredentialsSource, SyncCredentials};
 use tokio::sync::watch::Receiver;
 
-pub use account_client::AccountSessionError;
+pub use account_client::{AccountSessionError, AuthenticatedRequestError, RefreshPolicy, authenticated_request};
 
 pub type SharedSyncCredentials = Arc<dyn CredentialsSource>;
+
+/// A managed account supplies both renewal and its live credentials. A caller
+/// that supplies credentials alone explicitly opts out of account renewal.
+#[derive(Clone)]
+pub enum LibraryAuthentication {
+    Account(LibraryAccount),
+    Credentials(SharedSyncCredentials),
+}
+
+impl LibraryAuthentication {
+    pub fn credentials(&self) -> SharedSyncCredentials {
+        match self {
+            Self::Account(account) => account.credentials(),
+            Self::Credentials(credentials) => credentials.clone(),
+        }
+    }
+
+    pub fn account(&self) -> Option<LibraryAccount> {
+        match self {
+            Self::Account(account) => Some(account.clone()),
+            Self::Credentials(_) => None,
+        }
+    }
+}
 
 /// One shared session supplies account operations and sync credentials.
 /// Async operations own a handle so their futures can outlive the caller.
@@ -19,7 +43,7 @@ trait AccountService: CredentialsSource {
     fn subscribe(&self) -> Receiver<u64>;
     fn refresh_if_needed(self: Arc<Self>) -> SessionFuture<'static, Result<Option<Session>, AccountSessionError>>;
     fn refresh_after_unauthorized(self: Arc<Self>, token: String) -> SessionFuture<'static, Result<Option<Session>, AccountSessionError>>;
-    fn create_library(self: Arc<Self>, expected: Session, library_id: LibraryId, name: String, storage: LibraryStorage) -> SessionFuture<'static, Result<(), AccountSessionError>>;
+    fn create_library(self: Arc<Self>, expected: Session, library_id: LibraryId, name: String, storage: LibraryStorage, kind: LibraryKind) -> SessionFuture<'static, Result<(), AccountSessionError>>;
 }
 
 type Authorization = Arc<dyn Fn(&Session) -> std::io::Result<bool> + Send + Sync>;
@@ -78,12 +102,18 @@ impl LibraryAccount {
             account.authorized_session(account.service.clone().refresh_after_unauthorized(token).await?)
         })
     }
-    pub fn create_library(&self, library_id: LibraryId, name: String, storage: LibraryStorage) -> SessionFuture<'static, Result<(), AccountSessionError>> {
+    pub fn create_library(&self, library_id: LibraryId, name: String, storage: LibraryStorage, kind: LibraryKind) -> SessionFuture<'static, Result<(), AccountSessionError>> {
         let account = self.clone();
         Box::pin(async move {
             let session = account.require()?;
-            account.service.create_library(session, library_id, name, storage).await
+            account.service.create_library(session, library_id, name, storage, kind).await
         })
+    }
+    pub async fn request<T, Fut>(&self, request: impl FnMut(Session) -> Fut) -> Result<T, AccountSessionError>
+    where
+        Fut: std::future::Future<Output = Result<T, account_client::AuthError>>,
+    {
+        account_client::account_request(self, request).await
     }
     pub fn credentials(&self) -> SharedSyncCredentials {
         Arc::new(self.clone())
@@ -93,6 +123,20 @@ impl LibraryAccount {
 impl CredentialsSource for LibraryAccount {
     fn credentials(&self) -> Option<SyncCredentials> {
         self.current().ok().flatten().map(|session| SyncCredentials::new(session.server_url().clone(), session.token()))
+    }
+}
+
+impl SessionAuthority for LibraryAccount {
+    fn current(&self) -> Result<Option<Session>, AccountSessionError> {
+        LibraryAccount::current(self)
+    }
+
+    fn refresh_if_needed(&self) -> SessionFuture<'_, Result<Option<Session>, AccountSessionError>> {
+        LibraryAccount::refresh_if_needed(self)
+    }
+
+    fn refresh_after_unauthorized(&self, token: String) -> SessionFuture<'_, Result<Option<Session>, AccountSessionError>> {
+        LibraryAccount::refresh_after_unauthorized(self, token)
     }
 }
 
@@ -130,18 +174,19 @@ where
     fn refresh_after_unauthorized(self: Arc<Self>, token: String) -> SessionFuture<'static, Result<Option<Session>, AccountSessionError>> {
         Box::pin(async move { self.0.refresh_after_unauthorized(&token).await })
     }
-    fn create_library(self: Arc<Self>, expected: Session, library_id: LibraryId, name: String, storage: LibraryStorage) -> SessionFuture<'static, Result<(), AccountSessionError>> {
+    fn create_library(self: Arc<Self>, expected: Session, library_id: LibraryId, name: String, storage: LibraryStorage, kind: LibraryKind) -> SessionFuture<'static, Result<(), AccountSessionError>> {
         Box::pin(async move {
             self.0
                 .request(|session| {
                     let matches = session.server_url() == expected.server_url() && session.user_id() == expected.user_id();
                     let name = name.clone();
                     let storage = storage.clone();
+                    let kind = kind.clone();
                     Box::pin(async move {
                         if !matches {
                             return Err(account_client::AuthError::SignInRequired("library belongs to another account"));
                         }
-                        account_client::create_library_with_storage(session, library_id, name, storage).await
+                        account_client::create_library_with_kind(&session, library_id, name, storage, kind).await
                     })
                 })
                 .await
@@ -246,7 +291,7 @@ mod tests {
         assert!(library.require().is_err());
         assert!(library.refresh_if_needed().await.unwrap().is_none());
         assert!(library.refresh_after_unauthorized("a".repeat(43)).await.unwrap().is_none());
-        assert!(library.create_library(LibraryId::new_v4(), "Books".into(), LibraryStorage::Bokheim).await.is_err());
+        assert!(library.create_library(LibraryId::new_v4(), "Books".into(), LibraryStorage::Bokheim, LibraryKind::Standard).await.is_err());
         assert_eq!(session.require().unwrap().user_id(), "other", "a library must not sign out the other account");
 
         let owner = Session::try_new("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), "c".repeat(43)).unwrap();

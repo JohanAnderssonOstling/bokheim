@@ -1,5 +1,7 @@
 //! Search controls shared by every reader surface.
 
+use ui_text::text;
+
 use super::toolbar::{ChromeCommand, ChromeTarget};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Div, ElementId, Entity, Focusable, FontWeight, HighlightStyle, Stateful, StyledText, Window, div, px};
@@ -30,20 +32,23 @@ pub(super) fn header_controls(position: (usize, usize), target: &ChromeTarget, t
         .flex()
         .items_center()
         .gap(px(components::SPACE_XXS))
-        .child(components::reader_match_count(format!("{current} of {total}"), theme))
+        .child(components::reader_match_count(format!(text!(reader::of), current = current, total = total), theme))
         .child(
-            components::outlined_icon_button("reader-search-previous", "Previous match", IconName::ChevronLeft)
+            components::outlined_icon_button("reader-search-previous", text!(reader::previous_match), IconName::ChevronLeft)
                 .disabled(total == 0)
-                .tooltip(components::shortcut_tooltip_with_alternatives("Previous match", &["shift-enter", "up"]))
+                .tooltip(components::shortcut_tooltip_with_alternatives(text!(reader::previous_match), &["shift-enter", "up"]))
                 .on_click(move |_, window, cx| {
                     previous_target.execute(ChromeCommand::Search(-1), window, cx);
                 }),
         )
-        .child(components::outlined_icon_button("reader-search-next", "Next match", IconName::ChevronRight).disabled(total == 0).tooltip(components::shortcut_tooltip_with_alternatives("Next match", &["enter", "down"])).on_click(
-            move |_, window, cx| {
-                next_target.execute(ChromeCommand::Search(1), window, cx);
-            },
-        ));
+        .child(
+            components::outlined_icon_button("reader-search-next", text!(reader::next_match), IconName::ChevronRight)
+                .disabled(total == 0)
+                .tooltip(components::shortcut_tooltip_with_alternatives(text!(reader::next_match), &["enter", "down"]))
+                .on_click(move |_, window, cx| {
+                    next_target.execute(ChromeCommand::Search(1), window, cx);
+                }),
+        );
     controls.into_any_element()
 }
 

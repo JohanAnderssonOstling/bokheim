@@ -1,5 +1,7 @@
 //! Selection actions for mouse and touch, plus touch selection handles.
 
+use ui_text::text;
+
 use std::{cell::Cell, rc::Rc};
 
 use dictionary::can_lookup;
@@ -71,13 +73,8 @@ impl ReaderView {
         let anchor = renderer.read(cx).selection_bounds();
         self.selection = Some(cfi_range);
         self.close_annotation_popup(cx);
-        let dictionary = cx.new(|cx| {
-            if translate {
-                DictionaryPopup::translate(self.app.clone(), self.locator.content_hash(), text, self.book.languages(), anchor, window, cx)
-            } else {
-                DictionaryPopup::new(self.app.clone(), text, self.book.languages(), anchor, window, cx)
-            }
-        });
+        let dictionary =
+            cx.new(|cx| if translate { DictionaryPopup::translate(self.locator.book_id(), text, self.book.languages(), anchor, window, cx) } else { DictionaryPopup::new(text, self.book.languages(), anchor, window, cx) });
         cx.subscribe_in(&dictionary, window, |this, _, _: &Closed, window, cx| {
             this.dictionary = None;
             this.dismiss_selection(cx);
@@ -265,13 +262,37 @@ impl ReaderView {
                 .gap_0()
                 .p(px(4.0))
                 .child(canvas(move |bounds, _, _| measure.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0())
-                .child(components::outlined_text_button("epub-selection-annotate", "Annotate").ghost().no_fill().h(px(44.0)).w_full().justify_start().on_click(cx.listener(|reader, _, window, cx| reader.annotate_selection(window, cx))))
-                .when(self.touch_selection.lookup_available, |actions| {
-                    actions.child(components::outlined_text_button("epub-selection-lookup", "Lookup").ghost().no_fill().h(px(44.0)).w_full().justify_start().on_click(cx.listener(|reader, _, window, cx| reader.lookup_selection(window, cx))))
-                })
-                .child(components::outlined_text_button("epub-selection-translate", "Translate").ghost().no_fill().h(px(44.0)).w_full().justify_start().on_click(cx.listener(|reader, _, window, cx| reader.translate_selection(window, cx))))
                 .child(
-                    components::outlined_text_button("epub-selection-copy-markdown", "Copy Markdown")
+                    components::outlined_text_button("epub-selection-annotate", text!(reader::annotate))
+                        .ghost()
+                        .no_fill()
+                        .h(px(44.0))
+                        .w_full()
+                        .justify_start()
+                        .on_click(cx.listener(|reader, _, window, cx| reader.annotate_selection(window, cx))),
+                )
+                .when(self.touch_selection.lookup_available, |actions| {
+                    actions.child(
+                        components::outlined_text_button("epub-selection-lookup", text!(reader::lookup))
+                            .ghost()
+                            .no_fill()
+                            .h(px(44.0))
+                            .w_full()
+                            .justify_start()
+                            .on_click(cx.listener(|reader, _, window, cx| reader.lookup_selection(window, cx))),
+                    )
+                })
+                .child(
+                    components::outlined_text_button("epub-selection-translate", text!(reader::translate))
+                        .ghost()
+                        .no_fill()
+                        .h(px(44.0))
+                        .w_full()
+                        .justify_start()
+                        .on_click(cx.listener(|reader, _, window, cx| reader.translate_selection(window, cx))),
+                )
+                .child(
+                    components::outlined_text_button("epub-selection-copy-markdown", text!(reader::copy_markdown))
                         .ghost()
                         .no_fill()
                         .h(px(44.0))
@@ -281,7 +302,7 @@ impl ReaderView {
                         .on_click(cx.listener(|reader, _, _, cx| reader.copy_selection(cx))),
                 )
                 .child(
-                    components::outlined_text_button("epub-selection-copy-source-link", "Copy link")
+                    components::outlined_text_button("epub-selection-copy-source-link", text!(reader::copy_link))
                         .ghost()
                         .no_fill()
                         .h(px(44.0))

@@ -1,7 +1,7 @@
 //! Durable update lifecycle. Hosts own I/O, scheduling, and activation. Every
 //! transition is persisted before it is returned to a caller or shown in the UI.
-use crate::{verify, Artifact, DiscoveryConfig, Installed, Manifest};
-use ring::digest::{digest, SHA256};
+use crate::{Artifact, DiscoveryConfig, Installed, Manifest, verify};
+use ring::digest::{SHA256, digest};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,15 @@ pub enum UpdateAction {
     Install,
     GrantPermission,
     Check,
+}
+
+/// How the host makes a prepared application available on a later launch.
+/// Package identifiers select artifacts; they do not select installation policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplicationActivation {
+    Restart,
+    /// An external installer must replace the application before data activates.
+    Installer,
 }
 
 /// Technical errors stay in diagnostics. Only actionable reasons enter the UI.
@@ -30,9 +39,15 @@ pub enum UpdateView {
     },
     NeedsPermission,
     Activating,
-    Current { version: String, checked: bool },
+    Current {
+        version: String,
+        checked: bool,
+    },
     Checking,
-    Downloading { bytes: u64, total: u64 },
+    Downloading {
+        bytes: u64,
+        total: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,6 +145,7 @@ pub struct Coordinator<S> {
     store: S,
     config: DiscoveryConfig,
     device: DeviceVersion,
+    application_activation: ApplicationActivation,
     session: String,
     record: Record,
 }
@@ -150,13 +166,13 @@ fn trust_scope(config: &DiscoveryConfig) -> String {
 
 impl<S: Store> Coordinator<S> {
     /// Session ID must identify a process launch, not a window or activity resume.
-    pub fn open(store: S, config: DiscoveryConfig, device: DeviceVersion, session: String) -> Result<Self, String> {
+    pub fn open(store: S, config: DiscoveryConfig, device: DeviceVersion, session: String, application_activation: ApplicationActivation) -> Result<Self, String> {
         config.validate()?;
         if session.is_empty() {
             return Err("update coordinator requires a launch session ID".into());
         }
         let record = store.load()?;
-        let mut coordinator = Self { store, config, device, session, record };
+        let mut coordinator = Self { store, config, device, application_activation, session, record };
         let scope = trust_scope(&coordinator.config);
         if coordinator.record.trust_scope != scope {
             // Adding a rotation key must not erase an approved plan or reset its
@@ -253,7 +269,9 @@ impl<S: Store> Coordinator<S> {
                 _ => {}
             }
             return match plan.phase {
-                Phase::Ready => UpdateView::Ready { action: if self.device.target.ends_with("-apk") && plan.artifacts.iter().any(|a| a.kind == ArtifactKind::Application) { UpdateAction::Install } else { UpdateAction::Restart } },
+                Phase::Ready => UpdateView::Ready {
+                    action: if self.application_activation == ApplicationActivation::Installer && plan.artifacts.iter().any(|a| a.kind == ArtifactKind::Application) { UpdateAction::Install } else { UpdateAction::Restart },
+                },
                 Phase::Activating => UpdateView::Activating,
                 Phase::Preparing => UpdateView::Preparing,
                 Phase::Quarantined => UpdateView::Hidden,
@@ -262,11 +280,7 @@ impl<S: Store> Coordinator<S> {
         let Some(bytes) = &self.record.discovered else { return UpdateView::Hidden };
         let Ok(manifest) = verify(bytes, &self.config, now, self.record.highest_sequence) else { return UpdateView::Hidden };
         let offer = crate::offer(&manifest, &self.device.installed());
-        if offer.application.is_some() || offer.taxonomy.is_some() {
-            UpdateView::Available
-        } else {
-            UpdateView::Hidden
-        }
+        if offer.application.is_some() || offer.taxonomy.is_some() { UpdateView::Available } else { UpdateView::Hidden }
     }
 
     /// Explicit user authorization, committed before downloads can begin.
@@ -383,7 +397,7 @@ impl<S: Store> Coordinator<S> {
 
     /// Application activation waits for a later launch. Reference-only work
     /// may publish its next-start snapshot from the current background worker.
-    /// Android must verify the required APK is installed before code activation.
+    /// External installers must replace the application before data activation.
     pub fn begin_activation(&mut self) -> Result<Manifest, String> {
         let reference_ready = self.is_taxonomy_only() && self.record.approved.as_ref().is_some_and(|plan| matches!(plan.phase, Phase::Ready | Phase::Activating));
         if !self.activation_due() && !reference_ready {
@@ -391,10 +405,10 @@ impl<S: Store> Coordinator<S> {
         }
         let manifest = self.approved_manifest()?;
         let plan = self.record.approved.as_ref().ok_or("no approved update")?;
-        if plan.artifacts.iter().any(|a| a.kind == ArtifactKind::Application) && self.device.target.ends_with("-apk") {
-            let required = manifest.application.as_ref().ok_or("APK update lacks application metadata")?;
+        if plan.artifacts.iter().any(|a| a.kind == ArtifactKind::Application) && self.application_activation == ApplicationActivation::Installer {
+            let required = manifest.application.as_ref().ok_or("Installer update lacks application metadata")?;
             if self.device.application < required.version {
-                return Err("Android installation is still pending".into());
+                return Err("Application installation is still pending".into());
             }
         }
         let mut next = self.record.clone();

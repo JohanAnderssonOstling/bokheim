@@ -28,14 +28,14 @@ impl Database {
         })
     }
 
-    pub fn annotations(&self, content_hash: BookId) -> Result<Vec<Annotation>, DatabaseError> {
-        Ok(query_rows(|read| self.connection.get_annotations(&content_hash, read), read_annotation)?)
+    pub fn annotations(&self, book_id: BookId) -> Result<Vec<Annotation>, DatabaseError> {
+        Ok(query_rows(|read| self.connection.get_annotations(&book_id, read), read_annotation)?)
     }
 
     /// Resolve a live annotation without loading the book's other annotations.
-    pub fn annotation(&self, content_hash: BookId, id: &str) -> Result<Option<Annotation>, DatabaseError> {
+    pub fn annotation(&self, book_id: BookId, id: &str) -> Result<Option<Annotation>, DatabaseError> {
         let annotation = query_last(|read| self.connection.get_annotation_by_id(id, read), read_annotation)?;
-        Ok(annotation.filter(|annotation| annotation.content_hash == content_hash && !annotation.deleted))
+        Ok(annotation.filter(|annotation| annotation.book_id == book_id && !annotation.deleted))
     }
 
     /// Only explicit recurring annotations from live books in this library. Derived inline
@@ -52,9 +52,9 @@ impl Database {
     }
 
     /// Includes tombstones so an old export cannot restore a deleted note.
-    pub fn annotation_history(&self, content_hash: BookId) -> Result<Vec<Annotation>, DatabaseError> {
+    pub fn annotation_history(&self, book_id: BookId) -> Result<Vec<Annotation>, DatabaseError> {
         let mut query = self.connection.prepare("SELECT a.body FROM annotation a JOIN book b ON b.row_id=a.book_row_id WHERE b.content_hash=?1 ORDER BY a.id")?;
-        Ok(query.query_map([content_hash], read_annotation)?.collect::<Result<Vec<_>, _>>()?)
+        Ok(query.query_map([book_id], read_annotation)?.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Import only discoveries as ordinary synchronized annotations. Existing
@@ -65,14 +65,14 @@ impl Database {
             let mut imported = 0;
             for value in incoming {
                 value.validate().map_err(DatabaseError::operation)?;
-                if value.content_hash != book || value.deleted {
+                if value.book_id != book || value.deleted {
                     return Err(DatabaseError::message("invalid annotation export identity"));
                 }
                 if !transaction.annotation_book_exists(&(&book), |row| row.get::<_, bool>(0))? {
                     return Err(DatabaseError::message("annotation book not found"));
                 }
                 match existing_annotation(transaction, &value.id)? {
-                    Some(current) if current.content_hash != book => return Err(DatabaseError::message("annotation export ID belongs to another book")),
+                    Some(current) if current.book_id != book => return Err(DatabaseError::message("annotation export ID belongs to another book")),
                     Some(_) => continue,
                     None => {
                         record_local(transaction, LibraryStateEntry::Annotation { value: value.clone() })?;
@@ -95,7 +95,7 @@ impl Database {
                 value.created_at = existing.created_at;
             }
             value.deleted = false;
-            if !transaction.annotation_book_exists(&(&value.content_hash), |row| row.get::<_, bool>(0))? {
+            if !transaction.annotation_book_exists(&(&value.book_id), |row| row.get::<_, bool>(0))? {
                 return Err(DatabaseError::message("annotation book not found"));
             }
             record_local(transaction, LibraryStateEntry::Annotation { value })?;
@@ -158,7 +158,7 @@ mod tests {
     fn export_note(book: BookId) -> Annotation {
         Annotation {
             id: "foreign-note".into(),
-            content_hash: book,
+            book_id: book,
             anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:3)"),
             exact_text: "Quote".into(),
             style: AnnotationStyle::Highlight,
@@ -219,7 +219,7 @@ mod tests {
         let mut rolled_back = new.clone();
         rolled_back.id = "rolled-back-note".into();
         let mut invalid = external.clone();
-        invalid.content_hash = BookId::from_bytes([8; 32]);
+        invalid.book_id = BookId::from_bytes([8; 32]);
         assert!(db.import_export_annotations(book, &[rolled_back, invalid]).is_err());
         assert_eq!(db.annotations(book).unwrap().len(), 2);
         db.delete_annotation(&base.id, 5).unwrap();
@@ -304,7 +304,7 @@ mod tests {
         }
         let anchor = AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2,/1:0,/1:9)");
         let mut annotation = Annotation {
-            id: "recurring-name".into(), content_hash: origin, anchor: anchor.clone(),
+            id: "recurring-name".into(), book_id: origin, anchor: anchor.clone(),
             exact_text: "Elizabeth".into(), style: AnnotationStyle::Highlight, color: 0xffcc00,
             note: "One shared note".into(), created_at: 1, toc_ordinal: Some(2), progress: Some(25.0),
             modified_at: 2, deleted: false,
@@ -344,7 +344,7 @@ mod tests {
         let full = "epubcfi(/8/8!/4/2/1:3)";
         let mut annotation = Annotation {
             id: "migrate-note".into(),
-            content_hash: hash,
+            book_id: hash,
             anchor: AnnotationAnchor::epub_cfi(legacy),
             exact_text: "Text".into(),
             style: AnnotationStyle::Highlight,

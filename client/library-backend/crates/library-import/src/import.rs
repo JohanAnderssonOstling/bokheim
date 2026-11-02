@@ -48,11 +48,11 @@ impl LibraryImport {
                 .await
                 .map_err(|error| BackendError::operation(error).context(format!("invalid {} book", import.format.canonical_extension().to_ascii_uppercase())))?;
             let inspection = Some(ingested.inspection);
-            (staged.into_staged(ingested.content_hash, ingested.size_bytes), inspection, ingested.source_identity)
+            (staged.into_staged(ingested.book_id, ingested.size_bytes), inspection, ingested.source_identity)
         };
         #[cfg(target_arch = "wasm32")]
         let inspection = {
-            let reuse = import.format != BookFormat::Pdf && self.database.has_import_inspection(&staged.content_hash(), import.format, book_inspection::inspection_version(import.format)).map_err(BackendError::operation)?;
+            let reuse = import.format != BookFormat::Pdf && self.database.has_import_inspection(&staged.book_id(), import.format, book_inspection::inspection_version(import.format)).map_err(BackendError::operation)?;
             if reuse {
                 None
             } else {
@@ -63,8 +63,8 @@ impl LibraryImport {
                         cpu_host::Inspect {
                             source_name: import.file_name.clone(),
                             format: import.format,
-                            content_hash: Some(staged.content_hash()),
-                            cached_pdf: if import.format == BookFormat::Pdf { self.database.cached_pdf_reader(staged.content_hash()).map_err(BackendError::operation)? } else { None },
+                            book_id: Some(staged.book_id()),
+                            cached_pdf: if import.format == BookFormat::Pdf { self.database.cached_pdf_reader(staged.book_id()).map_err(BackendError::operation)? } else { None },
                         },
                         cpu_host::as_cpu_reader(reader),
                     )
@@ -78,8 +78,8 @@ impl LibraryImport {
         #[cfg(target_arch = "wasm32")]
         let source_identity = None;
         let content = self.resolve_import_content(byte_checksum, staged.size_bytes(), source_identity)?;
-        let content_hash = content.content_hash;
-        let staged = staged.with_local_identity(&self.assets, content_hash).await.map_err(BackendError::operation)?;
+        let book_id = content.book_id;
+        let staged = staged.with_local_identity(&self.assets, book_id).await.map_err(BackendError::operation)?;
         let _lease = self.lease_import_content(&content).await?;
         // Inspection may overlap a delete/move. Do not publish into a folder
         // that became unavailable while CPU or source I/O was in flight.
@@ -89,7 +89,7 @@ impl LibraryImport {
         // library file remains discoverable by the next scan.
         let published = self.publish_import(&self.assets, &import, staged).await?;
         self.commit_import(import, content, inspection, published)?;
-        Ok(content_hash)
+        Ok(book_id)
     }
 
     pub(crate) async fn publish_import(&self, assets: &AssetStore, import: &ValidatedImport, staged: StagedBook) -> Result<PublishedStagedBook, BackendError> {
@@ -99,13 +99,13 @@ impl LibraryImport {
     /// Placement rows whose remembered path disagrees with storage, resolved
     /// from a snapshot so no filesystem check holds the writer.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn import_restore_paths(&self, content_hash: &BookId) -> Result<Vec<String>, BackendError> {
-        let candidates = self.database.import_restore_candidates(content_hash).map_err(BackendError::operation)?;
+    pub(crate) fn import_restore_paths(&self, book_id: &BookId) -> Result<Vec<String>, BackendError> {
+        let candidates = self.database.import_restore_candidates(book_id).map_err(BackendError::operation)?;
         Ok(candidates.into_iter().filter(|(path, materialized)| materialized.as_deref() != Some(path.as_str()) || !self.assets.placement_file_exists(path)).map(|(path, _)| path.to_string()).collect())
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn import_restore_paths(&self, _content_hash: &BookId) -> Result<Vec<String>, BackendError> {
+    pub(crate) fn import_restore_paths(&self, _book_id: &BookId) -> Result<Vec<String>, BackendError> {
         Ok(Vec::new())
     }
 }

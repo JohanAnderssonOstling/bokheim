@@ -2,11 +2,10 @@
 
 use crate::matching::NormalizedTitle;
 use crate::{
-    Classification, ClassificationEvidence, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
     matching::{author_credits, author_names_compatible_with_title, matching_author_count, matching_edition_author_count, title_qualifiers, title_substring_keys},
+    Classification, ClassificationEvidence, ClassificationMethod, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
 };
 use std::collections::BTreeSet;
-pub const METHOD: &str = "verified_matching_edition_classifications";
 
 fn title_key(title: &str) -> String {
     let mut key = NormalizedTitle::new(title).full;
@@ -46,8 +45,7 @@ pub fn titles_compatible(local: &str, remote: &str) -> bool {
     // A long subtitle can push even the complete main title beyond the
     // bounded fragment list. Check it explicitly, keeping the same qualifier
     // and edition-marker guards used for other shortened titles.
-    edition_markers(&local) == edition_markers(&remote)
-        && (title_key(&local_title.main) == remote || title_substring_keys(&local, 64).iter().any(|(key, _)| key == &remote))
+    edition_markers(&local) == edition_markers(&remote) && (title_key(&local_title.main) == remote || title_substring_keys(&local, 64).iter().any(|(key, _)| key == &remote))
 }
 
 pub fn classifications(query: &EditionIdentityQuery, result: &EditionIdentityResult) -> Vec<Classification> {
@@ -87,11 +85,11 @@ pub fn classifications(query: &EditionIdentityQuery, result: &EditionIdentityRes
     if !year_codes.is_empty() {
         return year_codes;
     }
-    candidate_classifications(result.candidates.iter(), METHOD)
+    candidate_classifications(result.candidates.iter(), ClassificationMethod::VerifiedMatchingEditions)
 }
 
 /// Union valid codes while attributing each code only to records that supplied it.
-pub(crate) fn candidate_classifications<'a>(candidates: impl IntoIterator<Item = &'a crate::EditionIdentityMatch>, method: &str) -> Vec<Classification> {
+pub(crate) fn candidate_classifications<'a>(candidates: impl IntoIterator<Item = &'a crate::EditionIdentityMatch>, method: ClassificationMethod) -> Vec<Classification> {
     let mut codes = std::collections::BTreeMap::<String, Vec<ClassificationEvidence>>::new();
     for candidate in candidates {
         for code in &candidate.classifications {
@@ -102,7 +100,7 @@ pub(crate) fn candidate_classifications<'a>(candidates: impl IntoIterator<Item =
                 continue;
             };
             let evidence = ClassificationEvidence {
-                method: method.into(),
+                method: method.clone(),
                 isbn13: candidate.canonical_isbn13.clone(),
                 open_library_work_id: candidate.open_library_work_id.clone().unwrap_or_default(),
                 open_library_edition_id: candidate.open_library_edition_id.clone(),
@@ -167,16 +165,16 @@ pub fn resolved_classifications(query: &EditionIdentityQuery, result: &EditionId
         // work-only inherited code may belong to an adaptation of that work.
         let mut direct = (*matches[0]).clone();
         direct.classifications.retain(|code| code.source == ClassificationSource::ExactEdition);
-        return candidate_classifications(std::iter::once(&direct), "verified_short_credit_edition_classification");
+        return candidate_classifications(std::iter::once(&direct), ClassificationMethod::VerifiedShortCreditEdition);
     }
     candidate_classifications(
         matches,
         if surname.is_some() {
-            "verified_filename_surname_title_classification"
+            ClassificationMethod::VerifiedFilenameSurnameTitle
         } else if unique_title {
-            "verified_unique_title_classification"
+            ClassificationMethod::VerifiedUniqueTitle
         } else {
-            METHOD
+            ClassificationMethod::VerifiedMatchingEditions
         },
     )
 }
@@ -242,7 +240,6 @@ mod tests {
         assert!(resolved_classifications(&q, &r).is_empty());
     }
 
-
     #[test]
     fn unrelated_titles_authors_or_invalid_codes_cannot_vote() {
         for change in 0..7 {
@@ -265,5 +262,4 @@ mod tests {
             }
         }
     }
-
 }

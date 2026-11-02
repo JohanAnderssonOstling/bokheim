@@ -1,4 +1,6 @@
 //! Presentation only: loading, errors and playback share one footer placement.
+use ui_text::text;
+
 use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window, prelude::*};
 
 pub(super) struct CancelPending;
@@ -33,7 +35,7 @@ impl Render for AudiobookFooter {
                     .items_center()
                     .p(gpui::px(12.0))
                     .child(gpui::div().flex_1().min_w_0().child(message.clone()))
-                    .child(gpui::div().id("cancel-audiobook-open").debug_selector(|| "cancel-audiobook-open".into()).cursor_pointer().child("Close").on_click(cx.listener(|_, _, _, cx| cx.emit(CancelPending)))),
+                    .child(gpui::div().id("cancel-audiobook-open").debug_selector(|| "cancel-audiobook-open".into()).cursor_pointer().child(text!(common::close)).on_click(cx.listener(|_, _, _, cx| cx.emit(CancelPending)))),
             )
         })
     }

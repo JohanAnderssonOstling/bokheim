@@ -17,6 +17,12 @@ the other files. Unchanged registration files and caches are left alone.
 Registration is serialized across concurrent launches. If registration fails,
 the AppImage continues running normally.
 
+The desktop entry offers Bokheim in “Open With” for EPUB, PDF, MOBI/AZW/AZW3,
+FictionBook, CBZ and M4B files. Opening a file imports a copy into the selected
+library and opens it for reading or playback, preserving the original. Requests
+go to the running application when one exists. The command line also accepts
+paths and `file:` URLs, for example `bokheim "My book.epub"`.
+
 Metadata checks, update preparation and update trials bypass registration.
 Development binaries and native package installations do not register
 themselves. Set `BOKHEIM_DISABLE_DESKTOP_INTEGRATION=1` to suppress registration
@@ -241,9 +247,9 @@ Python GTK 3 bindings, `xdotool`, and Xvfb installed, run it after building
 the helper:
 
 ```sh
-xvfb-run -a python3 apps/opds-webview/tests/native_focus.py --display-env
-xvfb-run -a python3 apps/opds-webview/tests/profile.py --display-env
-xvfb-run -a python3 apps/opds-webview/tests/responsiveness.py --display-env
+xvfb-run -a python3 apps/browser/crates/embedded-browser-ui/tests/native_focus.py --display-env
+xvfb-run -a python3 apps/browser/crates/embedded-browser-ui/tests/profile.py --display-env
+xvfb-run -a python3 apps/browser/crates/embedded-browser-ui/tests/responsiveness.py --display-env
 ```
 
 The responsiveness regression hangs a page with an infinite JavaScript loop
@@ -255,8 +261,8 @@ unchanged page dimensions, the native color-scheme hint, toast lifecycle,
 simultaneous overlays, and navigation availability using a local server:
 
 ```sh
-xvfb-run -a python3 apps/opds-webview/tests/ui.py --display-env --appearance dark
-xvfb-run -a python3 apps/opds-webview/tests/ui.py --display-env --appearance light
+xvfb-run -a python3 apps/browser/crates/embedded-browser-ui/tests/ui.py --display-env --appearance dark
+xvfb-run -a python3 apps/browser/crates/embedded-browser-ui/tests/ui.py --display-env --appearance light
 ```
 
 The packaging script writes `Bokheim-x86_64.AppImage`,
@@ -309,7 +315,7 @@ archive available to Cargo without network access:
 python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu \
   --archive /run/build/bokheim/pdfium-linux-x64.tgz --offline
 python3 scripts/linux/toolchain.py --offline -- cargo build --locked --release -p desktop-gpui --features flatpak
-cargo build --locked --release -p opds-webview
+cargo build --locked --release -p embedded-browser-ui
 ```
 
 The Flatpak source inputs must also include the checksum-pinned SDK archives

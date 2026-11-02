@@ -1,0 +1,23 @@
+[package]
+name = "reader-lookups"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dictionary-catalog = { path = "../../shared/dictionary-catalog" }
+http-response = { workspace = true }
+language-tags = { version = "0.3.2", features = ["serde"] }
+log = "0.4"
+reqwest = { workspace = true, features = ["stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+ui-text = { path = "../../apps/ui-text" }
+url = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "time"] }

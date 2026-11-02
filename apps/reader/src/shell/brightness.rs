@@ -1,4 +1,5 @@
-use app::AppClient;
+use ui_text::text;
+
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, FocusHandle, IntoElement, Pixels, Render, Window};
 use gpui_component::{
@@ -16,8 +17,8 @@ enum LightKind {
 impl LightKind {
     fn label(self) -> &'static str {
         match self {
-            Self::Brightness => "Brightness",
-            Self::Natural => "Natural light",
+            Self::Brightness => text!(common::brightness),
+            Self::Natural => text!(reader::natural_light),
         }
     }
 }
@@ -28,9 +29,9 @@ pub struct BrightnessControls {
     natural: Entity<LightControl>,
 }
 impl BrightnessControls {
-    pub fn new(backend: AppClient, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let brightness = cx.new(|cx| LightControl::new(backend.clone(), LightKind::Brightness, window, cx));
-        let natural = cx.new(|cx| LightControl::new(backend, LightKind::Natural, window, cx));
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let brightness = cx.new(|cx| LightControl::new(LightKind::Brightness, window, cx));
+        let natural = cx.new(|cx| LightControl::new(LightKind::Natural, window, cx));
         // Read after the entity has been installed in the window. Starting the
         // request inside another entity constructor can race the first Kobo
         // frame and leave the slider at its default value until the popover is
@@ -43,10 +44,14 @@ impl BrightnessControls {
     }
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(feature = "kobo")]
-        if !components::kobo::has_frontlight(cx) { return; }
+        if !components::kobo::has_frontlight(cx) {
+            return;
+        }
         self.brightness.update(cx, |control, cx| control.request(None, window, cx));
         #[cfg(feature = "kobo")]
-        if !components::kobo::has_warmth(cx) { return; }
+        if !components::kobo::has_warmth(cx) {
+            return;
+        }
         self.natural.update(cx, |control, cx| control.request(None, window, cx));
     }
 }
@@ -64,7 +69,6 @@ impl Render for BrightnessControls {
 struct LightControl {
     kind: LightKind,
     unsupported: bool,
-    backend: AppClient,
     percent: Option<u8>,
     slider: Entity<SliderState>,
     busy: bool,
@@ -72,7 +76,7 @@ struct LightControl {
 }
 
 impl LightControl {
-    fn new(backend: AppClient, kind: LightKind, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(kind: LightKind, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let slider = cx.new(|_| SliderState::new().min(0.0).max(100.0).step(if matches!(kind, LightKind::Natural) { 10.0 } else { 1.0 }));
         cx.subscribe_in(&slider, window, |panel, _, event, window, cx| match event {
             SliderEvent::Change(_) => cx.notify(),
@@ -82,7 +86,7 @@ impl LightControl {
             }
         })
         .detach();
-        Self { kind, unsupported: false, backend, percent: None, slider, busy: false, error: None }
+        Self { kind, unsupported: false, percent: None, slider, busy: false, error: None }
     }
 
     fn request(&mut self, percent: Option<u8>, window: &mut Window, cx: &mut Context<Self>) {
@@ -92,14 +96,13 @@ impl LightControl {
         self.busy = true;
         self.error = None;
         cx.notify();
-        let backend = self.backend.clone();
         let kind = self.kind;
         cx.spawn_in(window, async move |panel, cx| {
             let result = match (kind, percent) {
-                (LightKind::Brightness, Some(percent)) => backend.set_kobo_brightness(percent).await.map(Some),
-                (LightKind::Brightness, None) => backend.kobo_brightness().await.map(Some),
-                (LightKind::Natural, Some(percent)) => backend.set_kobo_natural_light(percent).await.map(Some),
-                (LightKind::Natural, None) => backend.kobo_natural_light().await,
+                (LightKind::Brightness, Some(percent)) => kobo_device::control::set_brightness(percent).await.map(Some),
+                (LightKind::Brightness, None) => kobo_device::control::brightness().await.map(Some),
+                (LightKind::Natural, Some(percent)) => kobo_device::control::set_natural_light(percent).await.map(Some),
+                (LightKind::Natural, None) => kobo_device::control::natural_light().await,
             };
             let _ = panel.update_in(cx, |panel, window, cx| {
                 panel.busy = false;
@@ -116,7 +119,7 @@ impl LightControl {
                     Err(error) => {
                         panel.percent = None;
                         log::warn!("Device control failed: {error}");
-                        panel.error = Some("Couldn't adjust the light. Retry or restart the app.".into());
+                        panel.error = Some(text!(reader::couldn_t_adjust_the_light_retry_or_restart_the_app).into());
                     }
                 }
                 cx.notify();
@@ -133,9 +136,9 @@ impl Render for LightControl {
         let label = if self.percent.is_some() {
             format!("{:.0}%", self.slider.read(cx).value().start())
         } else if self.busy {
-            "Loading…".to_owned()
+            text!(common::loading).to_owned()
         } else {
-            "Unavailable".to_owned()
+            text!(common::unavailable).to_owned()
         };
         let mut panel = components::reader_settings_section(self.kind.label(), theme).child(
             gpui::div()
@@ -146,14 +149,14 @@ impl Render for LightControl {
                 .child(gpui::div().w(gpui::px(48.0)).text_align(gpui::TextAlign::Right).child(label)),
         );
         if self.unsupported {
-            panel = panel.child(gpui::div().text_color(theme.text_muted).child("Not supported on this Kobo"));
+            panel = panel.child(gpui::div().text_color(theme.text_muted).child(text!(reader::not_supported_on_this_kobo)));
         } else if matches!(self.kind, LightKind::Natural) {
-            panel = panel.child(gpui::div().flex().justify_between().text_color(theme.text_muted).child("Cooler").child("Warmer"));
+            panel = panel.child(gpui::div().flex().justify_between().text_color(theme.text_muted).child(text!(reader::cooler)).child(text!(reader::warmer)));
         }
         if let Some(error) = self.error.clone() {
             panel = panel
                 .child(gpui::div().text_color(theme.text_muted).child(error))
-                .child(components::topbar_action_button("brightness-retry", "Retry", IconName::Redo2, theme).disabled(self.busy).on_click(cx.listener(|panel, _, window, cx| panel.request(None, window, cx))));
+                .child(components::topbar_action_button("brightness-retry", text!(common::retry), IconName::Redo2, theme).disabled(self.busy).on_click(cx.listener(|panel, _, window, cx| panel.request(None, window, cx))));
         }
         panel
     }
@@ -170,7 +173,7 @@ pub fn popover_with_height(panel: Entity<BrightnessControls>, document_focus: Op
         .top(gpui::px(components::reader_toolbar_size_px(window) + 4.0))
         .p_0()
         .when_some(document_focus, |popover, focus| popover.track_focus(focus))
-        .trigger(components::outlined_icon_button("reader-brightness-button", "Brightness", IconName::Sun))
+        .trigger(components::outlined_icon_button("reader-brightness-button", text!(common::brightness), IconName::Sun))
         .on_open_change(move |open, window, cx: &mut App| {
             if *open {
                 refresh.update(cx, |panel, cx| panel.refresh(window, cx));

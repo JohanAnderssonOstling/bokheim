@@ -179,7 +179,7 @@ impl MobiContainer {
         navigation::ReadingText::new(&self.metadata, text, entries)
     }
 
-    pub(crate) async fn toc(&mut self) -> io::Result<Option<Vec<crate::TocEntry>>> {
+    pub(crate) async fn toc(&mut self) -> io::Result<Option<Vec<crate::BookTocEntry>>> {
         self.reading_text().await.map(|text| text.toc())
     }
 

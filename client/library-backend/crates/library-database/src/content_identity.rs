@@ -1,9 +1,14 @@
 //! Stable book references and independently verified byte revisions.
 
+use crate::query_methods::try_for_each_row;
 use crate::{Database, DatabaseError};
+use book_model::BookFormat;
 use content_address::{BookId, ContentHash};
+use include_sqlite_sql::include_sql;
 use rusqlite::{Connection, OptionalExtension, params};
 use sync_common::{DirId, LibraryId, ReplicaId};
+
+include_sql!("src/content_identity_operations.sql");
 
 pub(crate) fn initialize_scope(connection: &Connection, library: Option<LibraryId>, replica: ReplicaId) -> Result<(), DatabaseError> {
     let existing: Option<Vec<u8>> = connection.query_row("SELECT scope FROM local_identity_scope WHERE singleton=1", [], |row| row.get(0)).optional()?;
@@ -63,6 +68,46 @@ pub(crate) fn freeze_content(connection: &Connection, book: BookId, checksum: Co
     connection.execute("UPDATE book_transfer SET upload_checksum=?2,upload_size=COALESCE(?3,upload_size) WHERE content_hash=?1 AND upload_id IS NOT NULL", params![book, checksum, size_bytes])?;
     connection.execute("DELETE FROM local_content_origin WHERE book_id=?1", [book])?;
     record_alias(connection, book, checksum)
+}
+
+/// Canonicalize distinct books under the caller's writer transaction.
+/// The manifest query has already grouped duplicate upload acknowledgements.
+pub(crate) fn freeze_contents(connection: &Connection, contents: &[(BookId, ContentHash, Option<u64>)]) -> Result<(), DatabaseError> {
+    if contents.is_empty() {
+        return Ok(());
+    }
+    let contents = contents
+        .iter()
+        .map(|(book, checksum, size)| {
+            let size = size.map(i64::try_from).transpose().map_err(DatabaseError::operation)?;
+            if size.is_some_and(|size| size <= 0) {
+                return Err(DatabaseError::message("the uploaded byte length of a book cannot change"));
+            }
+            Ok((*book, *checksum, size))
+        })
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+    let contents = serde_json::to_string(&contents).map_err(DatabaseError::operation)?;
+    try_for_each_row(
+        |read| connection.content_validate_batch(&contents, read),
+        |row| {
+            let current = row.get::<_, Option<ContentHash>>(0)?;
+            let size = row.get::<_, Option<i64>>(1)?;
+            let checksum = row.get::<_, ContentHash>(2)?;
+            let requested_size = row.get::<_, Option<i64>>(3)?;
+            if current.is_some_and(|current| current != checksum) {
+                return Err(DatabaseError::message("the uploaded content hash of a book cannot change"));
+            }
+            if size.zip(requested_size).is_some_and(|(stored, requested)| stored != requested) {
+                return Err(DatabaseError::message("the uploaded byte length of a book cannot change"));
+            }
+            Ok(())
+        },
+    )?;
+    connection.content_freeze_batch(&contents)?;
+    connection.content_update_uploads_batch(&contents)?;
+    connection.content_forget_origins_batch(&contents)?;
+    connection.content_record_aliases_batch(&contents)?;
+    Ok(())
 }
 
 pub(crate) fn observe_content(connection: &Connection, book: BookId, directory: DirId, checksum: ContentHash) -> Result<(), DatabaseError> {
@@ -133,7 +178,7 @@ impl Database {
                 }
             }
             freeze_content(tx, book, checksum, size_bytes)?;
-            record_local(tx, LibraryStateEntry::BookContent { content_hash: book, checksum, size_bytes, pdf })?;
+            record_local(tx, LibraryStateEntry::BookContent { book_id: book, checksum, size_bytes, pdf })?;
             tx.execute("UPDATE book_transfer SET server_has_book=1,upload_id=NULL,upload_size=NULL,upload_prepared=NULL,upload_checksum=NULL WHERE content_hash=?1", [book])?;
             Ok(())
         })
@@ -145,6 +190,32 @@ impl Database {
 
     pub fn canonical_content_hash(&self, book: BookId) -> Result<Option<ContentHash>, DatabaseError> {
         canonical_hash(&self.connection, book)
+    }
+
+    /// Whether this exact revision has been observed for the registered book.
+    pub fn book_has_content_revision(&self, book: BookId, checksum: ContentHash) -> Result<bool, DatabaseError> {
+        if book.content_hash() == Some(checksum) {
+            return Ok(true);
+        }
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM local_content_alias WHERE book_id=?1 AND byte_hash=?2)", params![book, checksum], |row| row.get(0))?)
+    }
+
+    /// Existing live books whose exact bytes can be adopted at a new root.
+    pub fn registered_books_for_content(&self, checksum: ContentHash) -> Result<Vec<(BookId, BookFormat)>, DatabaseError> {
+        Ok(self
+            .connection
+            .prepare_cached(
+                "SELECT b.content_hash,b.format FROM book b WHERE b.deleted_at IS NULL
+            AND (b.content_hash=?1 OR EXISTS(SELECT 1 FROM local_content_alias a WHERE a.book_id=b.content_hash AND a.byte_hash=?2)
+                OR EXISTS(SELECT 1 FROM book_content c WHERE c.book_id=b.content_hash AND c.canonical_hash=?2))
+            AND EXISTS(SELECT 1 FROM book_dir d WHERE d.book_row_id=b.row_id AND d.deleted_at IS NULL)
+            ORDER BY b.content_hash",
+            )?
+            .query_map(params![BookId::from(checksum), checksum], |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, Option<i64>>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(book, format)| format.and_then(BookFormat::from_code).map(|format| (book, format)))
+            .collect())
     }
 
     /// A hash can belong to multiple logical books (particularly provider
@@ -218,7 +289,7 @@ mod tests {
         let (db, book) = library();
         let annotation = Annotation {
             id: "note".into(),
-            content_hash: book,
+            book_id: book,
             anchor: AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(0, vec![], None)),
             exact_text: "quote".into(),
             style: AnnotationStyle::Highlight,
@@ -274,14 +345,8 @@ mod tests {
     fn later_presence_confirmation_preserves_canonical_pdf_metadata_and_length() {
         let (db, book) = library();
         let checksum = hash(b"canonical annotated PDF");
-        let pdf = pdf_view_common::PdfReaderMetadata {
-            version: 1,
-            content_hash: book.to_hex(),
-            pages: vec![pdf_view_common::PdfStoredPage { width: 600.0, height: 800.0, rotation: 0 }],
-            skippable_pages: None,
-            annotations: vec![],
-            dependencies: None,
-        };
+        let pdf =
+            pdf_view_common::PdfReaderMetadata { version: 1, book_id: book.to_hex(), pages: vec![pdf_view_common::PdfStoredPage { width: 600.0, height: 800.0, rotation: 0 }], skippable_pages: None, annotations: vec![], dependencies: None };
         db.confirm_uploaded_content_with_pdf(book, checksum, Some(200), Some(pdf.clone())).unwrap();
         db.confirm_uploaded_content_with_pdf(book, checksum, None, None).unwrap();
         assert_eq!(db.pdf_metadata(&book).unwrap(), Some(pdf.clone()));
@@ -311,7 +376,7 @@ mod tests {
             parent_id: ROOT_DIR_ID,
             file_name: "Book.pdf".into(),
             format: BookFormat::Pdf,
-            content_hash: book,
+            book_id: book,
             size_bytes: 400,
             inspection_version: 1,
             inspection: Some(book_inspection::InspectedBook { metadata: book_model::BookRecord { metadata: Default::default(), description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),

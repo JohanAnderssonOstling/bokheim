@@ -1,12 +1,14 @@
 //! UI binding for the shared backend update state. The host supplies actions
 //! only after its preparation and startup/installer lifecycle are available.
+use ui_text::text;
+
 use gpui::prelude::FluentBuilder;
 use gpui::{App, AppContext, Context, Div, ElementId, Entity, ParentElement, Styled, div, px};
 use gpui_component::IconName;
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
-#[cfg(not(target_arch = "wasm32"))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use std::rc::Rc;
 use ui_components as components;
 pub use update_client::coordinator::{UpdateAction, UpdateView};
@@ -27,7 +29,7 @@ pub struct UpdateControls {
 
 impl UpdateControls {
     pub fn new(view: UpdateView, action: UpdateActionHandler) -> Self {
-        Self { view, action, worker_failed: false, prompt_shown: false, message: None, error: None, update_label: "Update", install_label: "Install" }
+        Self { view, action, worker_failed: false, prompt_shown: false, message: None, error: None, update_label: text!(browse::update), install_label: text!(browse::install) }
     }
 
     pub(crate) fn take_available_prompt(&mut self) -> Option<UpdateActionHandler> {
@@ -112,41 +114,43 @@ pub fn bind_worker<H: Send + 'static>(
     let executor = cx.background_executor().clone();
     cx.spawn(async move |_| {
         let Some(mut host) = take_host() else { return };
-        executor.spawn(async move {
-            let publish = |event| events.try_send(event).map_err(|_| "update UI closed".to_owned());
-            let mut automatic = automatic_check;
-            loop {
-                let action = if std::mem::take(&mut automatic) {
-                    None
-                } else {
-                    let Ok(action) = requests.recv().await else { break };
-                    Some(action)
-                };
-                // Waiting for actions holds no OS thread. Blocking update work
-                // runs serially on the shared background pool, away from the UI.
-                let result = match catch_unwind(AssertUnwindSafe(|| work(&mut host, action, &publish))) {
-                    Ok(result) => result,
-                    Err(_) => {
-                        log::error!("update worker panicked");
-                        let _ = publish(UpdateEvent::Failed(Some("Update failed. Restart the application to retry.".into())));
-                        break;
-                    }
-                };
-                match result {
-                    Ok(view) => {
-                        if publish(UpdateEvent::View(view)).is_err() {
+        executor
+            .spawn(async move {
+                let publish = |event| events.try_send(event).map_err(|_| "update UI closed".to_owned());
+                let mut automatic = automatic_check;
+                loop {
+                    let action = if std::mem::take(&mut automatic) {
+                        None
+                    } else {
+                        let Ok(action) = requests.recv().await else { break };
+                        Some(action)
+                    };
+                    // Waiting for actions holds no OS thread. Blocking update work
+                    // runs serially on the shared background pool, away from the UI.
+                    let result = match catch_unwind(AssertUnwindSafe(|| work(&mut host, action, &publish))) {
+                        Ok(result) => result,
+                        Err(_) => {
+                            log::error!("update worker panicked");
+                            let _ = publish(UpdateEvent::Failed(Some(text!(browse::update_failed_restart_the_application_to_retry).into())));
                             break;
                         }
-                    }
-                    Err(error) => {
-                        log::warn!("update work failed: {error}");
-                        if publish(UpdateEvent::View(view(&host))).is_err() || publish(UpdateEvent::Failed(user_error(&error))).is_err() {
-                            break;
+                    };
+                    match result {
+                        Ok(view) => {
+                            if publish(UpdateEvent::View(view)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!("update work failed: {error}");
+                            if publish(UpdateEvent::View(view(&host))).is_err() || publish(UpdateEvent::Failed(user_error(&error))).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
-            }
-        }).detach();
+            })
+            .detach();
     })
     .detach();
     let weak = controls.downgrade();
@@ -166,40 +170,37 @@ pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<Elemen
     let controls = controls.read(cx);
     let (message, button) = match &controls.view {
         UpdateView::Hidden => return None,
-        UpdateView::Available => ("Update available".to_owned(), Some((controls.update_label, UpdateAction::Update, false))),
-        UpdateView::Preparing => ("Preparing update…".into(), Some(("Update", UpdateAction::Update, true))),
-        UpdateView::WaitingForConnection => ("Check your internet connection, then retry the update.".into(), Some(("Retry", UpdateAction::Update, false))),
-        UpdateView::Ready { action } => ("Update ready".into(), Some((if *action == UpdateAction::Install { controls.install_label } else { "Restart" }, action.clone(), false))),
-        UpdateView::NeedsSpace { additional_bytes } => (format!("Free up {} to continue", needed_space(*additional_bytes)), Some(("Retry", UpdateAction::Update, false))),
-        UpdateView::NeedsPermission => ("Allow the app to install the update.".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
-        UpdateView::Activating => ("Updating your library…".into(), None),
-        UpdateView::Current { version, checked } => (if *checked { format!("Bokheim {version} is up to date") } else { format!("Bokheim {version}") }, Some(("Check for updates", UpdateAction::Check, false))),
-        UpdateView::Checking => ("Checking for updates…".into(), Some(("Checking…", UpdateAction::Check, true))),
+        UpdateView::Available => (text!(browse::update_available).to_owned(), Some((controls.update_label, UpdateAction::Update, false))),
+        UpdateView::Preparing => (text!(browse::preparing_update).into(), Some((text!(browse::update), UpdateAction::Update, true))),
+        UpdateView::WaitingForConnection => (text!(browse::check_your_internet_connection_then_retry_the_update).into(), Some((text!(common::retry), UpdateAction::Update, false))),
+        UpdateView::Ready { action } => (text!(browse::update_ready).into(), Some((if *action == UpdateAction::Install { controls.install_label } else { text!(common::restart) }, action.clone(), false))),
+        UpdateView::NeedsSpace { additional_bytes } => (format!(text!(browse::free_up_to_continue), needed_space(*additional_bytes)), Some((text!(common::retry), UpdateAction::Update, false))),
+        UpdateView::NeedsPermission => (text!(browse::allow_the_app_to_install_the_update).into(), Some((text!(browse::continue), UpdateAction::GrantPermission, false))),
+        UpdateView::Activating => (text!(browse::updating_your_library).into(), None),
+        UpdateView::Current { version, checked } => {
+            (if *checked { format!(text!(browse::bokheim_is_up_to_date), version = version) } else { format!(text!(browse::bokheim), version = version) }, Some((text!(browse::check_for_updates), UpdateAction::Check, false)))
+        }
+        UpdateView::Checking => (text!(browse::checking_for_updates).into(), Some((text!(common::checking), UpdateAction::Check, true))),
         UpdateView::Downloading { bytes, total } => (
             if *total == 0 {
-                "Downloading update…".into()
+                text!(browse::downloading_update).into()
             } else if bytes >= total {
-                "Verifying and preparing update…".into()
+                text!(browse::verifying_and_preparing_update).into()
             } else {
-                format!("Downloading update — {}%", bytes.saturating_mul(100) / total)
+                format!(text!(browse::update_download_percent), bytes.saturating_mul(100) / total)
             },
-            Some(("Downloading…", UpdateAction::Update, true)),
+            Some((text!(browse::downloading), UpdateAction::Update, true)),
         ),
     };
     let message = controls.message.clone().unwrap_or(message);
-    let message = if controls.worker_failed && controls.error.is_none() { "Could not continue update. Try again.".to_owned() } else { message };
+    let message = if controls.worker_failed && controls.error.is_none() { text!(browse::could_not_continue_update_try_again).to_owned() } else { message };
     let mut row = div().w_full().flex().flex_col().child({
         let mut content = div().w_full().px(px(components::SPACE_MD)).py(px(components::SPACE_SM)).min_h(px(56.)).flex().flex_wrap().items_center().justify_between().gap(px(components::SPACE_SM)).child(message);
         if let Some((label, action, busy)) = button {
             let handler = controls.action.clone();
             let loading = busy && !controls.worker_failed;
-            let label = if controls.worker_failed { "Retry" } else { label };
-            content = content.child(
-                components::browser_settings_header_button(id, label, true, theme)
-                    .when(loading, |button| button.icon(IconName::LoaderCircle))
-                    .loading(loading)
-                    .on_click(move |_, _, cx| handler(action.clone(), cx)),
-            );
+            let label = if controls.worker_failed { text!(common::retry) } else { label };
+            content = content.child(components::browser_settings_header_button(id, label, true, theme).when(loading, |button| button.icon(IconName::LoaderCircle)).loading(loading).on_click(move |_, _, cx| handler(action.clone(), cx)));
         }
         content
     });
@@ -211,7 +212,7 @@ pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<Elemen
 
 pub(crate) fn needed_space(bytes: u64) -> String {
     // Round up by at most one decimal MB; never exaggerate a 1.1 GB deficit to 2 GB.
-    if bytes >= 1_000_000 { format!("{} MB", bytes.div_ceil(1_000_000)) } else { format!("{} KB", bytes.div_ceil(1_000)) }
+    if bytes >= 1_000_000 { format!(text!(browse::mb_2), bytes.div_ceil(1_000_000)) } else { format!(text!(browse::kb_2), bytes.div_ceil(1_000)) }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

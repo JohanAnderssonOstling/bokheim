@@ -2,8 +2,8 @@
 
 mod font_picker;
 pub(crate) mod marks;
-mod recurring;
 pub(crate) mod progress;
+mod recurring;
 pub(crate) mod render;
 pub(crate) mod search;
 pub(crate) mod state;
@@ -19,6 +19,7 @@ use std::sync::atomic::AtomicU64;
 use gpui::{Entity, FocusHandle, ListState, Pixels, Point, Size, Subscription};
 use gpui_component::input::InputState;
 use gpui_component::tree::TreeState;
+use html::style::ReaderStyleOverrides;
 use html_view_gpui::{HtmlPageSnapshot, HtmlView};
 use library_backend::LibraryClient;
 use library_model::BookLocator;
@@ -105,6 +106,9 @@ pub(crate) struct ReaderView {
     title: String,
     load_state: LoadState,
     applied_palette: Option<ui_components::theme::SelectedPalette>,
+    applied_font_size: Option<f32>,
+    applied_scale: Option<f64>,
+    applied_style_overrides: Option<ReaderStyleOverrides>,
     last_column_viewport_plan: Option<(gpui::EntityId, f64, f64, u8, f64)>,
     desired_column_count: u8,
     toc: TocState,
@@ -139,7 +143,7 @@ pub(crate) struct ReaderView {
     #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
     tts: crate::shell::tts::Narration,
     #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
-    tts_fragments: Vec<html::layout::ReadingTarget>,
+    tts_fragments: Vec<html::reading::ReadingTarget>,
     #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
     tts_doc: usize,
     #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]

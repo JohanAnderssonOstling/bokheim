@@ -1,4 +1,4 @@
-//! Catalog files on their origin: hosted books checked against their hashes,
+//! Shared catalog snapshots, hosted books checked against their hashes,
 //! and retained cover images. Downloads need no account.
 use client_platform_runtime::{executor::run_blocking, transfers};
 use client_runtime::{BackendError, Failure};
@@ -14,6 +14,9 @@ use web_time::Instant;
 mod cover_cache;
 pub use cover_cache::MAX_BYTES as COVER_CACHE_MAX_BYTES;
 use cover_cache::{Address, CoverCache};
+
+mod snapshots;
+pub use snapshots::start;
 
 #[cfg(test)]
 mod download_tests;

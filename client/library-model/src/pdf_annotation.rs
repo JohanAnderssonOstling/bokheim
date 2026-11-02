@@ -9,7 +9,7 @@ pub fn stored_pdf_annotation(book: BookId, value: &PdfStoredAnnotation) -> Optio
     let color = parse_annotation_color(&value.color).ok().flatten()?;
     Some(Annotation {
         id: format!("pdf-external:{book}:{}:{}", value.page_index, value.index),
-        content_hash: book,
+        book_id: book,
         anchor: AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(value.page_index as u32, value.rects.iter().map(|r| PdfAnnotationRect::new(r[0], r[1], r[2], r[3])).collect(), None)),
         exact_text: value.text.clone(),
         style: match value.kind {

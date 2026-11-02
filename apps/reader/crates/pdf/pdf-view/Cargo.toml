@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+ui-text = { path = "../../../../ui-text" }
 serde = { version = "1", features = ["derive"] }
 ui-components = { path = "../../../../components" }
 gpui.workspace = true

@@ -110,8 +110,8 @@ cat > "$stage/se.bokheim.Bokheim.desktop" <<EOF
 Type=Application
 Name=Bokheim
 Comment=Read and organize your books
-Exec="$exec_path" %u
-MimeType=x-scheme-handler/bokheim;
+Exec="$exec_path" %U
+MimeType=x-scheme-handler/bokheim;application/epub+zip;application/pdf;application/x-mobipocket-ebook;application/vnd.amazon.ebook;application/x-mobi8-ebook;application/x-fictionbook+xml;application/x-zip-compressed-fb2;application/vnd.comicbook+zip;application/x-cbz;audio/x-m4b;audio/mp4;
 Icon=se.bokheim.Bokheim
 Terminal=false
 Categories=Office;Viewer;

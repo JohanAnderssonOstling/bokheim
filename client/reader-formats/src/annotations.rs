@@ -104,7 +104,7 @@ pub fn decode_annotation_identity(format: ReaderFormat, record: &Value, book: Bo
     let created_at = timestamp(record, if foliate { "created" } else { "createdAt" }, format, 0)?;
     Ok(Annotation {
         id,
-        content_hash: book,
+        book_id: book,
         anchor: AnnotationAnchor::epub_publication_cfi(cfi),
         exact_text: String::new(),
         note: String::new(),

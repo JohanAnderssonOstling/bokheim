@@ -1,26 +1,44 @@
 //! Language choices shared by library and catalog browsing. Preserve stored
 //! metadata codes while treating two- and three-letter aliases as one choice.
+use ui_text::text;
+
 use library_model::LibraryLanguageCount;
 use std::collections::{BTreeMap, HashSet};
 
 const LANGUAGES: &[(&str, &str, &[&str])] = &[
-    ("en", "English", &["eng"]), ("sv", "Swedish", &["swe"]),
-    ("no", "Norwegian", &["nor"]), ("nb", "Norwegian Bokmål", &["nob"]),
-    ("nn", "Norwegian Nynorsk", &["nno"]), ("da", "Danish", &["dan"]),
-    ("de", "German", &["deu", "ger"]), ("fr", "French", &["fra", "fre"]),
-    ("es", "Spanish", &["spa"]), ("it", "Italian", &["ita"]),
-    ("nl", "Dutch", &["nld", "dut"]), ("pt", "Portuguese", &["por"]),
-    ("pl", "Polish", &["pol"]), ("he", "Hebrew", &["heb"]),
-    ("ja", "Japanese", &["jpn"]), ("el", "Greek", &["ell", "gre"]),
-    ("tl", "Tagalog", &["tgl"]), ("bg", "Bulgarian", &["bul"]),
-    ("ta", "Tamil", &["tam"]), ("zh", "Chinese", &["zho", "chi"]),
-    ("se", "Northern Sámi", &["sme"]), ("fi", "Finnish", &["fin"]),
-    ("is", "Icelandic", &["isl", "ice"]), ("ru", "Russian", &["rus"]),
-    ("uk", "Ukrainian", &["ukr"]), ("ar", "Arabic", &["ara"]),
-    ("hi", "Hindi", &["hin"]), ("la", "Latin", &["lat"]),
-    ("ang", "Old English", &[]), ("smi", "Sámi languages", &[]),
-    ("mul", "Multiple languages", &[]), ("und", "Unspecified language", &[]),
-    ("zxx", "No linguistic content", &[]),
+    ("en", text!(common::english), &["eng"]),
+    ("sv", text!(common::swedish), &["swe"]),
+    ("no", text!(browse::norwegian), &["nor"]),
+    ("nb", text!(common::norwegian_bokmal), &["nob"]),
+    ("nn", text!(common::norwegian_nynorsk), &["nno"]),
+    ("da", text!(common::danish), &["dan"]),
+    ("de", text!(common::german), &["deu", "ger"]),
+    ("fr", text!(common::french), &["fra", "fre"]),
+    ("es", text!(common::spanish), &["spa"]),
+    ("it", text!(common::italian), &["ita"]),
+    ("nl", text!(common::dutch), &["nld", "dut"]),
+    ("pt", text!(common::portuguese), &["por"]),
+    ("pl", text!(common::polish), &["pol"]),
+    ("he", text!(common::hebrew), &["heb"]),
+    ("ja", text!(common::japanese), &["jpn"]),
+    ("el", text!(common::greek), &["ell", "gre"]),
+    ("tl", text!(common::tagalog), &["tgl"]),
+    ("bg", text!(common::bulgarian), &["bul"]),
+    ("ta", text!(common::tamil), &["tam"]),
+    ("zh", text!(common::chinese), &["zho", "chi"]),
+    ("se", text!(browse::northern_sami), &["sme"]),
+    ("fi", text!(common::finnish), &["fin"]),
+    ("is", text!(common::icelandic), &["isl", "ice"]),
+    ("ru", text!(common::russian), &["rus"]),
+    ("uk", text!(common::ukrainian), &["ukr"]),
+    ("ar", text!(common::arabic), &["ara"]),
+    ("hi", text!(common::hindi), &["hin"]),
+    ("la", text!(common::latin), &["lat"]),
+    ("ang", text!(browse::old_english), &[]),
+    ("smi", text!(browse::sami_languages), &[]),
+    ("mul", text!(browse::multiple_languages), &[]),
+    ("und", text!(browse::unspecified_language), &[]),
+    ("zxx", text!(browse::no_linguistic_content), &[]),
 ];
 
 fn canonical(code: &str) -> String {
@@ -36,10 +54,13 @@ pub(super) fn choices(counts: &[LibraryLanguageCount]) -> Vec<(String, String, u
             *languages.entry(code).or_default() += count.book_count;
         }
     }
-    let mut choices = languages.into_iter().map(|(code, count)| {
-        let label = LANGUAGES.iter().find(|(primary, _, _)| *primary == code).map_or_else(|| code.clone(), |(_, label, _)| (*label).to_owned());
-        (code, label, count)
-    }).collect::<Vec<_>>();
+    let mut choices = languages
+        .into_iter()
+        .map(|(code, count)| {
+            let label = LANGUAGES.iter().find(|(primary, _, _)| *primary == code).map_or_else(|| code.clone(), |(_, label, _)| (*label).to_owned());
+            (code, label, count)
+        })
+        .collect::<Vec<_>>();
     choices.sort_unstable_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
     choices
 }

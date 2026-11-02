@@ -9,6 +9,7 @@ default = ["random-ids"]
 random-ids = ["uuid/v4", "book-model/random-ids"]
 
 [dependencies]
+ui-text = { path = "../../apps/ui-text" }
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"

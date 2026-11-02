@@ -7,6 +7,8 @@
 //! These functions style and lay out. What a button does, which entry the reader
 //! is inside, and whether the file is on the device are the page's business.
 
+use ui_text::text;
+
 use gpui::prelude::*;
 use gpui::{App, Div, ElementId, SharedString, Stateful, div, px, rems, rgba};
 use gpui_component::text::TextView;
@@ -22,7 +24,7 @@ use crate::{
 gpui::actions!(book_detail, [ShowBookDescription, ShowBookContents, CloseBookPlayer]);
 
 pub fn book_detail_close_player_button() -> crate::Button {
-    crate::playback_secondary_button(crate::outlined_icon_button("book-close-player", "Close player", IconName::Close)).on_click(|_, window, cx| window.dispatch_action(Box::new(CloseBookPlayer), cx))
+    crate::playback_secondary_button(crate::outlined_icon_button("book-close-player", text!(common::close_player), IconName::Close)).on_click(|_, window, cx| window.dispatch_action(Box::new(CloseBookPlayer), cx))
 }
 
 /// Secondary book information stays one tap away without extending the page.
@@ -31,7 +33,7 @@ pub fn book_detail_description_button(theme: BrowserTheme) -> crate::Button {
         .ghost()
         .text_color(theme.text)
         .icon(IconName::Info)
-        .label("Description")
+        .label(text!(common::description))
         .h(rems(2.5))
         .px(rems(0.25))
         .debug_selector(|| "book-description".into())
@@ -45,7 +47,7 @@ pub fn book_detail_contents_button(theme: BrowserTheme) -> crate::Button {
         .h(rems(2.5))
         .px(rems(0.25))
         .icon(IconName::Menu)
-        .label("Contents")
+        .label(text!(common::contents))
         .debug_selector(|| "book-contents".into())
         .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowBookContents), cx))
 }
@@ -124,7 +126,7 @@ pub fn book_detail_column_body() -> Div {
 
 /// Back to where the book was opened, beside the top of its cover.
 pub fn book_detail_back(id: impl Into<ElementId>, theme: BrowserTheme) -> crate::Button {
-    crate::outlined_icon_button(id, "Return to library", IconName::ArrowLeft).text_color(theme.text).tooltip(crate::shortcut_tooltip("Return to library", "escape")).debug_selector(|| "book-detail-back".into())
+    crate::outlined_icon_button(id, text!(common::return_to_library), IconName::ArrowLeft).text_color(theme.text).tooltip(crate::shortcut_tooltip(text!(common::return_to_library), "escape")).debug_selector(|| "book-detail-back".into())
 }
 
 /// A centred cover with navigation beside its top edge, without a header row.
@@ -365,7 +367,7 @@ mod tests {
                             assert_eq!(format.font_weight, 700);
                         }
                         if id == "italic" {
-                            assert_eq!(format.font_style, html::layout::FontStyle::Italic);
+                            assert_eq!(format.font_style, html::text::FontStyle::Italic);
                         }
                     }
                 }

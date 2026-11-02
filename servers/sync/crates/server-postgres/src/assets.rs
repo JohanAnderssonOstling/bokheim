@@ -142,9 +142,9 @@ pub(super) async fn book_storage_usage(pool: &PgPool, user_id: &str, limit: usiz
     rows.into_iter()
         .map(|row| {
             let hash: Vec<u8> = row.try_get("content_hash").map_err(storage)?;
-            let content_hash = BookId::try_from(hash.as_slice()).map_err(storage)?;
+            let book_id = BookId::try_from(hash.as_slice()).map_err(storage)?;
             let used_bytes: i64 = row.try_get("used_bytes").map_err(storage)?;
-            Ok(BookStorageUsage { content_hash, used_bytes: used_bytes.max(0) as u64 })
+            Ok(BookStorageUsage { book_id, used_bytes: used_bytes.max(0) as u64 })
         })
         .collect()
 }
@@ -187,12 +187,12 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
     require_cloud_storage(&mut transaction, user_id, library_id).await?;
     let mut verified = HashSet::new();
     for blob in blobs {
-        if store.size(user_id, AssetKind::Book, &blob.content_hash).await?.is_some() {
-            verified.insert(blob.content_hash);
+        if store.size(user_id, AssetKind::Book, &blob.book_id).await?.is_some() {
+            verified.insert(blob.book_id);
         }
     }
     let mut seen = HashSet::with_capacity(blobs.len());
-    if blobs.iter().any(|blob| !seen.insert(blob.content_hash.clone())) {
+    if blobs.iter().any(|blob| !seen.insert(blob.book_id.clone())) {
         return Err(AssetError::InvalidInput("book manifest contains a duplicate content hash".to_string()));
     }
     let mut response = BlobManifestResponse::default();
@@ -201,12 +201,12 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
     let mut checksums = Vec::with_capacity(blobs.len());
     for blob in blobs {
         if blob.size_bytes == 0 {
-            response.rejected.push(RejectedBlobManifestEntry { content_hash: blob.content_hash.clone(), reason: BlobManifestRejectionReason::InvalidSize });
+            response.rejected.push(RejectedBlobManifestEntry { book_id: blob.book_id.clone(), reason: BlobManifestRejectionReason::InvalidSize });
             continue;
         }
-        hashes.push(blob.content_hash.as_bytes().to_vec());
+        hashes.push(blob.book_id.as_bytes().to_vec());
         sizes.push(size_i64(blob.size_bytes)?);
-        checksums.push(blob.byte_checksum.or_else(|| blob.content_hash.content_hash()).map(|hash| hash.as_bytes().to_vec()));
+        checksums.push(blob.byte_checksum.or_else(|| blob.book_id.content_hash()).map(|hash| hash.as_bytes().to_vec()));
     }
     if hashes.is_empty() {
         transaction.commit().await.map_err(storage)?;
@@ -237,12 +237,12 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
         let stored_checksum: Option<Vec<u8>> = row.try_get("stored_checksum").map_err(storage)?;
         let stored_checksum = stored_checksum.map(|bytes| ContentHash::try_from(bytes.as_slice()).map_err(storage)).transpose()?;
         if public.as_ref().is_some_and(|book| book.size_bytes() != requested_size as u64) {
-            response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
+            response.rejected.push(RejectedBlobManifestEntry { book_id: hash, reason: BlobManifestRejectionReason::SizeMismatch });
             continue;
         }
         // Size validation must not reveal another account's stored objects.
         if owned && !hash.is_local() && requested_checksum == stored_checksum && stored_size.is_some_and(|size| size != requested_size) {
-            response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
+            response.rejected.push(RejectedBlobManifestEntry { book_id: hash, reason: BlobManifestRejectionReason::SizeMismatch });
             continue;
         }
         if owned {
@@ -265,7 +265,7 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
         if canonical_owned {
             let checksum = requested_checksum.ok_or(AssetError::HashMismatch)?;
             if canonical_size.is_some_and(|size| size != requested_size) {
-                response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
+                response.rejected.push(RejectedBlobManifestEntry { book_id: hash, reason: BlobManifestRejectionReason::SizeMismatch });
                 continue;
             }
             let linked = if let Some(book) = public.take() {
@@ -280,7 +280,7 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
             continue;
         }
         if reservation_id.is_some() {
-            response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::UploadInProgress });
+            response.rejected.push(RejectedBlobManifestEntry { book_id: hash, reason: BlobManifestRejectionReason::UploadInProgress });
             continue;
         }
         // Another account's copy is never claimed by hash: knowing a hash is
@@ -288,9 +288,9 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
         // then keeps the single existing copy.
         let preview_size = requested_checksum.and_then(|checksum| previewed.get(&checksum).copied());
         if preview_size.is_some_and(|size| size != requested_size) {
-            response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
+            response.rejected.push(RejectedBlobManifestEntry { book_id: hash, reason: BlobManifestRejectionReason::SizeMismatch });
         } else if preview_size.is_none() && requested_size > available {
-            response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::QuotaExceeded });
+            response.rejected.push(RejectedBlobManifestEntry { book_id: hash, reason: BlobManifestRejectionReason::QuotaExceeded });
         } else if let Some(book) = public {
             let checksum = requested_checksum.ok_or(AssetError::HashMismatch)?;
             insert_blob_object(&mut transaction, &hash, requested_size, checksum).await?;

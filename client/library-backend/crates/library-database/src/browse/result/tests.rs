@@ -34,7 +34,7 @@ fn heading_and_card_continuations_reuse_the_same_prepared_selection() {
     for id in 1..=37 {
         let book = db.connection.query_row("SELECT content_hash FROM book WHERE row_id=?1", [id], |row| row.get(0)).unwrap();
         db.upsert_annotation(&Annotation {
-            id: format!("prepared-{id}"), content_hash: book,
+            id: format!("prepared-{id}"), book_id: book,
             anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:0)"),
             exact_text: "A searchable passage".into(), note: String::new(), style: AnnotationStyle::Highlight,
             color: 0xe0bb4b, created_at: id as u64, modified_at: id as u64,

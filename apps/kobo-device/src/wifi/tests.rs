@@ -120,7 +120,9 @@ fn event_refresh_preserves_changes_arriving_during_the_status_query() {
             let (length, client) = server.recv_from(&mut bytes).unwrap();
             assert_eq!(&bytes[..length], expected.as_bytes());
             // The event describes a change newer than this status response.
-            if expected == "STATUS" { server.send_to(b"<3>CTRL-EVENT-DISCONNECTED\n", &peer).unwrap(); }
+            if expected == "STATUS" {
+                server.send_to(b"<3>CTRL-EVENT-DISCONNECTED\n", &peer).unwrap();
+            }
             server.send_to(reply.as_bytes(), client.as_pathname().unwrap()).unwrap();
         }
     });
@@ -153,11 +155,7 @@ fn scan_completion_event_updates_results_immediately() {
     let (_directory, path, monitor, server, peer) = attached_monitor();
     server.send_to(b"<3>CTRL-EVENT-SCAN-RESULTS\n", &peer).unwrap();
     let serving = std::thread::spawn(move || {
-        for (expected, reply) in [
-            ("STATUS", "wpa_state=DISCONNECTED\n"),
-            ("LIST_NETWORKS", "header\n"),
-            ("SCAN_RESULTS", "header\naa:bb:cc:dd:ee:ff\t2412\t-60\t[ESS]\tCafe\n"),
-        ] {
+        for (expected, reply) in [("STATUS", "wpa_state=DISCONNECTED\n"), ("LIST_NETWORKS", "header\n"), ("SCAN_RESULTS", "header\naa:bb:cc:dd:ee:ff\t2412\t-60\t[ESS]\tCafe\n")] {
             let mut bytes = [0; 256];
             let (length, client) = server.recv_from(&mut bytes).unwrap();
             assert_eq!(&bytes[..length], expected.as_bytes());
@@ -215,7 +213,6 @@ fn connection_waits_for_status_changes_and_unchanged_snapshots_do_not_wake_obser
     assert!(offline_again.as_mut().poll(&mut cx).is_pending());
 }
 
-
 #[test]
 fn scan_groups_only_matching_ssid_and_security_and_preserves_bytes() {
     let text = "bssid / frequency / signal level / flags / ssid\n\
@@ -231,7 +228,6 @@ fn scan_groups_only_matching_ssid_and_security_and_preserves_bytes() {
     assert_eq!(networks[2].security, Security::Unsupported);
     assert!(parse_scan("header\ntruncated row").is_err());
 }
-
 
 #[test]
 fn control_uses_a_private_socket_and_does_not_expose_secrets_in_errors() {
@@ -269,7 +265,6 @@ fn monitor_receives_scan_completion_without_mixing_command_responses() {
     assert!(monitor.events().unwrap().iter().any(|event| event.contains("CTRL-EVENT-SCAN-RESULTS")));
     assert!(monitor.events().unwrap().is_empty());
 }
-
 
 fn fake_service(replies: Vec<(&'static str, &'static str)>) -> (tempfile::TempDir, PathBuf, std::thread::JoinHandle<()>) {
     let directory = tempfile::tempdir().unwrap();
@@ -372,7 +367,10 @@ fn failed_radio_shutdown_aborts_sleep_and_releases_operation_guard() {
     assert_ne!(controller.snapshot.phase, Phase::Off);
     assert!(controller.restore_after_ui);
     let mut restored = false;
-    controller.resume_after_ui_with(|_| { restored = true; Ok(()) });
+    controller.resume_after_ui_with(|_| {
+        restored = true;
+        Ok(())
+    });
     assert!(restored, "partially stopped services must be restored after failed suspend");
     assert!(!controller.restore_after_ui);
 }
@@ -400,7 +398,6 @@ fn wake_preserves_off_setting_and_explicit_user_override() {
     let _ = controller.execute(Request::Disconnect);
     controller.resume_after_ui_with(|_| panic!("user action overrides restore"));
 }
-
 
 #[test]
 fn subprocess_timeout_stops_descendants_and_reports_failures() {
@@ -449,9 +446,12 @@ fn rejected_status_also_clears_connection_work() {
 #[test]
 fn automatic_reconnect_expires_even_before_dhcp_starts() {
     let (_directory, path, server) = fake_service(vec![
-        ("ATTACH", "OK"), ("STATUS", "wpa_state=SCANNING\n"), ("LIST_NETWORKS", "network id / ssid / bssid / flags\n"),
+        ("ATTACH", "OK"),
+        ("STATUS", "wpa_state=SCANNING\n"),
+        ("LIST_NETWORKS", "network id / ssid / bssid / flags\n"),
         ("DISCONNECT", "OK"),
-        ("STATUS", "wpa_state=DISCONNECTED\n"), ("LIST_NETWORKS", "network id / ssid / bssid / flags\n"),
+        ("STATUS", "wpa_state=DISCONNECTED\n"),
+        ("LIST_NETWORKS", "network id / ssid / bssid / flags\n"),
     ]);
     let mut controller = Controller::new();
     controller.socket_path = Some(path);
@@ -469,9 +469,7 @@ fn automatic_reconnect_expires_even_before_dhcp_starts() {
 
 #[test]
 fn successful_automatic_reconnect_clears_its_deadline() {
-    let (_directory, path, server) = fake_service(vec![
-        ("ATTACH", "OK"), ("STATUS", "wpa_state=COMPLETED\nip_address=192.168.1.2\n"), ("LIST_NETWORKS", "network id / ssid / bssid / flags\n"),
-    ]);
+    let (_directory, path, server) = fake_service(vec![("ATTACH", "OK"), ("STATUS", "wpa_state=COMPLETED\nip_address=192.168.1.2\n"), ("LIST_NETWORKS", "network id / ssid / bssid / flags\n")]);
     let mut controller = Controller::new();
     controller.socket_path = Some(path);
     controller.address_requested = true;

@@ -1,15 +1,18 @@
+use ui_text::text;
+
 use kobo_package::{MENU_CONFIGURATION as NICKEL_MENU_CONFIGURATION_PATH, REQUIRED_FILES as REQUIRED_INSTALLED_FILES};
 use kobo_package::{Policy, destination, inspect, visit};
+use path_label::path_label;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
-use update_files::existing_regular_file;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use tar::EntryType;
+use update_files::existing_regular_file;
 
 mod device_monitor;
 pub use device_monitor::{DeviceDetection, DeviceMonitor};
@@ -45,9 +48,26 @@ impl KoboDevice {
     }
 
     pub fn nickel_menu_detected(&self) -> bool {
-        let nickel_menu = self.root.join(".adds/nm");
-        nickel_menu.join("doc").exists() || nickel_menu.join("config").exists()
+        nickel_menu_detected(&self.root).unwrap_or(false)
     }
+}
+
+fn nickel_menu_detected(root: &Path) -> io::Result<bool> {
+    let entries = match fs::read_dir(root.join(".adds/nm")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        // Our menu entry can exist after an interrupted first installation,
+        // before the firmware has installed NickelMenu itself. NickelMenu
+        // ignores hidden files, including metadata left by the host computer.
+        let name = entry?.file_name();
+        if name != "desktop-gpui-kobo" && !name.to_string_lossy().starts_with('.') {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -77,8 +97,8 @@ pub fn detect_kobo_devices() -> Vec<KoboDevice> {
                 return None;
             }
             let root = root.canonicalize().ok()?;
-            let volume = root.file_name().and_then(OsStr::to_str).filter(|name| !name.is_empty()).unwrap_or("Kobo eReader");
-            Some(KoboDevice { display_name: format!("Kobo eReader ({volume}) — {}", root.display()), root })
+            let volume = root.file_name().and_then(OsStr::to_str).filter(|name| !name.is_empty()).unwrap_or(text!(installer::kobo_ereader_3));
+            Some(KoboDevice { display_name: format!(text!(installer::device_volume), path_label(&root), volume = volume), root })
         })
         .collect()
 }
@@ -124,7 +144,10 @@ pub fn install_archive_with_progress(device_root: &Path, archive: &[u8], mut on_
     let device_root = validate_device_root(device_root)?;
     let profile = kobo_package::installed_profile(&fs::read_to_string(device_root.join(".kobo/version"))?)?;
     kobo_package::validate_device(archive, Policy::Usb, profile)?;
-    let total_bytes = validate_archive_size(archive, Some(&device_root))? + NICKEL_MENU_ARCHIVE.len() as u64 + NICKEL_MENU_ICONS.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+    // Decide before extraction creates our own NickelMenu configuration.
+    let install_nickel_menu = !nickel_menu_detected(&device_root)?;
+    let nickel_menu_bytes = if install_nickel_menu { NICKEL_MENU_ARCHIVE.len() as u64 } else { 0 };
+    let total_bytes = validate_archive_size(archive, Some(&device_root))? + nickel_menu_bytes + NICKEL_MENU_ICONS.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
     validate_nickel_menu_install(&device_root)?;
     for (path, _) in NICKEL_MENU_ICONS {
         existing_regular_file(&device_root.join(path))?;
@@ -144,8 +167,8 @@ pub fn install_archive_with_progress(device_root: &Path, archive: &[u8], mut on_
                 on_progress(InstallProgress { copied_bytes, total_bytes });
             };
             summary.bytes += if relative == Path::new(NICKEL_MENU_CONFIGURATION_PATH) {
-                // Older downloaded packages may contain diagnostic menu entries.
-                // Always install the current Bokheim launch configuration.
+                // Older packages can rename the shared button or bypass the
+                // menu. Replace only our entry with the regular menu action.
                 install_file_atomically(&mut &NICKEL_MENU_CONFIGURATION[..], &destination, &mut report_progress)?
             } else {
                 install_file_atomically(entry, &destination, &mut report_progress)?
@@ -168,27 +191,29 @@ pub fn install_archive_with_progress(device_root: &Path, archive: &[u8], mut on_
         }
     }
     validate_nickel_menu_install(&device_root)?;
-    summary.bytes += install_file_atomically(&mut &NICKEL_MENU_ARCHIVE[..], &device_root.join(".kobo/KoboRoot.tgz"), &mut |bytes| {
-        copied_bytes = copied_bytes.saturating_add(bytes);
-        on_progress(InstallProgress { copied_bytes, total_bytes });
-    })?;
-    summary.files += 1;
+    if install_nickel_menu {
+        summary.bytes += install_file_atomically(&mut &NICKEL_MENU_ARCHIVE[..], &device_root.join(".kobo/KoboRoot.tgz"), &mut |bytes| {
+            copied_bytes = copied_bytes.saturating_add(bytes);
+            on_progress(InstallProgress { copied_bytes, total_bytes });
+        })?;
+        summary.files += 1;
+    }
     Ok(summary)
 }
 
 fn validate_nickel_menu_install(root: &Path) -> io::Result<()> {
     if hex::encode(Sha256::digest(NICKEL_MENU_ARCHIVE)) != NICKEL_MENU_SHA256 {
-        return Err(io::Error::other("Embedded NickelMenu checksum mismatch"));
+        return Err(io::Error::other(text!(installer::embedded_nickelmenu_checksum_mismatch)));
     }
     let version = fs::read_to_string(root.join(".kobo/version"))?;
     kobo_package::installed_profile(&version)?;
     let pending = root.join(".kobo/KoboRoot.tgz");
     if pending.exists() && fs::read(&pending)? != NICKEL_MENU_ARCHIVE {
-        return Err(io::Error::other("A Kobo update package is pending. Finish it before installing this app; the package won't be overwritten."));
+        return Err(io::Error::other(text!(installer::a_kobo_update_package_is_pending_finish_it_before_installing_this_app)));
     }
     let upgrade = root.join(".kobo/upgrade");
     if upgrade.is_dir() && fs::read_dir(upgrade)?.next().is_some() {
-        return Err(io::Error::other("A Kobo firmware upgrade is pending. Finish it before installing this app."));
+        return Err(io::Error::other(text!(installer::a_kobo_firmware_upgrade_is_pending_finish_it_before_installing_this_app)));
     }
     Ok(())
 }
@@ -208,7 +233,7 @@ fn validate_archive_size(archive: &[u8], device_root: Option<&Path>) -> io::Resu
 
 fn validate_device_root(device_root: &Path) -> io::Result<PathBuf> {
     if !device_root.join(KOBO_MARKER_DIRECTORY).is_dir() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not a mounted Kobo device", device_root.display())));
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not a mounted Kobo device", path_label(device_root))));
     }
     device_root.canonicalize()
 }
@@ -217,7 +242,6 @@ fn validate_device_root(device_root: &Path) -> io::Result<PathBuf> {
 fn sanitize_package_path(path: &Path, entry_type: EntryType) -> io::Result<PathBuf> {
     kobo_package::sanitize_path(path, entry_type, Policy::Usb)
 }
-
 
 fn install_file_atomically<R: Read>(source: &mut R, destination: &Path, on_bytes: &mut impl FnMut(u64)) -> io::Result<u64> {
     let parent = update_files::parent_directory(destination)?;
@@ -275,7 +299,6 @@ mod tests {
         }
         compressed
     }
-
 
     #[test]
     fn reinstall_preserves_books_databases_and_preferences() {
@@ -437,7 +460,8 @@ mod tests {
         let error = install_file_atomically(&mut Cursor::new(b"package bytes"), &destination, &mut |_| {
             fs::create_dir(&destination).unwrap();
             fs::write(destination.join("user.db"), b"user data").unwrap();
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read(destination.join("user.db")).unwrap(), b"user data");
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1, "staging or backup files were left behind");
@@ -453,5 +477,4 @@ mod tests {
             assert!(!directory.path().join(".adds").exists());
         }
     }
-
 }

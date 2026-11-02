@@ -1,4 +1,5 @@
 import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 
 plugins {
@@ -68,7 +69,15 @@ val stageLauncherIcon by tasks.registering(Copy::class) {
     rename { "bokheim_launcher_foreground.png" }
 }
 
-tasks.named("preBuild") { dependsOn(stageLauncherIcon) }
+val exportUiText by tasks.registering(Exec::class) {
+    workingDir(workspaceRoot)
+    commandLine("python3", "apps/ui-text/export.py", "--android-only")
+    inputs.file(workspaceRoot.resolve("apps/ui-text/english.json"))
+    inputs.file(workspaceRoot.resolve("apps/ui-text/export.py"))
+    inputs.files(fileTree("src/main/java") { include("**/*.java"); exclude("**/UiText.java") })
+    outputs.file(file("src/main/java/se/bokheim/reader/gpui/UiText.java"))
+}
+tasks.named("preBuild") { dependsOn(stageLauncherIcon, exportUiText) }
 
 val stageFdroidNativeNotices by tasks.registering(Copy::class) {
     dependsOn("preparePdfium", "prepareSpeech")
@@ -79,6 +88,51 @@ val stageFdroidNativeNotices by tasks.registering(Copy::class) {
     into(layout.buildDirectory.dir("fdroidNotices"))
 }
 
+
+val bookFormatsJson = providers.fileContents(layout.projectDirectory.file("../../../shared/book-model/formats.json")).asText
+val bookFormatsManifest = layout.buildDirectory.file("generated/bookFormats/AndroidManifest.xml")
+val generateBookFormats by tasks.registering {
+    inputs.file(workspaceRoot.resolve("shared/book-model/formats.json"))
+    inputs.file("AndroidManifest.xml")
+    outputs.file(bookFormatsManifest)
+    doLast {
+        val androidNamespace = "http://schemas.android.com/apk/res/android"
+        val factory = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+        factory.isNamespaceAware = true
+        val document = factory.newDocumentBuilder().parse(file("AndroidManifest.xml"))
+        val activities = document.getElementsByTagName("activity")
+        val activity = (0 until activities.length).map { activities.item(it) as org.w3c.dom.Element }
+            .single { it.getAttributeNS(androidNamespace, "name").endsWith("MainActivity") }
+        val filter = document.createElement("intent-filter")
+        for ((tag, value) in listOf("action" to "android.intent.action.VIEW", "category" to "android.intent.category.DEFAULT")) {
+            val element = document.createElement(tag)
+            element.setAttributeNS(androidNamespace, "android:name", value)
+            filter.appendChild(element)
+        }
+        val formats = JsonSlurper().parseText(bookFormatsJson.get()) as List<*>
+        val mediaTypes = linkedSetOf<String>()
+        for (raw in formats) {
+            val format = raw as Map<*, *>
+            if (format["android_view"] != true) continue
+            for (rawFile in format["files"] as List<*>) {
+                val entry = rawFile as Map<*, *>
+                for (rawType in entry["mime_types"] as List<*>) {
+                    mediaTypes.add((rawType as Map<*, *>)["value"] as String)
+                }
+            }
+        }
+        for (type in mediaTypes) {
+            val element = document.createElement("data")
+            element.setAttributeNS(androidNamespace, "android:mimeType", type)
+            filter.appendChild(element)
+        }
+        activity.appendChild(filter)
+        val output = bookFormatsManifest.get().asFile
+        output.parentFile.mkdirs()
+        javax.xml.transform.TransformerFactory.newInstance().newTransformer().transform(
+            javax.xml.transform.dom.DOMSource(document), javax.xml.transform.stream.StreamResult(output))
+    }
+}
 
 android {
     namespace = "se.bokheim.reader.gpui"
@@ -96,6 +150,7 @@ android {
         testInstrumentationRunner = "se.bokheim.reader.gpui.UpdateMetadataInstrumentation"
         buildConfigField("boolean", "PLAY_STORE", "false")
         buildConfigField("boolean", "FDROID", fdroidBuild.toString())
+        buildConfigField("String", "BOOK_FORMATS_JSON", JsonOutput.toJson(bookFormatsJson.get()))
     }
 
     buildFeatures.buildConfig = true
@@ -107,7 +162,7 @@ android {
 
     testOptions.unitTests.isIncludeAndroidResources = true
 
-    sourceSets.getByName("main").manifest.srcFile("AndroidManifest.xml")
+    sourceSets.getByName("main").manifest.srcFile(bookFormatsManifest)
     sourceSets.getByName("main").res.srcDir(launcherIconResources)
     sourceSets.getByName("main").assets.srcDir(speechDirectory.resolve("assets"))
     // Read bundled font faces from APK assets only when requested.
@@ -339,6 +394,7 @@ val stageTaxonomyRelease by tasks.registering(Copy::class) {
 }
 
 tasks.configureEach {
+    if (name.contains("Manifest")) dependsOn(generateBookFormats)
     if (fdroidBuild && (name == "preparePdfium" || name == "prepareSpeech")) {
         (this as Exec).environment("SOURCE_DATE_EPOCH", fdroidToolchains["source_date_epoch"].toString())
     }

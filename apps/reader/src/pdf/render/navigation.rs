@@ -1,5 +1,7 @@
 //! PDF page and outline navigation.
 
+use ui_text::text;
+
 use crate::shell::toolbar::SidebarTarget;
 use book_model::BookTocEntry;
 use gpui::prelude::*;
@@ -16,12 +18,12 @@ use crate::shell::state_panel::{self, TocActivation};
 impl PdfReaderView {
     pub(super) fn load_database_toc(&mut self, cx: &mut Context<Self>) {
         let library = self.library.clone();
-        let content_hash = self.locator.content_hash();
+        let book_id = self.locator.book_id();
         // Owned by the reader so closing it cancels requests and delayed retries.
         self._toc_load = Some(cx.spawn(async move |this, cx| {
             let mut delay = Duration::from_secs(1);
             loop {
-                match library.book_detail(content_hash).await {
+                match library.book_detail(book_id).await {
                     Ok(detail) => {
                         let _ = this.update(cx, |this, cx| {
                             this.toc.read_status = detail.chapter_read_status;
@@ -113,7 +115,7 @@ impl PdfReaderView {
                 }
             },
         );
-        let reset = components::topbar_action_button("reset-chapter-read-status", "Reset read status", gpui_component::IconName::Undo2, theme).on_click(move |_, _, cx| {
+        let reset = components::topbar_action_button("reset-chapter-read-status", text!(common::reset_read_status), gpui_component::IconName::Undo2, theme).on_click(move |_, _, cx| {
             entity.update(cx, |this, cx| {
                 this.positions.reset_read_status();
                 this.toc.read_status.reset();

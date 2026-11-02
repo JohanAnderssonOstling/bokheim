@@ -1,5 +1,7 @@
 //! A filtered contents hierarchy with annotation cards beneath each entry.
 
+use ui_text::text;
+
 use std::collections::HashSet;
 
 use gpui::prelude::*;
@@ -209,7 +211,7 @@ fn annotation_tree_rows(tree: &AnnotationTree, state: &AnnotationTreeState, anno
         .map(|(index, annotation)| AnnotationTreeRow::Annotation(AnnotationRow::card(index, 0, annotation)))
         .collect::<Vec<_>>();
     if !recurring.is_empty() {
-        rows.push(AnnotationTreeRow::Annotation(AnnotationRow::Heading("Recurring notes".into())));
+        rows.push(AnnotationTreeRow::Annotation(AnnotationRow::Heading(text!(reader::recurring_notes).into())));
         rows.extend(recurring);
     }
     if tree.branches.is_empty() && tree.other.is_empty() {
@@ -220,7 +222,7 @@ fn annotation_tree_rows(tree: &AnnotationTree, state: &AnnotationTreeState, anno
     }
     visit(&tree.branches, state, annotations, 0, &mut rows);
     if !tree.other.is_empty() {
-        rows.push(AnnotationTreeRow::Annotation(AnnotationRow::Heading(if annotations.iter().any(Annotation::is_bookmark) { "Other bookmarks" } else { "Other notes" }.into())));
+        rows.push(AnnotationTreeRow::Annotation(AnnotationRow::Heading(if annotations.iter().any(Annotation::is_bookmark) { text!(reader::other_bookmarks) } else { text!(reader::other_notes) }.into())));
         rows.extend(tree.other.iter().map(|&index| AnnotationTreeRow::Annotation(AnnotationRow::card(index, 0, &annotations[index]))));
     }
     rows
@@ -245,7 +247,7 @@ mod tests {
     impl AnnotationSidebarTarget for TreeTest {
         fn copy_sidebar_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>) {
             crate::shell::annotation_copy::copy_passage(
-                &library_model::BookLocator::new(uuid::Uuid::nil(), annotation.content_hash),
+                &library_model::BookLocator::new(uuid::Uuid::nil(), annotation.book_id),
                 "Test book",
                 None,
                 &annotation.exact_text,
@@ -291,7 +293,7 @@ mod tests {
     fn annotation(id: &str) -> Annotation {
         Annotation {
             id: id.into(),
-            content_hash: BookId::from_bytes([0; 32]),
+            book_id: BookId::from_bytes([0; 32]),
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2/1:0)".to_owned()),
             exact_text: "A passage with enough text to occupy several lines in the annotation sidebar.".into(),
             style: AnnotationStyle::Highlight,

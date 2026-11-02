@@ -21,14 +21,14 @@ pub use pruning::redundant_lcc_exact_selectors;
 pub use source_headings::{reviewed_source_heading_path, reviewed_source_heading_subject};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use bisac::{bisac_code_for_path, match_bisac_subjects, match_bisac_subjects_with_minimum_adjacent, SubjectAssignment};
-pub use bisac_database::{bisac_reference_filename, install_bisac_reference, open_bisac_reference, BISAC_REFERENCE_DIGEST, BISAC_REFERENCE_GZIP_DIGEST};
+pub use bisac::{SubjectAssignment, bisac_code_for_path, match_bisac_subjects, match_bisac_subjects_with_minimum_adjacent};
+pub use bisac_database::{BISAC_REFERENCE_DIGEST, BISAC_REFERENCE_GZIP_DIGEST, bisac_reference_filename, install_bisac_reference, open_bisac_reference};
 pub use lcc::canonical_lcc_notation;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bundled;
 pub use runtime::{
-    install_unified_taxonomy_concepts, lcc_subject_sort_orders, loaded_unified_taxonomy_revision_id, most_specific_concept_ids, unified_concept_id, unified_lcc_has_numeric_coverage, unified_lcc_match_report, unified_subject_paths,
-    unified_subject_similarity_keys, unified_taxonomy_revision_id, unified_taxonomy_routes, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, BUNDLED_UNIFIED_TAXONOMY_REVISION_ID,
+    BUNDLED_UNIFIED_TAXONOMY_REVISION_ID, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, install_unified_taxonomy_concepts, lcc_subject_sort_orders, loaded_unified_taxonomy_revision_id, most_specific_concept_ids,
+    unified_concept_id, unified_lcc_has_numeric_coverage, unified_lcc_match_report, unified_subject_paths, unified_subject_similarity_keys, unified_taxonomy_revision_id, unified_taxonomy_routes,
 };
 pub use taxonomy_sqlite::{read_unified_taxonomy_connection, read_unified_taxonomy_sqlite};
 
@@ -43,6 +43,15 @@ pub const EDITION_SUBTREE_CONSENSUS_SOURCE: &str = "metadata:edition-subtree-con
 /// Automatic catalog assignments retain taxonomy identities through label and parent changes.
 pub const CATALOG_CONCEPT_SOURCE: &str = "catalog:concept";
 pub const MANUAL_SUBJECT_EXCLUSION_SOURCE: &str = "manual:subject:exclude";
+
+/// The literature genre root is a broad classification, rather than evidence
+/// for a specific genre. Its stable identity survives label and parent changes.
+const LITERATURE_GENRES_CONCEPT_ID: i64 = 5583;
+
+pub fn is_broad_literature_classification(system_id: &str, code: &str) -> bool {
+    let concepts = runtime::resolved_subject_concepts(system_id, code);
+    concepts.len() == 1 && concepts.contains(&LITERATURE_GENRES_CONCEPT_ID)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedSubjectCode {
@@ -84,8 +93,7 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
     let mut projected = BTreeMap::<(String, String), BTreeSet<usize>>::new();
     for assignment in match_bisac_subjects(subjects) {
         let Some(code) = bisac_code_for_path(assignment.node_path()) else { continue };
-        let paths = unified_subject_paths(BISAC_SYSTEM_ID, &code);
-        if !paths.is_empty() && paths.iter().all(|path| path == "Literature / Genres") {
+        if is_broad_literature_classification(BISAC_SYSTEM_ID, &code) {
             if unified_concept_id(source_headings::GENERAL_FICTION_PATH) == Some(source_headings::GENERAL_FICTION_CONCEPT_ID) {
                 projected.entry((UNIFIED_SYSTEM_ID.to_owned(), source_headings::GENERAL_FICTION_PATH.to_owned())).or_default().extend(assignment.evidence_positions());
             }

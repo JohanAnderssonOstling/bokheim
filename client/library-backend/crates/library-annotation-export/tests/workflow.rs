@@ -57,7 +57,7 @@ impl Fixture {
             parent_id: ROOT_DIR_ID,
             file_name: "Original.pdf".into(),
             format: BookFormat::Pdf,
-            content_hash: book,
+            book_id: book,
             size_bytes: size,
             inspection_version: 1,
             inspection: Some(InspectedBook {
@@ -73,7 +73,7 @@ impl Fixture {
         .unwrap();
         let note = Annotation {
             id: "test-note".into(),
-            content_hash: book,
+            book_id: book,
             anchor: AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(0, vec![PdfAnnotationRect::new(0.1, 0.2, 0.3, 0.1)], None)),
             exact_text: "Quoted text\n\nSecond line".into(),
             style: AnnotationStyle::Highlight,
@@ -240,7 +240,7 @@ async fn assert_foliate_export(bytes: &[u8], identifier: &str) {
         parent_id: ROOT_DIR_ID,
         file_name: "Book.epub".into(),
         format: BookFormat::Epub,
-        content_hash: book,
+        book_id: book,
         size_bytes: bytes.len() as u64,
         inspection_version: 1,
         inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: "EPUB Book".into(), ..Default::default() }, description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
@@ -253,7 +253,7 @@ async fn assert_foliate_export(bytes: &[u8], identifier: &str) {
     let reading = publication.prepare_reading().await.unwrap();
     let base = reading.publication_cfi_bases().unwrap()[0].clone().unwrap();
     let mut note = f.note.clone();
-    note.content_hash = book;
+    note.book_id = book;
     note.id = "epub-note".into();
     note.anchor = AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2,/1:0,/1:1)");
     f.db.upsert_annotation(&note).unwrap();
@@ -340,7 +340,7 @@ fn add_epub(f: &Fixture) -> (BookId, Annotation) {
         parent_id: ROOT_DIR_ID,
         file_name: "Book.epub".into(),
         format: BookFormat::Epub,
-        content_hash: book,
+        book_id: book,
         size_bytes: bytes.len() as u64,
         inspection_version: 1,
         inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: "EPUB Book".into(), ..Default::default() }, description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
@@ -351,7 +351,7 @@ fn add_epub(f: &Fixture) -> (BookId, Annotation) {
     .unwrap();
     let mut note = f.note.clone();
     note.id = "epub-note".into();
-    note.content_hash = book;
+    note.book_id = book;
     note.anchor = AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2,/1:0,/1:1)");
     f.db.upsert_annotation(&note).unwrap();
     (book, note)

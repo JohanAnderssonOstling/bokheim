@@ -26,7 +26,7 @@ async fn explicit_opds_acquisitions_bypass_the_automatic_transfer_restriction() 
     });
     POLICY.set_network_cost(NetworkCost::Metered);
     POLICY.set_allow_metered(false);
-    let (contents, _) = library_opds::browse(&source, None, None, "").await.unwrap();
+    let (contents, _, _) = library_opds::browse(&source, None, None, "").await.unwrap();
     let BookSource::Opds { entry, .. } = contents.books[0].source else { panic!("expected OPDS book") };
     let (name, bytes) = tokio::time::timeout(Duration::from_secs(5), library_opds::download(&source, None, entry)).await.expect("explicit OPDS download must not wait for unmetered Wi-Fi").unwrap();
     assert_eq!(name, "Novel.epub");

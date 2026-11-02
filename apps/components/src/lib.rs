@@ -60,8 +60,8 @@ pub use contents::*;
 pub use detail::*;
 pub use errors::{AccountAction, authentication_error, user_facing_error, wifi_error_message};
 pub use fonts::{
-    CJK_FONT_FAMILY, FontCatalog, FontCatalogTarget, SystemFontFamilies, bundled_font_loader, configured_ui_font_name, ensure_bundled_font, ensure_cjk_fonts, ensure_text_fonts, equal_choice_group_width, interface_label_width, load_font_catalog,
-    observe_font_catalog, register_fonts, register_interface_fonts,
+    CJK_FONT_FAMILY, FontCatalog, FontCatalogTarget, SystemFontFamilies, bundled_font_loader, configured_ui_font_name, ensure_bundled_font, ensure_cjk_fonts, ensure_text_fonts, equal_choice_group_width, interface_label_width,
+    load_font_catalog, observe_font_catalog, register_fonts, register_interface_fonts,
 };
 pub use graph::*;
 pub use infinite_canvas::*;
@@ -73,6 +73,7 @@ pub use library::*;
 pub use menu_items::*;
 pub use modal::*;
 pub use operation_failure::{Classified, Failure, WifiFailure};
+pub use path_label::path_label;
 pub use player_dock::*;
 pub use reader::*;
 pub use responsive::*;
@@ -89,7 +90,7 @@ pub use trash::*;
 #[cfg(feature = "kobo")]
 pub mod kobo;
 
-#[cfg(target_arch = "wasm32")]
-pub use fonts::{InterfaceFontFace, interface_font_faces};
 #[cfg(target_os = "android")]
 pub use fonts::configure_bundled_font_source;
+#[cfg(target_arch = "wasm32")]
+pub use fonts::{InterfaceFontFace, interface_font_faces};

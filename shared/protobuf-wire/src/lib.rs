@@ -4,28 +4,25 @@
 //! values serialize their domain types through this same codec.
 
 use prost::Message;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::fmt;
 
-pub mod compact;
-mod value_serializer;
 mod canonical;
-mod deserializer;
-mod serializer;
-mod size_serializer;
-mod serialization;
-#[cfg(test)]
-mod legacy_serializer;
+pub mod compact;
 #[cfg(test)]
 mod compatibility_tests;
+mod deserializer;
+#[cfg(test)]
+mod legacy_serializer;
+mod serialization;
+mod serializer;
+mod size_serializer;
+mod value_serializer;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=31";
-pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+protobuf";
+include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-
-const VERSION: u32 = 31;
 
 /// The protobuf protocol version written into every envelope.
 pub const fn version() -> u32 {
@@ -197,7 +194,9 @@ fn domain_value(value: protobuf::Value, byte_fields: bool) -> Result<serde_value
         Kind::OptionValue(value) => Value::Option(value.value.map(|value| domain_value(*value, byte_fields).map(Box::new)).transpose()?),
         Kind::NewtypeValue(value) => Value::Newtype(Box::new(domain_value(*value, byte_fields)?)),
         Kind::Sequence(value) => Value::Seq(value.values.into_iter().map(|value| domain_value(value, byte_fields)).collect::<Result<_, _>>()?),
-        Kind::Map(value) => Value::Map(value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or(WireError::InvalidHeader)?, byte_fields)?, domain_value(entry.value.ok_or(WireError::InvalidHeader)?, byte_fields)?))).collect::<Result<_, WireError>>()?),
+        Kind::Map(value) => Value::Map(
+            value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or(WireError::InvalidHeader)?, byte_fields)?, domain_value(entry.value.ok_or(WireError::InvalidHeader)?, byte_fields)?))).collect::<Result<_, WireError>>()?,
+        ),
         // The established encoder also represents empty sequences as bytes.
         // Keep those deserializable as lists (e.g. no rejections or mutations).
         Kind::BytesValue(value) if byte_fields && !value.is_empty() => Value::Bytes(value),

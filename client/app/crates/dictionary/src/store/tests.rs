@@ -1,8 +1,10 @@
 use std::fs::{self, File};
-use std::io::{self, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
+use crate::{DictionaryImport, DictionarySource, ImportReader};
+use std::io::Cursor;
 use std::path::PathBuf;
 #[derive(Clone)]
 struct TestStorage {
@@ -32,37 +34,43 @@ impl Seek for MeteredFile {
 }
 impl Storage for TestStorage {
     type Source = MeteredFile;
-    fn read_value(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn read_value(&self, key: &str) -> Result<Option<Vec<u8>>> {
         match fs::read(self.root.join(key)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.to_string()),
         }
     }
-    fn write_value(&self, key: &str, bytes: &[u8]) -> Result<()> {
+    async fn write_value(&self, key: &str, bytes: &[u8]) -> Result<()> {
         fs::write(self.root.join(key), bytes).map_err(|error| error.to_string())
     }
     async fn open(&self, id: &str, name: &str) -> Result<Self::Source> {
-        Ok(MeteredFile { file: native::open(&self.root, id, name).await?, bytes_read: self.bytes_read.clone() })
+        Ok(MeteredFile { file: LocalStorage::new(self.root.clone()).open(id, name).await?, bytes_read: self.bytes_read.clone() })
     }
     async fn write_all(&self, id: &str, files: Vec<(String, Vec<u8>)>) -> Result<()> {
-        native::write_all(&self.root, id, files).await
+        LocalStorage::new(self.root.clone()).write_all(id, files).await
     }
     async fn remove(&self, id: &str) -> Result<()> {
-        native::remove(&self.root, id).await
+        LocalStorage::new(self.root.clone()).remove(id).await
     }
 }
 
-fn dictionary(name: &str, definition: &str) -> Vec<DictionaryFile> {
+fn dictionary(name: &str, definition: &str) -> DictionaryImport {
     dictionary_word(name, "book", definition, "")
 }
 
-fn dictionary_word(name: &str, word: &str, definition: &str, language: &str) -> Vec<DictionaryFile> {
+fn dictionary_word(name: &str, word: &str, definition: &str, language: &str) -> DictionaryImport {
     let mut index = format!("{word}\0").into_bytes();
     index.extend_from_slice(&0u32.to_be_bytes());
     index.extend_from_slice(&(definition.len() as u32).to_be_bytes());
     let ifo = format!("StarDict's dict ifo file\nversion=2.4.2\nbookname={name}\nwordcount=1\nidxfilesize={}\nsametypesequence=m\nidxlang={language}\n", index.len());
-    [("ifo", ifo.into_bytes()), ("idx", index), ("dict", definition.as_bytes().to_vec())].into_iter().map(|(suffix, bytes)| DictionaryFile { name: format!("custom.{suffix}"), bytes }).collect()
+    DictionaryImport::new(
+        [("ifo", ifo.into_bytes()), ("idx", index), ("dict", definition.as_bytes().to_vec())]
+            .into_iter()
+            .map(|(suffix, bytes)| DictionarySource::new(format!("custom.{suffix}"), Some(bytes.len() as u64), move || Box::pin(async move { Ok(Box::new(Cursor::new(bytes)) as ImportReader) })))
+            .collect(),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -77,7 +85,7 @@ async fn dictionary_import_priority_disabled_state_and_removal_survive_reopening
     assert_eq!(backend.lookup("BOOK".into(), Vec::new()).await.unwrap().dictionaries[0].dictionary, "First");
     backend.configure(second.clone(), true, -1).await.unwrap();
     backend.configure(first.clone(), false, 0).await.unwrap();
-    assert!(backend.import(vec![]).await.is_err());
+    assert!(backend.import(DictionaryImport::new(vec![]).unwrap()).await.is_err());
     assert_eq!(backend.list().await.unwrap().len(), 2);
     drop(backend);
     let backend = Arc::new(DictionaryStore::new(context));
@@ -86,7 +94,7 @@ async fn dictionary_import_priority_disabled_state_and_removal_survive_reopening
     assert_eq!(found.dictionaries[0].dictionary, "Second");
     assert_eq!(found.dictionaries[0].definitions[0].text, "A reservation");
     backend.remove(second.clone()).await.unwrap();
-    assert!(!root.path().join("dictionaries-v1").join(second).exists());
+    assert!(!root.path().join("files").join(second).exists());
     assert_eq!(backend.lookup("book".into(), Vec::new()).await.unwrap().enabled_count, 0);
     let installed = backend.list().await.unwrap();
     assert_eq!(installed.len(), 1);
@@ -98,7 +106,7 @@ async fn failed_file_install_leaves_the_catalog_unchanged_and_allows_retry() {
     let root = tempfile::tempdir().unwrap();
     let context = TestStorage::new(root.path().to_owned());
     let backend = Arc::new(DictionaryStore::new(context));
-    let directory = root.path().join("dictionaries-v1");
+    let directory = root.path().join("files");
     fs::write(&directory, b"Blocks directory creation").unwrap();
     assert!(backend.import(dictionary("Example", "A printed volume")).await.is_err());
     assert!(backend.list().await.unwrap().is_empty());
@@ -116,7 +124,7 @@ async fn lookup_leaves_installed_files_and_catalog_unchanged() {
     assert_eq!(backend.lookup("book".into(), Vec::new()).await.unwrap().dictionaries.len(), 1);
     assert_eq!(fs::read(root.path().join(CATALOG)).unwrap(), persisted);
 
-    let index = root.path().join("dictionaries-v1").join(&catalog[0].id).join(IDX_FILE);
+    let index = root.path().join("files").join(&catalog[0].id).join(IDX_FILE);
     fs::write(&index, b"old format").unwrap();
     let found = backend.lookup("book".into(), Vec::new()).await.unwrap();
     assert!(found.dictionaries.is_empty());
@@ -141,7 +149,7 @@ async fn source_languages_prioritize_matches_and_unknowns_with_foreign_word_fall
     let untagged = backend.lookup("Haus".into(), Vec::new()).await.unwrap();
     assert_eq!(untagged.dictionaries.len(), 3);
     // A primary match must not open a known other-language dictionary.
-    fs::remove_file(root.path().join("dictionaries-v1").join(first).join(DICT_FILE)).unwrap();
+    fs::remove_file(root.path().join("files").join(first).join(DICT_FILE)).unwrap();
     assert!(backend.lookup("Haus".into(), vec!["de".into()]).await.unwrap().errors.is_empty());
 }
 
@@ -196,7 +204,7 @@ async fn obsolete_installs_can_be_listed_and_removed_without_migration() {
     let mut installed = backend.import(dictionary("Old dictionary", "A printed volume")).await.unwrap();
     let id = installed[0].id.clone();
     installed[0].files = vec!["dictionary.search".into(), "dictionary.data".into(), "dictionary.json".into()];
-    backend.save_catalog(&installed).unwrap();
+    backend.save_catalog(&installed).await.unwrap();
     assert_eq!(backend.list().await.unwrap().len(), 1);
     let found = backend.lookup("book".into(), Vec::new()).await.unwrap();
     assert!(found.dictionaries.is_empty());

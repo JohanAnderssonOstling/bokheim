@@ -19,7 +19,9 @@ pub struct Android {
 
 impl Android {
     fn new(target: &str) -> Result<Self, String> {
-        if !target.starts_with("android-") || !target.ends_with("-apk") { return Err("invalid Android package target".into()); }
+        if !target.starts_with("android-") || !target.ends_with("-apk") {
+            return Err("invalid Android package target".into());
+        }
         Ok(Self { target: target.into() })
     }
 }
@@ -27,6 +29,9 @@ impl Android {
 impl Platform for Android {
     fn target(&self) -> String {
         self.target.clone()
+    }
+    fn application_activation(&self) -> ApplicationActivation {
+        ApplicationActivation::Installer
     }
     fn workspace(&self, host: &AndroidHost) -> Result<u64, String> {
         host.data_workspace()
@@ -129,10 +134,15 @@ impl AndroidHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ring::{digest::{digest, SHA256}, signature::{Ed25519KeyPair, KeyPair}};
-    use update_client::{ApplicationRelease, Artifact, Manifest, SignedManifest, SIGNATURE_CONTEXT};
+    use ring::{
+        digest::{SHA256, digest},
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+    use update_client::{ApplicationRelease, Artifact, Manifest, SIGNATURE_CONTEXT, SignedManifest};
 
-    fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
 
     struct Fixture {
         dir: tempfile::TempDir,
@@ -142,11 +152,9 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
-            rusqlite::Connection::open(dir.path().join("app-state-v1.sqlite3")).unwrap()
-                .execute_batch("CREATE TABLE setting(v); INSERT INTO setting VALUES('prior')").unwrap();
-            let key = Ed25519KeyPair::from_seed_unchecked(&[17;32]).unwrap();
-            let config = DiscoveryConfig { endpoint: "https://example.org/v1/stable".into(), channel: "stable".into(),
-                trusted_keys: [("test".into(), key.public_key().as_ref().try_into().unwrap())].into() };
+            rusqlite::Connection::open(dir.path().join("app-state-v1.sqlite3")).unwrap().execute_batch("CREATE TABLE setting(v); INSERT INTO setting VALUES('prior')").unwrap();
+            let key = Ed25519KeyPair::from_seed_unchecked(&[17; 32]).unwrap();
+            let config = DiscoveryConfig { endpoint: "https://example.org/v1/stable".into(), channel: "stable".into(), trusted_keys: [("test".into(), key.public_key().as_ref().try_into().unwrap())].into() };
             Self { dir, config, key }
         }
         fn host(&self, version: &str) -> AndroidHost {
@@ -157,26 +165,38 @@ mod tests {
         }
         fn approved(&self) -> AndroidHost {
             let mut host = self.host("1.0.0");
-            let manifest = Manifest { protocol_version: 1, channel: "stable".into(), sequence: 1,
-                issued_at_unix: now(), expires_at_unix: now()+3600, taxonomy: None, catalog: None,
-                application: Some(ApplicationRelease { version: "2.0.0".parse().unwrap(), name: "Test".into(),
-                    schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32, taxonomy_format_versions: vec![1],
-                    artifacts: [("android-aarch64-apk".into(), Artifact { url: "https://example.org/releases/2/app.apk".into(), bytes: 3, sha256: hex(digest(&SHA256, b"apk").as_ref()) })].into() }) };
+            let manifest = Manifest {
+                protocol_version: 1,
+                channel: "stable".into(),
+                sequence: 1,
+                issued_at_unix: now(),
+                expires_at_unix: now() + 3600,
+                taxonomy: None,
+                catalog: None,
+                application: Some(ApplicationRelease {
+                    version: "2.0.0".parse().unwrap(),
+                    name: "Test".into(),
+                    schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32,
+                    taxonomy_format_versions: vec![1],
+                    artifacts: [("android-aarch64-apk".into(), Artifact { url: "https://example.org/releases/2/app.apk".into(), bytes: 3, sha256: hex(digest(&SHA256, b"apk").as_ref()) })].into(),
+                }),
+            };
             let payload = serde_json::to_string(&manifest).unwrap();
-            let mut message = SIGNATURE_CONTEXT.to_vec(); message.extend_from_slice(payload.as_bytes());
+            let mut message = SIGNATURE_CONTEXT.to_vec();
+            message.extend_from_slice(payload.as_bytes());
             let envelope = serde_json::to_vec(&SignedManifest { key_id: "test".into(), payload, signature: hex(self.key.sign(&message).as_ref()) }).unwrap();
             host.coordinator.discovered(envelope, now()).unwrap();
             assert_eq!(host.view(), UpdateView::Available);
             assert!(host.install_request().is_err());
             host.approve().unwrap();
             let stage = host.root.join("staging").join(&host.coordinator.record().approved.as_ref().unwrap().id);
-            fs::create_dir_all(&stage).unwrap(); fs::write(stage.join("application.bin"), b"apk").unwrap();
+            fs::create_dir_all(&stage).unwrap();
+            fs::write(stage.join("application.bin"), b"apk").unwrap();
             host.coordinator.artifact_prepared(ArtifactKind::Application).unwrap();
             host
         }
         fn value(&self) -> String {
-            rusqlite::Connection::open(self.dir.path().join("app-state-v1.sqlite3")).unwrap()
-                .query_row("SELECT v FROM setting", [], |row| row.get(0)).unwrap()
+            rusqlite::Connection::open(self.dir.path().join("app-state-v1.sqlite3")).unwrap().query_row("SELECT v FROM setting", [], |row| row.get(0)).unwrap()
         }
     }
 
@@ -212,11 +232,16 @@ mod tests {
         drop(db);
         let bytes = fs::read(&snapshot).unwrap();
         let manifest = Manifest {
-            protocol_version: 1, channel: "stable".into(), sequence: 1,
-            issued_at_unix: now(), expires_at_unix: now() + 3600,
-            application: None, catalog: None,
+            protocol_version: 1,
+            channel: "stable".into(),
+            sequence: 1,
+            issued_at_unix: now(),
+            expires_at_unix: now() + 3600,
+            application: None,
+            catalog: None,
             taxonomy: Some(TaxonomyRelease {
-                release_id: release, format_version: 1,
+                release_id: release,
+                format_version: 1,
                 minimum_application_version: "1.0.0".parse().unwrap(),
                 minimum_schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32,
                 artifact: Artifact { url: "https://example.org/taxonomy".into(), bytes: bytes.len() as u64, sha256: hex(digest(&SHA256, &bytes).as_ref()) },
@@ -302,11 +327,11 @@ mod tests {
 
     #[test]
     fn interrupted_trial_restores_database_and_taxonomy_before_next_startup() {
-        let f = Fixture::new(); drop(f.approved());
+        let f = Fixture::new();
+        drop(f.approved());
         let (host, trial) = f.startup("2.0.0");
         assert!(trial);
-        rusqlite::Connection::open(f.dir.path().join("app-state-v1.sqlite3")).unwrap()
-            .execute_batch("UPDATE setting SET v='trial change'").unwrap();
+        rusqlite::Connection::open(f.dir.path().join("app-state-v1.sqlite3")).unwrap().execute_batch("UPDATE setting SET v='trial change'").unwrap();
         let root = f.dir.path().join("updates");
         let trial_taxonomy = ActiveTaxonomy { path: root.join("uncommitted-taxonomy.sqlite3"), release: 99 };
         activation::write_json(&root.join("active-taxonomy.json"), &Some(trial_taxonomy)).unwrap();
@@ -320,10 +345,12 @@ mod tests {
 
     #[test]
     fn corrupt_staged_apk_retries_without_touching_live_data() {
-        let f = Fixture::new(); let mut host = f.approved();
+        let f = Fixture::new();
+        let mut host = f.approved();
         let path = host.install_request().unwrap().path;
         fs::write(path, b"bad").unwrap();
-        assert!(host.install_request().is_err()); drop(host);
+        assert!(host.install_request().is_err());
+        drop(host);
         let mut host = f.host("2.0.0");
         assert!(!host.startup(|_| panic!("unverified APK")).unwrap());
         assert_eq!(host.coordinator.record().approved.as_ref().unwrap().phase, Phase::Preparing);
@@ -332,7 +359,8 @@ mod tests {
 
     #[test]
     fn invalid_apk_is_quarantined_without_repeated_install_prompts() {
-        let f = Fixture::new(); let mut host = f.approved();
+        let f = Fixture::new();
+        let mut host = f.approved();
         host.reject_package().unwrap();
         assert!(host.install_request().is_err());
         assert_eq!(host.view(), UpdateView::Hidden);

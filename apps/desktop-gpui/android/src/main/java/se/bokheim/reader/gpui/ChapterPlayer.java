@@ -23,7 +23,7 @@ final class ChapterPlayer extends ForwardingSimpleBasePlayer {
         Chapter(JSONObject data, int index) throws JSONException {
             start = data.getLong("start");
             end = data.getLong("end");
-            label = "Chapter " + (index + 1) + " · " + data.optString("title");
+            label = UiText.format(UiText.READER_CHAPTER_WITH_TITLE, "number", index + 1, "title", data.optString("title"));
         }
     }
     private final LongConsumer remoteSeek;

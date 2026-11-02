@@ -1,11 +1,9 @@
 //! Classification recovery for bibliographically equivalent editions with year differences.
 use crate::{
     matching::{bibliographic_match_key, matching_author_count_with_title, NormalizedTitle},
-    Classification, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
+    Classification, ClassificationMethod, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
 };
 use std::collections::BTreeSet;
-
-pub const METHOD: &str = "verified_year_variant_classifications";
 
 fn credits_match(local: &[String], remote: &[String], title: &str) -> bool {
     matching_author_count_with_title(local, remote, title, title) > 0
@@ -34,5 +32,5 @@ pub fn classifications(query: &EditionIdentityQuery, result: &EditionIdentityRes
             return Vec::new();
         }
     }
-    crate::subject_consensus::candidate_classifications(result.candidates.iter(), METHOD)
+    crate::subject_consensus::candidate_classifications(result.candidates.iter(), ClassificationMethod::VerifiedYearVariants)
 }

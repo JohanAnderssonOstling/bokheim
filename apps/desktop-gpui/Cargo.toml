@@ -1,6 +1,6 @@
 [package]
 name = "desktop-gpui"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 license.workspace = true
 
@@ -44,6 +44,8 @@ path = "src/bin/desktop-gpui-kobo.rs"
 required-features = ["kobo"]
 
 [dependencies]
+app-preferences = { path = "../../client/preferences", features = ["store"] }
+ui-text = { path = "../ui-text" }
 async-channel = "2"
 application-shell = { path = "../application-shell", default-features = false }
 ui-components = { path = "../components" }
@@ -73,7 +75,11 @@ url = "2"
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+embedded-browser = { path = "../../client/embedded-browser" }
+
 [target.'cfg(target_os = "android")'.dependencies]
+embedded-browser-ui = { path = "../browser/crates/embedded-browser-ui", default-features = false }
 subject-projection = { path = "../../shared/subject-projection" }
 rustls-platform-verifier = "0.7.1"
 reader-speech = { path = "../../shared/reader-speech", optional = true }

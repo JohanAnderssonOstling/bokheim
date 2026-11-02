@@ -1,9 +1,11 @@
 //! The full-screen audiobook player on phones. Play is the one dominant
 //! control; secondary controls share one square size, and speed, sleep and
 //! chapters sit on a quiet tier below.
+use ui_text::text;
+
+use crate::Button;
 use gpui::prelude::*;
 use gpui::{Div, ElementId, SharedString, div, px, rems};
-use crate::Button;
 use gpui_component::{Icon, IconName};
 
 use crate::{BrowserTheme, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS, touch_ui};
@@ -67,8 +69,8 @@ pub fn playback_transport_buttons(id: &str, playing: bool, layout: TransportLayo
     use PlaybackTransportAction::*;
     let button = |suffix: &str, label: &str, icon: Icon, control| transport_button(SharedString::from(format!("{id}-{suffix}")), SharedString::from(label.to_owned()), icon, control, layout, theme);
     let (back_label, forward_label, back_icon, forward_icon) = match skips {
-        PlaybackSkipKind::Seconds => ("Back 15 seconds", "Forward 30 seconds", skip_back_icon(), skip_forward_icon()),
-        PlaybackSkipKind::Elements => ("Previous passage", "Next passage", Icon::empty().path("icons/undo-2.svg"), Icon::empty().path("icons/redo-2.svg")),
+        PlaybackSkipKind::Seconds => (text!(common::back_15_seconds), text!(common::forward_30_seconds), skip_back_icon(), skip_forward_icon()),
+        PlaybackSkipKind::Elements => (text!(common::previous_passage), text!(common::next_passage), Icon::empty().path("icons/undo-2.svg"), Icon::empty().path("icons/redo-2.svg")),
     };
     let mut buttons = Vec::with_capacity(5);
     if let Some([previous, _]) = navigation_labels {
@@ -86,13 +88,13 @@ pub fn playback_transport_buttons(id: &str, playing: bool, layout: TransportLayo
 /// Play, or pause while playing: a plain icon in the mini-player, and an
 /// accent-filled circle in the other transports.
 pub fn playback_play_button(id: impl Into<ElementId>, playing: bool, layout: TransportLayout, theme: BrowserTheme) -> Button {
-    let button = transport_button(id, if playing { "Pause" } else { "Play" }, play_pause_icon(playing), TransportControl::Play, layout, theme);
+    let button = transport_button(id, if playing { text!(common::pause) } else { text!(common::play) }, play_pause_icon(playing), TransportControl::Play, layout, theme);
     if layout == TransportLayout::MiniPlayer { button } else { crate::selectable_button(button, true, theme) }
 }
 
 /// The mini-player's quick forward action, sharing the transport's skip styling.
 pub fn playback_skip_forward_button(id: impl Into<ElementId>, layout: TransportLayout, theme: BrowserTheme) -> Button {
-    transport_button(id, "Forward 30 seconds", skip_forward_icon(), TransportControl::Skip, layout, theme)
+    transport_button(id, text!(common::forward_30_seconds), skip_forward_icon(), TransportControl::Skip, layout, theme)
 }
 
 impl TransportControl {
@@ -152,13 +154,13 @@ pub fn now_playing_inline_controls() -> Div {
 /// glyphs beside it, in the text colour until it holds a choice of the
 /// reader's (a speed other than 1×), then accent.
 pub fn now_playing_speed_button(id: impl Into<ElementId>, rate: impl Into<SharedString>, set: bool, theme: BrowserTheme) -> Button {
-    inline_secondary_button(id, "Playback speed", set, theme).child(div().text_size(rems(TEXT_SM)).child(rate.into()))
+    inline_secondary_button(id, text!(common::playback_speed), set, theme).child(div().text_size(rems(TEXT_SM)).child(rate.into()))
 }
 
 /// Sleep beside the detail page's transport: the alarm glyph, or the time
 /// left in accent once a timer is running.
 pub fn now_playing_sleep_button(id: impl Into<ElementId>, running: Option<SharedString>, theme: BrowserTheme) -> Button {
-    let button = inline_secondary_button(id, "Sleep timer", running.is_some(), theme);
+    let button = inline_secondary_button(id, text!(common::sleep_timer), running.is_some(), theme);
     match running {
         Some(left) => button.child(div().text_size(rems(TEXT_SM)).whitespace_nowrap().child(left)),
         None => button.child(Icon::empty().path("icons/alarm.svg").size(rems(INLINE_GLYPH_REM))),
@@ -219,7 +221,11 @@ pub fn now_playing_scrub_track(fraction: f32, theme: BrowserTheme) -> Div {
 /// Elapsed at the start, the book's time left in the middle, the chapter's
 /// remaining time at the end.
 pub fn now_playing_times(elapsed: impl Into<SharedString>, book_left: Option<SharedString>, remaining: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    crate::spread_row(SPACE_SM).flex_none().child(crate::caption_line(elapsed, theme).flex_1().text_left()).children(book_left.map(|left| crate::caption_line(left, theme).flex_1().text_center())).child(crate::caption_line(remaining, theme).flex_1().text_right())
+    crate::spread_row(SPACE_SM)
+        .flex_none()
+        .child(crate::caption_line(elapsed, theme).flex_1().text_left())
+        .children(book_left.map(|left| crate::caption_line(left, theme).flex_1().text_center()))
+        .child(crate::caption_line(remaining, theme).flex_1().text_right())
 }
 
 /// The phone's player, set apart below the times.

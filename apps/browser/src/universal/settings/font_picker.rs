@@ -1,5 +1,7 @@
 //! A single interface-font override, with a lazy, virtualized system catalog.
 
+use ui_text::text;
+
 use components::{FontCatalog, FontCatalogTarget};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, SharedString, Task, TextSystem, UniformListScrollHandle, Window, div, px, uniform_list};
@@ -40,7 +42,7 @@ impl FontCatalogTarget for FontPicker {
 
 impl FontPicker {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search fonts"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(common::search_fonts)));
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             match event {
                 InputEvent::Change => this.filter(cx),
@@ -77,7 +79,7 @@ impl FontPicker {
         }
     }
 
-    fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active
             && let Some(family) = self.selected.clone()
         {
@@ -112,8 +114,8 @@ impl Render for FontPicker {
         let theme = components::browser_theme(cx);
         let preview_family = self.selected.clone().filter(|family| !cfg!(target_os = "android") || cx.try_global::<components::SystemFontFamilies>().is_some_and(|fonts| fonts.0.contains(family)));
         let sample = components::reader_typeface_sample(None).when_some(preview_family, |sample, family| sample.font_family(family));
-        let tooltip = self.selected.clone().unwrap_or_else(|| "Choose an installed font".into());
-        let label = self.selected.clone().unwrap_or_else(|| "Custom".into());
+        let tooltip = self.selected.clone().unwrap_or_else(|| text!(settings::choose_an_installed_font).into());
+        let label = self.selected.clone().unwrap_or_else(|| text!(common::custom).into());
         let trigger = components::reader_picture_tile("ui-font-custom", sample, label, self.open || self.active, theme)
             .w_full()
             .track_focus(&self.trigger_focus)
@@ -160,11 +162,14 @@ impl Render for FontPicker {
             .child(rows)
             .child(Scrollbar::new(&self.scroll).axis(ScrollbarAxis::Vertical).scrollbar_show(ScrollbarShow::Always));
         let panel = components::font_picker_surface(window, theme)
+            .key_context("BrowserFontPicker")
             .id("ui-font-overlay")
             .debug_selector(|| "ui-font-overlay".into())
             .tab_group()
             .track_focus(&self.input.read(cx).focus_handle(cx))
-            .when(self.catalog.loaded && self.selected.as_ref().is_some_and(|family| !self.catalog.families.contains(family)), |panel| panel.child(div().text_color(theme.text_muted).child("Saved font unavailable on this device")))
+            .when(self.catalog.loaded && self.selected.as_ref().is_some_and(|family| !self.catalog.families.contains(family)), |panel| {
+                panel.child(div().text_color(theme.text_muted).child(text!(common::saved_font_unavailable_on_this_device)))
+            })
             .child(
                 div()
                     .flex_none()
@@ -174,7 +179,7 @@ impl Render for FontPicker {
                     .child(div().flex_1().min_w_0().child(Input::new(&self.input)))
                     .child(components::bottom_sheet_close_button("ui-font-overlay-close", theme).on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))),
             )
-            .when(self.catalog.loading || self.catalog.filtered.is_empty(), |panel| panel.child(div().text_color(theme.text_muted).child(if self.catalog.loading { "Loading fonts…" } else { "No matching fonts" })))
+            .when(self.catalog.loading || self.catalog.filtered.is_empty(), |panel| panel.child(div().text_color(theme.text_muted).child(if self.catalog.loading { text!(common::loading_fonts) } else { text!(common::no_matching_fonts) })))
             .when(!self.catalog.loading && !self.catalog.filtered.is_empty(), |panel| panel.child(list));
         let picker = cx.entity();
         trigger.child(components::font_picker_overlay(panel, window, theme, move |window, cx| picker.update(cx, |picker, cx| picker.close(window, cx))))

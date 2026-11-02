@@ -1,6 +1,6 @@
 //! Recognize CJK books using structured BCP 47 language metadata.
 
-use html::text::LanguageTag;
+use language_tags::LanguageTag;
 
 use crate::book::NativeBook;
 use ui_components::CJK_FONT_FAMILY;

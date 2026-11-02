@@ -53,9 +53,9 @@ pub(crate) fn applies_at(annotation: &Annotation, book: BookId, origin_chapter: 
     match annotation.anchor.recurring_scope() {
         None => false,
         Some(RecurringScope::Library) => true,
-        Some(RecurringScope::Book) => annotation.content_hash == book,
+        Some(RecurringScope::Book) => annotation.book_id == book,
         Some(RecurringScope::Chapter) => {
-            annotation.content_hash == book
+            annotation.book_id == book
                 && match (origin_chapter, chapter) {
                     (Some(origin), Some(current)) => origin == current,
                     _ => same_document,

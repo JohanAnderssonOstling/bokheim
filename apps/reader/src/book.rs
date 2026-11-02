@@ -8,7 +8,7 @@ mod tests {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use book_content::BookFormat;
     use futures_lite::future::block_on;
-    use html::pipeline::{DocumentFactory, ResourceContext};
+    use html_pipeline::{DocumentFactory, ResourceContext};
     use html::resources::{ImagePipeline, ImageService, InlineJobSpawner};
     use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
     use std::{
@@ -40,7 +40,7 @@ mod tests {
         pipeline.ensure_window(document.images(), &HashSet::from([0]));
         let deadline = Instant::now() + Duration::from_secs(2);
         while pipeline.get_decoded(0).is_none() && Instant::now() < deadline {
-            pipeline.poll();
+            pipeline.poll(document.images());
             std::thread::yield_now();
         }
         assert_eq!(pipeline.get_decoded(0).expect("FB2 image must load through the real HTML resource pipeline").dimensions(), (2, 3));

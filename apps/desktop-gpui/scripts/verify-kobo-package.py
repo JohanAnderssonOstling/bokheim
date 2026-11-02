@@ -77,7 +77,12 @@ def main():
                 raise RuntimeError(f'Unsafe package entry: {member.name}')
             if '\n' in member.name or '\r' in member.name or '\\' in member.name:
                 raise RuntimeError(f'Unsupported package filename: {member.name}')
-            if path.parts and path.parts[0] not in ('.adds', 'Bokheim'):
+            if path.parts and not (
+                path.is_relative_to('.adds/bokheim')
+                or path.is_relative_to('Bokheim')
+                or path == PurePosixPath('.adds/nm/desktop-gpui-kobo')
+                or (member.isdir() and path in (PurePosixPath('.adds'), PurePosixPath('.adds/nm')))
+            ):
                 raise RuntimeError(f'Unexpected package entry: {member.name}')
             if path.is_relative_to('Bokheim/Libraries') and path != PurePosixPath('Bokheim/Libraries'):
                 raise RuntimeError(f'Package would overwrite a library: {member.name}')

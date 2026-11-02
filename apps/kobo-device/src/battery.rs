@@ -1,6 +1,6 @@
 //! Read the kernel's battery gauge without depending on a Kobo model name.
-use std::{fs, io, path::Path};
 use std::sync::OnceLock;
+use std::{fs, io, path::Path};
 use tokio::sync::watch;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,7 +23,9 @@ pub fn subscribe() -> watch::Receiver<Option<BatteryReading>> {
 
 fn publish(sender: &watch::Sender<Option<BatteryReading>>, reading: BatteryReading) {
     sender.send_if_modified(|previous| {
-        if previous.as_ref() == Some(&reading) { return false; }
+        if previous.as_ref() == Some(&reading) {
+            return false;
+        }
         *previous = Some(reading);
         true
     });

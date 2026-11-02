@@ -4,12 +4,14 @@
 //! events, and retry decisions belong to `LibrarySession`.
 
 use crate::BackendError;
-#[cfg(not(target_arch = "wasm32"))]
-use filesystem_scanner::filesystem_scan::ScanBookIndex;
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use filesystem_scanner::filesystem_scan::inspect_files;
 #[cfg(not(target_arch = "wasm32"))]
+use filesystem_scanner::filesystem_scan::ScanBookIndex;
+#[cfg(not(target_arch = "wasm32"))]
 use library_database::{InspectedFilesystemScan, ScanFileObservation, ScanSnapshot};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 #[derive(Clone)]
@@ -50,6 +52,27 @@ impl LibraryScanner {
             InspectedFilesystemScan { readable: false, ..InspectedFilesystemScan::default() }
         }
     }
+}
+
+/// Eligible native book paths without importing or changing their contents.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn book_files_at(root: &Path) -> Result<Vec<PathBuf>, BackendError> {
+    use filesystem_scanner::discovery::{is_audiobook_folder, next_book_entry};
+    let mut walk = library_files::filesystem::walk(root);
+    let mut paths = Vec::new();
+    while let Some(entry) = next_book_entry(&mut walk) {
+        let entry = entry?;
+        if entry.is_symlink() {
+            continue;
+        }
+        if entry.is_file() || (entry.is_dir() && is_audiobook_folder(entry.path())?) {
+            paths.push(entry.path().strip_prefix(root).map_err(BackendError::operation)?.to_owned());
+            if entry.is_dir() {
+                walk.skip_current_dir();
+            }
+        }
+    }
+    Ok(paths)
 }
 
 pub fn estimate_folders(locators: Vec<String>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(u64, u64, u64), BackendError> {

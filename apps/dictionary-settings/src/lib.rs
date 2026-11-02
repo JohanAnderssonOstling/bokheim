@@ -1,7 +1,9 @@
 //! Import and order device-local dictionaries without involving a library.
+use ui_text::text;
+
 use std::{collections::HashSet, rc::Rc};
 
-use dictionary::{Client, DictionaryDownloads, DictionaryFile, DictionaryInfo, MAX_FILE_BYTES, MAX_IMPORT_BYTES, Result};
+use dictionary::{Client, DictionaryDownloads, DictionaryImport, DictionaryInfo, DictionarySource, Result};
 use dictionary_catalog::{find, for_language};
 use gpui::prelude::*;
 use gpui::{Context, EventEmitter, FileDialogFilter, FocusHandle, IntoElement, PathPromptOptions, Render, SharedString, Task, Window, div, px};
@@ -9,6 +11,17 @@ use gpui_component::checkbox::Checkbox;
 use gpui_component::{Disableable, IconName};
 use ui_components as components;
 use ui_components::ScrollableElement;
+
+struct DictionaryService(Rc<dyn Client>);
+impl gpui::Global for DictionaryService {}
+
+pub fn configure(client: Rc<dyn Client>, cx: &mut gpui::App) {
+    cx.set_global(DictionaryService(client));
+}
+
+pub fn client(cx: &gpui::App) -> Rc<dyn Client> {
+    cx.global::<DictionaryService>().0.clone()
+}
 
 pub struct Closed;
 
@@ -48,16 +61,14 @@ impl DictionarySettings {
                 }
             };
             loop {
-                let dictionaries = client.list().await;
-                let downloads = client.downloads(languages.clone()).await;
+                let snapshot = client.snapshot(languages.clone()).await;
                 if this
                     .update(cx, |this, cx| {
-                        match dictionaries {
-                            Ok(items) => this.dictionaries = items,
-                            Err(error) => this.error = Some(error.to_string().into()),
-                        }
-                        match downloads {
-                            Ok(state) => this.downloads = Some(state),
+                        match snapshot {
+                            Ok(snapshot) => {
+                                this.dictionaries = snapshot.dictionaries;
+                                this.downloads = Some(snapshot.downloads);
+                            }
                             Err(error) => this.error = Some(error.to_string().into()),
                         }
                         cx.notify();
@@ -104,8 +115,8 @@ impl DictionarySettings {
             return;
         }
         let selection = cx.prompt_for_files_with_filters(
-            PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Import StarDict dictionary".into()) },
-            vec![FileDialogFilter { name: "Dictionary files or ZIP".into(), extensions: ["ifo", "idx", "gz", "dict", "dz", "syn", "search", "data", "json", "zip"].map(str::to_owned).to_vec() }],
+            PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(text!(dictionary::import_stardict_dictionary).into()) },
+            vec![FileDialogFilter { name: text!(dictionary::dictionary_files_or_zip).into(), extensions: ["ifo", "idx", "gz", "dict", "dz", "syn", "search", "data", "json", "zip"].map(str::to_owned).to_vec() }],
         );
         self.busy = true;
         self.error = None;
@@ -115,40 +126,21 @@ impl DictionarySettings {
                 let Some(selected) = selection.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())? else {
                     return backend.list().await;
                 };
-                let mut files = Vec::new();
-                let mut total = 0u64;
-                if selected.len() > 8 {
-                    return Err(String::from("Select the files for one dictionary at a time"));
-                }
-                for file in selected {
-                    if file.source.size_bytes.is_some_and(|size| size > MAX_FILE_BYTES) {
-                        return Err(String::from("Dictionary files must be smaller than 256 MiB each"));
-                    }
-                    let reader = file.source.open().await.map_err(|error| error.to_string())?;
-                    let limit = MAX_FILE_BYTES.min(MAX_IMPORT_BYTES.saturating_sub(total));
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let bytes = {
-                        let read = cx.background_executor().spawn(async move {
-                            use std::io::Read;
-                            let mut bytes = Vec::new();
-                            reader.take(limit + 1).read_to_end(&mut bytes).map(|_| bytes).map_err(|error| error.to_string())
-                        });
-                        read.await?
-                    };
-                    #[cfg(target_arch = "wasm32")]
-                    let bytes = {
-                        use futures_util::io::AsyncReadExt;
-                        let mut bytes = Vec::new();
-                        reader.take(limit + 1).read_to_end(&mut bytes).await.map_err(|error| error.to_string())?;
-                        bytes
-                    };
-                    if bytes.len() as u64 > limit {
-                        return Err(String::from("Dictionary import exceeds the size limit"));
-                    }
-                    total += bytes.len() as u64;
-                    files.push(DictionaryFile { name: file.name, bytes });
-                }
-                backend.import(files).await
+                let sources = selected
+                    .into_iter()
+                    .map(|file| {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            DictionarySource::new(file.name, file.source.size_bytes, move || Box::pin(async move { file.source.open().await.map_err(|error| error.to_string()) }))
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let mut source = file.source;
+                            DictionarySource::from_browser(file.name, source.size_bytes, source.take_browser_file())
+                        }
+                    })
+                    .collect();
+                backend.import(DictionaryImport::new(sources)?).await
             }
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -235,23 +227,23 @@ impl DictionarySettings {
         }
         let downloads = self.downloads.as_ref()?;
         let theme = components::browser_theme(cx);
-        let close = components::outlined_text_button("dictionary-picker-close", "Close").on_click(cx.listener(|this, _, window, cx| this.close_picker(window, cx)));
-        let header = div().flex_none().flex().items_center().justify_between().gap(px(12.0)).child("Download dictionary").child(close);
+        let close = components::outlined_text_button("dictionary-picker-close", text!(common::close)).on_click(cx.listener(|this, _, window, cx| this.close_picker(window, cx)));
+        let header = div().flex_none().flex().items_center().justify_between().gap(px(12.0)).child(text!(dictionary::download_dictionary)).child(close);
         let mut list = div().id("dictionary-picker-list").flex_1().min_h_0().overflow_y_scrollbar();
         let mut available: Vec<_> = downloads.available.iter().collect();
         available.sort_by_key(|spec| downloads.recommended.iter().position(|id| id == &spec.id).unwrap_or(usize::MAX));
         for spec in available {
             let installed = self.dictionaries.iter().any(|item| item.curated_id.as_deref() == Some(spec.id.as_str()));
             let id = spec.id.clone();
-            let info = components::outlined_icon_button(format!("dictionary-source-{id}"), format!("Source and license for {}", spec.name), IconName::Info).on_click(cx.listener(move |this, _, _, cx| {
+            let info = components::outlined_icon_button(format!("dictionary-source-{id}"), format!(text!(dictionary::source_and_license_for), spec.name), IconName::Info).on_click(cx.listener(move |this, _, _, cx| {
                 this.download_details = if this.download_details.as_ref() == Some(&id) { None } else { Some(id.clone()) };
                 cx.notify();
             }));
             let id = spec.id.clone();
-            let download = components::outlined_text_button(format!("dictionary-download-{id}"), if installed { "Installed" } else { "Download" })
+            let download = components::outlined_text_button(format!("dictionary-download-{id}"), if installed { text!(dictionary::installed) } else { text!(common::download) })
                 .disabled(installed || self.busy || downloads.active.is_some())
                 .on_click(cx.listener(move |this, _, window, cx| this.download(id.clone(), window, cx)));
-            let size = div().text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text_muted).child(format!("{:.1} MiB", spec.download_bytes() as f64 / (1024.0 * 1024.0)));
+            let size = div().text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text_muted).child(format!(text!(dictionary::mib), spec.download_bytes() as f64 / (1024.0 * 1024.0)));
             list = list.child(
                 div()
                     .w_full()
@@ -272,18 +264,18 @@ impl DictionarySettings {
                                 })
                                 .text_size(gpui::rems(components::TEXT_XS))
                                 .text_color(theme.text_muted)
-                                .child("Recommended"),
+                                .child(text!(dictionary::recommended)),
                         )
                     }))
                     .child(div().flex_none().flex().items_center().gap(px(8.0)).child(size).child(info).child(download)),
             );
             if self.download_details.as_deref() == Some(spec.id.as_str()) {
                 let source_url = spec.source_url.clone();
-                let source = components::outlined_text_button(format!("dictionary-source-link-{}", spec.id), "Source").ghost().on_click(move |_, _, cx| cx.open_url(&source_url));
+                let source = components::outlined_text_button(format!("dictionary-source-link-{}", spec.id), text!(dictionary::source)).ghost().on_click(move |_, _, cx| cx.open_url(&source_url));
                 let mut links = div().flex().flex_wrap().gap(px(8.0)).child(source);
                 if let Some(version) = spec.license.strip_prefix("CC-BY-SA-") {
                     let license_url = format!("https://creativecommons.org/licenses/by-sa/{version}/");
-                    links = links.child(components::outlined_text_button(format!("dictionary-license-link-{}", spec.id), "License").ghost().on_click(move |_, _, cx| cx.open_url(&license_url)));
+                    links = links.child(components::outlined_text_button(format!("dictionary-license-link-{}", spec.id), text!(dictionary::license)).ghost().on_click(move |_, _, cx| cx.open_url(&license_url)));
                 }
                 list = list.child(
                     div()
@@ -293,15 +285,16 @@ impl DictionarySettings {
                         .flex_col()
                         .gap(px(4.0))
                         .text_size(gpui::rems(components::TEXT_XS))
-                        .child("Source and license")
+                        .child(text!(common::source_and_license))
                         .child(spec.source.clone())
-                        .child(div().text_color(theme.text_muted).child(format!("Edition {} · {}", spec.version, spec.license)))
+                        .child(div().text_color(theme.text_muted).child(format!(text!(dictionary::edition), spec.version, spec.license)))
                         .child(links),
                 );
             }
         }
         let height = (f32::from(window.viewport_size().height) - 32.0).clamp(1.0, 640.0);
         let panel = components::modal_form_surface(theme)
+            .key_context("Dialog")
             .w(px(640.0))
             .h(px(height))
             .track_focus(&self.picker_focus)
@@ -321,52 +314,56 @@ impl DictionarySettings {
 impl Render for DictionarySettings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let import = components::outlined_text_button("import-stardict", "Import").debug_selector(|| "import-stardict".into()).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.import(cx)));
-        let download = components::outlined_text_button("download-dictionary", "Download dictionary")
+        let import = components::outlined_text_button("import-stardict", text!(dictionary::import)).debug_selector(|| "import-stardict".into()).disabled(self.busy).on_click(cx.listener(|this, _, _, cx| this.import(cx)));
+        let download = components::outlined_text_button("download-dictionary", text!(dictionary::download_dictionary))
             .debug_selector(|| "download-dictionary".into())
             .disabled(self.busy || self.downloads.is_none())
             .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx)));
         let actions =
             div().flex().items_center().gap(px(8.0)).when(!self.closable, |actions| actions.py(px(12.0))).child(div().flex_1().min_w_0().flex().flex_wrap().gap(px(8.0)).child(import).child(download)).when(self.closable, |actions| {
                 actions.child(
-                    components::outlined_icon_button("dictionary-settings-close", "Close dictionary settings", IconName::Close)
+                    components::outlined_icon_button("dictionary-settings-close", text!(dictionary::close_dictionary_settings), IconName::Close)
                         .no_fill()
                         .debug_selector(|| "dictionary-settings-close".into())
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))),
                 )
             });
-        let mut group = if self.closable { components::browser_settings_group() } else { components::browser_settings_fieldset("Dictionaries", theme) }.child(actions);
+        let mut group = if self.closable { components::browser_settings_group() } else { components::browser_settings_fieldset(text!(dictionary::dictionaries), theme) }.child(actions);
         if let Some(downloads) = &self.downloads {
             if let Some(active) = downloads.active.as_deref().and_then(|id| downloads.available.iter().find(|spec| spec.id == id)) {
-                group = group.child(div().p(px(12.0)).child(format!("Downloading {} dictionary…", active.name)));
+                group = group.child(div().p(px(12.0)).child(format!(text!(dictionary::downloading_dictionary), active.name)));
             }
             if let Some(error) = &downloads.error {
                 group = group.child(components::browser_settings_group_error(error.clone(), theme));
             }
         }
         if self.dictionaries.is_empty() && !self.busy {
-            group = group.child(div().py(px(12.0)).text_color(theme.text_muted).child("No dictionaries installed."));
+            group = group.child(div().py(px(12.0)).text_color(theme.text_muted).child(text!(dictionary::no_dictionaries_installed)));
         }
         for (index, dictionary) in self.dictionaries.iter().enumerate() {
             let id = dictionary.id.clone();
             let enabled = dictionary.enabled;
             let busy = self.busy || self.pending.contains(&id);
-            let toggle = Checkbox::new(SharedString::from(format!("dictionary-toggle-{id}"))).tooltip("Enabled").checked(enabled).disabled(busy).on_click(cx.listener(move |this, checked, _, cx| this.configure(id.clone(), *checked, 0, cx)));
+            let toggle = Checkbox::new(SharedString::from(format!("dictionary-toggle-{id}")))
+                .tooltip(text!(dictionary::enabled))
+                .checked(enabled)
+                .disabled(busy)
+                .on_click(cx.listener(move |this, checked, _, cx| this.configure(id.clone(), *checked, 0, cx)));
             let id = dictionary.id.clone();
-            let info = components::outlined_icon_button(format!("dictionary-details-{id}"), "Dictionary details", IconName::Info).no_fill().on_click(cx.listener(move |this, _, _, cx| {
+            let info = components::outlined_icon_button(format!("dictionary-details-{id}"), text!(dictionary::dictionary_details), IconName::Info).no_fill().on_click(cx.listener(move |this, _, _, cx| {
                 this.details = if this.details.as_ref() == Some(&id) { None } else { Some(id.clone()) };
                 cx.notify();
             }));
             let mut controls = div().flex().items_center().flex_wrap().gap(px(4.0)).child(toggle).child(info);
             let id = dictionary.id.clone();
             controls = controls.child(
-                components::outlined_icon_button(format!("dictionary-remove-{id}"), "Remove dictionary", components::navigation_icon(components::NavigationIcon::Trash2))
+                components::outlined_icon_button(format!("dictionary-remove-{id}"), text!(dictionary::remove_dictionary), components::navigation_icon(components::NavigationIcon::Trash2))
                     .no_fill()
                     .text_color(theme.danger)
                     .disabled(busy)
                     .on_click(cx.listener(move |this, _, _, cx| this.remove(id.clone(), cx))),
             );
-            for (direction, label, icon, disabled) in [(-1, "Move up", IconName::ArrowUp, index == 0), (1, "Move down", IconName::ArrowDown, index + 1 == self.dictionaries.len())] {
+            for (direction, label, icon, disabled) in [(-1, text!(dictionary::move_up), IconName::ArrowUp, index == 0), (1, text!(dictionary::move_down), IconName::ArrowDown, index + 1 == self.dictionaries.len())] {
                 let id = dictionary.id.clone();
                 controls = controls.child(
                     components::outlined_icon_button(format!("dictionary-move-{id}-{direction}"), label, icon)
@@ -375,10 +372,10 @@ impl Render for DictionarySettings {
                         .on_click(cx.listener(move |this, _, _, cx| this.configure(id.clone(), enabled, direction, cx))),
                 );
             }
-            let details = format!("{} words · {:.1} MiB", dictionary.metadata.word_count, dictionary.size_bytes as f64 / (1024.0 * 1024.0));
+            let details = format!(text!(dictionary::words_mib), dictionary.metadata.word_count, dictionary.size_bytes as f64 / (1024.0 * 1024.0));
             let language = dictionary.metadata.language.as_deref().map(str::trim).filter(|language| !language.is_empty());
-            let label = dictionary.curated_id.as_deref().and_then(find).or_else(|| language.and_then(for_language)).map_or_else(|| language.unwrap_or("Unknown language").to_owned(), |spec| spec.name.clone());
-            let label = if dictionary.curated_id.is_none() { format!("{label} (imported)") } else { label };
+            let label = dictionary.curated_id.as_deref().and_then(find).or_else(|| language.and_then(for_language)).map_or_else(|| language.unwrap_or(text!(dictionary::unknown_language)).to_owned(), |spec| spec.name.clone());
+            let label = if dictionary.curated_id.is_none() { format!(text!(dictionary::imported), label = label) } else { label };
             group = group.child(components::browser_settings_row(label, details, controls, theme));
             if self.details.as_deref() == Some(dictionary.id.as_str()) {
                 group = group.child(div().p(px(12.0)).child(format!("{}\n\n{}", dictionary.metadata.name, dictionary.metadata.description)));

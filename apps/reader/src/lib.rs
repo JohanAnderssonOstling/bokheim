@@ -2,6 +2,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+use app_preferences::ReaderPreferencePatch;
+
 mod book;
 mod cjk;
 mod comic;
@@ -26,12 +28,12 @@ pub use windows::AudiobookOpened;
 pub use windows::{BookOpenFailed, CloseRequested, ReaderView, configure};
 
 fn save_audiobook_speed(speed: f64, cx: &mut gpui::App) {
-    settings::ReaderSettings::update(cx, |preferences| preferences.audiobook_speed = speed);
+    settings::ReaderSettings::update(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::AudiobookSpeed(speed)));
 }
 
 pub fn open_audiobook(locator: library_model::BookLocator, library: library_backend::LibraryClient, resolved: library_backend::ResolvedBook, initial_target: Option<String>, cx: &mut gpui::App) -> gpui::Entity<PlaybackSession> {
     use gpui::AppContext;
-    let speed = settings::ReaderSettings::preferences(cx).audiobook_speed;
+    let speed = settings::ReaderSettings::preferences(cx).synchronized.audiobook_speed();
     cx.new(|cx| PlaybackSession::open(locator, library, resolved, initial_target, speed, save_audiobook_speed, cx))
 }
 

@@ -163,9 +163,8 @@ impl<'de> Deserialize<'de> for BookRecord {
     }
 }
 
-/// One entry in a book's own hierarchical navigation document. It is
-/// shared by library ingestion and library inspection; UI contracts only
-/// project it at their process boundary.
+/// One entry in a book's own hierarchical navigation document, shared by
+/// content parsing, library storage, readers, bookmarks, and annotation exports.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookTocEntry {
     pub title: String,

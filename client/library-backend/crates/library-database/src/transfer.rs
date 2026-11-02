@@ -20,7 +20,8 @@ pub struct TransferSelection {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferBook {
-    pub content_hash: BookId,
+    #[serde(rename = "content_hash")]
+    pub book_id: BookId,
     pub directory: DirId,
     pub file_name: String,
     /// Direct selections go into the destination itself; tree placements keep their parent.
@@ -43,7 +44,8 @@ pub enum ReaderAnnotationSource {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BookTransferState {
-    pub content_hash: BookId,
+    #[serde(rename = "content_hash")]
+    pub book_id: BookId,
     #[serde(default)]
     pub byte_checksum: Option<ContentHash>,
     pub addition: BookAddition,
@@ -57,19 +59,19 @@ pub struct BookTransferState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImportedBook {
-    pub content_hash: BookId,
+    pub book_id: BookId,
     pub created: bool,
 }
 
 impl BookTransferState {
     pub fn expected_checksum(&self) -> Option<ContentHash> {
-        self.byte_checksum.or_else(|| self.content_hash.content_hash())
+        self.byte_checksum.or_else(|| self.book_id.content_hash())
     }
 
     /// Only call after verifying complete bytes. Reading state follows those
     /// bytes when the destination assigns a different storage identity.
     pub fn retarget(mut self, destination: BookId) -> Result<Self, DatabaseError> {
-        let original = self.content_hash;
+        let original = self.book_id;
         self.byte_checksum = self.expected_checksum();
         if destination.content_hash().zip(self.byte_checksum).is_some_and(|(target, original)| target != original) {
             return Err(DatabaseError::message("destination bytes differ from the transferred source"));
@@ -78,7 +80,7 @@ impl BookTransferState {
             if !pdf.valid_for(&original.to_hex()) {
                 return Err(DatabaseError::message("transferred PDF metadata does not match the source"));
             }
-            pdf.content_hash = destination.to_hex();
+            pdf.book_id = destination.to_hex();
         }
         if let Some(tracks) = self.addition.navigation.as_mut().and_then(|navigation| navigation.tracks.as_mut()) {
             for track in tracks {
@@ -96,18 +98,18 @@ impl BookTransferState {
                     return Err(DatabaseError::message("transferred reading state does not match the source"));
                 }
                 match entry {
-                    LibraryStateEntry::ReadingPosition { content_hash, .. } | LibraryStateEntry::ChapterReadStatus { content_hash, .. } => *content_hash = destination,
+                    LibraryStateEntry::ReadingPosition { book_id, .. } | LibraryStateEntry::ChapterReadStatus { book_id, .. } => *book_id = destination,
                     _ => return Err(DatabaseError::message("invalid transferred reading state")),
                 }
             }
         }
         for annotation in &mut self.annotations {
-            if annotation.content_hash != original {
+            if annotation.book_id != original {
                 return Err(DatabaseError::message("transferred annotation does not match the source"));
             }
-            annotation.content_hash = destination;
+            annotation.book_id = destination;
         }
-        self.content_hash = destination;
+        self.book_id = destination;
         Ok(self)
     }
 }
@@ -203,12 +205,12 @@ impl Database {
         while let Some(row) = rows.next()? {
             let id: String = row.get(1)?;
             let directory = id.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))?;
-            let mut placement = TransferBook { content_hash: row.get(0)?, directory, file_name: row.get(2)?, direct: false };
+            let mut placement = TransferBook { book_id: row.get(0)?, directory, file_name: row.get(2)?, direct: false };
             let in_tree = scope.contains(&placement.directory);
             // SQL orders source placements. Keep the first matching one even
             // when it is already covered by a selected folder.
             if selection.source.is_none_or(|source| source == placement.directory)
-                && let Some(selected) = selected_books.get_mut(&placement.content_hash)
+                && let Some(selected) = selected_books.get_mut(&placement.book_id)
                 && matches!(selected, SelectedPlacement::Missing)
             {
                 if !in_tree {
@@ -244,7 +246,7 @@ impl Database {
                 crate::projection::project_dirty(tx)?;
             }
             for book in plan.books.iter().filter(|book| book.direct) {
-                crate::placements::remove_book_placement_in(tx, &book.content_hash, &book.directory)?;
+                crate::placements::remove_book_placement_in(tx, &book.book_id, &book.directory)?;
                 crate::projection::project_dirty(tx)?;
             }
             Ok(())
@@ -269,7 +271,7 @@ impl Database {
             }
         }
         let Some(mut metadata) = self.pdf_metadata(&identity)? else { return Ok(None) };
-        metadata.content_hash = hash.to_hex();
+        metadata.book_id = hash.to_hex();
         metadata.skippable_pages = None;
         metadata.annotations.clear();
         metadata.dependencies = None;
@@ -296,14 +298,14 @@ impl Database {
             Some((body, _)) => body,
             None => self.connection.query_row("SELECT body FROM local_book_draft WHERE content_hash=?1", [hash], |row| row.get::<_, Vec<u8>>(0)).optional()?.ok_or_else(|| DatabaseError::message("source book metadata is unavailable"))?,
         };
-        let (content_hash, addition) = match sync_common::wire::decode(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
-            LibraryStateEntry::BookAdd { content_hash, value } => (content_hash, value),
+        let (book_id, addition) = match sync_common::wire::decode(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
+            LibraryStateEntry::BookAdd { book_id, value } => (book_id, value),
             _ => return Err(DatabaseError::message("source book metadata is invalid")),
         };
-        if hash != content_hash {
+        if hash != book_id {
             return Err(DatabaseError::message("source book identity is invalid"));
         }
-        Ok((content_hash, addition))
+        Ok((book_id, addition))
     }
 
     pub(crate) fn book_transfer_state_in_snapshot(&self, hash: BookId) -> Result<BookTransferState, DatabaseError> {
@@ -316,7 +318,7 @@ impl Database {
         let byte_checksum = self.connection.query_row("SELECT f.byte_hash FROM local_file_content f JOIN book b ON b.content_hash=f.book_id JOIN book_dir d ON d.book_row_id=b.row_id AND d.dir_id=f.dir_id WHERE f.book_id=?1 AND d.deleted_at IS NULL AND d.is_downloaded=1 ORDER BY f.dir_id LIMIT 1", [hash], |row| row.get::<_,ContentHash>(0)).optional()?
             .or(crate::content_identity::canonical_hash(&self.connection, hash)?)
             .or_else(|| hash.content_hash());
-        let state = BookTransferState { content_hash: hash, byte_checksum, addition, reading, chapter_read, annotations: self.annotations(hash)?, annotation_source: None };
+        let state = BookTransferState { book_id: hash, byte_checksum, addition, reading, chapter_read, annotations: self.annotations(hash)?, annotation_source: None };
         Ok(state)
     }
 
@@ -337,7 +339,7 @@ pub(crate) fn reconcile_reader_annotations(tx: &rusqlite::Transaction<'_>, sourc
         return Ok(());
     }
     let mut query = tx.prepare("SELECT a.body FROM annotation a JOIN book b ON b.row_id=a.book_row_id WHERE b.content_hash=?1 ORDER BY a.id")?;
-    let bodies = query.query_map([source.content_hash], |row| row.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let bodies = query.query_map([source.book_id], |row| row.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?;
     let history = bodies.iter().map(|body| Annotation::decode(body).map_err(DatabaseError::operation)).collect::<Result<Vec<_>, _>>()?;
     let matched = library_model::match_foliate_annotations(&source.annotations, &history).map_err(DatabaseError::operation)?;
     for (annotation, matched) in source.annotations.iter_mut().zip(matched) {
@@ -374,7 +376,7 @@ pub(crate) fn merge_transfer_progress(tx: &rusqlite::Transaction<'_>, book: Book
         }
     }
     for mut annotation in annotations {
-        if annotation.content_hash != book {
+        if annotation.book_id != book {
             return Err(DatabaseError::message("invalid transferred annotation"));
         }
         let original_id = annotation.id.clone();
@@ -429,7 +431,7 @@ mod tests {
         .unwrap();
         let note = Annotation {
             id: "shared-note".into(),
-            content_hash: original,
+            book_id: original,
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
             exact_text: "Text".into(),
             style: AnnotationStyle::Underline,
@@ -443,7 +445,7 @@ mod tests {
         };
         db.upsert_annotation(&note).unwrap();
         let mut copy = note.clone();
-        copy.content_hash = destination;
+        copy.book_id = destination;
         db.write(|tx| merge_transfer_progress(tx, destination, None, None, vec![copy.clone()])).unwrap();
         assert_eq!(db.annotations(original).unwrap(), vec![note.clone()]);
         let mut copied = db.annotations(destination).unwrap().pop().unwrap();

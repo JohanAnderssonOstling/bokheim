@@ -1,4 +1,6 @@
 //! Logical sleep owns peripherals; the GPUI backend classifies physical wakes.
+use ui_text::text;
+
 use gpui_kobo::KoboPowerEvent;
 use kobo_device::{
     battery,
@@ -55,7 +57,7 @@ pub fn poll() -> KoboPowerEvent {
             BatteryAction::PowerOff => KoboPowerEvent::PowerOff,
             BatteryAction::Warn(percent) if !state.low_battery_warned => {
                 state.low_battery_warned = true;
-                KoboPowerEvent::Warning(format!("Battery low ({percent}%). Connect a charger."))
+                KoboPowerEvent::Warning(format!(text!(startup::battery_low_connect_a_charger), percent = percent))
             }
             BatteryAction::Warn(_) => KoboPowerEvent::None,
             BatteryAction::None => {

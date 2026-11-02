@@ -12,15 +12,15 @@ pub enum LibraryRootRecovery {
     Recovered(LibraryEntry),
 }
 
-fn identity_key(id: &LibraryId) -> String {
+pub(super) fn identity_key(id: &LibraryId) -> String {
     format!("library-root-storage:{id}")
 }
 
-fn pending_key(id: &LibraryId) -> String {
+pub(super) fn pending_key(id: &LibraryId) -> String {
     format!("library-root-recovery:{id}")
 }
 
-fn storage_identity(root: &Path) -> RegistryResult<Option<Vec<u8>>> {
+pub(super) fn storage_identity(root: &Path) -> RegistryResult<Option<Vec<u8>>> {
     match fs::read(root.join(".bokheim/storage-identity")) {
         Ok(bytes) if !bytes.is_empty() => Ok(Some(bytes)),
         Ok(_) => Err("library storage identity is empty".into()),
@@ -56,6 +56,13 @@ impl LocalRegistry {
         let manifest = platform::read_manifest(root)?;
         let previous = self.read_value(&identity_key(id))?;
         let identity = storage_identity(root)?;
+        // A committed move may have stopped before writing its manifests.
+        // The remembered storage token proves this is still the same store;
+        // repair metadata without clearing queued work or local observations.
+        if manifest.is_none() && previous.is_some() && previous == identity {
+            let repaired = platform::prepare_attached_library(*id, entry.library_name(), entry.storage_locator().to_owned())?;
+            return Ok(if self.read_value(&pending_key(id))?.is_some() { LibraryRootRecovery::Recovered(repaired) } else { LibraryRootRecovery::Unchanged(repaired) });
+        }
         let intact = manifest.as_ref().is_some_and(|(found, _)| found == id) && root.join(".bokheim/library.json").is_file() && (previous.is_none() || identity.is_some());
         if intact {
             let changed = self.read_value(&pending_key(id))?.is_some() || (previous.is_some() && previous != identity);
@@ -89,7 +96,7 @@ impl LocalRegistry {
                 if path == root {
                     continue;
                 }
-                if platform::read_manifest(&path).ok().flatten().is_some_and(|(found, _)| found == *id) {
+                if platform::read_manifest(&path).ok().flatten().is_some_and(|(found, _)| found == *id) && !self.library_root_retired(id, &path)? {
                     found.insert(path.canonicalize()?);
                 }
             }

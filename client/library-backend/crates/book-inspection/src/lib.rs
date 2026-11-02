@@ -1,7 +1,7 @@
 //! Portable book metadata inspection: EPUB, MOBI and PDF documents, and M4B
 //! and MP3-folder audiobooks.
 
-use book_content::{Book, BookFormat as ContainerFormat, DeclaredMetadata, TocEntry};
+use book_content::{Book, BookFormat as ContainerFormat, DeclaredMetadata};
 use book_content::{IdentifierScheme, MetadataCredit, MetadataProperty};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, BookFormat, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, Scheme, Scope, marc_relator_code_from_metadata_role, unique_book_year};
 use regex::Regex;
@@ -79,7 +79,7 @@ pub fn inspect_epub(path: &Path) -> MetadataResult<InspectedEpub> {
     inspect_epub_pages(&mut provider, &mut metadata);
     let evidence_ms = u64::try_from(evidence_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let toc_started = Instant::now();
-    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
+    let toc = sanitize_toc_entries(provider.toc()?.unwrap_or_default());
     let toc_ms = u64::try_from(toc_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings { container_ms, evidence_ms, toc_ms } })
 }
@@ -94,16 +94,16 @@ where
     let mut provider = Book::open_reader(ContainerFormat::Epub, reader)?;
     let mut metadata = metadata_from_book(source_name, &mut provider)?;
     inspect_epub_pages(&mut provider, &mut metadata);
-    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
+    let toc = sanitize_toc_entries(provider.toc()?.unwrap_or_default());
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings::default() })
 }
 
-fn book_toc_entries(entries: Vec<TocEntry>) -> Vec<BookTocEntry> {
+fn sanitize_toc_entries(entries: Vec<BookTocEntry>) -> Vec<BookTocEntry> {
     let mut count = 0;
-    entries.into_iter().filter_map(|entry| book_toc_entry(entry, 0, &mut count)).collect()
+    entries.into_iter().filter_map(|entry| sanitize_toc_entry(entry, 0, &mut count)).collect()
 }
 
-fn book_toc_entry(entry: TocEntry, depth: usize, count: &mut usize) -> Option<BookTocEntry> {
+fn sanitize_toc_entry(entry: BookTocEntry, depth: usize, count: &mut usize) -> Option<BookTocEntry> {
     const MAX_TOC_DEPTH: usize = 32;
     const MAX_TOC_ENTRIES: usize = 8_192;
     const MAX_TOC_TEXT_BYTES: usize = 4_096;
@@ -115,9 +115,9 @@ fn book_toc_entry(entry: TocEntry, depth: usize, count: &mut usize) -> Option<Bo
         (!value.is_empty() && value.len() <= MAX_TOC_TEXT_BYTES && !value.chars().any(char::is_control)).then(|| value.split_whitespace().collect::<Vec<_>>().join(" "))
     };
     let title = valid_text(entry.title)?;
-    let target = valid_text(entry.link).unwrap_or_default();
+    let target = valid_text(entry.target).unwrap_or_default();
     *count += 1;
-    let children = entry.children.into_iter().filter_map(|entry| book_toc_entry(entry, depth + 1, count)).collect();
+    let children = entry.children.into_iter().filter_map(|entry| sanitize_toc_entry(entry, depth + 1, count)).collect();
     Some(BookTocEntry { title, target, children })
 }
 
@@ -469,7 +469,7 @@ pub fn inspect_epub_metadata_with_toc(path: &Path) -> MetadataResult<InspectedEp
 pub fn inspect_epub_metadata_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedEpub> {
     let mut provider = Book::open_reader(ContainerFormat::Epub, reader)?;
     let metadata = metadata_from_book(source_name, &mut provider)?;
-    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
+    let toc = sanitize_toc_entries(provider.toc()?.unwrap_or_default());
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings::default() })
 }
 

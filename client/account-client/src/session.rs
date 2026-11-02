@@ -9,6 +9,8 @@ use web_time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug)]
 pub enum AuthError {
     Http(reqwest::Error),
+    /// The native HTTP I/O runtime could not be initialized.
+    Runtime(std::io::Error),
     Wire(WireError),
     Url(ParseError),
     InvalidData(String),
@@ -21,6 +23,7 @@ impl fmt::Display for AuthError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Http(error) => error.fmt(formatter),
+            Self::Runtime(error) => write!(formatter, "could not initialize HTTP runtime: {error}"),
             Self::Wire(error) => error.fmt(formatter),
             Self::Url(error) => error.fmt(formatter),
             Self::InvalidData(message) => write!(formatter, "invalid authentication data: {message}"),
@@ -34,6 +37,7 @@ impl std::error::Error for AuthError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Http(error) => Some(error),
+            Self::Runtime(error) => Some(error),
             Self::Wire(error) => Some(error),
             Self::Url(error) => Some(error),
             Self::InvalidData(_) | Self::PasswordTooLong | Self::SignInRequired(_) => None,

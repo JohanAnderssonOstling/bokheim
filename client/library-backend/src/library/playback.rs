@@ -10,13 +10,14 @@ use sync_common::BookId;
 pub struct DirectPlayback {
     pub url: String,
     pub expires_in_seconds: u32,
-    pub content_hash: BookId,
+    #[serde(rename = "content_hash")]
+    pub book_id: BookId,
     pub length: u64,
 }
 
 impl std::fmt::Debug for DirectPlayback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DirectPlayback").field("content_hash", &self.content_hash).finish_non_exhaustive()
+        f.debug_struct("DirectPlayback").field("content_hash", &self.book_id).finish_non_exhaustive()
     }
 }
 

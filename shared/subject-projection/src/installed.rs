@@ -11,6 +11,8 @@ use subject_taxonomy::{runtime_index::build_runtime_with_subclasses, taxonomy_re
 static ACTIVE: OnceLock<PathBuf> = OnceLock::new();
 pub const BUNDLED_RELEASE_ID: u64 = include!(concat!(env!("OUT_DIR"), "/taxonomy-release.rs"));
 pub const PAGE_CACHE_KIB: i64 = 512;
+#[cfg(not(target_arch = "wasm32"))]
+pub const READ_ONLY_MMAP_BYTES: i64 = 16 * 1024 * 1024;
 
 /// Identifies the prepared reference packaged with this application build.
 pub fn bundled_source() -> String {
@@ -55,6 +57,8 @@ pub fn read_only_uri(path: &Path) -> Result<String, String> {
 pub fn open_read_only(path: &Path) -> Result<Connection, String> {
     let db = Connection::open_with_flags(read_only_uri(path)?, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI).map_err(|e| e.to_string())?;
     db.pragma_update(None, "cache_size", -PAGE_CACHE_KIB).map_err(|e| e.to_string())?;
+    #[cfg(not(target_arch = "wasm32"))]
+    db.pragma_update(None, "mmap_size", READ_ONLY_MMAP_BYTES).map_err(|e| e.to_string())?;
     Ok(db)
 }
 

@@ -81,6 +81,10 @@ impl<P: SessionPersistence> AccountSession<P> {
         Ok(Self { persistence, server, state: Arc::new(RwLock::new(SessionState { session, generation: 0 })), refresh: Arc::new(Mutex::new(())), changes: watch::channel(0).0 })
     }
 
+    pub fn server_url(&self) -> &Url {
+        &self.server
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
     }
@@ -235,16 +239,11 @@ impl<P: SessionPersistence> AccountSession<P> {
         })
     }
 
-    pub async fn request<T>(&self, mut request: impl for<'a> FnMut(&'a Session) -> SessionFuture<'a, Result<T, AuthError>>) -> Result<T, AccountSessionError> {
-        let session = self.refresh_if_needed().await?.ok_or(AccountSessionError::Authentication(AuthError::SignInRequired("not signed in")))?;
-        match request(&session).await {
-            Ok(value) => Ok(value),
-            Err(error) if error.is_unauthorized() => {
-                let refreshed = self.refresh_after_unauthorized(session.token()).await?.ok_or(AccountSessionError::Authentication(AuthError::SignInRequired("authentication expired")))?;
-                request(&refreshed).await.map_err(AccountSessionError::Authentication)
-            }
-            Err(error) => Err(AccountSessionError::Authentication(error)),
-        }
+    pub async fn request<T, Fut>(&self, request: impl FnMut(Session) -> Fut) -> Result<T, AccountSessionError>
+    where
+        Fut: Future<Output = Result<T, AuthError>>,
+    {
+        crate::account_request(self, request).await
     }
 
     fn is_usable(session: &Session, server: &Url) -> bool {

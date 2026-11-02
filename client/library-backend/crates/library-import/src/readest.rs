@@ -112,13 +112,13 @@ pub(crate) async fn import_book_in_batch(
 
 pub(crate) fn prepare_state(book: &ReadestBook, config: &ReadestConfig, ingested: &IngestedFile, warnings: &mut Vec<String>) -> Result<BookTransferState, BackendError> {
     let mut state = ReaderMetadata { title: &book.title, author: &book.author, language: &book.primary_language, tags: &book.tags, metadata: &book.metadata, source: "Readest" }.transfer_state(ingested, warnings)?;
-    state.annotations = epub_annotations(book, config, ingested.content_hash, ingested.format)?;
-    state.reading = reading_state(book, config, ingested.content_hash, ingested.format)?;
+    state.annotations = epub_annotations(book, config, ingested.book_id, ingested.format)?;
+    state.reading = reading_state(book, config, ingested.book_id, ingested.format)?;
     state.chapter_read = match book.reading_status {
         Some(ReadestReadingStatus::Finished | ReadestReadingStatus::Unread) => {
             let mut value = book_model::ChapterReadStatus::default();
             value.mark_all(&ingested.inspection.toc, book.reading_status == Some(ReadestReadingStatus::Finished));
-            Some(LibraryStateEntry::ChapterReadStatus { content_hash: ingested.content_hash, value })
+            Some(LibraryStateEntry::ChapterReadStatus { book_id: ingested.book_id, value })
         }
         Some(ReadestReadingStatus::Abandoned) => {
             warnings.push("Readest abandoned status has no Bokheim equivalent; reading progress is retained".into());
@@ -152,7 +152,7 @@ fn reading_state(book: &ReadestBook, config: &ReadestConfig, hash: BookId, forma
         Some(ReadestReadingStatus::Unread) => 0.0,
         _ => reading_progress(config.progress, "Readest")?,
     };
-    Ok(Some(LibraryStateEntry::ReadingPosition { content_hash: hash, value: ReadingPositionState { location, progress } }))
+    Ok(Some(LibraryStateEntry::ReadingPosition { book_id: hash, value: ReadingPositionState { location, progress } }))
 }
 
 fn epub_annotations(book: &ReadestBook, config: &ReadestConfig, hash: BookId, format: BookFormat) -> Result<Vec<Annotation>, BackendError> {

@@ -5,15 +5,16 @@ use crate::books::report_download_status;
 use crate::deadline::download_deadline;
 use crate::{books::BookTransfers, thumbnails::ThumbnailTransfers, TransferError};
 use crate::{deadline::transfer_deadline, policy::SMALL_REQUEST_TIMEOUT};
-use futures_util::{stream, StreamExt};
 use content_address::ContentHash;
+use futures_util::{stream, StreamExt};
 use library_database::Database;
 use library_files::AssetStore;
 use library_model::BookUploadIntent;
 #[cfg(not(target_arch = "wasm32"))]
 use library_model::{LibraryUpdate, TransferOrigin};
+use library_placement::LibraryPlacement;
 use library_runtime::{
-    account::{LibraryAccount, SharedSyncCredentials},
+    account::{LibraryAccount, LibraryAuthentication, SharedSyncCredentials},
     events::{LibraryEvent, LibraryEventRouter},
     interest::NotificationInterest,
 };
@@ -27,18 +28,19 @@ use std::{
 };
 use sync_common::{BookId, LibraryId};
 
+#[derive(Clone)]
 pub struct AssetExecutor {
-    pub asset_storage_enabled: Arc<AtomicBool>,
-    pub assets: AssetStore,
-    pub http_client: reqwest::Client,
-    pub library_id: LibraryId,
-    pub events: Option<LibraryEventRouter>,
-    pub credentials: SharedSyncCredentials,
-    pub account: Option<LibraryAccount>,
-    pub notification_interest: NotificationInterest,
-    pub availability_changed: Arc<AtomicBool>,
-    pub database: Arc<Database>,
-    pub cpu: Arc<dyn cpu_host::CpuHost>,
+    pub(super) asset_storage_enabled: Arc<AtomicBool>,
+    pub(super) assets: AssetStore,
+    pub(super) http_client: reqwest::Client,
+    pub(super) library_id: LibraryId,
+    pub(super) events: Option<LibraryEventRouter>,
+    pub(super) credentials: SharedSyncCredentials,
+    pub(super) account: Option<LibraryAccount>,
+    pub(super) notification_interest: NotificationInterest,
+    pub(super) availability_changed: Arc<AtomicBool>,
+    pub(super) database: Arc<Database>,
+    pub(super) cpu: Arc<dyn cpu_host::CpuHost>,
 }
 
 /// Poll uploads on the library thread. Ordinary failures leave later work
@@ -61,26 +63,58 @@ where
 }
 
 impl AssetExecutor {
-    fn asset_storage_enabled(&self) -> bool {
+    /// Derive storage and notifications from one library owner, and keep
+    /// renewal paired with the credentials it authorizes.
+    pub fn new(placement: Arc<LibraryPlacement>, library_id: LibraryId, authentication: LibraryAuthentication, notification_interest: NotificationInterest, cpu: Arc<dyn cpu_host::CpuHost>) -> Self {
+        Self {
+            asset_storage_enabled: Arc::new(AtomicBool::new(true)),
+            assets: placement.assets().clone(),
+            http_client: http_response::client(),
+            library_id,
+            events: Some(placement.events().clone()),
+            credentials: authentication.credentials(),
+            account: authentication.account(),
+            notification_interest,
+            availability_changed: Arc::new(AtomicBool::new(false)),
+            database: placement.database().clone(),
+            cpu,
+        }
+    }
+
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+
+    pub fn set_asset_storage_enabled(&self, enabled: bool) {
+        self.asset_storage_enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn asset_storage_enabled(&self) -> bool {
         self.asset_storage_enabled.load(Ordering::Acquire)
     }
 
     async fn negotiate_uploads(&self, intents: &[BookUploadIntent]) -> Result<sync_common::api::assets::BlobManifestResponse, TransferError> {
         let credentials = self.credentials()?;
-        let manifest = intents.iter().map(|intent| sync_common::api::assets::BlobManifestEntry { byte_checksum: intent.byte_checksum, content_hash: intent.content_hash, size_bytes: intent.size_bytes }).collect();
+        let manifest = intents.iter().map(|intent| sync_common::api::assets::BlobManifestEntry { byte_checksum: intent.byte_checksum, book_id: intent.book_id, size_bytes: intent.size_bytes }).collect();
         let response = transfer_deadline(SMALL_REQUEST_TIMEOUT, crate::negotiate_blobs(&self.http_client, &credentials, &self.library_id, manifest)).await?.map_err(|error| match error {
             sync_transport::SyncRequestError::AuthenticationRequired => TransferError::AuthenticationRequired,
             error => TransferError::retryable(error),
         })?;
         self.check_transfer_account(&credentials)?;
-        for intent in intents.iter().filter(|intent| response.owned.contains(&intent.content_hash)) {
-            let endpoint = sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, &intent.content_hash).map_err(crate::AssetResponseError::Url)?;
+        for intent in intents.iter().filter(|intent| response.owned.contains(&intent.book_id)) {
+            let endpoint = sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, &intent.book_id).map_err(crate::AssetResponseError::Url)?;
             let head = transfer_deadline(SMALL_REQUEST_TIMEOUT, self.http_client.head(endpoint).bearer_auth(credentials.access_token()).send()).await?.map_err(TransferError::retryable)?;
             let head = crate::validate_streaming_asset_response(head)?;
-            let checksum = head.headers().get("x-bokheim-content-hash").and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<ContentHash>().ok()).or_else(|| intent.content_hash.content_hash()).ok_or_else(|| TransferError::rejected("the server did not provide the canonical book checksum"))?;
+            let checksum = head
+                .headers()
+                .get("x-bokheim-content-hash")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<ContentHash>().ok())
+                .or_else(|| intent.book_id.content_hash())
+                .ok_or_else(|| TransferError::rejected("the server did not provide the canonical book checksum"))?;
             self.check_transfer_account(&credentials)?;
             let size = head.headers().get(reqwest::header::CONTENT_LENGTH).and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<u64>().ok());
-            self.database.confirm_uploaded_content_with_pdf(intent.content_hash, checksum, size, None)?;
+            self.database.confirm_uploaded_content_with_pdf(intent.book_id, checksum, size, None)?;
         }
         Ok(response)
     }
@@ -93,10 +127,10 @@ impl AssetExecutor {
         }
         let _interest = self.notification_interest.work();
         let response = self.refreshed(|| self.negotiate_uploads(intents)).await?;
-        self.database.settle_book_manifest(intents.iter().filter(|intent| response.owned.contains(&intent.content_hash)))?;
+        self.database.settle_book_manifest(intents.iter().filter(|intent| response.owned.contains(&intent.book_id)))?;
         let uploads = intents.iter().map(|intent| {
-            let present = response.owned.contains(&intent.content_hash);
-            let rejected = response.rejected.iter().find(|item| item.content_hash == intent.content_hash).map(|item| TransferError::from_upload_admission(item.reason));
+            let present = response.owned.contains(&intent.book_id);
+            let rejected = response.rejected.iter().find(|item| item.book_id == intent.book_id).map(|item| TransferError::from_upload_admission(item.reason));
             async move {
                 if let Some(error) = rejected {
                     Err(error)
@@ -115,7 +149,7 @@ impl AssetExecutor {
         if !self.asset_storage_enabled() {
             return Ok(());
         }
-        let snapshot = self.database.transfer_snapshot(&[intent.content_hash])?;
+        let snapshot = self.database.transfer_snapshot(&[intent.book_id])?;
         self.book_transfers().upload_blob_version(&snapshot, intent).await
     }
 
@@ -165,8 +199,19 @@ impl AssetExecutor {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn download_book(&self, hash: BookId) -> Result<(), TransferError> {
+        self.download_book_mode(hash, false).await
+    }
+
+    /// Fetch verified cloud bytes even when an invalid local file exists.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn redownload_book(&self, hash: BookId) -> Result<(), TransferError> {
+        self.download_book_mode(hash, true).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn download_book_mode(&self, hash: BookId, force: bool) -> Result<(), TransferError> {
         let origin = self.database.book_download_origin(&hash)?.unwrap_or(TransferOrigin::Background);
-        let result = self.download_book_with_origin(hash, origin).await;
+        let result = self.download_book_with_origin(hash, origin, force).await;
         if let Err(error) = &result {
             self.report_download_failure(hash, origin, error);
         }
@@ -180,7 +225,7 @@ impl AssetExecutor {
             // Local failures must not forget that the server holds this book.
             log::warn!("user download of {hash} failed: {error}");
             if let Some(events) = &self.events {
-                events.publish_update(LibraryUpdate::DownloadFailed { content_hash: hash, failure: error.failure() });
+                events.publish_update(LibraryUpdate::DownloadFailed { book_id: hash, failure: error.failure() });
             }
             if let Err(error) = self.database.complete_download(&hash) {
                 log::warn!("could not clear failed user download {hash}: {error}");
@@ -192,17 +237,17 @@ impl AssetExecutor {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn download_book_with_origin(&self, hash: BookId, origin: TransferOrigin) -> Result<(), TransferError> {
+    async fn download_book_with_origin(&self, hash: BookId, origin: TransferOrigin, force: bool) -> Result<(), TransferError> {
         let _interest = self.notification_interest.work();
         let paths = self.database.book_paths(&hash)?;
-        if self.assets.book_exists(&hash, &paths)? {
+        if !force && self.assets.book_exists(&hash, &paths)? {
             self.database.complete_local_book_request(&hash)?;
         } else {
             let snapshot = self.database.transfer_snapshot(&[hash])?;
-            let placement = snapshot.placements.iter().find(|entry| entry.content_hash == hash && entry.book.is_some());
+            let placement = snapshot.placements.iter().find(|entry| entry.book_id == hash && entry.book.is_some());
             if let Some(entry) = placement {
                 let placement = library_model::BookPlacement::new(hash, entry.rel_path.clone());
-                let result = self.refreshed(|| async { download_deadline(origin, crate::policy::BOOK_DOWNLOAD_TIMEOUT, self.book_transfers().download_blob(&snapshot, &hash, &placement)).await? }).await;
+                let result = self.refreshed(|| async { download_deadline(origin, crate::policy::BOOK_DOWNLOAD_TIMEOUT, Box::pin(self.book_transfers().download_blob(&snapshot, &hash, &placement))).await? }).await;
                 if matches!(result, Err(TransferError::Rejected(_))) {
                     self.database.complete_download(&hash)?;
                 }
@@ -320,7 +365,7 @@ mod failure_tests {
                 parent_id: ROOT_DIR_ID,
                 file_name: "book.epub".into(),
                 format: BookFormat::Epub,
-                content_hash: hash,
+                book_id: hash,
                 size_bytes: 4,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { pdf: None, audiobook: None, metadata: BookRecord { metadata: BookDetails { title: "Remote book".into(), ..Default::default() }, description: String::new() }, toc: vec![] }),
@@ -332,19 +377,8 @@ mod failure_tests {
         database.record_remote_asset(BlobKind::Book, &hash).unwrap();
         database.sync_request_book_downloads(&[hash], origin).unwrap();
         let (events, state) = LibraryEventRouter::new(SyncScheduler::new().0, SyncScheduler::new().0, SyncScheduler::new().0, SyncScheduler::new().0);
-        let executor = AssetExecutor {
-            asset_storage_enabled: Arc::new(AtomicBool::new(true)),
-            assets: AssetStore::open(root.path().to_str().unwrap()).unwrap(),
-            http_client: http_response::client(),
-            library_id: LibraryId::new_v4(),
-            events: Some(events),
-            credentials: Arc::new(RwLock::new(None)),
-            account: None,
-            notification_interest: Default::default(),
-            availability_changed: Arc::new(AtomicBool::new(false)),
-            database,
-            cpu: Arc::new(UnusedCpu),
-        };
+        let placement = Arc::new(LibraryPlacement::new(database, AssetStore::open(root.path().to_str().unwrap()).unwrap(), events));
+        let executor = AssetExecutor::new(placement, LibraryId::new_v4(), LibraryAuthentication::Credentials(Arc::new(RwLock::new(None))), Default::default(), Arc::new(UnusedCpu));
         (root, executor, state, hash)
     }
 
@@ -478,7 +512,7 @@ mod failure_tests {
             let error = TransferError::retryable(Error::from(kind));
             executor.report_download_failure(hash, TransferOrigin::UserInitiated, &error);
             state.drain(executor.events.as_ref().unwrap());
-            assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::DownloadFailed { content_hash: hash, failure: error.failure() });
+            assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::DownloadFailed { book_id: hash, failure: error.failure() });
             assert!(error.failure().is_some(), "storage failures are classified");
             assert_eq!(executor.database.book_download_origin(&hash).unwrap(), None);
             assert_eq!(state.download_state(&hash), Some(&DownloadState::NotDownloaded));
@@ -495,13 +529,12 @@ mod failure_tests {
         let (_root, mut executor, _state, owned) = fixture(TransferOrigin::Background);
         let rejected = BookId::from_bytes([8; 32]);
         let canonical = ContentHash::from_bytes([9; 32]);
-        let (credentials, server) = asset_server_with_head(BlobManifestResponse {
-            owned: vec![owned],
-            upload: Vec::new(),
-            rejected: vec![RejectedBlobManifestEntry { content_hash: rejected, reason: BlobManifestRejectionReason::QuotaExceeded }],
-        }, Some((owned, canonical, 6)));
+        let (credentials, server) = asset_server_with_head(
+            BlobManifestResponse { owned: vec![owned], upload: Vec::new(), rejected: vec![RejectedBlobManifestEntry { book_id: rejected, reason: BlobManifestRejectionReason::QuotaExceeded }] },
+            Some((owned, canonical, 6)),
+        );
         executor.credentials = Arc::new(RwLock::new(Some(credentials)));
-        let results = executor.upload_books(&[BookUploadIntent { byte_checksum: None, id: 1, content_hash: owned, size_bytes: 4 }, BookUploadIntent { byte_checksum: None, id: 2, content_hash: rejected, size_bytes: 4 }]).await.unwrap();
+        let results = executor.upload_books(&[BookUploadIntent { byte_checksum: None, id: 1, book_id: owned, size_bytes: 4 }, BookUploadIntent { byte_checksum: None, id: 2, book_id: rejected, size_bytes: 4 }]).await.unwrap();
         server.join().unwrap();
 
         // Neither book has local bytes. HEAD confirms the actual server
@@ -556,7 +589,9 @@ mod failure_tests {
                 loop {
                     line.clear();
                     socket.read_line(&mut line).unwrap();
-                    if line == "\r\n" { break; }
+                    if line == "\r\n" {
+                        break;
+                    }
                 }
                 write!(socket.get_mut(), "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nx-bokheim-content-hash: {checksum}\r\nConnection: close\r\n\r\n").unwrap();
             }
@@ -628,7 +663,7 @@ mod failure_tests {
             }
             let master = b"\xff\xd8\xffserver master";
             let browse = b"\xff\xd8\xffserver browse";
-            let (credentials, server) = asset_server(ThumbnailBatchDownloadResponse { thumbnails: vec![ThumbnailBatchEntry { content_hash: hash, bytes: master.to_vec(), browse_bytes: browse.to_vec() }], missing: vec![] });
+            let (credentials, server) = asset_server(ThumbnailBatchDownloadResponse { thumbnails: vec![ThumbnailBatchEntry { book_id: hash, bytes: master.to_vec(), browse_bytes: browse.to_vec() }], missing: vec![] });
             executor.credentials = Arc::new(RwLock::new(Some(credentials)));
             let transfers = executor.thumbnail_transfers();
             transfers.download_thumbnail_batch(&[hash]).await.unwrap();
@@ -645,8 +680,7 @@ mod failure_tests {
     #[tokio::test]
     async fn invalid_server_browse_thumbnail_is_rejected_before_storage() {
         let (_root, mut executor, _state, hash) = fixture(TransferOrigin::Background);
-        let (credentials, server) =
-            asset_server(ThumbnailBatchDownloadResponse { thumbnails: vec![ThumbnailBatchEntry { content_hash: hash, bytes: b"\xff\xd8\xffmaster".to_vec(), browse_bytes: b"not a JPEG".to_vec() }], missing: vec![] });
+        let (credentials, server) = asset_server(ThumbnailBatchDownloadResponse { thumbnails: vec![ThumbnailBatchEntry { book_id: hash, bytes: b"\xff\xd8\xffmaster".to_vec(), browse_bytes: b"not a JPEG".to_vec() }], missing: vec![] });
         executor.credentials = Arc::new(RwLock::new(Some(credentials)));
         assert!(executor.thumbnail_transfers().download_thumbnail_batch(&[hash]).await.is_err());
         server.join().unwrap();
@@ -661,7 +695,7 @@ mod failure_tests {
             let updates = state.subscribe_updates();
             let second = BookId::from_bytes([8; 32]);
             let unknown = BookId::from_bytes([9; 32]);
-            let first = ThumbnailBatchEntry { content_hash: hash, bytes: b"\xff\xd8\xffmaster".to_vec(), browse_bytes: b"\xff\xd8\xffbrowse".to_vec() };
+            let first = ThumbnailBatchEntry { book_id: hash, bytes: b"\xff\xd8\xffmaster".to_vec(), browse_bytes: b"\xff\xd8\xffbrowse".to_vec() };
             let mut response = ThumbnailBatchDownloadResponse { thumbnails: vec![first.clone()], missing: vec![] };
             match invalid {
                 "duplicate entry" => {
@@ -669,7 +703,7 @@ mod failure_tests {
                     repeated.bytes.extend_from_slice(b"replacement");
                     response.thumbnails.push(repeated);
                 }
-                "unrequested entry" => response.thumbnails.push(ThumbnailBatchEntry { content_hash: unknown, ..first.clone() }),
+                "unrequested entry" => response.thumbnails.push(ThumbnailBatchEntry { book_id: unknown, ..first.clone() }),
                 "entry also missing" => response.missing.push(hash),
                 "duplicate missing" => response.missing.extend([second, second]),
                 "unrequested missing" => response.missing.push(unknown),
@@ -701,7 +735,7 @@ mod failure_tests {
                 executor.database.record_remote_asset(BlobKind::Thumbnail, &hash).unwrap();
             }
             let response = ThumbnailBatchDownloadResponse {
-                thumbnails: if with_cover { vec![ThumbnailBatchEntry { content_hash: hash, bytes: b"\xff\xd8\xffmaster".to_vec(), browse_bytes: b"\xff\xd8\xffbrowse".to_vec() }] } else { vec![] },
+                thumbnails: if with_cover { vec![ThumbnailBatchEntry { book_id: hash, bytes: b"\xff\xd8\xffmaster".to_vec(), browse_bytes: b"\xff\xd8\xffbrowse".to_vec() }] } else { vec![] },
                 missing: if with_cover { vec![second] } else { vec![hash, second] },
             };
             let (credentials, server) = asset_server(response);
@@ -855,7 +889,7 @@ mod failure_tests {
         let updates = state.subscribe_updates();
         assert!(matches!(executor.download_book(hash).await, Err(TransferError::AuthenticationRequired)));
         state.drain(executor.events.as_ref().unwrap());
-        assert!(matches!(updates.try_recv().unwrap(), LibraryUpdate::DownloadFailed { content_hash, .. } if content_hash == hash));
+        assert!(matches!(updates.try_recv().unwrap(), LibraryUpdate::DownloadFailed { book_id, .. } if book_id == hash));
         assert_eq!(executor.database.book_download_origin(&hash).unwrap(), None);
     }
 

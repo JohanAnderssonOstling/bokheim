@@ -3,6 +3,7 @@ pub mod executor;
 pub mod connectivity;
 pub mod transfers;
 pub mod storage_queue;
+pub mod file_storage;
 pub mod startup_profile;
 
 pub mod coordinator;

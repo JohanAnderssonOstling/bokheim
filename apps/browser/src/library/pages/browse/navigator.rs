@@ -3,12 +3,12 @@
 //! The page's views read it and redraw when it loads; none of them load
 //! anything themselves.
 
+use ui_text::text;
+
 use ui_components::user_facing_error;
 
 use gpui::{Context, EventEmitter, SharedString, Subscription, Task};
 use library_backend::{BackendError, LibraryBrowseData};
-#[cfg(not(target_arch = "wasm32"))]
-use library_backend::{BookId, LibraryCommand, ReadyCommand};
 use library_model::{BrowseBookPage, BrowseLocation, BrowsePageRequest, BrowsePathSegment, LibraryBrowseQuery};
 use std::{future::Future, ops::Range};
 
@@ -132,7 +132,7 @@ impl BrowseNavigator {
             let books = cards.iter().map(|(_, id)| *id).collect();
             let library = self.ui.backend().clone();
             self.request = Some(cx.spawn(async move |navigator, cx| {
-                let states = library.request::<Vec<(BookId, f32, bool)>>(LibraryCommand::Ready(ReadyCommand::OpdsBookStates { books })).await;
+                let states = library.opds_book_states(books).await;
                 let _ = navigator.update(cx, |navigator, cx| {
                     navigator.request = None;
                     if let Ok(states) = states {
@@ -200,7 +200,7 @@ impl BrowseNavigator {
             if let Some(crumb) = path.last_mut() {
                 crumb.id = location;
             } else {
-                path.push(BrowsePathSegment { id: location, name: "Feed".into() });
+                path.push(BrowsePathSegment { id: location, name: text!(browse::feed).into() });
             }
             self.open_path(path, cx);
             return;
@@ -250,7 +250,7 @@ impl BrowseNavigator {
                     }
                     Err(error) => {
                         log::warn!("Loading the next feed page failed: {error}");
-                        navigator.error = Some(user_facing_error(&error, "Could not load this page. Please try again.").into());
+                        navigator.error = Some(user_facing_error(&error, text!(browse::could_not_load_this_page_please_try_again)).into());
                     }
                 }
                 cx.notify();
@@ -292,7 +292,7 @@ impl BrowseNavigator {
                     Ok(None) => navigator.refresh(cx),
                     Err(error) => {
                         navigator.page_failed = true;
-                        navigator.error = Some(user_facing_error(&error, "Could not load this page. Please try again.").into());
+                        navigator.error = Some(user_facing_error(&error, text!(browse::could_not_load_this_page_please_try_again)).into());
                     }
                 }
                 cx.notify();
@@ -392,37 +392,29 @@ impl BrowseNavigator {
             }
             Err(error) => {
                 log::warn!("Browse failed for {}: {}", destination.location, error);
-                self.error = Some(user_facing_error(&error, "Could not load this page. Please try again.").into());
+                self.error = Some(user_facing_error(&error, text!(browse::could_not_load_this_page_please_try_again)).into());
             }
         }
         cx.notify();
     }
 }
 
-/// A page from where it lives: a feed page from the feed, through the app,
-/// and anything else from the library. The catalog's root also lists the
-/// account's OPDS feeds, each as a chip without a section.
+/// A page from its owning library, including each feed's OPDS library.
+/// The catalog's root also lists the account's OPDS feeds as chips.
 async fn fetch(ui: &LibraryContext, query: LibraryBrowseQuery) -> Result<LibraryBrowseData, BackendError> {
-    if matches!(query.location, BrowseLocation::Opds { .. }) {
-        return ui.app().browse_opds(query).await;
+    if let BrowseLocation::Opds { source, .. } = query.location {
+        return ui.opds_library(source).browse_opds(query).await;
     }
     let feeds_listed = matches!(query.location, BrowseLocation::Catalog(library_model::ROOT_SUBJECT_ROUTE_ID) | BrowseLocation::CatalogAuthor(None)) && query.search.is_empty();
     let mut data = ui.backend().browse_page(query, BrowsePageRequest::default()).await?;
     if feeds_listed {
         // Without its feeds the catalog still lists; the failure is logged.
-        let feeds = ui.app().opds_feeds().await.unwrap_or_else(|error| {
+        let feeds = ui.catalog().list().await.unwrap_or_else(|error| {
             log::warn!("could not list OPDS feeds: {error}");
             Vec::new()
         });
         for feed in feeds {
             data.contents.children.push(library_model::BrowseRow { id: BrowseLocation::Opds { source: feed.id, page: None }, name: feed.name, path: None, book_count: 0, downloaded_book_count: 0 });
-        }
-        let stores = ui.app().stores().await.unwrap_or_else(|error| {
-            log::warn!("could not list stores: {error}");
-            Vec::new()
-        });
-        for store in stores {
-            data.contents.children.push(library_model::BrowseRow { id: BrowseLocation::Store(store.id), name: store.name, path: None, book_count: 0, downloaded_book_count: 0 });
         }
     }
     Ok(data)
@@ -430,8 +422,8 @@ async fn fetch(ui: &LibraryContext, query: LibraryBrowseQuery) -> Result<Library
 
 #[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
 mod tests {
-    use super::*;
     use super::super::controls::BrowseControls;
+    use super::*;
     use crate::navigation::LibrarySession;
     use gpui::{AppContext, TestAppContext};
     use std::{cell::Cell, rc::Rc};

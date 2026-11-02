@@ -19,7 +19,7 @@ pub const READER_EPUB_METADATA_VERSION: i64 = -2;
 
 pub struct IngestedFile {
     pub source_identity: Option<book_inspection::PdfSourceIdentity>,
-    pub content_hash: BookId,
+    pub book_id: BookId,
     pub size_bytes: u64,
     pub fingerprint: u64,
     pub format: BookFormat,
@@ -77,7 +77,7 @@ async fn ingest_file_inner(
 ) -> io::Result<IngestedFile> {
     let format = BookFormat::from_file_name(&name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported book format"))?;
     let permit = executor::inspection_permit().await;
-    let (content_hash, size_bytes, fingerprint, source_identity, reader) = executor::run_blocking({
+    let (book_id, size_bytes, fingerprint, source_identity, reader) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
             let _permit = permit;
@@ -96,7 +96,7 @@ async fn ingest_file_inner(
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "empty book"));
             }
             require_unchanged(&path, fingerprint)?;
-            let content_hash = BookId::from(checksum);
+            let book_id = BookId::from(checksum);
             reader.rewind()?;
             let source_identity = if format == BookFormat::Pdf {
                 let identity = book_inspection::PdfSourceIdentity::read(&mut reader).ok().flatten();
@@ -105,27 +105,27 @@ async fn ingest_file_inner(
             } else {
                 None
             };
-            Ok((content_hash, size_bytes, fingerprint, source_identity, reader))
+            Ok((book_id, size_bytes, fingerprint, source_identity, reader))
         }
     })
     .await
     .map_err(|error| io::Error::other(error.to_string()))??;
-    let inspection = match cached(content_hash)? {
+    let inspection = match cached(book_id)? {
         Some(inspection) => inspection,
         None if reader_metadata && format == BookFormat::Epub => cpu_host::submit_book(host, cpu_host::InspectEpubMetadata { source_name: name }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
-        None => cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, content_hash: Some(content_hash), cached_pdf: cached_pdf(content_hash)? }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
+        None => cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, book_id: Some(book_id), cached_pdf: cached_pdf(book_id)? }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
     };
     // A file edited during inspection must be retried rather than committed
     // with a content_hash and metadata from different revisions.
     require_unchanged(&path, fingerprint)?;
-    Ok(IngestedFile { source_identity, content_hash, size_bytes, fingerprint, format, inspection })
+    Ok(IngestedFile { source_identity, book_id, size_bytes, fingerprint, format, inspection })
 }
 
 /// Inspect the reproducible archive of a native MP3 folder, while keeping its
 /// tracks and sidecars as ordinary files at the library placement.
 pub async fn ingest_audiobook_folder(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
     let permit = executor::inspection_permit().await;
-    let (content_hash, size_bytes, fingerprint, reader) = executor::run_blocking({
+    let (book_id, size_bytes, fingerprint, reader) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
             let _permit = permit;
@@ -146,9 +146,9 @@ pub async fn ingest_audiobook_folder(path: PathBuf, name: String, host: &dyn cpu
     .await
     .map_err(|error| io::Error::other(error.to_string()))??;
     let format = BookFormat::Mp3Folder;
-    let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, content_hash: Some(content_hash), cached_pdf: None }, cpu_host::as_cpu_reader(reader)).await;
+    let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, book_id: Some(book_id), cached_pdf: None }, cpu_host::as_cpu_reader(reader)).await;
     require_folder_unchanged(&path, fingerprint)?;
-    Ok(IngestedFile { source_identity: None, content_hash, size_bytes, fingerprint, format, inspection: inspection.map_err(io::Error::other)? })
+    Ok(IngestedFile { source_identity: None, book_id, size_bytes, fingerprint, format, inspection: inspection.map_err(io::Error::other)? })
 }
 
 fn require_folder_unchanged(path: &Path, fingerprint: u64) -> io::Result<()> {

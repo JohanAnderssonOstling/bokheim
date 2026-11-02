@@ -4,7 +4,7 @@
         <meta charset="utf-8" />
         <base href="/" />
         <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, viewport-fit=cover" />
-        <title>Bokheim</title>
+        <title data-ui-text="common.bokheim">Bokheim</title>
         <script type="module">
             globalThis.__BOKHEIM_ASSET_BASE__ = "./pkg";
             globalThis.__BOKHEIM_CJK_FONT_URL__ = new URL(`${globalThis.__BOKHEIM_ASSET_BASE__}/fonts/DroidSansFallback.ttf`, document.baseURI).href;
@@ -68,5 +68,5 @@
             #startup-status li { margin-block: 12px; max-width: 65ch; }
         </style>
     </head>
-    <body><main id="startup-status" role="status" aria-live="polite">Checking browser compatibility…</main></body>
+    <body><main id="startup-status" role="status" aria-live="polite" data-ui-text="web.checking_browser_compatibility">Checking your browser…</main></body>
 </html>

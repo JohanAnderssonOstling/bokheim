@@ -51,7 +51,7 @@ impl ThumbnailTransfers {
             self.discard_invalid_thumbnail(hash)?;
             return Ok(None);
         }
-        Ok(Some(ThumbnailBatchEntry { content_hash: hash, bytes, browse_bytes }))
+        Ok(Some(ThumbnailBatchEntry { book_id: hash, bytes, browse_bytes }))
     }
 
     /// Upload a bounded page in one request, enforcing its aggregate byte bound.
@@ -70,7 +70,7 @@ impl ThumbnailTransfers {
             return Ok(());
         }
         let credentials = self.credentials()?;
-        let uploaded = thumbnails.iter().map(|thumbnail| thumbnail.content_hash).collect::<Vec<_>>();
+        let uploaded = thumbnails.iter().map(|thumbnail| thumbnail.book_id).collect::<Vec<_>>();
         let response = transfer_deadline(SMALL_REQUEST_TIMEOUT, crate::upload_thumbnail_batch(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, thumbnails)).await?;
         self.check_transfer_account(&credentials)?;
         response?;
@@ -103,7 +103,7 @@ impl ThumbnailTransfers {
             self.check_transfer_account(&credentials)?;
             let response = response?;
             for thumbnail in response.thumbnails {
-                if !remaining.remove(&thumbnail.content_hash) {
+                if !remaining.remove(&thumbnail.book_id) {
                     return Err(TransferError::retryable("thumbnail batch returned an unexpected or duplicate hash"));
                 }
                 if thumbnail.bytes.len() > MAX_THUMBNAIL_BYTES || !thumbnail.bytes.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -115,10 +115,10 @@ impl ThumbnailTransfers {
                 // Server artwork is already finished. The transfer supplies a
                 // browse JPEG and a master; use the master for dense cards too,
                 // preserving both images without cropping or re-encoding.
-                self.assets.write_thumbnail_set(&thumbnail.content_hash, &thumbnail.bytes, &thumbnail.browse_bytes, &thumbnail.bytes).await?;
+                self.assets.write_thumbnail_set(&thumbnail.book_id, &thumbnail.bytes, &thumbnail.browse_bytes, &thumbnail.bytes).await?;
                 self.check_transfer_account(&credentials)?;
-                received.push(thumbnail.content_hash);
-                ready.push(thumbnail.content_hash);
+                received.push(thumbnail.book_id);
+                ready.push(thumbnail.book_id);
             }
             self.check_transfer_account(&credentials)?;
             for hash in response.missing {
@@ -136,14 +136,14 @@ impl ThumbnailTransfers {
         self.database.complete_cover_downloads(&ready, &received, &missing)?;
         for hash in ready {
             if let Some(events) = &self.events {
-                events.emit(LibraryEvent::ThumbnailGenerated { content_hash: hash });
+                events.emit(LibraryEvent::ThumbnailGenerated { book_id: hash });
             }
         }
         result
     }
-    fn discard_invalid_thumbnail(&self, content_hash: BookId) -> Result<(), TransferError> {
-        self.assets.remove(BlobKind::Thumbnail, &content_hash)?;
-        self.database.request_missing_thumbnail(&content_hash)?;
+    fn discard_invalid_thumbnail(&self, book_id: BookId) -> Result<(), TransferError> {
+        self.assets.remove(BlobKind::Thumbnail, &book_id)?;
+        self.database.request_missing_thumbnail(&book_id)?;
         Ok(())
     }
 }

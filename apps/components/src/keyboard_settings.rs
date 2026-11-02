@@ -1,5 +1,7 @@
 //! Shared shortcut catalog, live bindings and conflict checks for desktop and web.
 
+use ui_text::text;
+
 use app_preferences::KeyboardShortcuts;
 use gpui::{Action, App, DummyKeyboardMapper, Global, KeyBinding, KeyBindingMetaIndex, Keystroke, SharedString, Task};
 use std::rc::Rc;
@@ -15,8 +17,8 @@ pub enum ShortcutPage {
 impl ShortcutPage {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Browse => "Browse",
-            Self::Reader => "Reader",
+            Self::Browse => text!(common::browse),
+            Self::Reader => text!(common::reader),
         }
     }
 }
@@ -136,11 +138,11 @@ pub fn configured_shortcut_tooltip(label: impl Into<SharedString>, id: &str, cx:
 /// Reject a duplicate within an action or a conflicting action on the same page.
 /// Browse and Reader can safely reuse a key because they are separate pages.
 pub fn shortcut_conflict(settings: &[ShortcutSetting], overrides: &KeyboardShortcuts, id: &str, replacing: Option<usize>, shortcut: &str) -> Result<(), String> {
-    let proposed = Keystroke::parse(shortcut).map_err(|_| "Choose a valid keyboard shortcut.".to_owned())?;
+    let proposed = Keystroke::parse(shortcut).map_err(|_| text!(common::choose_a_valid_keyboard_shortcut).to_owned())?;
     if !has_shortcut_modifier(&proposed) {
-        return Err("Include Ctrl, Shift or Alt in the shortcut (Command on Mac).".into());
+        return Err(text!(common::include_ctrl_shift_or_alt_in_the_shortcut_command_on_mac).into());
     }
-    let setting = settings.iter().find(|setting| setting.id == id).ok_or("This shortcut is unavailable.")?;
+    let setting = settings.iter().find(|setting| setting.id == id).ok_or(text!(common::this_shortcut_is_unavailable))?;
     for other in settings.iter().filter(|other| other.page == setting.page) {
         for (index, key) in configured_shortcuts(other, overrides).iter().enumerate() {
             if other.id == id && replacing == Some(index) {
@@ -148,9 +150,9 @@ pub fn shortcut_conflict(settings: &[ShortcutSetting], overrides: &KeyboardShort
             }
             if Keystroke::parse(key).is_ok_and(|existing| existing.key == proposed.key && existing.modifiers == proposed.modifiers) {
                 return Err(if other.id == id {
-                    format!("This shortcut is already assigned to {}.", other.label)
+                    format!(text!(common::this_shortcut_is_already_assigned_to), other.label)
                 } else {
-                    format!("This shortcut is already assigned to {} in {}. Choose another shortcut or remove that assignment first.", other.label, other.page.label())
+                    format!(text!(common::this_shortcut_is_already_assigned_to_in_choose_another_shortcut_or_remove), other.label, other.page.label())
                 });
             }
         }

@@ -1,12 +1,12 @@
 //! Bounded front/back matter inspection. TOC fragments delimit sections inside
 //! combined HTML documents; body chapters are never joined to copyright text.
 use crate::evidence::{self, SectionEvidence};
-use book_content::{Book, TocEntry};
-use book_model::BookRecord;
+use book_content::Book;
+use book_model::{BookRecord, BookTocEntry};
 use quick_xml::{
+    Reader, XmlVersion,
     escape::{resolve_xml_entity, unescape_with},
     events::Event,
-    Reader, XmlVersion,
 };
 use std::{
     collections::BTreeMap,
@@ -35,9 +35,9 @@ fn boundary(s: &str) -> bool {
         .any(|v| s.trim_end_matches(':') == *v || (*v != "references" && s.starts_with(&format!("{v} "))))
 }
 
-fn toc_links(entries: &[TocEntry], links: &mut BTreeMap<String, BTreeMap<String, bool>>) {
+fn toc_links(entries: &[BookTocEntry], links: &mut BTreeMap<String, BTreeMap<String, bool>>) {
     for entry in entries.iter().take(2048) {
-        let (uri, fragment) = entry.link.split_once('#').unwrap_or((&entry.link, ""));
+        let (uri, fragment) = entry.target.split_once('#').unwrap_or((&entry.target, ""));
         // TOC links are container-root-relative; document URIs omit the slash.
         links.entry(uri.trim_start_matches('/').to_owned()).or_default().insert(fragment.to_owned(), copyright(&entry.title));
         toc_links(&entry.children, links);

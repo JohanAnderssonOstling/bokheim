@@ -20,7 +20,7 @@ fn bounds(cx: &mut VisualTestContext, selector: String) -> Option<Bounds<Pixels>
 fn book(index: usize, deleted_at: i64) -> TrashedBook {
     let mut hash = [0; 32];
     hash[..8].copy_from_slice(&(index as u64).to_le_bytes());
-    TrashedBook { content_hash: BookId::from_bytes(hash), title: format!("Book {index}"), author: "Writer".into(), format: "EPUB".into(), deleted_at }
+    TrashedBook { book_id: BookId::from_bytes(hash), title: format!("Book {index}"), author: "Writer".into(), format: "EPUB".into(), deleted_at }
 }
 
 fn draw(cx: &mut VisualTestContext) {
@@ -44,7 +44,7 @@ fn rows_group_and_filter_original_indices_without_copying_metadata() {
     list.invalidate();
     list.update(&contents, "  BoOk 0  ", now);
     assert_eq!(list.rows, [TrashRow::Group(2), TrashRow::Book(0)]);
-    assert_eq!(list.rows[1].item(&contents).unwrap().key(), TrashKey::Book(contents.books[0].content_hash));
+    assert_eq!(list.rows[1].item(&contents).unwrap().key(), TrashKey::Book(contents.books[0].book_id));
     list.invalidate();
     list.update(&contents, "no matches", now);
     assert!(list.rows.is_empty());
@@ -71,7 +71,7 @@ async fn reader_entry_preserves_displayed_trash_covers_and_requests(cx: &mut Tes
     let (_directory, _session, library) = LibrarySession::test_context(cx).await;
     let now = now_ms();
     let book = book(0, now);
-    let hash = book.content_hash;
+    let hash = book.book_id;
     let page = cx.new(|cx| {
         let mut page = TrashPage::new(library, cx);
         page.request.take();
@@ -114,8 +114,8 @@ async fn large_trash_only_builds_nearby_rows_and_actions_keep_their_ids_across_f
     let fixture = cx.new(|_| TrashFixture(view.clone()));
     let (_, visual) = cx.add_window_view(|window, cx| Root::new(fixture, window, cx));
     draw(visual);
-    let first = TrashKey::Book(book(0, now).content_hash);
-    let last = TrashKey::Book(book(9_999, now).content_hash);
+    let first = TrashKey::Book(book(0, now).book_id);
+    let last = TrashKey::Book(book(9_999, now).book_id);
     assert!(bounds(visual, format!("trash-row-{first}")).is_some());
     assert!(bounds(visual, format!("trash-row-{last}")).is_none());
     view.read_with(visual, |page, _| {
@@ -182,7 +182,7 @@ async fn large_trash_only_builds_nearby_rows_and_actions_keep_their_ids_across_f
     // leave the viewport and cancel every obsolete request.
     visual.update(|_, cx| cx.set_global(crate::stores::GeneratedCoversOnly(false)));
     view.update(visual, |page, cx| {
-        page.request_visible_covers((0..100).map(|index| book(index, now).content_hash).collect(), cx);
+        page.request_visible_covers((0..100).map(|index| book(index, now).book_id).collect(), cx);
         assert_eq!(page.cover_requests.len(), MAX_COVER_REQUESTS);
         page.request_visible_covers(HashSet::new(), cx);
         assert!(page.cover_requests.is_empty());
@@ -216,7 +216,7 @@ async fn refreshing_a_hidden_trash_page_cancels_its_previous_cover_work(cx: &mut
         let mut page = TrashPage::new(library, cx);
         page.request.take();
         page.contents = Some(LibraryTrashView { books: (0..100).map(|index| book(index, now)).collect(), folders: Vec::new() });
-        page.request_visible_covers((0..100).map(|index| book(index, now).content_hash).collect(), cx);
+        page.request_visible_covers((0..100).map(|index| book(index, now).book_id).collect(), cx);
         assert_eq!(page.cover_requests.len(), MAX_COVER_REQUESTS);
         page
     });

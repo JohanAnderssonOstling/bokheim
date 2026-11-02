@@ -1,5 +1,7 @@
 //! Desktop dropdown and centered mobile overlay for adding a library.
 
+use ui_text::text;
+
 use gpui::prelude::*;
 use gpui::{Anchor, AnyElement, App, Context, DismissEvent, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton, Subscription, Window, anchored, deferred, div, px};
 use gpui_component::IconName;
@@ -29,11 +31,11 @@ impl AddLibraryChoice {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Create => "Create new library",
+            Self::Create => text!(browse::create_new_library),
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Opds => "Add OPDS library",
+            Self::Opds => text!(browse::add_opds_library),
             #[cfg(not(target_arch = "arm"))]
-            Self::OpenFolder => "Open library from folder",
+            Self::OpenFolder => text!(browse::open_library_from_folder),
         }
     }
 
@@ -46,8 +48,6 @@ impl AddLibraryChoice {
             Self::OpenFolder => IconName::FolderOpen,
         }
     }
-
-
 }
 
 pub(super) struct AddLibraryChoices {
@@ -176,7 +176,7 @@ impl Sidebar {
         let choices = self.add_library_choices.as_ref().filter(|choices| choices.menu.is_none())?;
         let theme = components::browser_theme(cx);
         let close = emitter.clone();
-        let header = components::library_switcher_header("Add library", theme).child(components::outlined_icon_button("add-library-overlay-close", "Close", IconName::Close).on_click(move |_, window, cx| {
+        let header = components::library_switcher_header(text!(common::add_library), theme).child(components::outlined_icon_button("add-library-overlay-close", text!(common::close), IconName::Close).on_click(move |_, window, cx| {
             close.update(cx, |sidebar, cx| sidebar.close_add_library_choices(window, cx));
         }));
         let keys = emitter.clone();

@@ -15,7 +15,7 @@ use library_model::PlaybackMetadata;
 // write call with its own transaction. Callers never hold a connection or
 // transaction across the inspection work that produces the metadata.
 
-pub(crate) use book_model::{AudiobookChapter, BookFormat};
+pub(crate) use book_model::{AudiobookChapter, AudiobookTrack, BookFormat};
 
 /// A verified download already has immutable playback facts keyed by its
 /// content hash. Reuse complete facts without claiming this device inspected
@@ -85,24 +85,7 @@ impl Database {
             return Ok(Vec::new());
         }
         let Some(metadata) = self.audiobook_playback_metadata(hash)? else { return Ok(Vec::new()) };
-        if !book_model::tracks_match_archive(&metadata.tracks, *hash) {
-            return Ok(Vec::new());
-        }
-        Ok(metadata
-            .tracks
-            .into_iter()
-            .enumerate()
-            .map(|(index, track)| {
-                let title = metadata
-                    .chapters
-                    .iter()
-                    .find(|chapter| chapter.start_ms >= track.start_ms && chapter.start_ms < track.end_ms)
-                    .map(|chapter| chapter.title.clone())
-                    .filter(|title| !title.trim().is_empty())
-                    .unwrap_or_else(|| format!("Track {}", index + 1));
-                (track.name, title)
-            })
-            .collect())
+        Ok(track_title_hints(*hash, &metadata.chapters, metadata.tracks))
     }
 
     /// Everything a player needs to open the book without inspecting its
@@ -132,6 +115,17 @@ impl Database {
         let tracks = first_column::<Vec<u8>>(|read| self.connection.audiobook_track_index_select(hash, read))?;
         tracks.map(|bytes| stored_document::decode(&bytes)).transpose().map(Option::unwrap_or_default)
     }
+}
+
+pub(crate) fn track_title_hints(hash: BookId, chapters: &[AudiobookChapter], tracks: Vec<AudiobookTrack>) -> Vec<(String, String)> {
+    if !book_model::tracks_match_archive(&tracks, hash) {
+        return Vec::new();
+    }
+    tracks.into_iter().enumerate().map(|(index, track)| {
+        let title = chapters.iter().find(|chapter| chapter.start_ms >= track.start_ms && chapter.start_ms < track.end_ms)
+            .map(|chapter| chapter.title.clone()).filter(|title| !title.trim().is_empty()).unwrap_or_else(|| format!("Track {}", index + 1));
+        (track.name, title)
+    }).collect()
 }
 
 include_sql!("src/books/sql/audiobook.sql");

@@ -26,7 +26,7 @@ sync
 
 printf 'Installed Bokheim under %s/.adds/bokheim\n' "$DEVICE_ROOT"
 if sh "$SCRIPT_DIR/eject-kobo.sh" "$DEVICE_ROOT"; then
-    printf 'Let the Kobo restart, then tap "Bokheim" to open the app.\n'
+    printf 'Let the Kobo restart, then open NickelMenu and select "Bokheim Kobo".\n'
 else
     printf 'Installation succeeded, but automatic eject failed. Safely eject the Kobo manually, then let it restart.\n' >&2
 fi

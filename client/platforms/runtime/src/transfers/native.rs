@@ -9,7 +9,7 @@ use crate::storage_queue::{self, Priority};
 #[cfg(not(target_os = "android"))]
 use std::future::pending;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 #[cfg(not(target_os = "android"))]
@@ -37,10 +37,7 @@ pub fn configure_reader(path: PathBuf, executor: &BackendExecutor) {
 pub fn save_allow_metered(allow: bool) -> io::Result<()> {
     let file = FILE.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(path) = file.as_ref() {
-        let mut staged = tempfile::NamedTempFile::new_in(path.parent().ok_or_else(|| io::Error::other("missing policy directory"))?)?;
-        staged.write_all(if allow { b"true" } else { b"false" })?;
-        staged.as_file().sync_all()?;
-        staged.persist(path).map_err(|error| error.error)?;
+        crate::file_storage::write_atomic_sync(path, if allow { b"true" } else { b"false" })?;
     }
     POLICY.set_allow_metered(allow);
     Ok(())

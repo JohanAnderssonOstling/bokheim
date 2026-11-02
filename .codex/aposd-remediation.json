@@ -1,0 +1,1724 @@
+{
+  "objective": "Fix all 23 APOSD review findings",
+  "sources": [
+    "https://web.stanford.edu/~ouster/cgi-bin/aposd2ndEdExtract.pdf",
+    "https://web.stanford.edu/~ouster/cgi-bin/cs190-winter18/lecture.php?topic=modularDesign"
+  ],
+  "findings": [
+    {
+      "id": 1,
+      "description": "Synchronize shared reader preferences with every renderer",
+      "status": "verified",
+      "verification": [
+        "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+        "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+        "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source"
+      ],
+      "implementation": "EPUB, PDF and comic surfaces observe ReaderSettings. EPUB reconciles font, scale and per-book style overrides; renderer acknowledgements no longer overwrite shared requests or store window-dependent column widths. PDF observers apply stored zoom and trim settings.",
+      "previous_validation_attempts": [
+        "cargo check -p browser-ui -p reader-ui passed before the last scale/policy adjustments; full existing library tests compiling",
+        "Full reader/browser library tests could not compile because sibling HtmlViewCore uses removed PipelineError tuple constructor and treats scope_note_content Result as Option after concurrent HtmlEngine changes; no sibling source edited.",
+        "Latest reader/browser check remains blocked in sibling HtmlViewCore/html-view-cfi:136 by removed html::parse::SourceTextPosition; no sibling source was changed"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "apps/reader/src/epub/render.rs",
+          "apps/reader/src/pdf/render/init.rs",
+          "apps/reader/src/comic/mod.rs"
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "description": "Retain failed and pending undo steps",
+      "status": "verified",
+      "verification": [
+        "3 existing undo unit tests passed",
+        "Existing folder rename/undo and async completion after navigation tests passed",
+        "Source audit: each successful reversal pops its step only after success; failure returns the entry containing its failed and unattempted steps; the session receives that remainder before page notification",
+        "Final existing browser runs pass all 5 undo tests and all 23 selected action/selection tests; every browser library test target compiled."
+      ],
+      "implementation": "UndoFailure returns the failed and remaining steps. Completed steps are removed; the library session restores the remainder even if navigation closed the originating page.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "apps/browser/src/library/services/undo.rs",
+          "apps/browser/src/library/pages/browse/page.rs"
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "description": "Expose persistence failures and retain retryable writes",
+      "status": "verified",
+      "verification": [
+        "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+        "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+        "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+        "Source audit: EPUB, PDF and comic constructors watch their progress writer and all three surfaces render its persistent failure/retry notice. Position batching awaits the ordered writer completion receipt before accepting another batch; no duplicate progress retry loop remains."
+      ],
+      "implementation": "MutationWriter retains failed writes in order and owns backoff, manual retry, completion receipts and visible failure status. PositionWriter coalesces compatible progress updates and submits them to this same ordered writer, awaiting completion so chapter/reset ordering and bounded batching survive failures. EPUB, PDF and comics observe progress-save status and show a persistent retry notice; annotation queues retain their separate notes/bookmarks notice. Failed records remain queued after a reader closes; fallible flushes protect annotation reloads.",
+      "previous_validation_attempts": [
+        "cargo check -p browser-ui -p reader-ui passed before the last scale/policy adjustments; full existing library tests compiling",
+        "Full reader/browser library tests could not compile because sibling HtmlViewCore uses removed PipelineError tuple constructor and treats scope_note_content Result as Option after concurrent HtmlEngine changes; no sibling source edited.",
+        "Latest reader/browser check remains blocked in sibling HtmlViewCore/html-view-cfi:136 by removed html::parse::SourceTextPosition; no sibling source was changed"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "apps/reader/src/shell/persistence.rs",
+          "apps/reader/src/shell/marks.rs",
+          "apps/reader/src/epub/render.rs",
+          "apps/reader/src/pdf/render.rs",
+          "apps/reader/src/comic/mod.rs"
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "description": "Associate backend request and response types",
+      "status": "verified",
+      "verification": [
+        "Existing metered_reading integration test passed through the typed bundle API",
+        "Native backend library tests compiled; 43 passed, 9 import/transfer failures, 1 ignored",
+        "Current native app, browser-ui and audiobook-player cargo check passed",
+        "All browser library tests compiled and 11 relevant undo/action tests passed",
+        "Stale notebook test cache-key access was updated to the existing CardKey conversion; no new tests or test-only implementation helpers were added",
+        "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+        "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+        "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+        "Follow-up: library_backend: 52 passed; 0 failed; 1 ignored; .tmp/aposd-remediation/backend-current-status-tests.log; app: 59 passed; 0 failed; .tmp/aposd-remediation/app-followup-final-tests.log"
+      ],
+      "implementation": "LibraryClient exposes typed operations and keeps its generic request dispatcher and transport private to its client module. The OPDS UI uses opds_book_states; range-bundle callers use read_file_bundle. Browser BookTransport exposes fixed source-operation signatures rather than a caller-selected reply type or actor scheduling commands. The generic serde-bound reply marker now lives in client-runtime as WireReply; AppClient generic dispatch is limited to API adapters.",
+      "previous_validation_attempts": [
+        "Wasm check blocked in sibling HtmlEngine by Option<LinePlacements> size assertion; native UI check blocked by sibling HtmlViewCore referring to removed html::parse",
+        "Latest reader/browser check remains blocked in sibling HtmlViewCore/html-view-cfi:136 by removed html::parse::SourceTextPosition; no sibling source was changed"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "client/library-backend/src/client/client.rs",
+          "client/library-backend/src/library/book/web_reader.rs",
+          "client/app/src/api/app/client.rs"
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "description": "Encapsulate narration transitions",
+      "status": "verified",
+      "verification": [
+        "Rustfmt and scoped whitespace checks pass",
+        "Source audit: format readers no longer access or assign raw narration lifecycle fields, task handles, generations or services",
+        "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+        "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+        "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+        "All existing narration lifecycle, stale-generation, notification, sleep, close-reader, dock and voice-picker tests pass in the 205-test speech-enabled reader suite."
+      ],
+      "implementation": "Narration now keeps its service, generation, lifecycle flags, cursor, status, timers, listeners, navigation work and dock visibility private. EPUB and PDF use shared preparation, batch completion, navigation, remote-control and stop-status operations. toggle_pause returns PlaybackContinuation so format readers provide only page/chapter loading or advancement. Navigation cancels the old work and speech generation and resets its cursor/limits; voice failures run the full stop path, including renderer highlight cleanup through the owning reader. Sleep retains completed-batch state so resuming can advance. A successful retry after voice initialization failure installs a missing event listener even when the endpoint already exists.",
+      "previous_validation_attempts": [
+        "Speech-enabled reader cargo check was attempted with --features native-tts; compilation is blocked in sibling HtmlViewCore/html-view-cfi:136 because html::parse was removed"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "apps/reader/src/shell/tts.rs",
+          "apps/reader/src/epub/tts.rs",
+          "apps/reader/src/pdf/render/tts.rs"
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "description": "Use structured catalog recovery errors",
+      "status": "verified",
+      "verification": [
+        "Catalog compiles and 66 of 67 existing tests pass serially, including the existing optional-cover versus lookup-failure test",
+        "The one JPEG byte-equality failure also occurs with all changed catalog ingestion sources restored to pre-edit snapshots; current changes were restored afterward",
+        "All 12 library-enrichment and 30 metadata-contract existing tests pass",
+        "Source audit confirms acquisition recovery and crawler cooldown no longer parse error messages",
+        "Full metadata suite baseline comparison: both versions pass 82 tests and fail exactly the same 13 tests; only the new response field was supplied as None to compile the original server constructors against the additive contract",
+        "The enrichment recipe remains books_v27 because failure-stage diagnostics do not change bibliographic lookup or merge policy",
+        "Final current-source cargo check passed for app, library-backend, catalog and metadata-server after all constructor, cover and response-contract changes were restored",
+        "Follow-up: catalog: 67 passed; 0 failed; .tmp/aposd-remediation/catalog-cover-final-tests.log; metadata_server: 95 passed; 0 failed; .tmp/aposd-remediation/metadata-contract-final-tests.log"
+      ],
+      "implementation": "Metadata responses include an optional typed BookEnrichmentFailure stage; the server marks cover failures where cover lookup runs and other failures as lookup errors. Catalog optional-cover recovery uses this field and treats missing/unknown stages as ordinary failures. IngestError retains HTTP errors, invalid source/book failures, enrichment failures and both errors of an exhausted alternative. EPUB alternatives are attempted only for acquisition failures. Crawler cooldown uses HTTP status and timeout classification, independent of diagnostic text. String conversion occurs at CLI, optional diagnostics and persisted-message boundaries.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "servers/catalog/src/ingest_error.rs",
+          "shared/metadata-contract/src/books.rs",
+          "servers/metadata/src/serve/books.rs"
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "description": "Keep release validation active under Python optimization",
+      "status": "verified",
+      "verification": [
+        "22 existing release-script tests passed",
+        "AST: 21 require calls, zero assertion statements",
+        "Invalid repository/source inputs rejected under Python optimization levels 0, 1, and 2; no external commands executed"
+      ],
+      "implementation": "All 21 release promotion assertions replaced by explicit require checks with diagnostic errors.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "scripts/ci/promote-release-patch.py"
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "description": "Share validated reader preference model",
+      "status": "verified",
+      "verification": [
+        "All 14 existing app-preferences tests pass",
+        "All touched reader source parses through rustfmt using its actual Rust 2024 edition; shared preference source retains surrounding formatting",
+        "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+        "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+        "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+        "All 18 existing reader settings tests pass inside the 205-test suite; the UI has no duplicate synchronized fields and the shared snapshot diff covers all 32 model fields."
+      ],
+      "implementation": "The UI ReaderPreferences composes app-preferences::ReaderPreferences with local display, font, narration, translation and sidebar state. Removed 31 duplicate raw synchronized fields, default values, copy assignments and UI patch comparisons. Controls submit typed ReaderPreferencePatch values through shared validation; PDF/comic spacing no longer mutates borrowed raw numbers. The shared model owns complete snapshot diffs, including flow. Flattened local JSON uses canonical shared keys while aliases accept legacy font_size, column_width and scale; missing older fields take shared defaults.",
+      "previous_validation_attempts": [
+        "Speech-enabled reader/browser cargo check attempted; currently blocked in sibling HtmlViewCore/html-view-cfi:136 by removed html::parse::SourceTextPosition"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "client/preferences/src/lib.rs",
+          "apps/reader/src/settings.rs"
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "description": "Use structured release and protocol configuration",
+      "status": "verified",
+      "verification": [
+        "All 69 existing release/CI Python tests passed; the existing server-probe fixture now supplies JSON and still checks authentication-safe version framing and accepted/rejected HTTP statuses",
+        "All 17 existing protobuf-wire tests passed; protocol version remains 31 and the MIME value remains application/vnd.bokheim+protobuf; version=31",
+        "YAML checks verify all 4 workflows load configuration before dependency checkout and use its refs, including workflow-owned configuration for separately pinned app builds",
+        "Public-trust override checks and a local GitHub-environment export check passed",
+        "Shared codec WebAssembly check passed",
+        "Source audit: local release, shared-test pin verification and protocol probe no longer parse workflow or Rust source declarations"
+      ],
+      "implementation": "Protocol version and base MIME type live in shared/protobuf-wire/protocol.json; the codec build generates its constants from that file, and the exact-commit server probe reads the structured file with git show. Release trust, Rust toolchain and dependency pins live in scripts/ci/release-config.json. One validated Python adapter supplies local builds, shared-suite pin validation and all four client CI workflows. Public trust overrides remain supported. Separately pinned application builds load release inputs from the workflow revision, matching their existing packaging-tool ownership.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "shared/protobuf-wire/protocol.json",
+          "shared/protobuf-wire/build.rs",
+          "scripts/ci/release-config.json",
+          "scripts/ci/release_config.py",
+          "scripts/ci/check-server-protocol.py"
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "description": "Unify authenticated request renewal",
+      "status": "verified",
+      "verification": [
+        "10 existing account-client tests passed",
+        "19 existing library-runtime tests passed",
+        "22 existing asset-transfer tests passed, including concurrent renewal, at-most-one retry, account-switch rejection, and unrefreshable credentials",
+        "Native app and library-backend cargo check passed after callback migration"
+      ],
+      "implementation": "account-client::authenticated_request owns one renewal/retry and pins the original server/user. SessionAuthority adapts account sessions and scoped LibraryAccount capabilities; BeforeRequest and OnRejection policies preserve interactive versus transfer timing. AccountSession callbacks own their Session, avoiding higher-ranked borrowed future contracts. Remote reads and asset transfers share the mechanism and retain their domain-specific error mappings and transfer admission checks.",
+      "previous_validation_attempts": [
+        "account-client compiled for wasm32-unknown-unknown; full library-runtime Wasm builds need the normal application feature union and remain covered by the tracked broader Wasm validation limitation"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "client/account-client/src/authenticated_request.rs",
+          "client/library-backend/crates/library-runtime/src/account.rs"
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "description": "Centralize book format capabilities",
+      "status": "verified",
+      "verification": [
+        "All 60 existing book-model and library-opds tests passed, including compound FB2, CBZ, supported versus protected OPDS acquisitions, and downloads",
+        "Native app, browser-ui and opds-webview cargo check passed",
+        "Android production Java compilation and generated manifest processing passed",
+        "All 15 existing BookBrowserTest and 3 BackButtonRouterTest tests passed; the existing browser layout test had its obsolete backPressed call/assertion removed because Back is already tested through BackButtonRouter",
+        "Generated Android manifest exactly matches all 11 registry MIME aliases",
+        "Shared book-model and protobuf-wire WebAssembly check passed",
+        "Scoped formatting and whitespace checks passed",
+        "Final serial run of all 60 existing book-model/OPDS tests passed. The preceding parallel run had one transient failure in the unchanged helper-availability shell probe; no probe implementation or test expectations were changed",
+        "Registry audit confirms the exact historical stored bits and that application/zip is present only among picker aliases"
+      ],
+      "implementation": "shared/book-model/formats.json owns stored format bits, renderer families, compound extensions, import-picker aliases, download eligibility, MIME aliases and OPDS preference. The book-model build generates its Rust enum/constants and capabilities from the registry. Browser pickers and the embedded webview use those capabilities. OPDS publication format/filename selection uses the common MIME adapters. Android bundles the same registry through BuildConfig; BookFormats adapts it for downloads and pickers, and Gradle generates VIEW MIME declarations from it, including FB2 and CBZ. Stored bits and canonical extensions remain unchanged; generic ZIP MIME is picker-only. The text-container enum remains a narrower parsing capability.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "shared/book-model/formats.json",
+          "shared/book-model/build.rs",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/BookFormats.java",
+          "apps/desktop-gpui/android/build.gradle.kts"
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "description": "Encapsulate cover asset variants",
+      "status": "verified",
+      "verification": [
+        "Full existing catalog suite: 66 passed, 1 JPEG byte-equality failure",
+        "Existing extraction, derivative recovery, edition preservation, retained-art reimport and publication tests passed",
+        "The remaining JPEG equality test fails at the same assertion with all ingestion changes restored to their pre-edit source baseline",
+        "Production cover filenames and variant enumeration are centralized in covers/assets.rs; fixture filename assertions remain explicit",
+        "Final current-source cargo check passed for app, library-backend, catalog and metadata-server after all constructor, cover and response-contract changes were restored",
+        "Follow-up: catalog: 67 passed; 0 failed; .tmp/aposd-remediation/catalog-cover-final-tests.log"
+      ],
+      "implementation": "CoverAssets owns the retained master, legacy card and both versioned card derivatives. Ingestion, source-art extraction, edition preservation, audiobook reuse, publication, existence checks and removal all use its operations. Paths and variant membership live in one module; published and preserved files are copied without replacing existing artwork, and missing cards are rebuilt only from the retained master. Audiobook reuse now copies the whole available set, and removal includes current derivatives.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "servers/catalog/src/covers/assets.rs",
+          "servers/catalog/src/main.rs"
+        ]
+      }
+    },
+    {
+      "id": 13,
+      "description": "Represent valid document sources and formats",
+      "status": "verified",
+      "verification": [
+        "Existing PDF export snapshot/metadata test passed",
+        "Existing stale-path recovery test passed for EPUB, PDF and audio",
+        "Existing metered_reading integration test passed",
+        "Full native backend result: 43 passed, 9 failed, 1 ignored; the original resource model produces exactly the same 9 failures",
+        "Current native app, browser-ui and audiobook-player cargo check passed, including the new Pdf resource match in audiobook playback",
+        "Existing PDF feature HTTP demand-read test passed",
+        "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+        "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+        "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+        "Follow-up: library_backend: 52 passed; 0 failed; 1 ignored; .tmp/aposd-remediation/backend-current-status-tests.log"
+      ],
+      "implementation": "ResolvedBook has a dedicated Pdf(PdfBook) resource carrying a seekable reader and matching metadata. Text/comic DocumentBook constructors require DocumentFormat, which excludes PDF and audio. Reader opening matches resource variants directly and no longer converts an asynchronous source into a PDF reader or reports that programming error as unavailable book content.",
+      "previous_validation_attempts": [
+        "Native UI and Wasm compile checks blocked by sibling engine/view API/assertion errors",
+        "Latest reader/browser check remains blocked in sibling HtmlViewCore/html-view-cfi:136 by removed html::parse::SourceTextPosition; no sibling source was changed"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "client/library-backend/src/library/book/mod.rs",
+          "apps/reader/src/windows.rs"
+        ]
+      }
+    },
+    {
+      "id": 14,
+      "description": "Make wire adapters explicit",
+      "status": "verified",
+      "verification": [
+        "All 55 existing protobuf-wire, content-address and book-model tests pass, including storage/JSON equality, local and legacy identities, compact metadata/TOC compatibility, sizing, opaque representation and historical state decoding",
+        "Shared protobuf-wire, content-address and book-model WebAssembly cargo check passed",
+        "Native app, library-backend and metadata-server cargo check passed"
+      ],
+      "implementation": "Shared serde-transport owns an explicit opt-in representation API. ContentHash and BookId select text/byte adapters themselves; compact record and TOC adapters use the same contract. Protobuf encoding, exact sizing and opaque representation implement the generic adapter handshake without domain names. The one private Serde extension marker is centralized and never encoded; JSON, bincode and protocol framing remain unchanged.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "shared/serde-transport/src/lib.rs",
+          "shared/serde-transport/src/compact.rs",
+          "shared/protobuf-wire/src/serialization.rs",
+          "shared/content-address/src/lib.rs",
+          "shared/content-address/src/book_id.rs"
+        ]
+      }
+    },
+    {
+      "id": 15,
+      "description": "Type classification provenance",
+      "status": "verified",
+      "verification": [
+        "All 30 existing metadata-contract tests pass",
+        "Metadata server: 82 existing tests pass; exactly the same 13 tests fail as the recorded pre-change enrichment-failure baseline",
+        "Native cargo check passed for app, library-backend, catalog and metadata-server",
+        "Source audit: no classification policy parses method strings or prefixes outside the serialization boundary",
+        "Follow-up: all 95 metadata-server library tests pass after aligning existing test contracts with current ownership, provenance, migration and editable-taxonomy semantics; .tmp/aposd-remediation/metadata-contract-final-tests.log"
+      ],
+      "implementation": "ClassificationEvidence stores ClassificationMethod variants with typed authority providers and explicit record/work/property/notation/support payloads. Producers construct variants directly, and matching, subject attribution and ISBN-reference policies match variants instead of parsing text. A single Serde boundary preserves the historical string representation and lexical evidence ordering; unrecognized methods remain opaque Unknown values. The bibliographic enrichment policy is unchanged.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "shared/metadata-contract/src/classification_method.rs",
+          "shared/metadata-contract/src/authority_subjects.rs",
+          "servers/metadata/src/serve/resolution.rs",
+          "servers/metadata/src/serve/related_isbn.rs"
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "description": "Share stable taxonomy semantics",
+      "status": "verified",
+      "verification": [
+        "50 existing subject-projection library tests passed",
+        "Metadata source-heading tests compile, but 3 existing assertions expect old taxonomy paths or BISAC strings; all 3 fail identically with the original two policy conditions restored",
+        "Restored both APOSD policy conditions after baseline comparison; no taxonomy data or reviewed route pins modified",
+        "Follow-up: all 95 metadata-server library tests pass after aligning existing test contracts with current ownership, provenance, migration and editable-taxonomy semantics; .tmp/aposd-remediation/metadata-contract-final-tests.log"
+      ],
+      "implementation": "Shared is_broad_literature_classification resolves classification concepts and tests stable genre-root identity 5583. Both projection and metadata source-heading policy use it; reviewed route pins and taxonomy data unchanged.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "shared/subject-projection/src/lib.rs",
+          "servers/metadata/src/serve/source_subjects.rs"
+        ]
+      }
+    },
+    {
+      "id": 17,
+      "description": "Own consistent library service resources",
+      "status": "verified",
+      "verification": [
+        "51 existing library-import tests passed",
+        "12 existing library-sync tests passed, 1 optional benchmark ignored",
+        "Native app and library-backend cargo check passed after constructor and configuration migration",
+        "109 existing tests passed: placement 24, import 51, sync 12 (1 optional benchmark ignored), asset-transfer 22",
+        "Native app and library-backend check passed after the complete ownership migration",
+        "Existing metered_reading integration test passed with RUST_MIN_STACK=16777216; its initial run overflowed the default test-thread stack",
+        "Final current-source cargo check passed for app, library-backend, catalog and metadata-server after all constructor, cover and response-contract changes were restored"
+      ],
+      "implementation": "LibraryImport now accepts only its LibraryPlacement owner and CPU capability; private database, assets, event router and native PathBuf root are derived together. The unused production library_id field was removed, and existing export fixtures supply their explicit namespace. LibrarySyncConfig now chooses LibraryAuthentication::Account or ::Credentials, so managed credentials and renewal cannot be supplied from different accounts; its stored account/credentials fields are private outside the sync crate. LibraryPlacement now owns immutable resource bindings and exposes borrowed accessors. LibrarySyncConfig receives this owner instead of independent database/assets/events/replica values; LibrarySync::new reads and validates the initialized database replica. Sync and asset-executor resource fields are private outside their implementation crates. The executor factory derives storage, notifications and paired authentication once, and sync clones that configured executor, sharing its transfer controls. Backend consumers use capability accessors.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "client/library-backend/crates/library-placement/src/lib.rs",
+          "client/library-backend/crates/library-import/src/lib.rs",
+          "client/library-backend/crates/library-sync/src/library_sync.rs",
+          "client/library-backend/crates/asset-transfer/src/transfer/executor.rs"
+        ]
+      }
+    },
+    {
+      "id": 18,
+      "description": "Move dictionary source handling into import boundary",
+      "status": "verified",
+      "verification": [
+        "All 25 existing dictionary tests pass after store fixtures migrate to owned reader sources",
+        "All 12 selected existing app runtime tests pass, including panic isolation, ordered settings and browser request/subscription recovery",
+        "Native app and dictionary-settings cargo check passed after removing the byte-payload import route",
+        "WebAssembly dictionary cargo check with --features store passed, including browser source conversion and bounded File reads",
+        "Source audit: settings view no longer reads bytes, runs blocking jobs or implements import size/count policy; its native provider adapter defers source opening until worker consumption",
+        "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+        "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+        "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source"
+      ],
+      "implementation": "DictionaryImport owns a validated collection of DictionarySource capabilities. The service owns bounded reads and aggregate limits; native reads run on the backend blocking executor and browser reads use bounded File slices in the worker. The settings view only adapts picker capabilities and submits the import. Native app transport has a typed owned import job, and web transport sends File objects beside a names/token command. A worker selection guard releases untaken capabilities on success, failure or cancellation. Removed the full-byte app import command and migrated existing store fixtures to the source API without adding tests or test-only production helpers.",
+      "previous_validation_attempts": [
+        "Full WebAssembly app check attempted; blocked in sibling HtmlEngine by Option<LinePlacements> 32-bit size assertion"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "client/app/crates/dictionary/src/import_source.rs",
+          "client/app/src/runtime/web.rs",
+          "apps/dictionary-settings/src/lib.rs"
+        ]
+      }
+    },
+    {
+      "id": 19,
+      "description": "Share byte range responses",
+      "status": "verified",
+      "verification": [
+        "All 4 existing server-http asset range tests passed, covering track-relative bytes, content-hash/If-Range validation, multipart range rejection rules, and truncated multipart storage",
+        "9 existing desktop HTTP reader tests passed (2 optional fixture benchmarks ignored)",
+        "Existing PDF-feature test unindexed_pdf_streams_large_demand_reads_over_http passed"
+      ],
+      "implementation": "Whole assets and bounded audio tracks use one AssetView response path for If-Range, clamping, seeking, bounded streaming, throttling and HTTP range headers. The view constructors own extent, MIME type, ETag and multipart policy. Audio tracks reject multipart ranges; whole book multipart responses retain their existing implementation.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "servers/sync/crates/server-http/src/assets/ranges.rs",
+          "servers/sync/crates/server-http/src/assets.rs",
+          "servers/sync/crates/server-http/src/playback.rs"
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "description": "Use named Android theme fields",
+      "status": "verified",
+      "verification": [
+        "Android browser-ui cargo check passed using the installed NDK",
+        "Source check confirms Rust camelCase serialization and the Java parser agree on all 9 field names",
+        "Final complete desktop-gpui Android library check passed with the real Android feature set, including the reader, native narration and account theme transport. BookBrowser test compilation was already repaired during finding 11."
+      ],
+      "implementation": "Android authentication transports a typed Theme serialized as nine named ARGB fields. Java parses the named object into immutable Theme fields; form rendering no longer depends on matching numeric positions. Existing account-dialog fixtures use the named JSON representation.",
+      "previous_validation_attempts": [
+        "All 7 existing AccountDialogTest tests passed with Robolectric; the focused invocation compiles that existing test class because the full Android test compilation is blocked by an unrelated BookBrowserTest call to removed backPressed()"
+      ],
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "apps/browser/src/android_authentication.rs",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/AccountDialog.java",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/MainActivity.java"
+        ]
+      }
+    },
+    {
+      "id": 21,
+      "description": "Let hosts specify update activation",
+      "status": "verified",
+      "verification": [
+        "20 existing update-client tests passed",
+        "11 existing native-host tests passed, including Android install and taxonomy behavior"
+      ],
+      "implementation": "Coordinator receives ApplicationActivation from its host. Android supplies Installer; other native hosts supply Restart. Both ready actions and installation verification use the policy, independent of target suffixes.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "client/update-client/src/coordinator.rs",
+          "client/update-host/src/host.rs",
+          "client/update-host/src/android.rs"
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "description": "Name logical book identities accurately",
+      "status": "verified",
+      "verification": [
+        "Native app, library-backend, catalog and metadata-server cargo check passed after the rename",
+        "All 228 selected existing contract/model/service tests pass; one existing sync test remains ignored",
+        "Source audit: no Rust content_hash field or parameter typed BookId remains",
+        "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+        "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+        "The separate sync-server workspace and every existing test target compile offline after updating its lockfile for the shared adapter dependency",
+        "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+        "All 5 existing database content-identity tests pass, covering canonical upload races, conflicting aliases, local references and PDF provenance.",
+        "Account-client: 10 existing tests pass. App: 57 pass and 2 fail; both failures reproduce at identical assertions in the earlier 06:53 app test binary, before this round of changes.",
+        "Final complete Android app and sync-server workspace/test-target checks passed.",
+        "Follow-up: app: 59 passed; 0 failed; .tmp/aposd-remediation/app-followup-final-tests.log; library_backend: 52 passed; 0 failed; 1 ignored; .tmp/aposd-remediation/backend-current-status-tests.log"
+      ],
+      "implementation": "Logical BookId fields, parameters, locals and accessors now use book_id/book_ids across the domain, library services, transports, readers and sync server. Annotation, locator, download, replica, asset and PDF metadata contracts retain all 54 historical Serde field keys through explicit rename attributes. SQL schemas, column names, query parameters and actual ContentHash checksum accessors are preserved. Local and canonical byte checksums remain distinct from book identity.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "client/library-model/src/view.rs",
+          "shared/book-model/src/annotations.rs",
+          "shared/sync-common/src/api.rs",
+          "client/library-backend/crates/library-replica/src/lib.rs",
+          "shared/pdf-view-common/src/metadata.rs"
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "description": "Remove selection menu order coupling",
+      "status": "verified",
+      "verification": [
+        "8 existing browser action tests passed: rename/undo, async completion after navigation, three multi-selection/footer cases, nested context menus, download availability, placement source/order behavior",
+        "All browser library tests compiled, including typed action constructors; source audit confirms menu groups match SelectionActionKind instead of iterator position",
+        "Final existing browser runs pass all 5 undo tests and all 23 selected action/selection tests; every browser library test target compiled."
+      ],
+      "implementation": "Selection commands carry a typed kind; menu sections collect commands by kind independently of producer ordering.",
+      "audit": {
+        "result": "satisfied",
+        "sources": [
+          "apps/browser/src/library/widgets/selection_action.rs",
+          "apps/browser/src/library/pages/browse/page.rs"
+        ]
+      }
+    }
+  ],
+  "worktree": "Existing uncommitted changes preserved; pre-edit source copies in /tmp/aposd-remediation-baseline. EPUB module restored after a disk-full write using the archived matching module plus its current TranslateSelection variant.",
+  "validation_storage": "Isolated local .tmp/aposd-remediation/cargo-target and build-tmp; no SSHFS. Logs under .tmp/aposd-remediation. Native speech tests use the 13 real static archives in the local /home/johan/.cache/bokheim-native-libraries/sherpa-onnx-prebuilt/sherpa-onnx-v1.13.8-linux-x64-static-lib/lib via an explicit absolute SHERPA_ONNX_LIB_DIR; CARGO_TARGET_DIR is now absolute to avoid the vendor build script emitting a package-relative link search path.",
+  "remaining": "No remaining implementation or verification work for the 23 APOSD findings. Previously recorded residual suite failures are resolved; historical evidence is retained.",
+  "edited_files": [
+    ".github/workflows/client-platforms.yml",
+    ".github/workflows/desktop-release.yml",
+    ".github/workflows/macos-release.yml",
+    ".github/workflows/sync-e2e.yml",
+    "Cargo.lock",
+    "apps/audiobook-player/src/session.rs",
+    "apps/browser/src/android_authentication.rs",
+    "apps/browser/src/lib.rs",
+    "apps/browser/src/library/pages/browse/navigator.rs",
+    "apps/browser/src/library/pages/browse/page.rs",
+    "apps/browser/src/library/pages/notebook/tests.rs",
+    "apps/browser/src/library/services/undo.rs",
+    "apps/browser/src/library/widgets/book_card.rs",
+    "apps/browser/src/library/widgets/mod.rs",
+    "apps/browser/src/library/widgets/selection_action.rs",
+    "apps/browser/src/universal/sync/android_authentication.rs",
+    "apps/desktop-gpui/android/AndroidManifest.xml",
+    "apps/desktop-gpui/android/build.gradle.kts",
+    "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/AccountDialog.java",
+    "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/BookDownload.java",
+    "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/BookFormats.java",
+    "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/MainActivity.java",
+    "apps/desktop-gpui/android/src/test/java/se/bokheim/reader/gpui/AccountDialogTest.java",
+    "apps/desktop-gpui/android/src/test/java/se/bokheim/reader/gpui/BookBrowserTest.java",
+    "apps/dictionary-settings/Cargo.toml",
+    "apps/dictionary-settings/src/lib.rs",
+    "apps/opds-webview/Cargo.toml",
+    "apps/opds-webview/src/store.rs",
+    "apps/reader/src/comic/mod.rs",
+    "apps/reader/src/epub/mod.rs",
+    "apps/reader/src/epub/render.rs",
+    "apps/reader/src/epub/render/overlays.rs",
+    "apps/reader/src/epub/state.rs",
+    "apps/reader/src/epub/state/appearance.rs",
+    "apps/reader/src/epub/state/events.rs",
+    "apps/reader/src/epub/tts.rs",
+    "apps/reader/src/pdf/render.rs",
+    "apps/reader/src/pdf/render/init.rs",
+    "apps/reader/src/pdf/render/tts.rs",
+    "apps/reader/src/shell/dictionary_tests.rs",
+    "apps/reader/src/shell/marks.rs",
+    "apps/reader/src/shell/persistence.rs",
+    "apps/reader/src/shell/tts.rs",
+    "apps/reader/src/shell/tts/voice_picker.rs",
+    "apps/reader/src/windows.rs",
+    "client/account-client/src/authenticated_request.rs",
+    "client/account-client/src/lib.rs",
+    "client/account-client/src/session_manager.rs",
+    "client/app/crates/dictionary/Cargo.toml",
+    "client/app/crates/dictionary/src/client.rs",
+    "client/app/crates/dictionary/src/import_source.rs",
+    "client/app/crates/dictionary/src/lib.rs",
+    "client/app/crates/dictionary/src/store/mod.rs",
+    "client/app/crates/dictionary/src/store/tests.rs",
+    "client/app/src/api/app/client.rs",
+    "client/app/src/api/app/dictionaries.rs",
+    "client/app/src/app/account.rs",
+    "client/app/src/app/dictionaries.rs",
+    "client/app/src/app/opds.rs",
+    "client/app/src/app/quota.rs",
+    "client/app/src/app/storage_copy.rs",
+    "client/app/src/runtime/mod.rs",
+    "client/app/src/runtime/native.rs",
+    "client/app/src/runtime/requests.rs",
+    "client/app/src/runtime/web.rs",
+    "client/client-runtime/src/reply.rs",
+    "client/library-backend/crates/asset-transfer/Cargo.toml",
+    "client/library-backend/crates/asset-transfer/src/transfer/authentication.rs",
+    "client/library-backend/crates/asset-transfer/src/transfer/executor.rs",
+    "client/library-backend/crates/library-database/src/browse/popularity/tests.rs",
+    "client/library-backend/crates/library-database/tests/regressions.rs",
+    "client/library-backend/crates/library-enrichment/src/enrich.rs",
+    "client/library-backend/crates/library-enrichment/src/tests.rs",
+    "client/library-backend/crates/library-import/src/catalog.rs",
+    "client/library-backend/crates/library-import/src/filesystem_import.rs",
+    "client/library-backend/crates/library-import/src/foliate.rs",
+    "client/library-backend/crates/library-import/src/lib.rs",
+    "client/library-backend/crates/library-import/src/reader_transfer.rs",
+    "client/library-backend/crates/library-opds/src/lib.rs",
+    "client/library-backend/crates/library-opds/src/publications.rs",
+    "client/library-backend/crates/library-placement/src/lib.rs",
+    "client/library-backend/crates/library-runtime/src/account.rs",
+    "client/library-backend/crates/library-sync/Cargo.toml",
+    "client/library-backend/crates/library-sync/src/library_sync.rs",
+    "client/library-backend/crates/library-sync/src/library_sync/tests.rs",
+    "client/library-backend/examples/epub_opening_checks.rs",
+    "client/library-backend/src/client/books.rs",
+    "client/library-backend/src/client/client.rs",
+    "client/library-backend/src/client/web.rs",
+    "client/library-backend/src/lib.rs",
+    "client/library-backend/src/library/automatic_annotation_export.rs",
+    "client/library-backend/src/library/book/mod.rs",
+    "client/library-backend/src/library/book/native.rs",
+    "client/library-backend/src/library/book/remote_archive.rs",
+    "client/library-backend/src/library/book/web_reader.rs",
+    "client/library-backend/src/library/commands.rs",
+    "client/library-backend/src/library/handle.rs",
+    "client/library-backend/src/library/mod.rs",
+    "client/library-backend/src/library/opds.rs",
+    "client/library-backend/src/library/remote_access.rs",
+    "client/library-backend/src/library/resources.rs",
+    "client/library-backend/src/library/workers.rs",
+    "client/library-backend/tests/metered_reading.rs",
+    "client/update-client/src/coordinator.rs",
+    "client/update-client/src/coordinator/tests.rs",
+    "client/update-host/src/android.rs",
+    "client/update-host/src/host.rs",
+    "client/update-host/src/lib.rs",
+    "scripts/ci/check-server-protocol.py",
+    "scripts/ci/local-release.py",
+    "scripts/ci/promote-release-patch.py",
+    "scripts/ci/release-config.json",
+    "scripts/ci/release_config.py",
+    "scripts/ci/shared-tests.py",
+    "scripts/ci/tests/test_server_protocol.py",
+    "servers/catalog/src/covers.rs",
+    "servers/catalog/src/covers/assets.rs",
+    "servers/catalog/src/gutenberg.rs",
+    "servers/catalog/src/ingest_error.rs",
+    "servers/catalog/src/links.rs",
+    "servers/catalog/src/loyalbooks.rs",
+    "servers/catalog/src/loyalbooks/crawl.rs",
+    "servers/catalog/src/main.rs",
+    "servers/catalog/src/publish.rs",
+    "servers/metadata/src/serve/books.rs",
+    "servers/metadata/src/serve/source_subjects.rs",
+    "servers/sync/crates/server-http/src/assets.rs",
+    "servers/sync/crates/server-http/src/assets/ranges.rs",
+    "shared/book-model/Cargo.toml",
+    "shared/book-model/build.rs",
+    "shared/book-model/formats.json",
+    "shared/book-model/src/book_format.rs",
+    "shared/book-model/src/lib.rs",
+    "shared/book-model/src/reading.rs",
+    "shared/metadata-contract/src/books.rs",
+    "shared/protobuf-wire/Cargo.toml",
+    "shared/protobuf-wire/build.rs",
+    "shared/protobuf-wire/protocol.json",
+    "shared/protobuf-wire/src/lib.rs",
+    "shared/subject-projection/src/lib.rs",
+    "Cargo.toml",
+    "shared/content-address/Cargo.toml",
+    "shared/content-address/src/lib.rs",
+    "shared/content-address/src/book_id.rs",
+    "shared/protobuf-wire/src/compact.rs",
+    "shared/protobuf-wire/src/serialization.rs",
+    "shared/protobuf-wire/src/deserializer.rs",
+    "shared/serde-transport/Cargo.toml",
+    "shared/serde-transport/src/lib.rs",
+    "shared/serde-transport/src/compact.rs",
+    "shared/metadata-contract/src/classification_method.rs",
+    "shared/metadata-contract/src/lib.rs",
+    "shared/metadata-contract/src/authority_subjects.rs",
+    "shared/metadata-contract/src/subject_consensus.rs",
+    "shared/metadata-contract/src/year_consensus.rs",
+    "servers/metadata/src/build/mod.rs",
+    "servers/metadata/src/build/work_lookup.rs",
+    "servers/metadata/src/build/wikidata_books.rs",
+    "servers/metadata/src/serve/mod.rs",
+    "servers/metadata/src/serve/resolution.rs",
+    "servers/metadata/src/serve/related_isbn.rs",
+    "servers/metadata/src/serve/sibling_subjects.rs",
+    "servers/metadata/src/crawl/librarything.rs",
+    "servers/metadata/src/crawl/library_of_congress.rs",
+    "apps/reader/src/lib.rs",
+    "apps/reader/src/settings.rs",
+    "apps/reader/src/opening_recovery.rs",
+    "apps/reader/src/pdf/state.rs",
+    "apps/reader/src/comic/tests.rs",
+    "apps/reader/src/comic/controls.rs",
+    "apps/reader/src/epub/toolbar.rs",
+    "apps/reader/src/pdf/render/settings.rs",
+    "client/preferences/src/lib.rs",
+    "client/reader-formats/src/annotations.rs",
+    "apps/browser/src/navigation/shell.rs",
+    "apps/reader/src/epub/recurring.rs",
+    "servers/sync/tests/catalog_assets.rs",
+    "apps/browser/src/navigation/library_session.rs",
+    "apps/reader/src/epub/render/touch_selection.rs",
+    "apps/reader/src/epub/render/sidebar.rs",
+    "apps/browser/src/services/catalog_import.rs",
+    "shared/book-model/src/annotations.rs",
+    "apps/components/src/annotation_editor.rs",
+    "apps/reader/src/epub/state/annotations.rs",
+    "client/account-client/src/account.rs",
+    "apps/reader/src/epub/state/navigation.rs",
+    "apps/browser/src/universal/annotation_export.rs",
+    "client/library-backend/src/browser_audiobook.rs",
+    "shared/book-model/tests/canonical_models.rs",
+    "apps/browser/src/root.rs",
+    "servers/sync/crates/server-postgres/src/sync_store.rs",
+    "apps/reader/src/shell/recurring.rs",
+    "client/library-backend/src/client/reading.rs",
+    "client/library-backend/src/client/transfer.rs",
+    "client/library-backend/src/client/directories.rs",
+    "servers/sync/crates/server-postgres/src/assets.rs",
+    "client/library-backend/src/client/browse.rs",
+    "client/library-backend/src/client/import.rs",
+    "servers/sync/crates/server-postgres/src/applications.rs",
+    "servers/sync/crates/server-postgres/tests/stable_content.rs",
+    "shared/account-contract/src/lib.rs",
+    "client/library-backend/src/library/operations.rs",
+    "servers/sync/crates/server-postgres/tests/asset_authorization.rs",
+    "client/library-backend/src/library/transfer_tests.rs",
+    "apps/reader/crates/pdf/pdf-view/src/lib.rs",
+    "shared/pdf-view-common/src/metadata.rs",
+    "apps/browser/src/library/widgets/book_card/tests.rs",
+    "client/library-backend/src/library/automatic_annotation_export/reader_lifecycle_tests.rs",
+    "apps/reader/src/shell/bookmarks.rs",
+    "shared/pdf-view-common/src/metadata/transport.rs",
+    "client/app/src/app/libraries.rs",
+    "apps/reader/src/shell/annotation_tree.rs",
+    "apps/application-shell/src/panes.rs",
+    "client/library-backend/src/library/reader_import.rs",
+    "apps/browser/src/library/services/update_bridge.rs",
+    "apps/reader/src/shell/annotation_editor.rs",
+    "client/library-backend/src/library/playback.rs",
+    "apps/browser/src/library/services/context.rs",
+    "client/library-backend/src/library/browse.rs",
+    "client/library-backend/src/library/jobs.rs",
+    "client/app/src/app/core.rs",
+    "client/library-backend/src/library/transfer.rs",
+    "apps/application-shell/src/lib.rs",
+    "apps/reader/src/pdf/recurring.rs",
+    "shared/sync-common/src/api.rs",
+    "client/app/src/app/root_recovery.rs",
+    "client/library-backend/src/library/concurrency_tests.rs",
+    "client/library-backend/src/library/book/web.rs",
+    "apps/browser/src/library/pages/trash/tests.rs",
+    "client/library-backend/tests/asset_workflow/ingestion.rs",
+    "client/library-backend/src/library/subscriptions.rs",
+    "apps/browser/src/library/pages/notebook/overlay.rs",
+    "apps/reader/src/pdf/render/annotations.rs",
+    "servers/sync/crates/server-http/src/assets/multipart.rs",
+    "apps/reader/src/pdf/render/navigation.rs",
+    "client/app/src/library_client.rs",
+    "apps/browser/src/library/pages/notebook/overlay/tests.rs",
+    "servers/sync/crates/server-http/src/playback.rs",
+    "servers/sync/crates/server-http/src/account.rs",
+    "apps/browser/src/library/pages/notebook/row/tests.rs",
+    "client/library-backend/crates/library-replica/src/lib.rs",
+    "servers/sync/crates/server-asset-store/src/lib.rs",
+    "client/library-backend/crates/library-replica/examples/compact-sync-payloads.rs",
+    "apps/browser/src/library/pages/browse/detail.rs",
+    "client/library-model/src/placement.rs",
+    "shared/pdf-reader-core/src/streaming_tests.rs",
+    "client/library-model/src/view.rs",
+    "shared/pdf-reader-core/src/native.rs",
+    "apps/browser/src/library/pages/browse/layout.rs",
+    "client/library-model/src/foliate_identity.rs",
+    "apps/browser/src/library/pages/browse/drag_drop.rs",
+    "shared/pdf-reader-core/src/metadata.rs",
+    "apps/browser/src/library/pages/browse/folder_actions.rs",
+    "client/library-model/src/pdf_annotation.rs",
+    "apps/browser/src/library/pages/browse/listing.rs",
+    "client/library-model/src/annotation_markdown.rs",
+    "shared/pdf-reader-core/src/lib.rs",
+    "apps/browser/src/library/pages/trash.rs",
+    "client/library-model/src/download.rs",
+    "client/library-model/src/transfer.rs",
+    "client/library-backend/crates/book-access/tests/epub_http/opening.rs",
+    "client/library-backend/crates/library-enrichment/src/covers.rs",
+    "client/library-backend/crates/library-database/src/projection.rs",
+    "client/library-backend/crates/filesystem-scanner/src/ingestion.rs",
+    "apps/desktop-gpui/examples/audiobook_smoke/loopback.rs",
+    "client/library-backend/crates/book-inspection/src/pdf_annotation_export.rs",
+    "client/library-backend/crates/library-database/src/import/mod.rs",
+    "client/library-backend/crates/filesystem-scanner/src/filesystem_scan.rs",
+    "client/library-backend/crates/library-database/src/native/mod.rs",
+    "client/library-backend/crates/library-database/src/native/placement_edit.rs",
+    "client/library-backend/crates/library-database/tests/local_evict_guard.rs",
+    "client/library-backend/crates/library-database/src/placements/mod.rs",
+    "client/library-backend/crates/cpu-host/src/lib.rs",
+    "client/library-backend/crates/library-database/src/lib.rs",
+    "client/library-backend/crates/library-database/src/annotations/mod.rs",
+    "client/library-backend/crates/library-database/tests/obsolete_download.rs",
+    "client/library-backend/crates/library-database/src/notebook.rs",
+    "client/library-backend/crates/library-database/tests/folder_facets_validation.rs",
+    "client/library-backend/crates/library-database/src/sync/outbox.rs",
+    "client/library-backend/crates/library-database/src/content_identity.rs",
+    "client/library-backend/crates/book-inspection/src/book.rs",
+    "client/library-backend/crates/sync-transport/src/assets.rs",
+    "client/library-backend/crates/library-database/src/enrichment/facts.rs",
+    "client/library-backend/crates/library-database/src/browse/library.rs",
+    "client/library-backend/crates/library-annotation-export/src/tests.rs",
+    "client/library-backend/crates/library-placement/src/asset_workflow.rs",
+    "client/library-backend/crates/library-database/src/sync/apply/registers.rs",
+    "client/library-backend/crates/library-placement/src/management.rs",
+    "client/library-backend/crates/library-database/src/sync/apply/pull.rs",
+    "client/library-backend/crates/library-database/src/books/reading.rs",
+    "client/library-backend/crates/library-database/src/sync/apply/records.rs",
+    "client/library-backend/crates/library-placement/src/asset_workflow/native.rs",
+    "client/library-backend/crates/library-runtime/src/events.rs",
+    "client/library-backend/crates/library-database/src/assets/uploads.rs",
+    "client/library-backend/crates/library-database/src/transfer.rs",
+    "client/library-backend/crates/library-database/src/stored_document.rs",
+    "client/library-backend/crates/library-placement/src/native_edit.rs",
+    "client/library-backend/crates/library-annotation-export/src/reader_profiles.rs",
+    "client/library-backend/crates/library-database/src/browse/catalog.rs",
+    "client/library-backend/crates/library-database/src/browse/rows.rs",
+    "client/library-backend/crates/library-placement/tests/local_eviction.rs",
+    "client/library-backend/crates/library-sync/src/state_sync.rs",
+    "client/library-backend/crates/library-database/src/assets/transfer.rs",
+    "client/library-backend/crates/library-database/src/notebook/tests.rs",
+    "client/library-backend/crates/library-database/src/browse/result/tests.rs",
+    "client/library-backend/crates/library-annotation-export/examples/export_memory.rs",
+    "client/library-backend/crates/library-annotation-export/tests/workflow.rs",
+    "client/library-backend/crates/asset-transfer/src/books.rs",
+    "client/library-backend/crates/library-sync/src/engine_tests.rs",
+    "client/library-backend/crates/library-import/src/completion.rs",
+    "client/library-backend/crates/asset-transfer/src/books/web_upload.rs",
+    "client/library-backend/crates/library-import/src/import.rs",
+    "client/platforms/web/src/web_storage.rs",
+    "client/library-backend/crates/library-import/src/readest.rs",
+    "client/library-backend/crates/asset-transfer/src/thumbnails.rs",
+    "client/library-backend/crates/library-import/src/reader_batch.rs",
+    "client/library-backend/crates/library-files/src/asset_store/browser.rs",
+    "client/library-backend/crates/library-import/src/transfer.rs",
+    "client/library-backend/crates/library-files/src/asset_store/mod.rs",
+    "client/library-backend/crates/library-files/src/asset_store/native/mod.rs",
+    "client/library-backend/crates/library-import/src/native_move.rs",
+    "apps/reader/src/comic/image_decode.rs",
+    "apps/reader/src/shell/dictionary.rs",
+    "apps/reader/src/shell/toolbar.rs",
+    "servers/sync/Cargo.lock"
+  ],
+  "validation_logs": {
+    "typed-client-tests.log": ".tmp/aposd-remediation/typed-client-tests.log",
+    "backend-resource-tests.log": ".tmp/aposd-remediation/backend-resource-tests.log",
+    "backend-resource-baseline-tests.log": ".tmp/aposd-remediation/backend-resource-baseline-tests.log",
+    "native-client-check.log": ".tmp/aposd-remediation/native-client-check.log",
+    "current-client-check.log": ".tmp/aposd-remediation/current-client-check.log",
+    "browser-source-check.log": ".tmp/aposd-remediation/browser-source-check.log",
+    "asset-range-tests.log": ".tmp/aposd-remediation/asset-range-tests.log",
+    "reader-http-tests.log": ".tmp/aposd-remediation/reader-http-tests.log",
+    "pdf-http-test.log": ".tmp/aposd-remediation/pdf-http-test.log",
+    "browser-undo-tests.log": ".tmp/aposd-remediation/browser-undo-tests.log",
+    "browser-action-tests.log": ".tmp/aposd-remediation/browser-action-tests.log",
+    "authentication-tests.log": ".tmp/aposd-remediation/authentication-tests.log",
+    "authentication-client-check.log": ".tmp/aposd-remediation/authentication-client-check.log",
+    "account-client-wasm-check.log": ".tmp/aposd-remediation/account-client-wasm-check.log",
+    "library-resource-tests.log": ".tmp/aposd-remediation/library-resource-tests.log",
+    "library-resource-client-check.log": ".tmp/aposd-remediation/library-resource-client-check.log",
+    "library-owner-tests.log": ".tmp/aposd-remediation/library-owner-tests.log",
+    "library-owner-client-check.log": ".tmp/aposd-remediation/library-owner-client-check.log",
+    "library-owner-metered-test.log": ".tmp/aposd-remediation/library-owner-metered-test.log",
+    "android-theme-tests.log": ".tmp/aposd-remediation/android-theme-tests.log",
+    "android-theme-focused-tests.log": ".tmp/aposd-remediation/android-theme-focused-tests.log",
+    "android-theme-rust-check.log": ".tmp/aposd-remediation/android-theme-rust-check.log",
+    "catalog-recovery-check.log": ".tmp/aposd-remediation/catalog-recovery-check.log",
+    "catalog-recovery-tests.log": ".tmp/aposd-remediation/catalog-recovery-tests.log",
+    "catalog-recovery-baseline-test.log": ".tmp/aposd-remediation/catalog-recovery-baseline-test.log",
+    "catalog-cover-recovery-tests.log": ".tmp/aposd-remediation/catalog-cover-recovery-tests.log",
+    "enrichment-failure-tests.log": ".tmp/aposd-remediation/enrichment-failure-tests.log",
+    "enrichment-failure-baseline-tests.log": ".tmp/aposd-remediation/enrichment-failure-baseline-tests.log",
+    "current-reader-check.log": ".tmp/aposd-remediation/current-reader-check.log",
+    "final-integration-check.log": ".tmp/aposd-remediation/final-integration-check.log",
+    "narration-reader-check.log": ".tmp/aposd-remediation/narration-reader-check.log",
+    "dictionary-source-check.log": ".tmp/aposd-remediation/dictionary-source-check.log",
+    "dictionary-source-tests.log": ".tmp/aposd-remediation/dictionary-source-tests.log",
+    "dictionary-source-wasm-check.log": ".tmp/aposd-remediation/dictionary-source-wasm-check.log",
+    "dictionary-runtime-tests.log": ".tmp/aposd-remediation/dictionary-runtime-tests.log",
+    "dictionary-app-wasm-check.log": ".tmp/aposd-remediation/dictionary-app-wasm-check.log",
+    "structured-release-tests.log": ".tmp/aposd-remediation/structured-release-tests.log",
+    "protocol-config-tests.log": ".tmp/aposd-remediation/protocol-config-tests.log",
+    "book-format-tests.log": ".tmp/aposd-remediation/book-format-tests.log",
+    "android-book-format-check.log": ".tmp/aposd-remediation/android-book-format-check.log",
+    "android-book-format-tests.log": ".tmp/aposd-remediation/android-book-format-tests.log",
+    "book-format-client-check.log": ".tmp/aposd-remediation/book-format-client-check.log",
+    "book-format-wasm-check.log": ".tmp/aposd-remediation/book-format-wasm-check.log",
+    "book-format-tests-serial.log": ".tmp/aposd-remediation/book-format-tests-serial.log",
+    "wire_adapters": [
+      ".tmp/aposd-remediation/wire-adapters-tests.log",
+      ".tmp/aposd-remediation/wire-adapters-wasm.log",
+      ".tmp/aposd-remediation/wire-adapters-consumers.log"
+    ],
+    "classification_provenance": [
+      ".tmp/aposd-remediation/classification-provenance-tests.log",
+      ".tmp/aposd-remediation/classification-provenance-consumers.log"
+    ],
+    "shared_preference_model": [
+      ".tmp/aposd-remediation/shared-preference-model-tests.log",
+      ".tmp/aposd-remediation/reader-shared-model-check.log"
+    ],
+    "book_identity": [
+      ".tmp/aposd-remediation/book-identity-consumers-check.log",
+      ".tmp/aposd-remediation/book-identity-service-tests.log",
+      ".tmp/aposd-remediation/book-identity-rename.log"
+    ],
+    "full_browser_findings": ".tmp/aposd-remediation/full-browser-findings-check.log",
+    "full_reader_findings": ".tmp/aposd-remediation/reader-all-findings-tests.log",
+    "book_identity_sync": ".tmp/aposd-remediation/book-identity-sync-check.log",
+    "app_account_suite": ".tmp/aposd-remediation/final-app-account-tests.log",
+    "release_final": ".tmp/aposd-remediation/final-release-tests.log",
+    "identity_database": ".tmp/aposd-remediation/book-identity-database-tests.log",
+    "final_browser_undo": ".tmp/aposd-remediation/final-browser-undo-tests.log",
+    "final_native": ".tmp/aposd-remediation/final-native-check.log",
+    "final_android": ".tmp/aposd-remediation/final-android-app-check.log",
+    "final_browser_selection": ".tmp/aposd-remediation/final-browser-selection-tests.log",
+    "taxonomy_tests": ".tmp/aposd-remediation/taxonomy-tests.log",
+    "update_tests": ".tmp/aposd-remediation/update-tests.log"
+  },
+  "next_work": "The APOSD remediation and recorded residual test failures are complete. No further implementation step is pending in this audit.",
+  "dependency_repairs": [
+    {
+      "path": "../HtmlViewCore/crates/html-view-cfi/src/lib.rs",
+      "change": "Import SourceTextPosition from the current public html::document facade instead of removed html::parse",
+      "baseline": "/tmp/aposd-remediation-baseline/sibling-HtmlViewCore/crates/html-view-cfi/src/lib.rs"
+    },
+    {
+      "path": "../HtmlViewCore/crates/skrift-column-paginator/src/lib.rs",
+      "change": "Use the current structured PipelineError::message constructor and imported error type",
+      "baseline": "/tmp/aposd-remediation-baseline/sibling-HtmlViewCore/crates/skrift-column-paginator/src/lib.rs"
+    },
+    {
+      "path": "../HtmlViewCore/crates/skrift-column-paginator/src/renderer/nav/notes.rs",
+      "change": "Handle Result<Option<ScopedContent>>; optional preview failures preserve normal link-navigation fallback and prepared document reuse",
+      "baseline": "/tmp/aposd-remediation-baseline/sibling-HtmlViewCore/crates/skrift-column-paginator/src/renderer/nav/notes.rs"
+    },
+    {
+      "path": "../HtmlEngine/crates/04-html-layout/src/layout/inline/fragments/mod.rs",
+      "change": "Keep the exact descriptor size assertion relative to the old Vec footprint rounded to the enum alignment; f64 alignment needs padding on 32-bit targets",
+      "baseline": "/tmp/aposd-remediation-baseline/sibling-HtmlEngine/crates/04-html-layout/src/layout/inline/fragments/mod.rs"
+    }
+  ],
+  "verification_repairs": [
+    "Dictionary scrim now registers its capture mouse-move listener during canvas paint rather than prepaint, as required by GPUI",
+    "Comic decoded dimensions now describe the scaled pixel buffer rather than the source dimensions",
+    "Existing header-action fixture sends the release event required by GPUI keyboard click synthesis; no new tests or test-only production helpers added"
+  ],
+  "baseline_app_failures": {
+    "current_log": ".tmp/aposd-remediation/final-app-account-tests.log",
+    "comparison_binary": ".tmp/aposd-remediation/cargo-target/debug/deps/app-21f085361907c1b9",
+    "comparison_build": "2026-11-02 06:53:15 +0100, identified in dictionary-runtime-tests.log, before the wire adapter, classification, preference composition and identity rename changes",
+    "comparison_logs": [
+      ".tmp/aposd-remediation/app-quota-pre-rename-binary.log",
+      ".tmp/aposd-remediation/app-storage-pre-rename-binary.log"
+    ],
+    "result": "Historical comparison: both assertions failed in the earlier binary. Follow-up traced the quota assertion to an obsolete import-admission expectation and the storage-copy failure to a missing source length. Both are now resolved; see app_failure_followup.",
+    "status": "resolved_in_app_failure_followup"
+  },
+  "completion_audit": {
+    "completed_at_utc": "2026-11-02T08:26:56.092300+00:00",
+    "scope": "All 23 recorded APOSD findings, including previously pending implementations and reader/browser/Android validation. This is not a claim that every unrelated repository test passes.",
+    "requirements": [
+      {
+        "id": 1,
+        "requirement": "Synchronize shared reader preferences with every renderer",
+        "result": "satisfied",
+        "sources": [
+          "apps/reader/src/epub/render.rs",
+          "apps/reader/src/pdf/render/init.rs",
+          "apps/reader/src/comic/mod.rs"
+        ],
+        "evidence": [
+          "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+          "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+          "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source"
+        ]
+      },
+      {
+        "id": 2,
+        "requirement": "Retain failed and pending undo steps",
+        "result": "satisfied",
+        "sources": [
+          "apps/browser/src/library/services/undo.rs",
+          "apps/browser/src/library/pages/browse/page.rs"
+        ],
+        "evidence": [
+          "3 existing undo unit tests passed",
+          "Existing folder rename/undo and async completion after navigation tests passed",
+          "Source audit: each successful reversal pops its step only after success; failure returns the entry containing its failed and unattempted steps; the session receives that remainder before page notification",
+          "Final existing browser runs pass all 5 undo tests and all 23 selected action/selection tests; every browser library test target compiled."
+        ]
+      },
+      {
+        "id": 3,
+        "requirement": "Expose persistence failures and retain retryable writes",
+        "result": "satisfied",
+        "sources": [
+          "apps/reader/src/shell/persistence.rs",
+          "apps/reader/src/shell/marks.rs",
+          "apps/reader/src/epub/render.rs",
+          "apps/reader/src/pdf/render.rs",
+          "apps/reader/src/comic/mod.rs"
+        ],
+        "evidence": [
+          "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+          "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+          "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+          "Source audit: EPUB, PDF and comic constructors watch their progress writer and all three surfaces render its persistent failure/retry notice. Position batching awaits the ordered writer completion receipt before accepting another batch; no duplicate progress retry loop remains."
+        ]
+      },
+      {
+        "id": 4,
+        "requirement": "Associate backend request and response types",
+        "result": "satisfied",
+        "sources": [
+          "client/library-backend/src/client/client.rs",
+          "client/library-backend/src/library/book/web_reader.rs",
+          "client/app/src/api/app/client.rs"
+        ],
+        "evidence": [
+          "Existing metered_reading integration test passed through the typed bundle API",
+          "Native backend library tests compiled; 43 passed, 9 import/transfer failures, 1 ignored",
+          "Current native app, browser-ui and audiobook-player cargo check passed",
+          "All browser library tests compiled and 11 relevant undo/action tests passed",
+          "Stale notebook test cache-key access was updated to the existing CardKey conversion; no new tests or test-only implementation helpers were added",
+          "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+          "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+          "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source"
+        ]
+      },
+      {
+        "id": 5,
+        "requirement": "Encapsulate narration transitions",
+        "result": "satisfied",
+        "sources": [
+          "apps/reader/src/shell/tts.rs",
+          "apps/reader/src/epub/tts.rs",
+          "apps/reader/src/pdf/render/tts.rs"
+        ],
+        "evidence": [
+          "Rustfmt and scoped whitespace checks pass",
+          "Source audit: format readers no longer access or assign raw narration lifecycle fields, task handles, generations or services",
+          "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+          "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+          "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+          "All existing narration lifecycle, stale-generation, notification, sleep, close-reader, dock and voice-picker tests pass in the 205-test speech-enabled reader suite."
+        ]
+      },
+      {
+        "id": 6,
+        "requirement": "Use structured catalog recovery errors",
+        "result": "satisfied",
+        "sources": [
+          "servers/catalog/src/ingest_error.rs",
+          "shared/metadata-contract/src/books.rs",
+          "servers/metadata/src/serve/books.rs"
+        ],
+        "evidence": [
+          "Catalog compiles and 66 of 67 existing tests pass serially, including the existing optional-cover versus lookup-failure test",
+          "The one JPEG byte-equality failure also occurs with all changed catalog ingestion sources restored to pre-edit snapshots; current changes were restored afterward",
+          "All 12 library-enrichment and 30 metadata-contract existing tests pass",
+          "Source audit confirms acquisition recovery and crawler cooldown no longer parse error messages",
+          "Full metadata suite baseline comparison: both versions pass 82 tests and fail exactly the same 13 tests; only the new response field was supplied as None to compile the original server constructors against the additive contract",
+          "The enrichment recipe remains books_v27 because failure-stage diagnostics do not change bibliographic lookup or merge policy",
+          "Final current-source cargo check passed for app, library-backend, catalog and metadata-server after all constructor, cover and response-contract changes were restored"
+        ]
+      },
+      {
+        "id": 7,
+        "requirement": "Keep release validation active under Python optimization",
+        "result": "satisfied",
+        "sources": [
+          "scripts/ci/promote-release-patch.py"
+        ],
+        "evidence": [
+          "22 existing release-script tests passed",
+          "AST: 21 require calls, zero assertion statements",
+          "Invalid repository/source inputs rejected under Python optimization levels 0, 1, and 2; no external commands executed"
+        ]
+      },
+      {
+        "id": 8,
+        "requirement": "Share validated reader preference model",
+        "result": "satisfied",
+        "sources": [
+          "client/preferences/src/lib.rs",
+          "apps/reader/src/settings.rs"
+        ],
+        "evidence": [
+          "All 14 existing app-preferences tests pass",
+          "All touched reader source parses through rustfmt using its actual Rust 2024 edition; shared preference source retains surrounding formatting",
+          "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+          "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+          "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+          "All 18 existing reader settings tests pass inside the 205-test suite; the UI has no duplicate synchronized fields and the shared snapshot diff covers all 32 model fields."
+        ]
+      },
+      {
+        "id": 9,
+        "requirement": "Use structured release and protocol configuration",
+        "result": "satisfied",
+        "sources": [
+          "shared/protobuf-wire/protocol.json",
+          "shared/protobuf-wire/build.rs",
+          "scripts/ci/release-config.json",
+          "scripts/ci/release_config.py",
+          "scripts/ci/check-server-protocol.py"
+        ],
+        "evidence": [
+          "All 69 existing release/CI Python tests passed; the existing server-probe fixture now supplies JSON and still checks authentication-safe version framing and accepted/rejected HTTP statuses",
+          "All 17 existing protobuf-wire tests passed; protocol version remains 31 and the MIME value remains application/vnd.bokheim+protobuf; version=31",
+          "YAML checks verify all 4 workflows load configuration before dependency checkout and use its refs, including workflow-owned configuration for separately pinned app builds",
+          "Public-trust override checks and a local GitHub-environment export check passed",
+          "Shared codec WebAssembly check passed",
+          "Source audit: local release, shared-test pin verification and protocol probe no longer parse workflow or Rust source declarations"
+        ]
+      },
+      {
+        "id": 10,
+        "requirement": "Unify authenticated request renewal",
+        "result": "satisfied",
+        "sources": [
+          "client/account-client/src/authenticated_request.rs",
+          "client/library-backend/crates/library-runtime/src/account.rs"
+        ],
+        "evidence": [
+          "10 existing account-client tests passed",
+          "19 existing library-runtime tests passed",
+          "22 existing asset-transfer tests passed, including concurrent renewal, at-most-one retry, account-switch rejection, and unrefreshable credentials",
+          "Native app and library-backend cargo check passed after callback migration"
+        ]
+      },
+      {
+        "id": 11,
+        "requirement": "Centralize book format capabilities",
+        "result": "satisfied",
+        "sources": [
+          "shared/book-model/formats.json",
+          "shared/book-model/build.rs",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/BookFormats.java",
+          "apps/desktop-gpui/android/build.gradle.kts"
+        ],
+        "evidence": [
+          "All 60 existing book-model and library-opds tests passed, including compound FB2, CBZ, supported versus protected OPDS acquisitions, and downloads",
+          "Native app, browser-ui and opds-webview cargo check passed",
+          "Android production Java compilation and generated manifest processing passed",
+          "All 15 existing BookBrowserTest and 3 BackButtonRouterTest tests passed; the existing browser layout test had its obsolete backPressed call/assertion removed because Back is already tested through BackButtonRouter",
+          "Generated Android manifest exactly matches all 11 registry MIME aliases",
+          "Shared book-model and protobuf-wire WebAssembly check passed",
+          "Scoped formatting and whitespace checks passed",
+          "Final serial run of all 60 existing book-model/OPDS tests passed. The preceding parallel run had one transient failure in the unchanged helper-availability shell probe; no probe implementation or test expectations were changed",
+          "Registry audit confirms the exact historical stored bits and that application/zip is present only among picker aliases"
+        ]
+      },
+      {
+        "id": 12,
+        "requirement": "Encapsulate cover asset variants",
+        "result": "satisfied",
+        "sources": [
+          "servers/catalog/src/covers/assets.rs",
+          "servers/catalog/src/main.rs"
+        ],
+        "evidence": [
+          "Full existing catalog suite: 66 passed, 1 JPEG byte-equality failure",
+          "Existing extraction, derivative recovery, edition preservation, retained-art reimport and publication tests passed",
+          "The remaining JPEG equality test fails at the same assertion with all ingestion changes restored to their pre-edit source baseline",
+          "Production cover filenames and variant enumeration are centralized in covers/assets.rs; fixture filename assertions remain explicit",
+          "Final current-source cargo check passed for app, library-backend, catalog and metadata-server after all constructor, cover and response-contract changes were restored"
+        ]
+      },
+      {
+        "id": 13,
+        "requirement": "Represent valid document sources and formats",
+        "result": "satisfied",
+        "sources": [
+          "client/library-backend/src/library/book/mod.rs",
+          "apps/reader/src/windows.rs"
+        ],
+        "evidence": [
+          "Existing PDF export snapshot/metadata test passed",
+          "Existing stale-path recovery test passed for EPUB, PDF and audio",
+          "Existing metered_reading integration test passed",
+          "Full native backend result: 43 passed, 9 failed, 1 ignored; the original resource model produces exactly the same 9 failures",
+          "Current native app, browser-ui and audiobook-player cargo check passed, including the new Pdf resource match in audiobook playback",
+          "Existing PDF feature HTTP demand-read test passed",
+          "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+          "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+          "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source"
+        ]
+      },
+      {
+        "id": 14,
+        "requirement": "Make wire adapters explicit",
+        "result": "satisfied",
+        "sources": [
+          "shared/serde-transport/src/lib.rs",
+          "shared/serde-transport/src/compact.rs",
+          "shared/protobuf-wire/src/serialization.rs",
+          "shared/content-address/src/lib.rs",
+          "shared/content-address/src/book_id.rs"
+        ],
+        "evidence": [
+          "All 55 existing protobuf-wire, content-address and book-model tests pass, including storage/JSON equality, local and legacy identities, compact metadata/TOC compatibility, sizing, opaque representation and historical state decoding",
+          "Shared protobuf-wire, content-address and book-model WebAssembly cargo check passed",
+          "Native app, library-backend and metadata-server cargo check passed"
+        ]
+      },
+      {
+        "id": 15,
+        "requirement": "Type classification provenance",
+        "result": "satisfied",
+        "sources": [
+          "shared/metadata-contract/src/classification_method.rs",
+          "shared/metadata-contract/src/authority_subjects.rs",
+          "servers/metadata/src/serve/resolution.rs",
+          "servers/metadata/src/serve/related_isbn.rs"
+        ],
+        "evidence": [
+          "All 30 existing metadata-contract tests pass",
+          "Metadata server: 82 existing tests pass; exactly the same 13 tests fail as the recorded pre-change enrichment-failure baseline",
+          "Native cargo check passed for app, library-backend, catalog and metadata-server",
+          "Source audit: no classification policy parses method strings or prefixes outside the serialization boundary"
+        ]
+      },
+      {
+        "id": 16,
+        "requirement": "Share stable taxonomy semantics",
+        "result": "satisfied",
+        "sources": [
+          "shared/subject-projection/src/lib.rs",
+          "servers/metadata/src/serve/source_subjects.rs"
+        ],
+        "evidence": [
+          "50 existing subject-projection library tests passed",
+          "Metadata source-heading tests compile, but 3 existing assertions expect old taxonomy paths or BISAC strings; all 3 fail identically with the original two policy conditions restored",
+          "Restored both APOSD policy conditions after baseline comparison; no taxonomy data or reviewed route pins modified"
+        ]
+      },
+      {
+        "id": 17,
+        "requirement": "Own consistent library service resources",
+        "result": "satisfied",
+        "sources": [
+          "client/library-backend/crates/library-placement/src/lib.rs",
+          "client/library-backend/crates/library-import/src/lib.rs",
+          "client/library-backend/crates/library-sync/src/library_sync.rs",
+          "client/library-backend/crates/asset-transfer/src/transfer/executor.rs"
+        ],
+        "evidence": [
+          "51 existing library-import tests passed",
+          "12 existing library-sync tests passed, 1 optional benchmark ignored",
+          "Native app and library-backend cargo check passed after constructor and configuration migration",
+          "109 existing tests passed: placement 24, import 51, sync 12 (1 optional benchmark ignored), asset-transfer 22",
+          "Native app and library-backend check passed after the complete ownership migration",
+          "Existing metered_reading integration test passed with RUST_MIN_STACK=16777216; its initial run overflowed the default test-thread stack",
+          "Final current-source cargo check passed for app, library-backend, catalog and metadata-server after all constructor, cover and response-contract changes were restored"
+        ]
+      },
+      {
+        "id": 18,
+        "requirement": "Move dictionary source handling into import boundary",
+        "result": "satisfied",
+        "sources": [
+          "client/app/crates/dictionary/src/import_source.rs",
+          "client/app/src/runtime/web.rs",
+          "apps/dictionary-settings/src/lib.rs"
+        ],
+        "evidence": [
+          "All 25 existing dictionary tests pass after store fixtures migrate to owned reader sources",
+          "All 12 selected existing app runtime tests pass, including panic isolation, ordered settings and browser request/subscription recovery",
+          "Native app and dictionary-settings cargo check passed after removing the byte-payload import route",
+          "WebAssembly dictionary cargo check with --features store passed, including browser source conversion and bounded File reads",
+          "Source audit: settings view no longer reads bytes, runs blocking jobs or implements import size/count policy; its native provider adapter defers source opening until worker consumption",
+          "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+          "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+          "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source"
+        ]
+      },
+      {
+        "id": 19,
+        "requirement": "Share byte range responses",
+        "result": "satisfied",
+        "sources": [
+          "servers/sync/crates/server-http/src/assets/ranges.rs",
+          "servers/sync/crates/server-http/src/assets.rs",
+          "servers/sync/crates/server-http/src/playback.rs"
+        ],
+        "evidence": [
+          "All 4 existing server-http asset range tests passed, covering track-relative bytes, content-hash/If-Range validation, multipart range rejection rules, and truncated multipart storage",
+          "9 existing desktop HTTP reader tests passed (2 optional fixture benchmarks ignored)",
+          "Existing PDF-feature test unindexed_pdf_streams_large_demand_reads_over_http passed"
+        ]
+      },
+      {
+        "id": 20,
+        "requirement": "Use named Android theme fields",
+        "result": "satisfied",
+        "sources": [
+          "apps/browser/src/android_authentication.rs",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/AccountDialog.java",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/MainActivity.java"
+        ],
+        "evidence": [
+          "Android browser-ui cargo check passed using the installed NDK",
+          "Source check confirms Rust camelCase serialization and the Java parser agree on all 9 field names",
+          "Final complete desktop-gpui Android library check passed with the real Android feature set, including the reader, native narration and account theme transport. BookBrowser test compilation was already repaired during finding 11."
+        ]
+      },
+      {
+        "id": 21,
+        "requirement": "Let hosts specify update activation",
+        "result": "satisfied",
+        "sources": [
+          "client/update-client/src/coordinator.rs",
+          "client/update-host/src/host.rs",
+          "client/update-host/src/android.rs"
+        ],
+        "evidence": [
+          "20 existing update-client tests passed",
+          "11 existing native-host tests passed, including Android install and taxonomy behavior"
+        ]
+      },
+      {
+        "id": 22,
+        "requirement": "Name logical book identities accurately",
+        "result": "satisfied",
+        "sources": [
+          "client/library-model/src/view.rs",
+          "shared/book-model/src/annotations.rs",
+          "shared/sync-common/src/api.rs",
+          "client/library-backend/crates/library-replica/src/lib.rs",
+          "shared/pdf-view-common/src/metadata.rs"
+        ],
+        "evidence": [
+          "Native app, library-backend, catalog and metadata-server cargo check passed after the rename",
+          "All 228 selected existing contract/model/service tests pass; one existing sync test remains ignored",
+          "Source audit: no Rust content_hash field or parameter typed BookId remains",
+          "Current speech-enabled reader-ui and browser-ui native cargo check passed",
+          "Full web-backend-worker and web-gpui WebAssembly cargo check passed with the existing RUSTC_BOOTSTRAP=1 browser build configuration",
+          "The separate sync-server workspace and every existing test target compile offline after updating its lockfile for the shared adapter dependency",
+          "All 205 existing speech-enabled reader library tests pass after progress notices and the popup/image verification repairs; the final full browser app/worker WebAssembly check passes with the same source",
+          "All 5 existing database content-identity tests pass, covering canonical upload races, conflicting aliases, local references and PDF provenance.",
+          "Account-client: 10 existing tests pass. App: 57 pass and 2 fail; both failures reproduce at identical assertions in the earlier 06:53 app test binary, before this round of changes.",
+          "Final complete Android app and sync-server workspace/test-target checks passed."
+        ]
+      },
+      {
+        "id": 23,
+        "requirement": "Remove selection menu order coupling",
+        "result": "satisfied",
+        "sources": [
+          "apps/browser/src/library/widgets/selection_action.rs",
+          "apps/browser/src/library/pages/browse/page.rs"
+        ],
+        "evidence": [
+          "8 existing browser action tests passed: rename/undo, async completion after navigation, three multi-selection/footer cases, nested context menus, download availability, placement source/order behavior",
+          "All browser library tests compiled, including typed action constructors; source audit confirms menu groups match SelectionActionKind instead of iterator position",
+          "Final existing browser runs pass all 5 undo tests and all 23 selected action/selection tests; every browser library test target compiled."
+        ]
+      }
+    ],
+    "current_gates": {
+      "reader-all-findings-tests.log": "205 passed; 0 failed",
+      "book-identity-service-tests.log": "51 passed; 0 failed",
+      "book-identity-database-tests.log": "5 passed; 0 failed",
+      "final-browser-undo-tests.log": "5 passed; 0 failed",
+      "final-browser-selection-tests.log": "23 passed; 0 failed",
+      "final-release-tests.log": "Ran 69 tests",
+      "final-native-check.log": "Finished `dev`",
+      "full-browser-findings-check.log": "Finished `dev`",
+      "final-android-app-check.log": "Finished `dev`",
+      "book-identity-sync-check.log": "Finished `dev`",
+      "update-tests.log": "20 passed; 0 failed",
+      "taxonomy-tests.log": "50 passed; 0 failed",
+      "wire-adapters-tests.log": "17 passed; 0 failed",
+      "classification-provenance-tests.log": "30 passed; 0 failed"
+    },
+    "runtime_results": {
+      "speech_enabled_reader": "205 passed",
+      "selected_contract_model_service_tests": "228 passed; 1 existing optional test ignored",
+      "database_content_identity": "5 passed",
+      "browser_undo_and_selection": "28 passed",
+      "release_ci_python": "69 passed",
+      "account_client": "10 passed"
+    },
+    "compile_results": [
+      "Native reader/browser with native narration, plus metadata server",
+      "Full web-backend-worker and web-gpui WebAssembly application",
+      "Complete desktop-gpui Android library with android feature",
+      "Separate sync-server workspace including every existing test target"
+    ],
+    "remaining_requirement_count": 0,
+    "residual_suite_failures": "All previously recorded app, backend, metadata and catalog suite failures have been resolved or reconciled with current behavior. Final results: app 59 passed; backend 52 passed and 1 existing ignored; metadata 95 passed; catalog 67 passed. Historical baseline logs remain available; see residual_failure_reconciliation for the latest verification.",
+    "constraints": {
+      "vendored_sources_modified": false,
+      "new_tests_or_test_only_production_helpers": false,
+      "local_storage_only": true,
+      "glibc_release_baseline": "2.17 unchanged",
+      "wire_protocol_version": 31,
+      "persisted_wire_version": 17,
+      "curated_taxonomy_data_modified": false,
+      "user_worktree_preserved": true
+    }
+  },
+  "app_failure_followup": {
+    "updated_at_utc": "2026-11-02T12:43:43.869428+00:00",
+    "scope": "Resolve the two app quota/storage-copy failures identified after the APOSD remediation.",
+    "quota": {
+      "result": "The old test assumed imports must synchronously pass cloud admission. Current production code and existing backend tests intentionally commit local imports without cloud admission; uploads enforce cloud quota separately.",
+      "change": "Adapted the existing quota test to exercise simultaneous cloud enablement of two populated local libraries. It verifies exactly one succeeds, the rejected library keeps its local books and policy, duplicate content consumes no additional quota, and pending inventory survives reopening.",
+      "path": "client/app/src/app/quota.rs"
+    },
+    "storage_copy": {
+      "result": "Fixed native transfer verification by preserving TransferResource.length through LibraryImport.import_transferred_book. Copies without a published byte checksum now verify the pinned source length instead of failing with transfer has no verified byte source. Known checksum verification remains required.",
+      "paths": [
+        "client/library-backend/src/library/transfer.rs",
+        "client/library-backend/crates/library-import/src/transfer.rs"
+      ],
+      "existing_test_adaptation": "Updated existing import call sites for the source-length argument and the storage-copy fixture to resolve destination-scoped book IDs through its durable copy journal. Existing safety assertions still require complete exact bytes before cloud deletion, retained source/journal after failure, reuse of the same destination, preserved reading position, and local availability across account changes."
+    },
+    "verification": {
+      "log": ".tmp/aposd-remediation/app-followup-final-tests.log",
+      "app": "59 passed",
+      "library_files": "44 passed",
+      "library_import": "51 passed",
+      "backend_wrong_byte_rejection": "1 passed; all backend unit test targets compiled",
+      "backend_log": ".tmp/aposd-remediation/app-followup-backend-test.log"
+    },
+    "constraints": {
+      "new_tests_or_test_only_production_helpers": false,
+      "vendored_sources_modified": false,
+      "user_worktree_preserved": true
+    }
+  },
+  "taxonomy_test_followup": {
+    "updated_at_utc": "2026-11-02T13:26:09.301890+00:00",
+    "instruction": "Tests should not freeze catalog or taxonomy structure.",
+    "change": "Updated seven existing metadata-serving tests. Expected classification concepts and audience scopes are derived from the active taxonomy for fixture BISAC/LCC inputs, without hard-coded output paths, parent chains, labels, concept IDs, or raw-versus-unified representation requirements. Enrichment allows additional classifications from preserved source metadata. Criticism and juvenile/adult scope checks follow the active mappings. Source preservation and idempotence assertions remain.",
+    "paths": [
+      "servers/metadata/src/serve/books.rs",
+      "servers/metadata/src/serve/source_subjects.rs"
+    ],
+    "verification": {
+      "command": "cargo test --offline -p metadata-server --lib -- --test-threads=1",
+      "log": ".tmp/aposd-remediation/taxonomy-independent-metadata-full-tests.log",
+      "result": "88 passed; 7 failed; all 36 serving tests pass",
+      "resolved_baseline_failure_count": 6,
+      "remaining_build_failures": [
+        "build::tests::answers_across_query_and_commit_boundaries_match_the_original_resolver",
+        "build::tests::classification_lookup_keeps_sibling_domains_when_work_evidence_is_incomplete",
+        "build::tests::classification_lookup_requires_consensus_when_sibling_evidence_is_sparse",
+        "build::tests::description_sidecar_enriches_a_core_without_embedded_descriptions",
+        "build::tests::previous_classification_recipe_uses_targeted_migration",
+        "build::tests::single_classified_sibling_is_used_until_another_sibling_has_codes",
+        "build::tests::work_subtree_policy_agrees_across_single_batch_published_and_title_candidates"
+      ]
+    },
+    "remaining_scope": "The seven build/resolver/migration failures were subsequently resolved in metadata_build_test_followup. The complete metadata-server library suite now passes all 95 tests.",
+    "constraints": {
+      "production_code_changed": false,
+      "catalog_or_taxonomy_data_changed": false,
+      "new_tests_or_test_only_helpers": false
+    }
+  },
+  "metadata_build_test_followup": {
+    "updated_at_utc": "2026-11-02T13:35:15.506700+00:00",
+    "scope": "Resolve the seven remaining metadata build/resolver/migration test failures while keeping catalog structure editable.",
+    "path": "servers/metadata/src/build/tests.rs",
+    "changes": [
+      "Existing FixtureService now compares stored builder answers, including restored shared descriptions, with raw resolver output before applying serving policy. Full metadata fidelity checks remain intact.",
+      "Serving assertions verify that sibling/sidecar evidence does not become edition-owned ISBN evidence; declared work classifications retain their explicit provenance; exact sibling classifications remain available for their own editions.",
+      "Single-query, batch-query, stored-answer and edition-candidate consistency checks remain; inferred classification expectations follow current runtime results rather than a frozen catalog subtree selection.",
+      "The existing targeted-migration fixture now uses explicitly supported legacy recipe 2 instead of assuming that every immediately preceding recipe has the same migration contract."
+    ],
+    "verification": {
+      "command": "cargo test --offline -p metadata-server --lib -- --test-threads=1",
+      "log": ".tmp/aposd-remediation/metadata-contract-final-tests.log",
+      "result": "95 passed; 0 failed; all existing metadata tests"
+    },
+    "constraints": {
+      "production_code_changed": false,
+      "catalog_or_taxonomy_data_changed": false,
+      "existing_test_count_unchanged": true,
+      "new_test_helpers": false
+    }
+  },
+  "catalog_cover_followup": {
+    "updated_at_utc": "2026-11-02T13:46:38.230509+00:00",
+    "path": "servers/catalog/src/main.rs",
+    "change": "Corrected the existing local/source/fallback cover fixture to serve the unadjusted high-density master instead of an already transformed browse card. This avoids applying card crop/stretch twice while retaining byte-equality, request-order, needs_cover, availability and fallback assertions.",
+    "result": "67 catalog tests passed; 0 failed",
+    "log": ".tmp/aposd-remediation/catalog-cover-final-tests.log",
+    "constraints": {
+      "production_code_changed": false,
+      "catalog_curation_changed": false,
+      "new_tests_or_helpers": false
+    }
+  },
+  "residual_failure_reconciliation": {
+    "updated_at_utc": "2026-11-02T13:46:38.230525+00:00",
+    "scope": "Previously reported app, backend, metadata and catalog suite failures; not an exhaustive workspace test run.",
+    "results": {
+      "catalog": {
+        "log": ".tmp/aposd-remediation/catalog-cover-final-tests.log",
+        "result": "67 passed; 0 failed;"
+      },
+      "library_backend": {
+        "log": ".tmp/aposd-remediation/backend-current-status-tests.log",
+        "result": "52 passed; 0 failed; 1 ignored;"
+      },
+      "metadata_server": {
+        "log": ".tmp/aposd-remediation/metadata-contract-final-tests.log",
+        "result": "95 passed; 0 failed;"
+      },
+      "app": {
+        "log": ".tmp/aposd-remediation/app-followup-final-tests.log",
+        "result": "59 passed; 0 failed;"
+      }
+    },
+    "backend_note": "The current checkout had already adapted the old import/transfer assertions. A read-only rerun confirmed all 52 active backend tests pass; no backend source changes were made during that status check.",
+    "unresolved_recorded_failures": 0
+  },
+  "commit_review": {
+    "prepared_at_utc": "2026-11-02T13:52:41.831084+00:00",
+    "status": "Review breakdown prepared; nothing staged or committed.",
+    "worktree_entry_count_at_review": 1718,
+    "audited_edited_path_inventory_count": 325,
+    "staging_scope": "Review individual hunks, including consumers of changed shared contracts. The audit path inventory records touched files, not exclusive ownership of their current diffs. Preserve unrelated changes and keep regression assertions with the corresponding domain change.",
+    "groups": [
+      {
+        "title": "Shared contracts and book identity",
+        "finding_ids": [
+          8,
+          11,
+          14,
+          15,
+          16,
+          22
+        ],
+        "primary_review_paths": [
+          "apps/desktop-gpui/android/build.gradle.kts",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/BookFormats.java",
+          "apps/reader/src/settings.rs",
+          "client/library-backend/crates/library-replica/src/lib.rs",
+          "client/library-model/src/view.rs",
+          "client/preferences/src/lib.rs",
+          "servers/metadata/src/serve/related_isbn.rs",
+          "servers/metadata/src/serve/resolution.rs",
+          "servers/metadata/src/serve/source_subjects.rs",
+          "shared/book-model/build.rs",
+          "shared/book-model/formats.json",
+          "shared/book-model/src/annotations.rs",
+          "shared/content-address/src/book_id.rs",
+          "shared/content-address/src/lib.rs",
+          "shared/metadata-contract/src/authority_subjects.rs",
+          "shared/metadata-contract/src/classification_method.rs",
+          "shared/pdf-view-common/src/metadata.rs",
+          "shared/protobuf-wire/src/serialization.rs",
+          "shared/serde-transport/src/compact.rs",
+          "shared/serde-transport/src/lib.rs",
+          "shared/subject-projection/src/lib.rs",
+          "shared/sync-common/src/api.rs"
+        ],
+        "validation_evidence": [
+          "shared-contract serialization tests",
+          "metadata-server: 95 passed",
+          "account-client and app tests",
+          "native, WebAssembly and Android compilation"
+        ]
+      },
+      {
+        "title": "Backend services, imports and storage",
+        "finding_ids": [
+          4,
+          6,
+          10,
+          12,
+          13,
+          17,
+          18,
+          19
+        ],
+        "primary_review_paths": [
+          "apps/dictionary-settings/src/lib.rs",
+          "apps/reader/src/windows.rs",
+          "client/account-client/src/authenticated_request.rs",
+          "client/app/crates/dictionary/src/import_source.rs",
+          "client/app/src/api/app/client.rs",
+          "client/app/src/runtime/web.rs",
+          "client/library-backend/crates/asset-transfer/src/transfer/executor.rs",
+          "client/library-backend/crates/library-import/src/lib.rs",
+          "client/library-backend/crates/library-placement/src/lib.rs",
+          "client/library-backend/crates/library-runtime/src/account.rs",
+          "client/library-backend/crates/library-sync/src/library_sync.rs",
+          "client/library-backend/src/client/client.rs",
+          "client/library-backend/src/library/book/mod.rs",
+          "client/library-backend/src/library/book/web_reader.rs",
+          "servers/catalog/src/covers/assets.rs",
+          "servers/catalog/src/ingest_error.rs",
+          "servers/catalog/src/main.rs",
+          "servers/metadata/src/serve/books.rs",
+          "servers/sync/crates/server-http/src/assets.rs",
+          "servers/sync/crates/server-http/src/assets/ranges.rs",
+          "servers/sync/crates/server-http/src/playback.rs",
+          "shared/metadata-contract/src/books.rs"
+        ],
+        "validation_evidence": [
+          "library-backend: 52 passed, 1 ignored",
+          "app: 59 passed",
+          "library-import: 51 passed",
+          "library-files: 44 passed",
+          "catalog: 67 passed"
+        ]
+      },
+      {
+        "title": "Reader state, persistence and narration",
+        "finding_ids": [
+          1,
+          2,
+          3,
+          5,
+          23
+        ],
+        "primary_review_paths": [
+          "apps/browser/src/library/pages/browse/page.rs",
+          "apps/browser/src/library/services/undo.rs",
+          "apps/browser/src/library/widgets/selection_action.rs",
+          "apps/reader/src/comic/mod.rs",
+          "apps/reader/src/epub/render.rs",
+          "apps/reader/src/epub/tts.rs",
+          "apps/reader/src/pdf/render.rs",
+          "apps/reader/src/pdf/render/init.rs",
+          "apps/reader/src/pdf/render/tts.rs",
+          "apps/reader/src/shell/marks.rs",
+          "apps/reader/src/shell/persistence.rs",
+          "apps/reader/src/shell/tts.rs"
+        ],
+        "validation_evidence": [
+          "speech-enabled reader-ui: 205 passed",
+          "browser undo and selection: 28 passed",
+          "native and full WebAssembly compilation"
+        ]
+      },
+      {
+        "title": "Release configuration and platform integration",
+        "finding_ids": [
+          7,
+          9,
+          20,
+          21
+        ],
+        "primary_review_paths": [
+          "apps/browser/src/android_authentication.rs",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/AccountDialog.java",
+          "apps/desktop-gpui/android/src/main/java/se/bokheim/reader/gpui/MainActivity.java",
+          "client/update-client/src/coordinator.rs",
+          "client/update-host/src/android.rs",
+          "client/update-host/src/host.rs",
+          "scripts/ci/check-server-protocol.py",
+          "scripts/ci/promote-release-patch.py",
+          "scripts/ci/release-config.json",
+          "scripts/ci/release_config.py",
+          "shared/protobuf-wire/build.rs",
+          "shared/protobuf-wire/protocol.json"
+        ],
+        "validation_evidence": [
+          "release CI Python: 69 passed",
+          "update host and client tests",
+          "Android theme and browser Java tests",
+          "Android library compilation"
+        ]
+      }
+    ],
+    "sibling_repository_prerequisites": [
+      {
+        "path": "../HtmlViewCore/crates/html-view-cfi/src/lib.rs",
+        "change": "Import SourceTextPosition from the current public html::document facade instead of removed html::parse",
+        "baseline": "/tmp/aposd-remediation-baseline/sibling-HtmlViewCore/crates/html-view-cfi/src/lib.rs"
+      },
+      {
+        "path": "../HtmlViewCore/crates/skrift-column-paginator/src/lib.rs",
+        "change": "Use the current structured PipelineError::message constructor and imported error type",
+        "baseline": "/tmp/aposd-remediation-baseline/sibling-HtmlViewCore/crates/skrift-column-paginator/src/lib.rs"
+      },
+      {
+        "path": "../HtmlViewCore/crates/skrift-column-paginator/src/renderer/nav/notes.rs",
+        "change": "Handle Result<Option<ScopedContent>>; optional preview failures preserve normal link-navigation fallback and prepared document reuse",
+        "baseline": "/tmp/aposd-remediation-baseline/sibling-HtmlViewCore/crates/skrift-column-paginator/src/renderer/nav/notes.rs"
+      },
+      {
+        "path": "../HtmlEngine/crates/04-html-layout/src/layout/inline/fragments/mod.rs",
+        "change": "Keep the exact descriptor size assertion relative to the old Vec footprint rounded to the enum alignment; f64 alignment needs padding on 32-bit targets",
+        "baseline": "/tmp/aposd-remediation-baseline/sibling-HtmlEngine/crates/04-html-layout/src/layout/inline/fragments/mod.rs"
+      }
+    ],
+    "whitespace_check": "git diff --check passed for the reviewed native transfer, metadata build/serving and catalog files.",
+    "verification_scope": "The recorded focused suites and compile checks passed; this review does not claim that the entire workspace test suite was run."
+  }
+}

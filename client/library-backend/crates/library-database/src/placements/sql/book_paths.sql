@@ -27,9 +27,17 @@ FROM local_file_projection p
 JOIN book b ON b.content_hash = p.content_hash
 WHERE b.deleted_at IS NULL;
 
+-- name: registered_file_projection_paths?
+SELECT p.content_hash,p.relative_path FROM local_file_projection p
+JOIN book b ON b.content_hash=p.content_hash;
+
+-- name: registered_file_placements?
+SELECT b.content_hash,bd.dir_id,bd.file_name FROM book b
+JOIN book_dir bd ON bd.book_row_id=b.row_id
+WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL;
+
 -- name: local_book_placements?
 SELECT bd.dir_id, bd.file_name
 FROM book_dir bd
 JOIN book b ON b.row_id = bd.book_row_id
 WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL;
-

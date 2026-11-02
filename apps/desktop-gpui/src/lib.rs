@@ -6,11 +6,11 @@ mod android_fonts;
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android_updates;
 mod blocking_worker;
+#[cfg(feature = "kobo")]
+mod kobo_fonts;
 mod reader_links;
 pub use reader_links::ReaderActivation;
 pub(crate) use reader_links::forward_reader_links;
-#[cfg(any(all(feature = "android", target_os = "android"), test))]
-mod book_browser;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod linux_updates;
 mod session;
@@ -96,7 +96,7 @@ pub type IncomingBookResult = Result<IncomingBook, app::BackendError>;
 
 #[cfg(any(target_os = "android", test))]
 fn stage_incoming_book(mut source: impl std::io::Read, path: &std::path::Path) -> std::io::Result<()> {
-    use std::io::{Error, Write as _};
+    use std::io::{Error, ErrorKind, Write as _};
     const RESERVED_BYTES: u64 = 128 * 1024 * 1024;
     let mut destination = std::fs::OpenOptions::new().create_new(true).write(true).open(path)?;
     let directory = path.parent().ok_or_else(|| Error::other("incoming file has no parent directory"))?;
@@ -105,7 +105,7 @@ fn stage_incoming_book(mut source: impl std::io::Read, path: &std::path::Path) -
     loop {
         if bytes_until_check == 0 {
             if fs2::available_space(directory)? <= RESERVED_BYTES {
-                return Err(Error::other("not enough free storage to stage book"));
+                return Err(Error::new(ErrorKind::StorageFull, "not enough free storage to stage book"));
             }
             bytes_until_check = 8 * 1024 * 1024;
         }
@@ -127,6 +127,8 @@ pub fn open_ui(
     let mut profile = StartupProfile::new("open_ui");
     http_response::initialize_tls();
     profile.mark("crypto_provider");
+    #[cfg(feature = "kobo")]
+    kobo_fonts::register(cx);
     #[cfg(feature = "kobo")]
     if let Err(error) = cx
         .text_system()
@@ -186,21 +188,21 @@ pub fn open_ui(
     if cx.global::<browser_ui::AndroidStoragePolicy>().all_files_access_available {
         android::watch_storage_access(backend_worker.clone(), android_private_library_root, cx);
     }
-    let AppStartupState { libraries, browsing_preferences, account_status, reader_preferences: shared_reader_preferences } = backend_startup;
-    let startup = AppStartup { libraries, browsing_preferences, account_status };
+    let AppStartupState { default_library_root, dictionary_storage_root, preference_storage_root, libraries, browsing_preferences, account_status, reader_preferences: shared_reader_preferences } = backend_startup;
+    let startup = AppStartup { default_library_root, dictionary_storage_root, preference_storage_root, libraries, browsing_preferences, account_status };
     session_saves.update(cx, |owner, _| owner.session.reader_preferences.apply_synchronized(&shared_reader_preferences));
 
     let reader_session_saves = session_saves.clone();
-    let reader_preferences_backend = backend_worker.clone();
+    let reader_preferences_store = app_preferences::Client::new(startup.preference_storage_root.clone());
     let save_reader_settings: SaveReaderSettings = Rc::new(move |preferences: ReaderPreferences, patches, cx: &mut App| {
         reader_session_saves.update(cx, |owner, cx| {
             owner.session.reader_preferences = preferences;
             owner.schedule(cx);
         });
         if !patches.is_empty() {
-            let backend = reader_preferences_backend.clone();
+            let preferences_store = reader_preferences_store.clone();
             cx.spawn(async move |_| {
-                if let Err(error) = backend.update_reader_preferences(patches).await {
+                if let Err(error) = preferences_store.update_reader(patches).await {
                     log::warn!("failed to persist reader preference: {error}");
                 }
             })
@@ -334,7 +336,7 @@ pub fn open_ui(
                 let content = platform_content(application.clone(), cx);
                 #[cfg(all(feature = "android", target_os = "android"))]
                 let content = {
-                    match book_browser::wrap(content.clone(), window, cx) {
+                    match embedded_browser_ui::android::wrap(content.clone(), window, cx) {
                         Ok(content) => {
                             let host = content.downgrade();
                             application.update(cx, |application, _| application.set_native_back_overlay(move |window, cx| host.update(cx, |host, cx| host.native_back(window, cx)).unwrap_or(false)));

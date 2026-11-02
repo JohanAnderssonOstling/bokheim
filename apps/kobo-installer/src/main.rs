@@ -1,5 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use ui_text::text;
+
 use bokheim_kobo_installer::{DeviceDetection, DeviceMonitor, EjectOutcome, KoboDevice, detect_kobo_devices, eject_device, install_archive_with_progress, validate_archive};
 use gpui::{App, Bounds, Context, FontWeight, SharedString, Task, Window, WindowBounds, WindowOptions, div, prelude::*, px, relative, rgb, size};
 use kobo_package::{RELEASE_API, newer_release};
@@ -100,29 +102,35 @@ impl Installer {
                     Err(_) => break,
                 };
                 if !installing {
-                    let (updated_monitor, detected) = cx.background_executor().spawn(async move {
-                        let detected = if PREVIEW_ONLY {
-                            DeviceDetection { devices: detect_kobo_devices(), mount_error: None }
-                        } else {
-                            device_monitor.poll()
-                        };
-                        (device_monitor, detected)
-                    }).await;
+                    let (updated_monitor, detected) = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let detected = if PREVIEW_ONLY { DeviceDetection { devices: detect_kobo_devices(), mount_error: None } } else { device_monitor.poll() };
+                            (device_monitor, detected)
+                        })
+                        .await;
                     device_monitor = updated_monitor;
-                    if this.update(cx, |this, cx| {
-                        if matches!(this.status, InstallerStatus::Installing) { return; }
-                        if detected.devices != this.devices || detected.mount_error != this.mount_error {
-                            this.devices = detected.devices;
-                            if let Some(error) = &detected.mount_error {
-                                eprintln!("Automatic Kobo mount failed: {error}");
+                    if this
+                        .update(cx, |this, cx| {
+                            if matches!(this.status, InstallerStatus::Installing) {
+                                return;
                             }
-                            this.mount_error = detected.mount_error;
-                            if !matches!(this.status, InstallerStatus::Installed(_)) || !this.devices.is_empty() {
-                                this.status = this.detected_status();
+                            if detected.devices != this.devices || detected.mount_error != this.mount_error {
+                                this.devices = detected.devices;
+                                if let Some(error) = &detected.mount_error {
+                                    eprintln!("Automatic Kobo mount failed: {error}");
+                                }
+                                this.mount_error = detected.mount_error;
+                                if !matches!(this.status, InstallerStatus::Installed(_)) || !this.devices.is_empty() {
+                                    this.status = this.detected_status();
+                                }
+                                cx.notify();
                             }
-                            cx.notify();
-                        }
-                    }).is_err() { break; }
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 cx.background_executor().timer(if installing { Duration::from_millis(50) } else { Duration::from_secs(1) }).await;
             }
@@ -142,13 +150,26 @@ impl Installer {
             });
         });
 
-        Self { devices: Vec::new(), mount_error: None, status: InstallerStatus::Monitoring, _monitor: monitor, _update_check: update_check, install_task: None, package: KoboPackage::Embedded, checking_for_update: true, showing_detail: false, progress: Arc::default() }
+        Self {
+            devices: Vec::new(),
+            mount_error: None,
+            status: InstallerStatus::Monitoring,
+            _monitor: monitor,
+            _update_check: update_check,
+            install_task: None,
+            package: KoboPackage::Embedded,
+            checking_for_update: true,
+            showing_detail: false,
+            progress: Arc::default(),
+        }
     }
 
     fn detected_status(&self) -> InstallerStatus {
         if let Some(device) = self.devices.first() {
             let compatible = device.profile().and_then(|profile| kobo_package::validate_device(self.package.bytes(), kobo_package::Policy::Usb, profile));
-            if let Err(error) = compatible { return InstallerStatus::Unsupported(error.to_string()); }
+            if let Err(error) = compatible {
+                return InstallerStatus::Unsupported(error.to_string());
+            }
         }
         match self.devices.first() {
             Some(device) if device.nickel_menu_detected() => InstallerStatus::Ready,
@@ -188,19 +209,20 @@ impl Installer {
             .map_err(|error| {
                 eprintln!("Kobo installation failed: {error}");
                 match error.kind() {
-                    ErrorKind::StorageFull => "There isn't enough free space on your Kobo. Free up space, then try installing again.",
-                    ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => "The installer can't save files to your Kobo. Check that your computer can write to it, then try again.",
-                    ErrorKind::InvalidData => "The installation package couldn't be read. Download the installer again and retry.",
-                    _ => "Installation couldn't finish. Reconnect your Kobo via USB and try again.",
-                }.to_owned()
+                    ErrorKind::StorageFull => text!(installer::there_isn_t_enough_free_space_on_your_kobo_free_up_space),
+                    ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => text!(installer::the_installer_can_t_save_files_to_your_kobo_check_that_your),
+                    ErrorKind::InvalidData => text!(installer::the_installation_package_couldn_t_be_read_download_the_installer_again_and),
+                    _ => text!(installer::installation_couldn_t_finish_reconnect_your_kobo_via_usb_and_try_again),
+                }
+                .to_owned()
             })?;
             let message = match eject_device(&root) {
-                Ok(EjectOutcome::Ejected) => "Installed and ejected. Disconnect the Kobo, let it restart, then tap Bokheim.".to_owned(),
-                Ok(EjectOutcome::Unmounted) => "Installed and safely unmounted. Disconnect the Kobo, let it restart, then tap Bokheim.".to_owned(),
+                Ok(EjectOutcome::Ejected) => text!(installer::installed_and_ejected_disconnect_the_kobo_let_it_restart_then_open_nickelmenu).to_owned(),
+                Ok(EjectOutcome::Unmounted) => text!(installer::installed_and_safely_unmounted_disconnect_the_kobo_let_it_restart_then_open).to_owned(),
                 Err(error) => {
                     eprintln!("Automatic Kobo eject failed: {error}");
-                    "Installed. Use your computer's eject option to safely remove your Kobo, then disconnect it and let it restart.".to_owned()
-                },
+                    text!(installer::installed_use_your_computer_s_eject_option_to_safely_remove_your_kobo).to_owned()
+                }
             };
             Ok::<_, String>(message)
         });
@@ -219,24 +241,24 @@ impl Installer {
 
     fn status_text(&self) -> SharedString {
         match &self.status {
-            InstallerStatus::Monitoring => "Connect your Kobo via USB".into(),
-            InstallerStatus::MountFailed(_) => "Kobo detected — mount required".into(),
-            InstallerStatus::Ready | InstallerStatus::NickelMenuMissing => "✓  Kobo eReader".into(),
+            InstallerStatus::Monitoring => text!(installer::connect_your_kobo_via_usb).into(),
+            InstallerStatus::MountFailed(_) => text!(installer::kobo_detected_mount_required).into(),
+            InstallerStatus::Ready | InstallerStatus::NickelMenuMissing => text!(installer::kobo_ereader).into(),
             InstallerStatus::Installing => {
                 let total = self.progress.total_bytes.load(Ordering::Relaxed);
                 let copied = self.progress.copied_bytes.load(Ordering::Relaxed);
                 let percent = if total == 0 { 0 } else { (copied.saturating_mul(100) / total).min(100) };
-                format!("Installing Bokheim — {percent}%").into()
+                format!(text!(installer::installing_bokheim), percent = percent).into()
             }
-            InstallerStatus::Installed(_) => "✓  Installed".into(),
-            InstallerStatus::Failed(_) => "Installation failed".into(),
-            InstallerStatus::Unsupported(_) => "Kobo or package is incompatible".into(),
+            InstallerStatus::Installed(_) => text!(installer::installed).into(),
+            InstallerStatus::Failed(_) => text!(installer::installation_failed).into(),
+            InstallerStatus::Unsupported(_) => text!(installer::kobo_or_package_is_incompatible).into(),
         }
     }
 
     fn status_detail(&self) -> Option<SharedString> {
         match &self.status {
-            InstallerStatus::MountFailed(_) => Some("Couldn't open the Kobo automatically. Open it in your file manager, then return here to install.".into()),
+            InstallerStatus::MountFailed(_) => Some(text!(installer::couldn_t_open_the_kobo_automatically_open_it_in_your_file_manager).into()),
             InstallerStatus::Installed(message) | InstallerStatus::Failed(message) | InstallerStatus::Unsupported(message) => Some(message.clone().into()),
             _ => None,
         }
@@ -281,11 +303,11 @@ impl gpui::Render for Installer {
             .when(can_install, |button| button.cursor_pointer().hover(|style| style.bg(rgb(ACCENT))))
             .on_click(cx.listener(|this, _, _, cx| this.install(cx)))
             .child(if self.checking_for_update {
-                "Checking…"
+                text!(common::checking)
             } else if matches!(self.status, InstallerStatus::Installing) {
-                "Installing…"
+                text!(installer::installing)
             } else {
-                "Install Bokheim"
+                text!(installer::install_bokheim)
             });
 
         div()
@@ -299,7 +321,7 @@ impl gpui::Render for Installer {
             .bg(rgb(SURFACE))
             .text_color(rgb(TEXT))
             .font_family("NV Garamond")
-            .child(div().mb_3().text_size(px(21.0)).font_weight(FontWeight::BOLD).child("Bokheim Kobo Installation"))
+            .child(div().mb_3().text_size(px(21.0)).font_weight(FontWeight::BOLD).child(text!(installer::bokheim_kobo_installation)))
             .child(
                 div()
                     .flex()
@@ -338,9 +360,10 @@ fn main() {
                 Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/NV_Garamond-BoldItalic.ttf")),
             ])
             .expect("failed to register embedded interface fonts");
-        cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some("Bokheim".into()), ..Default::default() }), focus: true, ..Default::default() }, |_, cx| {
-            cx.new(Installer::new)
-        })
+        cx.open_window(
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some(text!(common::bokheim).into()), ..Default::default() }), focus: true, ..Default::default() },
+            |_, cx| cx.new(Installer::new),
+        )
         .expect("failed to open the Kobo installer window");
         cx.activate(true);
     });

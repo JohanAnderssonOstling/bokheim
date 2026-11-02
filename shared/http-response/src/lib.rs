@@ -1,6 +1,9 @@
 //! HTTP client construction and bounded body collection.
 //! Callers own status, retry, timeout, and decoding policy.
 
+mod runtime;
+pub use runtime::{run, with_runtime};
+
 use futures_util::StreamExt;
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
@@ -8,7 +11,7 @@ use reqwest::{Client, ClientBuilder, Error, IntoUrl, Response};
 #[cfg(not(target_arch = "wasm32"))]
 use rustls::crypto::{ring, CryptoProvider};
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 /// Install the native provider before Reqwest's provider-free TLS path is used.
 pub fn initialize_tls() {
@@ -29,9 +32,23 @@ pub fn client_builder() -> ClientBuilder {
     Client::builder()
 }
 
+pub fn try_client() -> Result<Client, Error> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Default-policy users share the verifier, trust roots and connection pool.
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        if let Some(client) = CLIENT.get() {
+            return Ok(client.clone());
+        }
+        let client = client_builder().build()?;
+        Ok(CLIENT.get_or_init(|| client).clone())
+    }
+    #[cfg(target_arch = "wasm32")]
+    client_builder().build()
+}
+
 pub fn client() -> Client {
-    initialize_tls();
-    Client::new()
+    try_client().expect("failed to initialize the default HTTP client")
 }
 
 pub async fn get(url: impl IntoUrl) -> Result<Response, Error> {

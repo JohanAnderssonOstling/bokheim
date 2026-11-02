@@ -4,6 +4,8 @@
 //! folder can both be undone from Trash, so a prompt only slowed down the
 //! common case.
 
+use ui_text::text;
+
 use ui_components::user_facing_error;
 
 use gpui::{App, Window};
@@ -43,14 +45,14 @@ impl BookCommand {
 
     pub(crate) fn report_failure(self, error: BackendError, window: &mut Window, cx: &mut App) {
         let (id, prefix) = match self {
-            Self::RemoveFromFolder(_) => ("book-remove-error", "Could not remove book from folder"),
-            Self::TrashBook => ("book-trash-error", "Could not move book to Trash"),
-            Self::TrashBooks => ("book-trash-error", "Could not move selected books to Trash"),
-            Self::RemoveDownload => ("book-evict-error", "Could not remove download"),
-            Self::SetRead(true) => ("book-read-error", "Could not mark the book read"),
-            Self::SetRead(false) => ("book-read-error", "Could not mark the book unread"),
+            Self::RemoveFromFolder(_) => ("book-remove-error", text!(browse::could_not_remove_book_from_folder)),
+            Self::TrashBook => ("book-trash-error", text!(browse::could_not_move_book_to_trash)),
+            Self::TrashBooks => ("book-trash-error", text!(browse::could_not_move_selected_books_to_trash)),
+            Self::RemoveDownload => ("book-evict-error", text!(browse::could_not_remove_download)),
+            Self::SetRead(true) => ("book-read-error", text!(browse::could_not_mark_the_book_read)),
+            Self::SetRead(false) => ("book-read-error", text!(browse::could_not_mark_the_book_unread)),
         };
-        notify_error(id, format!("{prefix}. {}", user_facing_error(&error, "Please try again.")), window, cx);
+        notify_error(id, format!(text!(browse::recovery_with_detail), user_facing_error(&error, text!(common::please_try_again)), prefix = prefix), window, cx);
     }
 }
 

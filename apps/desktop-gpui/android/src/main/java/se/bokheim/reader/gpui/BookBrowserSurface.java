@@ -57,9 +57,9 @@ final class BookBrowserSurface {
         if (!(anchor.getParent() instanceof FrameLayout)) throw new IllegalStateException("The GPUI surface has no browser container");
         host = (FrameLayout) anchor.getParent();
         downloads = new File(request.getString("downloads")).getCanonicalFile();
-        if (!downloads.isDirectory()) throw new java.io.IOException("The library download folder is unavailable");
+        if (!downloads.isDirectory()) throw new java.io.IOException(UiText.ANDROID_THE_LIBRARY_DOWNLOAD_FOLDER_IS_UNAVAILABLE);
         String initial = request.getString("url");
-        if (!initial.equals("about:blank") && !BookDownload.webAddress(initial)) throw new IllegalArgumentException("Unsupported browser address");
+        if (!initial.equals("about:blank") && !BookDownload.webAddress(initial)) throw new IllegalArgumentException(UiText.ANDROID_UNSUPPORTED_BROWSER_ADDRESS);
         web = new WebView(activity);
         web.setVisibility(View.INVISIBLE);
         configurePage(web);
@@ -70,7 +70,7 @@ final class BookBrowserSurface {
                 // Challenge widgets use inline documents in child frames.
                 if (!request.isForMainFrame() && url.equals("about:srcdoc")) return false;
                 if (!BookDownload.webAddress(url) && !url.equals("about:blank")) {
-                    emit("status", "message", "This link cannot open in the book browser");
+                    emit("status", "message", UiText.ANDROID_THIS_LINK_CANNOT_OPEN_IN_THE_BOOK_BROWSER);
                     return true;
                 }
                 if (request.isForMainFrame() && BookDownload.bookAddress(url) && request.getMethod().equals("GET")) {
@@ -269,7 +269,7 @@ final class BookBrowserSurface {
             if (url.equals("about:blank") && !startPageHtml.isEmpty()) {
                 web.loadDataWithBaseURL("about:blank", startPageHtml, "text/html", "UTF-8", null);
             } else web.loadUrl(url);
-        } else emit("status", "message", "This link cannot open in the book browser");
+        } else emit("status", "message", UiText.ANDROID_THIS_LINK_CANNOT_OPEN_IN_THE_BOOK_BROWSER);
     }
 
     private void navigation() {
@@ -282,14 +282,14 @@ final class BookBrowserSurface {
 
     void startDownload(String url, String agent, String disposition, String mime) {
         if (closed || transferring.contains(url)) return;
-        if (!BookDownload.webAddress(url)) { emit("status", "message", "This download needs an HTTP or HTTPS link"); return; }
+        if (!BookDownload.webAddress(url)) { emit("status", "message", UiText.ANDROID_THIS_DOWNLOAD_NEEDS_AN_HTTP_OR_HTTPS_LINK); return; }
         transferring.add(url);
         BookDownload.Cancellation cancellation = new BookDownload.Cancellation();
         cancellations.put(url, cancellation);
         String referer = web.getUrl();
         String name;
         try { name = BookDownload.filename(url, disposition, mime); }
-        catch (java.io.IOException unknown) { name = "Book download"; }
+        catch (java.io.IOException unknown) { name = UiText.ANDROID_BOOK_DOWNLOAD; }
         final String downloadName = name;
         downloadEvent("download_started", url, downloadName, null, null);
         worker.execute(() -> {
@@ -318,8 +318,9 @@ final class BookBrowserSurface {
                     finishIfIdle();
                 });
             } catch (Exception error) {
+                android.util.Log.w("Bokheim", "Book download failed", error);
                 ui.post(() -> {
-                    if (!cancellation.isCancelled()) downloadEvent("download_finished", url, downloadName, null, "Could not download the book: " + error.getMessage());
+                    if (!cancellation.isCancelled()) downloadEvent("download_finished", url, downloadName, null, UiText.ANDROID_COULD_NOT_DOWNLOAD_THE_BOOK);
                     transferring.remove(url);
                     cancellations.remove(url);
                     finishIfIdle();

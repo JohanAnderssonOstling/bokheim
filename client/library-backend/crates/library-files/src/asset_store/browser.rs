@@ -5,6 +5,7 @@ use crate::hashing::{HashService, HashSession};
 pub(crate) use book_access::BoxedBookReader;
 use client_platform_web::web_storage::{self, FileWriter};
 use content_address::ContentHash;
+use library_model::RelativeBookPath;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -69,7 +70,7 @@ pub(crate) fn name(handle: &Handle, asset_name: String) -> String {
 pub(crate) struct StagedBook {
     pub(crate) byte_checksum: ContentHash,
     pub(crate) writer: FileWriter,
-    pub(crate) content_hash: BookId,
+    pub(crate) book_id: BookId,
     pub(crate) size_bytes: u64,
     pub(crate) destination: String,
 }
@@ -103,7 +104,7 @@ impl StagingWriter {
         }
         let size_bytes = self.writer.length();
         let destination = name(handle, format!("book/{checksum}"));
-        Ok(StagedBook { byte_checksum: checksum.content_hash().expect("hash service returns a byte checksum"), writer: self.writer, content_hash: checksum, size_bytes, destination })
+        Ok(StagedBook { byte_checksum: checksum.content_hash().expect("hash service returns a byte checksum"), writer: self.writer, book_id: checksum, size_bytes, destination })
     }
 }
 
@@ -141,15 +142,47 @@ pub(crate) async fn stage_browser_file(handle: &Handle, file: &web_sys::File) ->
     writer.finish(handle, None).await
 }
 
-impl StagedBook {
-    pub(crate) async fn commit(self) -> Result<(), AssetStoreError> {
-        self.writer.publish_verified_as(self.destination, self.content_hash).map_err(AssetStoreError::operation)
-    }
-}
-
 pub(crate) fn write_capacity(_handle: &Handle) -> Result<Option<u64>, AssetStoreError> {
     // OPFS enforces its dynamic quota on each chunk write. No in-memory book buffer.
     Ok(None)
+}
+
+pub(crate) async fn available_write_capacity(_handle: &Handle) -> Result<Option<u64>, AssetStoreError> {
+    use js_sys::{Function, Promise, Reflect};
+    let unavailable = |error| AssetStoreError::operation(format!("could not check storage capacity: {error:?}"));
+    let navigator = Reflect::get(&js_sys::global(), &"navigator".into()).map_err(unavailable)?;
+    let storage = Reflect::get(&navigator, &"storage".into()).map_err(unavailable)?;
+    if storage.is_null() || storage.is_undefined() {
+        return Ok(None);
+    }
+    let estimate = Reflect::get(&storage, &"estimate".into()).map_err(unavailable)?;
+    if !estimate.is_function() {
+        return Ok(None);
+    }
+    let estimate = Function::from(estimate).call0(&storage).map_err(unavailable)?;
+    let estimate = wasm_bindgen_futures::JsFuture::from(Promise::resolve(&estimate)).await.map_err(unavailable)?;
+    let quota = Reflect::get(&estimate, &"quota".into()).map_err(unavailable)?.as_f64();
+    let usage = Reflect::get(&estimate, &"usage".into()).map_err(unavailable)?.as_f64();
+    Ok(quota.zip(usage).filter(|(quota, usage)| quota.is_finite() && usage.is_finite() && *quota >= 0.0 && *usage >= 0.0).map(|(quota, usage)| ((quota - usage).max(0.0) as u64).saturating_sub(super::RESERVED_STORAGE_BYTES)))
+}
+
+pub(crate) fn book_download_space(bytes: u64, _paths: &[RelativeBookPath], _audiobook_archive: bool) -> (u64, u64) {
+    // OPFS publishes the staged object by identity, without copying it for placements.
+    (bytes, 0)
+}
+
+pub(crate) async fn evict_book_files(handle: &Handle, book: BookId, _paths: Vec<RelativeBookPath>) -> Result<(), AssetStoreError> {
+    remove(handle, format!("book/{book}")).map(|_| ())
+}
+
+pub(crate) async fn evictable_book_bytes(handle: &Handle, book: BookId, paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
+    stored_book_bytes(handle, book, paths).await
+}
+
+pub(crate) async fn stored_book_bytes(handle: &Handle, book: BookId, _paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
+    use std::io::{Seek, SeekFrom};
+    let Some(mut reader) = open_verified_reader(handle, &book).await? else { return Ok(0) };
+    reader.seek(SeekFrom::End(0)).map_err(AssetStoreError::operation)
 }
 
 pub(crate) async fn read(handle: &Handle, asset_name: String) -> Result<Option<Vec<u8>>, AssetStoreError> {

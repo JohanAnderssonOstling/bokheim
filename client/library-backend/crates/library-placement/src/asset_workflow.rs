@@ -4,29 +4,22 @@
 //! SQLite state transitions that decide which operations are required.
 use client_runtime::BackendError;
 use library_database::Database;
-use library_files::AssetStore;
 use library_files::asset_store::{CopiedBook, ImportOptions, PublishedStagedBook, StagedBook};
+use library_files::AssetStore;
 #[cfg(target_arch = "wasm32")]
 use library_model::BlobKind;
 use sync_common::BookId;
 use sync_common::DirId;
 
-pub fn evict_local_book(assets: &AssetStore, database: &Database, hash: &BookId) -> Result<(), BackendError> {
+/// Remove local bytes before acknowledging eviction, so storage failures leave
+/// availability intact and the same operation can be retried.
+pub async fn evict_local_book(assets: &AssetStore, database: &Database, hash: &BookId) -> Result<bool, BackendError> {
     // Refuse eviction before touching the files that an unfinished upload needs.
     if !database.check_local_book_eviction(hash)? {
-        return Ok(());
+        return Ok(false);
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let paths = database.book_paths(hash)?;
-        assets.evict_book_files(&paths, hash)?;
-    }
-    if !database.evict_local_book(hash)? {
-        return Ok(());
-    }
-    #[cfg(target_arch = "wasm32")]
-    assets.remove(BlobKind::Book, hash)?;
-    Ok(())
+    assets.evict_book_files(*hash, database.book_paths(hash)?).await?;
+    database.evict_local_book(hash).map_err(BackendError::operation)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -80,7 +73,7 @@ fn purge_book(assets: &AssetStore, database: &Database, hash: &BookId) -> Result
 pub async fn run_file_jobs_for(assets: &AssetStore, database: &Database, hash: &BookId) -> Result<(), BackendError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let jobs = database.native_file_work()?.into_iter().filter(|work| &work.content_hash == hash).collect();
+        let jobs = database.native_file_work()?.into_iter().filter(|work| &work.book_id == hash).collect();
         native::reconcile_file_jobs(assets, database, jobs)
     }
     #[cfg(target_arch = "wasm32")]
@@ -98,7 +91,9 @@ pub async fn prepare_directory(assets: &AssetStore, database: &Database, id: Dir
 /// Recover a set of destinations together, visiting shared ancestors once.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn prepare_directories(assets: &AssetStore, database: &Database, ids: &[DirId]) -> Result<(), BackendError> {
-    if ids.is_empty() { return Ok(()); }
+    if ids.is_empty() {
+        return Ok(());
+    }
     native::replay_directories(assets, database, Some(ids))
 }
 

@@ -6,8 +6,11 @@
 //! page lookup and the active-entry search all agree on identity without
 //! duplicating navigation identities.
 
+use ui_text::text;
+
 use std::collections::HashMap;
 
+use book_content::{BookToc, toc_entries};
 use book_model::{BookTocEntry, ChapterReadStatus, ReadingPosition, pdf_toc_page};
 use gpui_component::tree::TreeItem;
 
@@ -23,8 +26,7 @@ fn toc_order(id: &str) -> Option<usize> {
 
 #[derive(Default)]
 pub(crate) struct PdfTocState {
-    entries: Vec<BookTocEntry>,
-    sidebar_targets: Vec<String>,
+    toc: BookToc,
     chapter_pages: Vec<usize>,
     chapter_titles: HashMap<usize, String>,
     pub(crate) read_status: ChapterReadStatus,
@@ -36,27 +38,27 @@ pub(crate) struct PdfTocState {
 impl PdfTocState {
     pub(crate) fn reset_chapter_read_status(&mut self, id: &str) -> Option<String> {
         let target = self.entry(id)?.target.clone();
-        self.read_status.reset_chapter(&self.entries, &target);
+        self.read_status.reset_chapter(&self.toc.entries, &target);
         Some(target)
     }
     pub(crate) fn update_read_status(&mut self, page: usize, at_end: bool) {
-        self.read_status.update_position(&self.entries, &ReadingPosition::pdf_page(page as u32), None, at_end);
+        self.read_status.update_position(&self.toc.entries, &ReadingPosition::pdf_page(page as u32), None, at_end);
     }
 
     pub(crate) fn is_read(&self, id: &str) -> bool {
-        toc_order(id).and_then(|order| self.sidebar_targets.get(order)).is_some_and(|target| self.read_status.completed.contains(target))
+        self.entry(id).is_some_and(|entry| self.read_status.completed.contains(&entry.target))
     }
     pub(crate) fn has_entries(&self) -> bool {
-        !self.entries.is_empty()
+        !self.toc.entries.is_empty()
     }
 
     pub(crate) fn replace_entries(&mut self, entries: Vec<BookTocEntry>) {
         self.loaded = true;
-        self.entries = entries;
-        fn visit<'a>(entries: &'a [BookTocEntry], depth: usize, in_chapter: bool, targets: &mut Vec<String>, pages: &mut Vec<usize>, titles: &mut HashMap<usize, (usize, usize, &'a str)>) {
+        self.toc = BookToc::new(entries, Vec::new());
+        fn visit<'a>(entries: &'a [BookTocEntry], depth: usize, in_chapter: bool, next: &mut usize, pages: &mut Vec<usize>, titles: &mut HashMap<usize, (usize, usize, &'a str)>) {
             for entry in entries {
-                let order = targets.len();
-                targets.push(entry.target.clone());
+                let order = *next;
+                *next += 1;
                 let page = pdf_toc_page(&entry.target);
                 if let Some(page) = page {
                     if !in_chapter {
@@ -66,13 +68,12 @@ impl PdfTocState {
                         titles.insert(page, (depth, order, entry.title.as_str()));
                     }
                 }
-                visit(&entry.children, depth + 1, in_chapter || page.is_some(), targets, pages, titles);
+                visit(&entry.children, depth + 1, in_chapter || page.is_some(), next, pages, titles);
             }
         }
-        self.sidebar_targets.clear();
         self.chapter_pages.clear();
         let mut titles = HashMap::new();
-        visit(&self.entries, 0, false, &mut self.sidebar_targets, &mut self.chapter_pages, &mut titles);
+        visit(&self.toc.entries, 0, false, &mut 0, &mut self.chapter_pages, &mut titles);
         self.chapter_pages.sort_unstable();
         self.chapter_pages.dedup();
         // The single walk resolves equal-page titles by depth and document
@@ -96,8 +97,8 @@ impl PdfTocState {
             }
             None
         }
-        let title = chapter_title(&self.entries, start).filter(|title| !title.trim().is_empty());
-        title.map_or_else(|| format!("Chapter {number}"), |title| format!("Chapter {number} · {title}"))
+        let title = chapter_title(&self.toc.entries, start).filter(|title| !title.trim().is_empty());
+        title.map_or_else(|| format!(text!(reader::chapter), number = number), |title| format!(text!(reader::chapter_with_title), number = number, title = title))
     }
 
     pub(crate) fn chapter_at(&self, page: usize) -> usize {
@@ -111,8 +112,8 @@ impl PdfTocState {
     #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn narration_start_page(&self, page: usize, page_count: usize) -> Option<usize> {
         (page..page_count).find(|page| {
-            let entry = self.ordinal_at(*page).and_then(|ordinal| entry_in_order(&self.entries, ordinal, &mut 0));
-            entry.is_none_or(|entry| !html::layout::is_navigation_section_title(&entry.title))
+            let entry = self.ordinal_at(*page).and_then(|ordinal| toc_entries(&self.toc.entries).nth(ordinal));
+            entry.is_none_or(|(_, entry)| !html::layout::is_navigation_section_title(&entry.title))
         })
     }
 
@@ -139,9 +140,14 @@ impl PdfTocState {
     /// position. Matches the sidebar identity, so stored ordinals agree with
     /// what the contents panel shows.
     pub(crate) fn ordinal_at(&self, page_index: usize) -> Option<usize> {
-        let mut best = None;
-        best_entry_at(&self.entries, page_index, 0, &mut 0, &mut best);
-        best.map(|(_, _, order)| order)
+        toc_entries(&self.toc.entries)
+            .enumerate()
+            .filter_map(|(order, (depth, entry))| {
+                let page = pdf_toc_page(&entry.target).filter(|page| *page <= page_index)?;
+                Some((page, depth, order))
+            })
+            .max()
+            .map(|(_, _, order)| order)
     }
 
     pub(crate) fn is_loaded(&self) -> bool {
@@ -151,11 +157,12 @@ impl PdfTocState {
     /// Before the outline starts, use its earliest destination. Zero denotes
     /// the implicit whole-book entry when the publication has no outline.
     pub(crate) fn bookmark_ordinal_at(&self, page: usize) -> usize {
-        self.ordinal_at(page).or_else(|| self.sidebar_targets.iter().enumerate().filter_map(|(ordinal, target)| pdf_toc_page(target).map(|page| (page, ordinal))).min().map(|(_, ordinal)| ordinal)).unwrap_or(0)
+        self.ordinal_at(page).or_else(|| toc_entries(&self.toc.entries).enumerate().filter_map(|(ordinal, (_, entry))| pdf_toc_page(&entry.target).map(|page| (page, ordinal))).min().map(|(_, ordinal)| ordinal)).unwrap_or(0)
     }
 
     pub(crate) fn chapter_for_ordinal(&self, ordinal: usize) -> Option<(usize, &str)> {
-        let page = pdf_toc_page(self.sidebar_targets.get(ordinal)?)?;
+        let (_, entry) = toc_entries(&self.toc.entries).nth(ordinal)?;
+        let page = pdf_toc_page(&entry.target)?;
         Some((self.chapter_at(page), self.chapter_title_at(page)?))
     }
 
@@ -173,38 +180,7 @@ impl PdfTocState {
     }
 
     fn entry(&self, id: &str) -> Option<&BookTocEntry> {
-        entry_in_order(&self.entries, toc_order(id)?, &mut 0)
-    }
-}
-
-/// The entry at one position in document order.
-fn entry_in_order<'a>(entries: &'a [BookTocEntry], order: usize, next: &mut usize) -> Option<&'a BookTocEntry> {
-    for entry in entries {
-        let current = *next;
-        *next += 1;
-        if current == order {
-            return Some(entry);
-        }
-        if let Some(found) = entry_in_order(&entry.children, order, next) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-/// Searches for the entry a page belongs to, carrying the best candidate so
-/// far as `(page, depth, order)` — the ordering that decides ties.
-fn best_entry_at(entries: &[BookTocEntry], page_index: usize, depth: usize, next: &mut usize, best: &mut Option<(usize, usize, usize)>) {
-    for entry in entries {
-        let order = *next;
-        *next += 1;
-        if let Some(page) = pdf_toc_page(&entry.target).filter(|page| *page <= page_index) {
-            let candidate = (page, depth, order);
-            if best.is_none_or(|current| candidate > current) {
-                *best = Some(candidate);
-            }
-        }
-        best_entry_at(&entry.children, page_index, depth + 1, next, best);
+        toc_entries(&self.toc.entries).nth(toc_order(id)?).map(|(_, entry)| entry)
     }
 }
 

@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use crate::{OpeningTiming, lock_state};
 #[cfg(not(target_arch = "wasm32"))]
 use library_backend::library::AudioStreamControl;
@@ -7,14 +9,14 @@ use std::io::{BufReader, SeekFrom};
 #[cfg(feature = "kobo")]
 use std::io::{Read, Write};
 use std::num::{NonZeroU16, NonZeroU32};
+#[cfg(feature = "kobo")]
+use std::process::ExitStatus;
 #[cfg(any(feature = "kobo", test))]
 use std::process::{Child, Command, Stdio};
 #[cfg(feature = "kobo")]
-use std::process::ExitStatus;
+use std::sync::Condvar;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-#[cfg(feature = "kobo")]
-use std::sync::Condvar;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 #[cfg(any(feature = "kobo", test))]
@@ -227,7 +229,9 @@ impl AudioEngine {
     pub fn play(&self) {
         #[cfg(feature = "kobo")]
         if self.output.stop.load(Ordering::Acquire) {
-            if let Err(error) = self.begin_output_recovery() { *lock_state(&self.state.error) = Some(error); }
+            if let Err(error) = self.begin_output_recovery() {
+                *lock_state(&self.state.error) = Some(error);
+            }
             return;
         }
         self.state.output_lost.store(false, Ordering::Release);
@@ -865,7 +869,9 @@ impl KoboOutput {
                             guard = changed.wait(guard).unwrap_or_else(std::sync::PoisonError::into_inner);
                         }
                     }
-                    if thread_stop.load(Ordering::Acquire) { break; }
+                    if thread_stop.load(Ordering::Acquire) {
+                        break;
+                    }
                     if !prebuffered {
                         let _prebuffer_timing = OpeningTiming::new("prebuffer");
                         // Do not start feeding ALSA until the decoder has built a
@@ -932,7 +938,11 @@ impl KoboOutput {
         changed.notify_all();
     }
     fn toggle(&self) {
-        if self.is_playing() { self.stop(); } else { self.play(); }
+        if self.is_playing() {
+            self.stop();
+        } else {
+            self.play();
+        }
     }
     fn stop(&self) {
         {
@@ -945,7 +955,9 @@ impl KoboOutput {
         // Closing ALSA releases the Bluetooth transport while paused. It also
         // interrupts a blocked PCM write, so shutdown never waits on the sink.
         let mut child = lock_state(&self.child);
-        if matches!(child.try_wait(), Ok(None)) { let _ = child.kill(); }
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+        }
     }
     fn is_playing(&self) -> bool {
         self.playing.load(Ordering::Acquire)
@@ -963,8 +975,11 @@ fn wait_for_output_exit(child: &Mutex<Child>, stop: &AtomicBool, wake: &(Mutex<(
             let mut child = lock_state(child);
             match child.try_wait() {
                 Ok(Some(status)) => return Some(status),
-                Err(_) => { let _ = child.kill(); return child.wait().ok(); },
-                Ok(None) => {},
+                Err(_) => {
+                    let _ = child.kill();
+                    return child.wait().ok();
+                }
+                Ok(None) => {}
             }
             if stop.load(Ordering::Acquire) || Instant::now() >= deadline {
                 let _ = child.kill();
@@ -984,7 +999,7 @@ fn wait_for_output_exit(child: &Mutex<Child>, stop: &AtomicBool, wake: &(Mutex<(
 #[cfg(feature = "kobo")]
 fn kobo_output_message(detail: &str) -> Option<&'static str> {
     let detail = detail.to_ascii_lowercase();
-    if detail.contains("no such device") || detail.contains("disconnected") || detail.contains("broken pipe") { None } else { Some("Audio output stopped. Check your headphone connection, then press Play to retry.") }
+    if detail.contains("no such device") || detail.contains("disconnected") || detail.contains("broken pipe") { None } else { Some(text!(audiobook::audio_output_stopped_check_your_headphone_connection_then_press_play_to_retry)) }
 }
 
 #[cfg(feature = "kobo")]

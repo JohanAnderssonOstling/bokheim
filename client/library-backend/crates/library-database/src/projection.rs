@@ -195,12 +195,19 @@ fn project_directory_tree(tx: &Transaction<'_>, purged: &HashSet<DirId>) -> Resu
         tx.activate_remote_directory(&id.to_string()).map_err(DatabaseError::operation)?;
     }
     #[cfg(not(target_arch = "wasm32"))]
-    for (dir, state) in &expected {
-        let id = dir.to_string();
-        if before.get(&id) != Some(state) {
+    {
+        let changed = expected
+            .iter()
+            .filter_map(|(dir, state)| {
+                let id = dir.to_string();
+                (before.get(&id) != Some(state)).then_some(id)
+            })
+            .collect::<Vec<_>>();
+        let mut paths = crate::placements::FolderPaths::for_directories(tx, changed.iter().map(String::as_str))?;
+        for id in changed {
             // Lifecycle changes do not relocate directories. Only materialize
             // a live directory whose desired path differs from its stored path.
-            let Some(desired) = crate::placements::directory_relative_path(tx, dir)? else { continue };
+            let Some(desired) = paths.folder(&id)? else { continue };
             let retained = tx.projection_directory_path_retained(&id, &desired, |row| row.get::<_, bool>(0))?;
             if retained {
                 continue;
@@ -344,31 +351,31 @@ fn project_value(tx: &Transaction<'_>, body: &LibraryStateEntry, purged: &HashSe
         LibraryStateEntry::BookLifecycle { .. } | LibraryStateEntry::ReadingPosition { .. } | LibraryStateEntry::ChapterReadStatus { .. } | LibraryStateEntry::BookAdd { .. } | LibraryStateEntry::BookContent { .. } => {
             unreachable!("book records and scalar registers are projected together")
         }
-        LibraryStateEntry::Placement { dir_id, content_hash, present, origin_folder_id } => {
+        LibraryStateEntry::Placement { dir_id, book_id, present, origin_folder_id } => {
             if *present {
                 // Filenames are a local projection. A tombstoned placement's
                 // old name may have been reused since it was removed.
                 let directory = dir_id.to_string();
                 let mut statement = tx.prepare_cached(include_str!("projection/placement_name.sql"))?;
-                let (requested, conflict): (String, bool) = statement.query_row(rusqlite::params![directory, content_hash], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                let (requested, conflict): (String, bool) = statement.query_row(rusqlite::params![directory, book_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
                 drop(statement);
                 let chosen = if conflict {
-                    let occupied = query_rows(|callback| tx.projection_other_placement_names(&directory, &(&content_hash), callback), |row| row.get::<_, String>(0))?;
+                    let occupied = query_rows(|callback| tx.projection_other_placement_names(&directory, &(&book_id), callback), |row| row.get::<_, String>(0))?;
                     // Use a short fallback when the old name conflicts or fills
                     // the filesystem's component byte limit.
                     library_replica::unique_file_name("Untitled", occupied.iter().map(String::as_str))
                 } else {
                     requested
                 };
-                tx.apply_remote_book_dir_added(&directory, content_hash, &chosen).map_err(DatabaseError::operation)?;
+                tx.apply_remote_book_dir_added(&directory, book_id, &chosen).map_err(DatabaseError::operation)?;
             } else {
-                tx.apply_remote_book_dir_removed(&dir_id.to_string(), content_hash, origin_folder_id.as_deref()).map_err(DatabaseError::operation)?;
+                tx.apply_remote_book_dir_removed(&dir_id.to_string(), book_id, origin_folder_id.as_deref()).map_err(DatabaseError::operation)?;
             }
         }
         LibraryStateEntry::Annotation { value } => {
             let modified_at = storage_i64(value.modified_at, "annotation modification timestamp").map_err(DatabaseError::operation)?;
             let body = value.encode().map_err(DatabaseError::operation)?;
-            tx.upsert_annotation(value.id.as_str(), &value.content_hash, value.toc_ordinal, value.progress, body.as_slice(), modified_at, value.deleted.then_some(modified_at)).map_err(DatabaseError::operation)?;
+            tx.upsert_annotation(value.id.as_str(), &value.book_id, value.toc_ordinal, value.progress, body.as_slice(), modified_at, value.deleted.then_some(modified_at)).map_err(DatabaseError::operation)?;
             crate::annotations::project_recurrence(tx, value)?;
             crate::notebook::project_annotation(tx, value)?;
         }
@@ -440,7 +447,7 @@ pub(crate) fn backfill_popularity(tx: &Transaction<'_>) -> Result<(), DatabaseEr
 /// through the same canonical path used by directory commands.
 pub(crate) fn place_book(tx: &Transaction<'_>, directory: &DirId, hash: &BookId, name: &str) -> Result<(), DatabaseError> {
     tx.projection_upsert_placement(&(directory.to_string()), &(&hash), &name)?;
-    crate::sync::apply::registers::record_local(tx, LibraryStateEntry::Placement { dir_id: *directory, content_hash: *hash, present: true, origin_folder_id: None })
+    crate::sync::apply::registers::record_local(tx, LibraryStateEntry::Placement { dir_id: *directory, book_id: *hash, present: true, origin_folder_id: None })
 }
 
 include_sqlite_sql::include_sql!("src/sql/projection.sql");
@@ -584,7 +591,7 @@ mod tests {
             record_local(
                 tx,
                 LibraryStateEntry::BookAdd {
-                    content_hash: hash,
+                    book_id: hash,
                     value: addition,
                 },
             )?;

@@ -1,12 +1,14 @@
+use ui_text::text;
+
 use crate::{CONTENT_INSET, NAV_RAIL_ICON_SIZE_REM, NAV_RAIL_LABEL_SIZE, navigation_modal_row_height_rem, topbar_height_rem};
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
 
-use gpui::prelude::*;
-use gpui::{Bounds, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight, MouseButton, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage, div, img, px, rems};
 use crate::Button;
-use gpui_component::input::InputState;
+use gpui::prelude::*;
+use gpui::{App, Bounds, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight, MouseButton, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage, Window, div, img, px, rems};
+use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::{
@@ -19,23 +21,18 @@ use crate::{
 /// button, and the current one takes the shared selection highlight. The
 /// caller sizes the tile and sets the label's text, which the label inherits.
 pub(crate) fn navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    let button = crate::base_button(id)
-        .ghost()
-        .min_w_0()
-        .p_0()
-        .rounded(px(RADIUS_MD))
-        .child(
-            div()
-                .size_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(SPACE_XXS))
-                .child(div().flex_none().child(glyph))
-                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label.into())),
-        );
+    let button = crate::base_button(id).ghost().min_w_0().p_0().rounded(px(RADIUS_MD)).child(
+        div()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(SPACE_XXS))
+            .child(div().flex_none().child(glyph))
+            .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label.into())),
+    );
     crate::selectable_button(button, selected, theme)
 }
 
@@ -48,12 +45,7 @@ pub fn navigation_rail_width<'a>(labels: impl IntoIterator<Item = &'a str>, wind
 
 /// A rail destination using the shared selected-button treatment.
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, selected, theme)
-        .w_full()
-        .h(gpui::rems(crate::NAV_RAIL_SIZE_REM))
-        .flex_none()
-        .px(px(SPACE_XS))
-        .text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
+    navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, selected, theme).w_full().h(gpui::rems(crate::NAV_RAIL_SIZE_REM)).flex_none().px(px(SPACE_XS)).text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
 }
 
 /// A full-width bar along the bottom of the window, ruled off from the page
@@ -110,7 +102,6 @@ pub enum NavigationIcon {
     Trash2,
     Building2,
     Settings,
-    Storefront,
     Notebook,
     Search,
 }
@@ -126,7 +117,6 @@ pub fn navigation_icon(icon: NavigationIcon) -> Icon {
         NavigationIcon::Trash2 => "icons/navigation/trash-2.svg",
         NavigationIcon::Building2 => "icons/navigation/building-2.svg",
         NavigationIcon::Settings => "icons/navigation/settings.svg",
-        NavigationIcon::Storefront => "icons/storefront.svg",
         NavigationIcon::Notebook => "icons/replace.svg",
         NavigationIcon::Search => return Icon::new(gpui_component::IconName::Search),
     };
@@ -241,7 +231,7 @@ pub fn browser_topbar_left() -> Div {
 }
 
 pub fn mobile_back_button() -> Button {
-    crate::outlined_icon_button("mobile-navigation-back", crate::shortcut_tooltip("Back", "escape"), IconName::ArrowLeft).debug_selector(|| "mobile-navigation-back".into())
+    crate::outlined_icon_button("mobile-navigation-back", crate::shortcut_tooltip(text!(common::back), "escape"), IconName::ArrowLeft).debug_selector(|| "mobile-navigation-back".into())
 }
 
 /// Shared navigation heading for browsing, book loading, and reading. `back`
@@ -346,7 +336,7 @@ fn library_switcher_action_button(id: impl Into<ElementId>, label: impl Into<Sha
 }
 
 pub fn library_switcher_add_button(cursor: bool, theme: BrowserTheme) -> Button {
-    library_switcher_action_button("library-switcher-add", "Add library", IconName::Plus, cursor, theme)
+    library_switcher_action_button("library-switcher-add", text!(common::add_library), IconName::Plus, cursor, theme)
 }
 
 /// The library in use shares the selected-button highlight. The keyboard
@@ -372,7 +362,7 @@ pub fn library_switcher_row(library: impl IntoElement, actions: impl IntoElement
 }
 
 pub fn library_switcher_menu_button(id: impl Into<ElementId>, label: impl Into<SharedString>, cursor: bool, theme: BrowserTheme) -> Button {
-    library_switcher_action_button(id, format!("Manage {}", label.into()), IconName::EllipsisVertical, cursor, theme)
+    library_switcher_action_button(id, format!(text!(common::manage), label.into()), IconName::EllipsisVertical, cursor, theme)
 }
 
 pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
@@ -572,10 +562,12 @@ pub fn browser_settings_compact_row(title: impl Into<SharedString>, choices: imp
 /// value is what changes it.
 ///
 /// Long paths shrink to the available space and truncate in the middle,
-/// keeping both the root and leaf folder visible. The tooltip shows the full
-/// label without changing the path used by the caller.
+/// preserving the beginning and end. The tooltip shows the full
+/// compact label without changing the path used by the caller. Formatting is
+/// applied here so every caller gets the same readable path.
 pub fn browser_settings_path_button(id: impl Into<ElementId>, path: impl Into<SharedString>, theme: BrowserTheme) -> Button {
     let path = path.into();
+    let path = SharedString::from(crate::path_label(Path::new(path.as_ref())));
     crate::base_button(id)
         .aria_label(path.clone())
         .tooltip(path.clone())
@@ -590,21 +582,43 @@ pub fn browser_settings_path_button(id: impl Into<ElementId>, path: impl Into<Sh
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis_middle().child(path))
 }
 
-/// Show normal Windows paths and abbreviate Unix home-directory prefixes;
-/// keep the actual path for opening the folder.
-pub fn library_path_label(path: &Path) -> String {
-    #[cfg(target_os = "windows")]
-    let path = dunce::simplified(path);
-    #[cfg(not(target_os = "windows"))]
-    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-        let home = std::path::PathBuf::from(home);
-        if home.is_absolute()
-            && let Ok(relative) = path.strip_prefix(&home)
-        {
-            return if relative.as_os_str().is_empty() { "~".to_owned() } else { Path::new("~").join(relative).display().to_string() };
-        }
-    }
-    path.display().to_string()
+/// Show a compact path until the user focuses the editor. The input stays
+/// mounted and retains its original value for editing and file operations.
+pub fn browser_path_input(id: impl Into<ElementId>, state: &Entity<InputState>, disabled: bool, theme: BrowserTheme, window: &Window, cx: &App) -> Div {
+    let value = state.read(cx).value();
+    let show_label = !value.is_empty() && !state.read(cx).focus_handle(cx).is_focused(window);
+    let label = crate::path_label(Path::new(value.as_ref()));
+    let state = state.clone();
+    div().w_full().min_w_0().relative().child(Input::new(&state).disabled(disabled)).when(show_label, move |field| {
+        field.child(
+            div()
+                .id(id)
+                .absolute()
+                .inset_0()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .px(px(SPACE_SM))
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(RADIUS_SM))
+                .bg(theme.page_bg)
+                .text_color(if disabled { theme.text_muted } else { theme.text })
+                .text_size(rems(TEXT_SM))
+                .when(!disabled, |field| field.cursor_text())
+                .occlude()
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    window.prevent_default();
+                    if !disabled {
+                        state.update(cx, |state, cx| {
+                            state.focus_handle(cx).focus(window, cx);
+                            state.set_selected_range(0..state.value().len(), cx);
+                        });
+                    }
+                })
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis_middle().child(label)),
+        )
+    })
 }
 
 #[cfg(test)]

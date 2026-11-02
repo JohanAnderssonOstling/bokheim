@@ -27,8 +27,9 @@ async fn notebook_uses_book_card_geometry_and_opens_overlay_immediately(cx: &mut
         cx.set_global(crate::stores::CoverTextSetting(CoverText::Always));
         LibraryContext::new(
             Rc::new(original.app().clone()),
+            original.catalog().clone(),
             Rc::new(original.backend().clone()),
-            Rc::new(move |locator, _, target, _, _| recorded.borrow_mut().push((locator.content_hash(), target))),
+            Rc::new(move |locator, _, target, _, _| recorded.borrow_mut().push((locator.book_id(), target))),
             original.updates(),
             session.downgrade(),
             cx.new(|_| crate::NowPlaying::default()),
@@ -36,7 +37,7 @@ async fn notebook_uses_book_card_geometry_and_opens_overlay_immediately(cx: &mut
     });
     let id = BookId::from_bytes([37; 32]);
     let book = BookCardRow {
-        source: BookSource::Library { content_hash: id },
+        source: BookSource::Library { book_id: id },
         title: "Notebook fixture".into(),
         subtitle: Some("The standard subtitle".into()),
         author: "Writer".into(),
@@ -46,12 +47,13 @@ async fn notebook_uses_book_card_geometry_and_opens_overlay_immediately(cx: &mut
         format_category: LibraryFileTypeFilter::Book,
         audiobook_duration_ms: None,
         added_at: 0,
+        description: String::new(),
         source_directory: None,
     };
     let values = (0..4)
         .map(|index| Annotation {
             id: format!("note-{index}"),
-            content_hash: id,
+            book_id: id,
             anchor: AnnotationAnchor::epub_publication_cfi(format!("epubcfi(/6/2!/4/2/1:{index})")),
             exact_text: if index == 1 { "Short quote".into() } else { "A long highlighted passage, with several words. ".repeat(8) },
             style: AnnotationStyle::Highlight,
@@ -129,12 +131,12 @@ async fn notebook_uses_book_card_geometry_and_opens_overlay_immediately(cx: &mut
 async fn notebook_row_replaces_annotation_windows_and_enters_previous_at_the_end(cx: &mut TestAppContext) {
     let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_directory, session, original) = LibrarySession::test_context(cx).await;
-    let entry = original.app().create_library_with_asset_storage("Paging fixture".into(), false).await.unwrap();
+    let entry = original.app().management.create_library_with_asset_storage("Paging fixture".into(), false).await.unwrap();
     let library = cx.update(|cx| {
         let app = Rc::new(original.app().clone());
-        let backend = Rc::new(app.library(*entry.library_id()));
+        let backend = Rc::new(app.management.library(*entry.library_id()));
         let updates = crate::library::LibraryUpdateBridge::create(app.clone(), *entry.library_id(), cx);
-        LibraryContext::new(app, backend, Rc::new(|_, _, _, _, _| {}), updates, session.downgrade(), cx.new(|_| crate::NowPlaying::default()))
+        LibraryContext::new(app, original.catalog().clone(), backend, Rc::new(|_, _, _, _, _| {}), updates, session.downgrade(), cx.new(|_| crate::NowPlaying::default()))
     });
     let backend = library.backend().clone();
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/library-backend/crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
@@ -161,7 +163,7 @@ async fn notebook_row_replaces_annotation_windows_and_enters_previous_at_the_end
         backend
             .upsert_annotation(Annotation {
                 id: format!("window-{index:03}"),
-                content_hash: book.library_file().unwrap(),
+                book_id: book.library_file().unwrap(),
                 anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:0)"),
                 exact_text: "A passage".into(),
                 style: AnnotationStyle::Highlight,

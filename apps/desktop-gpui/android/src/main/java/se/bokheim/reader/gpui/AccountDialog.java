@@ -36,15 +36,27 @@ import java.util.List;
 
 /** Real Android fields, with one stable form throughout an account request. */
 final class AccountDialog extends Dialog {
-    // Order matches the browser theme sent by open_android_authentication.
-    private static final int BACKGROUND = 0, TEXT = 1, MUTED = 2, ACCENT = 3,
-        ACCENT_TEXT = 4, BORDER = 5, LINK = 6, DANGER = 7, SELECTION = 8;
+    static final class Theme {
+        final int background, text, muted, accent, accentText, border, link, danger, selection;
+
+        Theme(JSONObject colors) throws JSONException {
+            background = (int) colors.getLong("background");
+            text = (int) colors.getLong("text");
+            muted = (int) colors.getLong("muted");
+            accent = (int) colors.getLong("accent");
+            accentText = (int) colors.getLong("accentText");
+            border = (int) colors.getLong("border");
+            link = (int) colors.getLong("link");
+            danger = (int) colors.getLong("danger");
+            selection = (int) colors.getLong("selection");
+        }
+    }
     interface Submit { void send(long id, String message); }
     final long sessionId;
     private final Submit submit;
     private final int minimum;
     private final int resendCooldownSeconds;
-    private final int[] colors;
+    private final Theme theme;
     private final LinearLayout form;
     private final AutofillManager autofill;
     private final List<Button> buttons = new ArrayList<>();
@@ -58,18 +70,18 @@ final class AccountDialog extends Dialog {
     private long resendAvailableAt;
     private final Runnable resendTick = this::updateResend;
 
-    AccountDialog(Activity activity, long id, int minimum, int resendCooldownSeconds, int[] colors, Submit submit) {
-        super(activity, ColorUtils.calculateLuminance(colors[BACKGROUND]) > 0.5
+    AccountDialog(Activity activity, long id, int minimum, int resendCooldownSeconds, Theme theme, Submit submit) {
+        super(activity, ColorUtils.calculateLuminance(theme.background) > 0.5
             ? android.R.style.Theme_Material_Light_NoActionBar : android.R.style.Theme_Material_NoActionBar);
         this.sessionId = id;
         this.minimum = minimum;
         this.resendCooldownSeconds = resendCooldownSeconds;
-        this.colors = colors;
+        this.theme = theme;
         this.submit = submit;
         autofill = activity.getSystemService(AutofillManager.class);
         ScrollView scroll = new ScrollView(getContext());
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(colors[BACKGROUND]);
+        scroll.setBackgroundColor(theme.background);
         scroll.setClipToPadding(false);
         LinearLayout column = new LinearLayout(getContext());
         column.setOrientation(LinearLayout.VERTICAL);
@@ -89,7 +101,7 @@ final class AccountDialog extends Dialog {
         WindowCompat.setDecorFitsSystemWindows(window, false);
         window.setStatusBarColor(Color.TRANSPARENT);
         window.setNavigationBarColor(Color.TRANSPARENT);
-        boolean light = ColorUtils.calculateLuminance(colors[BACKGROUND]) > 0.5;
+        boolean light = ColorUtils.calculateLuminance(theme.background) > 0.5;
         WindowCompat.getInsetsController(window, scroll).setAppearanceLightStatusBars(light);
         WindowCompat.getInsetsController(window, scroll).setAppearanceLightNavigationBars(light);
         if (Build.VERSION.SDK_INT >= 29) window.setNavigationBarContrastEnforced(false);
@@ -126,7 +138,7 @@ final class AccountDialog extends Dialog {
         TextView view = new TextView(getContext());
         view.setText(value);
         view.setTextSize(size);
-        view.setTextColor(colors[TEXT]);
+        view.setTextColor(theme.text);
         view.setTypeface(Typeface.SERIF);
         view.setPadding(0, dp(8), 0, dp(8));
         form.addView(view);
@@ -142,23 +154,23 @@ final class AccountDialog extends Dialog {
         input.setId(id);
         input.setInputType(inputType);
         input.setSingleLine(true);
-        input.setTextColor(colors[TEXT]);
-        input.setHintTextColor(colors[MUTED]);
+        input.setTextColor(theme.text);
+        input.setHintTextColor(theme.muted);
         input.setTextSize(16);
-        input.setHighlightColor(colors[SELECTION]);
+        input.setHighlightColor(theme.selection);
         input.setBackgroundTintList(null);
         StateListDrawable background = new StateListDrawable();
-        background.addState(new int[]{android.R.attr.state_focused}, surface(colors[BACKGROUND], colors[ACCENT], 2));
-        background.addState(new int[]{}, surface(colors[BACKGROUND], colors[BORDER], 1));
+        background.addState(new int[]{android.R.attr.state_focused}, surface(theme.background, theme.accent, 2));
+        background.addState(new int[]{}, surface(theme.background, theme.border, 1));
         input.setBackground(background);
         input.setPadding(dp(12), dp(12), dp(12), dp(12));
         input.setMinHeight(dp(56));
         if (Build.VERSION.SDK_INT >= 29) {
-            GradientDrawable cursor = surface(colors[ACCENT], colors[ACCENT], 0);
+            GradientDrawable cursor = surface(theme.accent, theme.accent, 0);
             cursor.setSize(dp(2), Math.round(input.getTextSize() * 1.2f));
             input.setTextCursorDrawable(cursor);
             Drawable[] handles = {input.getTextSelectHandle(), input.getTextSelectHandleLeft(), input.getTextSelectHandleRight()};
-            for (Drawable handle : handles) if (handle != null) handle.mutate().setTint(colors[ACCENT]);
+            for (Drawable handle : handles) if (handle != null) handle.mutate().setTint(theme.accent);
         }
         input.setTypeface(Typeface.SERIF);
         input.setSaveEnabled(false);
@@ -176,12 +188,12 @@ final class AccountDialog extends Dialog {
         return shape;
     }
     private void styleButton(Button button, boolean primary) {
-        button.setTextColor(colors[primary ? ACCENT_TEXT : LINK]);
+        button.setTextColor((primary ? theme.accentText : theme.link));
         button.setBackgroundTintList(null);
         StateListDrawable background = new StateListDrawable();
-        background.addState(new int[]{android.R.attr.state_focused}, surface(colors[primary ? ACCENT : SELECTION], colors[primary ? ACCENT_TEXT : ACCENT], 2));
-        background.addState(new int[]{}, surface(colors[primary ? ACCENT : BACKGROUND], colors[ACCENT], 0));
-        button.setBackground(new RippleDrawable(ColorStateList.valueOf(ColorUtils.setAlphaComponent(colors[primary ? ACCENT_TEXT : ACCENT], 40)), background,
+        background.addState(new int[]{android.R.attr.state_focused}, surface((primary ? theme.accent : theme.selection), (primary ? theme.accentText : theme.accent), 2));
+        background.addState(new int[]{}, surface((primary ? theme.accent : theme.background), theme.accent, 0));
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(ColorUtils.setAlphaComponent((primary ? theme.accentText : theme.accent), 40)), background,
             surface(Color.WHITE, Color.WHITE, 0)));
         button.setStateListAnimator(null);
         button.setElevation(0);
@@ -203,7 +215,7 @@ final class AccountDialog extends Dialog {
     }
     private void feedback(String message, boolean error) {
         feedback.setText(message);
-        feedback.setTextColor(colors[error ? DANGER : MUTED]);
+        feedback.setTextColor((error ? theme.danger : theme.muted));
         feedback.setVisibility(message.isEmpty() ? View.GONE : View.VISIBLE);
     }
     private void change(String next) {
@@ -221,7 +233,7 @@ final class AccountDialog extends Dialog {
         form.removeCallbacks(resendTick);
         if (finished || resendButton == null) return;
         long seconds = Math.max(0, (resendAvailableAt - SystemClock.elapsedRealtime() + 999) / 1000);
-        resendButton.setText(seconds > 0 ? "Resend PIN (" + seconds + "s)" : "Resend PIN");
+        resendButton.setText(seconds > 0 ? UiText.format(UiText.ACCOUNT_RESEND_PIN_S, "seconds", seconds) : UiText.ACCOUNT_RESEND_PIN);
         resendButton.setEnabled(!busy && seconds == 0);
         if (seconds > 0) form.postDelayed(resendTick, 1000);
     }
@@ -236,11 +248,11 @@ final class AccountDialog extends Dialog {
         email = password = pin = token = null;
         String title;
         switch (flow) {
-            case "register": title = "Create account"; break;
-            case "verify": title = "Check your email"; break;
-            case "request-reset": title = "Reset your password"; break;
-            case "reset": title = "Set a new password"; break;
-            default: title = "Sign in";
+            case "register": title = UiText.ACCOUNT_CREATE_ACCOUNT; break;
+            case "verify": title = UiText.ACCOUNT_CHECK_YOUR_EMAIL; break;
+            case "request-reset": title = UiText.ACCOUNT_RESET_YOUR_PASSWORD; break;
+            case "reset": title = UiText.ACCOUNT_SET_A_NEW_PASSWORD; break;
+            default: title = UiText.COMMON_SIGN_IN;
         }
         setTitle(title);
         LinearLayout header = new LinearLayout(getContext());
@@ -248,7 +260,7 @@ final class AccountDialog extends Dialog {
         TextView heading = text(title, 28);
         form.removeView(heading);
         header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        Button close = button("Close", this::dismiss);
+        Button close = button(UiText.COMMON_CLOSE, this::dismiss);
         form.removeView(close);
         header.addView(close, new LinearLayout.LayoutParams(-2, -2));
         form.addView(header);
@@ -256,15 +268,15 @@ final class AccountDialog extends Dialog {
         feedback = text(message, 16);
         feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         feedback(message, false);
-        if (!flow.equals("verify")) email = field(R.id.account_email, "Email", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
+        if (!flow.equals("verify")) email = field(R.id.account_email, UiText.ACCOUNT_EMAIL, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
             flow.equals("register") ? "newUsername" : View.AUTOFILL_HINT_USERNAME, address);
-        if (flow.equals("verify")) pin = field(R.id.account_pin, "Verification PIN", InputType.TYPE_CLASS_NUMBER, null, "");
+        if (flow.equals("verify")) pin = field(R.id.account_pin, UiText.ACCOUNT_VERIFICATION_PIN, InputType.TYPE_CLASS_NUMBER, null, "");
         if (flow.equals("login") || flow.equals("register") || flow.equals("reset")) {
-            password = field(R.id.account_password, flow.equals("reset") ? "New password" : "Password",
+            password = field(R.id.account_password, flow.equals("reset") ? UiText.ACCOUNT_NEW_PASSWORD : UiText.COMMON_PASSWORD,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD,
                 flow.equals("login") ? View.AUTOFILL_HINT_PASSWORD : "newPassword", "");
             password.setTransformationMethod(PasswordTransformationMethod.getInstance());
-            Button reveal = button("Show password", () -> {});
+            Button reveal = button(UiText.ACCOUNT_SHOW_PASSWORD, () -> {});
             LinearLayout.LayoutParams revealLayout = new LinearLayout.LayoutParams(-2, -2);
             revealLayout.gravity = Gravity.END;
             reveal.setLayoutParams(revealLayout);
@@ -273,19 +285,19 @@ final class AccountDialog extends Dialog {
                 boolean hidden = password.getTransformationMethod() instanceof PasswordTransformationMethod;
                 password.setTransformationMethod(hidden ? null : PasswordTransformationMethod.getInstance());
                 password.setSelection(password.length());
-                reveal.setText(hidden ? "Hide password" : "Show password");
-                reveal.setContentDescription(hidden ? "Hide password" : "Show password");
+                reveal.setText(hidden ? UiText.ACCOUNT_HIDE_PASSWORD : UiText.ACCOUNT_SHOW_PASSWORD);
+                reveal.setContentDescription(hidden ? UiText.ACCOUNT_HIDE_PASSWORD : UiText.ACCOUNT_SHOW_PASSWORD);
             });
-            if (flow.equals("register") || flow.equals("reset")) text("Use at least " + minimum + " characters.", 14).setTextColor(colors[MUTED]);
+            if (flow.equals("register") || flow.equals("reset")) text(UiText.format(UiText.ACCOUNT_USE_AT_LEAST_MINIMUM_CHARACTERS, "minimum", minimum), 14).setTextColor(theme.muted);
         }
-        if (flow.equals("reset")) token = field(R.id.account_reset_token, "Reset code from your email", InputType.TYPE_CLASS_TEXT, null, "");
+        if (flow.equals("reset")) token = field(R.id.account_reset_token, UiText.ACCOUNT_RESET_CODE_FROM_YOUR_EMAIL, InputType.TYPE_CLASS_TEXT, null, "");
         EditText last = token != null ? token : pin != null ? pin : password != null ? password : email;
         last.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         last.setOnEditorActionListener((v, action, event) -> {
             if (action == EditorInfo.IME_ACTION_DONE) { perform(flow); return true; }
             return false;
         });
-        String action = flow.equals("verify") ? "Verify email" : flow.equals("request-reset") ? "Email me a reset code" : flow.equals("reset") ? "Set new password" : title;
+        String action = flow.equals("verify") ? UiText.ACCOUNT_VERIFY_EMAIL : flow.equals("request-reset") ? UiText.ACCOUNT_EMAIL_ME_A_RESET_CODE : flow.equals("reset") ? UiText.ACCOUNT_SET_NEW_PASSWORD : title;
         Button primary = button(action, () -> perform(flow));
         styleButton(primary, true);
         LinearLayout.LayoutParams primaryLayout = new LinearLayout.LayoutParams(-1, -2);
@@ -293,14 +305,14 @@ final class AccountDialog extends Dialog {
         primaryLayout.bottomMargin = dp(8);
         primary.setLayoutParams(primaryLayout);
         if (flow.equals("login")) {
-            button("Forgot password?", () -> change("request-reset"));
-            button("Create account", () -> change("register"));
+            button(UiText.ACCOUNT_FORGOT_PASSWORD, () -> change("request-reset"));
+            button(UiText.ACCOUNT_CREATE_ACCOUNT, () -> change("register"));
         } else {
             if (flow.equals("verify")) {
-                resendButton = button("Resend PIN", () -> perform("resend"));
-                button("Use a different email", () -> change("register"));
+                resendButton = button(UiText.ACCOUNT_RESEND_PIN, () -> perform("resend"));
+                button(UiText.ACCOUNT_USE_A_DIFFERENT_EMAIL, () -> change("register"));
             }
-            button("Back to sign in", () -> change("login"));
+            button(UiText.ACCOUNT_BACK_TO_SIGN_IN, () -> change("login"));
         }
         (pin != null ? pin : email).requestFocus();
     }
@@ -318,15 +330,15 @@ final class AccountDialog extends Dialog {
         String secret = flow.equals("verify") ? registrationPassword : password != null ? password.getText().toString() : "";
         String code = pin != null ? pin.getText().toString().trim() : "";
         String resetToken = token == null ? "" : token.getText().toString().trim();
-        if (email != null && !android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches()) { email.setError("Enter a valid email address"); email.requestFocus(); return; }
-        if (action.equals("verify") && !code.matches("[0-9]{6}")) { pin.setError("Enter the six-digit PIN"); pin.requestFocus(); return; }
+        if (email != null && !android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches()) { email.setError(UiText.ACCOUNT_ENTER_A_VALID_EMAIL_ADDRESS); email.requestFocus(); return; }
+        if (action.equals("verify") && !code.matches("[0-9]{6}")) { pin.setError(UiText.ACCOUNT_ENTER_THE_SIX_DIGIT_PIN); pin.requestFocus(); return; }
         if ((action.equals("login") && secret.isEmpty()) || ((action.equals("register") || action.equals("reset")) && secret.codePointCount(0, secret.length()) < minimum)) {
-            password.setError(action.equals("register") || action.equals("reset") ? "Use at least " + minimum + " characters" : "Enter your password"); password.requestFocus(); return;
+            password.setError(action.equals("register") || action.equals("reset") ? UiText.format(UiText.ACCOUNT_USE_AT_LEAST_MINIMUM_CHARACTERS_2, "minimum", minimum) : UiText.ACCOUNT_ENTER_YOUR_PASSWORD); password.requestFocus(); return;
         }
-        if (action.equals("reset") && resetToken.isEmpty()) { token.setError("Enter the reset code from your email"); token.requestFocus(); return; }
+        if (action.equals("reset") && resetToken.isEmpty()) { token.setError(UiText.ACCOUNT_ENTER_THE_RESET_CODE_FROM_YOUR_EMAIL); token.requestFocus(); return; }
         pending = action;
         setBusy(true);
-        feedback("Please wait…", false);
+        feedback(UiText.ACCOUNT_PLEASE_WAIT, false);
         // Each action sends exactly its own fields; Rust parses this into an enum.
         try {
             JSONObject request = new JSONObject().put("action", action);
@@ -358,15 +370,15 @@ final class AccountDialog extends Dialog {
             case "register":
                 registrationEmail = address;
                 registrationPassword = password.getText().toString();
-                render("verify", address, "Enter the six-digit PIN sent to " + address + ".");
+                render("verify", address, UiText.format(UiText.ACCOUNT_ENTER_THE_SIX_DIGIT_PIN_SENT_TO_EMAIL, "email", address));
                 startResendCooldown();
                 break;
             case "resend":
-                feedback("A new PIN has been requested. Check your email and use the latest PIN.", false);
+                feedback(UiText.ACCOUNT_A_NEW_PIN_HAS_BEEN_REQUESTED_CHECK_YOUR_EMAIL_AND_USE_THE, false);
                 startResendCooldown();
                 break;
-            case "request-reset": render("reset", address, "Check your email for a reset code."); break;
-            case "reset": render("login", address, "Password updated. Sign in with your new password."); break;
+            case "request-reset": render("reset", address, UiText.ACCOUNT_CHECK_YOUR_EMAIL_FOR_A_RESET_CODE); break;
+            case "reset": render("login", address, UiText.ACCOUNT_PASSWORD_UPDATED_SIGN_IN_WITH_YOUR_NEW_PASSWORD); break;
         }
     }
 }

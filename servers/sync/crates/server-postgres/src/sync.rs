@@ -16,10 +16,8 @@ pub enum SyncError {
     LibraryOwnershipConflict,
     #[error("invalid library name")]
     InvalidLibraryName,
-    #[error("invalid OPDS feed")]
-    InvalidOpdsFeed,
-    #[error("OPDS feed was removed or belongs to a different user")]
-    OpdsFeedConflict,
+    #[error("invalid library kind or source")]
+    InvalidLibraryKind,
     #[error("synchronization request contains too many mutations")]
     TooManyMutations,
     #[error("synchronization request contains an ambiguous mutation identity")]
@@ -87,6 +85,11 @@ impl PostgresSyncRepository {
         let name = request.library_name.trim();
         if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
             return Err(SyncError::InvalidLibraryName);
+        }
+        if let sync_common::storage::LibraryKind::Opds { url } = &request.kind {
+            if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() || request.storage.uses_bokheim_assets() {
+                return Err(SyncError::InvalidLibraryKind);
+            }
         }
         sync_store::create_library(&self.pool, user_id, &LibraryNameRequest { library_name: name.to_owned(), ..request.clone() }).await.map_err(internal)
     }

@@ -40,7 +40,7 @@ pub(super) async fn response(mut asset: StoredAsset, headers: &HeaderMap, govern
     // A random boundary prevents file contents from being chosen to impersonate
     // a part separator. The reader validates each part's explicit byte length.
     let boundary = format!("bokheim-{}", uuid::Uuid::new_v4().simple());
-    let mut response_headers = response_headers(AssetKind::Book, &asset.content_hash);
+    let mut response_headers = response_headers(AssetKind::Book, &asset.book_id);
     response_headers.insert(header::CONTENT_TYPE, format!("multipart/byteranges; boundary={boundary}").parse().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
     let mut parts = Vec::new();
     let mut wire_length = 0_u64;
@@ -91,7 +91,7 @@ mod tests {
     async fn rejects_overlapping_unsorted_excessive_and_out_of_bounds_ranges() {
         let excessive = format!("bytes={}", (0..129).map(|n| format!("{}-{}", n * 2, n * 2)).collect::<Vec<_>>().join(","));
         for value in ["bytes=0-5,4-8", "bytes=8-9,0-1", "bytes=0-1,9999999-", "bytes=0-4194304,4194305-4194305", "bytes=0-1,18446744073709551615-", &excessive] {
-            let asset = StoredAsset { reader: Box::new(Cursor::new(Vec::new())), total_len: 8 * 1024 * 1024, offset: 0, content_hash: BookId::new(&"f".repeat(64)) };
+            let asset = StoredAsset { reader: Box::new(Cursor::new(Vec::new())), total_len: 8 * 1024 * 1024, offset: 0, book_id: BookId::new(&"f".repeat(64)) };
             let mut headers = HeaderMap::new();
             headers.insert(header::RANGE, value.parse().unwrap());
             assert_eq!(response(asset, &headers, TransferGovernor::new(Default::default()), "test".into()).await.unwrap_err(), StatusCode::RANGE_NOT_SATISFIABLE, "{value}");
@@ -100,7 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_stream_fails_on_truncated_storage() {
-        let asset = StoredAsset { reader: Box::new(Cursor::new(b"abc".to_vec())), total_len: 10, offset: 0, content_hash: BookId::new(&"f".repeat(64)) };
+        let asset = StoredAsset { reader: Box::new(Cursor::new(b"abc".to_vec())), total_len: 10, offset: 0, book_id: BookId::new(&"f".repeat(64)) };
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, "bytes=0-1,8-9".parse().unwrap());
         let response = response(asset, &headers, TransferGovernor::new(Default::default()), "test".into()).await.unwrap();

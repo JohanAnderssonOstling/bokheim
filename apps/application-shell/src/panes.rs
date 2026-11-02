@@ -400,10 +400,21 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = AppClient::start_native(launch).unwrap();
-        let first = backend.create_library_with_asset_storage("First pane".into(), false).await.unwrap();
-        let second = backend.create_library_with_asset_storage("Second pane".into(), false).await.unwrap();
+        let first = backend.management.create_library_with_asset_storage("First pane".into(), false).await.unwrap();
+        let second = backend.management.create_library_with_asset_storage("Second pane".into(), false).await.unwrap();
         let ids = [*first.library_id(), *second.library_id()];
-        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let services = AppServices::new(
+            backend.clone(),
+            AppStartup {
+                libraries: backend.management.libraries().await.unwrap(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);
@@ -522,7 +533,7 @@ mod tests {
                             cover: Vec::new(),
                         };
                         let record = reader_ui::ActiveAudiobook::new(locator.clone(), 1000, 1.0, metadata);
-                        let session = reader_ui::restore_audiobook(&record, root.backend.library(library), cx);
+                        let session = reader_ui::restore_audiobook(&record, root.backend.management.library(library), cx);
                         root.panes[index].view.update(cx, |pane, cx| {
                             pane.playback.update(cx, |controller, cx| controller.replace(locator, record.metadata.title, session, cx));
                             pane.sync_playback(window, cx);
@@ -550,7 +561,7 @@ mod tests {
         let bytes = br#"<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0"><description><title-info><book-title>Linked book</book-title><lang>en</lang></title-info></description><body><section><p>First chapter.</p></section><section><p>Linked chapter.</p></section></body></FictionBook>"#;
         let mut locators = Vec::new();
         for library in libraries {
-            let book = backend.library(library).import_downloaded_book(ROOT_DIR_ID, "Linked.fb2".into(), bytes.to_vec()).await.unwrap();
+            let book = backend.management.library(library).import_downloaded_book(ROOT_DIR_ID, "Linked.fb2".into(), bytes.to_vec()).await.unwrap();
             locators.push(BookLocator::new(library, book));
         }
         let readers = window
@@ -599,7 +610,7 @@ mod tests {
                     root.active = 1;
                     assert!(root.has_open_reader(&locator, cx));
                     assert_eq!(root.reader_pane_index(&locator, cx), Some(1));
-                    let other_library = BookLocator::new(libraries[1], locator.content_hash());
+                    let other_library = BookLocator::new(libraries[1], locator.book_id());
                     assert!(!root.has_open_reader(&other_library, cx), "book identity must include the library");
                 })
             })

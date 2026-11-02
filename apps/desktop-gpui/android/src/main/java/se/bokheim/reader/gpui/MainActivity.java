@@ -125,10 +125,8 @@ public final class MainActivity extends GameActivity {
             switch (message.getString("command")) {
                 case "open":
                     if (accountDialog != null) accountDialog.dismiss();
-                    org.json.JSONArray palette = message.getJSONArray("colors");
-                    int[] colors = new int[9];
-                    for (int i = 0; i < colors.length; i++) colors[i] = (int) palette.getLong(i);
-                    accountDialog = new AccountDialog(this, id, message.getInt("minimum"), message.getInt("resendCooldownSeconds"), colors, (session, request) -> {
+                    AccountDialog.Theme theme = new AccountDialog.Theme(message.getJSONObject("theme"));
+                    accountDialog = new AccountDialog(this, id, message.getInt("minimum"), message.getInt("resendCooldownSeconds"), theme, (session, request) -> {
                         nativeAuthenticationRequest(session, request);
                         try {
                             if (new org.json.JSONObject(request).getString("action").equals("closed") && accountDialog != null && accountDialog.sessionId == session) accountDialog = null;
@@ -763,54 +761,10 @@ public final class MainActivity extends GameActivity {
         }
     }
 
-    private static String[] mimeTypesFor(String[] extensions) {
-        Set<String> mimeTypes = new LinkedHashSet<>();
-        for (String extension : extensions) {
-            switch (extension.toLowerCase(Locale.ROOT)) {
-                case "epub":
-                    mimeTypes.add("application/epub+zip");
-                    break;
-                case "pdf":
-                    mimeTypes.add("application/pdf");
-                    break;
-                case "mobi":
-                    mimeTypes.add("application/x-mobipocket-ebook");
-                    break;
-                case "azw":
-                case "azw3":
-                    mimeTypes.add("application/vnd.amazon.ebook");
-                    mimeTypes.add("application/x-mobi8-ebook");
-                    break;
-                case "fb2":
-                    mimeTypes.add("application/x-fictionbook+xml");
-                    mimeTypes.add("text/xml");
-                    mimeTypes.add("application/xml");
-                    break;
-                case "fbz":
-                case "zip":
-                    mimeTypes.add("application/zip");
-                    mimeTypes.add("application/x-zip-compressed-fb2");
-                    break;
-                case "cbz":
-                    mimeTypes.add("application/vnd.comicbook+zip");
-                    mimeTypes.add("application/x-cbz");
-                    mimeTypes.add("application/zip");
-                    break;
-                case "m4b":
-                    mimeTypes.add("audio/mp4");
-                    mimeTypes.add("audio/x-m4b");
-                    break;
-                default:
-                    break;
-            }
-        }
-        return mimeTypes.toArray(new String[0]);
-    }
-
     private static Intent filePromptIntent(boolean multiple, String[] extensions) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        String[] mimeTypes = mimeTypesFor(extensions);
+        String[] mimeTypes = BookFormats.mimeTypesFor(extensions);
         intent.setType(mimeTypes.length == 1 ? mimeTypes[0] : "*/*");
         if (mimeTypes.length > 1) {
             intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);

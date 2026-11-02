@@ -50,7 +50,7 @@ async fn restored_history_rejects_old_cursors_even_after_passing_their_revision(
     sqlx::query("INSERT INTO users(id) VALUES($1)").bind(user).execute(database.pool()).await.unwrap();
     let library = LibraryId::new_v4();
     let replica = ReplicaId::new_v4();
-    repository.create_library(user, &LibraryNameRequest { library_id: library, library_name: "History".into(), storage: Default::default() }).await.unwrap();
+    repository.create_library(user, &LibraryNameRequest { library_id: library, library_name: "History".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
     let empty = repository.exchange(user, &SyncExchangeRequest { library_id: library, replica_id: replica, mutations: Vec::new(), cursor: SyncCursor::default() }).await.unwrap();
     assert!(empty.pull.next_cursor.generation.is_some(), "even an empty library binds its checkpoint to the history");
     assert!(empty.pull.next_cursor.lifecycle_revision.is_none());

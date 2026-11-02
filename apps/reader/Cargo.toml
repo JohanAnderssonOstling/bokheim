@@ -7,11 +7,14 @@ edition = "2024"
 default = ["native-audio"]
 native-audio = ["audiobook-player/native-rodio"]
 native-tts = ["dep:reader-speech"]
-kobo = ["mobile", "dep:gpui_kobo", "app/kobo", "audiobook-player/kobo", "ui-components/kobo", "gpui-image-eviction/kobo"]
+kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "app/kobo", "audiobook-player/kobo", "ui-components/kobo", "gpui-image-eviction/kobo"]
 mobile = ["ui-components/mobile"]
 packaged-pdfium = ["pdf-reader-core/packaged-pdfium"]
 
 [dependencies]
+language-tags = { version = "0.3.2", features = ["serde"] }
+reader-lookups = { path = "../../client/reader-lookups" }
+ui-text = { path = "../ui-text" }
 dictionary = { path = "../../client/app/crates/dictionary", features = ["client"] }
 dictionary-settings = { path = "../dictionary-settings" }
 sys-locale = { version = "0.3", features = ["js"] }
@@ -26,6 +29,7 @@ audiobook-player = { path = "../audiobook-player", default-features = false }
 gpui = { workspace = true, features = ["snapshot"] }
 gpui-component.workspace = true
 gpui_kobo = { workspace = true, optional = true }
+kobo-device = { path = "../kobo-device", optional = true }
 skrift-column-paginator.workspace = true
 html-view-gpui = { path = "../../../HtmlViewCore/adapters/html-view-gpui" }
 html.workspace = true
@@ -44,6 +48,10 @@ image = { workspace = true, features = ["bmp", "gif", "jpeg", "png", "webp", "ti
 gpui-image-eviction = { path = "../../../HtmlEngine/adapters/gpui-image-eviction" }
 
 [dev-dependencies]
+dictionary = { path = "../../client/app/crates/dictionary", features = ["store"] }
+html-engine-model = { package = "skrift-engine-model", path = "../../../HtmlEngine/crates/html-engine-model" }
+html-pipeline = { package = "skrift-pipeline", path = "../../../HtmlEngine/crates/html-pipeline" }
+
 base64 = "0.22"
 book-access = { path = "../../client/library-backend/crates/book-access" }
 gpui = { workspace = true, features = ["test-support"] }

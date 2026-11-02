@@ -1,10 +1,10 @@
 //! Deserialize the protobuf tree directly. Byte sequences stream u8 values;
 //! arbitrary map keys alone retain the original Serde ordering and deduplication.
-use crate::protobuf::{self, Value, value::Kind};
-use crate::{WireError, domain_value, protobuf_value};
+use crate::protobuf::{self, value::Kind, Value};
+use crate::{domain_value, protobuf_value, WireError};
 use serde::de::{self, DeserializeSeed, Deserializer as _, Visitor};
 use serde_value::{DeserializerError as Error, Value as Key};
-use std::collections::{BTreeMap, btree_map};
+use std::collections::{btree_map, BTreeMap};
 use std::vec;
 
 pub(crate) fn validate(value: &Value) -> Result<(), WireError> {
@@ -128,7 +128,7 @@ impl<'de> de::Deserializer<'de> for Deserializer {
     }
     fn deserialize_newtype_struct<V: Visitor<'de>>(self, name: &'static str, visitor: V) -> Result<V::Value, Error> {
         match self.value.kind {
-            Some(Kind::BytesValue(value)) if name == "BokheimTransportBytes" => visitor.visit_newtype_struct(de::value::BytesDeserializer::<Error>::new(&value)),
+            Some(Kind::BytesValue(value)) if serde_transport::uses_binary_representation(name) => visitor.visit_newtype_struct(de::value::BytesDeserializer::<Error>::new(&value)),
             Some(Kind::NewtypeValue(value)) => visitor.visit_newtype_struct(Self { value: *value, byte_fields: self.byte_fields }),
             _ => visitor.visit_newtype_struct(self),
         }

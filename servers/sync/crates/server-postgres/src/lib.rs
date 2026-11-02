@@ -6,7 +6,6 @@ mod assets;
 mod cleanup;
 mod cloud_storage;
 mod database;
-mod opds_feeds;
 mod sync;
 mod sync_store;
 

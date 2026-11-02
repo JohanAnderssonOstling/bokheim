@@ -1,5 +1,7 @@
 //! Browser route definitions.
 
+use ui_text::text;
+
 use crate::library::BrowseKind;
 
 /// A page whose state belongs to one library session.
@@ -51,16 +53,16 @@ impl Route {
     pub(crate) fn presentation(self) -> (&'static str, ui_components::NavigationIcon) {
         use ui_components::NavigationIcon;
         match self {
-            Self::Library(LibraryRoute::Home) => ("Home", NavigationIcon::House),
-            Self::Library(LibraryRoute::Books) => ("Books", NavigationIcon::BookOpen),
-            Self::Library(LibraryRoute::Authors) => ("Authors", NavigationIcon::User),
-            Self::Library(LibraryRoute::Folders) => ("Folders", NavigationIcon::Folder),
-            Self::Library(LibraryRoute::Subjects) => ("Subjects", NavigationIcon::Tags),
-            Self::Library(LibraryRoute::Catalog) => ("Catalog", NavigationIcon::Building2),
-            Self::Library(LibraryRoute::Trash) => ("Trash", NavigationIcon::Trash2),
-            Self::Library(LibraryRoute::Notebook) => ("Notes", NavigationIcon::Notebook),
-            Self::Library(LibraryRoute::Search) => ("Search", NavigationIcon::Search),
-            Self::Global(GlobalRoute::Settings) => ("Settings", NavigationIcon::Settings),
+            Self::Library(LibraryRoute::Home) => (text!(browse::home), NavigationIcon::House),
+            Self::Library(LibraryRoute::Books) => (text!(browse::books), NavigationIcon::BookOpen),
+            Self::Library(LibraryRoute::Authors) => (text!(browse::authors), NavigationIcon::User),
+            Self::Library(LibraryRoute::Folders) => (text!(browse::folders), NavigationIcon::Folder),
+            Self::Library(LibraryRoute::Subjects) => (text!(browse::subjects), NavigationIcon::Tags),
+            Self::Library(LibraryRoute::Catalog) => (text!(browse::catalog), NavigationIcon::Building2),
+            Self::Library(LibraryRoute::Trash) => (text!(browse::trash), NavigationIcon::Trash2),
+            Self::Library(LibraryRoute::Notebook) => (text!(common::notes), NavigationIcon::Notebook),
+            Self::Library(LibraryRoute::Search) => (text!(common::search), NavigationIcon::Search),
+            Self::Global(GlobalRoute::Settings) => (text!(common::settings), NavigationIcon::Settings),
         }
     }
 }

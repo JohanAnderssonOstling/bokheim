@@ -1,5 +1,7 @@
 //! Format-neutral dispatch for reader input commands.
 
+use ui_text::text;
+
 use std::time::Duration;
 
 use gpui::{App, Context, Focusable, KeyBinding, Task, Window};
@@ -201,17 +203,17 @@ where
 /// Binds commands handled by the reader shell rather than the document.
 pub(crate) fn bind_reader_keys(cx: &mut App) {
     use ui_components::{ShortcutPage::Reader, bind_shortcut};
-    bind_shortcut(cx, Reader, "reader.back", "Back in reading history", &["alt-left"], NavigateBack, "Reader");
-    bind_shortcut(cx, Reader, "reader.forward", "Forward in reading history", &["alt-right"], NavigateForward, "Reader");
-    bind_shortcut(cx, Reader, "reader.next_tab", "Next sidebar tab", &["ctrl-tab"], NextSidebarTab, "Reader");
-    bind_shortcut(cx, Reader, "reader.previous_tab", "Previous sidebar tab", &["ctrl-shift-tab"], PreviousSidebarTab, "Reader");
-    bind_shortcut(cx, Reader, "reader.settings", "Open reader settings", &["secondary-s"], OpenReaderSettings, "Reader");
-    bind_shortcut(cx, Reader, "reader.contents", "Toggle contents", &["secondary-shift-t"], ToggleToc, "Reader");
-    bind_shortcut(cx, Reader, "reader.tts", "Toggle text-to-speech", &["ctrl-t"], ToggleTts, "Reader");
-    bind_shortcut(cx, Reader, "reader.notes", "Toggle notes", &["ctrl-n"], ToggleNotes, "Reader");
-    bind_shortcut(cx, Reader, "reader.search", "Search in book", &["secondary-f"], FocusReaderSearch, "Reader");
-    bind_shortcut(cx, Reader, "reader.close_search", "Close search or sidebar", &["escape"], CloseSearch, "Reader");
-    bind_shortcut(cx, Reader, "reader.library", "Return to library", &["backspace"], ReturnToLibrary, "Reader");
+    bind_shortcut(cx, Reader, "reader.back", text!(reader::back_in_reading_history), &["alt-left"], NavigateBack, "Reader");
+    bind_shortcut(cx, Reader, "reader.forward", text!(reader::forward_in_reading_history), &["alt-right"], NavigateForward, "Reader");
+    bind_shortcut(cx, Reader, "reader.next_tab", text!(reader::next_sidebar_tab), &["ctrl-tab"], NextSidebarTab, "Reader");
+    bind_shortcut(cx, Reader, "reader.previous_tab", text!(reader::previous_sidebar_tab), &["ctrl-shift-tab"], PreviousSidebarTab, "Reader");
+    bind_shortcut(cx, Reader, "reader.settings", text!(reader::open_reader_settings), &["secondary-s"], OpenReaderSettings, "Reader");
+    bind_shortcut(cx, Reader, "reader.contents", text!(reader::toggle_contents), &["secondary-shift-t"], ToggleToc, "Reader");
+    bind_shortcut(cx, Reader, "reader.tts", text!(reader::toggle_text_to_speech), &["ctrl-t"], ToggleTts, "Reader");
+    bind_shortcut(cx, Reader, "reader.notes", text!(reader::toggle_notes), &["ctrl-n"], ToggleNotes, "Reader");
+    bind_shortcut(cx, Reader, "reader.search", text!(reader::search_in_book), &["secondary-f"], FocusReaderSearch, "Reader");
+    bind_shortcut(cx, Reader, "reader.close_search", text!(reader::close_search_or_sidebar), &["escape"], CloseSearch, "Reader");
+    bind_shortcut(cx, Reader, "reader.library", text!(common::return_to_library), &["backspace"], ReturnToLibrary, "Reader");
     cx.bind_keys([
         #[cfg(not(target_os = "android"))]
         KeyBinding::new("back", ReturnToLibrary, Some("Reader")),
@@ -274,8 +276,8 @@ pub(crate) fn install_reader_shortcuts<
 /// Binds navigation shared by reflowable and fixed-layout documents.
 pub(crate) fn bind_document_keys(cx: &mut App, context: &'static str) {
     use ui_components::{ShortcutPage::Reader, bind_shortcut};
-    bind_shortcut(cx, Reader, "reader.previous_line", "Previous line", &["up"], PreviousLine, context);
-    bind_shortcut(cx, Reader, "reader.next_line", "Next line", &["down"], NextLine, context);
-    bind_shortcut(cx, Reader, "reader.previous_page", "Previous page", &["left", "pageup"], PreviousPage, context);
-    bind_shortcut(cx, Reader, "reader.next_page", "Next page", &["right", "pagedown", "space"], NextPage, context);
+    bind_shortcut(cx, Reader, "reader.previous_line", text!(reader::previous_line), &["up"], PreviousLine, context);
+    bind_shortcut(cx, Reader, "reader.next_line", text!(reader::next_line), &["down"], NextLine, context);
+    bind_shortcut(cx, Reader, "reader.previous_page", text!(reader::previous_page), &["left", "pageup"], PreviousPage, context);
+    bind_shortcut(cx, Reader, "reader.next_page", text!(reader::next_page), &["right", "pagedown", "space"], NextPage, context);
 }

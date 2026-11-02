@@ -2,13 +2,13 @@ pub(crate) use super::error::SyncError;
 pub(crate) use super::error::SyncResult;
 pub(crate) use crate::engine::SyncOutcome;
 pub(crate) use account_client::Url;
+use asset_transfer::transfer::AssetExecutor;
 pub(crate) use library_database::Database;
-pub(crate) use library_files::asset_store::AssetStore;
 pub(crate) use library_model::{LibraryUpdate, TransferOrigin};
-use library_runtime::account::{LibraryAccount, SharedSyncCredentials};
+use library_placement::LibraryPlacement;
+use library_runtime::account::{LibraryAccount, LibraryAuthentication, SharedSyncCredentials};
 pub(crate) use library_runtime::events::{LibraryEvent, LibraryEventRouter};
 pub(crate) use library_runtime::interest::NotificationInterest;
-pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) use std::sync::Arc;
 pub(crate) use sync_common::BookId;
 pub(crate) use sync_common::{LibraryId, ReplicaId};
@@ -22,57 +22,60 @@ mod host;
 mod host;
 
 pub struct LibrarySyncConfig {
-    /// The library session's connection; sync runs on the library thread.
-    pub database: Arc<Database>,
-    pub assets: AssetStore,
-    pub replica_id: ReplicaId,
+    pub placement: Arc<LibraryPlacement>,
     pub server_url: Url,
     pub library_id: LibraryId,
-    pub events: Option<LibraryEventRouter>,
-    pub credentials: SharedSyncCredentials,
-    pub account: Option<LibraryAccount>,
+    pub authentication: LibraryAuthentication,
     pub notification_interest: NotificationInterest,
     pub cpu: Arc<dyn cpu_host::CpuHost>,
 }
 
 pub struct LibrarySync {
-    pub asset_storage_enabled: Arc<AtomicBool>,
-    pub assets: AssetStore,
-    pub database: Arc<Database>,
-    pub replica_id: ReplicaId,
-    pub server_url: Url,
-    pub http_client: reqwest::Client,
-    pub library_id: LibraryId,
-    pub events: Option<LibraryEventRouter>,
-    pub credentials: SharedSyncCredentials,
-    pub account: Option<LibraryAccount>,
-    pub notification_interest: NotificationInterest,
-    pub cpu: Arc<dyn cpu_host::CpuHost>,
+    pub(crate) database: Arc<Database>,
+    pub(crate) replica_id: ReplicaId,
+    pub(crate) server_url: Url,
+    pub(crate) http_client: reqwest::Client,
+    pub(crate) library_id: LibraryId,
+    pub(crate) events: Option<LibraryEventRouter>,
+    pub(crate) credentials: SharedSyncCredentials,
+    pub(crate) account: Option<LibraryAccount>,
+    pub(crate) notification_interest: NotificationInterest,
     #[cfg(not(target_arch = "wasm32"))]
     sync_gate: tokio::sync::Mutex<()>,
-    pub availability_changed: Arc<AtomicBool>,
+    asset_executor: AssetExecutor,
 }
 
 impl LibrarySync {
-    pub fn new(config: LibrarySyncConfig) -> Self {
-        let http_client = http_response::client();
-        Self {
-            asset_storage_enabled: Arc::new(AtomicBool::new(true)),
-            assets: config.assets,
-            database: config.database,
-            replica_id: config.replica_id,
+    pub fn new(config: LibrarySyncConfig) -> SyncResult<Self> {
+        let database = config.placement.database().clone();
+        let replica_id = database.sync_metadata("replica_id")?.ok_or_else(|| SyncError::failed("library database has not been initialized"))?.parse().map_err(SyncError::failed)?;
+        let asset_executor = AssetExecutor::new(config.placement.clone(), config.library_id, config.authentication.clone(), config.notification_interest.clone(), config.cpu);
+        Ok(Self {
+            database,
+            replica_id,
             server_url: config.server_url,
-            http_client,
+            http_client: asset_executor.http_client().clone(),
             library_id: config.library_id,
-            events: config.events,
-            credentials: config.credentials,
-            account: config.account,
+            events: Some(config.placement.events().clone()),
+            credentials: config.authentication.credentials(),
+            account: config.authentication.account(),
             notification_interest: config.notification_interest,
-            cpu: config.cpu,
             #[cfg(not(target_arch = "wasm32"))]
             sync_gate: tokio::sync::Mutex::new(()),
-            availability_changed: Arc::new(AtomicBool::new(false)),
-        }
+            asset_executor,
+        })
+    }
+
+    pub fn library_id(&self) -> LibraryId {
+        self.library_id
+    }
+
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+
+    pub fn notification_interest(&self) -> &NotificationInterest {
+        &self.notification_interest
     }
 
     pub fn is_signed_in(&self) -> bool {
@@ -141,23 +144,23 @@ impl LibrarySync {
     }
 
     pub fn set_asset_storage_enabled(&self, enabled: bool) {
-        self.asset_storage_enabled.store(enabled, Ordering::Release);
+        self.asset_executor.set_asset_storage_enabled(enabled);
     }
 
     pub fn asset_storage_enabled(&self) -> bool {
-        self.asset_storage_enabled.load(Ordering::Acquire)
+        self.asset_executor.asset_storage_enabled()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn request_download(&self, content_hash: BookId) -> SyncResult<()> {
-        self.request_downloads(std::slice::from_ref(&content_hash))
+    pub fn request_download(&self, book_id: BookId) -> SyncResult<()> {
+        self.request_downloads(std::slice::from_ref(&book_id))
     }
 
-    pub fn request_downloads(&self, content_hashes: &[BookId]) -> SyncResult<()> {
-        self.database.sync_request_book_downloads(content_hashes, TransferOrigin::UserInitiated)?;
+    pub fn request_downloads(&self, book_ids: &[BookId]) -> SyncResult<()> {
+        self.database.sync_request_book_downloads(book_ids, TransferOrigin::UserInitiated)?;
         if let Some(tx) = &self.events {
-            for content_hash in content_hashes {
-                let _ = tx.emit(LibraryEvent::DownloadStatusChanged { content_hash: *content_hash, state: library_model::DownloadState::Queued });
+            for book_id in book_ids {
+                let _ = tx.emit(LibraryEvent::DownloadStatusChanged { book_id: *book_id, state: library_model::DownloadState::Queued });
             }
         }
         Ok(())
@@ -165,20 +168,8 @@ impl LibrarySync {
 }
 
 impl LibrarySync {
-    pub fn asset_executor(&self) -> asset_transfer::transfer::AssetExecutor {
-        asset_transfer::transfer::AssetExecutor {
-            asset_storage_enabled: self.asset_storage_enabled.clone(),
-            assets: self.assets.clone(),
-            http_client: self.http_client.clone(),
-            library_id: self.library_id,
-            events: self.events.clone(),
-            credentials: self.credentials.clone(),
-            account: self.account.clone(),
-            notification_interest: self.notification_interest.clone(),
-            availability_changed: self.availability_changed.clone(),
-            database: self.database.clone(),
-            cpu: self.cpu.clone(),
-        }
+    pub fn asset_executor(&self) -> AssetExecutor {
+        self.asset_executor.clone()
     }
 }
 

@@ -9,12 +9,14 @@ kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-profile"]
 mobile = []
 
 [dependencies]
+ui-text = { path = "../ui-text" }
 book-model = { path = "../../shared/book-model", default-features = false }
 kobo-profile = { path = "../../shared/kobo-profile", optional = true }
 log = "0.4"
 web-time = "1"
 library-model = { path = "../../client/library-model", default-features = false }
 operation-failure = { path = "../../client/operation-failure" }
+path-label = { path = "../../shared/path-label" }
 app-preferences = { path = "../../client/preferences" }
 gpui.workspace = true
 html.workspace = true
@@ -38,9 +40,6 @@ gpui_wgpu.workspace = true
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["Window", "MediaQueryList"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-dunce = "1"
 
 [package.metadata.cargo-machete]
 ignored = ["image", "resvg"]

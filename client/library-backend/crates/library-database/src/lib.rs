@@ -18,17 +18,17 @@ use std::sync::Arc;
 use sync_common::BookId;
 #[macro_use]
 mod query_methods;
+mod annotation_export;
+mod content_identity;
 pub(crate) mod contributors;
+mod opds;
 pub(crate) mod purge;
 pub mod shared_sql;
 mod taxonomy_update;
 mod transactions;
-mod content_identity;
-mod opds;
-mod annotation_export;
 pub mod transfer;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 50;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 53;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -112,11 +112,7 @@ fn configure_library_connection(connection: &rusqlite::Connection) -> rusqlite::
     profile.mark("sql_functions");
     attach_taxonomy(connection).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     profile.mark("taxonomy_attach");
-    // Each schema has its own page cache. Set the KiB target after attaching
-    // the taxonomy so every storage path gets the same policy.
-    for schema in ["main", "curated"] {
-        connection.pragma_update(Some(schema), "cache_size", -subject_projection::installed::PAGE_CACHE_KIB)?;
-    }
+    connection.pragma_update(Some("main"), "cache_size", -subject_projection::installed::PAGE_CACHE_KIB)?;
     profile.mark("cache_policy");
     Ok(())
 }
@@ -127,12 +123,16 @@ fn attach_taxonomy(connection: &rusqlite::Connection) -> Result<(), DatabaseErro
         attached = row.get(0)?;
         Ok(())
     })?;
-    if attached {
-        return Ok(());
+    if !attached {
+        let path = subject_projection::installed::path().map_err(DatabaseError::message)?;
+        let uri = subject_projection::installed::read_only_uri(&path).map_err(DatabaseError::message)?;
+        connection.taxonomy_attach(&uri)?;
     }
-    let path = subject_projection::installed::path().map_err(DatabaseError::message)?;
-    let uri = subject_projection::installed::read_only_uri(&path).map_err(DatabaseError::message)?;
-    connection.taxonomy_attach(&uri)?;
+    // The immutable taxonomy is shared by all library and catalog connections.
+    // Map its pages instead of retaining a private heap copy in each page cache.
+    connection.pragma_update(Some("curated"), "cache_size", -subject_projection::installed::PAGE_CACHE_KIB)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    connection.pragma_update(Some("curated"), "mmap_size", subject_projection::installed::READ_ONLY_MMAP_BYTES)?;
     Ok(())
 }
 
@@ -186,7 +186,9 @@ impl Database {
                 transaction.execute_batch(include_str!("sync/sql/schema/book_popularity.sql"))?;
                 projection::backfill_popularity(&transaction)?;
             }
-            if version < 41 { browse::revision::install(&transaction)?; }
+            if version < 41 {
+                browse::revision::install(&transaction)?;
+            }
             if version < 44 {
                 transaction.execute_batch(include_str!("sync/sql/schema/contributor_names.sql"))?;
                 contributors::backfill_name_keys(&transaction)?;
@@ -214,6 +216,15 @@ impl Database {
             if version < 50 {
                 transaction.execute_batch(include_str!("sync/sql/schema/compress_descriptions.sql"))?;
             }
+            if version < 51 {
+                native::migrate_file_work(&transaction)?;
+            }
+            if version < 52 {
+                native::migrate_cleanup_owners(&transaction)?;
+            }
+            if version < 53 {
+                transaction.execute_batch(include_str!("placements/sql/schema/path_indexes.sql"))?;
+            }
             profile.mark("schema_and_migrations");
             // Rewriting the same version dirties the header and forces a write commit on every open.
             if version != VERSION {
@@ -237,7 +248,9 @@ impl Database {
             profile.mark("replica_identity");
             transaction.commit()?;
             profile.mark("commit");
-            if refresh_taxonomy { self.refresh_taxonomy_assignments()?; }
+            if refresh_taxonomy {
+                self.refresh_taxonomy_assignments()?;
+            }
             profile.mark("taxonomy_refresh");
             return Ok(replica_id);
         }
@@ -269,6 +282,7 @@ impl Database {
         transaction.schema_sync_index()?;
         transaction.schema_native_index()?;
         transaction.schema_placements_index()?;
+        transaction.execute_batch(include_str!("placements/sql/schema/path_indexes.sql"))?;
         transaction.schema_annotations_index()?;
         browse::revision::install(&transaction)?;
         let replica_id = sync_common::ReplicaId::new_v4();
@@ -278,7 +292,9 @@ impl Database {
         profile.mark("new_schema");
         transaction.commit()?;
         profile.mark("commit");
-        if refresh_taxonomy { self.refresh_taxonomy_assignments()?; }
+        if refresh_taxonomy {
+            self.refresh_taxonomy_assignments()?;
+        }
         profile.mark("taxonomy_refresh");
         Ok(replica_id)
     }
@@ -326,14 +342,16 @@ impl Database {
             if reset_cloud_presence {
                 transaction.owner_reset_remote_books()?;
                 let candidates = query_rows(|read| transaction.owner_cloud_storage_candidates(read), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))?;
-                let mut folders = placements::FolderPaths::new(transaction);
+                let mut folders = placements::FolderPaths::for_directories(transaction, candidates.iter().map(|(_, id, _)| id.as_str()))?;
                 let mut queued = std::collections::HashSet::new();
-                for (content_hash, dir_id, size_bytes) in candidates {
-                    if !queued.contains(&content_hash) && folders.folder(&dir_id)?.is_some() {
-                        transaction.owner_queue_book_upload(&content_hash, size_bytes)?;
-                        let checksum = content_identity::expected_hash(transaction, content_hash)?.or(transaction.query_row("SELECT byte_hash FROM local_file_content WHERE book_id=?1 AND dir_id=?2", rusqlite::params![content_hash,dir_id], |row| row.get::<_,content_address::ContentHash>(0)).optional()?).or_else(|| content_hash.content_hash());
-                        transaction.execute("UPDATE book_transfer SET upload_checksum=?2 WHERE content_hash=?1 AND upload_id IS NOT NULL", rusqlite::params![content_hash,checksum])?;
-                        queued.insert(content_hash);
+                for (book_id, dir_id, size_bytes) in candidates {
+                    if !queued.contains(&book_id) && folders.folder(&dir_id)?.is_some() {
+                        transaction.owner_queue_book_upload(&book_id, size_bytes)?;
+                        let checksum = content_identity::expected_hash(transaction, book_id)?
+                            .or(transaction.query_row("SELECT byte_hash FROM local_file_content WHERE book_id=?1 AND dir_id=?2", rusqlite::params![book_id, dir_id], |row| row.get::<_, content_address::ContentHash>(0)).optional()?)
+                            .or_else(|| book_id.content_hash());
+                        transaction.execute("UPDATE book_transfer SET upload_checksum=?2 WHERE content_hash=?1 AND upload_id IS NOT NULL", rusqlite::params![book_id, checksum])?;
+                        queued.insert(book_id);
                     }
                 }
                 transaction.owner_refresh_book_uploads()?;
@@ -365,13 +383,22 @@ impl Database {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Release reusable statements and unused pages while keeping the connection open.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn release_cached_memory(&self) -> Result<(), DatabaseError> {
+        // Background operations must finish their transaction before trimming.
+        if self.connection.is_autocommit() {
+            self.connection.flush_prepared_statement_cache();
+            self.connection.release_memory()?;
+        }
+        Ok(())
+    }
 }
 
 include_sql!("src/sql/owner.sql");
 
 mod annotations;
-mod notebook;
-mod stored_document;
 pub mod assets;
 pub(crate) mod books;
 pub mod browse;
@@ -379,9 +406,11 @@ pub mod catalog;
 pub mod enrichment;
 mod import;
 pub mod native;
+mod notebook;
 pub(crate) mod placements;
 mod projection;
 mod storage;
+mod stored_document;
 pub(crate) mod sync;
 pub mod sync_status;
 

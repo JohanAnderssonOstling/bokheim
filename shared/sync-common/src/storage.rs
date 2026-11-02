@@ -1,6 +1,24 @@
-//! Library storage selection.
+//! Library sources and book storage policy.
 
 use serde::{Deserialize, Serialize};
+use url::Url;
+
+/// How a library obtains its contents, independently of its book storage policy.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LibraryKind {
+    #[default]
+    Standard,
+    Opds {
+        url: Url,
+    },
+}
+
+impl LibraryKind {
+    pub fn is_opds(&self) -> bool {
+        matches!(self, Self::Opds { .. })
+    }
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

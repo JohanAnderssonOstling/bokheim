@@ -103,7 +103,7 @@ mod tests {
         fs::write(&source, include_bytes!("../../tests/fixtures/cloud-cover.epub")).unwrap();
         let (actor, handle, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
         let moved = actor.session.import.move_book_from_path(ROOT_DIR_ID, &source).await.unwrap();
-        let name = actor.session.db.transfer_destination_name(&moved.content_hash, &ROOT_DIR_ID).unwrap().unwrap();
+        let name = actor.session.db.transfer_destination_name(&moved.book_id, &ROOT_DIR_ID).unwrap().unwrap();
         let destination = root.path().join(name).canonicalize().unwrap();
         // Recreate the committed publication with a real indexed claim, then
         // leave its journal as if the process exited before private cleanup.

@@ -72,7 +72,6 @@ impl crate::Database {
             library_model::BrowseLocation::Author(author) => self.browse_author(author, query, downloaded_only, None, None),
             library_model::BrowseLocation::Home(shelf) => self.browse_home(shelf, query, downloaded_only),
             library_model::BrowseLocation::Opds { .. } => Err(DatabaseError::message("an OPDS feed is browsed over the network, not in the library")),
-            library_model::BrowseLocation::Store(_) => Err(DatabaseError::message("a store opens in its own window and is not browsed")),
         }
     }
 

@@ -1,5 +1,7 @@
 //! Loads account and library state; local sizes and transfers arrive separately.
 
+use ui_text::text;
+
 use app::{AccountSnapshot, BackendError, Failure};
 use gpui::Context;
 use ui_components::user_facing_error;
@@ -75,8 +77,10 @@ impl SyncPage {
         // Signed out, this reloads the local library list, not anything
         // account-related; showing "Refreshing…" would imply
         // account/network activity that isn't happening.
-        if show_feedback && self.state.read(cx).account_status.signed_in() {
-            self.message = Some("Refreshing…".into());
+        // Before the first quota arrives, the storage body already reports
+        // loading. Only announce a refresh when there is existing data.
+        if show_feedback && self.state.read(cx).account_status.signed_in() && self.state.read(cx).storage_usage.is_some() {
+            self.message = Some(text!(account::refreshing).into());
         }
         cx.notify();
         #[cfg(target_arch = "wasm32")]
@@ -87,7 +91,7 @@ impl SyncPage {
         {
             let backend = self.services.backend.clone();
             self.task = Some(cx.spawn(async move |page, cx| {
-                let result = backend.account_snapshot().await;
+                let result = backend.account.account_snapshot().await;
                 let _ = page.update(cx, |page, cx| match result {
                     Ok(snapshot) => page.apply_snapshot(snapshot, None, cx),
                     Err(error) => page.apply_error(error, cx),
@@ -133,9 +137,9 @@ impl SyncPage {
     fn request_local_storage_usage(&mut self, cx: &mut Context<Self>) {
         self.local_usage_generation = self.local_usage_generation.wrapping_add(1);
         let generation = self.local_usage_generation;
-        let backend = self.services.backend.clone();
+        let libraries = self.services.management.clone();
         cx.spawn(async move |page, cx| {
-            let result = backend.local_storage_usage().await;
+            let result = libraries.local_storage_usage().await;
             let _ = page.update(cx, |page, cx| {
                 if generation != page.local_usage_generation {
                     return;
@@ -162,7 +166,8 @@ impl SyncPage {
         #[cfg(any(target_arch = "wasm32", target_os = "android"))]
         let authentication_message: Option<&'static str> = None;
         let message = authentication_message.unwrap_or_else(|| {
-            let fallback = if self.activity == super::AccountActivity::AccountRequest { "Could not finish the account action. Please try again." } else { "Could not refresh your account and libraries. Please try again." };
+            let fallback =
+                if self.activity == super::AccountActivity::AccountRequest { text!(account::could_not_finish_the_account_action_please_try_again) } else { text!(account::could_not_refresh_your_account_and_libraries_please_try_again) };
             user_facing_error(&error, fallback)
         });
         self.activity = super::AccountActivity::Idle;
@@ -208,15 +213,15 @@ impl SyncPage {
             }
             self.activity = super::AccountActivity::AccountRequest;
             self.error = None;
-            self.message = Some("Signing out…".into());
+            self.message = Some(text!(account::signing_out).into());
             cx.notify();
             self.send_event(super::SyncEvent::LogoutRequested, cx);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let backend = self.services.backend.clone();
-            let operation = async move { backend.logout().await };
-            self.start_snapshot_operation("Signing out…", Some("Signed out"), false, operation, cx);
+            let operation = async move { backend.account.logout().await };
+            self.start_snapshot_operation(text!(account::signing_out), Some(text!(account::signed_out)), false, operation, cx);
         }
     }
 }
@@ -235,7 +240,7 @@ impl SyncPage {
         }
         self.error = None;
         if !enabled {
-            self.message = Some("Saving all books on this device before removing cloud storage…".into());
+            self.message = Some(text!(account::saving_all_books_on_this_device_before_removing_cloud_storage).into());
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -251,7 +256,7 @@ impl SyncPage {
                     match result {
                         Ok(()) => {
                             if !enabled {
-                                page.message = Some("The library is now local-only.".into());
+                                page.message = Some(text!(account::cloud_book_storage_is_off).into());
                             }
                             page.state.update(cx, |state, cx| {
                                 for status in state.sync_statuses.iter_mut().filter(|status| status.library_id == library_id) {
@@ -263,8 +268,8 @@ impl SyncPage {
                         }
                         Err(error) => {
                             page.message = None;
-                            let recovery = user_facing_error(&error, "Could not change cloud storage. Check your connection and free space, then retry.");
-                            page.error = Some(if enabled { recovery.to_owned() } else { format!("{recovery} The cloud library has been kept. Retry to resume saving books locally.") }.into());
+                            let recovery = user_facing_error(&error, text!(account::could_not_change_cloud_storage_check_your_connection_and_free_space_then));
+                            page.error = Some(if enabled { recovery.to_owned() } else { format!(text!(account::cloud_book_storage_has_been_kept_retry_to_finish_saving_books_locally), recovery = recovery) }.into());
                         }
                     }
                     cx.notify();

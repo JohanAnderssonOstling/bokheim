@@ -1,6 +1,8 @@
 //! Chapter membership changes with bookmark data; filters and folds only
 //! change which rows of that model are visible.
 
+use ui_text::text;
+
 use gpui::{AnyElement, Entity, SharedString};
 use library_backend::Annotation;
 use ui_components as components;
@@ -50,7 +52,7 @@ impl BookmarkFilter {
     }
 
     fn empty_message(&self) -> &'static str {
-        if self.query.is_empty() { "No bookmarks yet." } else { "No bookmarks match your filter." }
+        if self.query.is_empty() { text!(reader::no_bookmarks_yet) } else { text!(reader::no_bookmarks_match_your_filter) }
     }
 }
 
@@ -140,7 +142,7 @@ impl BookmarkTree {
         let mut rows = Vec::new();
         visit(&self.hierarchy.branches, &self.state, &self.filter, 0, true, &mut rows);
         if self.hierarchy.other.iter().any(|&index| self.filter.matches[index]) {
-            rows.push(AnnotationTreeRow::Annotation(AnnotationRow::Heading("Other bookmarks".into())));
+            rows.push(AnnotationTreeRow::Annotation(AnnotationRow::Heading(text!(reader::other_bookmarks).into())));
             rows.extend(self.hierarchy.other.iter().filter(|&&index| self.filter.matches[index]).map(|&index| AnnotationTreeRow::Annotation(self.filter.entries[index].row(index, 0))));
         }
         if rows.is_empty() {

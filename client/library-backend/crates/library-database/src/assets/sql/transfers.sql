@@ -4,6 +4,31 @@
 -- param: content_hash: &BookId
 SELECT upload_id, upload_size, upload_checksum FROM book_transfer WHERE content_hash=:content_hash AND upload_id IS NOT NULL;
 
+-- name: transfer_matching_manifest?
+-- param: intents: &str
+SELECT MIN(requested.key) AS request_index
+FROM json_each(:intents) requested
+JOIN book_transfer transfer ON transfer.content_hash=unhex(json_extract(requested.value,'$[0]'))
+WHERE transfer.upload_id=json_extract(requested.value,'$[1]')
+  AND transfer.upload_size=json_extract(requested.value,'$[2]')
+  AND transfer.upload_checksum IS unhex(json_extract(requested.value,'$[3]'))
+GROUP BY transfer.content_hash ORDER BY request_index;
+
+-- name: transfer_record_manifest_books!
+-- param: intents: &str
+INSERT INTO book_transfer(content_hash,server_has_book)
+SELECT b.content_hash,1 FROM json_each(:intents) requested
+JOIN book b ON b.content_hash=unhex(json_extract(requested.value,'$[0]'))
+WHERE true
+ON CONFLICT(content_hash) DO UPDATE SET server_has_book=1 WHERE book_transfer.server_has_book=0;
+
+-- name: transfer_complete_manifest!
+-- param: intents: &str
+UPDATE book_transfer SET upload_id=NULL,upload_size=NULL
+WHERE (content_hash,upload_id) IN (
+    SELECT unhex(json_extract(value,'$[0]')),json_extract(value,'$[1]') FROM json_each(:intents)
+);
+
 -- Hash-level transfer snapshot reads. Each query returns only rows for the
 -- requested hashes; one-to-many values are grouped by the Rust assembler.
 -- name: transfer_snapshot_versions?
@@ -30,6 +55,19 @@ SELECT unhex(requested.value), projection.relative_path
 FROM json_each(:hashes) requested
 JOIN local_file_projection projection ON projection.content_hash = unhex(requested.value)
 ORDER BY requested.value;
+
+-- name: transfer_snapshot_books?
+-- param: hashes: &str
+SELECT b.content_hash,b.format,b.duration_ms,CAST(b.toc_json AS BLOB),CAST(b.tracks_json AS BLOB)
+FROM json_each(:hashes) requested JOIN book b ON b.content_hash=unhex(requested.value)
+WHERE b.deleted_at IS NULL;
+
+-- name: transfer_snapshot_occupied_names?
+-- param: directories: &str
+SELECT occupied.dir_id,occupied.file_name
+FROM json_each(:directories) requested
+JOIN book_dir occupied ON occupied.dir_id=requested.value AND occupied.deleted_at IS NULL
+ORDER BY occupied.dir_id,occupied.book_row_id;
 
 -- name: transfer_pending_book_uploads?
 -- param: after: i64
@@ -72,14 +110,46 @@ WHERE b.content_hash > COALESCE(:after,X'') AND b.content_hash != '' AND b.delet
        OR NOT EXISTS(SELECT 1 FROM library_book_presence presence WHERE presence.book_row_id=b.row_id AND presence.downloaded=1))
 ORDER BY b.content_hash LIMIT :limit;
 
+-- Path eligibility needs every row for validation, but not snapshot ordering
+-- or upload fingerprints. Keep these reads limited to the requested page.
+-- name: thumbnail_download_projection_paths?
+-- param: hashes: &str
+SELECT unhex(requested.value), projection.relative_path
+FROM json_each(:hashes) requested
+JOIN local_file_projection projection ON projection.content_hash = unhex(requested.value);
+
+-- name: thumbnail_download_placements?
+-- param: hashes: &str
+SELECT b.content_hash, bd.dir_id, bd.file_name
+FROM json_each(:hashes) requested
+JOIN book b ON b.content_hash = unhex(requested.value)
+JOIN book_dir bd ON bd.book_row_id = b.row_id AND bd.deleted_at IS NULL
+WHERE b.deleted_at IS NULL;
+
 -- name: transfer_queue_materialization!
 -- param: content_hash: &BookId
--- param: relative_path: &str
-INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES ('materialize',:content_hash,:relative_path);
+-- param: dir_id: &str
+INSERT OR IGNORE INTO local_file_work(operation,content_hash,dir_id) VALUES ('materialize',:content_hash,:dir_id);
 
 -- name: transfer_download_placement ->
 -- param: content_hash: &BookId
 SELECT EXISTS(SELECT 1 FROM book b JOIN book_dir bd ON bd.book_row_id=b.row_id WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL);
+
+-- name: transfer_mark_stored_book!
+-- param: content_hash: &BookId
+-- param: size_bytes: i64
+UPDATE book_dir SET is_downloaded=1, size_bytes=:size_bytes
+WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash AND deleted_at IS NULL)
+  AND deleted_at IS NULL;
+
+-- name: transfer_observe_stored_book!
+-- param: content_hash: &BookId
+-- param: checksum: &ContentHash
+INSERT INTO local_file_content(book_id,dir_id,byte_hash)
+SELECT b.content_hash, bd.dir_id, :checksum
+FROM book b JOIN book_dir bd ON bd.book_row_id=b.row_id
+WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL
+ON CONFLICT(book_id,dir_id) DO UPDATE SET byte_hash=excluded.byte_hash;
 
 -- name: book_download_requests?
 -- param: after_at: i64
@@ -133,6 +203,32 @@ WHERE content_hash = :content_hash;
 -- name: remote_asset_hashes?
 -- param: kind: &str
 SELECT content_hash FROM book_transfer WHERE CASE :kind WHEN 'book' THEN server_has_book ELSE server_has_cover END;
+
+-- name: record_cover_presence_present!
+-- param: hashes: &str
+INSERT INTO book_transfer(content_hash, server_has_cover)
+SELECT b.content_hash, 1
+FROM json_each(:hashes) requested
+JOIN book b ON b.content_hash = unhex(requested.value)
+WHERE true
+ON CONFLICT(content_hash) DO UPDATE SET server_has_cover = 1
+WHERE book_transfer.server_has_cover = 0;
+
+-- name: record_cover_presence_missing!
+-- param: hashes: &str
+UPDATE book_transfer SET server_has_cover = 0
+WHERE server_has_cover = 1
+  AND content_hash IN (SELECT unhex(value) FROM json_each(:hashes));
+
+-- name: complete_cover_downloads_ready!
+-- param: hashes: &str
+INSERT INTO book_transfer(content_hash, cover_state)
+SELECT b.content_hash, 'ready'
+FROM json_each(:hashes) requested
+JOIN book b ON b.content_hash = unhex(requested.value)
+WHERE true
+ON CONFLICT(content_hash) DO UPDATE SET cover_state = 'ready'
+WHERE book_transfer.cover_state IS NOT 'ready';
 
 
 -- name: asset_clear_downloaded_placements !

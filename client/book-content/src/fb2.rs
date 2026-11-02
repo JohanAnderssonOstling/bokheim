@@ -5,7 +5,7 @@ use crate::epub::archive::ArchiveReader;
 use crate::resources::{MAX_BINARY_RESOURCE_BYTES, MAX_PREPARED_TEXT_BYTES};
 use crate::source::Source;
 use crate::xml::{self, Content, Node, invalid};
-use crate::{CreatorRole, DeclaredMetadata, MetadataCredit, MetadataDate, MetadataProperty, MetadataSubject, PreparedResources, ReadingBook, TocEntry};
+use crate::{BookTocEntry, CreatorRole, DeclaredMetadata, MetadataCredit, MetadataDate, MetadataProperty, MetadataSubject, PreparedResources, ReadingBook};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_lite::io::{AsyncReadExt, AsyncSeekExt};
 use std::{
@@ -134,7 +134,7 @@ impl Fb2Container {
     pub(crate) fn prepare_text(&self) -> io::Result<PreparedText> {
         prepare_text(&self.root, self.resources.media_types.clone())
     }
-    pub(crate) fn toc(&self) -> io::Result<Vec<TocEntry>> {
+    pub(crate) fn toc(&self) -> io::Result<Vec<BookTocEntry>> {
         Ok(self.prepare_text()?.toc)
     }
     pub(crate) fn prepare_reading(self) -> io::Result<ReadingBook> {
@@ -290,7 +290,7 @@ fn index_links(node: &mut Node, uri: &str, links: &mut HashMap<String, String>, 
     }
 }
 
-fn collect_toc(node: &Node, uri: &str, entries: &mut Vec<TocEntry>) {
+fn collect_toc(node: &Node, uri: &str, entries: &mut Vec<BookTocEntry>) {
     if node.name == "section" {
         let title = node.field("title");
         if !title.is_empty() {
@@ -298,7 +298,7 @@ fn collect_toc(node: &Node, uri: &str, entries: &mut Vec<TocEntry>) {
             for child in node.children().filter(|node| node.name == "section") {
                 collect_toc(child, uri, &mut children);
             }
-            entries.push(TocEntry { title, link: format!("/{uri}#{}", node.attr("data-fb2-id").unwrap_or_default()), children });
+            entries.push(BookTocEntry { title, target: format!("/{uri}#{}", node.attr("data-fb2-id").unwrap_or_default()), children });
             return;
         }
     }

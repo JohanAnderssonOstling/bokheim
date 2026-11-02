@@ -34,6 +34,35 @@ SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE state_kind=:state_kind AND state_k
 -- name: registers_allocate_sequence ->
 UPDATE sync_clock SET sequence=sequence+1 WHERE singleton=1 AND sequence<9223372036854775807 RETURNING sequence;
 
+-- name: registers_allocate_batch ->
+-- param: count: i64
+UPDATE sync_clock SET sequence=sequence+:count
+WHERE singleton=1 AND sequence<=9223372036854775807-:count
+RETURNING sequence,(SELECT replica_id FROM sync_metadata WHERE singleton=1);
+
+-- name: registers_content_inputs?
+-- param: hashes: &str
+SELECT requested.key,v.body,v.changed_at,v.conflict_rank,v.replica_id,v.replica_seq,v.book_key
+FROM json_each(:hashes) requested
+LEFT JOIN sync_state_version v ON v.state_kind='book_content' AND v.state_key=unhex(requested.value) AND v.state_subkey='';
+
+-- name: registers_content_projection_batch!
+-- param: publications: &str
+INSERT OR IGNORE INTO sync_projection_dirty(state_kind,state_key,state_subkey)
+SELECT 'book_content',unhex(json_extract(value,'$[0]')),'' FROM json_each(:publications);
+
+-- name: registers_books_projection_batch!
+-- param: hashes: &str
+INSERT OR IGNORE INTO sync_projection_dirty(state_kind,state_key,state_subkey)
+SELECT 'book_projection',unhex(value),'' FROM json_each(:hashes);
+
+-- name: registers_content_schedule_batch!
+-- param: publications: &str
+INSERT INTO sync_outbox(replica_seq,state_kind,state_key,state_subkey)
+SELECT json_extract(value,'$[1]'),'book_content',unhex(json_extract(value,'$[0]')),'' FROM json_each(:publications)
+WHERE true
+ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET replica_seq=excluded.replica_seq,body=NULL,changed_at=NULL,winning_version=NULL;
+
 -- name: registers_replica_id ->
 SELECT replica_id FROM sync_metadata WHERE singleton=1;
 

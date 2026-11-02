@@ -3,12 +3,14 @@
 //! Home shelves and author cards show books in a horizontal strip.
 //! Tab reaches each child and book; Enter opens it and Ctrl+Enter opens its menu.
 
+use ui_text::text;
+
 use ui_components::user_facing_error;
 
 use crate::library::widgets::PaginatorState;
 use std::{
     cell::Cell,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
     rc::Rc,
 };
@@ -48,6 +50,8 @@ pub(super) struct SectionCard {
     navigator: WeakEntity<BrowseNavigator>,
     revision: u64,
     loaded_books: BTreeMap<usize, Entity<BookCardView>>,
+    /// Retain painted books while checking their slots against a new listing.
+    stale_books: BTreeSet<usize>,
     request: Option<Task<()>>,
     request_failed: bool,
     pending_turn: Option<bool>,
@@ -104,6 +108,7 @@ impl SectionCard {
             navigator: navigator.downgrade(),
             revision,
             loaded_books,
+            stale_books: BTreeSet::new(),
             request: None,
             request_failed: false,
             pending_turn: None,
@@ -119,7 +124,7 @@ impl SectionCard {
             library_model::BrowseLocation::Subject(route) | library_model::BrowseLocation::Catalog(route) => route.to_string(),
             library_model::BrowseLocation::Author(author) | library_model::BrowseLocation::CatalogAuthor(author) => author.map(|id| id.to_string()).unwrap_or_default(),
             library_model::BrowseLocation::Home(_) => parent.id.to_string(),
-            library_model::BrowseLocation::Books | library_model::BrowseLocation::Notebook(_) | library_model::BrowseLocation::TextSearch(_) | library_model::BrowseLocation::Opds { .. } | library_model::BrowseLocation::Store(_) => {
+            library_model::BrowseLocation::Books | library_model::BrowseLocation::Notebook(_) | library_model::BrowseLocation::TextSearch(_) | library_model::BrowseLocation::Opds { .. } => {
                 parent.id.to_string()
             }
         };
@@ -132,15 +137,51 @@ impl SectionCard {
             self.request.take();
             self.request_failed = false;
             self.pending_turn = None;
-            self.loaded_books = section.books.iter().cloned().enumerate().collect();
+            // A library change may reorder books without changing their count
+            // or initial preview. Revalidate retained slots as they are shown,
+            // keeping their covers painted until their replacements are ready.
+            self.stale_books = self.loaded_books.keys().copied().collect();
             self.revision = revision;
         }
-        self.layout.cover_text = crate::stores::current_cover_text(cx);
-        let groups = section_groups(&self.id, self.events.clone(), self.library_id, section, &self.loaded_books, self.child_icon, self.layout, cx);
-        self.flow.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
+        let cover_text = crate::stores::current_cover_text(cx);
+        let total = section.book_count.unwrap_or(section.books.len());
+        let removed = self.loaded_books.range(total..).next().is_some();
+        let books_changed = self.merge_books(0, section.books.iter().cloned(), cx);
+        self.loaded_books.retain(|index, _| *index < total);
+        self.stale_books.retain(|index| *index < total);
+        let changed = removed || books_changed || self.section.parent != section.parent || self.section.children != section.children || self.section.book_count != section.book_count || self.layout.cover_text != cover_text;
+        self.layout.cover_text = cover_text;
         self.section = section.clone();
-        self.update_band();
-        cx.notify();
+        if changed {
+            let groups = section_groups(&self.id, self.events.clone(), self.library_id, &self.section, &self.loaded_books, self.child_icon, self.layout, cx);
+            self.flow.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
+            self.update_band();
+            cx.notify();
+        }
+        self.load_visible_books(cx);
+    }
+
+    /// Reuse a book's card even when a deletion moves it to another slot.
+    fn merge_books(&mut self, offset: usize, books: impl IntoIterator<Item = Entity<BookCardView>>, cx: &mut Context<Self>) -> bool {
+        let previous: HashMap<_, _> = self.loaded_books.values().map(|book| ((book.read(cx).key(), book.read(cx).source_directory()), book.clone())).collect();
+        let mut changed = false;
+        for (index, book) in (offset..).zip(books) {
+            let identity = (book.read(cx).key(), book.read(cx).source_directory());
+            let book = match previous.get(&identity) {
+                Some(previous) => {
+                    if previous != &book {
+                        let (row, _) = book.read(cx).detail_source();
+                        previous.update(cx, |book, cx| book.replace_row(row, cx));
+                    }
+                    previous.clone()
+                }
+                None => book,
+            };
+            changed |= self.loaded_books.get(&index) != Some(&book);
+            self.loaded_books.insert(index, book);
+            self.stale_books.remove(&index);
+        }
+        changed
     }
 
     pub(super) fn present(card: Entity<Self>, focused: bool, selected: bool, marquee: bool, header_drag: Option<DragPayload>, preview: bool) -> gpui::ViewElement<SectionCardElement> {
@@ -183,7 +224,7 @@ impl SectionCard {
         let Some(total) = self.section.book_count else {
             return false;
         };
-        let Some(missing) = missing_book_range(range, total, |index| self.loaded_books.contains_key(&index)) else {
+        let Some(missing) = missing_book_range(range, total, |index| self.loaded_books.contains_key(&index) && !self.stale_books.contains(&index)) else {
             return false;
         };
         let offset = missing.start;
@@ -212,12 +253,17 @@ impl SectionCard {
                     Ok(Some(page)) => {
                         let unchanged = card.flow.read(cx).visible_child_range().map(|range| range.start) == anchor;
                         let books = navigator.update(cx, |navigator, cx| navigator.listing.section_book_cards(page.books, cx));
+                        let count_changed = card.section.book_count != Some(page.total);
                         card.section.book_count = Some(page.total);
+                        let books_changed = card.merge_books(page.offset, books, cx);
                         card.loaded_books.retain(|index, _| *index < page.total);
-                        card.loaded_books.extend((page.offset..).zip(books));
-                        let groups = section_groups(&card.id, card.events.clone(), card.library_id, &card.section, &card.loaded_books, card.child_icon, card.layout, cx);
-                        card.flow.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
+                        card.stale_books.retain(|index| *index < page.total);
+                        if count_changed || books_changed {
+                            let groups = section_groups(&card.id, card.events.clone(), card.library_id, &card.section, &card.loaded_books, card.child_icon, card.layout, cx);
+                            card.flow.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
+                        }
                         card.pending_turn = turn.filter(|_| unchanged);
+                        card.load_visible_books(cx);
                     }
                     Ok(None) => {
                         navigator.update(cx, |navigator, cx| navigator.refresh(cx));
@@ -232,7 +278,7 @@ impl SectionCard {
             if let Some(error) = failure {
                 let _ = card.update_in(cx, |card, window, cx| {
                     if card.revision == revision && card.request_failed {
-                        crate::services::notify_error("section-books-error", format!("Could not load books. {}", user_facing_error(&error, "Please try again.")), window, cx);
+                        crate::services::notify_error("section-books-error", format!(text!(browse::could_not_load_books), user_facing_error(&error, text!(common::please_try_again))), window, cx);
                     }
                 });
             }
@@ -274,15 +320,7 @@ mod tests {
         let path = external.path().join("Book.epub");
         std::fs::copy(source, &path).unwrap();
         assert!(library.backend().import_paths(ROOT_DIR_ID, vec![path], false).await.unwrap().is_empty());
-        let query = |location| LibraryBrowseQuery {
-            location,
-            search: String::new(),
-            file_types: Vec::new(),
-            chip_sort: Default::default(),
-            book_sort: Default::default(),
-            languages: Vec::new(),
-            hide_finished: false,
-        };
+        let query = |location| LibraryBrowseQuery { location, search: String::new(), file_types: Vec::new(), chip_sort: Default::default(), book_sort: Default::default(), languages: Vec::new(), hide_finished: false };
         let books = library.backend().browse_page(query(BrowseLocation::Books), BrowsePageRequest::default()).await.unwrap();
         let book = books.contents.books[0].library_file().unwrap();
         for name in ["Leaf", "Parent"] {
@@ -693,8 +731,8 @@ impl SectionCard {
             .gap(gpui::px(4.0))
             .text_size(gpui::rems(0.875))
             .text_color(gpui::rgb(0xf2efe8))
-            .child(arrow("previous-contents", "Previous entries", IconName::ArrowLeft, flow.has_previous() && self.request.is_none() && self.pending_turn.is_none(), false))
-            .child(arrow("next-contents", "Next entries", IconName::ArrowRight, flow.has_next() && self.request.is_none() && self.pending_turn.is_none(), true));
+            .child(arrow("previous-contents", text!(browse::previous_entries), IconName::ArrowLeft, flow.has_previous() && self.request.is_none() && self.pending_turn.is_none(), false))
+            .child(arrow("next-contents", text!(browse::next_entries), IconName::ArrowRight, flow.has_next() && self.request.is_none() && self.pending_turn.is_none(), true));
         // A shelf of Home is a row of the page, not a place to go.
         let parent = &self.section.parent;
         let author = is_author_heading(parent.id);

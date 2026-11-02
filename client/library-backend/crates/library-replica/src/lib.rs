@@ -99,28 +99,33 @@ pub enum LibraryStateEntry {
         value: DirectoryLifecycleState,
     },
     BookLifecycle {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
         value: BookLifecycleState,
     },
     Placement {
         dir_id: DirId,
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
         present: bool,
         origin_folder_id: Option<String>,
     },
     ReadingPosition {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
         value: ReadingPositionState,
     },
     Annotation {
         value: Annotation,
     },
     BookAdd {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
         value: BookAddition,
     },
     ChapterReadStatus {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
         value: book_model::ChapterReadStatus,
     },
     // Reserve the persisted discriminant so later variants keep their encoding.
@@ -129,7 +134,8 @@ pub enum LibraryStateEntry {
     Reserved9(#[serde(deserialize_with = "reject_reserved_state")] std::convert::Infallible),
     /// Byte revision fixed by the first successful upload.
     BookContent {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
         checksum: ContentHash,
         #[serde(default)]
         size_bytes: Option<u64>,
@@ -151,13 +157,13 @@ impl LibraryStateEntry {
         match self {
             Self::Reserved9(never) => match *never {},
             Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } | Self::BookLifecycle { value: BookLifecycleState::Purged, .. } | Self::Placement { present: false, .. } => None,
-            Self::Annotation { value, .. } => (!value.deleted).then_some(value.content_hash),
-            Self::BookLifecycle { content_hash, .. }
-            | Self::Placement { content_hash, .. }
-            | Self::ReadingPosition { content_hash, .. }
-            | Self::ChapterReadStatus { content_hash, .. }
-            | Self::BookAdd { content_hash, .. }
-            | Self::BookContent { content_hash, .. } => Some(*content_hash),
+            Self::Annotation { value, .. } => (!value.deleted).then_some(value.book_id),
+            Self::BookLifecycle { book_id, .. }
+            | Self::Placement { book_id, .. }
+            | Self::ReadingPosition { book_id, .. }
+            | Self::ChapterReadStatus { book_id, .. }
+            | Self::BookAdd { book_id, .. }
+            | Self::BookContent { book_id, .. } => Some(*book_id),
         }
     }
 
@@ -172,10 +178,10 @@ impl LibraryStateEntry {
         let (entity_key, entity_subkey) = match self {
             Self::Reserved9(never) => match *never {},
             Self::DirectoryName { dir_id, .. } | Self::DirectoryParent { dir_id, .. } | Self::DirectoryLifecycle { dir_id, .. } => (dir_id.to_string().into(), String::new()),
-            Self::Placement { content_hash, dir_id, .. } => ((*content_hash).into(), dir_id.to_string()),
+            Self::Placement { book_id, dir_id, .. } => ((*book_id).into(), dir_id.to_string()),
             Self::Annotation { value } => (value.id.clone().into(), String::new()),
-            Self::BookLifecycle { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::ChapterReadStatus { content_hash, .. } | Self::BookAdd { content_hash, .. } | Self::BookContent { content_hash, .. } => {
-                ((*content_hash).into(), String::new())
+            Self::BookLifecycle { book_id, .. } | Self::ReadingPosition { book_id, .. } | Self::ChapterReadStatus { book_id, .. } | Self::BookAdd { book_id, .. } | Self::BookContent { book_id, .. } => {
+                ((*book_id).into(), String::new())
             }
         };
         StateAddress { kind: self.kind().to_owned(), entity_key, entity_subkey }
@@ -186,13 +192,13 @@ impl LibraryStateEntry {
         match self {
             Self::Reserved9(never) => match *never {},
             Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } => None,
-            Self::Annotation { value, .. } => Some(value.content_hash),
-            Self::BookLifecycle { content_hash, .. }
-            | Self::Placement { content_hash, .. }
-            | Self::ReadingPosition { content_hash, .. }
-            | Self::ChapterReadStatus { content_hash, .. }
-            | Self::BookAdd { content_hash, .. }
-            | Self::BookContent { content_hash, .. } => Some(*content_hash),
+            Self::Annotation { value, .. } => Some(value.book_id),
+            Self::BookLifecycle { book_id, .. }
+            | Self::Placement { book_id, .. }
+            | Self::ReadingPosition { book_id, .. }
+            | Self::ChapterReadStatus { book_id, .. }
+            | Self::BookAdd { book_id, .. }
+            | Self::BookContent { book_id, .. } => Some(*book_id),
         }
     }
 
@@ -211,11 +217,11 @@ impl LibraryStateEntry {
         let invalid = |message: &str| WireError::Decode(message.to_owned());
         match self {
             Self::Reserved9(never) => match *never {},
-            Self::BookContent { content_hash, pdf, size_bytes, .. } => {
+            Self::BookContent { book_id, pdf, size_bytes, .. } => {
                 if size_bytes.is_some_and(|size| size == 0 || size > i64::MAX as u64) {
                     return Err(invalid("invalid canonical book length"));
                 }
-                if pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&content_hash.to_hex())) {
+                if pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&book_id.to_hex())) {
                     return Err(invalid("invalid canonical PDF reader metadata"));
                 }
             }
@@ -234,7 +240,7 @@ impl LibraryStateEntry {
             Self::Annotation { value, .. } => {
                 value.validate().map_err(|error| invalid(&error.to_string()))?;
             }
-            Self::BookAdd { content_hash, value } => {
+            Self::BookAdd { book_id, value } => {
                 let Some(enrichment) = &value.enrichment else {
                     return Err(invalid("book addition is awaiting enrichment"));
                 };
@@ -246,7 +252,7 @@ impl LibraryStateEntry {
                 if value.facts.added_at > i64::MAX as u64 {
                     return Err(invalid("book addition timestamp exceeds storage range"));
                 }
-                if value.pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&content_hash.to_hex())) {
+                if value.pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&book_id.to_hex())) {
                     return Err(invalid("invalid PDF reader metadata"));
                 }
                 if let Some(navigation) = &value.navigation {
@@ -350,7 +356,7 @@ mod tests {
 
     #[test]
     fn canonical_content_keeps_its_persisted_discriminant() {
-        let value = LibraryStateEntry::BookContent { content_hash: BookId::from_bytes([7; 32]), checksum: ContentHash::from_bytes([8; 32]), size_bytes: Some(42), pdf: None };
+        let value = LibraryStateEntry::BookContent { book_id: BookId::from_bytes([7; 32]), checksum: ContentHash::from_bytes([8; 32]), size_bytes: Some(42), pdf: None };
         let encoded = sync_common::wire::encode(&value).unwrap();
         assert_eq!(encoded[sync_common::wire::encode(&()).unwrap().len()], 10);
         assert_eq!(sync_common::wire::decode::<LibraryStateEntry>(&encoded, 1024).unwrap(), value);
@@ -379,7 +385,7 @@ mod tests {
             recording: None,
             enrichment: None,
         };
-        let publish = |value| LibraryStateEntry::BookAdd { content_hash: BookId::new(&"f".repeat(64)), value }.publication(ReplicaId::from_u128(1), 0, ReplicaSeq::new(1).unwrap());
+        let publish = |value| LibraryStateEntry::BookAdd { book_id: BookId::new(&"f".repeat(64)), value }.publication(ReplicaId::from_u128(1), 0, ReplicaSeq::new(1).unwrap());
         let draft = publish(addition.clone());
         assert!(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&draft).is_err());
         addition.enrichment = Some(EnrichmentResult::NoMatch);
@@ -400,7 +406,7 @@ mod tests {
         let position = ReadingPositionState { location: book_model::ReadingPosition::Audiobook(1500), progress: 30.0 };
         let legacy = LegacyPosition { location: position.location.clone(), progress: position.progress };
         assert_eq!(sync_common::wire::encode(&position).unwrap(), sync_common::wire::encode(&legacy).unwrap());
-        let status = LibraryStateEntry::ChapterReadStatus { content_hash: BookId::from_bytes([7; 32]), value: book_model::ChapterReadStatus::default() };
+        let status = LibraryStateEntry::ChapterReadStatus { book_id: BookId::from_bytes([7; 32]), value: book_model::ChapterReadStatus::default() };
         let encoded = sync_common::wire::encode(&status).unwrap();
         assert_eq!(sync_common::wire::decode::<LibraryStateEntry>(&encoded, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap(), status);
         assert_eq!(status.address().kind, "chapter_read_status");

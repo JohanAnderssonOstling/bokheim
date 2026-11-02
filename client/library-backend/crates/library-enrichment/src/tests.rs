@@ -191,7 +191,7 @@ async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
         format: BookFormat::Epub,
-        content_hash: hash,
+        book_id: hash,
         size_bytes: 10,
         inspection_version: 1,
         inspection: Some(book_inspection::InspectedBook { metadata: record(), pdf: None, audiobook: None, toc: Vec::new() }),
@@ -250,7 +250,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
                 let status = if batch == 0 && index == 1 { BookEnrichmentStatus::Failed } else { BookEnrichmentStatus::Found };
                 let mut record = facts.record;
                 record.book.year = Some(2000 + record.title.strip_prefix("Story ").unwrap().parse::<i32>().unwrap());
-                Some(BookEnrichment { key: facts.key, status, record: (status == BookEnrichmentStatus::Found).then_some(record), toc: None, cover: None, popularity: None, detail: String::new() })
+                Some(BookEnrichment { key: facts.key, status, record: (status == BookEnrichmentStatus::Found).then_some(record), toc: None, cover: None, popularity: None, failure: None, detail: String::new() })
             })
             .collect();
         // A consumed early answer must not move the later duplicate ahead of
@@ -259,7 +259,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
         results.insert(0, first);
         let mut duplicate = results[1].clone();
         duplicate.record.as_mut().unwrap().book.year = Some(9999);
-        results.push(BookEnrichment { key: "unrequested".into(), status: BookEnrichmentStatus::Found, record: None, toc: None, cover: None, popularity: None, detail: String::new() });
+        results.push(BookEnrichment { key: "unrequested".into(), status: BookEnrichmentStatus::Found, record: None, toc: None, cover: None, popularity: None, failure: None, detail: String::new() });
         results.push(duplicate);
         Json(BookEnrichmentResponse { policy: "batch fixture".into(), results }).into_response()
     }
@@ -299,7 +299,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
                     parent_id: ROOT_DIR_ID,
                     file_name: name.clone(),
                     format,
-                    content_hash: hash,
+                    book_id: hash,
                     size_bytes: 10,
                     inspection_version: 1,
                     inspection: Some(InspectedBook { metadata, pdf: None, audiobook, toc: vec![] }),
@@ -334,9 +334,9 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
             assert_eq!(serde_json::to_value(&facts.recording).unwrap(), serde_json::to_value(&expected.recording).unwrap());
             assert_eq!(serde_json::to_value(&facts.readings).unwrap(), serde_json::to_value(book_inspection::title_readings(&expected.record, &expected.filenames)).unwrap());
             let failed = if fail_first { index < MAX_BOOKS_PER_REQUEST } else { index == 1 || index == 2 };
-            let title = database.browse_book_detail(&expected.content_hash).unwrap().book.title;
+            let title = database.browse_book_detail(&expected.book_id).unwrap().book.title;
             assert_eq!(title, format!("Story {index}"), "the file's title is immutable");
-            let resolved = database.enrichment_cover_record(&expected.content_hash).unwrap();
+            let resolved = database.enrichment_cover_record(&expected.book_id).unwrap();
             if failed {
                 assert!(resolved.is_none());
             } else {
@@ -345,9 +345,9 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
         }
         let retry = database.enrichment_candidates(&hashes, i64::MAX).unwrap();
         let expected = if fail_first { hashes[..MAX_BOOKS_PER_REQUEST].to_vec() } else { vec![hashes[1], hashes[2]] };
-        assert_eq!(retry.iter().map(|candidate| candidate.content_hash).collect::<Vec<_>>(), expected);
+        assert_eq!(retry.iter().map(|candidate| candidate.book_id).collect::<Vec<_>>(), expected);
         for candidate in retry {
-            let expected = original.iter().find(|original| original.content_hash == candidate.content_hash).unwrap();
+            let expected = original.iter().find(|original| original.book_id == candidate.book_id).unwrap();
             assert_eq!(candidate.request_key, expected.request_key);
         }
         assert!(database.enrichment_next_retry().unwrap().is_some());

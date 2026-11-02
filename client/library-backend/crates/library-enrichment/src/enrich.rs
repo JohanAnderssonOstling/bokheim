@@ -12,7 +12,7 @@ pub(crate) fn now() -> i64 {
 }
 
 fn failed(key: String, detail: String) -> BookEnrichment {
-    BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail }
+    BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: None, detail }
 }
 
 impl LibraryEnrichment {
@@ -31,29 +31,47 @@ impl LibraryEnrichment {
                 .map(|(index, candidate)| {
                     let readings = book_inspection::title_readings(&candidate.record, &candidate.filenames);
                     let facts = BookFacts { key: index.to_string(), record: candidate.record, audiobook: candidate.audiobook, needs_cover: false, readings, recording: candidate.recording };
-                    (facts, (candidate.content_hash, candidate.request_key))
+                    (facts, (candidate.book_id, candidate.request_key))
                 })
                 .unzip();
             if books.is_empty() {
                 break;
             }
-            let mut response = self.client.books(&BookEnrichmentRequest { books }).await;
-            if let Err(error) = &response {
-                log::warn!("metadata server lookup will retry: {error}");
-            }
-            for (index, (content_hash, request_key)) in targets.iter().enumerate() {
-                let key = index.to_string();
-                let result = match &mut response {
-                    Ok(response) => response.results.iter().position(|result| result.key == key).map(|index| response.results.remove(index)).unwrap_or_else(|| failed(key, "metadata response omitted the book".to_owned())),
-                    Err(error) => failed(key, error.to_string()),
-                };
-                if result.status != BookEnrichmentStatus::Failed {
-                    changed += 1;
+            let hashes = targets.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+            match self.client.books(&BookEnrichmentRequest { books }).await {
+                Ok(response) => {
+                    let mut answered = vec![false; targets.len()];
+                    let mut results = response.results.into_iter();
+                    let mut pending = targets.iter().enumerate();
+                    let answers = std::iter::from_fn(|| {
+                        for result in results.by_ref() {
+                            let Ok(index) = result.key.parse::<usize>() else { continue };
+                            let Some((book_id, request_key)) = targets.get(index) else { continue };
+                            // Match the exact key and keep the first answer, as before.
+                            if answered[index] || result.key != index.to_string() {
+                                continue;
+                            }
+                            if result.status != BookEnrichmentStatus::Failed {
+                                changed += 1;
+                            }
+                            answered[index] = true;
+                            return Some((book_id, request_key.as_str(), result));
+                        }
+                        for (index, (book_id, request_key)) in pending.by_ref() {
+                            if !answered[index] {
+                                return Some((book_id, request_key.as_str(), failed(index.to_string(), "metadata response omitted the book".to_owned())));
+                            }
+                        }
+                        None
+                    });
+                    self.database.record_enrichments(&hashes, answers, now())?;
+                    self.events.publish_update(library_model::LibraryUpdate::Contents);
                 }
-                self.database.record_enrichment(content_hash, request_key, result, now())?;
-            }
-            if response.is_ok() {
-                self.events.publish_update(library_model::LibraryUpdate::Contents);
+                Err(error) => {
+                    log::warn!("metadata server lookup will retry: {error}");
+                    let answers = targets.iter().enumerate().map(|(index, (book_id, request_key))| (book_id, request_key.as_str(), failed(index.to_string(), error.to_string())));
+                    self.database.record_enrichments(&hashes, answers, now())?;
+                }
             }
         }
         changed += self.fill_covers(&members).await?;

@@ -3,19 +3,24 @@
 //! The application registry decides *which* location and account policy to
 //! use.  Everything opened from that location belongs to the library session.
 
-use crate::BackendError;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::asset_store::AssetStore;
 use crate::library::discovery::LibraryScanner;
 use crate::notification_interest::NotificationInterest;
+use crate::BackendError;
 use client_platform_runtime::startup_profile::StartupProfile;
 use cpu_host::CpuHost;
 use library_database::Database;
 #[cfg(not(target_arch = "wasm32"))]
+use library_model::OpdsSource;
+#[cfg(not(target_arch = "wasm32"))]
 use library_model::{BookDownloadStatus, DownloadState, LibraryUpdate};
+use library_runtime::account::LibraryAuthentication;
 use library_sync::{LibrarySync, LibrarySyncConfig};
 use std::sync::Arc;
 use std::{cell::Cell, rc::Rc};
+#[cfg(not(target_arch = "wasm32"))]
+use sync_common::storage::LibraryKind;
 
 use super::LibrarySession;
 
@@ -28,6 +33,20 @@ pub struct LibraryRuntimeSpec {
 }
 
 impl LibrarySession {
+    /// Catalog cache directories and local-only policy belong to this runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn open_catalog(mut spec: LibraryRuntimeSpec) -> Result<Self, BackendError> {
+        if !spec.config.kind.is_opds() {
+            return Err("not an OPDS catalog source".into());
+        }
+        std::fs::create_dir_all(&spec.config.root)?;
+        spec.account = spec.account.with_authorization(|_| Ok(false));
+        spec.root_failures = None;
+        let mut library = Self::open(spec)?;
+        library.opds.as_mut().ok_or("not an OPDS catalog source")?.make_catalog();
+        Ok(library)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn recover(spec: LibraryRuntimeSpec) -> Result<Self, BackendError> {
         let session = Self::open(spec)?;
@@ -39,6 +58,11 @@ impl LibrarySession {
 
     pub(crate) fn open(spec: LibraryRuntimeSpec) -> Result<Self, BackendError> {
         let mut profile = StartupProfile::for_library("library_resources", spec.config.id);
+        #[cfg(not(target_arch = "wasm32"))]
+        let opds = match &spec.config.kind {
+            LibraryKind::Standard => None,
+            LibraryKind::Opds { url } => Some(super::OpdsLibrary::new(OpdsSource { id: spec.config.id, name: spec.config.display_name.clone(), url: url.to_string() }, spec.config.opds_credentials)),
+        };
         // One connection per library file, owned by the session. Sync and
         // asset workers borrow it through the owner; their futures stay
         // local to their tasks, so no sharing primitive is needed.
@@ -88,7 +112,9 @@ impl LibrarySession {
         profile.mark("asset_store");
         // `Database::open` already configured the connection (pragmas, sync
         // functions) internally.
-        let replica_id = database.initialize_library_for_deferred_taxonomy(spec.config.id)?;
+        database.initialize_library_for_deferred_taxonomy(spec.config.id)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        database.apply_native_root_move(&spec.config.root)?;
         profile.mark("database_initialize");
         database.set_remote_library_name(&spec.config.display_name)?;
         profile.mark("remote_name");
@@ -101,21 +127,21 @@ impl LibrarySession {
         profile.mark("events_and_scanner");
         database.set_storage_policy(&spec.config.storage, spec.config.reset_cloud_presence)?;
         profile.mark("storage_policy");
-        let sync = Arc::new(LibrarySync::new(LibrarySyncConfig {
-            database: database.clone(),
-            account: Some(spec.account.clone()),
-            assets: assets.clone(),
-            replica_id,
-            // Opening runs while the storage owner waits. The configured server
-            // is known already; account authorization may read that owner's
-            // registry and must wait until the library is serving commands.
-            server_url: spec.config.default_sync_server_url,
-            library_id: spec.config.id,
-            events: Some(events.clone()),
-            credentials: spec.account.credentials(),
-            notification_interest: spec.notification_interest,
-            cpu: cpu.clone(),
-        }));
+        let placement = Arc::new(library_placement::LibraryPlacement::new(database.clone(), assets.clone(), events.clone()));
+        let sync = Arc::new(
+            LibrarySync::new(LibrarySyncConfig {
+                placement: placement.clone(),
+                authentication: LibraryAuthentication::Account(spec.account.clone()),
+                // Opening runs while the storage owner waits. The configured server
+                // is known already; account authorization may read that owner's
+                // registry and must wait until the library is serving commands.
+                server_url: spec.config.default_sync_server_url,
+                library_id: spec.config.id,
+                notification_interest: spec.notification_interest,
+                cpu: cpu.clone(),
+            })
+            .map_err(BackendError::operation)?,
+        );
         sync.set_asset_storage_enabled(spec.config.storage.uses_bokheim_assets());
         profile.mark("sync_construct");
         let client = library_enrichment::MetadataClient::new(&spec.config.metadata_server_url).map_err(BackendError::operation)?;
@@ -124,19 +150,9 @@ impl LibrarySession {
         profile.mark("cover_client");
         let enrichment = library_enrichment::LibraryEnrichment { database: database.clone(), assets: assets.clone(), client, covers, cpu: cpu.clone(), events: events.clone() };
         profile.mark("enrichment_construct");
-        let placement = Arc::new(library_placement::LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
-        let import = library_import::LibraryImport {
-            library_id: spec.config.id,
-            database: database.clone(),
-            assets: assets.clone(),
-            cpu: cpu.clone(),
-            events: events.clone(),
-            placement: placement.clone(),
-            #[cfg(not(target_arch = "wasm32"))]
-            root: scanner.root.clone(),
-        };
+        let import = library_import::LibraryImport::new(placement.clone(), cpu.clone());
         #[cfg(not(target_arch = "wasm32"))]
-        if spec.config.opds.is_some() {
+        if opds.is_some() {
             database.configure_opds()?;
             if let Err(error) = assets.trim_thumbnail_cache(super::opds::COVER_CACHE_MAX_BYTES) {
                 log::warn!("OPDS cover cache trim failed: {error}");
@@ -144,8 +160,9 @@ impl LibrarySession {
         }
         let library = Self {
             #[cfg(not(target_arch = "wasm32"))]
-            opds: spec.config.opds,
+            opds,
             id: spec.config.id,
+            kind: spec.config.kind,
             db: database,
             assets,
             enrichment,

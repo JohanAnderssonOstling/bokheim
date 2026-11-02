@@ -1,11 +1,11 @@
 use crate::sql_fixtures::FixturesSql;
 use crate::{Database, ImportCommit};
-use book_model::{AUTHOR_MARC_RELATOR_CODE, BookDetails, BookFormat, BookMetadata, BookRecord, Contributor, LanguageTag};
+use book_model::{BookDetails, BookFormat, BookMetadata, BookRecord, Contributor, LanguageTag, AUTHOR_MARC_RELATOR_CODE};
 use library_model::{BrowseBookSort, BrowseChipSort, BrowseLocation, HomeShelf, LibraryBrowseQuery, PublishedStagedBook};
 use library_replica::{EnrichmentResult, LibraryStateEntry};
-use metadata_contract::WorkPopularity;
 use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
-use sync_common::{BookId, Delivery, DirId, LibraryRevision, PullStateResponse, ROOT_DIR_ID, ReplicaId, ReplicaSeq, SyncCursor};
+use metadata_contract::WorkPopularity;
+use sync_common::{BookId, Delivery, DirId, LibraryRevision, PullStateResponse, ReplicaId, ReplicaSeq, SyncCursor, ROOT_DIR_ID};
 
 fn database() -> Database {
     let db = Database::open(":memory:").unwrap();
@@ -29,7 +29,7 @@ fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>
         parent_id: parent,
         file_name: name.clone(),
         format: BookFormat::Epub,
-        content_hash: hash,
+        book_id: hash,
         size_bytes: 1,
         inspection_version: 1,
         inspection: Some(book_inspection::InspectedBook { metadata: record, pdf: None, audiobook: None, toc: vec![] }),
@@ -49,6 +49,7 @@ fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>
             toc: None,
             cover: None,
             popularity: count.map(|rating_count| WorkPopularity { open_library_work_id: format!("OL{number}W"), rating_count, snapshot_date: "2026-09-01".into() }),
+            failure: None,
             detail: String::new(),
         },
         0,
@@ -72,9 +73,9 @@ fn popularity_projection_handles_unknown_zero_and_full_u64_counts() {
     assert_eq!(stored_count(&db, &maximum), Some(u64::MAX as f64));
     let mut query = query(BrowseLocation::Books);
     query.chip_sort = BrowseChipSort::Alphabetical;
-    assert_eq!(db.browse_contents(&query, false).unwrap().books.iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>(), [maximum, zero, unknown]);
+    assert_eq!(db.browse_contents(&query, false).unwrap().books.iter().map(|book| book.book_id().unwrap()).collect::<Vec<_>>(), [maximum, zero, unknown]);
     query.book_sort = BrowseBookSort::Alphabetical;
-    assert_eq!(db.browse_contents(&query, false).unwrap().books.iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>(), [unknown, zero, maximum]);
+    assert_eq!(db.browse_contents(&query, false).unwrap().books.iter().map(|book| book.book_id().unwrap()).collect::<Vec<_>>(), [unknown, zero, maximum]);
 }
 
 #[test]
@@ -84,7 +85,7 @@ fn popularity_browsing_reads_projected_counts_without_decoding_book_records() {
     let more = add(&db, ROOT_DIR_ID, 2, "Z more", Some(20), &["Z writer"], "en");
     // Deliberately unreadable canonical payloads expose any browse-time decode.
     db.connection.execute("UPDATE sync_book_record SET body=?1 WHERE state_kind='book_add'", [b"invalid".as_slice()]).unwrap();
-    assert_eq!(db.browse_contents(&query(BrowseLocation::Books), false).unwrap().books.iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>(), [more, less]);
+    assert_eq!(db.browse_contents(&query(BrowseLocation::Books), false).unwrap().books.iter().map(|book| book.book_id().unwrap()).collect::<Vec<_>>(), [more, less]);
     assert_eq!(db.browse(&query(BrowseLocation::Author(None)), false).unwrap().contents.children.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Z writer", "A writer"]);
 }
 
@@ -175,10 +176,10 @@ fn home_popularity_reorders_activity_members_without_changing_shelf_membership()
     query.book_sort = BrowseBookSort::DefaultOrder;
     query.chip_sort = BrowseChipSort::DefaultOrder;
     let before = db.browse_contents(&query, false).unwrap().books;
-    assert_eq!(before.iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>(), [recent, popular]);
+    assert_eq!(before.iter().map(|book| book.book_id().unwrap()).collect::<Vec<_>>(), [recent, popular]);
     query.book_sort = BrowseBookSort::Popularity;
     let after = db.browse_contents(&query, false).unwrap().books;
-    assert_eq!(after.iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>(), [popular, recent]);
+    assert_eq!(after.iter().map(|book| book.book_id().unwrap()).collect::<Vec<_>>(), [popular, recent]);
     query.location = BrowseLocation::Home(None);
     query.chip_sort = BrowseChipSort::Popularity;
     let root = db.browse(&query, false).unwrap();

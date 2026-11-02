@@ -1,5 +1,7 @@
 //! Row selection and immediate arrow-key editing in reader settings.
 
+use ui_text::text;
+
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{App, Context, Div, MouseButton, Subscription, Window, canvas, div, prelude::*, px};
@@ -65,7 +67,7 @@ impl SettingsNavigation {
 
     pub(crate) fn fullscreen_group(&self, rows: &[SettingsRow], window: &Window, theme: components::BrowserTheme) -> Option<Div> {
         DESKTOP_FULLSCREEN.then(|| {
-            let checkbox = components::reader_setting_checkbox("reader-toggle-fullscreen", "Full screen", window.is_fullscreen(), theme).on_click(|enabled, window, _| set_fullscreen(*enabled, window));
+            let checkbox = components::reader_setting_checkbox("reader-toggle-fullscreen", text!(reader::full_screen), window.is_fullscreen(), theme).on_click(|enabled, window, _| set_fullscreen(*enabled, window));
             let row = div().w_full().child(checkbox);
             components::reader_settings_group(theme).child(self.row(SettingsRow::Fullscreen, rows, row, theme))
         })

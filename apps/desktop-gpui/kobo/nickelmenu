@@ -1,5 +1,1 @@
-experimental :menu_main_15505_label :Bokheim
-experimental :menu_main_15505_icon :/mnt/onboard/.adds/bokheim/nickelmenu-icons/bokheim.png
-experimental :menu_main_15505_icon_active :/mnt/onboard/.adds/bokheim/nickelmenu-icons/bokheim-active.png
-experimental :menu_main_15505_direct :Bokheim Kobo
 menu_item :main :Bokheim Kobo :cmd_spawn :quiet:/bin/sh /mnt/onboard/.adds/bokheim/run-monitored.sh

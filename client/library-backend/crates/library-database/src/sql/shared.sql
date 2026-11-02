@@ -69,10 +69,14 @@ INSERT OR REPLACE INTO local_directory_work(dir_id) VALUES(:dir_id);
 
 
 -- name: shared_placements_queue_file_work!
--- param: operation: &str
 -- param: content_hash: &BookId
 -- param: relative_path: &str
-INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES(:operation,:content_hash,:relative_path);
+INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES('remove',:content_hash,:relative_path);
+
+-- name: shared_queue_materialization!
+-- param: content_hash: &BookId
+-- param: dir_id: &str
+INSERT OR IGNORE INTO local_file_work(operation,content_hash,dir_id) VALUES('materialize',:content_hash,:dir_id);
 
 
 -- name: shared_cancel_book_materialization!

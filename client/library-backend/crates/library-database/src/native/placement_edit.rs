@@ -2,7 +2,7 @@
 use super::{NativeDirectorySnapshot, NativeFileWorkSnapshot, NativeFileWorkSql};
 use crate::browse::revision::Revision;
 use crate::native::observations::{self, Revision as FileRevision};
-use crate::placements::{copy_book_to_directory_in, copy_directory_in, live_file_name, move_directory_in, placement_path, queue_file_work, restore_book_placement_in, stored_book_path, transfer_book_placement_in};
+use crate::placements::{copy_book_to_directory_in, copy_directory_in, live_file_name, move_directory_in, placement_path, queue_file_removal, queue_materialization, restore_book_placement_in, stored_book_path, transfer_book_placement_in};
 use crate::projection::project_dirty;
 use crate::transactions::WriteOutcome::Rollback;
 use crate::{Database, DatabaseError};
@@ -63,7 +63,7 @@ impl Database {
                     let original_path = placement_path(tx, source, &name)?;
                     let projected = tx.query_row("SELECT relative_path FROM local_file_projection WHERE content_hash=?1 AND dir_id=?2", (book, source.to_string()), |row| row.get::<_, String>(0)).optional()?;
                     let physical_path = projected.map(|path| stored_book_path(&path)).transpose()?.unwrap_or_else(|| original_path.clone());
-                    affected.push((*book, original_path.clone()));
+                    affected.push((*book, *source));
                     move_source = Some(NativeMoveSource { book: *book, directory: *source, original_path, physical_path });
                 }
             }
@@ -82,8 +82,8 @@ impl Database {
                 .collect::<Result<Vec<_>, _>>()?;
             match &edit {
                 NativePlacementEdit::CopyBook { book, destination, .. } | NativePlacementEdit::TransferBook { book, destination, .. } | NativePlacementEdit::RestoreBookPlacement { book, destination } => {
-                    if let Some(name) = live_file_name(tx, destination, book)? {
-                        affected.push((*book, placement_path(tx, destination, &name)?));
+                    if live_file_name(tx, destination, book)?.is_some() {
+                        affected.push((*book, *destination));
                     }
                 }
                 _ => {}
@@ -91,7 +91,7 @@ impl Database {
             let files = self
                 .native_file_work()?
                 .into_iter()
-                .filter(|work| !file_ids.contains(&work.id) || affected.iter().any(|(hash, path)| *hash == work.content_hash && path == &work.original_path))
+                .filter(|work| !file_ids.contains(&work.id) || affected.iter().any(|(hash, directory)| *hash == work.book_id && work.directory == Some(*directory)))
                 .map(|work| self.native_file_work_snapshot(work)?.ok_or_else(|| DatabaseError::message("placement changed while planning")))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Rollback(NativePlacementPlan { edit, revision, directory_ids, result, directories, files, move_source }))
@@ -122,8 +122,8 @@ impl Database {
                 "INSERT INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(?1,?2,?3) ON CONFLICT(content_hash,dir_id) DO UPDATE SET relative_path=excluded.relative_path",
                 (&source.book, source.directory.to_string(), staged.as_str()),
             )?;
-            queue_file_work(tx, "materialize", &source.book, &source.original_path)?;
-            queue_file_work(tx, "remove", &source.book, staged)?;
+            queue_materialization(tx, &source.book, &source.directory)?;
+            queue_file_removal(tx, &source.book, staged)?;
             Revision::read(tx)
         })?;
         plan.revision = revision;
@@ -170,10 +170,10 @@ impl Database {
                     continue;
                 }
                 let (directory, _) = file.placement.as_ref().ok_or_else(|| DatabaseError::message("copy destination is no longer present"))?;
-                observations::record_file(tx, directory, &file.work.content_hash, file.resolved_path.as_str(), None, FileRevision::Retained)?;
+                observations::record_file(tx, directory, &file.work.book_id, file.resolved_path.as_str(), None, FileRevision::Retained)?;
                 // The preview's queue IDs were rolled back and can be reused by
                 // other work. Acknowledge the current job by its full identity.
-                tx.execute("DELETE FROM local_file_work WHERE operation='materialize' AND content_hash=?1 AND relative_path=?2", (&file.work.content_hash, file.work.original_path.as_str()))?;
+                tx.execute("DELETE FROM local_file_work WHERE operation='materialize' AND content_hash=?1 AND dir_id=?2", (&file.work.book_id, directory))?;
             }
             Ok(result)
         })

@@ -1,72 +1,61 @@
 use serde::{Deserialize, Serialize};
 
-/// Supported book formats.
-///
-/// The discriminants are the stored database value. Each format is one bit so
-/// a set of formats can be matched as a mask; the values must never change.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum BookFormat {
-    Epub = 1,
-    Pdf = 2,
-    Mobi = 4,
-    M4b = 8,
-    Mp3Folder = 16,
-    Fb2 = 32,
-    Cbz = 64,
+/// The reading surface a supported book format requires.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BookKind {
+    Text,
+    Pdf,
+    Audio,
+    Comic,
 }
 
+struct MediaType {
+    value: &'static str,
+    acquisition_priority: Option<u8>,
+}
+struct FileType {
+    format: BookFormat,
+    extensions: &'static [&'static str],
+    media_types: &'static [MediaType],
+}
+
+// Stored bits, extensions, MIME aliases and capabilities come from formats.json.
+include!(concat!(env!("OUT_DIR"), "/book_formats.rs"));
+
 impl BookFormat {
-    pub const fn from_code(code: i64) -> Option<Self> {
-        match code {
-            1 => Some(Self::Epub),
-            2 => Some(Self::Pdf),
-            4 => Some(Self::Mobi),
-            8 => Some(Self::M4b),
-            16 => Some(Self::Mp3Folder),
-            32 => Some(Self::Fb2),
-            64 => Some(Self::Cbz),
-            _ => None,
-        }
-    }
-
-    /// Parses supported book extensions.
     pub fn from_extension(extension: &str) -> Option<Self> {
-        match extension.to_ascii_lowercase().as_str() {
-            "epub" => Some(Self::Epub),
-            "pdf" => Some(Self::Pdf),
-            "mobi" | "azw" | "azw3" => Some(Self::Mobi),
-            "m4b" => Some(Self::M4b),
-            "mp3folder" => Some(Self::Mp3Folder),
-            "fb2" | "fbz" => Some(Self::Fb2),
-            "cbz" => Some(Self::Cbz),
-            _ => None,
-        }
+        FILE_TYPES.iter().find(|file| file.extensions.iter().any(|candidate| extension.eq_ignore_ascii_case(candidate))).map(|file| file.format)
     }
 
-    /// Parses formats accepted for a new user-initiated import.
     pub fn from_import_extension(extension: &str) -> Option<Self> {
         Self::from_extension(extension)
     }
 
-    /// Recognizes compound FB2 ZIP names without accepting arbitrary ZIP files.
+    /// Compound extensions are explicit entries; a generic ZIP is not a book.
     pub fn from_file_name(name: &str) -> Option<Self> {
-        if name.to_ascii_lowercase().ends_with(".fb2.zip") {
-            return Some(Self::Fb2);
-        }
-        name.rsplit_once('.').and_then(|(_, extension)| Self::from_extension(extension))
+        let lower = name.to_ascii_lowercase();
+        FILE_TYPES.iter().find(|file| file.extensions.iter().any(|extension| lower.strip_suffix(extension).is_some_and(|prefix| prefix.ends_with('.')))).map(|file| file.format)
     }
 
-    pub const fn canonical_extension(self) -> &'static str {
-        match self {
-            Self::Epub => "epub",
-            Self::Pdf => "pdf",
-            Self::Mobi => "mobi",
-            Self::M4b => "m4b",
-            Self::Mp3Folder => "mp3folder",
-            Self::Fb2 => "fb2",
-            Self::Cbz => "cbz",
-        }
+    pub fn browser_file_name(name: &str) -> Option<Self> {
+        Self::from_file_name(name).filter(|format| format.browser_download())
+    }
+
+    pub fn from_media_type(value: &str) -> Option<Self> {
+        let bare = value.split(';').next()?.trim();
+        FILE_TYPES.iter().find(|file| file.media_types.iter().any(|media| bare.eq_ignore_ascii_case(media.value))).map(|file| file.format)
+    }
+
+    pub fn extension_for_media_type(value: &str) -> Option<&'static str> {
+        let bare = value.split(';').next()?.trim();
+        FILE_TYPES.iter().find(|file| file.media_types.iter().any(|media| bare.eq_ignore_ascii_case(media.value))).map(|file| file.extensions[0])
+    }
+
+    /// An acquisition MIME type with the common preference order, if feeds
+    /// offer this kind. Browser download support alone does not imply this.
+    pub fn acquisition_media_type(value: &str) -> Option<(u8, &'static str)> {
+        let bare = value.split(';').next()?.trim();
+        FILE_TYPES.iter().flat_map(|file| file.media_types).find(|media| bare.eq_ignore_ascii_case(media.value)).and_then(|media| media.acquisition_priority.map(|priority| (priority, media.value)))
     }
 }
 
@@ -81,7 +70,7 @@ mod tests {
         }
         assert_eq!(BookFormat::from_file_name("comic.CBZ"), Some(BookFormat::Cbz));
         assert_eq!(BookFormat::from_file_name("unrelated.zip"), None);
-        for format in [BookFormat::Epub, BookFormat::Pdf, BookFormat::Mobi, BookFormat::M4b, BookFormat::Mp3Folder, BookFormat::Fb2, BookFormat::Cbz] {
+        for format in BookFormat::ALL {
             assert_eq!(BookFormat::from_code(format as i64), Some(format));
         }
     }

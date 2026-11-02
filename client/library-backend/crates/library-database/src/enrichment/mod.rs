@@ -30,6 +30,11 @@ impl Database {
         Ok(())
     }
 
+    /// Finish external artwork only while its pre-fetch work state is current.
+    pub fn complete_thumbnail_if_current(&self, hash: &BookId, expected: Option<&str>) -> Result<bool, DatabaseError> {
+        Ok(self.connection.thumbnail_complete_if_current(hash, expected)? != 0)
+    }
+
     /// Whether the server holds this book's cover.
     pub fn server_has_cover(&self, hash: &BookId) -> Result<bool, DatabaseError> {
         Ok(self.connection.thumbnail_has_remote(hash, |row| row.get(0))?)

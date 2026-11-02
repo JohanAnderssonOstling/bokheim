@@ -1,5 +1,7 @@
 //! EPUB document surface, direct annotation creation, and table/image context menu.
 
+use ui_text::text;
+
 use dictionary::can_lookup;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, DispatchPhase, Entity, IntoElement, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Window, px};
@@ -26,7 +28,9 @@ impl ReaderView {
 
     pub(super) fn render_document(&self, entity: Entity<Self>, horizontal_margin: f32, vertical_margin: f32, mobile: bool, cx: &mut Context<Self>) -> AnyElement {
         if let LoadState::Error(error) = &self.load_state {
-            return components::reader_content().child(gpui::div().size_full().flex().flex_col().items_center().justify_center().gap(px(16.0)).p(px(24.0)).child("Could not display this book").child(error.clone())).into_any_element();
+            return components::reader_content()
+                .child(gpui::div().size_full().flex().flex_col().items_center().justify_center().gap(px(16.0)).p(px(24.0)).child(text!(reader::could_not_display_this_book)).child(error.clone()))
+                .into_any_element();
         }
         let LoadState::Ready(renderer) = &self.load_state else {
             return components::reader_content().child(gpui::div().size_full()).into_any_element();
@@ -142,16 +146,16 @@ impl ReaderView {
         }
         if renderer.read(cx).table_at(position) {
             actions.add_section(vec![
-                ContextAction { label: "Copy Table as Markdown", icon: "icons/markdown-logo.svg", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::Markdown } },
-                ContextAction { label: "Copy Table as Unstyled HTML", icon: "icons/file-html.svg", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::UnstyledHtml } },
-                ContextAction { label: "Copy Table as Styled HTML", icon: "icons/file-html.svg", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::StyledHtml } },
+                ContextAction { label: text!(common::copy_table_as_markdown), icon: "icons/markdown-logo.svg", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::Markdown } },
+                ContextAction { label: text!(common::copy_table_as_unstyled_html), icon: "icons/file-html.svg", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::UnstyledHtml } },
+                ContextAction { label: text!(common::copy_table_as_styled_html), icon: "icons/file-html.svg", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::StyledHtml } },
             ]);
         }
         if renderer.read(cx).image_at(position) {
-            actions.add_section(vec![ContextAction { label: "Copy Image", icon: "icons/image.svg", command: EpubContextCommand::CopyImage { view: renderer.clone(), position } }]);
+            actions.add_section(vec![ContextAction { label: text!(common::copy_image), icon: "icons/image.svg", command: EpubContextCommand::CopyImage { view: renderer.clone(), position } }]);
         }
         if renderer.read(cx).equation_at(position) {
-            actions.add_section(vec![ContextAction { label: "Copy as LaTeX", icon: "icons/function.svg", command: EpubContextCommand::CopyEquationLatex { view: renderer.clone(), position } }]);
+            actions.add_section(vec![ContextAction { label: text!(reader::copy_as_latex), icon: "icons/function.svg", command: EpubContextCommand::CopyEquationLatex { view: renderer.clone(), position } }]);
         }
         actions
     }

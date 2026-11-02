@@ -4,6 +4,7 @@ pub(crate) use super::{playback::DirectPlayback, LibrarySession, RemoteFile};
 pub(crate) use crate::BackendError;
 pub(crate) use crate::BookId;
 use crate::LibraryId;
+use account_client::{authenticated_request, AuthenticatedRequestError, RefreshPolicy};
 use book_access::remote_file::range_byte_count;
 use book_access::{AsyncBookSource, FetchFuture, RemoteFileError};
 use library_runtime::account::LibraryAccount;
@@ -94,7 +95,7 @@ impl LibrarySession {
     }
 
     pub(crate) fn remote_book_access(&self, source: &RemoteFile) -> Result<RemoteBookAccess, BackendError> {
-        Ok(RemoteBookAccess { client: self.sync.http_client.clone(), account: self.account()?, library: self.id, source: source.clone() })
+        Ok(RemoteBookAccess { client: self.sync.http_client().clone(), account: self.account()?, library: self.id, source: source.clone() })
     }
 
     pub(crate) async fn direct_audio_source(&self, hash: BookId) -> Result<DirectPlayback, String> {
@@ -105,7 +106,7 @@ impl LibrarySession {
             authenticated_file_request(&account, |session| async move {
                 let mut endpoint = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
                 endpoint.set_path(&format!("{}/playback", endpoint.path()));
-                let response = self.sync.http_client.post(endpoint).bearer_auth(session.token()).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).send().await.map_err(RemoteFileError::transport)?;
+                let response = self.sync.http_client().post(endpoint).bearer_auth(session.token()).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).send().await.map_err(RemoteFileError::transport)?;
                 if !response.status().is_success() {
                     return Err(RemoteFileError::status(response.status()));
                 }
@@ -116,7 +117,7 @@ impl LibrarySession {
                     return Err("Invalid playback grant".into());
                 }
                 let url = session.server_url().join(&grant.path).map_err(|_| RemoteFileError::Failed("Invalid playback grant path".into()))?;
-                Ok(DirectPlayback { url: url.to_string(), expires_in_seconds: grant.expires_in_seconds, content_hash: grant.content_hash, length: grant.length })
+                Ok(DirectPlayback { url: url.to_string(), expires_in_seconds: grant.expires_in_seconds, book_id: grant.book_id, length: grant.length })
             }),
         )
         .await
@@ -149,7 +150,7 @@ impl LibrarySession {
     }
 
     pub(crate) async fn describe_remote_file(&self, hash: BookId) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
-        describe_remote_file(&self.sync.http_client, &self.account().map_err(|error| RemoteFileError::Failed(error.to_string()))?, self.id, hash).await
+        describe_remote_file(self.sync.http_client(), &self.account().map_err(|error| RemoteFileError::Failed(error.to_string()))?, self.id, hash).await
     }
 }
 
@@ -166,16 +167,12 @@ pub(crate) fn file_auth_error(error: library_runtime::account::AccountSessionErr
 
 /// Opening and reading books is interactive and always allowed on metered
 /// connections. Automatic transfer callers apply their own transfer policy.
-pub(crate) async fn authenticated_file_request<T, F: Future<Output = Result<T, RemoteFileError>>>(account: &LibraryAccount, mut request: impl FnMut(account_client::Session) -> F) -> Result<T, RemoteFileError> {
-    let session = account.refresh_if_needed().await.map_err(file_auth_error)?.ok_or(RemoteFileError::Unauthorized)?;
-    let token = session.token().to_owned();
-    match request(session).await {
-        Err(RemoteFileError::Unauthorized) => {
-            let refreshed = account.refresh_after_unauthorized(&token).await.map_err(file_auth_error)?.ok_or(RemoteFileError::Unauthorized)?;
-            request(refreshed).await
-        }
-        result => result,
-    }
+pub(crate) async fn authenticated_file_request<T, F: Future<Output = Result<T, RemoteFileError>>>(account: &LibraryAccount, request: impl FnMut(account_client::Session) -> F) -> Result<T, RemoteFileError> {
+    authenticated_request(account, RefreshPolicy::BeforeRequest, request, |error| matches!(error, RemoteFileError::Unauthorized)).await.map_err(|error| match error {
+        AuthenticatedRequestError::Request(error) => error,
+        AuthenticatedRequestError::Session(error) => file_auth_error(error),
+        AuthenticatedRequestError::MissingSession => RemoteFileError::Unauthorized,
+    })
 }
 
 pub(crate) async fn describe_remote_file(client: &Client, account: &LibraryAccount, library: LibraryId, hash: BookId) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {

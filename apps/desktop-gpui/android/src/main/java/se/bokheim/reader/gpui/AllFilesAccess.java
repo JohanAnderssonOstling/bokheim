@@ -35,13 +35,13 @@ final class AllFilesAccess {
         }
         Runnable remember = () -> preferences.edit().putBoolean(PROMPT_HANDLED, true).apply();
         return new AlertDialog.Builder(activity)
-                .setTitle("Allow file access")
-                .setMessage("Allow Bokheim to access and manage files in shared storage, including Documents. You can also continue using the system file picker.")
-                .setPositiveButton("Open settings", (dialog, which) -> {
+                .setTitle(UiText.ANDROID_ALLOW_FILE_ACCESS)
+                .setMessage(UiText.ANDROID_ALLOW_BOKHEIM_TO_ACCESS_AND_MANAGE_FILES_IN_SHARED_STORAGE_INCLUDING_DOCUMENTS)
+                .setPositiveButton(UiText.ANDROID_OPEN_SETTINGS, (dialog, which) -> {
                     remember.run();
                     openSettings(activity);
                 })
-                .setNegativeButton("Not now", (dialog, which) -> remember.run())
+                .setNegativeButton(UiText.ANDROID_NOT_NOW, (dialog, which) -> remember.run())
                 .setOnCancelListener(dialog -> remember.run())
                 .show();
     }
@@ -49,7 +49,7 @@ final class AllFilesAccess {
     static void openSettings(Activity activity) {
         if (BuildConfig.PLAY_STORE) return;
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            Toast.makeText(activity, "Use the file picker to select folders on this Android version.", Toast.LENGTH_LONG).show();
+            Toast.makeText(activity, UiText.ANDROID_USE_THE_FILE_PICKER_TO_SELECT_FOLDERS_ON_THIS_ANDROID_VERSION, Toast.LENGTH_LONG).show();
             return;
         }
         try {
@@ -59,7 +59,7 @@ final class AllFilesAccess {
             try {
                 activity.startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
             } catch (ActivityNotFoundException missingSettings) {
-                Toast.makeText(activity, "File access settings are unavailable on this device. You can still use the file picker.", Toast.LENGTH_LONG).show();
+                Toast.makeText(activity, UiText.ANDROID_FILE_ACCESS_SETTINGS_ARE_UNAVAILABLE_ON_THIS_DEVICE_YOU_CAN_STILL_USE, Toast.LENGTH_LONG).show();
             }
         }
     }

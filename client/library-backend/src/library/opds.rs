@@ -1,9 +1,9 @@
 //! OPDS supplies metadata and files; ordinary library storage owns permanent copies.
-use super::{DocumentBook, LibrarySession, ResolvedBook};
-use crate::{BackendError, BookId, DownloadState};
+use super::{DocumentBook, LibrarySession, PdfBook, ResolvedBook};
+use crate::{BackendError, BookId, DownloadState, LibraryBrowseData};
 use book_access::AsyncBookSource;
 use book_model::BookFormat;
-use library_model::{BlobKind, CardKey, DownloadProgress, OpdsCredentials, OpdsPublication, OpdsSource, RelativeBookPath};
+use library_model::{BlobKind, BrowseLocation, CardKey, DownloadProgress, LibraryBrowseQuery, OpdsCredentials, OpdsPublication, OpdsSource, RelativeBookPath};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -16,26 +16,70 @@ use tokio::{io::AsyncWriteExt, sync::Mutex};
 pub(super) const COVER_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
-pub struct OpdsLibrary {
+pub(crate) struct OpdsLibrary {
     pub source: OpdsSource,
     pub(crate) credentials: RefCell<Option<OpdsCredentials>>,
+    scope: OpdsScope,
     temporary: RefCell<HashMap<BookId, (Option<String>, PathBuf)>>,
     downloads: Arc<Mutex<()>>,
     covers: RefCell<HashMap<BookId, Weak<Mutex<()>>>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OpdsScope {
+    Library,
+    Catalog,
+}
+
 impl OpdsLibrary {
-    pub fn new(source: OpdsSource, credentials: Option<OpdsCredentials>) -> Self {
-        Self { source, credentials: RefCell::new(credentials), temporary: RefCell::new(HashMap::new()), downloads: Arc::new(Mutex::new(())), covers: RefCell::new(HashMap::new()) }
+    pub(super) fn new(source: OpdsSource, credentials: Option<OpdsCredentials>) -> Self {
+        Self { source, credentials: RefCell::new(credentials), scope: OpdsScope::Library, temporary: RefCell::new(HashMap::new()), downloads: Arc::new(Mutex::new(())), covers: RefCell::new(HashMap::new()) }
+    }
+
+    pub(super) fn make_catalog(&mut self) {
+        self.scope = OpdsScope::Catalog;
+    }
+
+    pub(crate) fn is_catalog(&self) -> bool {
+        self.scope == OpdsScope::Catalog
     }
 }
 
 impl LibrarySession {
-    pub(crate) fn register_opds_books(&self, books: Vec<OpdsPublication>) -> Result<Vec<(BookId, f32, bool)>, BackendError> {
+    /// Fetch and register a page using this library's feed and device credentials.
+    pub(crate) async fn browse_opds(&self, query: LibraryBrowseQuery) -> Result<LibraryBrowseData, BackendError> {
+        let opds = self.opds.as_ref().ok_or("not an OPDS library")?;
+        let BrowseLocation::Opds { source, page } = query.location else { return Err("not an OPDS feed page".into()) };
+        if source != opds.source.id {
+            return Err("this page belongs to another OPDS library".into());
+        }
+        let credentials = opds.credentials.borrow().clone();
+        let (mut contents, feed, books) = library_opds::browse(&opds.source, credentials.as_ref(), page, &query.search).await?;
+        let states = self.register_opds_books(books)?;
+        for book in &mut contents.books {
+            let id = BookId::for_opds_entry(&book.key().0);
+            if let Some((_, progress, downloaded)) = states.iter().find(|(key, _, _)| *key == id) {
+                book.progress = *progress;
+                book.downloaded = *downloaded;
+            }
+        }
+        Ok(LibraryBrowseData { sections: Vec::new(), contents, path: Vec::new(), ancestors: Vec::new(), language_counts: Vec::new(), format_counts: Vec::new(), feed: Some(feed), page: None })
+    }
+
+    /// A listed feed book's file and the name to import it under.
+    pub(crate) async fn download_opds_book(&self, entry: CardKey) -> Result<(String, Vec<u8>), BackendError> {
+        let opds = self.opds.as_ref().ok_or("not an OPDS library")?;
+        let credentials = opds.credentials.borrow().clone();
+        library_opds::download(&opds.source, credentials.as_ref(), entry).await
+    }
+
+    fn register_opds_books(&self, books: Vec<OpdsPublication>) -> Result<Vec<(BookId, f32, bool)>, BackendError> {
         if !self.is_opds() {
             return Err("not an OPDS library".into());
         }
-        self.db.register_opds_books(&books)?;
+        if self.db.register_opds_books(&books, !self.opds.as_ref().ok_or("not an OPDS library")?.is_catalog())? {
+            self.events.sync.wake();
+        }
         self.opds_book_states(books.iter().filter(|book| book.format.is_some() && book.download_url.is_some()).map(OpdsPublication::book_id).collect())
     }
 
@@ -82,15 +126,15 @@ impl LibrarySession {
         let _lease = self.assets.lease_book(&id).await.map_err(BackendError::operation)?;
         let published = staged.publish_snapshot(&self.assets, &relative, &[], false).map_err(BackendError::operation)?;
         self.db.record_opds_download(id, &published, checksum, size, format)?;
-        self.emit(super::events::LibraryEvent::DownloadStatusChanged { content_hash: id, state: DownloadState::Downloaded });
+        self.emit(super::events::LibraryEvent::DownloadStatusChanged { book_id: id, state: DownloadState::Downloaded });
         self.events.notify_contents_changed();
         Ok((self.assets.native_library_root().join(published.relative_path.trim_start_matches('/')), format))
     }
 
     pub(crate) async fn download_opds(&self, id: BookId) -> Result<DownloadState, BackendError> {
-        self.emit(super::events::LibraryEvent::DownloadStatusChanged { content_hash: id, state: DownloadState::Downloading(DownloadProgress::ZERO) });
+        self.emit(super::events::LibraryEvent::DownloadStatusChanged { book_id: id, state: DownloadState::Downloading(DownloadProgress::ZERO) });
         if let Err(error) = self.opds_file(id, true).await {
-            self.emit(super::events::LibraryEvent::DownloadStatusChanged { content_hash: id, state: self.persistent_download_state(id).unwrap_or(DownloadState::NotDownloaded) });
+            self.emit(super::events::LibraryEvent::DownloadStatusChanged { book_id: id, state: self.persistent_download_state(id).unwrap_or(DownloadState::NotDownloaded) });
             return Err(error);
         }
         Ok(DownloadState::Downloaded)
@@ -100,13 +144,19 @@ impl LibrarySession {
         let (path, format) = self.opds_file(id, false).await?;
         let name = path.to_string_lossy().into_owned();
         let reader = crate::executor::run_blocking(move || File::open(path)).await.map_err(BackendError::operation)??;
-        Ok(ResolvedBook::Document(if format == BookFormat::Pdf { DocumentBook::new(name, format, Box::new(reader)) } else { DocumentBook::from_async_source(name, format, AsyncBookSource::from_file(reader)?) }))
+        if format == BookFormat::Pdf {
+            Ok(ResolvedBook::Pdf(PdfBook { path: name, reader: Box::new(reader), metadata: None }))
+        } else {
+            Ok(ResolvedBook::Document(DocumentBook::from_async_source(name, format.try_into()?, AsyncBookSource::from_file(reader)?)))
+        }
     }
 
     pub(crate) async fn opds_cover(&self, entry: CardKey, width: u32, card: bool) -> Result<Option<Vec<u8>>, BackendError> {
         let opds = self.opds.as_ref().ok_or("not an OPDS library")?;
-        let book = library_opds::publication(entry).ok().or(self.db.opds_publication(BookId::for_opds_entry(&entry.0))?);
-        let Some(book) = book else { return Ok(None) };
+        let Some(book) = self.db.opds_publication(BookId::for_opds_entry(&entry.0))? else {
+            let credentials = opds.credentials.borrow().clone();
+            return Ok(if card { library_opds::card_cover(&opds.source, credentials.as_ref(), entry, width).await } else { library_opds::cover(&opds.source, credentials.as_ref(), entry, width).await });
+        };
         let Some(url) = &book.cover_url else { return Ok(None) };
         // Cache the source image by URL, independently of display size or crop.
         let cover_id = BookId::for_opds_entry(blake3::hash(url.as_bytes()).as_bytes());

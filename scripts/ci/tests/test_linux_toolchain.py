@@ -55,7 +55,7 @@ class BrowserToolchainTests(unittest.TestCase):
              patch.object(browser, 'build_environment', return_value={'SDK': 'environment'}), \
              patch.object(browser.subprocess, 'run') as run:
             browser.main()
-        run.assert_called_once_with(['cargo', 'rustc', '--release', '-p', 'opds-webview', '--offline',
+        run.assert_called_once_with(['cargo', 'rustc', '--release', '-p', 'embedded-browser-ui', '--bin', 'bokheim-opds-webview', '--offline',
                                      '--', '-C', 'link-arg=-Wl,--allow-shlib-undefined'],
                                     env={'SDK': 'environment'}, check=True)
 

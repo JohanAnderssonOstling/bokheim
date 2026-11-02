@@ -17,8 +17,8 @@ pub struct SyncPullChanges {
 impl SyncPullChanges {
     fn record(&mut self, entry: &LibraryStateEntry) {
         match entry {
-            LibraryStateEntry::ReadingPosition { content_hash, .. } | LibraryStateEntry::ChapterReadStatus { content_hash, .. } => {
-                self.reading_progress.insert(*content_hash);
+            LibraryStateEntry::ReadingPosition { book_id, .. } | LibraryStateEntry::ChapterReadStatus { book_id, .. } => {
+                self.reading_progress.insert(*book_id);
             }
             _ => self.contents_changed = true,
         }
@@ -65,7 +65,7 @@ impl Database {
                 // The server delivers a book's lifecycle before any of its
                 // fields, so the page's lifecycles are the only book creations.
                 let lifecycles = changes.iter().filter_map(|state| match &state.value {
-                    LibraryStateEntry::BookLifecycle { content_hash, .. } => Some((state, content_hash)),
+                    LibraryStateEntry::BookLifecycle { book_id, .. } => Some((state, book_id)),
                     _ => None,
                 });
                 // A still-existing row may have missed a complete purge/readd.

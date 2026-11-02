@@ -95,12 +95,18 @@ def architecture(args, version, source):
                 else:
                     run("sips", "-z", pixels, pixels, original, "--out", destination)
         run("iconutil", "-c", "icns", iconset, "-o", resources / "Bokheim.icns")
+        formats = json.loads((ROOT / "shared/book-model/formats.json").read_text())
+        documents = [dict(CFBundleTypeName=format["variant"], CFBundleTypeRole="Viewer",
+                          LSHandlerRank="Alternate",
+                          CFBundleTypeExtensions=[ext for file in format["files"] for ext in file["extensions"]],
+                          CFBundleTypeMIMETypes=[mime["value"] for file in format["files"] for mime in file["mime_types"]])
+                     for format in formats if format["browser_download"]]
         info = dict(CFBundleIdentifier="se.bokheim.Bokheim", CFBundleName="Bokheim",
                     CFBundleDisplayName="Bokheim", CFBundleExecutable="Bokheim",
                     CFBundlePackageType="APPL", CFBundleIconFile="Bokheim.icns",
                     CFBundleShortVersionString=version, CFBundleVersion=version,
                     LSMinimumSystemVersion="13.0", NSHighResolutionCapable=True,
-                    NSPrincipalClass="NSApplication",
+                    NSPrincipalClass="NSApplication", CFBundleDocumentTypes=documents,
                     CFBundleURLTypes=[dict(CFBundleURLName="se.bokheim.reader", CFBundleURLSchemes=["bokheim"], CFBundleTypeRole="Viewer")])
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
         for path in (executable(app), browser_helper(app), pdfium(app)):

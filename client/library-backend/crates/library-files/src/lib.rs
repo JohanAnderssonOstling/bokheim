@@ -16,3 +16,5 @@ impl From<AssetStoreError> for client_runtime::BackendError {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub mod import_move;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod library_move;

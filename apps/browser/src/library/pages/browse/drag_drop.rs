@@ -1,5 +1,7 @@
 //! Shared folder drag sources, destinations and previews.
 
+use ui_text::text;
+
 use std::any::Any;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -45,7 +47,7 @@ impl LibraryDrag {
             return false;
         }
         if self.library_id == library_id {
-            return self.targets.source.is_some() && self.targets.accepts(destination);
+            return self.targets.accepts(destination);
         }
         cfg!(not(target_arch = "wasm32"))
     }
@@ -182,7 +184,7 @@ impl gpui::Render for DragPreview {
         let hint = cx.default_global::<DropHint>().0.take().filter(|hint| hint.window == window.window_handle().window_id());
         // Says where the drop would go, or that it would go nowhere; a drop it
         // cannot make also fades what is being carried.
-        let caption = hint.as_ref().map(|hint| components::drag_preview(SharedString::from(if hint.valid { format!("{} → {}", self.label, hint.name) } else { format!("Can't drop in {}", hint.name) }), theme));
+        let caption = hint.as_ref().map(|hint| components::drag_preview(SharedString::from(if hint.valid { format!("{} → {}", self.label, hint.name) } else { format!(text!(browse::can_t_drop_in), hint.name) }), theme));
         // Drag overlays live outside the page root's inherited typography.
         let application_theme = Theme::global(cx);
         div()
@@ -206,9 +208,9 @@ pub(super) fn folder_drag_source<E: StatefulInteractiveElement>(element: E, targ
         BrowseDrag::Library(drag) => describe(&drag.targets),
         BrowseDrag::Catalog(books) => {
             if books.len() == 1 {
-                "1 book".to_owned()
+                text!(browse::one_book).to_owned()
             } else {
-                format!("{} books", books.len())
+                format!(text!(browse::book_count), books.len())
             }
         }
     });
@@ -220,7 +222,7 @@ pub(super) fn folder_drag_source<E: StatefulInteractiveElement>(element: E, targ
         .external_drag_payload::<BrowseDrag>(|_, _, _| Some(ExternalDragPayload::Application(ApplicationDrag::new())))
 }
 
-/// What a drag carries out of the folder `source`, and the preview it shows.
+/// What a drag carries, with an optional source folder, and the preview it shows.
 pub(super) type DragPayload = (BrowseDrag, Vec<DragPreviewItem>);
 
 /// The drag a book card starts, from the paginator state and the card's id.
@@ -242,6 +244,9 @@ pub(super) fn drag_payload(items: &[BrowseItem], source: Option<DirId>, library_
             return None;
         }
         return Some((BrowseDrag::Catalog(books), preview));
+    }
+    if items.iter().filter_map(BrowseItem::book).any(|book| !book.read(cx).can_drag(cx)) {
+        return None;
     }
     let items = items.iter().filter(|item| source.is_some() || matches!(item, BrowseItem::Book(_)));
     let mut targets = FolderTargets::from_items(items.clone(), source.unwrap_or(sync_common::ROOT_DIR_ID), cx)?;
@@ -283,13 +288,14 @@ mod tests {
             format_category: LibraryFileTypeFilter::Book,
             audiobook_duration_ms: None,
             added_at: 0,
+            description: String::new(),
             source_directory: None,
         };
         let library = Uuid::from_u128(1);
         let folder = Uuid::from_u128(2);
         let entry = CardKey([7; 32]);
         let source = Uuid::from_u128(3);
-        for source in [BookSource::Catalog { content_hash: BookId::from_bytes([4; 32]) }, BookSource::ExternalCatalog { entry, downloadable: true }, BookSource::Opds { source, entry, downloadable: true, buyable: false }] {
+        for source in [BookSource::Catalog { book_id: BookId::from_bytes([4; 32]) }, BookSource::ExternalCatalog { entry, downloadable: true }, BookSource::Opds { source, entry, downloadable: true }] {
             let drag = BrowseDrag::Catalog(vec![book(source)]);
             assert!(drag.accepts(library, ROOT_DIR_ID));
             assert!(drag.accepts(library, folder));
@@ -297,7 +303,7 @@ mod tests {
             assert_eq!(books[0].source, source);
         }
         assert!(!BrowseDrag::Catalog(Vec::new()).accepts(library, ROOT_DIR_ID));
-        for source in [BookSource::Library { content_hash: BookId::from_bytes([4; 32]) }, BookSource::ExternalCatalog { entry, downloadable: false }, BookSource::Opds { source, entry, downloadable: false, buyable: true }] {
+        for source in [BookSource::Library { book_id: BookId::from_bytes([4; 32]) }, BookSource::ExternalCatalog { entry, downloadable: false }, BookSource::Opds { source, entry, downloadable: false }] {
             assert!(!BrowseDrag::Catalog(vec![book(source)]).accepts(library, ROOT_DIR_ID));
         }
     }
@@ -338,11 +344,11 @@ mod tests {
     }
 
     #[test]
-    fn cross_library_drag_from_all_books_requires_a_different_library() {
+    fn book_identity_drag_accepts_folders_in_same_or_other_library() {
         let library_id = Uuid::from_u128(1);
         let other = Uuid::from_u128(2);
         let drag = LibraryDrag { library_id, targets: FolderTargets { books: vec![sync_common::BookId::from_bytes([1; 32])], ..Default::default() } };
-        assert!(!drag.accepts(library_id, sync_common::ROOT_DIR_ID));
+        assert!(drag.accepts(library_id, sync_common::ROOT_DIR_ID));
         assert_eq!(drag.accepts(other, sync_common::ROOT_DIR_ID), cfg!(not(target_arch = "wasm32")));
     }
 

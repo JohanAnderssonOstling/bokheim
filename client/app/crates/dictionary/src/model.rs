@@ -34,3 +34,9 @@ pub struct DictionaryDownloads {
     pub active: Option<String>,
     pub error: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DictionarySnapshot {
+    pub dictionaries: Vec<DictionaryInfo>,
+    pub downloads: DictionaryDownloads,
+}

@@ -61,7 +61,7 @@ pub struct LibraryStorageUsage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BookStorageUsage {
-    pub content_hash: BookId,
+    pub book_id: BookId,
     pub used_bytes: u64,
 }
 
@@ -75,7 +75,7 @@ impl AssetApplication {
         let mut present = Vec::new();
         for hash in hashes {
             if let Some(revision) = self.store.thumbnail_revision(user_id, hash).await? {
-                present.push(sync_common::api::assets::ThumbnailRevision { content_hash: *hash, revision });
+                present.push(sync_common::api::assets::ThumbnailRevision { book_id: *hash, revision });
             }
         }
         Ok(present)
@@ -118,7 +118,7 @@ impl AssetApplication {
         }
 
         let mut hashes = HashSet::new();
-        if blobs.iter().any(|blob| !hashes.insert(blob.content_hash)) {
+        if blobs.iter().any(|blob| !hashes.insert(blob.book_id)) {
             return Err(AssetError::InvalidInput("book manifest contains duplicate content hashes".into()));
         }
         let phase_started = Instant::now();
@@ -127,9 +127,9 @@ impl AssetApplication {
         let mut catalog = HashMap::new();
         for blob in &blobs {
             if blob.size_bytes > 0 {
-                if let Some(source) = blob.byte_checksum.or_else(|| blob.content_hash.content_hash()) {
+                if let Some(source) = blob.byte_checksum.or_else(|| blob.book_id.content_hash()) {
                     if let Some(book) = self.store.prepare_catalog_book(&BookId::from(source)).await? {
-                    catalog.insert(blob.content_hash, book);
+                    catalog.insert(blob.book_id, book);
                     }
                 }
             }
@@ -170,7 +170,7 @@ impl AssetApplication {
                 let canonical = BookId::from(content_address::ContentHash::try_from(checksum.as_slice()).map_err(storage)?);
                 if canonical != *hash {
                     if let Some(mut asset) = self.store.open_from(user_id,kind,&canonical,offset).await? {
-                        asset.content_hash = *hash;
+                        asset.book_id = *hash;
                         return Ok(Some(asset));
                     }
                 }
@@ -181,7 +181,7 @@ impl AssetApplication {
 
     pub async fn audiobook_track(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &BookId, index: usize) -> Result<Option<(StoredAsset, audiobook_archive::ArchivedTrack)>, AssetError> {
         let Some(asset) = self.open_from(user_id, library_id, AssetKind::Book, hash, 0).await? else { return Ok(None) };
-        let track = self.store.book_tracks(&asset.content_hash).await?.into_iter().nth(index);
+        let track = self.store.book_tracks(&asset.book_id).await?.into_iter().nth(index);
         Ok(track.map(|track| (asset, track)))
     }
 

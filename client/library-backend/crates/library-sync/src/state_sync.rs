@@ -43,7 +43,7 @@ pub(crate) fn next_outbox_page(database: &Database, events: Option<&LibraryEvent
     let page = database.sync_next_outbox_page(&mut outbox.scan)?;
     if let Some(events) = events {
         let selected = outbox.positions.revisions(page.iter().filter_map(|publication| match &publication.state.value {
-            LibraryStateEntry::ReadingPosition { content_hash, .. } => Some(*content_hash),
+            LibraryStateEntry::ReadingPosition { book_id, .. } => Some(*book_id),
             _ => None,
         }));
         if !selected.is_empty() {
@@ -173,7 +173,7 @@ mod tests {
             next_cursor: SyncCursor::default(),
             has_more: false,
         };
-        let lifecycles = [first, second].map(|content_hash| publication(LibraryStateEntry::BookLifecycle { content_hash, value: BookLifecycleState::Present }, 1));
+        let lifecycles = [first, second].map(|book_id| publication(LibraryStateEntry::BookLifecycle { book_id, value: BookLifecycleState::Present }, 1));
         apply_response(&database, None, &[], &page(&lifecycles)).unwrap();
 
         let (sync, _) = SyncScheduler::new();
@@ -182,8 +182,8 @@ mod tests {
         let (enrichment, _) = SyncScheduler::new();
         let (events, mut state) = LibraryEventRouter::new(sync, assets, files, enrichment);
         let updates = state.subscribe_updates();
-        let position = |content_hash, time| publication(LibraryStateEntry::ReadingPosition { content_hash, value: ReadingPositionState { location: ReadingPosition::pdf_page(3), progress: 25.0 } }, time);
-        let progress = page(&[position(first, 10), publication(LibraryStateEntry::ChapterReadStatus { content_hash: first, value: ChapterReadStatus::default() }, 10), position(second, 10)]);
+        let position = |book_id, time| publication(LibraryStateEntry::ReadingPosition { book_id, value: ReadingPositionState { location: ReadingPosition::pdf_page(3), progress: 25.0 } }, time);
+        let progress = page(&[position(first, 10), publication(LibraryStateEntry::ChapterReadStatus { book_id: first, value: ChapterReadStatus::default() }, 10), position(second, 10)]);
         apply_response(&database, Some(&events), &[], &progress).unwrap();
         state.drain(&events);
         assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::ReadingProgress(first));

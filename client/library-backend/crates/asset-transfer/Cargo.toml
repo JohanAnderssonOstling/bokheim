@@ -16,6 +16,7 @@ thumbnail = { path = "../thumbnail" }
 library-files = { path = "../library-files" }
 library-database = { path = "../library-database" }
 library-runtime = { path = "../library-runtime" }
+library-placement = { path = "../library-placement" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 futures-util = "0.3"

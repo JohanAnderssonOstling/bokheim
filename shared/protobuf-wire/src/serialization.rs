@@ -143,10 +143,9 @@ impl<B: Backend> ser::Serializer for Serializer<B> {
         B::text(variant)
     }
     fn serialize_newtype_struct<T: Serialize + ?Sized>(self, name: &'static str, value: &T) -> Result<B::Output, SerializerError> {
-        // Opt-in transport payloads choose compact bytes in binary mode while
-        // JSON serializers keep their ordinary, human-readable representation.
-        // All three backends (encoding, counting, representation) share this.
-        if matches!(name, "ContentHash" | "BookId" | "BokheimTransportBytes") {
+        // The domain adapter owns representation policy. Encoding, counting
+        // and opaque representations all implement the same Serde extension.
+        if serde_transport::uses_binary_representation(name) {
             value.serialize(Self::new(true))
         } else {
             B::newtype(value.serialize(self)?)

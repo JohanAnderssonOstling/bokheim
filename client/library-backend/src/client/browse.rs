@@ -1,9 +1,17 @@
 use super::LibraryClient;
+use crate::library::{LibraryCommand, PendingCommand, ReadyCommand};
 use crate::{BackendError, LibraryBrowseData};
-use crate::library::{LibraryCommand, ReadyCommand};
 use library_model::{BrowseBookPage, BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
 
 impl LibraryClient {
+    pub async fn book_storage(&self, for_download: bool) -> Result<crate::LibraryBookStorage, BackendError> {
+        self.request(LibraryCommand::Pending(PendingCommand::LibraryBookStorage { for_download })).await
+    }
+
+    pub async fn download_all_books(&self, confirmed_books: Vec<crate::BookId>, confirmed_bytes: u64) -> Result<(), BackendError> {
+        self.request(LibraryCommand::Pending(PendingCommand::DownloadAllBooks { confirmed_books, confirmed_bytes })).await
+    }
+
     pub async fn book_count(&self) -> Result<usize, BackendError> {
         self.request(LibraryCommand::Ready(ReadyCommand::BookCount)).await
     }
@@ -25,8 +33,8 @@ impl LibraryClient {
     pub async fn browse_section_books(&self, query: LibraryBrowseQuery, offset: usize, limit: usize) -> Result<BrowseBookPage, BackendError> {
         self.request(LibraryCommand::Ready(ReadyCommand::BrowseSectionBooks { query, offset, limit })).await
     }
-    pub async fn book_detail(&self, content_hash: crate::BookId) -> Result<library_model::BookDetail, BackendError> {
-        self.request(LibraryCommand::Ready(ReadyCommand::BookDetail { content_hash })).await
+    pub async fn book_detail(&self, book_id: crate::BookId) -> Result<library_model::BookDetail, BackendError> {
+        self.request(LibraryCommand::Ready(ReadyCommand::BookDetail { book_id })).await
     }
     pub async fn external_catalog_detail(&self, entry: library_model::CardKey) -> Result<library_model::BookDetail, BackendError> {
         self.request(LibraryCommand::Ready(ReadyCommand::ExternalCatalogDetail { entry })).await

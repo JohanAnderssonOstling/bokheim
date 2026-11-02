@@ -1,23 +1,40 @@
 //! Shared, device-local export dialog for Settings and the library switcher.
 
+use ui_text::text;
+
 use super::background_job::{self, BackgroundJobView};
 use app::AppClient;
 use book_model::BookFormat;
+use futures_util::FutureExt;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, SharedString, Subscription, Task, Window, div, px, rems};
 use gpui_component::checkbox::Checkbox;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::progress::Progress;
 use gpui_component::{Disableable, WindowExt};
 use library_backend::{BackendError, LibraryClient};
 use library_model::{
-    AnnotationExportBook, AnnotationExportConflict, AnnotationExportFormat, AnnotationExportOptions, AnnotationExportOutcome, AnnotationExportProgress, AnnotationExportReport, AutomaticAnnotationExportState,
+    AnnotationExportBook, AnnotationExportConflict, AnnotationExportFailureKind, AnnotationExportFormat, AnnotationExportOptions, AnnotationExportOutcome, AnnotationExportProgress, AnnotationExportReport, AutomaticAnnotationExportState,
     AutomaticAnnotationExportStatus, LibraryUpdate,
 };
 use std::{path::PathBuf, rc::Rc};
 use sync_common::LibraryId;
 use ui_components::{self as components, user_facing_error};
 use uuid::Uuid;
+
+fn export_failure_message(kind: AnnotationExportFailureKind) -> &'static str {
+    match kind {
+        AnnotationExportFailureKind::Busy => text!(browse::export_destination_busy),
+        AnnotationExportFailureKind::Unavailable => text!(browse::export_destination_unavailable),
+        AnnotationExportFailureKind::Changed => text!(browse::export_changed),
+        AnnotationExportFailureKind::InvalidData => text!(browse::export_book_unreadable),
+        AnnotationExportFailureKind::Identity => text!(browse::export_book_mismatch),
+        AnnotationExportFailureKind::Unsupported => text!(browse::export_format_unsupported),
+        AnnotationExportFailureKind::LimitExceeded => text!(browse::export_limit_reached),
+        AnnotationExportFailureKind::Io => text!(browse::export_save_failed),
+        AnnotationExportFailureKind::Tracking => text!(browse::export_finish_failed),
+    }
+}
 
 pub(crate) fn open_annotation_export(backend: Rc<AppClient>, id: LibraryId, name: String, window: &mut Window, cx: &mut App) {
     background_job::open_job_dialog(650.0, move |window, cx| AnnotationExportDialog::new(backend, id, name, window, cx), window, cx);
@@ -86,23 +103,25 @@ impl BackgroundJobView for AnnotationExportDialog {
 
 impl AnnotationExportDialog {
     fn new(backend: Rc<AppClient>, id: LibraryId, name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let library = backend.library(id);
+        let library = backend.management.library(id);
         background_job::cancel_on_release(cx);
-        let folder = cx.new(|cx| InputState::new(window, cx).placeholder("Export folder"));
+        let folder = cx.new(|cx| InputState::new(window, cx).placeholder(text!(browse::export_folder)));
         let input = cx.subscribe_in(&folder, window, |view, _, event, _, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 view.start_export(cx);
             }
             cx.notify();
         });
+        let preferences = crate::services::preference_client(cx);
         let source = library.clone();
         let load = cx.spawn(async move |view, cx| {
-            let (books, folder, automatic) = futures_util::join!(source.annotation_export_snapshot(), backend.default_annotation_export_folder(), source.automatic_annotation_export());
+            let (books, folder, automatic) =
+                futures_util::join!(source.annotation_export_snapshot(), preferences.default_annotation_export_folder().map(|result| result.map_err(BackendError::operation)), source.automatic_annotation_export());
             let _ = view.update_in(cx, |view, window, cx| {
                 view.loading = false;
                 match books {
                     Ok(books) => view.books = books,
-                    Err(error) => view.error = Some(user_facing_error(&error, "Could not load annotations. Close the dialog and try again.").into()),
+                    Err(error) => view.error = Some(user_facing_error(&error, text!(browse::could_not_load_annotations_close_the_dialog_and_try_again)).into()),
                 }
                 match folder {
                     Ok(Some(base)) => {
@@ -110,7 +129,7 @@ impl AnnotationExportDialog {
                         view.folder.update(cx, |folder, cx| folder.set_value(destination.to_string_lossy().into_owned(), window, cx));
                     }
                     Ok(None) => {}
-                    Err(error) => view.error = Some(user_facing_error(&error, "Could not read the default export folder. Choose an export folder.").into()),
+                    Err(error) => view.error = Some(user_facing_error(&error, text!(browse::could_not_read_the_default_export_folder_choose_an_export_folder)).into()),
                 }
                 match automatic {
                     Ok(status) => {
@@ -121,7 +140,7 @@ impl AnnotationExportDialog {
                         }
                         view.automatic_status = Some(status);
                     }
-                    Err(error) => view.error = Some(user_facing_error(&error, "Could not read automatic export settings.").into()),
+                    Err(error) => view.error = Some(user_facing_error(&error, text!(browse::could_not_read_automatic_export_settings)).into()),
                 }
                 cx.notify();
             });
@@ -132,6 +151,12 @@ impl AnnotationExportDialog {
             // Subscribe before the snapshot so changes during opening are seen.
             loop {
                 if let Ok(status) = status_source.automatic_annotation_export().await {
+                    if let Some(error) = &status.error {
+                        log::warn!("Automatic annotation export failed: {error}");
+                    }
+                    for output in &status.outputs {
+                        log::warn!("Automatic annotation export failed for {}: {}", output.destination.path.display(), output.message);
+                    }
                     if view
                         .update(cx, |view, cx| {
                             view.automatic_status = Some(status);
@@ -208,7 +233,7 @@ impl AnnotationExportDialog {
     }
 
     fn choose_folder(&mut self, cx: &mut Context<Self>) {
-        let selection = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Choose annotation export folder".into()) });
+        let selection = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(browse::choose_annotation_export_folder).into()) });
         cx.spawn(async move |view, cx| {
             let Ok(Ok(Some(paths))) = selection.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
@@ -277,7 +302,7 @@ impl AnnotationExportDialog {
                     self.begin_export(options, cx);
                 }
             }
-            Err(error) => self.error = Some(user_facing_error(&error, "Could not check reader apps. Try again.").into()),
+            Err(error) => self.error = Some(user_facing_error(&error, text!(browse::could_not_check_reader_apps_try_again)).into()),
         }
         cx.notify();
     }
@@ -316,8 +341,15 @@ impl AnnotationExportDialog {
                 view.active = None;
                 view.poll = None;
                 match result {
-                    Ok(report) => view.report = Some(report),
-                    Err(error) => view.error = Some(user_facing_error(&error, "Could not export annotations. Check the destination and try again.").into()),
+                    Ok(report) => {
+                        for result in &report.results {
+                            if let AnnotationExportOutcome::Failed(error) = &result.outcome {
+                                log::warn!("Annotation export failed for {}: {error}", result.destination.path.display());
+                            }
+                        }
+                        view.report = Some(report);
+                    }
+                    Err(error) => view.error = Some(user_facing_error(&error, text!(browse::could_not_export_annotations_check_the_destination_and_try_again)).into()),
                 }
                 cx.notify();
             });
@@ -342,7 +374,7 @@ impl AnnotationExportDialog {
                     view.automatic_status = Some(status);
                 }
                 if let Err(error) = result {
-                    view.error = Some(user_facing_error(&error, "Could not request another export attempt.").into());
+                    view.error = Some(user_facing_error(&error, text!(browse::could_not_request_another_export_attempt)).into());
                 }
                 cx.notify();
             });
@@ -354,39 +386,39 @@ impl AnnotationExportDialog {
         let status = self.automatic_status.as_ref()?;
         status.options.as_ref()?;
         let theme = components::browser_theme(cx);
-        let mut body = div().flex().flex_col().gap(px(components::SPACE_SM)).child(components::section_title("Automatic export"));
-        if let Some(error) = &status.error {
-            body = body.child(components::error_text(theme).child(SharedString::from(error.clone())));
+        let mut body = div().flex().flex_col().gap(px(components::SPACE_SM)).child(components::section_title(text!(browse::automatic_export)));
+        if status.error.is_some() {
+            body = body.child(components::error_text(theme).child(text!(browse::automatic_export_failed)));
         }
         for output in &status.outputs {
             let format = match output.destination.format {
-                AnnotationExportFormat::Markdown => "Markdown",
-                AnnotationExportFormat::Pdf => "PDF",
-                AnnotationExportFormat::Foliate => "Foliate",
-                AnnotationExportFormat::Readest => "Readest",
+                AnnotationExportFormat::Markdown => text!(browse::markdown),
+                AnnotationExportFormat::Pdf => text!(browse::pdf),
+                AnnotationExportFormat::Foliate => text!(browse::foliate),
+                AnnotationExportFormat::Readest => text!(browse::readest),
             };
             let state = match output.state {
-                AutomaticAnnotationExportState::Waiting => "Waiting",
-                AutomaticAnnotationExportState::Retrying => "Retrying",
-                AutomaticAnnotationExportState::NeedsAttention => "Needs attention",
+                AutomaticAnnotationExportState::Waiting => text!(browse::waiting),
+                AutomaticAnnotationExportState::Retrying => text!(browse::retrying),
+                AutomaticAnnotationExportState::NeedsAttention => text!(browse::needs_attention),
             };
-            let message = if output.failure.file_written { format!("File saved; retrying its tracking update. {}", output.message) } else { output.message.clone() };
+            let message = if output.failure.file_written { text!(browse::file_saved_retrying_its_tracking_update) } else { export_failure_message(output.failure.kind) };
             body = body.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(components::SPACE_XS))
-                    .child(components::form_hint(format!("{} · {format} · {state}", output.book_title), theme))
-                    .child(components::form_hint(output.destination.path.to_string_lossy().into_owned(), theme))
+                    .child(components::form_hint(format!(text!(browse::export_state), output.book_title, format = format, state = state), theme))
+                    .child(components::form_hint(components::path_label(&output.destination.path), theme))
                     .child(components::form_hint(message, theme)),
             );
         }
         if status.outputs.is_empty() && status.error.is_none() {
-            body = body.child(components::form_hint(if status.last_success_at.is_some() { "Last export completed successfully." } else { "Automatic export is enabled." }, theme));
+            body = body.child(components::form_hint(if status.last_success_at.is_some() { text!(browse::last_export_completed_successfully) } else { text!(browse::automatic_export_is_enabled) }, theme));
         } else {
             body = body.child(
                 components::base_button("annotation-export-retry")
-                    .label(if self.retrying { "Requesting retry…" } else { "Retry failed exports" })
+                    .label(if self.retrying { text!(browse::requesting_retry) } else { text!(browse::retry_failed_exports) })
                     .disabled(self.retrying || self.active.is_some())
                     .on_click(cx.listener(|view, _, _, cx| view.retry_automatic(cx))),
             );
@@ -394,12 +426,15 @@ impl AnnotationExportDialog {
         Some(body)
     }
 
-    fn render_options(&self, cx: &Context<Self>) -> gpui::Div {
+    fn render_options(&self, window: &Window, cx: &Context<Self>) -> gpui::Div {
         let theme = components::browser_theme(cx);
-        let mut formats = div().debug_selector(|| "annotation-export-formats".into()).flex().flex_col().gap(px(components::SPACE_SM)).child(components::section_title("Export formats"));
-        for (index, format, label, unit) in
-            [(0, AnnotationExportFormat::Markdown, "Markdown", "books"), (1, AnnotationExportFormat::Foliate, "Foliate", "EPUBs"), (3, AnnotationExportFormat::Readest, "Readest", "EPUBs"), (2, AnnotationExportFormat::Pdf, "PDF", "PDFs")]
-        {
+        let mut formats = div().debug_selector(|| "annotation-export-formats".into()).flex().flex_col().gap(px(components::SPACE_SM)).child(components::section_title(text!(browse::export_formats)));
+        for (index, format, label, unit) in [
+            (0, AnnotationExportFormat::Markdown, text!(browse::markdown), "books"),
+            (1, AnnotationExportFormat::Foliate, text!(browse::foliate), text!(browse::epubs)),
+            (3, AnnotationExportFormat::Readest, text!(browse::readest), text!(browse::epubs)),
+            (2, AnnotationExportFormat::Pdf, text!(browse::pdf), text!(browse::pdfs)),
+        ] {
             let count = self.format_count(format);
             formats = formats.child(
                 div()
@@ -413,29 +448,29 @@ impl AnnotationExportDialog {
                             cx.notify();
                         },
                     )))
-                    .child(components::form_hint(SharedString::from(format!("{count} {unit}")), theme)),
+                    .child(components::form_hint(SharedString::from(format!(text!(browse::count_with_unit), count = count, unit = unit)), theme)),
             );
         }
         let mut body = div().flex().flex_col().gap(px(components::SPACE_MD)).child(formats).child(
-            Checkbox::new("annotation-export-automatic").label("Automatically export annotation changes").checked(self.automatic).disabled(self.loading).on_click(cx.listener(|view, selected, _, cx| {
+            Checkbox::new("annotation-export-automatic").label(text!(browse::automatically_export_annotation_changes)).checked(self.automatic).disabled(self.loading).on_click(cx.listener(|view, selected, _, cx| {
                 view.automatic = *selected;
                 cx.notify();
             })),
         );
         if self.formats[0] {
             body = body.child(
-                div().flex().flex_col().gap(px(components::SPACE_SM)).child(components::section_title("Export folder")).child(
+                div().flex().flex_col().gap(px(components::SPACE_SM)).child(components::section_title(text!(browse::export_folder))).child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(components::SPACE_SM))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.folder).disabled(self.loading)))
-                        .child(components::base_button("annotation-export-browse").label("Browse…").disabled(self.loading).on_click(cx.listener(|view, _, _, cx| view.choose_folder(cx)))),
+                        .child(div().flex_1().min_w_0().child(components::browser_path_input("annotation-export-folder-label", &self.folder, self.loading, theme, window, cx)))
+                        .child(components::base_button("annotation-export-browse").label(text!(browse::browse)).disabled(self.loading).on_click(cx.listener(|view, _, _, cx| view.choose_folder(cx)))),
                 ),
             );
         }
         if !self.loading && self.books.is_empty() {
-            body = body.child(components::form_hint("No annotations to export.", theme));
+            body = body.child(components::form_hint(text!(browse::no_annotations_to_export), theme));
         }
         if self.loading {
             body = body.child(Progress::new("annotation-export-loading").loading(true).color(theme.accent));
@@ -452,14 +487,14 @@ impl AnnotationExportDialog {
             .flex()
             .flex_col()
             .gap(px(components::SPACE_MD))
-            .child(components::section_title(if self.cancelling { "Cancelling export…" } else { "Exporting annotations…" }))
+            .child(components::section_title(if self.cancelling { text!(browse::cancelling_export) } else { text!(browse::exporting_annotations) }))
             .child(Progress::new("annotation-export-progress").loading(total == 0).value(if total == 0 { 0.0 } else { completed as f32 / total as f32 * 100.0 }).color(theme.accent));
         if let Some(item) = progress.and_then(|progress| progress.current.as_ref()) {
-            let title = self.books.iter().find(|book| book.book_id == item.book_id).map(|book| book.metadata.title.clone()).unwrap_or_else(|| item.path.to_string_lossy().into_owned());
+            let title = self.books.iter().find(|book| book.book_id == item.book_id).map(|book| book.metadata.title.clone()).unwrap_or_else(|| components::path_label(&item.path));
             body = body.child(components::form_hint(title, theme));
         }
         if total > 0 {
-            body = body.child(components::form_hint(SharedString::from(format!("{completed} of {total}")), theme));
+            body = body.child(components::form_hint(SharedString::from(format!(text!(browse::of), completed = completed, total = total)), theme));
         }
         body
     }
@@ -467,20 +502,20 @@ impl AnnotationExportDialog {
     fn render_reader_prompt(&self, cx: &Context<Self>) -> gpui::Div {
         let theme = components::browser_theme(cx);
         let title = if self.checking_readers {
-            "Checking reader apps…"
+            text!(browse::checking_reader_apps)
         } else {
             match (self.running_readers.contains(&AnnotationExportFormat::Foliate), self.running_readers.contains(&AnnotationExportFormat::Readest)) {
-                (true, true) => "Close Foliate and Readest",
-                (true, false) => "Close Foliate",
-                (false, true) => "Close Readest",
-                _ => "Check reader apps",
+                (true, true) => text!(browse::close_foliate_and_readest),
+                (true, false) => text!(browse::close_foliate),
+                (false, true) => text!(browse::close_readest),
+                _ => text!(browse::check_reader_apps),
             }
         };
         let mut body = div().debug_selector(|| "annotation-export-reader-prompt".into()).flex().flex_col().gap(px(components::SPACE_MD)).child(components::section_title(title));
         if self.checking_readers {
             body = body.child(Progress::new("annotation-export-reader-check").loading(true).color(theme.accent));
         } else {
-            body = body.child(components::form_hint("Close the reader apps, then choose Continue to export annotations.", theme));
+            body = body.child(components::form_hint(text!(browse::close_the_reader_apps_then_choose_continue_to_export_annotations), theme));
         }
         body
     }
@@ -495,22 +530,22 @@ impl AnnotationExportDialog {
             .flex_col()
             .gap(px(components::SPACE_SM))
             .child(components::section_title(if report.cancelled {
-                "Export cancelled"
+                text!(browse::export_cancelled)
             } else if report.results.iter().any(|result| matches!(result.outcome, AnnotationExportOutcome::Failed(_))) {
-                "Export finished with errors"
+                text!(browse::export_finished_with_errors)
             } else {
-                "Annotations exported"
+                text!(browse::annotations_exported)
             }))
-            .child(components::form_hint(SharedString::from(format!("{written} saved · {skipped} skipped · {failed} not saved")), theme));
+            .child(components::form_hint(SharedString::from(format!(text!(browse::saved_skipped_not_saved), failed = failed, skipped = skipped, written = written)), theme));
         if report.results.iter().any(|result| matches!(result.destination.format, AnnotationExportFormat::Foliate | AnnotationExportFormat::Readest) && matches!(result.outcome, AnnotationExportOutcome::Written)) {
-            body = body.child(components::form_hint("Reopen the book in Foliate or Readest to load the exported annotations.", theme));
+            body = body.child(components::form_hint(text!(browse::reopen_the_book_in_foliate_or_readest_to_load_the_exported_annotations), theme));
         }
         for result in &report.results {
-            if let AnnotationExportOutcome::Failed(error) = &result.outcome {
+            if let AnnotationExportOutcome::Failed(_) = &result.outcome {
                 let message = if result.failure.is_some_and(|failure| failure.file_written) {
-                    format!("{}: File saved; finishing export failed: {error}", result.destination.path.display())
+                    format!(text!(browse::file_saved_finishing_export_failed), components::path_label(&result.destination.path))
                 } else {
-                    format!("{}: {error}", result.destination.path.display())
+                    format!(text!(browse::export_destination_error), components::path_label(&result.destination.path))
                 };
                 body = body.child(components::error_text(theme).child(SharedString::from(message)));
             }
@@ -616,7 +651,7 @@ mod tests {
         let (_directory, _session, library) = crate::navigation::LibrarySession::test_context(cx).await;
         let output = tempfile::tempdir().unwrap();
         library.app().set_library_asset_storage(*library.backend().id(), false).await.unwrap();
-        library.app().set_default_annotation_export_folder(output.path().to_string_lossy().into_owned()).await.unwrap();
+        cx.read(crate::services::preference_client).set_default_annotation_export_folder(output.path().to_string_lossy().into_owned()).await.unwrap();
         let book = library
             .backend()
             .import_downloaded_book(
@@ -628,7 +663,7 @@ mod tests {
             .unwrap();
         let annotation = Annotation {
             id: "export-dialog-note".into(),
-            content_hash: book,
+            book_id: book,
             anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2,/1:0,/1:1)"),
             exact_text: "Highlighted passage".into(),
             style: AnnotationStyle::Highlight,
@@ -687,13 +722,13 @@ mod tests {
         let (_directory, _session, library) = crate::navigation::LibrarySession::test_context(cx).await;
         let output = tempfile::tempdir().unwrap();
         library.app().set_library_asset_storage(*library.backend().id(), false).await.unwrap();
-        library.app().set_default_annotation_export_folder(output.path().to_string_lossy().into_owned()).await.unwrap();
+        cx.read(crate::services::preference_client).set_default_annotation_export_folder(output.path().to_string_lossy().into_owned()).await.unwrap();
         let book = library.backend().import_downloaded_book(ROOT_DIR_ID, "Book.epub".into(), include_bytes!("../../../../client/library-backend/tests/fixtures/cloud-cover.epub").to_vec()).await.unwrap();
         library
             .backend()
             .upsert_annotation(Annotation {
                 id: "readest-dialog-note".into(),
-                content_hash: book,
+                book_id: book,
                 anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2,/1:0,/1:1)"),
                 exact_text: "Highlighted passage".into(),
                 style: AnnotationStyle::Underline,
@@ -747,10 +782,10 @@ impl Render for AnnotationExportDialog {
                     .flex()
                     .flex_col()
                     .gap(px(components::SPACE_XS))
-                    .child(div().text_size(rems(1.5)).child("Export annotations"))
-                    .child(components::form_hint(SharedString::from(if self.loading { self.name.clone() } else { format!("{} · {annotation_count} annotations in {} books", self.name, self.books.len()) }), theme)),
+                    .child(div().text_size(rems(1.5)).child(text!(browse::export_annotations)))
+                    .child(components::form_hint(SharedString::from(if self.loading { self.name.clone() } else { format!(text!(browse::annotations_in_books), self.name, self.books.len(), annotation_count = annotation_count) }), theme)),
             )
-            .child(components::outlined_icon_button("annotation-export-close", "Close", gpui_component::IconName::Close).disabled(self.cancelling && active).on_click(cx.listener(|view, _, window, cx| {
+            .child(components::outlined_icon_button("annotation-export-close", text!(common::close), gpui_component::IconName::Close).disabled(self.cancelling && active).on_click(cx.listener(|view, _, window, cx| {
                 if view.request_close(cx) {
                     window.close_dialog(cx);
                 }
@@ -762,7 +797,7 @@ impl Render for AnnotationExportDialog {
         } else if let Some(report) = &self.report {
             self.render_report(report, cx)
         } else {
-            self.render_options(cx)
+            self.render_options(window, cx)
         };
         if !active {
             if let Some(status) = self.render_automatic_status(cx) {
@@ -773,36 +808,36 @@ impl Render for AnnotationExportDialog {
         if let Some(report) = &self.report {
             if report.results.iter().any(|result| result.destination.format == AnnotationExportFormat::Markdown && (matches!(result.outcome, AnnotationExportOutcome::Written) || result.failure.is_some_and(|failure| failure.file_written))) {
                 let destination = self.destination.clone();
-                buttons = buttons.child(components::base_button("annotation-export-open-folder").label("Open export folder").on_click(move |_, _, cx| {
+                buttons = buttons.child(components::base_button("annotation-export-open-folder").label(text!(browse::open_export_folder)).on_click(move |_, _, cx| {
                     if let Some(path) = &destination {
                         cx.open_with_system(path);
                     }
                 }));
             }
-            buttons = buttons.child(components::base_button("annotation-export-done").primary().label("Done").on_click(|_, window, cx| window.close_dialog(cx)));
+            buttons = buttons.child(components::base_button("annotation-export-done").primary().label(text!(browse::done)).on_click(|_, window, cx| window.close_dialog(cx)));
         } else {
             if self.pending_options.is_some() && !self.checking_readers {
-                buttons = buttons.child(components::base_button("annotation-export-back").label("Back").on_click(cx.listener(|view, _, _, cx| view.back_to_options(cx))));
+                buttons = buttons.child(components::base_button("annotation-export-back").label(text!(common::back)).on_click(cx.listener(|view, _, _, cx| view.back_to_options(cx))));
             }
-            buttons = buttons.child(components::dialog_cancel_button("annotation-export-cancel", if self.cancelling && active { "Cancelling…" } else { "Cancel" }).disabled(self.cancelling && active).on_click(cx.listener(
-                |view, _, window, cx| {
+            buttons = buttons.child(components::dialog_cancel_button("annotation-export-cancel", if self.cancelling && active { text!(browse::cancelling) } else { text!(common::cancel) }).disabled(self.cancelling && active).on_click(
+                cx.listener(|view, _, window, cx| {
                     if view.request_close(cx) {
                         window.close_dialog(cx);
                     }
-                },
-            )));
+                }),
+            ));
             if !active {
                 buttons = buttons.child(
                     components::base_button("annotation-export-submit")
                         .primary()
                         .label(if self.checking_readers {
-                            "Checking…"
+                            text!(common::checking)
                         } else if self.pending_options.is_some() {
-                            "Continue"
+                            text!(browse::continue)
                         } else if self.automatic {
-                            "Save and export"
+                            text!(browse::save_and_export)
                         } else {
-                            "Export"
+                            text!(browse::export)
                         })
                         .disabled(self.checking_readers || (self.pending_options.is_none() && self.options(cx).is_none()))
                         .on_click(cx.listener(|view, _, _, cx| view.start_export(cx))),

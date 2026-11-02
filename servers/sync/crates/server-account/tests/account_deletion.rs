@@ -43,7 +43,6 @@ async fn deletion_removes_the_user_and_owned_data_and_revokes_cached_sessions() 
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO opds_feeds(id, user_id, name, url) VALUES ($1, $2, 'Feed', 'https://example.com/opds')").bind(unique.to_string()).bind(&user.user_id).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO user_storage_account(user_id) VALUES ($1)").bind(&user.user_id).execute(pool).await.unwrap();
     accounts.request_password_reset(&email).await.unwrap();
     // Include address-keyed records, which are not removed by user foreign keys.
@@ -64,7 +63,7 @@ async fn deletion_removes_the_user_and_owned_data_and_revokes_cached_sessions() 
     assert_eq!(app.clone().oneshot(Request::post("/api/auth/delete-account").header(header::CONTENT_TYPE, "application/json").body(Body::from("x".repeat(17 * 1024))).unwrap()).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
 
     assert_eq!(delete(&app, &email.to_uppercase(), password, "DELETE").await, StatusCode::NO_CONTENT);
-    for table in ["users", "auth_session", "auth_token", "password_reset", "libraries", "opds_feeds", "user_storage_account"] {
+    for table in ["users", "auth_session", "auth_token", "password_reset", "libraries", "user_storage_account"] {
         let column = if table == "users" { "id" } else { "user_id" };
         let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {column}=$1")).bind(&user.user_id).fetch_one(pool).await.unwrap();
         assert_eq!(count, 0, "remaining account rows in {table}");

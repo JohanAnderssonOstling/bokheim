@@ -14,6 +14,7 @@ cpu-host = { path = "../cpu-host" }
 library-database = { path = "../library-database" }
 library-files = { path = "../library-files" }
 library-model = { path = "../../../library-model" }
+library-placement = { path = "../library-placement" }
 library-replica = { path = "../library-replica" }
 library-runtime = { path = "../library-runtime" }
 log = "0.4"

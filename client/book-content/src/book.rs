@@ -7,7 +7,7 @@ use crate::profile::{PreparationProfile, measure};
 use crate::resource_path::local_resource_uri;
 use crate::resources::PreparedResources;
 use crate::source::{ReaderFactory, Source};
-use crate::{BookReader, DeclaredMetadata, DocumentInspection, TocEntry};
+use crate::{BookReader, BookToc, BookTocEntry, DeclaredMetadata, DocumentInspection};
 use futures_lite::future::block_on;
 use std::future::Future;
 use std::io::{self, Read, Seek};
@@ -64,13 +64,13 @@ impl Book {
 
     /// Resolve annotation chapters from package data, reading TOC anchors only
     /// in documents containing these CFIs rather than preparing the whole book.
-    pub fn annotation_toc_index_for_cfis(&mut self, toc: &[book_model::BookTocEntry], cfis: &[&str]) -> io::Result<crate::AnnotationTocIndex> {
+    pub fn toc_for_cfis(&mut self, toc: &[BookTocEntry], cfis: &[&str]) -> io::Result<BookToc> {
         let Container::Epub(epub) = &mut self.container else {
             return Err(io::Error::other("annotation TOC lookup requires an EPUB"));
         };
         let documents = epub.package.document_uris()?;
         let bases = epub.package.cfi_bases(&documents);
-        Ok(crate::AnnotationTocIndex::from_documents(&documents, bases, toc, Some(cfis), |uri| {
+        Ok(BookToc::from_documents(&documents, bases, toc, Some(cfis), |uri| {
             let xml = epub.package.resource_media_type(uri) == Some("application/xhtml+xml") || uri.to_ascii_lowercase().ends_with(".xhtml");
             let bytes = block_on(epub.read_bytes_bounded_async(uri, crate::resources::MAX_BINARY_RESOURCE_BYTES)).ok()?;
             Some((bytes, xml))
@@ -85,11 +85,11 @@ impl Book {
         }
     }
 
-    pub fn toc(&mut self) -> io::Result<Option<Vec<TocEntry>>> {
+    pub fn toc(&mut self) -> io::Result<Option<Vec<BookTocEntry>>> {
         block_on(self.toc_async())
     }
 
-    pub async fn toc_async(&mut self) -> io::Result<Option<Vec<TocEntry>>> {
+    pub async fn toc_async(&mut self) -> io::Result<Option<Vec<BookTocEntry>>> {
         match &mut self.container {
             Container::Epub(epub) => epub.toc().await,
             Container::Mobi(mobi) => mobi.toc().await,
@@ -209,7 +209,7 @@ impl Book {
 pub(crate) struct PreparedText {
     pub(crate) resources: PreparedResources,
     pub(crate) document_weights: Vec<u64>,
-    pub(crate) toc: Vec<TocEntry>,
+    pub(crate) toc: Vec<BookTocEntry>,
 }
 
 impl PreparedText {
@@ -232,7 +232,7 @@ pub struct ReadingBook {
     pub resources: PreparedResources,
     pub document_weights: Vec<u64>,
     source: ResourceSource,
-    pub toc: Vec<TocEntry>,
+    pub toc: Vec<BookTocEntry>,
 }
 
 impl ReadingBook {

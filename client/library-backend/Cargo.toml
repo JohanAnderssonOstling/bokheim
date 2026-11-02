@@ -10,9 +10,13 @@ default = ["desktop"]
 desktop = ["watcher"]
 scanner = ["dep:walkdir", "dep:crossbeam-channel", "library-database/scanner"]
 watcher = ["scanner", "dep:notify"]
-kobo = ["client-platform-kobo/device"]
+kobo = ["client-platform-kobo/device", "app-preferences/kobo"]
 
 [dependencies]
+account-contract = { path = "../../shared/account-contract" }
+content-address = { path = "../../shared/content-address" }
+app-preferences = { path = "../preferences", features = ["store"] }
+library-registry = { path = "../app/crates/library-registry" }
 http-response = { workspace = true }
 client-runtime = { path = "../client-runtime", features = ["http"] }
 book-model = { path = "../../shared/book-model" }
@@ -59,8 +63,8 @@ wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["console", "Event", "EventTarget", "File", "DedicatedWorkerGlobalScope", "MessageChannel", "MessageEvent", "MessageEventInit", "MessagePort", "SharedWorker", "Worker", "WorkerOptions", "WorkerType"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+embedded-browser = { path = "../embedded-browser" }
 library-opds = { path = "crates/library-opds" }
-content-address = { path = "../../shared/content-address" }
 filesystem-scanner = { path = "crates/filesystem-scanner" }
 client-platform-native = { path = "../platforms/native", features = ["websocket"] }
 client-platform-kobo = { path = "../platforms/kobo" }

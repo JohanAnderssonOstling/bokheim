@@ -31,6 +31,7 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
+ChangesAssociations=yes
 
 [Files]
 Source: "{#ExtractFilePath(SourceExe)}taxonomy.sqlite3"; DestDir: "{app}"; Flags: ignoreversion
@@ -41,6 +42,20 @@ Source: "{#IconFile}"; DestDir: "{app}"; DestName: "Bokheim.ico"; Flags: ignorev
 
 [Icons]
 Name: "{group}\Bokheim"; Filename: "{app}\Bokheim.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Bokheim.ico"
+
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\Bokheim.Book"; ValueType: string; ValueData: "Bokheim book"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Bokheim.Book\DefaultIcon"; ValueType: string; ValueData: "{app}\Bokheim.ico"
+Root: HKCU; Subkey: "Software\Classes\Bokheim.Book\shell\open\command"; ValueType: string; ValueData: """{app}\Bokheim.exe"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\.epub\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.mobi\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.azw\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.azw3\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.fb2\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.fbz\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.cbz\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.m4b\OpenWithProgids"; ValueType: none; ValueName: "Bokheim.Book"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\Bokheim.exe"; Description: "Launch Bokheim"; Flags: nowait postinstall skipifsilent

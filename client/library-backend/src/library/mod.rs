@@ -4,15 +4,18 @@ pub mod discovery;
 pub(crate) use library_runtime::events;
 
 mod browse;
+#[cfg(not(target_arch = "wasm32"))]
+mod browser;
+pub use browse::LibraryBookStorage;
 pub mod commands;
 mod directory;
 mod notifications;
 mod open;
 pub(crate) mod session;
 pub mod subscriptions;
-mod workers;
 #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
 mod watcher;
+mod workers;
 pub use open::LibraryOpenConfig;
 pub mod handle;
 mod io;
@@ -35,7 +38,7 @@ mod playback;
 pub(crate) mod preparation;
 pub(crate) mod remote_access;
 
-pub use book::{AudiobookBook, DocumentBook, DocumentSource, ResolvedBook};
+pub use book::{AudiobookBook, DocumentBook, DocumentFormat, DocumentSource, PdfBook, ResolvedBook};
 #[cfg(target_arch = "wasm32")]
 pub use browser_audiobook::{BrowserAudiobook, PlaybackLease};
 pub use commands::{LibraryCommand, PendingCommand, ReadyCommand};
@@ -67,4 +70,4 @@ mod text_search;
 #[cfg(not(target_arch = "wasm32"))]
 mod opds;
 #[cfg(not(target_arch = "wasm32"))]
-pub use opds::OpdsLibrary;
+pub(crate) use opds::OpdsLibrary;

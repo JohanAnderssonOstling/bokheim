@@ -1,5 +1,7 @@
 //! Window-level browser shell.
 
+use ui_text::text;
+
 use ui_components::user_facing_error;
 
 use app_preferences::{ApplicationTheme, BrowsingPreferencePatch, ResolvedAppearance};
@@ -93,8 +95,8 @@ impl BrowserRoot {
         self.shell.update(cx, |shell, cx| shell.set_content_footer(footer, cx));
     }
 
-    pub fn open_book_detail(&mut self, library_id: sync_common::LibraryId, content_hash: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
-        self.shell.update(cx, |shell, cx| shell.open_book_detail(library_id, content_hash, window, cx));
+    pub fn open_book_detail(&mut self, library_id: sync_common::LibraryId, book_id: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
+        self.shell.update(cx, |shell, cx| shell.open_book_detail(library_id, book_id, window, cx));
     }
 
     /// The library book whose detail page is on screen, if one is.
@@ -157,9 +159,9 @@ impl BrowserRoot {
             let handler = handler.clone();
             let shell = shell.clone();
             ui_components::confirmation_dialog(dialog, window)
-                .title("Update available")
-                .description("A new Bokheim update is available. Would you like to update now?")
-                .button_props(DialogButtonProps::default().ok_text("Update").cancel_text("Later").show_cancel(true))
+                .title(text!(browse::update_available))
+                .description(text!(browse::a_new_bokheim_update_is_available_would_you_like_to_update_now))
+                .button_props(DialogButtonProps::default().ok_text(text!(browse::update)).cancel_text(text!(browse::later)).show_cancel(true))
                 .on_ok(move |_, window, cx| {
                     // The existing Settings flow shows download progress and
                     // the platform's permission, install, or restart action.
@@ -225,7 +227,7 @@ impl BrowserRoot {
             return;
         }
         if let Err(error) = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(app_preferences::BrowsingPreferencePatch::UiFontSizePx(next), cx)) {
-            crate::services::notify_error("browser-error", format!("Could not save interface font size. {}", user_facing_error(&error, "Please try again.")), window, cx);
+            crate::services::notify_error("browser-error", format!(text!(browse::could_not_save_interface_font_size), user_facing_error(&error, text!(common::please_try_again))), window, cx);
         }
     }
 }
@@ -291,12 +293,20 @@ mod session_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = app::AppClient::start_native(launch).unwrap();
-        let first = backend.create_library_with_asset_storage("First".into(), true).await.unwrap();
-        let second = backend.create_library_with_asset_storage("Second".into(), true).await.unwrap();
-        let startup = AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status };
+        let first = backend.management.create_library_with_asset_storage("First".into(), true).await.unwrap();
+        let second = backend.management.create_library_with_asset_storage("Second".into(), true).await.unwrap();
+        let startup = AppStartup {
+            libraries: backend.management.libraries().await.unwrap(),
+
+            default_library_root: startup.default_library_root,
+            dictionary_storage_root: startup.dictionary_storage_root,
+            preference_storage_root: startup.preference_storage_root,
+            browsing_preferences: startup.browsing_preferences,
+            account_status: startup.account_status,
+        };
         // Leave this library out of the startup list so its first navigation
         // request waits for asynchronous discovery.
-        let third = backend.create_library_with_asset_storage("Discovered later".into(), true).await.unwrap();
+        let third = backend.management.create_library_with_asset_storage("Discovered later".into(), true).await.unwrap();
         let saved = NavigationSession { library_id: Some(*second.library_id()), route: Route::Library(LibraryRoute::Authors), ..Default::default() };
         let services = AppServices::new(backend, startup);
         cx.update(|cx| {
@@ -348,8 +358,19 @@ mod session_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = app::AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Shared".into(), true).await.unwrap();
-        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let library = backend.management.create_library_with_asset_storage("Shared".into(), true).await.unwrap();
+        let services = AppServices::new(
+            backend.clone(),
+            AppStartup {
+                libraries: backend.management.libraries().await.unwrap(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);

@@ -12,6 +12,7 @@ native-rodio = ["dep:rodio", "rodio/playback"]
 path = "src/lib.rs"
 
 [dependencies]
+ui-text = { path = "../ui-text" }
 library-backend = { path = "../../client/library-backend" }
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"

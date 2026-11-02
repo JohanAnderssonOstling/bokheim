@@ -2,18 +2,18 @@
 
 mod book_card;
 mod cover_cache;
-mod cover_visibility;
 #[cfg(test)]
 mod cover_frame;
+mod cover_visibility;
 pub(crate) mod mobile_context_menu;
 mod page_controls;
 mod paginator;
 mod selection_action;
 
-pub(crate) use selection_action::SelectionAction;
+pub(crate) use selection_action::{SelectionAction, SelectionActionKind};
 
+pub(crate) use book_card::{BookCardElement, BookCardInteraction, BookCardPresentation, BookCardView};
 pub(crate) use book_card::{BookCardEvent, BookCardEvents, LoadedCover, cover_aspect_ratio, generated_cover_variant, loaded_cover_from_jpeg, mark_feed_book_added};
-pub(crate) use book_card::{BookCardInteraction, BookCardPresentation, BookCardView, BookCardElement};
 pub(crate) use book_card::{CoversEvicted, evict_covers};
 pub(crate) use cover_visibility::CoverVisibility;
 pub(crate) use paginator::{

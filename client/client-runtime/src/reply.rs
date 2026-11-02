@@ -1,9 +1,14 @@
 //! An in-process reply. Encoding is deferred until an actual wire boundary.
-use crate::BackendError;
 #[cfg(target_arch = "wasm32")]
-use crate::wire::{WorkerPayload, encode_reply};
+use crate::wire::{encode_reply, WorkerPayload};
+use crate::BackendError;
 use client_platform_runtime::executor::BackendOutput;
 use std::any::Any;
+
+/// Values a command adapter can encode and decode at its transport boundary.
+/// Public client operations fix the response type before reaching that adapter.
+pub trait WireReply: BackendOutput + serde::Serialize + serde::de::DeserializeOwned {}
+impl<T: BackendOutput + serde::Serialize + serde::de::DeserializeOwned> WireReply for T {}
 
 #[cfg(not(target_arch = "wasm32"))]
 type Value = Box<dyn Any + Send>;

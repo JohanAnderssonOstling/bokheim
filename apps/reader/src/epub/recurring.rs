@@ -37,7 +37,7 @@ impl ReaderView {
         let LoadState::Ready(renderer) = &self.load_state else { return };
         let renderer = renderer.read(cx);
         let page = renderer.visible_page_key();
-        let signature = self.marks.recurring_annotations().map(|annotation| (annotation.id.clone(), annotation.content_hash, annotation.anchor.clone(), annotation.exact_text.clone())).collect::<Vec<_>>();
+        let signature = self.marks.recurring_annotations().map(|annotation| (annotation.id.clone(), annotation.book_id, annotation.anchor.clone(), annotation.exact_text.clone())).collect::<Vec<_>>();
         if !force && self.recurring.page == page && self.recurring.matched_annotations == signature {
             self.project_annotations(cx);
             return;
@@ -47,7 +47,7 @@ impl ReaderView {
         self.recurring.occurrences = if self.recurring.matched_annotations.is_empty() {
             Vec::new()
         } else if let Some(text) = renderer.visible_source_text() {
-            matched_page_occurrences(self.marks.recurring_matches(text.text()), self.locator.content_hash(), &self.book, &self.toc, text.document, text.text(), |start, end| {
+            matched_page_occurrences(self.marks.recurring_matches(text.text()), self.locator.book_id(), &self.book, &self.toc, text.document, text.text(), |start, end| {
                 let range = text.glyph_range(start, end)?;
                 self.book.cfi.to_publication(&renderer.source_cfi_range(range)?)
             })
@@ -58,7 +58,9 @@ impl ReaderView {
     }
 }
 
-fn matched_page_occurrences<'a>(matches: impl Iterator<Item = (&'a Annotation, TextPatternMatch)>, current_book: BookId, book: &crate::book::NativeBook, toc: &TocState, document: usize, text: &str, cfi_range: impl Fn(usize, usize) -> Option<String>) -> Vec<Occurrence> {
+fn matched_page_occurrences<'a>(
+    matches: impl Iterator<Item = (&'a Annotation, TextPatternMatch)>, current_book: BookId, book: &crate::book::NativeBook, toc: &TocState, document: usize, text: &str, cfi_range: impl Fn(usize, usize) -> Option<String>,
+) -> Vec<Occurrence> {
     let mut result = Vec::new();
     for (annotation, found) in matches {
         let start = found.range.start;
@@ -69,7 +71,7 @@ fn matched_page_occurrences<'a>(matches: impl Iterator<Item = (&'a Annotation, T
         let origin = book.annotation_cfi(&annotation.anchor);
         let origin_position = origin.as_deref().and_then(|origin| book.cfi.parse_source_position(origin));
         let position = book.cfi.parse_source_position(&range);
-        if annotation.content_hash == current_book && position == origin_position {
+        if annotation.book_id == current_book && position == origin_position {
             continue;
         }
         let exact_text = &text[found.byte_range];
@@ -89,13 +91,15 @@ fn occurrence_applies(annotation: &Annotation, current_book: BookId, book: &crat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use book_content::BookToc;
+    use book_model::BookTocEntry;
     use book_model::{AnnotationAnchor, AnnotationStyle, RecurringScope};
     use content_address::BookId;
     use gpui::{TestAppContext, px, size};
     use html::document::{DocumentTextIndex, MarkupSyntax, parse_document};
     use html_view_gpui::HtmlView;
     use skrift_column_paginator::{RendererInitialConfig, ResourceProvider};
-    use skrift_column_paginator::{SourcePosition, TocEntry, cfi};
+    use skrift_column_paginator::{SourcePosition, cfi};
     use std::{io, sync::Arc};
 
     struct Chapters;
@@ -202,7 +206,9 @@ mod tests {
         Some(format!("epubcfi(/6/{}!{base},/{},/{})", (document + 1) * 2, from_parts[common..].join("/"), to_parts[common..].join("/")))
     }
 
-    fn page_occurrences<'a>(annotations: impl Iterator<Item = &'a Annotation>, current_book: BookId, book: &crate::book::NativeBook, toc: &TocState, document: usize, text: &str, cfi_range: impl Fn(usize, usize) -> Option<String>) -> Vec<Occurrence> {
+    fn page_occurrences<'a>(
+        annotations: impl Iterator<Item = &'a Annotation>, current_book: BookId, book: &crate::book::NativeBook, toc: &TocState, document: usize, text: &str, cfi_range: impl Fn(usize, usize) -> Option<String>,
+    ) -> Vec<Occurrence> {
         let annotations = annotations.collect::<Vec<_>>();
         let mut matcher = crate::shell::recurring::RecurringMatcher::default();
         matcher.update(annotations.iter().copied());
@@ -225,7 +231,7 @@ mod tests {
     fn recurring_annotation(book: BookId, anchor: AnnotationAnchor, scope: RecurringScope) -> Annotation {
         Annotation {
             id: "shared-name".into(),
-            content_hash: book,
+            book_id: book,
             anchor: anchor.with_recurring_scope(Some(scope)),
             exact_text: "Elizabeth".into(),
             style: AnnotationStyle::Highlight,
@@ -271,8 +277,8 @@ mod tests {
         let matches = html::text::find_text_matches(text.text(), "Elizabeth", html::text::TextSearchOptions::default());
         let (first, end) = matches[0];
         let origin = AnnotationAnchor::epub_cfi(text_cfi_range(&text, 0, first, end).unwrap());
-        let entries = vec![TocEntry { title: "First".into(), link: "a.html#first".into(), children: vec![] }, TocEntry { title: "Second".into(), link: "a.html#second".into(), children: vec![] }];
-        let resolutions = TocState::resolve(&entries, |href| Some((0, href.split_once('#').map(|(_, fragment)| fragment.to_owned()))));
+        let entries = vec![BookTocEntry { title: "First".into(), target: "a.html#first".into(), children: vec![] }, BookTocEntry { title: "Second".into(), target: "a.html#second".into(), children: vec![] }];
+        let resolutions = BookToc::resolve(&entries, |href| Some((0, href.split_once('#').map(|(_, fragment)| fragment.to_owned()))));
         let mut toc = TocState::default();
         toc.set(entries, resolutions);
         let first_position = cfi::parse_source_position(origin.epub_cfi_value().unwrap()).unwrap();

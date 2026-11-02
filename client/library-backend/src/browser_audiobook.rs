@@ -37,7 +37,7 @@ pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: BookId, fi
     let remote = if file.is_none() && (format == Some(book_model::BookFormat::Mp3Folder) || metadata.is_none()) { Some(library.describe_remote_file(hash).await.map_err(BackendError::operation)?.0) } else { None };
     let current_hash = if format == Some(book_model::BookFormat::Mp3Folder) {
         match (&file, &remote) {
-            (Some(file), _) => file.content_hash().map_err(BackendError::message)?,
+            (Some(file), _) => file.book_id().map_err(BackendError::message)?,
             (_, Some(remote)) => Some(remote.hash),
             _ => None,
         }
@@ -48,7 +48,7 @@ pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: BookId, fi
     // a remote book must not wait on optional thumbnail extraction or storage,
     // so the cover stays empty.
     let metadata = metadata
-        .filter(|metadata| format != Some(book_model::BookFormat::Mp3Folder) || current_hash.is_some_and(|content_hash| book_model::tracks_match_archive(&metadata.tracks, content_hash)))
+        .filter(|metadata| format != Some(book_model::BookFormat::Mp3Folder) || current_hash.is_some_and(|book_id| book_model::tracks_match_archive(&metadata.tracks, book_id)))
         .ok_or("audiobook addition has no valid playback facts")?;
     let (location, local_lease) = match file {
         Some(file) if format == Some(book_model::BookFormat::Mp3Folder) => {
@@ -65,7 +65,7 @@ pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: BookId, fi
 
         None => {
             let source = library.direct_audio_source(hash).await?;
-            if format == Some(book_model::BookFormat::Mp3Folder) && !book_model::tracks_match_archive(&metadata.tracks, source.content_hash) {
+            if format == Some(book_model::BookFormat::Mp3Folder) && !book_model::tracks_match_archive(&metadata.tracks, source.book_id) {
                 return Err("audiobook track index does not match the playback archive".into());
             }
             (PlaybackLocation::Direct(source), None)

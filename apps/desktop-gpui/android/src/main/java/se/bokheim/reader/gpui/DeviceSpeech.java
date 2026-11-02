@@ -72,7 +72,7 @@ final class DeviceSpeech {
                         if (status != TextToSpeech.SUCCESS || holder[0] == null) {
                             if (holder[0] != null) holder[0].shutdown();
                             ENGINES.remove(key, future);
-                            future.completeExceptionally(new IllegalStateException("The installed local speech engine could not initialize."));
+                            future.completeExceptionally(new IllegalStateException(UiText.ANDROID_THE_INSTALLED_LOCAL_SPEECH_ENGINE_COULD_NOT_INITIALIZE));
                             return;
                         }
                         holder[0].setOnUtteranceProgressListener(listener());
@@ -81,7 +81,7 @@ final class DeviceSpeech {
                         reap(key, future, ready);
                     }), key);
                     MAIN.postDelayed(() -> {
-                        if (future.completeExceptionally(new IllegalStateException("The local speech engine took too long to initialize."))) {
+                        if (future.completeExceptionally(new IllegalStateException(UiText.ANDROID_THE_LOCAL_SPEECH_ENGINE_TOOK_TOO_LONG_TO_INITIALIZE))) {
                             ENGINES.remove(key, future);
                             if (holder[0] != null) holder[0].shutdown();
                         }
@@ -113,19 +113,21 @@ final class DeviceSpeech {
                 if (request != null && !events.audio(request.id, bytes)) MAIN.post(() -> cancel(request.id));
             }
             @Override public void onDone(String utterance) { finish(utterance, null); }
-            @Override public void onError(String utterance) { finish(utterance, "The installed local voice could not generate audio. Try another local voice."); }
+            @Override public void onError(String utterance) { finish(utterance, UiText.ANDROID_THE_INSTALLED_LOCAL_VOICE_COULD_NOT_GENERATE_AUDIO_TRY_ANOTHER_LOCAL_VOICE); }
             @Override public void onError(String utterance, int code) {
                 String message;
                 switch (code) {
-                    case TextToSpeech.ERROR_NOT_INSTALLED_YET: message = "Local voice data is not installed. Install it in device settings or choose another local voice."; break;
+                    case TextToSpeech.ERROR_NOT_INSTALLED_YET: message = UiText.ANDROID_LOCAL_VOICE_DATA_IS_NOT_INSTALLED_INSTALL_IT_IN_DEVICE_SETTINGS_OR; break;
                     case TextToSpeech.ERROR_NETWORK:
-                    case TextToSpeech.ERROR_NETWORK_TIMEOUT: message = "This voice attempted network synthesis. Choose an installed offline voice."; break;
-                    case TextToSpeech.ERROR_INVALID_REQUEST: message = "The local voice rejected this reading sample."; break;
-                    default: message = "Local voice synthesis failed (" + code + "). Try another installed voice.";
+                    case TextToSpeech.ERROR_NETWORK_TIMEOUT: message = UiText.ANDROID_THIS_VOICE_ATTEMPTED_NETWORK_SYNTHESIS_CHOOSE_AN_INSTALLED_OFFLINE_VOICE; break;
+                    case TextToSpeech.ERROR_INVALID_REQUEST: message = UiText.ANDROID_THE_LOCAL_VOICE_REJECTED_THIS_READING_SAMPLE; break;
+                    default:
+                        android.util.Log.w("Bokheim", "Local speech synthesis failed: " + code);
+                        message = UiText.ANDROID_LOCAL_SYNTHESIS_FAILED;
                 }
                 finish(utterance, message);
             }
-            @Override public void onStop(String utterance, boolean interrupted) { finish(utterance, "Local voice synthesis was interrupted. Start reading again to retry."); }
+            @Override public void onStop(String utterance, boolean interrupted) { finish(utterance, UiText.ANDROID_LOCAL_VOICE_SYNTHESIS_WAS_INTERRUPTED_START_READING_AGAIN_TO_RETRY); }
         };
     }
     private static Request request(String utterance) {
@@ -174,31 +176,31 @@ final class DeviceSpeech {
     private static void synthesize(Context context, JSONObject command) throws Exception {
         long id = command.getLong("id");
         JSONArray choice = new JSONArray(command.getString("voice"));
-        if (choice.length() != 2) throw new IllegalArgumentException("Invalid local voice identity.");
+        if (choice.length() != 2) throw new IllegalArgumentException(UiText.ANDROID_INVALID_LOCAL_VOICE_IDENTITY);
         String packageName = choice.getString(0), voiceName = choice.getString(1), text = command.getString("text");
         float rate = (float) command.getDouble("rate");
-        if (text.length() > TextToSpeech.getMaxSpeechInputLength() || !Float.isFinite(rate) || rate < 0.5f || rate > 3f) throw new IllegalArgumentException("Invalid reading sample or speed.");
+        if (text.length() > TextToSpeech.getMaxSpeechInputLength() || !Float.isFinite(rate) || rate < 0.5f || rate > 3f) throw new IllegalArgumentException(UiText.ANDROID_INVALID_READING_SAMPLE_OR_SPEED);
         Request request = new Request(id, packageName);
         REQUESTS.put(id, request);
         engine(context, "").thenCompose(bootstrap -> {
-            if (bootstrap.tts.getEngines().stream().noneMatch(info -> info.name.equals(packageName))) throw new IllegalStateException("The selected local speech engine is no longer installed.");
+            if (bootstrap.tts.getEngines().stream().noneMatch(info -> info.name.equals(packageName))) throw new IllegalStateException(UiText.ANDROID_THE_SELECTED_LOCAL_SPEECH_ENGINE_IS_NO_LONGER_INSTALLED);
             return engine(context, packageName);
         }).whenComplete((engine, error) -> MAIN.post(() -> {
             if (REQUESTS.get(id) != request) return;
-            if (error != null) { finish(Long.toString(id), "The selected local speech engine could not initialize. Try another installed voice."); return; }
+            if (error != null) { finish(Long.toString(id), UiText.ANDROID_THE_SELECTED_LOCAL_SPEECH_ENGINE_COULD_NOT_INITIALIZE_TRY_ANOTHER_INSTALLED_VOICE); return; }
             try {
                 engine.used = android.os.SystemClock.uptimeMillis();
                 request.tts = engine.tts;
                 Set<Voice> available = engine.tts.getVoices();
                 Voice voice = available == null ? null : available.stream().filter(candidate -> candidate.getName().equals(voiceName)).findFirst().orElse(null);
-                if (!localInstalled(voice)) throw new IllegalStateException("The selected voice is not installed for offline use. Choose another local voice.");
-                if (engine.tts.setVoice(voice) != TextToSpeech.SUCCESS || !localInstalled(engine.tts.getVoice()) || !voiceName.equals(engine.tts.getVoice().getName())) throw new IllegalStateException("The selected local voice could not be activated.");
-                if (engine.tts.setSpeechRate(rate) != TextToSpeech.SUCCESS) throw new IllegalStateException("The installed local voice does not support this reading speed.");
+                if (!localInstalled(voice)) throw new IllegalStateException(UiText.ANDROID_THE_SELECTED_VOICE_IS_NOT_INSTALLED_FOR_OFFLINE_USE_CHOOSE_ANOTHER_LOCAL);
+                if (engine.tts.setVoice(voice) != TextToSpeech.SUCCESS || !localInstalled(engine.tts.getVoice()) || !voiceName.equals(engine.tts.getVoice().getName())) throw new IllegalStateException(UiText.ANDROID_THE_SELECTED_LOCAL_VOICE_COULD_NOT_BE_ACTIVATED);
+                if (engine.tts.setSpeechRate(rate) != TextToSpeech.SUCCESS) throw new IllegalStateException(UiText.ANDROID_THE_INSTALLED_LOCAL_VOICE_DOES_NOT_SUPPORT_THIS_READING_SPEED);
                 request.output = File.createTempFile("bokheim-local-", ".wav", context.getCacheDir());
                 Bundle options = new Bundle();
                 options.putString(TextToSpeech.Engine.KEY_FEATURE_EMBEDDED_SYNTHESIS, "true");
                 // Never set the network-synthesis feature, even to a false string.
-                if (engine.tts.synthesizeToFile(text, options, request.output, Long.toString(id)) != TextToSpeech.SUCCESS) throw new IllegalStateException("The installed local voice rejected the reading sample.");
+                if (engine.tts.synthesizeToFile(text, options, request.output, Long.toString(id)) != TextToSpeech.SUCCESS) throw new IllegalStateException(UiText.ANDROID_THE_INSTALLED_LOCAL_VOICE_REJECTED_THE_READING_SAMPLE);
             } catch (Exception failure) { finish(Long.toString(id), failure.getMessage()); }
         }));
     }
@@ -210,7 +212,7 @@ final class DeviceSpeech {
             if (future.isCompletedExceptionally()) continue;
             Engine ready = future.getNow(null);
             if (ready != null) ready.tts.shutdown();
-            else future.completeExceptionally(new IllegalStateException("Local speech stopped."));
+            else future.completeExceptionally(new IllegalStateException(UiText.ANDROID_LOCAL_SPEECH_STOPPED));
         }
         ENGINES.clear();
     }
@@ -220,15 +222,15 @@ final class DeviceSpeech {
             JSONObject command = new JSONObject(encoded);
             switch (command.getString("command")) {
                 case "voices":
-                    if (Looper.myLooper() == Looper.getMainLooper()) throw new IllegalStateException("Local voice discovery must run in the background.");
+                    if (Looper.myLooper() == Looper.getMainLooper()) throw new IllegalStateException(UiText.ANDROID_LOCAL_VOICE_DISCOVERY_MUST_RUN_IN_THE_BACKGROUND);
                     return list(context);
                 case "synthesize": synthesize(context, command); return "";
                 case "cancel": long id = command.getLong("id"); MAIN.post(() -> cancel(id)); return "";
-                default: throw new IllegalArgumentException("Unknown local speech command.");
+                default: throw new IllegalArgumentException(UiText.ANDROID_UNKNOWN_LOCAL_SPEECH_COMMAND);
             }
         } catch (Exception error) {
             String message = error.getMessage();
-            try { return new JSONObject().put("error", message == null ? "Local voice discovery failed. Try again." : message).toString(); }
+            try { return new JSONObject().put("error", message == null ? UiText.ANDROID_LOCAL_VOICE_DISCOVERY_FAILED_TRY_AGAIN : message).toString(); }
             catch (Exception ignored) { return "{\"error\":\"Local speech is unavailable.\"}"; }
         }
     }

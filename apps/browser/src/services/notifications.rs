@@ -1,9 +1,11 @@
 //! One place to report a failed action to the user.
 
+use ui_text::text;
+
 use gpui::{App, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
+use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::{Sizable, WindowExt};
 use ui_components::Button;
-use gpui_component::notification::{Notification, NotificationType};
 
 /// Namespaces every browser notification. The ids below are unique across the
 /// crate, so one namespace is enough to collapse repeats of the same failure.
@@ -36,9 +38,13 @@ pub(crate) fn notify_undoable(id: &'static str, message: impl Into<SharedString>
         .id1::<BrowserNotification>(id)
         .content(move |_, _, cx| {
             let notification = cx.entity();
-            div().w_full().flex().items_center().gap(px(ui_components::SPACE_SM))
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(ui_components::SPACE_SM))
                 .child(div().flex_1().min_w_0().child(message.clone()))
-                .child(Button::new("undo").label("Undo").tooltip(ui_components::configured_shortcut_tooltip("Undo", "browse.undo", cx)).ghost().small().on_click(move |_, window, cx| {
+                .child(Button::new("undo").label(text!(browse::undo)).tooltip(ui_components::configured_shortcut_tooltip(text!(browse::undo), "browse.undo", cx)).ghost().small().on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(crate::UndoLibraryAction), cx);
                     notification.update(cx, |notification, cx| notification.dismiss(window, cx));
                 }))

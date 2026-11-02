@@ -22,11 +22,10 @@
 //! Batch profiling requires retained adapter resources.
 //! `NATIVE_SHAPE_ADAPTER_REGISTER=1` also registers each shaped run in the
 //! engine's glyph metric store, matching the reader's ownership of advances.
-//! `NATIVE_SHAPE_ADAPTER_DIRECT_REGISTER=1` registers native shaping results
-//! directly in that store, isolating its representation across scripts.
 //! `NATIVE_SHAPE_METRIC_READ_PASSES` repeats full and advance-only metric
 //! lookups, reporting their time separately from shaping and registration.
 
+use html_engine_model::shaping;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -39,7 +38,10 @@ use std::mem::size_of;
 use std::sync::Arc;
 use std::time::Instant;
 
-use html::text::{FontSlant, GlyphId as HtmlGlyphId, GlyphResourceStore, GlyphShaper, TextRunShapeRequest, TextStyleSpan};
+use html::text::{
+    FontSlant, GlyphId as HtmlGlyphId, GlyphResourceStore, GlyphShaper, ShapedRun as HtmlShapedRun,
+    TextStyleSpan,
+};
 use html_gpui::backend::GpuiTextCache;
 
 use gpui::{
@@ -160,6 +162,7 @@ fn rasterize_layout(
                         is_emoji: glyph.is_emoji,
                         subpixel_rendering: true,
                         dilation: 0,
+                        foreground_color: None,
                     };
                     COUNTS.with(|counts| counts.set(Some(Allocations::default())));
                     let started = Instant::now();
@@ -211,7 +214,13 @@ fn main() {
         .add_fonts(vec![Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf").as_slice()), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/Raleway-Regular.ttf").as_slice())])
         .expect("bundled fonts");
     let mut serif = font("NV Garamond");
-    serif.features = FontFeatures(Arc::new(["ccmp", "rlig", "rclt", "mark", "mkmk", "kern", "liga", "clig", "calt"].map(|tag| (tag.to_owned(), 1)).into()));
+    serif.features = FontFeatures::new(
+        [
+            "ccmp", "rlig", "rclt", "mark", "mkmk", "kern", "liga", "clig", "calt",
+        ]
+        .map(|tag| (tag.to_owned(), 1))
+        .into(),
+    );
     let mut fallback_serif = serif.clone();
     fallback_serif.fallbacks = Some(FontFallbacks::from_fonts(vec!["Raleway".to_owned()]));
     let cache_mode = env::var("NATIVE_SHAPE_WINDOW_CACHE").ok();
@@ -230,12 +239,27 @@ fn main() {
     let adapter_batch_size = env::var("NATIVE_SHAPE_ADAPTER_BATCH").ok().map(|value| value.parse::<usize>().expect("adapter batch size must be an integer"));
     assert!(adapter_batch_size.is_none_or(|size| size > 0 && retain_adapter_resources), "batch profiling requires a positive batch size and retained adapter resources");
     let register_adapter_runs = env::var_os("NATIVE_SHAPE_ADAPTER_REGISTER").is_some();
-    assert!(!register_adapter_runs || adapter.is_some(), "registering adapter runs requires adapter mode");
-    let direct_registration = env::var_os("NATIVE_SHAPE_ADAPTER_DIRECT_REGISTER").is_some();
-    assert!(!direct_registration || register_adapter_runs, "direct registration requires registering adapter runs");
-    let metric_read_passes = env::var("NATIVE_SHAPE_METRIC_READ_PASSES").map_or(0, |value| value.parse::<usize>().expect("metric read passes must be an integer"));
-    assert!(metric_read_passes == 0 || register_adapter_runs, "metric lookups require registered adapter runs");
-    let mut adapter_resources = register_adapter_runs.then(|| GlyphResourceStore::new(adapter.as_ref().expect("adapter text cache").resource_generation()));
+    assert!(
+        !register_adapter_runs || adapter.is_some(),
+        "registering adapter runs requires adapter mode"
+    );
+    let metric_read_passes = env::var("NATIVE_SHAPE_METRIC_READ_PASSES").map_or(0, |value| {
+        value
+            .parse::<usize>()
+            .expect("metric read passes must be an integer")
+    });
+    assert!(
+        metric_read_passes == 0 || register_adapter_runs,
+        "metric lookups require registered adapter runs"
+    );
+    let mut adapter_resources = register_adapter_runs.then(|| {
+        GlyphResourceStore::new(
+            adapter
+                .as_ref()
+                .expect("adapter text cache")
+                .resource_generation(),
+        )
+    });
     let mut cache_layout_bytes = 0;
     let mut cache_text_bytes = 0;
     let mut cache_entries = 0;
@@ -305,8 +329,8 @@ fn main() {
                 if adapter_batch_size.is_some_and(|size| index <= 1 || (index - 1) % size == 0) {
                     adapter.begin_append_shaping().expect("begin adapter shaping batch");
                 }
-                let style = TextStyleSpan::new(0..text.len(), font_size, 400, FontSlant::Normal, 0x000000ff, Some("NV Garamond")).expect("adapter style");
-                let request = TextRunShapeRequest::new(&text, style).expect("adapter shape request");
+                let style = shaping::style(font_size, 400, FontSlant::Normal, 0x000000ff, Some("NV Garamond")).and_then(|resolved_style| shaping::span(0..text.len(), resolved_style)).expect("adapter style");
+                let request = shaping::run(&text, style, None).expect("adapter shape request");
                 let mut registered_glyphs = register_adapter_runs.then(|| vec![HtmlGlyphId::MAX; text.chars().count()]);
                 if index > 0 {
                     COUNTS.with(|counts| counts.set(Some(Allocations::default())));
@@ -314,20 +338,11 @@ fn main() {
                 let started = Instant::now();
                 let shaped = if let Some(glyphs) = &mut registered_glyphs {
                     let resources = adapter_resources.as_mut().expect("adapter resource store");
-                    if direct_registration {
-                        let shaped = adapter.shape_text_run(black_box(request));
-                        if let Ok(Some(shaped)) = &shaped {
-                            let range = resources.register_run(&text, shaped, shaped.ascent(), 0.0).expect("direct metric registration");
-                            for (slot, id) in glyphs.iter_mut().zip(range) {
-                                *slot = id;
-                            }
-                        }
-                        shaped
-                    } else {
-                        adapter.shape_glyph_run(black_box(request), glyphs, resources)
-                    }
+                    resources.shape_run(adapter, black_box(request), glyphs)
                 } else {
-                    adapter.shape_text_run(black_box(request))
+                    adapter
+                        .shape_run(black_box(request))
+                        .map(|run| run.map(HtmlShapedRun::into_geometry))
                 };
                 let shaped = black_box(shaped).expect("adapter shaping").expect("adapter geometry");
                 let elapsed = started.elapsed().as_nanos();
@@ -342,7 +357,7 @@ fn main() {
                         advance.to_bits().hash(&mut geometry);
                     }
                     shaped.cluster_boundaries().hash(&mut geometry);
-                    for caret in shaped.caret_stops().expect("adapter caret geometry") {
+                    for caret in shaped.caret_stops().expect("adapter caret geometry").iter() {
                         caret.to_bits().hash(&mut geometry);
                     }
                     shaped.ascent().to_bits().hash(&mut geometry);
@@ -447,7 +462,6 @@ fn main() {
             profile["characters"] = glyphs.into();
             profile["retained_adapter_resources"] = retain_adapter_resources.into();
             profile["registered_adapter_runs"] = register_adapter_runs.into();
-            profile["direct_registration"] = direct_registration.into();
             profile["metric_digest_included"] = register_adapter_runs.into();
             profile["metric_read_passes"] = metric_read_passes.into();
             profile["metric_read_ms"] = (metric_read_ns as f64 / 1e6).into();

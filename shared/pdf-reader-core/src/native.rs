@@ -105,10 +105,10 @@ impl PdfDocumentSession {
         Self::load(move || LocalDocumentSession::from_reader(source_name, reader))
     }
 
-    pub fn from_reader_with_metadata<R: Read + Seek + Send + 'static>(source_name: impl Into<String>, reader: R, content_hash: &str, metadata: Option<PdfReaderMetadata>) -> PdfResult<Self> {
+    pub fn from_reader_with_metadata<R: Read + Seek + Send + 'static>(source_name: impl Into<String>, reader: R, book_id: &str, metadata: Option<PdfReaderMetadata>) -> PdfResult<Self> {
         let source_name = source_name.into();
-        let content_hash = content_hash.to_owned();
-        Self::load(move || LocalDocumentSession::from_reader_with_metadata(source_name, reader, &content_hash, metadata))
+        let book_id = book_id.to_owned();
+        Self::load(move || LocalDocumentSession::from_reader_with_metadata(source_name, reader, &book_id, metadata))
     }
 
     pub fn info(&self) -> &PdfDocumentInfo {

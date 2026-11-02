@@ -1,10 +1,14 @@
 //! Native (on-device) filesystem state: work, directories, staged books.
 
-use crate::placements::{FolderPaths, directory_relative_path, stored_book_path_column, stored_placement_path};
+use crate::placements::{FolderPaths, directory_relative_path, stored_book_path, stored_book_path_column, stored_placement_path};
 use crate::query_methods::{query_last, query_rows};
 use crate::transactions::WriteOutcome::{Commit, Rollback};
+use library_model::RelativeBookPath;
 use rusqlite::{Error as SqlError, Row, types::Type};
+mod migration;
 pub(crate) mod observations;
+mod relocation;
+pub(crate) use migration::{migrate_cleanup_owners, migrate_file_work};
 #[cfg(not(target_arch = "wasm32"))]
 mod placement_edit;
 #[cfg(not(target_arch = "wasm32"))]
@@ -17,14 +21,14 @@ pub(crate) use rusqlite::OptionalExtension;
 
 pub(crate) use crate::{Database, DatabaseError};
 pub(crate) use include_sqlite_sql::include_sql;
-pub(crate) use sync_common::{BookId, DirId};
+pub(crate) use sync_common::{BookId, DirId, LibraryId};
 
 #[derive(Clone, Debug)]
 pub struct NativeBookSnapshot {
-    pub content_hash: BookId,
+    pub book_id: BookId,
     pub directory: DirId,
     pub name: String,
-    pub relative_path: library_model::RelativeBookPath,
+    pub relative_path: RelativeBookPath,
     pub occupied_names: Vec<String>,
     pub format: book_model::BookFormat,
     pub audiobook_track_titles: Vec<(String, String)>,
@@ -76,8 +80,8 @@ impl Database {
         self.write(|tx| {
             let result = Self::complete_downloaded_book_in_transaction(tx, &completion, thumbnail_set_exists)?;
             if result == NativeBookAcknowledgement::Applied {
-                crate::content_identity::freeze_content(tx, completion.snapshot.content_hash, checksum, Some(completion.size_bytes))?;
-                crate::content_identity::observe_content(tx, completion.snapshot.content_hash, completion.snapshot.directory, checksum)?;
+                crate::content_identity::freeze_content(tx, completion.snapshot.book_id, checksum, Some(completion.size_bytes))?;
+                crate::content_identity::observe_content(tx, completion.snapshot.book_id, completion.snapshot.directory, checksum)?;
             }
             Ok(result)
         })
@@ -86,10 +90,10 @@ impl Database {
     pub(crate) fn complete_downloaded_book_in_transaction(connection: &rusqlite::Connection, completion: &NativeBookCompletion, thumbnail_set_exists: bool) -> Result<NativeBookAcknowledgement, DatabaseError> {
         let current = crate::placements::book_at_path(connection, completion.snapshot.relative_path.as_str())?;
         let directory = completion.snapshot.directory;
-        let placement_current = current.is_some_and(|(hash, dir, name)| hash == completion.snapshot.content_hash && dir == directory && name == completion.snapshot.name);
+        let placement_current = current.is_some_and(|(hash, dir, name)| hash == completion.snapshot.book_id && dir == directory && name == completion.snapshot.name);
         let mut conflict = false;
         if placement_current {
-            connection.shared_book_name_conflict(&directory.to_string(), &library_replica::portable_name_key(&completion.publication.name), &completion.snapshot.content_hash, |row| {
+            connection.shared_book_name_conflict(&directory.to_string(), &library_replica::portable_name_key(&completion.publication.name), &completion.snapshot.book_id, |row| {
                 conflict = row.get(0)?;
                 Ok(())
             })?;
@@ -98,29 +102,29 @@ impl Database {
             if completion.publication.published {
                 // Purge may have removed its original job before this download published.
                 // Retry deletion of the actual published path through durable file work.
-                connection.shared_placements_queue_file_work("remove", &completion.snapshot.content_hash, &completion.publication.relative_path)?;
+                connection.shared_placements_queue_file_work(&completion.snapshot.book_id, &completion.publication.relative_path)?;
             }
             return Ok(NativeBookAcknowledgement::Obsolete);
         }
-        connection.native_rename_book(&directory.to_string(), &completion.snapshot.content_hash, &completion.publication.name)?;
+        connection.native_rename_book(&directory.to_string(), &completion.snapshot.book_id, &completion.publication.name)?;
         if completion.publication.published && completion.publication.fingerprint.is_none() {
             return Err(DatabaseError::message("published native file has no fingerprint"));
         }
         observations::record_file(
             connection,
             &directory.to_string(),
-            &completion.snapshot.content_hash,
+            &completion.snapshot.book_id,
             &completion.publication.relative_path,
             completion.publication.fingerprint.as_deref(),
             observations::Revision::Remote { size: i64::try_from(completion.size_bytes).map_err(DatabaseError::operation)? },
         )?;
 
-        connection.native_record_remote_book(&completion.snapshot.content_hash)?;
+        connection.native_record_remote_book(&completion.snapshot.book_id)?;
 
-        connection.shared_transfer_complete_download(&completion.snapshot.content_hash)?;
-        connection.native_queue_book_work(&completion.snapshot.content_hash)?;
+        connection.shared_transfer_complete_download(&completion.snapshot.book_id)?;
+        connection.native_queue_book_work(&completion.snapshot.book_id)?;
         if !thumbnail_set_exists {
-            connection.native_request_thumbnail(&completion.snapshot.content_hash)?;
+            connection.native_request_thumbnail(&completion.snapshot.book_id)?;
         }
         Ok(NativeBookAcknowledgement::Applied)
     }
@@ -137,17 +141,23 @@ include_sql!("src/native/sql/native_file_work.sql");
 pub struct NativeFileWork {
     pub id: i64,
     pub operation: String,
-    pub content_hash: BookId,
-    pub original_path: library_model::RelativeBookPath,
+    pub book_id: BookId,
+    pub directory: Option<DirId>,
+    pub cleanup_path: Option<RelativeBookPath>,
+    /// None means the current root; root changes bind existing cleanup to its source.
+    pub source_root: Option<String>,
+    pub source_identity: Option<String>,
+    pub source_library: Option<LibraryId>,
 }
 
 #[derive(Clone, Debug)]
 pub struct NativeFileWorkSnapshot {
     pub work: NativeFileWork,
-    pub resolved_path: library_model::RelativeBookPath,
+    pub resolved_path: RelativeBookPath,
     pub placement: Option<(String, String)>,
-    pub book_paths: Vec<library_model::RelativeBookPath>,
-    pub live_book_paths: Vec<library_model::RelativeBookPath>,
+    pub book_paths: Vec<RelativeBookPath>,
+    pub live_book_paths: Vec<RelativeBookPath>,
+    pub staged_source: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -162,7 +172,7 @@ pub struct NativeFileWorkCompletion {
 #[derive(Clone, Debug)]
 pub struct PurgeBookSnapshot {
     pub(crate) work_id: i64,
-    pub content_hash: BookId,
+    pub book_id: BookId,
     pub remove_bytes: bool,
 }
 
@@ -176,15 +186,43 @@ impl Database {
     }
 
     pub fn native_file_work(&self) -> Result<Vec<NativeFileWork>, DatabaseError> {
-        Ok(query_rows(|read| self.connection.native_file_work_rows(read), |row| Ok(NativeFileWork { id: row.get(0)?, operation: row.get(1)?, content_hash: row.get(2)?, original_path: stored_book_path_column(row, 3)? }))?)
+        Ok(query_rows(
+            |read| self.connection.native_file_work_rows(read),
+            |row| {
+                let directory = row.get::<_, Option<String>>(3)?.map(|id| DirId::parse_str(&id).map_err(|error| SqlError::FromSqlConversionFailure(3, Type::Text, Box::new(error)))).transpose()?;
+                let cleanup_path = row.get::<_, Option<String>>(4)?.map(|path| stored_book_path(&path).map_err(|error| SqlError::FromSqlConversionFailure(4, Type::Text, Box::new(error)))).transpose()?;
+                Ok(NativeFileWork {
+                    id: row.get(0)?,
+                    operation: row.get(1)?,
+                    book_id: row.get(2)?,
+                    directory,
+                    cleanup_path,
+                    source_root: row.get(5)?,
+                    source_identity: row.get(6)?,
+                    source_library: row.get::<_, Option<String>>(7)?.map(|id| LibraryId::parse_str(&id).map_err(|error| SqlError::FromSqlConversionFailure(7, Type::Text, Box::new(error)))).transpose()?,
+                })
+            },
+        )?)
     }
 
     pub fn native_file_work_snapshot(&self, work: NativeFileWork) -> Result<Option<NativeFileWorkSnapshot>, DatabaseError> {
-        if !self.connection.native_file_is_current(work.id, work.operation.as_str(), &work.content_hash, work.original_path.as_str(), |row| row.get(0))? {
+        let directory = work.directory.map(|id| id.to_string());
+        let source_library = work.source_library.map(|id| id.to_string());
+        if !self.connection.native_file_is_current(
+            work.id,
+            work.operation.as_str(),
+            &work.book_id,
+            directory.as_deref(),
+            work.cleanup_path.as_ref().map(|path| path.as_str()),
+            work.source_root.as_deref(),
+            work.source_identity.as_deref(),
+            source_library.as_deref(),
+            |row| row.get(0),
+        )? {
             return Ok(None);
         }
-        let placements = query_rows(|read| self.connection.native_live_placement_paths(&work.content_hash, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-        let mut folders = FolderPaths::new(&self.connection);
+        let placements = query_rows(|read| self.connection.native_live_placement_paths(&work.book_id, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut folders = FolderPaths::for_directories(&self.connection, placements.iter().map(|(id, _)| id.as_str()))?;
         let mut live_places = Vec::new();
         for (dir_id, file_name) in placements {
             if let Some(path) = folders.placement(&dir_id, &file_name)? {
@@ -192,15 +230,32 @@ impl Database {
             }
         }
         live_places.sort_by(|left, right| left.2.cmp(&right.2));
-        let projections = query_rows(|read| self.connection.native_file_projection_paths(&work.content_hash, read), |row| Ok((row.get::<_, String>(0)?, stored_book_path_column(row, 1)?)))?;
-        // A hash can have many placements. Resolve this job's path, never an
-        // arbitrary sibling. A remembered projection can identify a moved one.
-        let remembered = projections.iter().find(|(_, path)| path == &work.original_path);
-        let target = live_places.iter().find(|(_, _, path)| path == &work.original_path).or_else(|| remembered.and_then(|(id, _)| live_places.iter().find(|(dir, _, _)| dir == id)));
-        let resolved_path = target.map(|(_, _, path)| path.clone()).unwrap_or_else(|| work.original_path.clone());
+        let projections = query_rows(|read| self.connection.native_file_projection_paths(&work.book_id, read), |row| Ok((row.get::<_, String>(0)?, stored_book_path_column(row, 1)?)))?;
+        let target = if let Some(directory) = directory.as_deref() {
+            live_places.iter().find(|(dir, _, _)| dir == directory)
+        } else if work.source_root.is_none() {
+            // Physical cleanup can protect a live placement or a staged source,
+            // but its deletion target always remains the captured physical path.
+            let remembered = projections.iter().find(|(_, path)| Some(path) == work.cleanup_path.as_ref());
+            live_places.iter().find(|(_, _, path)| Some(path) == work.cleanup_path.as_ref()).or_else(|| remembered.and_then(|(id, _)| live_places.iter().find(|(dir, _, _)| dir == id)))
+        } else {
+            None
+        };
+        let resolved_path = if work.operation == "materialize" {
+            let Some((_, _, path)) = target else {
+                // The requested placement was removed. Retire its identity job;
+                // it must never follow another copy of this book.
+                self.connection.native_delete_file_work(work.id)?;
+                return Ok(None);
+            };
+            path.clone()
+        } else {
+            work.cleanup_path.clone().ok_or_else(|| DatabaseError::message("cleanup work has no physical path"))?
+        };
+        let staged_source = work.operation == "remove" && target.is_some_and(|(_, _, path)| Some(path) != work.cleanup_path.as_ref());
         let placement = target.map(|(dir, name, _)| (dir.clone(), name.clone()));
         let live_book_paths = live_places.into_iter().map(|(_, _, path)| path).collect();
-        Ok(Some(NativeFileWorkSnapshot { work, resolved_path, placement, book_paths: projections.into_iter().map(|(_, relative)| relative).collect(), live_book_paths }))
+        Ok(Some(NativeFileWorkSnapshot { work, resolved_path, placement, book_paths: projections.into_iter().map(|(_, relative)| relative).collect(), live_book_paths, staged_source }))
     }
 
     pub fn acknowledge_native_file_work(&self, completion: NativeFileWorkCompletion) -> Result<(), DatabaseError> {
@@ -208,7 +263,7 @@ impl Database {
             let snapshot = completion.snapshot;
             let Some(current) = self.native_file_work_snapshot(snapshot.work)? else { return Ok(Rollback(())) };
             let work = &current.work;
-            let hash = &work.content_hash;
+            let hash = &work.book_id;
             if current.resolved_path != snapshot.resolved_path || current.placement != snapshot.placement {
                 return Err(DatabaseError::message("file placement changed during reconciliation; retry"));
             }
@@ -218,8 +273,8 @@ impl Database {
                         return Err(DatabaseError::message("placement became live before removal; retry"));
                     }
                     // Do not forget a replacement file now recorded for the same membership.
-                    if let Some(dir) = transaction.observations_file_directory(&hash, &completion.final_path, |row| row.get::<_, String>(0)).optional()? {
-                        observations::forget_file(transaction, &dir, &work.content_hash)?;
+                    if let Some(dir) = transaction.observations_file_directory(&hash, &completion.final_path, |row| row.get::<_, String>(0)).optional()?.filter(|_| work.source_root.is_none()) {
+                        observations::forget_file(transaction, &dir, &work.book_id)?;
                     }
                 } else if work.operation == "materialize" {
                     let (dir_id, _) = snapshot.placement.as_ref().ok_or_else(|| DatabaseError::message("materialization placement no longer exists"))?;
@@ -237,7 +292,7 @@ impl Database {
                         }
                         transaction.native_rename_book(dir_id, hash, name)?;
                     }
-                    observations::record_file(transaction, dir_id, &work.content_hash, &completion.final_path, None, observations::Revision::Retained)?;
+                    observations::record_file(transaction, dir_id, &work.book_id, &completion.final_path, None, observations::Revision::Retained)?;
                     transaction.shared_transfer_complete_download(hash)?;
                     if !completion.thumbnail_set_exists {
                         transaction.native_request_thumbnail(hash)?;
@@ -261,11 +316,11 @@ impl Database {
         if retired && self.connection.observations_has_file_work(&(&hash), |r| r.get::<_, bool>(0))? {
             return Ok(None);
         }
-        Ok(Some(PurgeBookSnapshot { work_id, content_hash: *hash, remove_bytes: retired }))
+        Ok(Some(PurgeBookSnapshot { work_id, book_id: *hash, remove_bytes: retired }))
     }
 
     pub fn acknowledge_purge_book(&self, snapshot: PurgeBookSnapshot) -> Result<(), DatabaseError> {
-        self.connection.acknowledge_purge_book(&snapshot.content_hash, snapshot.work_id)?;
+        self.connection.acknowledge_purge_book(&snapshot.book_id, snapshot.work_id)?;
         Ok(())
     }
 
@@ -314,7 +369,7 @@ impl Database {
     /// or `None` when `parent` is not a live directory. Callers combine this
     /// with their own library root to reach a filesystem path; this crate
     /// never resolves or touches the filesystem itself.
-    pub fn native_book_path(&self, parent: DirId, name: &str) -> Result<Option<library_model::RelativeBookPath>, DatabaseError> {
+    pub fn native_book_path(&self, parent: DirId, name: &str) -> Result<Option<RelativeBookPath>, DatabaseError> {
         directory_relative_path(&self.connection, &parent)?.map(|folder| stored_placement_path(&folder, name)).transpose()
     }
 }

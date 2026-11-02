@@ -3,7 +3,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use library_model::OpdsCredentials;
 use client_runtime::Failure;
-use library_opds::{browser::{self, Request, Response}, feed_title};
+use embedded_browser::{self as browser, verification::{Request, Response}};
+use library_opds::feed_title;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;

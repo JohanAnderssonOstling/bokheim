@@ -16,7 +16,7 @@ fn book(db: &Database, byte: u8, title: &str, format: BookFormat, downloaded: bo
 fn annotation(db: &Database, book: BookId, id: &str, created: u64, text: &str, note: &str) -> Annotation {
     let annotation = Annotation {
         id: id.into(),
-        content_hash: book,
+        book_id: book,
         anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:0)"),
         exact_text: text.into(),
         style: AnnotationStyle::Highlight,
@@ -107,7 +107,7 @@ fn migration_rebuilds_existing_notes_and_imported_pdf_annotations() {
     db.delete_annotation("deleted", 3).unwrap();
     let metadata = PdfReaderMetadata {
         version: 1,
-        content_hash: pdf.to_hex(),
+        book_id: pdf.to_hex(),
         pages: vec![PdfStoredPage { width: 600.0, height: 800.0, rotation: 0 }],
         skippable_pages: None,
         dependencies: None,
@@ -142,7 +142,7 @@ fn adopted_pdf_annotations_replace_cached_rows_and_deletions_stay_deleted() {
     let pdf = book(&db, 23, "Adopted PDF", BookFormat::Pdf, true);
     let metadata = PdfReaderMetadata {
         version: 1,
-        content_hash: pdf.to_hex(),
+        book_id: pdf.to_hex(),
         pages: vec![PdfStoredPage { width: 600.0, height: 800.0, rotation: 0 }],
         skippable_pages: None,
         dependencies: None,

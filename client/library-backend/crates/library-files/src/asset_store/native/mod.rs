@@ -1,23 +1,24 @@
 //! Native library-file access and adjacent transfer staging.
 
-use crate::APP_HIDDEN_DIR;
 use crate::filesystem::{copy_entry, rename_entry};
+use crate::APP_HIDDEN_DIR;
 use client_platform_native::filesystem::parent_directory;
-use content_address::{ContentHash, HashingReader, hash_file};
-use fs2::{FileExt, lock_contended_error};
+use client_platform_runtime::executor::run_blocking;
+use content_address::{hash_file, ContentHash, HashingReader};
+use fs2::{lock_contended_error, FileExt};
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 pub(crate) mod projection;
+pub(crate) use projection::create_directory;
 pub(crate) use projection::readable_path;
-pub(crate) use projection::{create_directory, evict_book_files};
 
+use super::RESERVED_STORAGE_BYTES;
 pub(crate) use super::{AssetStoreError, BookId};
 pub(crate) use book_access::BoxedBookReader;
 pub(crate) use library_model::RelativeBookPath;
 pub(crate) use std::collections::HashSet;
 pub(crate) use std::path::{Path, PathBuf};
-pub(crate) const RESERVED_STORAGE_BYTES: u64 = 128 * 1024 * 1024;
 pub(crate) type RootFailure = Box<dyn FnOnce() + Send + 'static>;
 #[derive(Clone)]
 pub(crate) struct Handle {
@@ -171,7 +172,9 @@ pub(crate) fn content_matches(path: &Path, hash: &BookId) -> Result<bool, AssetS
     } else {
         hash_file(&mut File::open(path)?)?
     };
-    if hash.content_hash() == Some(actual) { return Ok(true); }
+    if hash.content_hash() == Some(actual) {
+        return Ok(true);
+    }
     for ancestor in path.ancestors().skip(1) {
         let metadata = ancestor.join(APP_HIDDEN_DIR);
         if metadata.join("storage-identity").is_file() {
@@ -440,7 +443,7 @@ pub(crate) struct StagedBook {
     pub(crate) byte_checksum: ContentHash,
     // A cleanup guard; direct imports use the final path from the outset.
     pub(crate) temporary_path: tempfile::TempPath,
-    pub(crate) content_hash: BookId,
+    pub(crate) book_id: BookId,
     pub(crate) size_bytes: u64,
     pub(crate) direct: Option<DirectBook>,
 }
@@ -500,6 +503,73 @@ pub(crate) fn write_import_bytes(handle: &Handle, file: &mut File, source: &mut 
 
 pub(crate) fn write_capacity(handle: &Handle) -> Result<Option<u64>, AssetStoreError> {
     Ok(Some(fs2::available_space(&handle.assets_root)?.saturating_sub(RESERVED_STORAGE_BYTES)))
+}
+
+pub(crate) async fn available_write_capacity(handle: &Handle) -> Result<Option<u64>, AssetStoreError> {
+    write_capacity(handle)
+}
+
+pub(crate) fn book_download_space(bytes: u64, paths: &[RelativeBookPath], audiobook_archive: bool) -> (u64, u64) {
+    // Regular files publish by moving the staged file. Audiobook folders also
+    // need the archive alongside the extracted tracks during publication.
+    let copies = paths.iter().collect::<HashSet<_>>().len().max(1) as u64;
+    (bytes.saturating_mul(copies), if audiobook_archive { bytes } else { 0 })
+}
+
+pub(crate) async fn evict_book_files(handle: &Handle, _book: BookId, paths: Vec<RelativeBookPath>) -> Result<(), AssetStoreError> {
+    let handle = handle.clone();
+    run_blocking(move || projection::evict_book_files(&handle, &paths)).await.map_err(AssetStoreError::operation)?
+}
+
+pub(crate) async fn evictable_book_bytes(handle: &Handle, _book: BookId, paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
+    let handle = handle.clone();
+    client_platform_runtime::executor::run_blocking(move || {
+        let mut total = 0_u64;
+        let mut counted = HashSet::new();
+        for relative in paths {
+            for path in projection::book_eviction_files(&placement_path(&handle, &relative))? {
+                if counted.insert(path.clone()) {
+                    total = total.saturating_add(std::fs::symlink_metadata(path)?.len());
+                }
+            }
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(AssetStoreError::operation)?
+}
+
+pub(crate) async fn stored_book_bytes(handle: &Handle, _book: BookId, paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
+    book_bytes_at_paths(handle, paths).await
+}
+
+pub(crate) async fn book_bytes_at_paths(handle: &Handle, paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
+    let handle = handle.clone();
+    client_platform_runtime::executor::run_blocking(move || {
+        let mut total = 0_u64;
+        let mut counted = HashSet::new();
+        for relative in paths {
+            let path = placement_path(&handle, &relative);
+            let metadata = match std::fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.is_file() && counted.insert(path.clone()) {
+                total = total.saturating_add(metadata.len());
+            } else if metadata.is_dir() {
+                for entry in walkdir::WalkDir::new(path).follow_links(false) {
+                    let entry = entry.map_err(AssetStoreError::operation)?;
+                    if entry.file_type().is_file() && counted.insert(entry.path().to_owned()) {
+                        total = total.saturating_add(entry.metadata().map_err(AssetStoreError::operation)?.len());
+                    }
+                }
+            }
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(AssetStoreError::operation)?
 }
 
 #[cfg(target_os = "android")]

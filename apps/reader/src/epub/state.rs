@@ -1,3 +1,5 @@
+use ui_text::text;
+
 mod annotations;
 mod appearance;
 mod events;
@@ -33,12 +35,12 @@ pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
     // A phone owns its physical reading width. Start with one column and let
     // the reader derive its width from the live viewport rather than carrying
     // a desktop line-width preference into a narrow screen.
-    let column_width = if cfg!(any(feature = "kobo", target_os = "android")) { LINE_WIDTH_MAX } else { preferences.column_width };
+    let column_width = if cfg!(any(feature = "kobo", target_os = "android")) { LINE_WIDTH_MAX } else { preferences.synchronized.max_line_width_px() };
     RendererInitialConfig {
-        font_size: preferences.font_size,
+        font_size: preferences.synchronized.font_size_px(),
         column_width,
-        scale: preferences.scale,
-        max_column_count: Some(if cfg!(any(feature = "kobo", target_os = "android")) { 1 } else { preferences.max_column_count }),
+        scale: preferences.synchronized.zoom(),
+        max_column_count: Some(if cfg!(any(feature = "kobo", target_os = "android")) { 1 } else { preferences.synchronized.max_column_count() }),
         style_overrides: preferences.style_overrides(Some(library_theme_adaptation(cx)), library_link_foreground(cx)),
         paint_palette: library_paint_palette(cx),
         interaction_palette: library_interaction_palette(cx),
@@ -51,10 +53,13 @@ impl ReaderView {
         locator: BookLocator, title: String, app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, cjk_font: Option<crate::cjk::CjkFont>, preparation: skrift_column_paginator::RendererPreparation,
         save_progress: bool, close_reader: crate::CloseReader, #[cfg(feature = "kobo")] device_controls: Option<gpui::AnyView>, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
+        // Every open book observes changes made in other reader windows and
+        // changes received through preference synchronization.
+        cx.observe_global::<ReaderSettings>(|_: &mut Self, cx| cx.notify()).detach();
         let search_input = cx.new(|cx| {
             let input = InputState::new(window, cx);
             #[cfg(feature = "kobo")]
-            let input = input.placeholder("Search current chapter");
+            let input = input.placeholder(text!(reader::search_current_chapter));
             input
         });
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _window, cx| match event {
@@ -82,7 +87,7 @@ impl ReaderView {
             .detach();
         }
         let bookmark_filter_input = crate::shell::bookmarks::filter_input(window, cx);
-        let annotation_filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter annotations"));
+        let annotation_filter_input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(reader::filter_annotations)));
         let annotation_filter_subscription = cx.subscribe(&annotation_filter_input, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 notify(cx, Component::ReaderShell, "annotation_filter_changed");
@@ -92,14 +97,15 @@ impl ReaderView {
         let toc_tree = cx.new(|cx| TreeState::new(cx));
         let toc_filter = cx.new(|cx| crate::shell::toc_filter::TocFilter::new(toc_tree.clone(), window, cx));
         focus.focus(window, cx);
-        let reading_positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone()).with_saving_enabled(save_progress);
+        let reading_positions = ReadingPositionWriter::new(cx, locator.book_id(), library.clone()).with_saving_enabled(save_progress);
+        reading_positions.watch(cx);
         let marks = MarkSession::new(cx, library.clone());
         let bookmark_updates = marks.watch_bookmarks(cx, Self::update_bookmarks);
 
         #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
         let tts = crate::shell::tts::Narration::for_languages(&book.languages())
             .with_title(title.clone())
-            .with_rate(ReaderSettings::preferences(cx).audiobook_speed)
+            .with_rate(ReaderSettings::preferences(cx).synchronized.audiobook_speed())
             .with_pauses(ReaderSettings::preferences(cx).narration_pauses)
             .with_voice(ReaderSettings::preferences(cx).narration_voice)
             .with_device_voice(ReaderSettings::preferences(cx).narration_device_voice.clone())
@@ -119,6 +125,9 @@ impl ReaderView {
             title,
             load_state: LoadState::Loading,
             applied_palette: None,
+            applied_font_size: None,
+            applied_scale: None,
+            applied_style_overrides: None,
             last_column_viewport_plan: None,
             desired_column_count: u8::MAX,
             toc,
@@ -191,7 +200,7 @@ impl ReaderView {
             Err(error) => {
                 log::error!("could not initialize EPUB renderer: {error}");
                 let failure = opening_error(BackendError::message(error), "renderer_initialize", Failure::BookRendererFailed);
-                let message = ui_components::user_facing_error(&failure, "Couldn't display this book. Reopen the app and retry.").to_owned();
+                let message = ui_components::user_facing_error(&failure, text!(reader::couldn_t_display_this_book_reopen_the_app_and_retry)).to_owned();
                 // The parent installs its failure subscription after this
                 // constructor returns, before deferred events are delivered.
                 cx.defer_in(window, move |_, _, cx| cx.emit(crate::BookOpenFailed(failure)));

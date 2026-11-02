@@ -33,8 +33,8 @@ impl LibraryClient {
     }
 
     /// Downloads a public-domain catalog book and imports it under `parent_id`.
-    pub async fn add_catalog_book(&self, parent_id: DirId, content_hash: crate::BookId) -> Result<crate::BookId, BackendError> {
-        self.request(LibraryCommand::Pending(PendingCommand::AddCatalogBook { parent_id, content_hash })).await
+    pub async fn add_catalog_book(&self, parent_id: DirId, book_id: crate::BookId) -> Result<crate::BookId, BackendError> {
+        self.request(LibraryCommand::Pending(PendingCommand::AddCatalogBook { parent_id, book_id })).await
     }
 
     /// Downloads an external catalog audiobook from its source and imports it under `parent_id`.

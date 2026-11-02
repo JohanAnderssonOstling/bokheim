@@ -51,7 +51,7 @@ impl Fixture {
         let alice_library = LibraryId::new_v4();
         let bob_library = LibraryId::new_v4();
         for (user, library) in [(&alice, alice_library), (&bob, bob_library)] {
-            sync.create_library(user, &LibraryNameRequest { library_id: library, library_name: "Library".into(), storage: Default::default() }).await.unwrap();
+            sync.create_library(user, &LibraryNameRequest { library_id: library, library_name: "Library".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
         }
         let root = TempDir::new().unwrap();
         let store = Arc::new(FsAssetStore::new(root.path().join("books"), root.path().join("thumbnails")));
@@ -102,7 +102,7 @@ impl Fixture {
 async fn cleanup_keeps_shared_and_trashed_books_and_deletes_the_last_owners_files() {
     let f = Fixture::new().await;
     let second_library = LibraryId::new_v4();
-    f.sync.create_library(&f.alice, &LibraryNameRequest { library_id: second_library, library_name: "Second".into(), storage: Default::default() }).await.unwrap();
+    f.sync.create_library(&f.alice, &LibraryNameRequest { library_id: second_library, library_name: "Second".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
     for (user, library) in [(&f.alice, f.alice_library), (&f.alice, second_library), (&f.bob, f.bob_library)] {
         f.lifecycle(user, library, 1, ConflictRank::Update).await;
         f.upload(user, library).await;

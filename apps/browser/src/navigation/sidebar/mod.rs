@@ -3,6 +3,8 @@
 //! Renders whichever route the shell says is current; it owns no route of its
 //! own, only the open/closed state of its own overlays.
 
+use ui_text::text;
+
 mod add_library;
 mod switcher_overlay;
 
@@ -98,24 +100,19 @@ impl Sidebar {
         if compact { self.render_bottom_navigation(emitter, route, library_view, safe_area, cx) } else { self.render_sidebar(emitter, route, close_pane, window, cx) }
     }
 
-    /// The compact tab bar: the rail's destinations. On a phone the library's
-    /// browse views share one Library tab instead, switched from the menu in
-    /// their heading (`library_view_heading`).
+    /// Compact windows share one Library tab for the browse views, switched
+    /// from the menu in their heading (`library_view_heading`). Pointer type
+    /// controls target sizing, while available width controls destinations.
     fn render_bottom_navigation(&self, emitter: Entity<Self>, route: Route, library_view: LibraryRoute, safe_area: Edges<Pixels>, cx: &gpui::App) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let in_library_view = matches!(route, Route::Library(view) if super::LIBRARY_VIEWS.contains(&view));
-        let tabs = if self.libraries.read(cx).selected_is_opds() {
-            rail_routes(true, cx).collect()
-        } else if components::touch_ui() {
-            vec![Route::Library(LibraryRoute::Home), Route::Library(library_view), Route::Library(LibraryRoute::Catalog), Route::Global(GlobalRoute::Settings)]
-        } else {
-            rail_routes(self.libraries.read(cx).selected_is_opds(), cx).collect()
-        };
+        let opds = self.libraries.read(cx).selected_is_opds();
+        let tabs = if opds { rail_routes(true, cx).collect() } else { vec![Route::Library(LibraryRoute::Home), Route::Library(library_view), Route::Library(LibraryRoute::Catalog), Route::Global(GlobalRoute::Settings)] };
         let mut navigation = components::bottom_navigation(theme);
         for target in tabs {
             let (id, icon) = target.presentation();
-            let library_tab = components::touch_ui() && target == Route::Library(library_view);
-            let (id, label, selected) = if library_tab { ("library", "Library", in_library_view) } else { (id, id, route == target) };
+            let library_tab = !opds && target == Route::Library(library_view);
+            let (id, label, selected) = if library_tab { ("library", text!(common::library), in_library_view) } else { (id, id, route == target) };
             let select = emitter.clone();
             navigation = navigation.child(components::bottom_navigation_item(format!("bottom-{id}"), components::navigation_icon(icon), label, selected, theme).on_click(move |_, window, cx| {
                 select.update(cx, |navigation, cx| (navigation.navigate)(target, window, cx));
@@ -148,15 +145,19 @@ impl Sidebar {
         let split_available = crate::split_panes_available(window);
         if split_available {
             let split = emitter.clone();
-            destinations = destinations.child(components::nav_rail_item("split-pane", IconName::PanelLeft, "Split", false, theme).tooltip("Open split pane").on_click(move |_, _, cx| split.update(cx, |_, cx| cx.emit(SplitPane))));
+            destinations = destinations
+                .child(components::nav_rail_item("split-pane", IconName::PanelLeft, text!(browse::split), false, theme).tooltip(text!(browse::open_split_pane)).on_click(move |_, _, cx| split.update(cx, |_, cx| cx.emit(SplitPane))));
         }
         let library_name = self.active_library_name(cx);
         if close_pane {
             let close = emitter.clone();
-            destinations = destinations.child(components::nav_rail_item("close-pane", IconName::Close, "Close", false, theme).on_click(move |_, _, cx| close.update(cx, |_, cx| cx.emit(crate::PaneRequest::Close))));
+            destinations = destinations.child(components::nav_rail_item("close-pane", IconName::Close, text!(common::close), false, theme).on_click(move |_, _, cx| close.update(cx, |_, cx| cx.emit(crate::PaneRequest::Close))));
         }
-        let labels =
-            rail_routes(self.libraries.read(cx).selected_is_opds(), cx).map(|route| route.presentation().0).chain(std::iter::once(library_name.as_ref())).chain(split_available.then_some("Split")).chain(close_pane.then_some("Close"));
+        let labels = rail_routes(self.libraries.read(cx).selected_is_opds(), cx)
+            .map(|route| route.presentation().0)
+            .chain(std::iter::once(library_name.as_ref()))
+            .chain(split_available.then_some(text!(browse::split)))
+            .chain(close_pane.then_some(text!(common::close)));
         let width = components::navigation_rail_width(labels, window, cx);
         let sidebar = components::sidebar(theme).w(width).flex_1().child(self.render_library_switcher_trigger(emitter.clone(), cx)).child(destinations);
         gpui::div().w(width).h_full().min_h_0().flex_none().flex().flex_col().bg(theme.page_bg).child(sidebar).child(destination(Route::Global(GlobalRoute::Settings))).into_any_element()

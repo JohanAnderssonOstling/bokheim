@@ -1,8 +1,14 @@
+mod caches;
 mod books;
+#[cfg(not(target_arch = "wasm32"))]
+mod browser;
+#[cfg(not(target_arch = "wasm32"))]
+pub use browser::BrowserDownloads;
 mod browse;
 mod client;
 mod directories;
 mod import;
+mod opds;
 mod reading;
 #[cfg(not(target_arch = "wasm32"))]
 mod transfer;

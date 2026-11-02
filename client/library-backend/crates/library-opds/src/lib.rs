@@ -4,8 +4,6 @@
 use url::Url;
 
 mod browse;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod browser;
 mod fetch;
 mod opds1;
 mod opds2;
@@ -14,7 +12,7 @@ mod publications;
 
 pub use browse::{browse, feed_title};
 pub use opds1::opensearch_template;
-pub use publications::{buy_page, card_cover, cover, description, download, download_publication, evict_cover_cache, publication, publication_cover_bytes, thumbnail_jpeg};
+pub use publications::{card_cover, cover, download, download_publication, evict_cover_cache, publication_cover_bytes, thumbnail_jpeg};
 
 /// One page of a feed: what browsing it shows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -70,7 +68,7 @@ pub struct Publication {
     /// What Add to library downloads; none for a book offered only to buy,
     /// borrow or behind DRM.
     pub download: Option<Download>,
-    /// The store page that sells the book, opened in the store window.
+    /// A purchase link supplied by the feed.
     pub buy: Option<Url>,
     /// The cover image, the full-size one where the feed offers both.
     pub cover: Option<Url>,
@@ -79,12 +77,7 @@ pub struct Publication {
     pub description: String,
 }
 
-pub const EPUB: &str = "application/epub+zip";
-pub const PDF: &str = "application/pdf";
-pub const FB2: &str = "application/x-fictionbook+xml";
-pub const FB2_ZIP: &str = "application/x-zip-compressed-fb2";
-pub const CBZ: &str = "application/vnd.comicbook+zip";
-pub const CBZ_LEGACY: &str = "application/x-cbz";
+pub use book_model::book_format::{CBZ, CBZ_LEGACY, EPUB, FB2, FB2_ZIP, PDF};
 
 /// Whether acquisition links' media types, their own and those of their
 /// indirect acquisitions, name a DRM license file the book comes through:
@@ -106,13 +99,12 @@ pub struct Download {
 /// The open-access link to download among `links` (href, media type,
 /// length), preferring reflowable books before fixed-page formats.
 fn choose_download<'a>(links: impl IntoIterator<Item = (Url, &'a str, Option<u64>)>) -> Option<Download> {
-    let formats = [EPUB, FB2, FB2_ZIP, PDF, CBZ, CBZ_LEGACY];
     links
         .into_iter()
         .filter_map(|(href, kind, length)| {
             let kind = bare_media_type(kind);
-            let preference = formats.iter().position(|media_type| *media_type == kind)?;
-            Some((preference, Download { href, media_type: formats[preference], length }))
+            let (preference, media_type) = book_model::BookFormat::acquisition_media_type(&kind)?;
+            Some((preference, Download { href, media_type, length }))
         })
         .min_by_key(|(preference, _)| *preference)
         .map(|(_, download)| download)
@@ -185,3 +177,6 @@ fn merge_editions(publications: &mut Vec<Publication>) {
 fn bare_media_type(value: &str) -> String {
     value.split(';').next().unwrap_or_default().trim().to_ascii_lowercase()
 }
+
+mod source;
+pub use source::validated_source;

@@ -11,7 +11,7 @@ pub(crate) fn remove_book(tx: &rusqlite::Transaction<'_>, hash: &BookId) -> Resu
     // Capture materialized and logical paths before cascading placements away.
     tx.purge_queue_observed_files(&hash)?;
     let placements = query_rows(|callback| tx.purge_book_placements(&hash, callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-    let mut folders = crate::placements::FolderPaths::new(tx);
+    let mut folders = crate::placements::FolderPaths::for_directories(tx, placements.iter().map(|(id, _)| id.as_str()))?;
     for (dir_id, file_name) in placements {
         if let Some(path) = folders.placement(&dir_id, &file_name)? {
             tx.purge_queue_placement_file(&hash, &(path.as_str()))?;

@@ -35,7 +35,7 @@ impl PdfReaderView {
     ) -> Self {
         let preferences = ReaderSettings::preferences(cx);
         let zoom_mode = stored_zoom_mode(preferences);
-        let trim_margins = preferences.pdf_trim_margins;
+        let trim_margins = preferences.synchronized.pdf_trim_margins();
         let source_name = title.clone();
         let interaction_style = library_interaction_style(cx);
         let pdf = cx.new(|cx| {
@@ -46,6 +46,17 @@ impl PdfReaderView {
             pdf.set_full_page_position(initial_full_page_position, cx);
             pdf
         });
+        cx.observe_global::<ReaderSettings>(|reader: &mut Self, cx| {
+            let preferences = ReaderSettings::preferences(cx);
+            let zoom_mode = stored_zoom_mode(preferences);
+            let trim_margins = preferences.synchronized.pdf_trim_margins();
+            reader.pdf.update(cx, |pdf, cx| {
+                pdf.set_zoom_mode(zoom_mode, cx);
+                pdf.set_trim_margins(trim_margins, cx);
+            });
+            cx.notify();
+        })
+        .detach();
         let bookmark_filter_input = crate::shell::bookmarks::filter_input(window, cx);
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let toc_tree = cx.new(|cx| TreeState::new(cx));
@@ -68,13 +79,14 @@ impl PdfReaderView {
         // Page elements establish `PdfReaderDocument`; until one is laid out,
         // the shell owns keyboard focus.
         focus.focus(window, cx);
-        let positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone()).with_saving_enabled(save_progress);
+        let positions = ReadingPositionWriter::new(cx, locator.book_id(), library.clone()).with_saving_enabled(save_progress);
+        positions.watch(cx);
         let marks = MarkSession::new(cx, library.clone());
         let bookmark_updates = marks.watch_bookmarks(cx, Self::update_bookmarks);
         #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
         let tts = crate::shell::tts::Narration::default()
             .with_title(title.clone())
-            .with_rate(ReaderSettings::preferences(cx).audiobook_speed)
+            .with_rate(ReaderSettings::preferences(cx).synchronized.audiobook_speed())
             .with_pauses(ReaderSettings::preferences(cx).narration_pauses)
             .with_voice(ReaderSettings::preferences(cx).narration_voice)
             .with_device_voice(ReaderSettings::preferences(cx).narration_device_voice.clone())
@@ -145,8 +157,8 @@ impl PdfReaderView {
         match event {
             PdfViewEvent::TextLayersChanged => self.refresh_annotation_overlays(cx),
             PdfViewEvent::EmbeddedAnnotations(annotations) => {
-                let content_hash = self.locator.content_hash();
-                self.marks.merge_loaded(annotations.iter().filter_map(|value| library_model::stored_pdf_annotation(content_hash, value)).collect());
+                let book_id = self.locator.book_id();
+                self.marks.merge_loaded(annotations.iter().filter_map(|value| library_model::stored_pdf_annotation(book_id, value)).collect());
                 self.refresh_annotation_overlays(cx);
             }
             PdfViewEvent::NavigationJump { from } => self.history.begin_jump(*from),
@@ -204,7 +216,7 @@ impl PdfReaderView {
             PdfViewEvent::AnnotationActivated { id, position } => {
                 self.annotation_popup_anchor = Some(*position);
                 self.select_annotation(id.clone(), window, cx);
-                if self.marks.selected().is_some_and(|annotation| annotation.content_hash == self.locator.content_hash()) {
+                if self.marks.selected().is_some_and(|annotation| annotation.book_id == self.locator.book_id()) {
                     crate::shell::state_panel::select_tab(&mut self.sidebar, SidebarTab::Notes, cx);
                 }
             }

@@ -36,7 +36,7 @@ impl Database {
     }
 
     pub(crate) fn upload_intent_of(connection: &rusqlite::Connection, hash: &BookId) -> Result<Option<BookUploadIntent>, DatabaseError> {
-        Ok(query_last(|read| connection.transfer_upload_intent(hash, read), |row| Ok(BookUploadIntent { byte_checksum: row.get(2)?, id: row.get(0)?, content_hash: *hash, size_bytes: row.get::<_, i64>(1)? as u64 }))?)
+        Ok(query_last(|read| connection.transfer_upload_intent(hash, read), |row| Ok(BookUploadIntent { byte_checksum: row.get(2)?, id: row.get(0)?, book_id: *hash, size_bytes: row.get::<_, i64>(1)? as u64 }))?)
     }
 
     pub(crate) fn complete_book_upload_in_transaction(connection: &rusqlite::Connection, hash: &BookId, expected_versions: &[(String, String, String)], intent: Option<&BookUploadIntent>) -> Result<bool, DatabaseError> {
@@ -52,11 +52,11 @@ impl Database {
         if current {
             if let Some(checksum) = intent.and_then(|intent| intent.byte_checksum).or_else(|| hash.content_hash()) {
                 crate::content_identity::freeze_content(connection, *hash, checksum, intent.map(|intent| intent.size_bytes))?;
-                crate::sync::apply::registers::record_local(connection, library_replica::LibraryStateEntry::BookContent { content_hash: *hash, checksum, size_bytes: intent.map(|intent| intent.size_bytes), pdf: None })?;
+                crate::sync::apply::registers::record_local(connection, library_replica::LibraryStateEntry::BookContent { book_id: *hash, checksum, size_bytes: intent.map(|intent| intent.size_bytes), pdf: None })?;
             }
             connection.record_remote_asset(BlobKind::Book.storage(), hash)?;
             if let Some(intent) = intent {
-                connection.transfer_complete_upload(intent.id, &intent.content_hash)?;
+                connection.transfer_complete_upload(intent.id, &intent.book_id)?;
             }
         } else {
             connection.forget_remote_asset(BlobKind::Book.storage(), hash)?;
@@ -66,7 +66,7 @@ impl Database {
 
     /// One page of prepared uploads by intent id.
     pub fn pending_book_uploads(&self, after: i64, limit: i64) -> Result<Vec<BookUploadIntent>, DatabaseError> {
-        Ok(query_rows(|read| self.connection.transfer_pending_book_uploads(after, limit, read), |row| Ok(BookUploadIntent { byte_checksum: row.get(3)?, id: row.get(0)?, content_hash: row.get::<_, BookId>(1)?, size_bytes: row.get::<_, i64>(2)? as u64 }))?)
+        Ok(query_rows(|read| self.connection.transfer_pending_book_uploads(after, limit, read), |row| Ok(BookUploadIntent { byte_checksum: row.get(3)?, id: row.get(0)?, book_id: row.get::<_, BookId>(1)?, size_bytes: row.get::<_, i64>(2)? as u64 }))?)
     }
 
     /// One page of eligible covers by content hash.

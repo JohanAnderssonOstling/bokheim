@@ -43,7 +43,7 @@ impl Grants {
         }
         // Two random UUIDs provide 244 random bits without exposing credentials.
         let ticket = format!("{}{}", LibraryId::new_v4().simple(), LibraryId::new_v4().simple());
-        let reply = PlaybackGrant { path: format!("/api/playback/{ticket}"), expires_in_seconds: LIFETIME.as_secs() as u32, content_hash: grant.hash, length: grant.length };
+        let reply = PlaybackGrant { path: format!("/api/playback/{ticket}"), expires_in_seconds: LIFETIME.as_secs() as u32, book_id: grant.hash, length: grant.length };
         entries.insert(ticket, grant);
         Ok(reply)
     }
@@ -72,7 +72,7 @@ pub(crate) async fn read(State(state): State<AppState>, Path(ticket): Path<Strin
         return Err(StatusCode::FORBIDDEN);
     }
     let asset = state.assets.open_from(&grant.user, &grant.library, AssetKind::Book, &grant.hash, 0).await.map_err(asset_error)?.ok_or(StatusCode::NOT_FOUND)?;
-    if asset.content_hash != grant.hash {
+    if asset.book_id != grant.hash {
         return Err(StatusCode::PRECONDITION_FAILED);
     }
     let mut response = stream_asset(asset, AssetKind::Book, &headers, state.transfer_governor.clone(), grant.user).await?;
@@ -96,7 +96,7 @@ pub(crate) async fn read_track(State(state): State<AppState>, Path((ticket, inde
         return Err(StatusCode::FORBIDDEN);
     }
     let (asset, track) = state.assets.audiobook_track(&grant.user, &grant.library, &grant.hash, index).await.map_err(asset_error)?.ok_or(StatusCode::NOT_FOUND)?;
-    if asset.content_hash != grant.hash {
+    if asset.book_id != grant.hash {
         return Err(StatusCode::PRECONDITION_FAILED);
     }
     let mut response = stream_audio_track(asset, track.offset, track.length, &headers, state.transfer_governor.clone(), grant.user).await?;

@@ -1,5 +1,7 @@
 //! EPUB annotation, footnote, and image overlays.
 
+use ui_text::text;
+
 use crate::invalidation::notify;
 use book_model::{AnnotationStyle, RecurringScope};
 use gpui::prelude::*;
@@ -23,7 +25,7 @@ impl BookmarkEditorTarget for ReaderView {
 
 impl AnnotationEditorTarget for ReaderView {
     fn set_annotation_scope(&mut self, scope: Option<RecurringScope>, cx: &mut Context<Self>) {
-        if self.marks.selected().is_none_or(|annotation| annotation.content_hash != self.locator.content_hash() || annotation.exact_text.trim().is_empty()) {
+        if self.marks.selected().is_none_or(|annotation| annotation.book_id != self.locator.book_id() || annotation.exact_text.trim().is_empty()) {
             return;
         }
         self.save_selected_annotation(None, None, cx);
@@ -80,7 +82,7 @@ impl ReaderView {
         .or_else(|| self.annotation_popup_anchor.map(annotation_editor::Passage::from_point));
         let mobile = components::uses_mobile_reader_controls(window);
         #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
-        let dock_height = if mobile && self.tts.dock_open { components::player_dock_height_px(window) } else { 0.0 };
+        let dock_height = if mobile && self.tts.dock_open() { components::player_dock_height_px(window) } else { 0.0 };
         #[cfg(not(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
         let dock_height = 0.0;
         let mut insets = window.insets().effective();
@@ -103,14 +105,14 @@ impl ReaderView {
             })
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
-        let context = self.marks.editor_context(self.locator.content_hash(), text, &local_ids, !text.trim().is_empty());
+        let context = self.marks.editor_context(self.locator.book_id(), text, &local_ids, !text.trim().is_empty());
         Some(annotation_editor::recurring_editor("reader-annotation-popup", entity, &annotation, context, geometry, &self.annotation_note_input, components::browser_theme(cx), window, cx))
     }
 
     pub(super) fn render_footnote(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (_, prepared) = self.footnote.clone()?;
         let theme = components::browser_theme(cx);
-        let mut panel = components::reader_footnote_panel(theme).child(components::section_title("Footnote"));
+        let mut panel = components::reader_footnote_panel(theme).child(components::section_title(text!(reader::footnote)));
         if let LoadState::Ready(renderer) = &self.load_state {
             panel = panel.child(html_view_gpui::HtmlNoteElement::new(renderer.clone(), prepared));
         }
@@ -118,8 +120,8 @@ impl ReaderView {
             panel
                 .child(
                     components::action_row()
-                        .child(components::topbar_action_button("reader-footnote-open", "Go to note", gpui_component::IconName::ArrowRight, theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx))))
-                        .child(components::topbar_action_button("reader-footnote-close", "Close", gpui_component::IconName::Close, theme).on_click(cx.listener(|this, _, _, cx| {
+                        .child(components::topbar_action_button("reader-footnote-open", text!(reader::go_to_note), gpui_component::IconName::ArrowRight, theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx))))
+                        .child(components::topbar_action_button("reader-footnote-close", text!(common::close), gpui_component::IconName::Close, theme).on_click(cx.listener(|this, _, _, cx| {
                             this.footnote = None;
                             notify(cx, Component::ReaderShell, "footnote_closed");
                         }))),

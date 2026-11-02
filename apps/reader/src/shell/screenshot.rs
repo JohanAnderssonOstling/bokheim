@@ -1,7 +1,9 @@
+use ui_text::text;
+
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, EntityId, HitboxBehavior, Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderOnce, ScrollWheelEvent, Subscription, Window,
-    canvas, div, point, px, size,
+    AnyElement, App, Bounds, ClipboardItem, Context, EntityId, HitboxBehavior, Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderOnce, ScrollWheelEvent, Subscription, Window, canvas, div,
+    point, px, size,
 };
 use gpui_component::{WindowExt, notification::Notification};
 use ui_components::BrowserTheme;
@@ -136,13 +138,7 @@ impl RenderOnce for ScreenshotDocument {
                     window
                         .spawn(cx, async move |cx| {
                             let result = match capture.await {
-                                Ok(pixels) => {
-                                    cx.background_executor()
-                                        .spawn(async move {
-                                            Image::from_rgba(&pixels).map_err(|error| error.to_string())
-                                        })
-                                        .await
-                                }
+                                Ok(pixels) => cx.background_executor().spawn(async move { Image::from_rgba(&pixels).map_err(|error| error.to_string()) }).await,
                                 Err(error) => Err(error.to_string()),
                             };
                             if let Err(error) = cx.update(|window, cx| {
@@ -154,11 +150,11 @@ impl RenderOnce for ScreenshotDocument {
                                 match result {
                                     Ok(image) => {
                                         cx.write_to_clipboard(ClipboardItem::new_image(&image));
-                                        window.push_notification(Notification::success("Screenshot copied to clipboard").id::<Selection>(), cx);
+                                        window.push_notification(Notification::success(text!(reader::screenshot_copied_to_clipboard)).id::<Selection>(), cx);
                                     }
                                     Err(error) => {
                                         log::warn!("Reader screenshot failed: {error}");
-                                        window.push_notification(Notification::error(format!("Could not capture screenshot: {error}")).id::<Selection>(), cx);
+                                        window.push_notification(Notification::error(text!(reader::could_not_capture_screenshot)).id::<Selection>(), cx);
                                     }
                                 }
                             }) {

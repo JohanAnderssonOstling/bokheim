@@ -6,9 +6,11 @@ pub mod books;
 pub mod catalog;
 pub mod popularity;
 pub use popularity::{unique_work_popularity, WorkPopularity};
+mod classification_method;
 pub mod matching;
 pub mod subject_consensus;
 pub mod year_consensus;
+pub use classification_method::{ClassificationMethod, ClassificationProvider};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -88,8 +90,6 @@ pub struct SiblingSubjectSupport {
     pub support_fraction: f64,
     pub evidence: Vec<ClassificationEvidence>,
 }
-
-pub const SIBLING_SUBJECT_CONSENSUS_METHOD: &str = "verified_sibling_subject_consensus:";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -296,7 +296,7 @@ pub struct Classification {
 /// Provenance for classification evidence.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ClassificationEvidence {
-    pub method: String,
+    pub method: ClassificationMethod,
     pub isbn13: String,
     pub open_library_work_id: String,
     pub open_library_edition_id: String,

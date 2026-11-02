@@ -1,11 +1,8 @@
 //! In-memory record offsets for the original StarDict indexes. Nothing is serialized.
-use std::{
-    cmp::Ordering,
-    io::{Read, Seek},
-};
+use std::cmp::Ordering;
 
 use super::{Body, SourceMetadata, integer, string_at, text};
-use crate::{Definition, MAX_ENTRY_BYTES, MAX_INDEX_BYTES, Result, read_at};
+use crate::{Definition, MAX_ENTRY_BYTES, MAX_INDEX_BYTES, ReadAt, Result};
 
 pub const IFO_FILE: &str = "dictionary.ifo";
 pub const IDX_FILE: &str = "dictionary.idx";
@@ -57,17 +54,17 @@ impl Index {
         offsets.push(bytes.len() as u32);
         Ok(Self { offsets })
     }
-    fn record(&self, reader: &mut (impl Read + Seek), ordinal: usize) -> Result<Vec<u8>> {
+    async fn record(&self, reader: &mut impl ReadAt, ordinal: usize) -> Result<Vec<u8>> {
         let start = *self.offsets.get(ordinal).ok_or("Dictionary alias points outside its index")?;
         let end = *self.offsets.get(ordinal + 1).ok_or("Dictionary alias points outside its index")?;
-        read_at(reader, u64::from(start), (end - start) as usize)
+        reader.read_at(u64::from(start), (end - start) as usize).await
     }
-    fn matches(&self, reader: &mut (impl Read + Seek), query: &str, synonyms: bool) -> Result<Vec<usize>> {
+    async fn matches(&self, reader: &mut impl ReadAt, query: &str, synonyms: bool) -> Result<Vec<usize>> {
         let count = self.offsets.len() - 1;
         let (mut low, mut high) = (0, count);
         while low < high {
             let middle = low + (high - low) / 2;
-            let bytes = self.record(reader, middle)?;
+            let bytes = self.record(reader, middle).await?;
             let mut cursor = 0;
             if compare(string_at(&bytes, &mut cursor)?, query).is_lt() {
                 low = middle + 1;
@@ -77,7 +74,7 @@ impl Index {
         }
         let mut found = Vec::new();
         for ordinal in low..count {
-            let bytes = self.record(reader, ordinal)?;
+            let bytes = self.record(reader, ordinal).await?;
             let mut cursor = 0;
             if compare(string_at(&bytes, &mut cursor)?, query).is_ne() {
                 break;
@@ -117,22 +114,22 @@ impl Dictionary {
     pub(crate) fn validate(ifo: &[u8], index: &[u8], synonyms: Option<&[u8]>, body_size: u64) -> Result<crate::Metadata> {
         Ok(Self::open(ifo, index, synonyms, body_size)?.metadata.info)
     }
-    pub fn lookup<R: Read + Seek, D: Read + Seek>(&self, query: &str, index: &mut R, synonyms: Option<&mut R>, body: &mut Body<D>) -> Result<Vec<Definition>> {
+    pub async fn lookup<R: ReadAt, D: ReadAt>(&self, query: &str, index: &mut R, synonyms: Option<&mut R>, body: &mut Body<D>) -> Result<Vec<Definition>> {
         let query = query.trim();
-        let mut entries = self.words.matches(index, query, false)?;
+        let mut entries = self.words.matches(index, query, false).await?;
         if let Some(table) = &self.synonyms {
-            entries.extend(table.matches(synonyms.ok_or("Dictionary is missing its .syn file")?, query, true)?);
+            entries.extend(table.matches(synonyms.ok_or("Dictionary is missing its .syn file")?, query, true).await?);
         }
         entries.sort_unstable();
         entries.dedup();
         let mut definitions = Vec::new();
         for entry in entries.into_iter().take(32) {
-            let bytes = self.words.record(index, entry)?;
+            let bytes = self.words.record(index, entry).await?;
             let mut cursor = 0;
             let word = string_at(&bytes, &mut cursor)?.to_owned();
             let offset = integer(&bytes, &mut cursor, if self.metadata.offset64 { 8 } else { 4 })?;
             let size = integer(&bytes, &mut cursor, 4)? as u32;
-            let text = text::definition(&body.read_entry(offset, size)?, &self.metadata.types)?;
+            let text = text::definition(&body.read_entry(offset, size).await?, &self.metadata.types)?;
             if !text.is_empty() {
                 definitions.push(Definition { word, text });
             }

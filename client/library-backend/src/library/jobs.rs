@@ -97,7 +97,7 @@ impl asset_transfer::thumbnail_jobs::ThumbnailObserver for ThumbnailEvents<'_> {
     fn completed(&mut self) {
         self.library.events.sync.wake();
     }
-    fn ready(&mut self, content_hash: BookId) {
-        self.library.emit(LibraryEvent::ThumbnailGenerated { content_hash });
+    fn ready(&mut self, book_id: BookId) {
+        self.library.emit(LibraryEvent::ThumbnailGenerated { book_id });
     }
 }

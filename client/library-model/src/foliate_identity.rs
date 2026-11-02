@@ -9,16 +9,16 @@ use std::{
 /// tombstones. Creation times are evidence only when the old location vanished
 /// and the match is unique on both sides. Quotes are never used as identity.
 pub fn match_foliate_annotations(incoming: &[Annotation], history: &[Annotation]) -> io::Result<Vec<Option<usize>>> {
-    let locations = incoming.iter().filter_map(|a| a.anchor.epub_cfi_value().map(|cfi| (a.content_hash, cfi))).collect::<HashSet<_>>();
+    let locations = incoming.iter().filter_map(|a| a.anchor.epub_cfi_value().map(|cfi| (a.book_id, cfi))).collect::<HashSet<_>>();
     let mut ids = HashMap::new();
     let mut anchors = HashMap::<_, Vec<_>>::new();
     for (index, annotation) in history.iter().enumerate() {
         if !matches!(annotation.anchor.origin(), AnnotationAnchor::EpubCfi { .. }) {
             continue;
         }
-        ids.insert((annotation.content_hash, annotation.id.as_str()), index);
+        ids.insert((annotation.book_id, annotation.id.as_str()), index);
         if let Some(cfi) = annotation.anchor.epub_cfi_value() {
-            anchors.entry((annotation.content_hash, cfi)).or_default().push(index);
+            anchors.entry((annotation.book_id, cfi)).or_default().push(index);
         }
     }
     let conflict = || io::Error::other("Foliate annotation identity is ambiguous; multiple annotations match a location or creation time");
@@ -27,10 +27,10 @@ pub fn match_foliate_annotations(incoming: &[Annotation], history: &[Annotation]
     // Reserve every explicit identity/location before considering creation time.
     // A later record may still carry the ID of an earlier record's candidate.
     for (slot, annotation) in matched.iter_mut().zip(incoming) {
-        let candidate = if let Some(index) = ids.get(&(annotation.content_hash, annotation.id.as_str())) {
+        let candidate = if let Some(index) = ids.get(&(annotation.book_id, annotation.id.as_str())) {
             Some(*index)
         } else {
-            match annotation.anchor.epub_cfi_value().and_then(|cfi| anchors.get(&(annotation.content_hash, cfi))).map(Vec::as_slice) {
+            match annotation.anchor.epub_cfi_value().and_then(|cfi| anchors.get(&(annotation.book_id, cfi))).map(Vec::as_slice) {
                 None | Some([]) => None,
                 Some([index]) => Some(*index),
                 _ => return Err(conflict()),
@@ -47,8 +47,8 @@ pub fn match_foliate_annotations(incoming: &[Annotation], history: &[Annotation]
     for (index, annotation) in history.iter().enumerate() {
         if !used.contains(&index) && annotation.created_at > 0 && matches!(annotation.anchor.origin(), AnnotationAnchor::EpubCfi { .. }) {
             if let Some(cfi) = annotation.anchor.epub_cfi_value() {
-                if !locations.contains(&(annotation.content_hash, cfi)) {
-                    created.entry((annotation.content_hash, annotation.created_at)).or_default().push(index);
+                if !locations.contains(&(annotation.book_id, cfi)) {
+                    created.entry((annotation.book_id, annotation.created_at)).or_default().push(index);
                 }
             }
         }
@@ -57,7 +57,7 @@ pub fn match_foliate_annotations(incoming: &[Annotation], history: &[Annotation]
         if slot.is_some() || annotation.created_at == 0 {
             continue;
         }
-        match created.get(&(annotation.content_hash, annotation.created_at)).map(Vec::as_slice) {
+        match created.get(&(annotation.book_id, annotation.created_at)).map(Vec::as_slice) {
             None | Some([]) => {}
             Some([index]) => {
                 if !used.insert(*index) {
@@ -80,7 +80,7 @@ mod tests {
     fn note(id: &str, location: &str, created_at: u64) -> Annotation {
         Annotation {
             id: id.into(),
-            content_hash: BookId::from(blake3::hash(b"book")),
+            book_id: BookId::from(blake3::hash(b"book")),
             anchor: AnnotationAnchor::epub_publication_cfi(location),
             exact_text: "Repeated quote".into(),
             note: String::new(),
@@ -119,7 +119,7 @@ mod tests {
     fn missing_dates_and_other_books_are_not_matched() {
         assert_eq!(match_foliate_annotations(&[note("new", "new", 0)], &[note("old", "old", 0)]).unwrap(), vec![None]);
         let mut other = note("old", "old", 7);
-        other.content_hash = BookId::from(blake3::hash(b"other"));
+        other.book_id = BookId::from(blake3::hash(b"other"));
         assert_eq!(match_foliate_annotations(&[note("new", "new", 7)], &[other]).unwrap(), vec![None]);
     }
 }

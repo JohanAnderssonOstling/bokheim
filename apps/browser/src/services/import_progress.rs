@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use gpui::{App, IntoElement, Window};
 use gpui_component::{WindowExt, notification::Notification, progress::Progress};
 
@@ -14,7 +16,7 @@ impl Drop for ImportProgressToast {
 impl ImportProgressToast {
     pub(crate) fn start(window: &mut Window, cx: &mut App) -> Self {
         let id = gpui::SharedString::from(uuid::Uuid::new_v4().to_string());
-        window.push_notification(Notification::new().id1::<Self>(id.clone()).autohide(false).title("Importing books").content(|_, _, _| Progress::new("import-progress").loading(true).into_any_element()), cx);
+        window.push_notification(Notification::new().id1::<Self>(id.clone()).autohide(false).title(text!(browse::importing_books)).content(|_, _, _| Progress::new("import-progress").loading(true).into_any_element()), cx);
         let (done, finished) = async_channel::bounded::<()>(1);
         window
             .spawn(cx, async move |cx| {

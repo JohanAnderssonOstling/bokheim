@@ -1,9 +1,10 @@
 //! A feed page as browse chips and cards: its navigation links are chips,
 //! its publications cards, and its next page and facets locations of their
 //! own.
-use crate::{fetch, pages, publications, Feed, NavigationLink, Publication, PDF};
+use crate::{Feed, NavigationLink, PDF, Publication, fetch, pages, publications};
+use book_model::BookFormat;
 use client_runtime::{BackendError, Failure};
-use library_model::{BookCardRow, BookSource, BrowseContents, BrowseLocation, BrowseRow, CardKey, FeedFacet, FeedFacetGroup, FeedPage, LibraryFileTypeFilter, OpdsCredentials, OpdsSource, OpdsSourceId};
+use library_model::{BookCardRow, BookSource, BrowseContents, BrowseLocation, BrowseRow, CardKey, FeedFacet, FeedFacetGroup, FeedPage, LibraryFileTypeFilter, OpdsCredentials, OpdsPublication, OpdsSource, OpdsSourceId};
 use url::Url;
 
 /// The page `page` of `source` (its root when `None`), or the results for
@@ -13,7 +14,7 @@ use url::Url;
 /// Only this page is fetched: the pages its links lead to are fetched when
 /// opened. Feeds such as Project Gutenberg's link every listed book to a
 /// page of its own, and fetching those alongside held the page back.
-pub async fn browse(source: &OpdsSource, credentials: Option<&OpdsCredentials>, page: Option<u32>, search: &str) -> Result<(BrowseContents, FeedPage), BackendError> {
+pub async fn browse(source: &OpdsSource, credentials: Option<&OpdsCredentials>, page: Option<u32>, search: &str) -> Result<(BrowseContents, FeedPage, Vec<OpdsPublication>), BackendError> {
     let root = root(&source.url)?;
     let url = match page {
         None => root.clone(),
@@ -22,19 +23,19 @@ pub async fn browse(source: &OpdsSource, credentials: Option<&OpdsCredentials>, 
     let access = fetch::Access::new(&root, credentials);
     let feed = match fetch_page(&url, search, &access).await {
         Ok(feed) => feed,
-        Err(error) if error.failure() == Some(Failure::Unauthorized) => return Ok((BrowseContents::default(), FeedPage { sign_in: true, ..FeedPage::default() })),
+        Err(error) if error.failure() == Some(Failure::Unauthorized) => return Ok((BrowseContents::default(), FeedPage { sign_in: true, ..FeedPage::default() }, Vec::new())),
         Err(error) => return Err(error),
     };
     let source = source.id;
     let children = feed.navigation.iter().map(|link| chip(source, link)).collect();
-    let books = feed.publications.iter().map(|publication| card(source, publication)).collect();
+    let (books, publications) = feed.publications.iter().map(|publication| listing(source, publication)).unzip();
     let location = |href| BrowseLocation::Opds { source, page: Some(pages::id(source, href)) };
     let facets = feed
         .facets
         .iter()
         .map(|group| FeedFacetGroup { title: group.title.clone(), choices: group.facets.iter().map(|facet| FeedFacet { title: facet.title.clone(), location: location(&facet.href), active: facet.active }).collect() })
         .collect();
-    Ok((BrowseContents { children, books }, FeedPage { next: feed.next.as_ref().map(location), facets, sign_in: false }))
+    Ok((BrowseContents { children, books }, FeedPage { next: feed.next.as_ref().map(location), facets, sign_in: false }, publications))
 }
 
 async fn fetch_page(url: &Url, search: &str, access: &fetch::Access<'_>) -> Result<Feed, BackendError> {
@@ -67,21 +68,16 @@ fn chip(source: OpdsSourceId, link: &NavigationLink) -> BrowseRow {
     BrowseRow { id: BrowseLocation::Opds { source, page: Some(pages::id(source, &link.href)) }, name: link.title.clone(), path: None, book_count: link.count.map_or(0, |count| count as usize), downloaded_book_count: 0 }
 }
 
-/// A publication's card; adding it or drawing its cover finds it again by
-/// the card's key.
-fn card(source: OpdsSourceId, publication: &Publication) -> BookCardRow {
+/// Carry descriptions with the listing and pass feed metadata directly to library storage.
+fn listing(source: OpdsSourceId, publication: &Publication) -> (BookCardRow, OpdsPublication) {
     let entry = entry_key(source, publication);
     publications::remember(entry, publication);
-    // A sold book is offered only where its store's window can open.
-    #[cfg(not(target_arch = "wasm32"))]
-    let buyable = publication.buy.is_some() && crate::browser::stores_available();
-    #[cfg(target_arch = "wasm32")]
-    let buyable = false;
-    BookCardRow {
-        source: BookSource::Opds { source, entry, downloadable: publication.download.is_some(), buyable },
+    let card = BookCardRow {
+        source: BookSource::Opds { source, entry, downloadable: publication.download.is_some() },
         title: publication.title.clone(),
         subtitle: publication.subtitle.clone(),
         author: publication.authors.join(", "),
+        description: publication.description.clone(),
         progress: 0.0,
         downloaded: false,
         download_requested: false,
@@ -89,7 +85,18 @@ fn card(source: OpdsSourceId, publication: &Publication) -> BookCardRow {
         audiobook_duration_ms: None,
         added_at: 0,
         source_directory: None,
-    }
+    };
+    let metadata = OpdsPublication {
+        entry,
+        title: publication.title.clone(),
+        subtitle: publication.subtitle.clone(),
+        authors: publication.authors.clone(),
+        description: publication.description.clone(),
+        format: publication.download.as_ref().and_then(|download| BookFormat::from_media_type(download.media_type)),
+        download_url: publication.download.as_ref().map(|download| download.href.to_string()),
+        cover_url: publication.cover.as_ref().map(ToString::to_string),
+    };
+    (card, metadata)
 }
 
 /// A stable card key for a publication: its feed and OPDS id, or its title

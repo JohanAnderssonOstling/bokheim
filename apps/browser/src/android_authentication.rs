@@ -1,7 +1,9 @@
 //! Android UI transport. Session IDs prevent a dismissed screen receiving a
 //! later account response. Credentials exist only in the bounded request queue.
+use ui_text::text;
+
 use async_channel::{Receiver, Sender};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock,
     atomic::{AtomicU64, Ordering},
@@ -40,7 +42,7 @@ pub fn initialize(transport: impl Fn(&str) -> Result<(), String> + Send + Sync +
 pub fn receive(id: u64, message: &str) {
     let Ok(request) = serde_json::from_str::<Request>(message) else {
         // Release the dialog's busy state rather than leaving it waiting.
-        Session::complete(id, Some("Could not read the sign-in form. Close it and try again."));
+        Session::complete(id, Some(text!(browse::could_not_read_the_sign_in_form_close_it_and_try_again)));
         return;
     };
     let active = active_session();
@@ -53,13 +55,28 @@ pub fn receive(id: u64, message: &str) {
 fn send(message: serde_json::Value) -> Result<(), String> {
     TRANSPORT.get().ok_or("Android authentication is unavailable")?(&message.to_string())
 }
+/// Named ARGB colors for the native account form's JSON boundary.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Theme {
+    pub background: u32,
+    pub text: u32,
+    pub muted: u32,
+    pub accent: u32,
+    pub accent_text: u32,
+    pub border: u32,
+    pub link: u32,
+    pub danger: u32,
+    pub selection: u32,
+}
+
 pub(crate) struct Session(pub u64);
 impl Session {
-    pub fn open(colors: Vec<u32>) -> Result<(Self, Receiver<Request>), String> {
+    pub fn open(theme: Theme) -> Result<(Self, Receiver<Request>), String> {
         let session = Self(NEXT_ID.fetch_add(1, Ordering::Relaxed));
         let (sender, receiver) = async_channel::bounded(2);
         *active_session() = Some((session.0, sender));
-        send(serde_json::json!({"command":"open", "id":session.0, "colors":colors, "minimum":account_contract::PASSWORD_MIN_CHARACTERS, "resendCooldownSeconds":account_contract::EMAIL_RESEND_COOLDOWN_SECONDS}))?;
+        send(serde_json::json!({"command":"open", "id":session.0, "theme":theme, "minimum":account_contract::PASSWORD_MIN_CHARACTERS, "resendCooldownSeconds":account_contract::EMAIL_RESEND_COOLDOWN_SECONDS}))?;
         Ok((session, receiver))
     }
     pub fn complete(id: u64, error: Option<&str>) {

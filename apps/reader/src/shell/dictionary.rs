@@ -1,7 +1,8 @@
 //! Shared in-app definition popup for EPUB and PDF selections.
+use ui_text::text;
+
 use std::{collections::BTreeMap, future::Future, pin::Pin, rc::Rc};
 
-use app::{AppClient, WikipediaArticle, WikipediaChoice, WikipediaLookup};
 use content_address::BookId;
 use dictionary::{Client as DictionaryClient, Definition as DictionaryDefinition, DictionaryLookup};
 use dictionary_settings::{Closed as DictionarySettingsClosed, DictionarySettings};
@@ -12,8 +13,10 @@ use gpui::{
 };
 use gpui_component::popover::Popover;
 use gpui_component::text::TextView;
-use gpui_component::{Disableable, ElementExt, FocusTrapElement, IconName};
+use gpui_component::{Disableable, FocusTrapElement, IconName};
 use html::selection::WORD_SELECTION_DRAG_DISTANCE;
+use language_tags::LanguageTag;
+use reader_lookups::{WikipediaArticle, WikipediaChoice, WikipediaLookup, parse_language_tag};
 use ui_components as components;
 
 pub(crate) struct Closed;
@@ -133,7 +136,7 @@ fn definition_text(text: &str) -> String {
     output
 }
 
-type WikipediaRequest = Rc<dyn Fn(String, Vec<String>) -> Pin<Box<dyn Future<Output = Option<WikipediaLookup>>>>>;
+type WikipediaRequest = Rc<dyn Fn(String, Vec<LanguageTag>) -> Pin<Box<dyn Future<Output = Option<WikipediaLookup>>>>>;
 
 pub(crate) struct DictionaryPopup {
     translation: Option<Entity<super::translation::TranslationPopup>>,
@@ -170,20 +173,28 @@ impl EventEmitter<Closed> for DictionaryPopup {}
 impl EventEmitter<SelectElement> for DictionaryPopup {}
 
 impl DictionaryPopup {
-    pub(crate) fn new(backend: AppClient, query: String, languages: Vec<String>, anchor: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let dictionary: Rc<dyn DictionaryClient> = Rc::new(backend.clone());
+    pub(crate) fn new(query: String, languages: Vec<String>, anchor: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let dictionary = dictionary_settings::client(cx);
         let settings_backend = dictionary.clone();
         let lookup = query.clone();
         let lookup_languages = languages.clone();
-        let wikipedia_backend = backend.clone();
+        let wikipedia_client = super::lookups::client(cx);
         let wikipedia_request: WikipediaRequest = Rc::new(move |query, languages| {
-            let backend = wikipedia_backend.clone();
-            Box::pin(async move { backend.lookup_wikipedia(query, languages).await })
+            let client = wikipedia_client.clone();
+            Box::pin(async move { client.lookup_wikipedia(query, languages).await })
         });
         let task = cx.spawn(async move |this, cx| {
             let mut changes = dictionary.changes().await.ok();
             loop {
                 let result = dictionary.lookup(lookup.clone(), lookup_languages.clone()).await;
+                match &result {
+                    Err(error) => log::warn!("Dictionary lookup failed: {error}"),
+                    Ok(result) => {
+                        for error in &result.errors {
+                            log::warn!("Dictionary lookup failed: {error}");
+                        }
+                    }
+                }
                 let downloading = dictionary.downloads(Vec::new()).await.is_ok_and(|state| state.active.is_some());
                 if this
                     .update(cx, |this, cx| {
@@ -242,8 +253,8 @@ impl DictionaryPopup {
         }
     }
 
-    pub(crate) fn translate(backend: AppClient, book_id: BookId, query: String, languages: Vec<String>, anchor: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let translation = cx.new(|cx| super::translation::TranslationPopup::new(backend, book_id, query.clone(), &languages, cx));
+    pub(crate) fn translate(book_id: BookId, query: String, languages: Vec<String>, anchor: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let translation = cx.new(|cx| super::translation::TranslationPopup::new(book_id, query.clone(), &languages, cx));
         cx.subscribe(&translation, |_, _, _: &Closed, cx| cx.emit(Closed)).detach();
         Self { translation: Some(translation), selection_only: true, ..Self::empty(query, languages, anchor, window, cx) }
     }
@@ -343,7 +354,7 @@ impl DictionaryPopup {
             return;
         }
         self.wikipedia_attempted = true;
-        self.start_wikipedia(self.query.clone(), self.languages.clone(), cx);
+        self.start_wikipedia(self.query.clone(), self.languages.iter().filter_map(|tag| parse_language_tag(tag)).collect(), cx);
     }
 
     fn wikipedia_hit(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -467,7 +478,7 @@ impl DictionaryPopup {
         cx.stop_propagation();
     }
 
-    fn start_wikipedia(&mut self, query: String, languages: Vec<String>, cx: &mut Context<Self>) {
+    fn start_wikipedia(&mut self, query: String, languages: Vec<LanguageTag>, cx: &mut Context<Self>) {
         let Some(request) = self.wikipedia_request.clone() else { return };
         self.wikipedia_loading = true;
         self._wikipedia_task = cx.spawn(async move |this, cx| {
@@ -577,37 +588,37 @@ impl Render for DictionaryPopup {
             definitions = definitions.child(TextView::plain("lookup-selected-text", self.query.trim_start().to_owned()).selectable(true));
         } else {
             match &self.result {
-                None => definitions = definitions.child("Looking up…"),
-                Some(Err(error)) => definitions = definitions.child(error.clone()),
+                None => definitions = definitions.child(text!(reader::looking_up)),
+                Some(Err(_)) => definitions = definitions.child(text!(reader::dictionary_lookup_failed)),
                 Some(Ok(result)) => {
                     if dictionary_total == 0 && self.downloading {
-                        definitions = definitions.child("Downloading a dictionary… Results will update when it is installed.");
+                        definitions = definitions.child(text!(reader::downloading_a_dictionary_results_will_update_when_it_is_installed));
                     } else if dictionary_total == 0 && self.wikipedia_eligible() && self.wikipedia_attempted && wikipedia.is_none() && !self.wikipedia_loading {
-                        definitions = definitions.child("No Wikipedia article found.");
+                        definitions = definitions.child(text!(reader::no_wikipedia_article_found));
                     } else if result.enabled_count == 0 && wikipedia.is_none() && !self.wikipedia_loading {
-                        definitions = definitions.child("Open dictionary settings to download, import, or enable a dictionary for offline lookup.");
+                        definitions = definitions.child(text!(reader::open_dictionary_settings_to_download_import_or_enable_a_dictionary_for_offline));
                     } else if dictionary_total == 0 && wikipedia.is_none() && !self.wikipedia_loading {
-                        definitions = definitions.child("No definition found in the enabled dictionaries.");
+                        definitions = definitions.child(text!(reader::no_definition_found_in_the_enabled_dictionaries));
                     }
                     if let Some((_, definition)) = self.dictionary_entries().nth(self.dictionary_index) {
                         title = definition.word.trim_start().to_owned();
                         let entry = div().w_full().min_w_0().flex_none().debug_selector(|| "dictionary-entry".into());
                         definitions = definitions.child(entry.child(TextView::plain("lookup-definition-text", definition_text(&definition.text)).selectable(true)));
                     }
-                    for error in &result.errors {
-                        definitions = definitions.child(div().text_color(theme.text_muted).child(error.clone()));
+                    if !result.errors.is_empty() {
+                        definitions = definitions.child(div().text_color(theme.text_muted).child(text!(reader::dictionary_partly_unavailable)));
                     }
                 }
             }
         }
         if self.wikipedia_loading {
-            definitions = definitions.child(div().text_color(theme.text_muted).child("Looking up Wikipedia…"));
+            definitions = definitions.child(div().text_color(theme.text_muted).child(text!(reader::looking_up_wikipedia)));
         }
         if let Some(article) = wikipedia {
             definitions = definitions.child(div().min_w_0().flex_none().debug_selector(|| "wikipedia-summary".into()).child(TextView::plain("lookup-wikipedia-text", article.extract.trim_start().to_owned()).selectable(true)));
         }
         if self.selection_only {
-            title = "Selected text".to_owned();
+            title = text!(reader::selected_text).to_owned();
         } else if let Some(article) = wikipedia {
             title = article.title.trim_start().to_owned();
         }
@@ -626,7 +637,7 @@ impl Render for DictionaryPopup {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        components::outlined_icon_button("lookup-previous", "Previous result", IconName::ChevronLeft)
+                        components::outlined_icon_button("lookup-previous", text!(reader::previous_result), IconName::ChevronLeft)
                             .no_fill()
                             .debug_selector(|| "lookup-previous".into())
                             .disabled(loading)
@@ -634,7 +645,7 @@ impl Render for DictionaryPopup {
                     )
                     .child(div().debug_selector(|| "lookup-counter".into()).flex_1().text_center().child(format!("{}/{}", index + 1, total)))
                     .child(
-                        components::outlined_icon_button("lookup-next", "Next result", IconName::ChevronRight)
+                        components::outlined_icon_button("lookup-next", text!(reader::next_result), IconName::ChevronRight)
                             .no_fill()
                             .debug_selector(|| "lookup-next".into())
                             .disabled(loading)
@@ -643,14 +654,14 @@ impl Render for DictionaryPopup {
             );
         }
         let settings = (!self.selection_only && self.backend.is_some()).then(|| {
-            components::outlined_icon_button("dictionary-settings", "Dictionary settings", IconName::Settings)
+            components::outlined_icon_button("dictionary-settings", text!(reader::dictionary_settings), IconName::Settings)
                 .no_fill()
                 .debug_selector(|| "dictionary-settings".into())
                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
         });
         let show_wikipedia_button = dictionary_total > 0 && self.wikipedia_request.is_some();
         let wikipedia_lookup = show_wikipedia_button.then(|| {
-            components::outlined_icon_button("lookup-wikipedia", "Look up on Wikipedia", IconName::Globe)
+            components::outlined_icon_button("lookup-wikipedia", text!(reader::look_up_on_wikipedia), IconName::Globe)
                 .no_fill()
                 .debug_selector(|| "lookup-wikipedia".into())
                 .on_click(cx.listener(|this, _, window, cx| this.lookup_entry_on_wikipedia(window, cx)))
@@ -666,7 +677,9 @@ impl Render for DictionaryPopup {
                     .items_center()
                     .gap(px(8.0))
                     .child(
+                        // The adjacent browser button provides this same keyboard action.
                         components::base_button("wikipedia-title")
+                            .tab_stop(false)
                             .ghost()
                             .no_fill()
                             .h_auto()
@@ -677,12 +690,12 @@ impl Render for DictionaryPopup {
                             .whitespace_nowrap()
                             .justify_start()
                             .debug_selector(|| "wikipedia-title".into())
-                            .tooltip("Open article on Wikipedia")
+                            .tooltip(text!(reader::open_article_on_wikipedia))
                             .child(title)
                             .on_click(move |_, _, cx| cx.open_url(&title_url)),
                     )
                     .child(
-                        components::outlined_icon_button("wikipedia-open-browser", "Open Wikipedia in browser", IconName::Globe)
+                        components::outlined_icon_button("wikipedia-open-browser", text!(reader::open_wikipedia_in_browser), IconName::Globe)
                             .no_fill()
                             .debug_selector(|| "wikipedia-open-browser".into())
                             .on_click(move |_, _, cx| cx.open_url(&browser_url)),
@@ -691,17 +704,17 @@ impl Render for DictionaryPopup {
                         Popover::new("wikipedia-info")
                             .anchor(gpui::Anchor::TopRight)
                             .appearance(false)
-                            .trigger(components::outlined_icon_button("wikipedia-info-button", "Source and license", IconName::Info).no_fill().tab_stop(false).debug_selector(|| "wikipedia-info-button".into()))
+                            .trigger(components::outlined_icon_button("wikipedia-info-button", text!(common::source_and_license), IconName::Info).no_fill().tab_stop(false).debug_selector(|| "wikipedia-info-button".into()))
                             .child(
                                 components::modal_form_surface(theme)
                                     .debug_selector(|| "wikipedia-attribution".into())
                                     .w(px(260.0))
                                     .max_w(window.viewport_size().width - px(48.0))
                                     .gap(px(8.0))
-                                    .child(components::section_title("Source and license"))
-                                    .child("Wikipedia contributors")
-                                    .child(components::outlined_text_button("wikipedia-source", "Wikipedia article").ghost().no_fill().on_click(move |_, _, cx| cx.open_url(&source_url)))
-                                    .child(components::outlined_text_button("wikipedia-license", "CC BY-SA 4.0").ghost().no_fill().on_click(|_, _, cx| cx.open_url("https://creativecommons.org/licenses/by-sa/4.0/"))),
+                                    .child(components::section_title(text!(common::source_and_license)))
+                                    .child(text!(reader::wikipedia_contributors))
+                                    .child(components::outlined_text_button("wikipedia-source", text!(reader::wikipedia_article)).ghost().no_fill().on_click(move |_, _, cx| cx.open_url(&source_url)))
+                                    .child(components::outlined_text_button("wikipedia-license", text!(reader::cc_by_sa_4_0)).ghost().no_fill().on_click(|_, _, cx| cx.open_url("https://creativecommons.org/licenses/by-sa/4.0/"))),
                             ),
                     )
                     .children(settings),
@@ -792,15 +805,22 @@ impl DictionaryPopup {
                     cx.stop_propagation();
                 }),
             )
-            .on_prepaint(move |_, window, _| {
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture {
-                        let _ = movement_target.update(cx, |this, _| {
-                            this.element_click.moved(event.position);
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = movement_target.update(cx, |this, _| {
+                                    this.element_click.moved(event.position);
+                                });
+                            }
                         });
-                    }
-                });
-            })
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
                 let expand = this.element_click.finish_click(event);
@@ -825,9 +845,12 @@ impl DictionaryPopup {
                 cx.emit(Closed);
             }));
         let overlay = if let Some((bounds, above, _)) = placement {
+            // Anchor origins snap to device pixels. Reserve one pixel so the
+            // minimum gap survives rounding with fractional panel heights.
+            let gap = px(8.0 + 1.0 / window.scale_factor());
             let panel = anchored()
                 .anchor(if above { Anchor::BottomLeft } else { Anchor::TopLeft })
-                .position(point(bounds.left(), if above { bounds.top() - px(8.0) } else { bounds.bottom() + px(8.0) }))
+                .position(point(bounds.left(), if above { bounds.top() - gap } else { bounds.bottom() + gap }))
                 .snap_to_window_with_margin(Edges { top: insets.top + px(12.0), right: insets.right + px(12.0), bottom: insets.bottom + px(12.0), left: insets.left + px(12.0) })
                 .child(panel);
             components::anchor_to_window(components::absolute_full_size().child(scrim).child(panel), window)

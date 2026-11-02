@@ -8,7 +8,7 @@ pub async fn upload(book: &VerifiedBook, url: &reqwest::Url, token: &str) -> Res
         return Err(TransferError::retryable("verified book size changed"));
     }
     let bearer = format!("Bearer {token}");
-    let checksum = book.content_hash.to_hex();
+    let checksum = book.book_id.to_hex();
     trace.phase("send_body_wait_response");
     let trace_id = trace.id();
     let status = client_platform_web::transport::upload::put_blob(

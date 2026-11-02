@@ -266,7 +266,12 @@ pub(crate) fn direct_codes(book: &WikidataBookEvidence, isbn: &str) -> Vec<Class
                 scheme,
                 notation,
                 source: if c.source_entity == book.wikidata_id { ClassificationSource::ExactEdition } else { ClassificationSource::Work },
-                evidence: vec![ClassificationEvidence { method: format!("wikidata:direct:{}:{}", c.source_entity, c.property), isbn13: isbn.into(), open_library_work_id: String::new(), open_library_edition_id: String::new() }],
+                evidence: vec![ClassificationEvidence {
+                    method: metadata_contract::ClassificationMethod::WikidataDirect { entity: c.source_entity.clone(), property: c.property.clone() },
+                    isbn13: isbn.into(),
+                    open_library_work_id: String::new(),
+                    open_library_edition_id: String::new(),
+                }],
             })
         })
         .collect()

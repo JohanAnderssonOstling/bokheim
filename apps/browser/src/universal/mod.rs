@@ -1,11 +1,13 @@
 //! Pages whose lifetime is independent of the selected library.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod annotation_export;
 pub(crate) mod settings;
 pub(crate) mod sync;
 #[cfg(not(target_arch = "wasm32"))]
-mod annotation_export;
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use annotation_export::open_annotation_export;
+mod library_downloads;
+pub(crate) use library_downloads::library_book_menu;
 #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod reader_import;
 #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]

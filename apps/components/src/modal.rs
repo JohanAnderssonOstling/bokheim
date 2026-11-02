@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use gpui::prelude::*;
 use gpui::{Anchored, App, Div, ElementId, FontWeight, KeyDownEvent, MouseButton, SharedString, Stateful, Window, div, px, rems};
 
@@ -64,6 +66,8 @@ pub fn modal_form_surface(theme: BrowserTheme) -> Div {
 /// settings. Its list fills the available height instead of sizing to results.
 pub fn font_picker_surface(window: &Window, theme: BrowserTheme) -> Div {
     let viewport = window.viewport_size();
+    #[cfg(feature = "kobo")]
+    let viewport = gpui::size(viewport.width, viewport.height - gpui_kobo::keyboard_height(window));
     let insets = window.insets().effective();
     let width = (f32::from(viewport.width - insets.left - insets.right) - 2.0 * SPACE_MD).clamp(1.0, 640.0);
     let height = ((f32::from(viewport.height - insets.top - insets.bottom) - 2.0 * SPACE_MD) * 0.9).clamp(1.0, 720.0);
@@ -120,9 +124,7 @@ pub fn confirmation_dialog(dialog: gpui_component::dialog::AlertDialog, window: 
 /// Passed to the dialog as its footer, with nothing above it. The dialog's own
 /// minimum height and the gap it keeps between a header and a footer would
 /// otherwise leave an empty band over the row, so both are cleared.
-pub fn confirmation_dialog_row(
-    dialog: gpui_component::dialog::AlertDialog, question: impl Into<SharedString>, cancel: crate::Button, confirm: crate::Button, theme: BrowserTheme,
-) -> gpui_component::dialog::AlertDialog {
+pub fn confirmation_dialog_row(dialog: gpui_component::dialog::AlertDialog, question: impl Into<SharedString>, cancel: crate::Button, confirm: crate::Button, theme: BrowserTheme) -> gpui_component::dialog::AlertDialog {
     dialog.min_h_0().gap_0().footer(
         div()
             .w_full()
@@ -148,7 +150,18 @@ pub fn bottom_sheet_overlay() -> Div {
 /// and a click-swallowing guard so a tap inside doesn't fall through to the
 /// scrim below it and dismiss the sheet it landed on.
 pub fn bottom_sheet_surface(theme: BrowserTheme) -> Div {
-    div().w_full().flex_none().flex().flex_col().max_h(gpui::relative(0.8)).occlude().bg(theme.page_bg).border_t_1().border_color(theme.border).shadow(crate::overlay_shadow(theme)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    div()
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .max_h(gpui::relative(0.8))
+        .occlude()
+        .bg(theme.page_bg)
+        .border_t_1()
+        .border_color(theme.border)
+        .shadow(crate::overlay_shadow(theme))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 /// A bottom sheet's title row. Callers wanting a trailing close button (or
@@ -170,7 +183,7 @@ pub fn bottom_sheet_header(title: impl Into<SharedString>, theme: BrowserTheme) 
 /// A bottom sheet's close button, for the end of `bottom_sheet_header`: the
 /// muted glyph, centred in a touch target on a phone.
 pub fn bottom_sheet_close_button(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
-    let tooltip = crate::shortcut_tooltip("Close", "escape");
+    let tooltip = crate::shortcut_tooltip(text!(common::close), "escape");
     div()
         .id(id)
         .flex_none()

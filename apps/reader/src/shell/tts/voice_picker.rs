@@ -1,4 +1,6 @@
 //! The same installed/offline voice choices in a desktop popup and a mobile sheet.
+use ui_text::text;
+
 use super::*;
 use gpui::{Anchor, Entity, FocusHandle, Focusable, Render, Subscription, WeakEntity, Window, px};
 use gpui_component::{Selectable, WindowExt, popover::Popover};
@@ -72,9 +74,9 @@ impl Snapshot {
         let mut bundled = Vec::new();
         #[cfg(not(target_arch = "wasm32"))]
         if state.languages.iter().all(|language| reader_speech::language_base(language).is_empty()) || supports_languages(&state.languages) {
-            bundled.push(Item { choice: Choice::Bundled(NarrationVoice::Alba), name: "Alba".into(), language: "en".into(), detail: Some("Scottish English".into()) });
+            bundled.push(Item { choice: Choice::Bundled(NarrationVoice::Alba), name: text!(reader::alba).into(), language: "en".into(), detail: Some(text!(reader::scottish_english).into()) });
             #[cfg(not(target_os = "android"))]
-            bundled.push(Item { choice: Choice::Bundled(NarrationVoice::George), name: "George".into(), language: "en".into(), detail: Some("British English".into()) });
+            bundled.push(Item { choice: Choice::Bundled(NarrationVoice::George), name: text!(reader::george).into(), language: "en".into(), detail: Some(text!(reader::british_english).into()) });
         }
         bundled.sort_by_cached_key(Item::sort_key);
         Self {
@@ -115,6 +117,7 @@ impl<C: TtsReader> Picker<C> {
         let saved = crate::settings::ReaderSettings::preferences(cx).narration_voices.clone();
         let _ = self.owner.update(cx, |reader, cx| {
             let state = reader.narration_mut();
+            let was_active = state.is_active();
             state.voice_preferences.extend(saved);
             let snapshot = Snapshot::new(state);
             if !snapshot.toggle(item, state) {
@@ -123,6 +126,9 @@ impl<C: TtsReader> Picker<C> {
             let voice = state.voice;
             let id = state.device_voice.clone();
             let selections = state.voice_preferences.clone();
+            if was_active && !state.is_active() {
+                reader.stop_tts(cx);
+            }
             crate::settings::ReaderSettings::update(cx, |preferences| {
                 preferences.narration_voice = voice;
                 preferences.narration_device_voice = id;
@@ -142,19 +148,35 @@ impl<C: TtsReader> Render for Picker<C> {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let tabs = components::row(0.0)
-            .child(components::base_button("tts-device-tab").debug_selector(|| "tts-device-tab".into()).ghost().no_fill().label("Device").flex_1().border_b_2().border_color(if self.device { theme.accent } else { theme.rule }).on_click(
-                cx.listener(|picker, _, _, cx| {
-                    picker.device = true;
-                    cx.notify();
-                }),
-            ))
-            .child(components::base_button("tts-bokheim-tab").debug_selector(|| "tts-bokheim-tab".into()).ghost().no_fill().label("Bokheim").flex_1().border_b_2().border_color(if self.device { theme.rule } else { theme.accent }).on_click(
-                cx.listener(|picker, _, _, cx| {
-                    picker.device = false;
-                    cx.notify();
-                }),
-            ))
-            .child(components::outlined_icon_button("tts-voice-picker-close", "Close voice choices", IconName::Close).debug_selector(|| "tts-voice-picker-close".into()).on_click(cx.listener(|picker, _, window, cx| {
+            .child(
+                components::base_button("tts-device-tab")
+                    .debug_selector(|| "tts-device-tab".into())
+                    .ghost()
+                    .no_fill()
+                    .label(text!(reader::device))
+                    .flex_1()
+                    .border_b_2()
+                    .border_color(if self.device { theme.accent } else { theme.rule })
+                    .on_click(cx.listener(|picker, _, _, cx| {
+                        picker.device = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                components::base_button("tts-bokheim-tab")
+                    .debug_selector(|| "tts-bokheim-tab".into())
+                    .ghost()
+                    .no_fill()
+                    .label(text!(common::bokheim))
+                    .flex_1()
+                    .border_b_2()
+                    .border_color(if self.device { theme.rule } else { theme.accent })
+                    .on_click(cx.listener(|picker, _, _, cx| {
+                        picker.device = false;
+                        cx.notify();
+                    })),
+            )
+            .child(components::outlined_icon_button("tts-voice-picker-close", text!(reader::close_voice_choices), IconName::Close).debug_selector(|| "tts-voice-picker-close".into()).on_click(cx.listener(|picker, _, window, cx| {
                 (picker.close)(window, cx);
             })));
         let choices = if self.device { &self.snapshot.device } else { &self.snapshot.bundled };
@@ -173,7 +195,7 @@ impl<C: TtsReader> Render for Picker<C> {
                         .min_w_0()
                         .h_auto()
                         .py(px(10.0))
-                        .tooltip(if checked { format!("Unload {}", item.name) } else { item.name.clone() })
+                        .tooltip(if checked { format!(text!(reader::unload), item.name) } else { item.name.clone() })
                         .child(
                             components::column(0.0)
                                 .items_start()
@@ -189,16 +211,16 @@ impl<C: TtsReader> Render for Picker<C> {
             .collect::<Vec<_>>();
         let message = if self.device {
             if self.snapshot.loading {
-                Some("Finding installed local voices…".to_owned())
+                Some(text!(reader::finding_installed_local_voices).to_owned())
             } else if let Some(error) = &self.snapshot.error {
                 Some(error.clone())
             } else if choices.is_empty() {
-                Some("No matching local voices are installed. Install an offline voice in device settings.".into())
+                Some(text!(reader::no_matching_local_voices_are_installed_install_an_offline_voice_in_device).into())
             } else {
                 None
             }
         } else if choices.is_empty() {
-            Some("No built-in voice supports this book’s language on this device.".into())
+            Some(text!(reader::no_built_in_voice_supports_this_books_language_on_this_device).into())
         } else {
             None
         };
@@ -219,7 +241,7 @@ impl<C: TtsReader> Render for Picker<C> {
             }))
             .child(tabs)
             .child(div().id("tts-voice-list").flex_1().min_h_0().overflow_y_scroll().children(message.map(|text| components::caption_line(text, theme).p(px(12.0)))).children(rows))
-            .child(components::base_button("tts-refresh-voices").ghost().label("Refresh local voices").on_click(cx.listener(|picker, _, _, cx| {
+            .child(components::base_button("tts-refresh-voices").ghost().label(text!(reader::refresh_local_voices)).on_click(cx.listener(|picker, _, _, cx| {
                 let _ = picker.owner.update(cx, |reader, cx| {
                     reader.narration_mut().reload_voices(cx);
                     cx.notify();
@@ -231,16 +253,16 @@ impl<C: TtsReader> Render for Picker<C> {
 pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Context<C>) -> AnyElement {
     let snapshot = Snapshot::new(state);
     let label = if state.voice == NarrationVoice::Device {
-        state.device_voices.iter().find(|voice| Some(&voice.id) == state.device_voice.as_ref()).map_or("Device voice", |voice| voice.name.as_str())
+        state.device_voices.iter().find(|voice| Some(&voice.id) == state.device_voice.as_ref()).map_or(text!(reader::device_voice), |voice| voice.name.as_str())
     } else if state.voice == NarrationVoice::George {
-        "George"
+        text!(reader::george)
     } else {
-        "Alba"
+        text!(reader::alba)
     };
     let trigger = if compact {
-        components::outlined_icon_button("tts-voice", format!("Narration voice: {label}"), Icon::new(IconName::User).size(px(20.0))).p_0().size(px(32.0))
+        components::outlined_icon_button("tts-voice", format!(text!(reader::narration_voice), label = label), Icon::new(IconName::User).size(px(20.0))).p_0().size(px(32.0))
     } else {
-        components::player_dock_text_button("tts-voice", label.to_owned()).tooltip(format!("Narration voice: {label}"))
+        components::player_dock_text_button("tts-voice", label.to_owned()).tooltip(format!(text!(reader::narration_voice), label = label))
     }
     .debug_selector(|| "tts-voice".into())
     .no_fill();
@@ -255,7 +277,7 @@ pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Co
                         return sheet;
                     };
                     let picker = window.use_keyed_state(("tts-voice-sheet", owner.entity_id()), cx, |window, cx| Picker::new(&owner, snapshot.clone(), Rc::new(|window, cx| window.close_sheet(cx)), window, cx));
-                    sheet.title("Narration voice").size(px(420.0)).resizable(false).p_0().child(picker)
+                    sheet.title(text!(reader::narration_voice_label)).size(px(420.0)).resizable(false).p_0().child(picker)
                 });
             })
             .into_any_element()

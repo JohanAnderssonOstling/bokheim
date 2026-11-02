@@ -1,4 +1,6 @@
-use crate::{UnixMillis, PUBLICATION_CFI_PREFIX};
+use ui_text::text;
+
+use crate::{PUBLICATION_CFI_PREFIX, UnixMillis};
 use content_address::BookId;
 use serde::{Deserialize, Serialize};
 use wire::WireError;
@@ -101,9 +103,9 @@ pub enum RecurringScope {
 impl RecurringScope {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Chapter => "Chapter",
-            Self::Book => "Book",
-            Self::Library => "Library",
+            Self::Chapter => text!(audiobook::chapter),
+            Self::Book => text!(reader::book),
+            Self::Library => text!(common::library),
         }
     }
 }
@@ -179,7 +181,8 @@ impl AnnotationAnchor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Annotation {
     pub id: String,
-    pub content_hash: BookId,
+    #[serde(rename = "content_hash")]
+    pub book_id: BookId,
     pub anchor: AnnotationAnchor,
     pub exact_text: String,
     pub style: AnnotationStyle,

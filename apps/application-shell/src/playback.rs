@@ -186,11 +186,7 @@ impl Global for PlaybackControllers {}
 
 #[cfg(feature = "kobo")]
 pub(super) fn kobo_idle_sleep_allowed(cx: &App) -> bool {
-    cx.try_global::<PlaybackControllers>().is_none_or(|registry| {
-        !registry.0.iter().filter_map(WeakEntity::upgrade).any(|controller| {
-            controller.read(cx).current.as_ref().is_some_and(|active| active.session.read(cx).prevents_idle_sleep())
-        })
-    })
+    cx.try_global::<PlaybackControllers>().is_none_or(|registry| !registry.0.iter().filter_map(WeakEntity::upgrade).any(|controller| controller.read(cx).current.as_ref().is_some_and(|active| active.session.read(cx).prevents_idle_sleep())))
 }
 
 #[cfg(feature = "kobo")]
@@ -278,7 +274,7 @@ impl PlaybackController {
             };
             let mut stored_id = restored.as_ref().map(|record| record.session_id);
             if let Some(record) = restored {
-                let missing = backend.libraries().await.ok().is_some_and(|libraries| !libraries.iter().any(|entry| entry.library_id() == record.locator.library_id()));
+                let missing = backend.management.libraries().await.ok().is_some_and(|libraries| !libraries.iter().any(|entry| entry.library_id() == record.locator.library_id()));
                 if missing {
                     if matches!(restore_store.save(stored_id, None), Ok(true)) {
                         stored_id = None;
@@ -329,7 +325,7 @@ impl PlaybackController {
         cx.spawn(async move |_, _| writer.await).detach();
         cx.spawn(async move |this, cx| {
             if let Ok(record) = restored_rx.recv().await {
-                let library = restore_backend.library(*record.locator.library_id());
+                let library = restore_backend.management.library(*record.locator.library_id());
                 let _ = this.update(cx, |controller, cx| {
                     if controller.user_changed {
                         return;

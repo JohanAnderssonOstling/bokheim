@@ -1,14 +1,21 @@
 //! Database policy for native file replay and interrupted directory moves.
 
 use super::{AssetStore, BackendError, BookId, Database, DirId};
-use library_database::DatabaseError;
+use library_database::{DatabaseError, NativeFileWork};
+use library_files::library_move::{checked_path, cleanup_root_matches};
 use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind;
+use std::path::Path;
 use sync_common::ROOT_DIR_ID;
 
-pub(super) fn reconcile_file_jobs(assets: &AssetStore, database: &Database, jobs: Vec<library_database::NativeFileWork>) -> Result<(), BackendError> {
+pub(super) fn reconcile_file_jobs(assets: &AssetStore, database: &Database, jobs: Vec<NativeFileWork>) -> Result<(), BackendError> {
     let mut movable = HashMap::<BookId, Vec<library_model::RelativeBookPath>>::new();
     for job in jobs.iter().filter(|job| job.operation == "remove") {
-        movable.entry(job.content_hash).or_default().push(job.original_path.clone());
+        if job.source_root.is_none() {
+            if let Some(path) = &job.cleanup_path {
+                movable.entry(job.book_id).or_default().push(path.clone());
+            }
+        }
     }
     let mut failure = None;
     for work in jobs {
@@ -21,24 +28,45 @@ pub(super) fn reconcile_file_jobs(assets: &AssetStore, database: &Database, jobs
 
 /// One placement job: removes a file, or materializes it under a free name.
 /// Does nothing when the job is obsolete or another operation holds the book.
-fn apply_file_work(assets: &AssetStore, database: &Database, movable: &HashMap<BookId, Vec<library_model::RelativeBookPath>>, work: library_database::NativeFileWork) -> Result<(), BackendError> {
+fn apply_file_work(assets: &AssetStore, database: &Database, movable: &HashMap<BookId, Vec<library_model::RelativeBookPath>>, work: NativeFileWork) -> Result<(), BackendError> {
     let Some(snapshot) = database.native_file_work_snapshot(work)? else { return Ok(()) };
     // Keep a staged source's cleanup pending until its live placement has
     // been restored. A failed restore must never delete the remaining bytes.
-    if snapshot.work.operation == "remove" && snapshot.placement.is_some() && snapshot.resolved_path != snapshot.work.original_path {
+    if snapshot.staged_source {
         return Ok(());
     }
-    let hash = snapshot.work.content_hash;
+    let hash = snapshot.work.book_id;
     let Some(_lease) = assets.try_exclusive_lease(&hash)? else { return Ok(()) };
+    let historical_root = snapshot.work.source_root.as_deref().filter(|root| Path::new(root) != assets.native_library_root());
+    let cleanup_absent = if let Some(root) = historical_root {
+        // A completed root move often already removed this file. Do not reopen
+        // the old store or recreate its metadata just to acknowledge absent bytes.
+        match checked_path(Path::new(root), Path::new(snapshot.resolved_path.as_str().trim_start_matches('/'))) {
+            Ok(path) => !path.try_exists()?,
+            Err(error) if error.kind() == ErrorKind::NotFound => true,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        false
+    };
+    let cleanup_obsolete = !cleanup_absent && !cleanup_owner_valid(&snapshot.work)?;
+    let cleanup_assets = historical_root.filter(|_| !cleanup_absent && !cleanup_obsolete).map(AssetStore::open).transpose()?;
+    let cleanup_assets = cleanup_assets.as_ref().unwrap_or(assets);
+    let _cleanup_lease = if historical_root.is_some() && !cleanup_absent && !cleanup_obsolete {
+        let Some(lease) = cleanup_assets.try_exclusive_lease(&hash)? else { return Ok(()) };
+        Some(lease)
+    } else {
+        None
+    };
     let mut path = snapshot.resolved_path.clone();
     let mut renamed = None;
     let prepared = match snapshot.work.operation.as_str() {
-        "remove" if snapshot.placement.is_some() => None,
+        "remove" if cleanup_absent || cleanup_obsolete || snapshot.placement.is_some() || (historical_root.is_none() && snapshot.live_book_paths.contains(&path)) => None,
         "remove" => {
             if !snapshot.live_book_paths.is_empty() && !assets.verified_placement_exists(&hash, &snapshot.live_book_paths)? {
                 return Err(BackendError::message("destination copy is not ready; the source file has been kept"));
             }
-            Some(assets.prepare_removal(&hash, &path)?)
+            Some(cleanup_assets.prepare_removal(&hash, &path)?)
         }
         "materialize" => {
             if let Some((dir, name)) = &snapshot.placement {
@@ -61,12 +89,25 @@ fn apply_file_work(assets: &AssetStore, database: &Database, movable: &HashMap<B
         }
         operation => return Err(BackendError::message(format!("unknown file operation: {operation}"))),
     };
+    // Hashing a prepared removal may take time. Check ownership again before
+    // publishing so reusing the old folder cannot authorize a stale deletion.
+    let prepared = if snapshot.work.operation == "remove" && !cleanup_owner_valid(&snapshot.work)? { None } else { prepared };
     let published = prepared.is_some();
     if let Some(prepared) = prepared {
         prepared.publish()?;
     }
     database.acknowledge_native_file_work(library_database::NativeFileWorkCompletion { snapshot, final_path: path.to_string(), renamed, published, thumbnail_set_exists: assets.thumbnail_set_exists(&hash)? })?;
     Ok(())
+}
+
+fn cleanup_owner_valid(work: &NativeFileWork) -> Result<bool, BackendError> {
+    let Some(root) = work.source_root.as_deref() else { return Ok(true) };
+    let (Some(identity), Some(library)) = (work.source_identity.as_deref(), work.source_library) else { return Ok(false) };
+    match cleanup_root_matches(Path::new(root), identity, library) {
+        Ok(matches) => Ok(matches),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn materialize_directory(assets: &AssetStore, database: &Database, id: DirId) -> Result<(), BackendError> {

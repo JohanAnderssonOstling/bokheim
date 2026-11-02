@@ -9,7 +9,7 @@ fn late_download_requeues_removal_after_purge_work_has_finished() {
     // The book and its original purge jobs are already gone when the download finishes.
     let mut completion = NativeBookCompletion {
         snapshot: NativeBookSnapshot {
-            content_hash: hash,
+            book_id: hash,
             directory: ROOT_DIR_ID,
             name: "book.epub".into(),
             relative_path: "/book.epub".into(),
@@ -28,8 +28,8 @@ fn late_download_requeues_removal_after_purge_work_has_finished() {
     let jobs = db.native_file_work().unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].operation, "remove");
-    assert_eq!(jobs[0].content_hash, hash);
-    assert_eq!(jobs[0].original_path, completion.publication.relative_path);
+    assert_eq!(jobs[0].book_id, hash);
+    assert_eq!(jobs[0].cleanup_path.as_ref().unwrap(), &completion.publication.relative_path);
 
     db.complete_downloaded_book_with_content(completion, hash.content_hash().unwrap(), true).unwrap();
     assert_eq!(db.native_file_work().unwrap().len(), 1, "retrying completion must not duplicate deletion work");

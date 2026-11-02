@@ -40,7 +40,7 @@ pub struct StoredAsset {
     pub reader: Box<dyn StoredAssetReader>,
     pub total_len: u64,
     pub offset: u64,
-    pub content_hash: BookId,
+    pub book_id: BookId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -572,7 +572,7 @@ impl FsAssetStore {
                 }
                 let mut reader = std::io::Cursor::new(bytes);
                 reader.set_position(offset);
-                return Ok(Some(StoredAsset { reader: Box::new(reader), total_len: len, offset, content_hash: *hash }));
+                return Ok(Some(StoredAsset { reader: Box::new(reader), total_len: len, offset, book_id: *hash }));
             }
         }
         let mut file = match File::open(self.resolved_path(user_id, kind, hash).await?).await {
@@ -585,11 +585,11 @@ impl FsAssetStore {
             return Err(AssetError::RangeNotSatisfiable { offset, len });
         }
         file.seek(SeekFrom::Start(offset)).await.map_err(|error| AssetError::Storage(error.to_string()))?;
-        Ok(Some(StoredAsset { reader: Box::new(file), total_len: len, offset, content_hash: *hash }))
+        Ok(Some(StoredAsset { reader: Box::new(file), total_len: len, offset, book_id: *hash }))
     }
 
-    pub async fn book_tracks(&self, content_hash: &BookId) -> Result<Vec<audiobook_archive::ArchivedTrack>, AssetError> {
-        let path = self.resolved_path("", AssetKind::Book, content_hash).await?;
+    pub async fn book_tracks(&self, book_id: &BookId) -> Result<Vec<audiobook_archive::ArchivedTrack>, AssetError> {
+        let path = self.resolved_path("", AssetKind::Book, book_id).await?;
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
             audiobook_archive::archived_tracks(file).map_err(|error| AssetError::InvalidInput(error.to_string()))

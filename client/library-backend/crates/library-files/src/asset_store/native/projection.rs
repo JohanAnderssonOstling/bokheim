@@ -20,31 +20,50 @@ pub(crate) fn readable_path(handle: &Handle, name: String) -> Result<Option<Path
     Ok(None)
 }
 
-pub(crate) fn evict_book_files(handle: &Handle, relative_paths: &[RelativeBookPath], hash: &BookId) -> Result<(), AssetStoreError> {
+/// The same selection drives eviction and its disk-space review. Other files
+/// in an audiobook folder belong to the user and are left in place.
+/// Explicit eviction trusts the recorded paths without revalidating content.
+pub(crate) fn book_eviction_files(path: &Path) -> Result<Vec<PathBuf>, AssetStoreError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(vec![path.to_owned()]);
+    }
+    if !metadata.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = audiobook_folder::discover(path)?.into_iter().map(|track| track.path).collect::<Vec<_>>();
+    files.extend([audiobook_folder::discover_nfo(path)?, audiobook_folder::discover_cue(path)?, audiobook_folder::discover_cover(path)?].into_iter().flatten().map(|sidecar| sidecar.path));
+    let mapping = path.join(audiobook_folder::PATH_MAPPING_FILE);
+    if mapping.try_exists()? {
+        files.push(mapping);
+    }
+    Ok(files)
+}
+
+pub(crate) fn evict_book_files(handle: &Handle, relative_paths: &[RelativeBookPath]) -> Result<(), AssetStoreError> {
     for relative in relative_paths {
         let path = placement_path(handle, relative);
-        if (path.is_file() || path.is_dir()) && content_matches(&path, hash)? {
-            if path.is_dir() {
-                let sidecars = [audiobook_folder::discover_nfo(&path)?, audiobook_folder::discover_cue(&path)?, audiobook_folder::discover_cover(&path)?].into_iter().flatten().collect::<Vec<_>>();
-                for track in audiobook_folder::discover(&path)? {
-                    std::fs::remove_file(&track.path)?;
-                    if let Some(parent) = track.path.parent().filter(|parent| *parent != path.as_path()) {
-                        let _ = std::fs::remove_dir(parent);
-                    }
-                }
-                for sidecar in sidecars {
-                    std::fs::remove_file(sidecar.path)?;
-                }
-                let mapping = path.join(audiobook_folder::PATH_MAPPING_FILE);
-                if mapping.try_exists()? {
-                    std::fs::remove_file(mapping)?;
-                }
-                let _ = std::fs::remove_dir(&path);
-            } else {
-                std::fs::remove_file(&path)?;
-            }
-            sync_parent(&path)?;
+        let files = book_eviction_files(&path)?;
+        if files.is_empty() {
+            continue;
         }
+        let directory = std::fs::symlink_metadata(&path)?.is_dir();
+        for file in files {
+            std::fs::remove_file(&file)?;
+            if directory {
+                if let Some(parent) = file.parent().filter(|parent| *parent != path.as_path()) {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+        }
+        if directory {
+            let _ = std::fs::remove_dir(&path);
+        }
+        sync_parent(&path)?;
     }
     Ok(())
 }

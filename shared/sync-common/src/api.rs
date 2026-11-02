@@ -15,12 +15,13 @@ pub mod assets {
     pub struct PlaybackGrant {
         pub path: String,
         pub expires_in_seconds: u32,
-        pub content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        pub book_id: BookId,
         pub length: u64,
     }
     impl fmt::Debug for PlaybackGrant {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("PlaybackGrant").field("expires_in_seconds", &self.expires_in_seconds).field("content_hash", &self.content_hash).finish_non_exhaustive()
+            f.debug_struct("PlaybackGrant").field("expires_in_seconds", &self.expires_in_seconds).field("content_hash", &self.book_id).finish_non_exhaustive()
         }
     }
 
@@ -32,7 +33,8 @@ pub mod assets {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailPresenceRequest {
-        pub content_hashes: Vec<BookId>,
+        #[serde(rename = "content_hashes")]
+        pub book_ids: Vec<BookId>,
     }
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailPresenceResponse {
@@ -43,13 +45,15 @@ pub mod assets {
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailRevision {
-        pub content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        pub book_id: BookId,
         pub revision: BookId,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct BlobManifestEntry {
-        pub content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        pub book_id: BookId,
         pub size_bytes: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub byte_checksum: Option<content_address::ContentHash>,
@@ -71,11 +75,12 @@ pub mod assets {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct RejectedBlobManifestEntry {
-        pub content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        pub book_id: BookId,
         pub reason: BlobManifestRejectionReason,
     }
 
-    /// Every requested hash appears exactly once across these three collections.
+    /// Every requested book identity appears once across these three collections.
     /// `upload` means the bytes still require the ordinary quota-checked upload
     /// admission path, even when another account stores the same blob.
     #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,11 +111,11 @@ pub mod assets {
 
     /// Ensures every requested blob is classified exactly once by the server.
     pub fn validate_blob_manifest_response(request: &BlobManifestRequest, response: &BlobManifestResponse) -> Result<(), BlobManifestValidationError> {
-        let requested: HashSet<_> = request.blobs.iter().map(|blob| blob.content_hash).collect();
+        let requested: HashSet<_> = request.blobs.iter().map(|blob| blob.book_id).collect();
         if requested.len() != request.blobs.len() {
             return Err(BlobManifestValidationError::DuplicateRequestHash);
         }
-        let classified = response.owned.iter().chain(&response.upload).chain(response.rejected.iter().map(|entry| &entry.content_hash));
+        let classified = response.owned.iter().chain(&response.upload).chain(response.rejected.iter().map(|entry| &entry.book_id));
         let mut unique = HashSet::with_capacity(requested.len());
         for hash in classified {
             if !requested.contains(hash) || !unique.insert(*hash) {
@@ -125,7 +130,8 @@ pub mod assets {
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailBatchEntry {
-        pub content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        pub book_id: BookId,
         pub bytes: Vec<u8>,
         pub browse_bytes: Vec<u8>,
     }
@@ -137,7 +143,8 @@ pub mod assets {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailBatchDownloadRequest {
-        pub content_hashes: Vec<BookId>,
+        #[serde(rename = "content_hashes")]
+        pub book_ids: Vec<BookId>,
     }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,6 +165,8 @@ pub mod libraries {
         pub library_id: LibraryId,
         pub library_name: String,
         #[serde(default)]
+        pub kind: crate::storage::LibraryKind,
+        #[serde(default)]
         pub storage: crate::storage::LibraryStorage,
     }
 
@@ -165,6 +174,8 @@ pub mod libraries {
     pub struct LibraryNameRequest {
         pub library_id: LibraryId,
         pub library_name: String,
+        #[serde(default)]
+        pub kind: crate::storage::LibraryKind,
         #[serde(default)]
         pub storage: crate::storage::LibraryStorage,
     }
@@ -184,20 +195,6 @@ pub mod libraries {
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct DeleteLibraryResponse {
         pub library_id: LibraryId,
-    }
-}
-
-pub mod opds_feeds {
-    use serde::{Deserialize, Serialize};
-
-    pub type OpdsFeedId = uuid::Uuid;
-
-    /// One of the account's OPDS feeds. Credentials for it stay on devices.
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct OpdsFeed {
-        pub id: OpdsFeedId,
-        pub name: String,
-        pub url: String,
     }
 }
 

@@ -36,8 +36,8 @@ pub fn inspect_reader_metadata<R: Read + Seek + Send + 'static>(mut reader: R) -
         hash.update(&buffer[..count]);
     }
     reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
-    let content_hash = hash.finalize().to_hex().to_string();
-    inspect_reader_metadata_with_identity(reader, content_hash)
+    let book_id = hash.finalize().to_hex().to_string();
+    inspect_reader_metadata_with_identity(reader, book_id)
 }
 
 /// Inspect a source whose identity is already established by the caller.
@@ -47,21 +47,21 @@ pub fn inspect_reader_metadata<R: Read + Seek + Send + 'static>(mut reader: R) -
 /// must invalidate cached metadata when that revision changes.
 pub fn inspect_reader_metadata_with_identity<R: Read + Seek + Send + 'static>(mut reader: R, identity: String) -> PdfResult<(R, PdfReaderMetadata, Vec<BookTocEntry>)> {
     reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
-    let content_hash = identity;
-    let (mut reader, mut metadata, outline) = runtime::run(move || inspect_local(reader, content_hash))?;
+    let book_id = identity;
+    let (mut reader, mut metadata, outline) = runtime::run(move || inspect_local(reader, book_id))?;
     reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
     metadata.bound_optional_data();
     Ok((reader, metadata, outline))
 }
 
-fn inspect_local<R: Read + Seek + 'static>(reader: R, content_hash: String) -> PdfResult<(R, PdfReaderMetadata, Vec<BookTocEntry>)> {
+fn inspect_local<R: Read + Seek + 'static>(reader: R, book_id: String) -> PdfResult<(R, PdfReaderMetadata, Vec<BookTocEntry>)> {
     let shared = Rc::new(RefCell::new(reader));
     let session = LocalDocumentSession::from_reader("ingestion", SharedReader(shared.clone()))?;
     // PDFium's page-size query already applies the intrinsic page rotation.
     // No page contents, fonts, text characters, or annotations are loaded here.
     let pages = session.info.pages.iter().map(|info| PdfStoredPage { width: info.width_points, height: info.height_points, rotation: 0 }).collect();
     let outline = session.info.outline.clone();
-    let metadata = PdfReaderMetadata { version: 1, content_hash, pages, skippable_pages: None, annotations: Vec::new(), dependencies: None };
+    let metadata = PdfReaderMetadata { version: 1, book_id, pages, skippable_pages: None, annotations: Vec::new(), dependencies: None };
     drop(session);
     let reader = Rc::try_unwrap(shared).map_err(|_| PdfError::new("PDF ingestion reader still in use"))?.into_inner();
     Ok((reader, metadata, outline))
@@ -76,9 +76,9 @@ impl PdfError {
 impl LocalDocumentSession {
     /// The caller supplies the content hash of the opened book.
     /// Invalid, old, or missing metadata uses normal inspection.
-    pub fn from_reader_with_metadata<R: Read + Seek + 'static>(source_name: impl Into<String>, reader: R, content_hash: &str, metadata: Option<PdfReaderMetadata>) -> PdfResult<Self> {
+    pub fn from_reader_with_metadata<R: Read + Seek + 'static>(source_name: impl Into<String>, reader: R, book_id: &str, metadata: Option<PdfReaderMetadata>) -> PdfResult<Self> {
         let source_name = source_name.into();
-        let Some(metadata) = metadata.filter(|m| m.valid_for(content_hash)) else {
+        let Some(metadata) = metadata.filter(|m| m.valid_for(book_id)) else {
             return Self::from_reader(source_name, reader);
         };
         let document = load_document(reader).map_err(|e| PdfError::new(e.to_string()))?;

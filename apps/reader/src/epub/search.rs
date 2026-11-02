@@ -5,6 +5,8 @@
 //! request number to stop early, and the UI checks it again before displaying
 //! the completed result set.
 
+use ui_text::text;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,7 +95,7 @@ impl SearchState {
     pub(in crate::epub) fn rebuild_rows(&mut self, toc: &TocState) {
         self.rows.clear();
         for (chapter, document, indices) in search_groups(toc, &self.results) {
-            let title = chapter.and_then(|ordinal| toc.title_for_ordinal(ordinal)).unwrap_or_else(|| format!("Section {}", document + 1));
+            let title = chapter.and_then(|ordinal| toc.title_for_ordinal(ordinal)).unwrap_or_else(|| format!(text!(reader::section), document + 1));
             self.rows.push(SearchRow::Heading(title));
             self.rows.extend(indices.into_iter().map(SearchRow::Match));
         }

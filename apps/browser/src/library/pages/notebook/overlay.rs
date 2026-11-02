@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use crate::library::services::LibraryContext;
 use book_model::{Annotation, AnnotationStyle};
 use components::AnnotationEditorTarget;
@@ -12,7 +14,7 @@ use web_time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn open_reader(library: &LibraryContext, title: &str, annotation: &Annotation, window: &mut Window, cx: &mut App) {
     if let Some(target) = annotation.anchor.open_target() {
-        library.open_book_at(annotation.content_hash, title.to_owned(), Some(target), window, cx);
+        library.open_book_at(annotation.book_id, title.to_owned(), Some(target), window, cx);
     }
 }
 
@@ -157,7 +159,7 @@ impl NotebookEditor {
         cx.spawn(async move |_, cx| {
             let deleting = completion == Some(Completion::Delete);
             let result = if deleting { backend.delete_annotation(sent.id.clone(), sent.modified_at as i64).await } else { backend.upsert_annotation(sent.clone()).await }
-                .map_err(|error| components::user_facing_error(&error, "Could not update annotation. Your changes are still here.").to_owned());
+                .map_err(|error| components::user_facing_error(&error, text!(browse::could_not_update_annotation_your_changes_are_still_here)).to_owned());
             let sent = (!deleting).then_some(sent);
             let _ = handle.update(cx, |_, window, cx| editor.update(cx, |editor, cx| editor.did_save(sent, result, window, cx)));
         })
@@ -221,7 +223,7 @@ impl Render for NotebookEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let passage = (!self.draft.exact_text.is_empty()).then(|| components::annotation_editor_passage(&self.draft, theme).debug_selector(|| "notebook-full-annotation".into()).into_any_element());
-        let open = components::outlined_text_button("notebook-open-reader", "Open in reader").on_click(cx.listener(|editor, _, window, cx| {
+        let open = components::outlined_text_button("notebook-open-reader", text!(browse::open_in_reader)).on_click(cx.listener(|editor, _, window, cx| {
             editor.finish(Completion::OpenReader, window, cx);
         }));
         let passage = Some(div().w_full().flex().flex_col().gap(rems(0.5)).child(open).children(passage).into_any_element());
@@ -233,8 +235,8 @@ impl Render for NotebookEditor {
         };
         let controls = controls.when_some(error, |controls, error| {
             controls.child(components::error_text(theme).child(error)).child(
-                components::action_row().child(components::outlined_text_button("notebook-retry-save", "Retry").on_click(cx.listener(|editor, _, window, cx| editor.retry(window, cx)))).child(
-                    components::outlined_text_button("notebook-discard-edit", "Discard changes").on_click(cx.listener(|editor, _, window, cx| {
+                components::action_row().child(components::outlined_text_button("notebook-retry-save", text!(common::retry)).on_click(cx.listener(|editor, _, window, cx| editor.retry(window, cx)))).child(
+                    components::outlined_text_button("notebook-discard-edit", text!(browse::discard_changes)).on_click(cx.listener(|editor, _, window, cx| {
                         editor.close(Completion::Dismiss, window, cx);
                     })),
                 ),
@@ -264,10 +266,10 @@ fn show_read_only(library: LibraryContext, title: String, annotation: Annotation
             .when(!annotation.exact_text.is_empty(), |body| body.child(components::annotation_editor_passage(&annotation, theme)))
             .when(!annotation.note.is_empty(), |body| body.child(components::reader_state_note(annotation.note.clone(), theme).text_color(theme.text)));
         dialog
-            .title("Annotation")
+            .title(text!(common::annotation))
             .w(px(components::ANNOTATION_EDITOR_WIDTH))
             .max_w(window.viewport_size().width - rems(1.5).to_pixels(window.rem_size()))
-            .child(components::outlined_text_button("notebook-open-reader", "Open in reader").on_click(move |_, window, cx| {
+            .child(components::outlined_text_button("notebook-open-reader", text!(browse::open_in_reader)).on_click(move |_, window, cx| {
                 window.close_dialog(cx);
                 open_reader(&library, &title, &open_annotation, window, cx);
             }))

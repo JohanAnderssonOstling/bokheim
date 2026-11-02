@@ -2,6 +2,7 @@ use crate::build::import::core::{completed_phase, configure_import, create_schem
 use crate::*;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use metadata_contract::ClassificationMethod;
 use std::io::Write;
 
 fn dump(path: &Path, records: &[serde_json::Value]) {
@@ -51,7 +52,7 @@ fn description_sidecar_enriches_a_core_without_embedded_descriptions() {
     let response = service.enrich_rich(vec!["9780306406157".to_owned()]).unwrap();
 
     assert_eq!(response[0].matches[0].description.as_deref(), Some("Sidecar description"));
-    assert!(response[0].matches[0].classifications.iter().any(|classification| classification.scheme == ClassificationScheme::Bisac && classification.source == ClassificationSource::Work));
+    assert!(response[0].matches[0].classifications.iter().all(|classification| classification.source == ClassificationSource::ExactEdition), "sidecar headings must not become edition-owned classifications");
     let sidecar_connection = Connection::open(sidecar).unwrap();
     assert_eq!(sidecar_connection.query_row("SELECT description_records FROM description_snapshot", (), |row| row.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(sidecar_connection.query_row("SELECT subject_heading_records FROM description_snapshot", (), |row| row.get::<_, i64>(0)).unwrap(), 4);
@@ -122,11 +123,11 @@ fn classification_lookup_requires_consensus_when_sibling_evidence_is_sparse() {
     let service = FixtureService::open(&database).unwrap();
 
     let response = service.lookup(vec!["9780306406157".to_owned()]).unwrap();
-    assert_eq!(response[0].matches[0].classifications, vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76.73".into(), source: ClassificationSource::Work }]);
+    assert!(response[0].matches[0].classifications.is_empty(), "one sibling cannot establish classification of this ISBN");
 }
 
 #[test]
-fn classification_lookup_keeps_sibling_domains_when_work_evidence_is_incomplete() {
+fn classification_lookup_keeps_declared_work_separate_from_sibling_domains() {
     let temporary = tempfile::tempdir().unwrap();
     let editions = [
         serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL10W"}],"title":"Example","isbn_13":["9780306406157"]}),
@@ -141,8 +142,11 @@ fn classification_lookup_keeps_sibling_domains_when_work_evidence_is_incomplete(
 
     let response = service.lookup(vec!["9780306406157".to_owned()]).unwrap();
     let classifications = &response[0].matches[0].classifications;
-    assert_eq!(classifications.iter().map(|code| code.notation.as_str()).collect::<Vec<_>>(), ["PN1993", "QA76.6"]);
+    assert_eq!(classifications.iter().map(|code| code.notation.as_str()).collect::<Vec<_>>(), ["QA76.6"]);
     assert!(classifications.iter().all(|code| code.source == ClassificationSource::Work));
+    assert!(classifications.iter().all(|code| code.evidence.iter().any(|evidence| evidence.method == ClassificationMethod::OpenLibraryDeclaredWorkLcc && evidence.open_library_work_id == "OL10W")));
+    let sibling = service.lookup(vec!["9781861972712".into()]).unwrap();
+    assert!(sibling[0].matches[0].classifications.iter().any(|code| code.source == ClassificationSource::ExactEdition && code.notation == "PN1993.A1"), "the sibling retains its own evidence");
 }
 
 #[test]
@@ -170,14 +174,14 @@ fn classification_lookup_prefers_exact_edition_codes_to_work_and_sibling_codes()
 }
 
 #[test]
-fn work_subtree_policy_agrees_across_single_batch_published_and_title_candidates() {
-    for (work_codes, records, expected) in [
-        (vec!["PR4030"], (0..20).map(|id| if id < 18 { vec!["PR4034"] } else { vec!["PE1128"] }).collect::<Vec<_>>(), vec!["PR4030"]),
-        (vec!["PE1128"], (0..20).map(|id| if id < 18 { vec!["PR4750"] } else { vec!["PE1128"] }).collect(), vec!["PR4750"]),
-        (vec!["AC7"], (0..10).map(|id| if id < 2 { vec!["HB161", "AC7"] } else { vec!["HB161"] }).collect(), vec!["AC7", "HB161"]),
-        (vec!["B3376"], (0..26).map(|id| if id < 9 { vec!["B3376", "BC135"] } else { vec!["B3376"] }).collect(), vec!["B3376", "BC135"]),
-        (vec![], vec![vec!["PR4030", "PR4034"], vec!["PR4030", "PR4034"]], vec!["PR4030", "PR4034"]),
-        (vec!["PE1128"], vec![vec!["PR4034"]], vec!["PE1128", "PR4034"]),
+fn work_evidence_agrees_across_build_queries_and_stays_distinct_when_serving() {
+    for (work_codes, records) in [
+        (vec!["PR4030"], (0..20).map(|id| if id < 18 { vec!["PR4034"] } else { vec!["PE1128"] }).collect::<Vec<_>>()),
+        (vec!["PE1128"], (0..20).map(|id| if id < 18 { vec!["PR4750"] } else { vec!["PE1128"] }).collect()),
+        (vec!["AC7"], (0..10).map(|id| if id < 2 { vec!["HB161", "AC7"] } else { vec!["HB161"] }).collect()),
+        (vec!["B3376"], (0..26).map(|id| if id < 9 { vec!["B3376", "BC135"] } else { vec!["B3376"] }).collect()),
+        (vec![], vec![vec!["PR4030", "PR4034"], vec!["PR4030", "PR4034"]]),
+        (vec!["PE1128"], vec![vec!["PR4034"]]),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let mut editions = vec![serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL10W"}],"title":"Example","isbn_13":["9780306406157"],"authors":[{"key":"/authors/OL1A"}]})];
@@ -188,11 +192,13 @@ fn work_subtree_policy_agrees_across_single_batch_published_and_title_candidates
         let requested = vec!["9780306406157".to_owned()];
         let single = lookup_one(&c, requested[0].clone()).unwrap();
         let batch = crate::build::batch::lookup_many(&c, requested.clone()).unwrap();
-        assert_eq!(single.matches[0].classifications.iter().map(|code| code.notation.as_str()).collect::<Vec<_>>(), expected, "work {work_codes:?}");
+        let expected = single.matches[0].classifications.iter().map(|code| code.notation.as_str()).collect::<Vec<_>>();
         assert_eq!(serde_json::to_value(&single).unwrap(), serde_json::to_value(&batch[0]).unwrap());
         let service = FixtureService::open(&database).unwrap();
         let published = service.lookup(requested).unwrap();
-        assert_eq!(serde_json::to_value(&single).unwrap(), serde_json::to_value(&published[0]).unwrap());
+        let served = &published[0].matches[0].classifications;
+        assert_eq!(served.iter().map(|code| code.notation.as_str()).collect::<Vec<_>>(), work_codes, "ISBN lookup accepts declared work evidence rather than a sibling union");
+        assert!(served.iter().all(|code| code.evidence.iter().any(|evidence| evidence.method == ClassificationMethod::OpenLibraryDeclaredWorkLcc)));
         let answers = Connection::open(&service.server.state.database).unwrap();
         let codes: Vec<u8> = answers.query_row("SELECT classifications FROM edition_candidate WHERE edition_id=1", [], |r| r.get(0)).unwrap();
         let codes: Vec<Classification> = serde_json::from_slice(&codes).unwrap();
@@ -201,13 +207,13 @@ fn work_subtree_policy_agrees_across_single_batch_published_and_title_candidates
 }
 
 #[test]
-fn previous_classification_recipe_uses_targeted_migration() {
+fn supported_legacy_classification_recipe_uses_targeted_migration() {
     let temp = tempfile::tempdir().unwrap();
     let database = snapshot_from(temp.path(), &[serde_json::json!({"key":"/books/OL1M","isbn_13":["9780306406157"]})], &[], &[]);
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
     build_answers_with_ratings(&database, None, None, None, None, &base).unwrap();
-    Connection::open(&base).unwrap().execute("UPDATE answer_build SET recipe_version=recipe_version-1", []).unwrap();
+    Connection::open(&base).unwrap().execute("UPDATE answer_build SET recipe_version=2", []).unwrap();
     let report = build_answers_incremental(&database, None, None, None, None, &base, &next).unwrap();
     assert_eq!(report.mode, "reclassified");
     assert_eq!(report.resolved_rows, 0);
@@ -566,7 +572,7 @@ fn zero_isbn_in_snapshot_is_built_before_edition_indexing() {
 }
 
 #[test]
-fn answers_across_query_and_commit_boundaries_match_the_original_resolver() {
+fn answers_across_query_and_commit_boundaries_preserve_metadata_and_edition_ownership() {
     let temp = tempfile::tempdir().unwrap();
     let mut isbns = Vec::new();
     let editions = (1..=4200)
@@ -587,17 +593,16 @@ fn answers_across_query_and_commit_boundaries_match_the_original_resolver() {
     let answers = temp.path().join("answers.sqlite");
     let report = build_answers_with_ratings(&database, None, None, None, None, &answers).unwrap();
     assert_eq!(report.isbn_rows, 4200);
-    let resolver = Resolver::open(&database, None).unwrap();
-    let server = MetadataService::open(&answers, &temp.path().join("demand.sqlite")).unwrap();
+    let service = FixtureService { resolver: Resolver::open(&database, None).unwrap(), server: MetadataService::open(&answers, &temp.path().join("demand.sqlite")).unwrap() };
     for requested in isbns.chunks(256) {
-        let expected = resolver.enrich_rich(requested.to_vec()).unwrap();
-        let actual = server.enrich_rich(requested.to_vec()).unwrap();
-        assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+        let actual = service.enrich_rich(requested.to_vec()).unwrap();
+        assert_eq!(actual.len(), requested.len());
+        assert!(actual.iter().flat_map(|result| &result.matches).flat_map(|matched| &matched.classifications).all(|code| code.source == ClassificationSource::ExactEdition));
     }
 }
 
 #[test]
-fn single_classified_sibling_is_used_until_another_sibling_has_codes() {
+fn single_classified_sibling_is_retained_without_becoming_isbn_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let database = snapshot_from(
         temp.path(),
@@ -616,13 +621,12 @@ fn single_classified_sibling_is_used_until_another_sibling_has_codes() {
         for service in [FixtureService::open(&database).unwrap()] {
             let response = service.lookup(vec!["9780306406157".into()]).unwrap();
             let codes = &response[0].matches[0].classifications;
-            if conflicting {
-                assert!(codes.is_empty());
-            } else {
-                assert_eq!(codes.len(), 1);
-                assert!(codes.iter().any(|c| c.notation == "HE2751" && c.source == ClassificationSource::Work));
-                assert!(!codes.iter().any(|c| c.notation == "385"));
-            }
+            assert!(codes.is_empty(), "sibling classifications require edition matching before they can classify this ISBN");
+            let sibling = service.lookup(vec!["9780821338278".into()]).unwrap();
+            let sibling_codes = &sibling[0].matches[0].classifications;
+            assert!(!sibling_codes.is_empty());
+            assert!(sibling_codes.iter().all(|code| code.source == ClassificationSource::ExactEdition));
+            assert!(sibling_codes.iter().any(|code| code.scheme == ClassificationScheme::LibraryOfCongress && code.notation.starts_with("HE2751")));
         }
     }
 }
@@ -726,15 +730,30 @@ impl FixtureService {
         Ok(Self { resolver: Resolver::open(&path, descriptions.as_deref())?, server: MetadataService::open(&answers, &demand)? })
     }
     fn enrich_rich(&self, isbns: Vec<String>) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
-        let expected = self.resolver.enrich_rich(isbns.clone())?;
-        let results = self.server.enrich_rich(isbns)?;
-        assert_eq!(serde_json::to_value(&results).unwrap(), serde_json::to_value(&expected).unwrap(), "built ISBN answers differ from the resolver");
-        Ok(results)
+        // The builder preserves raw evidence; serving applies the stricter
+        // edition/work ownership policy. Check storage fidelity before that policy.
+        let connection = self.server.state.pool.get().map_err(error)?;
+        for expected in self.resolver.enrich_rich(isbns.clone())? {
+            let raw = expected.canonical_isbn13.as_ref().map(|isbn| connection.query_row("SELECT answer FROM isbn_answer WHERE isbn13=?1", [isbn], |row| row.get::<_, Vec<u8>>(0)).optional()).transpose().map_err(error)?.flatten();
+            if let Some(raw) = raw {
+                let mut stored: schema::StoredAnswer = serde_json::from_slice(&raw).unwrap();
+                assert_eq!(stored.result.matches.len(), stored.description_works.len());
+                for (matched, work) in stored.result.matches.iter_mut().zip(stored.description_works) {
+                    if let Some(work) = work {
+                        matched.description = Some(connection.query_row("SELECT text FROM work_description WHERE work_id=?1", [work], |row| row.get(0)).unwrap());
+                    }
+                }
+                stored.result.requested_isbn = expected.requested_isbn.clone();
+                assert_eq!(serde_json::to_value(stored.result).unwrap(), serde_json::to_value(expected).unwrap(), "stored ISBN answers differ from the resolver");
+            } else {
+                assert!(expected.matches.is_empty());
+            }
+        }
+        drop(connection);
+        self.server.enrich_rich(isbns)
     }
     fn lookup(&self, isbns: Vec<String>) -> Result<Vec<IsbnClassificationResult>, MetadataError> {
-        let expected = self.resolver.lookup(isbns.clone())?;
         let results = self
-            .server
             .enrich_rich(isbns)?
             .into_iter()
             .map(|r| IsbnClassificationResult {
@@ -744,7 +763,6 @@ impl FixtureService {
                 matches: r.matches.into_iter().map(|m| WorkClassificationMatch { open_library_work_id: m.open_library_work_id, exact_edition_ids: m.exact_edition_ids, classifications: m.classifications }).collect(),
             })
             .collect::<Vec<_>>();
-        assert_eq!(serde_json::to_value(&results).unwrap(), serde_json::to_value(&expected).unwrap(), "built classification answers differ from the resolver");
         Ok(results)
     }
 }

@@ -143,9 +143,9 @@ fn comic_spacing_controls_inset_the_document_and_separate_spreads(cx: &mut TestA
         view.adjust_spacing(SettingsRow::VerticalMargins, 24.0, cx);
         view.adjust_spacing(SettingsRow::ColumnGap, 32.0, cx);
         let preferences = ReaderSettings::preferences(cx);
-        assert_eq!(preferences.pdf_horizontal_margin_px, 0.0);
-        assert_eq!(preferences.pdf_vertical_margin_px, 0.0);
-        assert_eq!(preferences.pdf_page_gap_px, 0.0);
+        assert_eq!(preferences.synchronized.pdf_horizontal_margin_px(), 0.0);
+        assert_eq!(preferences.synchronized.pdf_vertical_margin_px(), 0.0);
+        assert_eq!(preferences.synchronized.pdf_page_gap_px(), 0.0);
     });
     visual.run_until_parked();
     let after = visual.debug_bounds("comic-document").unwrap();

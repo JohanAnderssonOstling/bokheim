@@ -1,6 +1,6 @@
 //! Keep explicitly declared work LCC separate from classifications of its editions.
 use super::*;
-use metadata_contract::{authority_subjects::OPEN_LIBRARY_WORK_PROVIDER, AuthoritySubjectMatch, ClassificationEvidence};
+use metadata_contract::{authority_subjects::OPEN_LIBRARY_WORK_PROVIDER, AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod, ClassificationProvider};
 
 pub(crate) fn build_work_lookup(source: &Connection, out: &Connection) -> Result<u64, MetadataError> {
     out.execute("DELETE FROM authority_title WHERE source=?1", [OPEN_LIBRARY_WORK_PROVIDER]).map_err(error)?;
@@ -36,7 +36,12 @@ fn put_work(out: &Connection, (id, title, codes): (i64, String, BTreeSet<String>
             notation,
             scheme: ClassificationScheme::LibraryOfCongress,
             source: ClassificationSource::Work,
-            evidence: vec![ClassificationEvidence { method: format!("{OPEN_LIBRARY_WORK_PROVIDER}_title_author:{work}"), isbn13: String::new(), open_library_work_id: work.clone(), open_library_edition_id: String::new() }],
+            evidence: vec![ClassificationEvidence {
+                method: ClassificationMethod::TitleAuthor { provider: ClassificationProvider::OpenLibraryWork, record_id: work.clone() },
+                isbn13: String::new(),
+                open_library_work_id: work.clone(),
+                open_library_edition_id: String::new(),
+            }],
         })
         .collect();
     let matched = AuthoritySubjectMatch { main_title: title.clone(), title, authors: Vec::new(), provider_id: OPEN_LIBRARY_WORK_PROVIDER.into(), record_ids: vec![work.clone()], classifications };

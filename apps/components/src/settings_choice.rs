@@ -1,8 +1,8 @@
 //! Choice controls shared by application and reader settings.
 
+use crate::Button;
 use gpui::prelude::*;
 use gpui::{Div, ElementId, SharedString, div, px, rems};
-use crate::Button;
 
 use crate::{BrowserTheme, RADIUS_SM, SETTINGS_CONTROL_GAP, SPACE_SM, TEXT_SM, base_button, settings_control_size_rem};
 
@@ -23,7 +23,8 @@ pub fn settings_choice_button_grid(columns: u16, theme: BrowserTheme) -> Div {
 pub fn settings_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
     let label = label.into();
     let button = base_button(id)
-        .child(div().min_w_0().max_w_full().whitespace_normal().text_align(gpui::TextAlign::Center).child(label))
+        .child(div().min_w_0().max_w_full().text_align(gpui::TextAlign::Center).child(label))
+        .whitespace_normal()
         .ghost()
         .flex_1()
         .min_w_0()

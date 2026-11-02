@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Reject release publication when the deployed server rejects the built protocol."""
 import argparse
+import json
 import re
 import subprocess
 import urllib.error
@@ -10,14 +11,16 @@ import urllib.request
 def check(source_commit, server='https://api.bokheim.se'):
     if not re.fullmatch('[0-9a-f]{40}', source_commit):
         raise ValueError('Expected full build source SHA')
-    source = subprocess.check_output(['git', 'show', f'{source_commit}:shared/protobuf-wire/src/lib.rs'], text=True)
-    match = re.search(r'pub const MEDIA_TYPE: &str = "([^"]+)";', source)
-    if not match:
-        raise ValueError('Cannot determine the built protocol media type')
-    media_type = match.group(1)
+    source = subprocess.check_output(['git', 'show', f'{source_commit}:shared/protobuf-wire/protocol.json'], text=True)
+    protocol = json.loads(source)
+    if set(protocol) != {'version', 'media_type'}:
+        raise ValueError('Invalid built protocol configuration')
+    version, base = protocol['version'], protocol['media_type']
+    if type(version) is not int or not 0 < version <= 0xffffffff or not isinstance(base, str) or '/' not in base or any(c.isspace() or c == ';' for c in base):
+        raise ValueError('Invalid built protocol version or base media type')
+    media_type = f'{base}; version={version}'
     # An envelope with a version but no value cannot authenticate or mutate state.
     # An empty byte string would decode as version zero, incorrectly returning 426.
-    version = int(re.search(r'version=(\d+)', media_type).group(1))
     payload = bytearray([8])  # Envelope.version, protobuf field 1 (varint).
     while version >= 128:
         payload.append((version & 127) | 128)

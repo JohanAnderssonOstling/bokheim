@@ -3,10 +3,14 @@ use account_client::{Session, SessionPersistence};
 use axum::{body::Bytes, extract::State, http::HeaderMap, routing::post, Router};
 use client_platform_runtime::executor::BoxedBackendFuture;
 use cpu_host::{BackendError, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse};
+use library_files::AssetStore;
 use library_runtime::{account::LibraryAccountSession, events::LibraryEventState, scheduler::SyncScheduler};
 use std::{
     io,
-    sync::{atomic::AtomicUsize, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, RwLock,
+    },
 };
 use sync_common::{DirId, PullStateResponse, PushMutationsResponse, SyncCursor, SyncExchangeRequest, SyncExchangeResponse, SyncGeneration, ROOT_DIR_ID};
 use sync_transport::CredentialsSource;
@@ -38,22 +42,22 @@ impl SessionPersistence for Persistence {
 fn fixture(server_url: Url, credentials: SharedSyncCredentials, account: Option<LibraryAccount>) -> (tempfile::TempDir, LibrarySync, LibraryEventState) {
     let root = tempfile::tempdir().unwrap();
     let database = Arc::new(Database::open(root.path().join("library.sqlite3")).unwrap());
-    let replica_id = database.initialize_library().unwrap();
+    database.initialize_library().unwrap();
     database.create_directory_with_id(&DirId::from_u128(1), &ROOT_DIR_ID, &"Offline shelf".into()).unwrap();
     database.set_sync_metadata("last_successful_sync_at", "previous").unwrap();
     let (events, state) = LibraryEventRouter::new(SyncScheduler::new().0, SyncScheduler::new().0, SyncScheduler::new().0, SyncScheduler::new().0);
     let sync = LibrarySync::new(LibrarySyncConfig {
-        database,
-        assets: AssetStore::open(root.path().to_str().unwrap()).unwrap(),
-        replica_id,
+        placement: Arc::new(LibraryPlacement::new(database, AssetStore::open(root.path().to_str().unwrap()).unwrap(), events)),
         server_url,
         library_id: LibraryId::new_v4(),
-        events: Some(events),
-        credentials,
-        account,
+        authentication: match account {
+            Some(account) => LibraryAuthentication::Account(account),
+            None => LibraryAuthentication::Credentials(credentials),
+        },
         notification_interest: Default::default(),
         cpu: Arc::new(NoCpu),
-    });
+    })
+    .unwrap();
     (root, sync, state)
 }
 
@@ -133,4 +137,3 @@ async fn exchange(State(requests): State<Arc<Mutex<Vec<SyncExchangeRequest>>>>, 
     })
     .unwrap()
 }
-

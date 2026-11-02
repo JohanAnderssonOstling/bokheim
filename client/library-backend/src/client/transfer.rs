@@ -43,11 +43,11 @@ impl LibraryClient {
         }
         for book in &plan.books {
             let parent = if book.direct { destination } else { *folders.get(&book.directory).ok_or("destination folder hierarchy is incomplete")? };
-            let resource = source.transport.handle().await?.export_transfer_book(book.content_hash).await?;
+            let resource = source.transport.handle().await?.export_transfer_book(book.book_id).await?;
             let imported = self.transport.handle().await?.import_transfer_book(parent, book.file_name.clone(), resource).await?;
             // Entire imported trees are already covered by their root's undo.
             if imported.created && book.direct {
-                outcome.created_placements.push((imported.content_hash, parent));
+                outcome.created_placements.push((imported.book_id, parent));
             }
         }
         // No source mutation occurs until ALL destination commits succeed.
@@ -57,7 +57,7 @@ impl LibraryClient {
                 let folder = plan.folders.iter().find(|folder| folder.id == *root).ok_or("source root is missing")?;
                 outcome.removed_folders.push((*root, folder.parent_id));
             }
-            outcome.removed_placements.extend(plan.books.iter().filter(|book| book.direct).map(|book| (book.content_hash, book.directory)));
+            outcome.removed_placements.extend(plan.books.iter().filter(|book| book.direct).map(|book| (book.book_id, book.directory)));
         }
         Ok(())
     }

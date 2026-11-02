@@ -1,5 +1,7 @@
 //! Context actions shared by desktop popup menus and mobile bottom sheets.
 
+use ui_text::text;
+
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, Window, div, px};
 use gpui_component::Icon;
@@ -40,14 +42,14 @@ impl<A> Default for ContextActions<A> {
 impl<A: Clone + 'static> ContextActions<A> {
     pub(crate) fn selection(commands: SelectionCommands<A>) -> Self {
         let mut actions = Self::default();
-        let mut selection = vec![ContextAction { label: "Annotate", icon: "icons/replace.svg", command: commands.annotate }];
+        let mut selection = vec![ContextAction { label: text!(reader::annotate), icon: "icons/replace.svg", command: commands.annotate }];
         if let Some(command) = commands.lookup {
-            selection.push(ContextAction { label: "Lookup", icon: "icons/search.svg", command });
+            selection.push(ContextAction { label: text!(reader::lookup), icon: "icons/search.svg", command });
         }
         selection.extend([
-            ContextAction { label: "Translate", icon: "icons/translate.svg", command: commands.translate },
-            ContextAction { label: "Copy", icon: "icons/copy.svg", command: commands.copy },
-            ContextAction { label: "Copy link", icon: "icons/link-simple.svg", command: commands.copy_link },
+            ContextAction { label: text!(reader::translate), icon: "icons/translate.svg", command: commands.translate },
+            ContextAction { label: text!(common::copy), icon: "icons/copy.svg", command: commands.copy },
+            ContextAction { label: text!(reader::copy_link), icon: "icons/link-simple.svg", command: commands.copy_link },
         ]);
         actions.add_section(selection);
         actions

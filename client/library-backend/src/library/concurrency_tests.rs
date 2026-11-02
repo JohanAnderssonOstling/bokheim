@@ -25,7 +25,7 @@ pub(in crate::library) fn fixture(root: &std::path::Path, url: account_client::U
     let account = library_runtime::account::LibraryAccountSession::load(Account(account_client::Session::try_new(url.clone(), "user".into(), "reader@example.com".into(), "a".repeat(43)).unwrap()), url.clone()).unwrap();
     let session = LibrarySession::open(super::super::LibraryRuntimeSpec {
         config: super::super::LibraryOpenConfig {
-            opds: None,
+            opds_credentials: None,
             id: LibraryId::new_v4(),
             display_name: "Concurrency".into(),
             root: root.to_string_lossy().into_owned(),
@@ -33,8 +33,7 @@ pub(in crate::library) fn fixture(root: &std::path::Path, url: account_client::U
             default_sync_server_url: url,
             metadata_server_url: "http://127.0.0.1:1".into(),
             storage: sync_common::storage::LibraryStorage::Bokheim,
-            reset_cloud_presence: false,
-        },
+            reset_cloud_presence: false, kind: Default::default() },
         account: account.library_account(),
         notification_interest: Default::default(),
         root_failures: None,
@@ -140,7 +139,7 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
             parent_id: ROOT_DIR_ID,
             file_name: "Book.epub".into(),
             format: book_model::BookFormat::Epub,
-            content_hash: hash,
+            book_id: hash,
             size_bytes: 100,
             inspection_version: 1,
             inspection: Some(book_inspection::InspectedBook {
@@ -170,7 +169,7 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
     let requests = actor.requests.as_ref().unwrap().sync.clone();
     let updates = actor.coordination.subscribe_updates();
     assert!(requests.is_empty());
-    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/2)".into(), progress: Some(10.0), entry: None })).unwrap();
+    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { book_id: hash, position: "epubcfi(/6/2)".into(), progress: Some(10.0), entry: None })).unwrap();
     let SyncRequest::WakeAfter(delay) = requests.try_recv().unwrap() else { panic!("position changes should schedule their own publication deadline") };
     assert!(delay <= Duration::from_secs(5) && delay > Duration::from_secs(4));
     assert_eq!(actor.session.db.reading_position(&hash).unwrap().as_deref(), Some("epubcfi(/6/2)"));
@@ -178,7 +177,7 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
     assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::ReadingProgress(hash));
     let recent = actor.session.db.browse_contents(&query, false).unwrap().books;
     assert_eq!(recent.len(), 1);
-    assert_eq!(recent[0].content_hash(), Some(hash));
+    assert_eq!(recent[0].book_id(), Some(hash));
     assert_eq!(recent[0].progress, 10.0);
     assert!(updates.is_empty());
     assert_eq!(actor.requests.as_ref().unwrap().assets.len(), asset_requests, "saving progress must not start asset work");
@@ -187,11 +186,11 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
     assert!(actor.session.db.sync_next_outbox_page(&mut outbox).unwrap().iter().all(|p| p.state.value.kind() != "reading_position"));
 
     // Updates within a chapter must refresh too, without needing a completed chapter.
-    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/4)".into(), progress: Some(20.0), entry: None })).unwrap();
+    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { book_id: hash, position: "epubcfi(/6/4)".into(), progress: Some(20.0), entry: None })).unwrap();
     actor.coordination.drain(&actor.session.events);
     assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::ReadingProgress(hash));
     assert_eq!(actor.session.db.browse_contents(&query, false).unwrap().books[0].progress, 20.0);
-    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/4)".into(), progress: Some(20.0), entry: None })).unwrap();
+    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { book_id: hash, position: "epubcfi(/6/4)".into(), progress: Some(20.0), entry: None })).unwrap();
     actor.coordination.drain(&actor.session.events);
     assert!(updates.is_empty(), "an unchanged position should not reload the library");
 }
@@ -351,7 +350,7 @@ async fn subscription_registers_with_initial_state_and_receives_callback_events(
         let (updates, scanning) = handle.subscribe_updates().await.unwrap();
         assert!(scanning, "the subscription snapshot includes the active import");
         // Callback capabilities can cross threads without sharing actor state.
-        std::thread::spawn(move || events.emit(LibraryEvent::ThumbnailGenerated { content_hash: hash })).join().unwrap();
+        std::thread::spawn(move || events.emit(LibraryEvent::ThumbnailGenerated { book_id: hash })).join().unwrap();
         assert_eq!(updates.recv().await.unwrap(), library_model::LibraryUpdate::Covers(vec![hash]));
         handle.shutdown();
         assert!(updates.recv().await.is_err());
@@ -481,14 +480,14 @@ async fn browser_download_import_appears_on_home_before_enrichment() {
         let page = actor.session.db.browse(&query, downloaded_only).unwrap();
         assert_eq!(page.contents.books.len(), 1);
         let book = &page.contents.books[0];
-        assert_eq!(book.content_hash(), Some(hash));
+        assert_eq!(book.book_id(), Some(hash));
         assert!(book.downloaded);
         assert!(book.added_at >= started);
     }
     query.location = BrowseLocation::Home(None);
     let home = actor.session.db.browse(&query, false).unwrap();
     let recent = home.sections.iter().find(|section| section.parent.id == BrowseLocation::Home(Some(HomeShelf::RecentlyAdded))).unwrap();
-    assert_eq!(recent.books[0].content_hash(), Some(hash));
+    assert_eq!(recent.books[0].book_id(), Some(hash));
 }
 
 #[tokio::test]

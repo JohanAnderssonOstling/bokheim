@@ -111,7 +111,8 @@ pub const MAX_ACCOUNT_STORAGE_BOOKS: usize = 100;
 /// An account-owned book's charged bytes. Titles remain client-owned metadata.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BookStorageUsage {
-    pub content_hash: sync_common::BookId,
+    #[serde(rename = "content_hash")]
+    pub book_id: sync_common::BookId,
     pub used_bytes: u64,
 }
 

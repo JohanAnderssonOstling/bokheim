@@ -15,6 +15,8 @@
 //! it — and which of those means "seek the running audiobook" rather than "open
 //! the book" is a decision only the surface can make.
 
+use ui_text::text;
+
 use crate::Button;
 use gpui::prelude::*;
 use gpui::{Div, ElementId, MouseButton, SharedString, Stateful, div, px};
@@ -29,7 +31,7 @@ pub fn contents_read_checkmark(id: impl Into<ElementId>, on_reset: ContentsReadR
     crate::base_button(id)
         .ghost()
         .icon(Icon::new(IconName::Check).size(gpui::rems(TEXT_XS)))
-        .tooltip("Mark chapter as unread")
+        .tooltip(text!(common::mark_chapter_as_unread))
         .debug_selector(|| "chapter-read-checkmark".into())
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |event, window, cx| {

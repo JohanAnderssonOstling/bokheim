@@ -28,7 +28,7 @@ fn rendering_keeps_simple_annotations_in_rotated_cropped_display_coordinates() -
     for rotation in [0, 90] {
         let bytes = annotated_streaming_fixture(rotation);
         let (_, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
-        assert!(metadata.valid_for(&metadata.content_hash));
+        assert!(metadata.valid_for(&metadata.book_id));
         assert!(metadata.annotations.is_empty());
         let document = PdfDocumentSession::from_reader("annotations", Cursor::new(bytes))?;
         let rendered = document.render_page_for_display(PageRenderKey::new(0, 320))?;

@@ -36,7 +36,7 @@ pub(super) async fn serve(State(fixture): State<Fixture>, headers: HeaderMap) ->
         fixture.requests.lock().unwrap().push((headers[header::RANGE].to_str().unwrap().to_owned(), 0));
         return Err(StatusCode::RANGE_NOT_SATISFIABLE);
     }
-    let asset = StoredAsset { reader: Box::new(Cursor::new(fixture.bytes.clone())), total_len: fixture.bytes.len() as u64, offset: 0, content_hash: fixture.hash };
+    let asset = StoredAsset { reader: Box::new(Cursor::new(fixture.bytes.clone())), total_len: fixture.bytes.len() as u64, offset: 0, book_id: fixture.hash };
     let response = stream_asset(asset, AssetKind::Book, &headers, TransferGovernor::new(Default::default()), "test".into()).await?;
     fixture.requests.lock().unwrap().push((headers[header::RANGE].to_str().unwrap().to_owned(), response.headers()[header::CONTENT_LENGTH].to_str().unwrap().parse().unwrap()));
     Ok(response)

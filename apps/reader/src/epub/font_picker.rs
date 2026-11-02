@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use components::{FontCatalog, FontCatalogTarget};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, SharedString, Task, TextSystem, UniformListScrollHandle, Window, div, px, rems, uniform_list};
@@ -53,7 +55,7 @@ fn font_supports_cjk(text_system: &TextSystem, family: &str) -> bool {
 
 impl FontPicker {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search fonts"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(common::search_fonts)));
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 if let Some(family) = this.catalog.filtered.first().and_then(|index| this.catalog.families.get(*index)).cloned() {
@@ -151,7 +153,7 @@ impl Render for FontPicker {
         let preferences = ReaderSettings::preferences(cx).clone();
         let choices = ReaderFontRole::ALL.into_iter().map(|role| {
             let family = preferences.custom_font_family(role).map(str::to_owned);
-            let name = family.clone().unwrap_or_else(|| "Book".into());
+            let name = family.clone().unwrap_or_else(|| text!(reader::book).into());
             let active = self.active_role == Some(role);
             components::reader_state_card(("custom-font-role", role.index()), active, theme)
                 .flex_1()
@@ -235,7 +237,7 @@ impl FontPicker {
             .child(rows)
             .child(Scrollbar::new(&self.scroll).axis(ScrollbarAxis::Vertical).scrollbar_show(ScrollbarShow::Always));
         let body = if self.catalog.loading || self.catalog.filtered.is_empty() {
-            div().flex_1().min_h_0().p(px(components::SPACE_SM)).text_color(theme.text_muted).child(if self.catalog.loading { "Loading fonts…" } else { "No matching fonts" }).into_any_element()
+            div().flex_1().min_h_0().p(px(components::SPACE_SM)).text_color(theme.text_muted).child(if self.catalog.loading { text!(common::loading_fonts) } else { text!(common::no_matching_fonts) }).into_any_element()
         } else {
             list.into_any_element()
         };
@@ -246,7 +248,7 @@ impl FontPicker {
             .key_context("ReaderFontPicker")
             .track_focus(&self.input.read(cx).focus_handle(cx))
             .when(self.catalog.loaded && selected.is_some_and(|family| !self.catalog.families.iter().any(|available| available == family)), |panel| {
-                panel.child(div().debug_selector(|| "reader-font-unavailable".into()).text_color(theme.text_muted).child("Saved font unavailable on this device"))
+                panel.child(div().debug_selector(|| "reader-font-unavailable".into()).text_color(theme.text_muted).child(text!(common::saved_font_unavailable_on_this_device)))
             })
             .child(
                 div()

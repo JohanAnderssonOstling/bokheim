@@ -179,13 +179,13 @@ public final class AudiobookService extends MediaSessionService {
         session = new MediaSession.Builder(this, sessionPlayer)
             .setCallback(new PlaybackControls())
             .setMediaButtonPreferences(java.util.Arrays.asList(
-                new CommandButton.Builder(CommandButton.ICON_SKIP_BACK_15).setDisplayName("Back 15 seconds")
+                new CommandButton.Builder(CommandButton.ICON_SKIP_BACK_15).setDisplayName(UiText.COMMON_BACK_15_SECONDS)
                     .setSessionCommand(SKIP_BACK).setSlots(CommandButton.SLOT_BACK).build(),
-                new CommandButton.Builder(CommandButton.ICON_SKIP_FORWARD_30).setDisplayName("Forward 30 seconds")
+                new CommandButton.Builder(CommandButton.ICON_SKIP_FORWARD_30).setDisplayName(UiText.COMMON_FORWARD_30_SECONDS)
                     .setSessionCommand(SKIP_FORWARD).setSlots(CommandButton.SLOT_FORWARD).build(),
-                new CommandButton.Builder(CommandButton.ICON_PREVIOUS).setDisplayName("Previous chapter")
+                new CommandButton.Builder(CommandButton.ICON_PREVIOUS).setDisplayName(UiText.AUDIOBOOK_PREVIOUS_CHAPTER)
                     .setSessionCommand(PREVIOUS_CHAPTER).setSlots(CommandButton.SLOT_OVERFLOW).build(),
-                new CommandButton.Builder(CommandButton.ICON_NEXT).setDisplayName("Next chapter")
+                new CommandButton.Builder(CommandButton.ICON_NEXT).setDisplayName(UiText.AUDIOBOOK_NEXT_CHAPTER)
                     .setSessionCommand(NEXT_CHAPTER).setSlots(CommandButton.SLOT_OVERFLOW).build()))
             .setSessionActivity(PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
             .build();

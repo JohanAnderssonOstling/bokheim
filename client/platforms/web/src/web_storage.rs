@@ -322,7 +322,7 @@ pub struct FileReader {
 }
 
 impl FileReader {
-    pub fn content_hash(&self) -> Result<Option<BookId>, String> {
+    pub fn book_id(&self) -> Result<Option<BookId>, String> {
         use rusqlite::OptionalExtension;
         let value: Option<BookId> = with_index(|index| index.query_row(include_str!("sql/web_storage/content_hash_select.sql"), [&self.physical], |row| row.get(0)).optional())?;
         Ok(value)
@@ -436,31 +436,31 @@ impl FileWriter {
         Ok(())
     }
 
-    pub fn publish_verified_as(mut self, name: String, content_hash: BookId) -> Result<(), StorageError> {
+    pub fn publish_verified_as(mut self, name: String, book_id: BookId) -> Result<(), StorageError> {
         self.name = name;
-        self.commit_verified(content_hash)
+        self.commit_verified(book_id)
     }
     /// Retain the published physical generation until the owning database has
     /// accepted or rejected it. Rejection cannot remove a later replacement.
-    pub fn publish_pinned_as(self, name: String, content_hash: BookId) -> Result<PublishedFile, StorageError> {
+    pub fn publish_pinned_as(self, name: String, book_id: BookId) -> Result<PublishedFile, StorageError> {
         let reader = self.open_reader();
-        self.publish_verified_as(name.clone(), content_hash)?;
+        self.publish_verified_as(name.clone(), book_id)?;
         Ok(PublishedFile { name, reader })
     }
     pub fn commit(self) -> Result<(), StorageError> {
         self.commit_revision(None)
     }
-    pub fn commit_verified(self, content_hash: BookId) -> Result<(), StorageError> {
-        self.commit_revision(Some(content_hash))
+    pub fn commit_verified(self, book_id: BookId) -> Result<(), StorageError> {
+        self.commit_revision(Some(book_id))
     }
-    fn commit_revision(mut self, content_hash: Option<BookId>) -> Result<(), StorageError> {
+    fn commit_revision(mut self, book_id: Option<BookId>) -> Result<(), StorageError> {
         let previous = physical_name(&self.name)?;
         flush_staged(&self.physical).map_err(storage_js_error)?;
         with_index_typed(|index| {
             let tx = index.unchecked_transaction()?;
             super::asset_index::publish(&tx, &self.name, &self.physical, self.length)?;
-            if let Some(content_hash) = content_hash {
-                tx.execute(include_str!("sql/web_storage/commit_revision_insert.sql"), rusqlite::params![self.physical, content_hash])?;
+            if let Some(book_id) = book_id {
+                tx.execute(include_str!("sql/web_storage/commit_revision_insert.sql"), rusqlite::params![self.physical, book_id])?;
             }
             tx.execute(include_str!("sql/web_storage/commit_revision_delete.sql"), [])?;
             tx.commit()

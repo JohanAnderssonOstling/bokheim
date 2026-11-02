@@ -1,3 +1,5 @@
+import {text} from './ui-text.mjs';
+
 // Version floors are a compatibility policy, not a guarantee that a device can
 // run the app. Probe the required capabilities before loading the WASM bundle.
 export function browserVersion(userAgent) {
@@ -29,9 +31,9 @@ function belowMinimum(browser) {
 export function compatibilityMessage(userAgent) {
     const browser = browserVersion(userAgent);
     if (browser && belowMinimum(browser)) {
-        return `Bokheim requires ${browser.name} ${browser.minimum} or newer.`;
+        return text('web.requires_browser', browser);
     }
-    return 'Update your browser to its latest version.';
+    return text('web.update_your_browser_to_its_latest_version');
 }
 
 // Detect standardized exception handling (exnref), rather than the older
@@ -56,18 +58,18 @@ export function requiredCapabilities(env = globalThis) {
     const browser = browserVersion(env.navigator?.userAgent || '');
     if (browser) {
         if (belowMinimum(browser)) {
-            issues.push(`${browser.name} ${browser.version} is too old. Update to version ${browser.minimum} or newer.`);
+            issues.push(text('web.browser_too_old', browser));
         }
     }
-    if (!env.isSecureContext) issues.push('Use HTTPS, or localhost for local testing.');
-    if (!env.crossOriginIsolated) issues.push('This site lacks required cross-origin isolation. Ask the site administrator to check COOP and COEP headers.');
-    if (!env.WebAssembly || typeof env.SharedArrayBuffer !== 'function') issues.push("This browser can't provide the required WebAssembly shared memory.");
-    if (!supportsUnwinding(env.WebAssembly)) issues.push('This browser lacks required WebAssembly exception handling. Update your browser.');
-    if (typeof env.Atomics?.waitAsync !== 'function') issues.push('This browser cannot wait asynchronously for shared-memory work. Update your browser.');
-    if (typeof env.Worker !== 'function') issues.push('This browser does not support background workers.');
-    if (typeof env.SharedWorker !== 'function') issues.push('This browser does not support shared background workers. On Android, Chrome 148 or newer is required.');
-    if (typeof env.navigator?.storage?.getDirectory !== 'function') issues.push('This browser does not provide the private file storage required for your library.');
-    if (typeof env.navigator?.locks?.request !== 'function') issues.push('This browser does not provide the locking required to safely share a library between tabs.');
+    if (!env.isSecureContext) issues.push(text('web.use_https'));
+    if (!env.crossOriginIsolated) issues.push(text('web.missing_isolation'));
+    if (!env.WebAssembly || typeof env.SharedArrayBuffer !== 'function') issues.push(text('web.missing_shared_memory'));
+    if (!supportsUnwinding(env.WebAssembly)) issues.push(text('web.missing_exceptions'));
+    if (typeof env.Atomics?.waitAsync !== 'function') issues.push(text('web.missing_async_wait'));
+    if (typeof env.Worker !== 'function') issues.push(text('web.missing_workers'));
+    if (typeof env.SharedWorker !== 'function') issues.push(text('web.missing_shared_workers'));
+    if (typeof env.navigator?.storage?.getDirectory !== 'function') issues.push(text('web.missing_private_storage'));
+    if (typeof env.navigator?.locks?.request !== 'function') issues.push(text('web.missing_locks'));
     return issues;
 }
 
@@ -93,15 +95,15 @@ export function checkSharedWorkerSupport() {
                 'self.onconnect = ({ports:[port]}) => { port.postMessage(true); self.close(); };',
             ], {type: 'text/javascript'}));
             worker = new SharedWorker(url, {type: 'module'});
-            timer = setTimeout(() => finish("Couldn't start a shared background worker. Check browser restrictions and reload."), 10000);
+            timer = setTimeout(() => finish(text('web.worker_timeout')), 10000);
             worker.onerror = event => {
                 event.preventDefault();
-                finish('The browser could not load a shared module worker. Update your browser or check whether this site blocks workers.');
+                finish(text('web.worker_load_failed'));
             };
             worker.port.onmessage = () => finish(null);
             worker.port.start();
         } catch {
-            finish('This browser or this site’s security settings prevent Bokheim from starting shared workers.');
+            finish(text('web.workers_blocked'));
         }
     });
 }

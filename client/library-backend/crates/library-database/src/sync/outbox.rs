@@ -169,7 +169,7 @@ impl Database {
                 scanned += 1;
                 let mutation = decode_outbox_row(stored)?;
                 let position_ready = match &mutation.state.value {
-                    LibraryStateEntry::ReadingPosition { content_hash, .. } => !pending.reading_positions.contains(content_hash),
+                    LibraryStateEntry::ReadingPosition { book_id, .. } => !pending.reading_positions.contains(book_id),
                     _ => true,
                 };
                 if !book_ready(&mutation, pending) || !position_ready {

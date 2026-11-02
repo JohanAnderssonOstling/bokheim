@@ -40,7 +40,7 @@ fn main() {
     settings["chrome_hidden"] = false.into();
     let preferences = serde_json::from_value(settings).unwrap();
     let launch = BackendLaunch::initialize(AppDataLocation::native_path(directory)).expect("isolated backend");
-    let (backend, _) = AppClient::start_native(launch).expect("backend worker");
+    let (backend, startup) = AppClient::start_native(launch).expect("backend worker");
     gpui_platform::application().with_assets(ui_components::Assets).run(move |cx: &mut App| {
         gpui_component::init(cx);
         ui_components::init_page_scrolling(cx);
@@ -49,22 +49,22 @@ fn main() {
             cx.text_system().add_fonts(vec![Cow::Owned(bytes)]).expect("register isolated test font");
         }
         ui_components::apply_appearance(&app_preferences::BrowsingPreferences::default(), cx);
+        dictionary_settings::configure(Rc::new(dictionary::LocalClient::new(startup.dictionary_storage_root)), cx);
         reader_ui::bind_keys(cx);
         reader_ui::configure(preferences, Rc::new(move |preferences, _, _| fs::write(&settings_path, serde_json::to_vec_pretty(&preferences).unwrap()).unwrap()), cx);
         let bounds = gpui::Bounds::centered(None, size(px(1200.0), px(850.0)), cx);
         let window = cx
-            .open_window(gpui::WindowOptions {
-                window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
-                titlebar: Some(gpui::TitlebarOptions { title: Some("CJK font validation".into()), ..Default::default() }),
-                ..Default::default()
-            }, |window, cx| {
-                let harness = cx.new(|_| Harness { reader: None });
-                cx.new(|cx| gpui_component::Root::new(harness, window, cx))
-            })
+            .open_window(
+                gpui::WindowOptions { window_bounds: Some(gpui::WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some("CJK font validation".into()), ..Default::default() }), ..Default::default() },
+                |window, cx| {
+                    let harness = cx.new(|_| Harness { reader: None });
+                    cx.new(|cx| gpui_component::Root::new(harness, window, cx))
+                },
+            )
             .unwrap();
         cx.activate(true);
         cx.spawn(async move |cx| {
-            let library = Rc::new(backend.library_for_import(None).await.expect("isolated library"));
+            let library = Rc::new(backend.management.library_for_import(None).await.expect("isolated library"));
             let name = book.file_name().unwrap().to_string_lossy().into_owned();
             let content = library.import_downloaded_book(ROOT_DIR_ID, name.clone(), fs::read(book).unwrap()).await.expect("import test book");
             let locator = BookLocator::new(*library.id(), content);

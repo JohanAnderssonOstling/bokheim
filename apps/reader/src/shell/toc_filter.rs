@@ -1,5 +1,7 @@
 //! Filter chapter titles without changing their destinations or document order.
 
+use ui_text::text;
+
 use std::{collections::HashMap, rc::Rc};
 
 use book_model::normalize_search_text;
@@ -49,7 +51,7 @@ pub(crate) struct TocFilter {
 
 impl TocFilter {
     pub(crate) fn new(tree: Entity<TreeState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter contents"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(reader::filter_contents)));
         cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| match event {
             InputEvent::Change => this.set_query(&input.read(cx).value(), cx),
             InputEvent::PressEnter { .. } => this.tree.update(cx, |tree, cx| tree.focus(window, cx)),
@@ -118,7 +120,7 @@ impl Render for TocFilter {
         let theme = components::browser_theme(cx);
         let filter = components::reader_search_bar(theme).child(components::reader_search_box(theme).debug_selector(|| "reader-toc-filter".into()).child(Input::new(&self.input).appearance(false).cleanable(true).size_full()));
         div().flex_none().w_full().child(filter).when(!self.query.is_empty() && self.tree.read(cx).entries().is_empty(), |panel| {
-            panel.child(components::reader_state_note("No chapters match your filter.", theme).debug_selector(|| "reader-toc-filter-empty".into()).p(px(12.0)))
+            panel.child(components::reader_state_note(text!(reader::no_chapters_match_your_filter), theme).debug_selector(|| "reader-toc-filter-empty".into()).p(px(12.0)))
         })
     }
 }
@@ -247,12 +249,13 @@ mod tests {
     #[gpui::test]
     fn positional_ids_keep_duplicate_chapters_distinct_when_filtered(cx: &mut TestAppContext) {
         use crate::epub::toc::TocState;
-        use skrift_column_paginator::TocEntry;
+        use book_content::BookToc;
+        use book_model::BookTocEntry;
 
         let mut toc = TocState::default();
-        let chapter = || TocEntry { title: "Chapter".into(), link: "shared.xhtml".into(), children: vec![] };
-        let entries = vec![TocEntry { title: "Part".into(), link: "shared.xhtml".into(), children: vec![chapter(), chapter()] }, TocEntry { title: "Appendix".into(), link: "appendix.xhtml".into(), children: vec![] }];
-        let resolutions = TocState::resolve(&entries, |_| Some((0, None)));
+        let chapter = || BookTocEntry { title: "Chapter".into(), target: "shared.xhtml".into(), children: vec![] };
+        let entries = vec![BookTocEntry { title: "Part".into(), target: "shared.xhtml".into(), children: vec![chapter(), chapter()] }, BookTocEntry { title: "Appendix".into(), target: "appendix.xhtml".into(), children: vec![] }];
+        let resolutions = BookToc::resolve(&entries, |_| Some((0, None)));
         toc.set(entries, resolutions);
         let (view, cx) = setup(cx);
         view.update(cx, |view, cx| view.filter.update(cx, |filter, cx| filter.set_items(toc.tree_items(), cx)));

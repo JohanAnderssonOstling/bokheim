@@ -131,7 +131,7 @@ impl Database {
         })?;
         // Search results come from anywhere below, so each says where it lives.
         if !options.search.is_empty() {
-            let mut paths = crate::placements::FolderPaths::new(&self.connection);
+            let mut paths = crate::placements::FolderPaths::for_directories(&self.connection, parents.iter().map(String::as_str))?;
             for (folder, parent) in folders.iter_mut().zip(parents) {
                 folder.path = paths.folder(&parent)?.filter(|path| !path.is_empty()).map(str::to_owned);
             }

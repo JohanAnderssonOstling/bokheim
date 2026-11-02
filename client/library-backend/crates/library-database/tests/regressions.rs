@@ -17,7 +17,7 @@ fn import() -> ImportCommit {
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
         format: book_model::BookFormat::Epub,
-        content_hash: hash,
+        book_id: hash,
         size_bytes: 10,
         inspection_version: 1,
         inspection: Some(book_inspection::InspectedBook {
@@ -41,7 +41,7 @@ fn browse_book_detail_projects_only_authors_and_narrators() {
 
     let db = database();
     let mut book = import();
-    let hash = book.content_hash;
+    let hash = book.book_id;
     book.inspection.as_mut().unwrap().metadata.contributors = vec![
         Contributor::new("Author", AUTHOR_MARC_RELATOR_CODE).unwrap(),
         Contributor::new("Translator", MarcRelatorCode(*b"trl")).unwrap(),
@@ -70,7 +70,7 @@ fn old_library_schemas_are_refused_without_modification() {
 #[test]
 fn reimport_with_catalog_answer_preserves_an_existing_definitive_answer() {
     let db = database();
-    let hash = import().content_hash;
+    let hash = import().book_id;
     let original = import().inspection.unwrap().metadata;
     db.commit_import_with_catalog_answer(import(), None, Some(original.clone())).unwrap();
     let mut changed = original.clone();
@@ -110,10 +110,10 @@ fn definitive_enrichment_answers_do_not_expire() {
     for status in [BookEnrichmentStatus::Found, BookEnrichmentStatus::NoMatch] {
         let db = database();
         let book = import();
-        let hash = book.content_hash;
+        let hash = book.book_id;
         db.commit_import(book).unwrap();
         let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-        let answer = BookEnrichment { key: String::new(), status, record: (status == BookEnrichmentStatus::Found).then_some(candidate.record), toc: None, popularity: None, cover: None, detail: String::new() };
+        let answer = BookEnrichment { key: String::new(), status, record: (status == BookEnrichmentStatus::Found).then_some(candidate.record), toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
         db.record_enrichment(&hash, &candidate.request_key, answer, 100).unwrap();
         assert!(db.enrichment_candidates(&[hash], 100).unwrap().is_empty());
         assert!(db.enrichment_candidates(&[hash], 10 * 365 * 24 * 60 * 60).unwrap().is_empty());
@@ -127,10 +127,10 @@ fn failed_enrichment_retries_until_a_definitive_answer() {
 
     let db = database();
     let book = import();
-    let hash = book.content_hash;
+    let hash = book.book_id;
     db.commit_import(book).unwrap();
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail: String::new() };
+    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, answer.clone(), 100).unwrap();
     assert_eq!(db.enrichment_next_retry().unwrap(), Some(160));
     assert!(db.enrichment_candidates(&[hash], 159).unwrap().is_empty());
@@ -149,16 +149,16 @@ fn enrichment_candidate_deadlines_preserve_scope_order_and_request_inputs() {
     let hashes = (1..=3).map(|index| import_in_folder(&db, index, ROOT_DIR_ID)).collect::<Vec<_>>();
     let scope = [hashes[2], hashes[0], hashes[1]];
     let original = db.enrichment_candidates(&scope, 0).unwrap();
-    assert_eq!(original.iter().map(|candidate| candidate.content_hash).collect::<Vec<_>>(), hashes);
-    let failure = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail: String::new() };
+    assert_eq!(original.iter().map(|candidate| candidate.book_id).collect::<Vec<_>>(), hashes);
+    let failure = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
     db.record_enrichment(&hashes[0], &original[0].request_key, failure.clone(), 10).unwrap();
     db.record_enrichment(&hashes[1], &original[1].request_key, failure, 25).unwrap();
     // The third draft has no retry deadline and remains immediately eligible.
     for (now, expected) in [(69, vec![hashes[2]]), (70, vec![hashes[0], hashes[2]]), (84, vec![hashes[0], hashes[2]]), (85, hashes.clone())] {
         let candidates = db.enrichment_candidates(&scope, now).unwrap();
-        assert_eq!(candidates.iter().map(|candidate| candidate.content_hash).collect::<Vec<_>>(), expected);
+        assert_eq!(candidates.iter().map(|candidate| candidate.book_id).collect::<Vec<_>>(), expected);
         for candidate in candidates {
-            let expected = original.iter().find(|original| original.content_hash == candidate.content_hash).unwrap();
+            let expected = original.iter().find(|original| original.book_id == candidate.book_id).unwrap();
             assert_eq!(candidate.request_key, expected.request_key);
             assert_eq!(serde_json::to_value(candidate.record).unwrap(), serde_json::to_value(&expected.record).unwrap());
             assert_eq!(candidate.recording, expected.recording);
@@ -169,7 +169,7 @@ fn enrichment_candidate_deadlines_preserve_scope_order_and_request_inputs() {
     assert!(db.enrichment_candidates(&[hashes[1]], 70).unwrap().is_empty());
     let candidates = db.enrichment_candidates(&[hashes[1]], 85).unwrap();
     assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].content_hash, hashes[1]);
+    assert_eq!(candidates[0].book_id, hashes[1]);
 }
 
 #[test]
@@ -179,7 +179,7 @@ fn enrichment_defers_corrupt_drafts_until_their_retry_deadline() {
     let db = database();
     let hash = import_in_folder(&db, 1, ROOT_DIR_ID);
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let failure = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail: String::new() };
+    let failure = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, failure, 100).unwrap();
     db.connection.execute("UPDATE local_book_draft SET body=?1 WHERE content_hash=?2", rusqlite::params![b"invalid draft".as_slice(), hash]).unwrap();
     assert!(db.enrichment_candidates(&[hash], 159).unwrap().is_empty());
@@ -193,7 +193,7 @@ fn enrichment_reads_identifiers_from_the_stored_metadata_document() {
 
     let db = database();
     let mut book = import();
-    let hash = book.content_hash;
+    let hash = book.book_id;
     let identifiers = &mut book.inspection.as_mut().unwrap().metadata.book.identifiers;
     push_isbn(identifiers, "9780393243277", Scope::Book).unwrap();
     let expected = identifiers.clone();
@@ -238,7 +238,7 @@ fn audiobook_detail_preserves_current_chapter_boundaries_and_fallback_titles() {
 
     let db = database();
     let mut book = import();
-    let hash = book.content_hash;
+    let hash = book.book_id;
     book.format = BookFormat::M4b;
     book.inspection.as_mut().unwrap().audiobook = Some(book_inspection::AudiobookMetadata {
         title: "Audio".into(),
@@ -283,7 +283,7 @@ fn copy_fixture(db: &Database) -> (BookId, DirId, DirId) {
     let source = db.create_directory(&ROOT_DIR_ID, &"A".into()).unwrap().id;
     let destination = db.create_directory(&ROOT_DIR_ID, &"Z".into()).unwrap().id;
     let mut book = import();
-    let hash = book.content_hash;
+    let hash = book.book_id;
     book.parent_id = source;
     book.published.relative_path = "/A/book.epub".into();
     db.commit_import(book).unwrap();
@@ -364,13 +364,13 @@ fn file_work_reads_preserve_queue_order_and_fail_on_a_later_invalid_path() {
     let db = database();
     let (hash, _, _) = copy_fixture(&db);
     let before = db.native_file_work().unwrap();
-    let expected = before.iter().map(|work| (work.id, work.operation.clone(), work.content_hash, work.original_path.clone())).collect::<Vec<_>>();
+    let expected = before.iter().map(|work| (work.id, work.operation.clone(), work.book_id, work.directory, work.cleanup_path.clone())).collect::<Vec<_>>();
     for invalid in ["/zz/../../outside.epub", "/zz/../another.epub"] {
         db.connection.execute("INSERT INTO local_file_work(operation,content_hash,relative_path) VALUES('remove',?1,?2)", (hash, invalid)).unwrap();
         let id = db.connection.last_insert_rowid();
         assert!(db.native_file_work().is_err());
         db.connection.execute("DELETE FROM local_file_work WHERE id=?1", [id]).unwrap();
-        assert_eq!(db.native_file_work().unwrap().into_iter().map(|work| (work.id, work.operation, work.content_hash, work.original_path)).collect::<Vec<_>>(), expected);
+        assert_eq!(db.native_file_work().unwrap().into_iter().map(|work| (work.id, work.operation, work.book_id, work.directory, work.cleanup_path)).collect::<Vec<_>>(), expected);
     }
 }
 
@@ -432,7 +432,7 @@ mod scanner {
     fn fixture() -> (Database, BookId) {
         let db = database();
         let mut book = import();
-        let hash = book.content_hash;
+        let hash = book.book_id;
         book.published.published = true;
         book.published.fingerprint = Some("1".into());
         db.commit_import(book).unwrap();
@@ -456,7 +456,7 @@ mod scanner {
             name: "book.epub".into(),
             path: "book.epub".into(),
             fingerprint: 2,
-            content_hash: hash,
+            book_id: hash,
             size_bytes: 20,
             extension: "epub".into(),
             inspection: import().inspection.unwrap(),
@@ -490,7 +490,7 @@ mod scanner {
                 assert_eq!(repaired.tombstoned_files, [(ROOT_DIR_ID, "book.epub".into())]);
             } else {
                 assert_eq!(repaired.books.len(), 1);
-                assert_eq!((repaired.books[0].content_hash, repaired.books[0].directory, repaired.books[0].fingerprint), (hash, ROOT_DIR_ID, 1));
+                assert_eq!((repaired.books[0].book_id, repaired.books[0].directory, repaired.books[0].fingerprint), (hash, ROOT_DIR_ID, 1));
                 db.connection.execute("UPDATE book_dir SET local_hash='outdated-fingerprint'", []).unwrap();
                 let skipped = db.scan_snapshot().unwrap();
                 assert!(skipped.books.is_empty());
@@ -522,7 +522,7 @@ mod scanner {
         let mut first = replacement();
         first.name = "first.epub".into();
         first.path = first.name.clone();
-        let first_hash = db.resolve_scanned_content(first.content_hash.content_hash().unwrap(), None).unwrap();
+        let first_hash = db.resolve_scanned_content(first.book_id.content_hash().unwrap(), None).unwrap();
         let discovery = FilesystemScan { readable: true, files: vec![observation(ROOT_DIR_ID, "first.epub", 2), observation(ROOT_DIR_ID, "second.epub", 2)], ..Default::default() };
         assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, InspectedFilesystemScan { readable: true, books: vec![first] }, false, None).unwrap(), ScanApplyResult::Applied);
         assert_eq!(
@@ -544,7 +544,7 @@ mod scanner {
         let mut second = replacement();
         second.name = "second.epub".into();
         second.path = second.name.clone();
-        second.content_hash = BookId::new(&"c".repeat(64));
+        second.book_id = BookId::new(&"c".repeat(64));
 
         assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, InspectedFilesystemScan { readable: true, books: vec![second] }, false, None).unwrap(), ScanApplyResult::Applied);
         assert_eq!(
@@ -569,7 +569,7 @@ mod scanner {
     fn ordinary_import_still_rejects_an_occupied_filename() {
         let (db, old) = fixture();
         let mut book = import();
-        book.content_hash = BookId::new(&"b".repeat(64));
+        book.book_id = BookId::new(&"b".repeat(64));
         assert!(db.commit_import(book).is_err());
         assert_eq!(local_state(&db, old, ROOT_DIR_ID), (true, true, "1".into(), 1));
     }
@@ -631,7 +631,7 @@ fn interrupted_initialization_rolls_back_and_retries_after_reopen() {
         };
         let reopened = Database::open(&path).unwrap();
         assert_eq!(reopened.initialize_library().unwrap(), replica);
-        assert_eq!(reopened.browse_book_detail(&import().content_hash).unwrap().book.title, "Original");
+        assert_eq!(reopened.browse_book_detail(&import().book_id).unwrap().book.title, "Original");
     }
 }
 
@@ -660,10 +660,13 @@ fn reopening_current_library_does_not_commit_database_changes() {
     let reopened = Database::open(&path).unwrap();
     let mode: String = reopened.connection.pragma_query_value(Some("main"), "journal_mode", |row| row.get(0)).unwrap();
     assert_eq!(mode, "wal", "WAL must survive closing and reopening the database");
-    reopened.connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-        AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => Authorization::Deny,
-        _ => Authorization::Allow,
-    })).unwrap();
+    reopened
+        .connection
+        .authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
     // Exercise both ordinary connection configuration and initialization with
     // every journal-mode read/write forbidden, including read-only queries.
     crate::configure_library_connection(&reopened.connection).unwrap();
@@ -684,10 +687,12 @@ fn failed_wal_setup_leaves_library_uninitialized_and_can_retry() {
     use library_database::rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
     let db = Database::open(":memory:").unwrap();
-    db.connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-        AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => Authorization::Deny,
-        _ => Authorization::Allow,
-    })).unwrap();
+    db.connection
+        .authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
     assert!(db.initialize_library().is_err());
     db.connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
     assert!(db.connection.is_autocommit());
@@ -718,7 +723,7 @@ fn failing_final_schema_version_write_rolls_back_schema_and_replica() {
 fn subject_browsing_reads_assignments_without_cached_membership() {
     let db = database();
     let mut book = import();
-    let hash = book.content_hash;
+    let hash = book.book_id;
     book.inspection.as_mut().unwrap().metadata.book.subjects = vec![book_model::BookSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".into()), Some("HIS036060".into())).unwrap()];
     db.commit_import(book).unwrap();
     let (path, parent): (i64, i64) = db.connection.fixtures_read_book_unified_concept_route_route_id_route(|row| Ok((row.get(0)?, row.get(1)?))).unwrap();
@@ -740,7 +745,7 @@ fn subject_browsing_reads_assignments_without_cached_membership() {
     query.location = library_model::BrowseLocation::Subject(0);
     query.search.clear();
     let root_contents = db.browse_contents(&query, false).unwrap();
-    assert_eq!(root_contents.books[0].content_hash(), Some(hash));
+    assert_eq!(root_contents.books[0].book_id(), Some(hash));
     query.search = "Original".into();
     let searched = db.browse_contents(&query, false).unwrap();
     assert!(searched.children.is_empty());
@@ -763,7 +768,7 @@ fn subject_fixture() -> (Database, String, String) {
     let db = database();
     for index in 1..=4 {
         let mut book = import();
-        book.content_hash = BookId::new(&format!("{index:064x}"));
+        book.book_id = BookId::new(&format!("{index:064x}"));
 
         book.file_name = format!("book{index}.epub");
         book.published.name = book.file_name.clone();
@@ -829,13 +834,13 @@ fn browse_folder(db: &Database, dir: DirId, search: &str, languages: &[&str]) ->
 fn import_in_folder(db: &Database, index: u64, dir: DirId) -> BookId {
     let mut book = import();
     book.parent_id = dir;
-    book.content_hash = BookId::new(&format!("{index:064x}"));
+    book.book_id = BookId::new(&format!("{index:064x}"));
 
     book.file_name = format!("book{index}.epub");
     book.published.name = book.file_name.clone();
     book.published.relative_path = format!("/{}", book.file_name);
     book.inspection.as_mut().unwrap().metadata.title = format!("Title {index}");
-    let hash = book.content_hash;
+    let hash = book.book_id;
     db.commit_import(book).unwrap();
     hash
 }
@@ -862,7 +867,7 @@ fn all_books_lists_unique_live_books_across_folders() {
     db.connection.fixtures_delete_book_dir_2(&(shelf.to_string()), &unplaced).unwrap();
 
     let page = db.browse(&query, false).unwrap();
-    assert_eq!(page.contents.books.iter().map(|book| book.content_hash()).collect::<Vec<_>>(), [Some(first), Some(second)]);
+    assert_eq!(page.contents.books.iter().map(|book| book.book_id()).collect::<Vec<_>>(), [Some(first), Some(second)]);
     assert!(page.contents.books.iter().all(|book| book.source_directory.is_none()));
     assert!(page.contents.children.is_empty());
     assert!(page.sections.is_empty());
@@ -893,7 +898,7 @@ fn all_books_uses_shared_search_filters_and_book_order() {
     db.connection.projection_set_book_reading(&first, Some("reading"), 50.0_f32, Some(20)).unwrap();
     db.connection.projection_set_book_reading(&second, Some("finished"), 100.0_f32, Some(30)).unwrap();
     let mut query = subject_query(BrowseLocation::Books);
-    let hashes = |query: &library_model::LibraryBrowseQuery, downloaded_only| db.browse_contents(query, downloaded_only).unwrap().books.into_iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>();
+    let hashes = |query: &library_model::LibraryBrowseQuery, downloaded_only| db.browse_contents(query, downloaded_only).unwrap().books.into_iter().map(|book| book.book_id().unwrap()).collect::<Vec<_>>();
     assert_eq!(hashes(&query, true), [first, second]);
     query.search = "TITLE 102".into();
     assert_eq!(hashes(&query, false), [second]);
@@ -1005,9 +1010,9 @@ fn folder_counts_include_all_placements_and_search_sources() {
     assert!(direct.books.iter().all(|b| b.source_directory == Some(shelf)));
     let searched = browse_folder(&db, shelf, "Title", &[]);
     assert_eq!(searched.books.len(), 5, "search returns each descendant placement");
-    assert_eq!(searched.books.iter().filter(|b| b.content_hash() == Some(first)).count(), 3);
+    assert_eq!(searched.books.iter().filter(|b| b.book_id() == Some(first)).count(), 3);
     let source = [shelf, nested, branch].into_iter().min_by_key(|id| id.to_string()).unwrap();
-    assert_eq!(searched.books.iter().find(|b| b.content_hash() == Some(first)).unwrap().source_directory, Some(source));
+    assert_eq!(searched.books.iter().find(|b| b.book_id() == Some(first)).unwrap().source_directory, Some(source));
     let filtered = browse_folder(&db, ROOT_DIR_ID, "", &["en"]);
     assert_eq!(filtered.children.len(), 1);
     assert_eq!(filtered.children[0].book_count, 4);
@@ -1030,7 +1035,7 @@ fn folder_counts_include_all_placements_and_search_sources() {
     let moved = browse_folder(&db, ROOT_DIR_ID, "", &[]);
     assert_eq!(moved.children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(shelf)).unwrap().book_count, 3);
     assert_eq!(moved.children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(empty)).unwrap().book_count, 1);
-    assert_eq!(browse_folder(&db, shelf, "Title", &[]).books.iter().find(|b| b.content_hash() == Some(first)).unwrap().source_directory, Some(branch));
+    assert_eq!(browse_folder(&db, shelf, "Title", &[]).books.iter().find(|b| b.book_id() == Some(first)).unwrap().source_directory, Some(branch));
 }
 
 #[test]
@@ -1208,7 +1213,7 @@ fn browse_progress_is_derived_without_rewriting_sync_registers_and_audio_is_book
 
 /// Books a search from the root finds, by title or author.
 fn searched(db: &Database, search: &str) -> Vec<BookId> {
-    browse_folder(db, ROOT_DIR_ID, search, &[]).books.into_iter().map(|book| book.content_hash().unwrap()).collect()
+    browse_folder(db, ROOT_DIR_ID, search, &[]).books.into_iter().map(|book| book.book_id().unwrap()).collect()
 }
 
 #[test]
@@ -1297,7 +1302,7 @@ use crate::sql_fixtures::FixturesSql;
 fn complete_no_match(db: &Database, hash: &BookId) {
     use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
     let Some(candidate) = db.enrichment_candidates(&[*hash], 0).unwrap().pop() else { return };
-    db.record_enrichment(hash, &candidate.request_key, BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, detail: String::new() }, 0).unwrap();
+    db.record_enrichment(hash, &candidate.request_key, BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() }, 0).unwrap();
 }
 
 #[test]
@@ -1310,7 +1315,11 @@ fn upload_preparation_excludes_physical_work_and_keeps_batch_membership_fixed() 
     db.connection.execute("INSERT INTO book_transfer(content_hash,upload_id) VALUES(?1,42) ON CONFLICT(content_hash) DO UPDATE SET upload_id=42", [hashes[0]]).unwrap();
     db.connection.execute("INSERT INTO local_book_work(content_hash) VALUES(?1)", [hashes[2]]).unwrap();
     for (hash, operation) in [(hashes[3], "materialize"), (hashes[4], "remove")] {
-        db.connection.execute("INSERT INTO local_file_work(operation,content_hash,relative_path) VALUES(?1,?2,'/book.epub')", (operation, hash)).unwrap();
+        if operation == "materialize" {
+            db.connection.execute("INSERT INTO local_file_work(operation,content_hash,dir_id) VALUES(?1,?2,?3)", (operation, hash, ROOT_DIR_ID.to_string())).unwrap();
+        } else {
+            db.connection.execute("INSERT INTO local_file_work(operation,content_hash,relative_path) VALUES(?1,?2,'/book.epub')", (operation, hash)).unwrap();
+        }
     }
     db.connection.execute("INSERT INTO local_directory_work(dir_id) VALUES(?1)", [branch.to_string()]).unwrap();
     db.connection.execute("UPDATE local_file_projection SET dir_id=?1,relative_path='/Branch/Nested/remembered.epub' WHERE content_hash=?2", (nested.to_string(), hashes[6])).unwrap();
@@ -1411,10 +1420,10 @@ fn transfer_snapshot_preserves_versions_projected_paths_and_requested_order() {
     assert_eq!(asset.upload.local_versions, [(ROOT_DIR_ID.to_string(), "book910.epub".into(), "root-version".into()), (shelf.to_string(), "book910.epub".into(), "shelf-version".into())]);
     assert_eq!(asset.upload_paths.iter().map(|path| path.as_str()).collect::<Vec<_>>(), ["/previous/book.epub", "/book910.epub", "/Shelf/book910.epub"]);
     assert!(snapshot.asset_for(&missing).unwrap().upload_paths.is_empty());
-    assert_eq!(snapshot.placements.iter().map(|entry| (entry.content_hash, entry.rel_path.as_str())).collect::<Vec<_>>(), [(second, "/Shelf/book911.epub"), (first, "/book910.epub"), (first, "/Shelf/book910.epub")]);
+    assert_eq!(snapshot.placements.iter().map(|entry| (entry.book_id, entry.rel_path.as_str())).collect::<Vec<_>>(), [(second, "/Shelf/book911.epub"), (first, "/book910.epub"), (first, "/Shelf/book910.epub")]);
     for (entry, directory) in snapshot.placements.iter().zip([shelf, ROOT_DIR_ID, shelf]) {
         let book = entry.book.as_ref().unwrap();
-        assert_eq!(book.content_hash, entry.content_hash);
+        assert_eq!(book.book_id, entry.book_id);
         assert_eq!(book.relative_path, entry.rel_path);
         assert_eq!(book.directory, directory);
         assert_eq!(book.format, book_model::BookFormat::Epub);
@@ -1472,16 +1481,16 @@ fn subtree_trash_and_restore_include_nested_books_and_shared_placements() {
     db.trash_directory(&shelf).unwrap();
 
     let trash = db.library_trash().unwrap();
-    assert!(trash.books.iter().any(|book| book.content_hash == only));
-    assert!(trash.books.iter().all(|book| book.content_hash != shared));
+    assert!(trash.books.iter().any(|book| book.book_id == only));
+    assert!(trash.books.iter().all(|book| book.book_id != shared));
     assert!(!nested_placement_live());
-    assert_eq!(db.browse_book_detail(&shared).unwrap().book.content_hash(), Some(shared));
+    assert_eq!(db.browse_book_detail(&shared).unwrap().book.book_id(), Some(shared));
 
     db.restore_directory(&shelf, None).unwrap();
 
     assert!(db.library_trash().unwrap().books.is_empty());
     assert!(nested_placement_live());
-    assert_eq!(db.browse_book_detail(&only).unwrap().book.content_hash(), Some(only));
+    assert_eq!(db.browse_book_detail(&only).unwrap().book.book_id(), Some(only));
     assert_eq!(db.dir_path_components(&deepest).unwrap().iter().map(|part| part.id).collect::<Vec<_>>(), [shelf, nested, deepest]);
 }
 
@@ -1503,7 +1512,15 @@ fn restored_nested_books_queue_paths_after_parent_and_name_changes() {
     assert_ne!(restored, "Shelf", "restoring must resolve the destination's name collision");
     let components = db.dir_path_components(&nested).unwrap();
     assert_eq!(components.iter().map(|part| part.id).collect::<Vec<_>>(), [destination, shelf, nested]);
-    let mut work = db.native_file_work().unwrap().into_iter().map(|work| (work.content_hash, work.operation, work.original_path.to_string())).collect::<Vec<_>>();
+    let mut work = db
+        .native_file_work()
+        .unwrap()
+        .into_iter()
+        .map(|work| {
+            let snapshot = db.native_file_work_snapshot(work).unwrap().unwrap();
+            (snapshot.work.book_id, snapshot.work.operation, snapshot.resolved_path.to_string())
+        })
+        .collect::<Vec<_>>();
     work.sort();
     assert_eq!(work, [(first, "materialize".to_owned(), format!("/Target/{restored}/Nested/book946.epub")), (second, "materialize".to_owned(), format!("/Target/{restored}/Nested/book947.epub"))]);
 }
@@ -1545,17 +1562,17 @@ fn manifest_settlement_preserves_missing_and_stale_upload_intents() {
     assert_eq!(planned.len(), 3);
     // The server owns the first two, but one response describes an obsolete
     // upload version. The current version must remain queued for negotiation.
-    let owned = [planned[0].content_hash, planned[1].content_hash];
+    let owned = [planned[0].book_id, planned[1].book_id];
     planned[1].size_bytes += 1;
-    db.settle_book_manifest(planned.iter().filter(|intent| owned.contains(&intent.content_hash))).unwrap();
+    db.settle_book_manifest(planned.iter().filter(|intent| owned.contains(&intent.book_id))).unwrap();
 
-    assert_eq!(db.remote_asset_hashes(BlobKind::Book).unwrap(), [planned[0].content_hash].into_iter().collect());
+    assert_eq!(db.remote_asset_hashes(BlobKind::Book).unwrap(), [planned[0].book_id].into_iter().collect());
     let pending = db.pending_book_uploads(0, 10).unwrap();
     assert_eq!(pending.len(), 2);
-    assert!(pending.iter().any(|intent| intent.content_hash == planned[1].content_hash && intent.size_bytes != planned[1].size_bytes));
+    assert!(pending.iter().any(|intent| intent.book_id == planned[1].book_id && intent.size_bytes != planned[1].size_bytes));
     assert!(pending.iter().any(|intent| intent == &planned[2]));
     // Repeating the same manifest cannot settle either remaining intent.
-    db.settle_book_manifest(planned.iter().filter(|intent| owned.contains(&intent.content_hash))).unwrap();
+    db.settle_book_manifest(planned.iter().filter(|intent| owned.contains(&intent.book_id))).unwrap();
     assert_eq!(db.pending_book_uploads(0, 10).unwrap(), pending);
 }
 
@@ -1565,12 +1582,12 @@ fn enrichment_cover_checks_preserve_transfer_state_and_survive_reopening() {
     let db = Database::open(&path).unwrap();
     db.initialize_library().unwrap();
     let book = import();
-    let hash = book.content_hash;
+    let hash = book.book_id;
     db.commit_import(book).unwrap();
     db.complete_thumbnail_work(&hash, false).unwrap();
     assert!(db.enrichment_cover_candidates(&[hash]).unwrap().is_empty());
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let answer = metadata_contract::books::BookEnrichment { key: String::new(), status: metadata_contract::books::BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, detail: String::new() };
+    let answer = metadata_contract::books::BookEnrichment { key: String::new(), status: metadata_contract::books::BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, answer, 0).unwrap();
     assert_eq!(db.enrichment_cover_record(&hash).unwrap().unwrap().title, "Original");
     assert_eq!(db.enrichment_cover_candidates(&[hash]).unwrap(), vec![hash]);
@@ -1592,7 +1609,7 @@ fn direct_cover_lookup_uses_file_title_and_enriched_attributes_without_a_server_
     use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
     let db = database();
     let book = import();
-    let hash = book.content_hash;
+    let hash = book.book_id;
     db.commit_import(book).unwrap();
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
     let mut enriched = candidate.record.clone();
@@ -1600,8 +1617,13 @@ fn direct_cover_lookup_uses_file_title_and_enriched_attributes_without_a_server_
     enriched.description = "Provider description".into();
     enriched.contributors = vec![Contributor::new("Matched Author", AUTHOR_MARC_RELATOR_CODE).unwrap()];
     enriched.book.identifiers.push(Identifier::new("9780306406157", Scheme::Isbn, Scope::Book).unwrap());
-    db.record_enrichment(&hash, &candidate.request_key, BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Found, record: Some(enriched.clone()), toc: None, cover: None, popularity: None, detail: String::new() }, 0)
-        .unwrap();
+    db.record_enrichment(
+        &hash,
+        &candidate.request_key,
+        BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Found, record: Some(enriched.clone()), toc: None, cover: None, popularity: None, failure: None, detail: String::new() },
+        0,
+    )
+    .unwrap();
     let record = db.enrichment_cover_record(&hash).unwrap().unwrap();
     assert_eq!(record.title, "Original");
     assert_eq!(record.book.identifiers, enriched.book.identifiers);
@@ -1635,9 +1657,9 @@ fn transfer_plans_preserve_root_order_and_visit_nested_selections_once() {
     assert_eq!(plan.roots, [zulu, alpha]);
     assert_eq!(plan.folders.iter().map(|folder| folder.id).collect::<Vec<_>>(), [zulu, alpha, empty, first, second, leaf]);
     assert_eq!(plan.books.len(), 3);
-    assert!(plan.books[..2].iter().all(|book| book.content_hash == shared && !book.direct));
+    assert!(plan.books[..2].iter().all(|book| book.book_id == shared && !book.direct));
     assert_eq!(plan.books[..2].iter().map(|book| book.directory).collect::<HashSet<_>>(), HashSet::from([first, second]));
-    assert_eq!((plan.books[2].content_hash, plan.books[2].directory, plan.books[2].direct), (direct, ROOT_DIR_ID, true));
+    assert_eq!((plan.books[2].book_id, plan.books[2].directory, plan.books[2].direct), (direct, ROOT_DIR_ID, true));
     assert_eq!(db.transfer_plan(selection).unwrap(), plan);
 
     let books_only = db.transfer_plan(TransferSelection { folders: vec![], books: vec![direct, direct], source: Some(ROOT_DIR_ID) }).unwrap();
@@ -1669,12 +1691,12 @@ fn direct_transfer_plans_preserve_source_choice_selection_order_and_late_row_err
 
     assert_eq!(plan.books.len(), 4);
     assert!(plan.books[..2].iter().all(|book| !book.direct && book.directory == tree));
-    assert_eq!(plan.books[..2].iter().map(|book| book.content_hash).collect::<HashSet<_>>(), HashSet::from([outside_first, inside_first]));
-    assert_eq!(plan.books[2..].iter().map(|book| (book.content_hash, book.directory, book.direct)).collect::<Vec<_>>(), [(direct, before, true), (outside_first, before, true)]);
+    assert_eq!(plan.books[..2].iter().map(|book| book.book_id).collect::<HashSet<_>>(), HashSet::from([outside_first, inside_first]));
+    assert_eq!(plan.books[2..].iter().map(|book| (book.book_id, book.directory, book.direct)).collect::<Vec<_>>(), [(direct, before, true), (outside_first, before, true)]);
 
     let explicit = db.transfer_plan(TransferSelection { folders: vec![tree], books: vec![inside_first, inside_first], source: Some(after) }).unwrap();
     assert_eq!(explicit.books.len(), 3);
-    assert_eq!((explicit.books[2].content_hash, explicit.books[2].directory, explicit.books[2].direct), (inside_first, after, true));
+    assert_eq!((explicit.books[2].book_id, explicit.books[2].directory, explicit.books[2].direct), (inside_first, after, true));
     assert!(db.transfer_plan(TransferSelection { folders: vec![tree], books: vec![outside_first], source: Some(after) }).is_err());
     assert!(db.transfer_plan(TransferSelection { folders: vec![tree], books: vec![BookId::from_bytes([255; 32])], source: None }).is_err());
 
@@ -1702,8 +1724,8 @@ fn flat_book_copy_preserves_each_source_and_file_name() {
     for hash in [first, second] {
         assert!(db.copy_book_to_directory(&hash, None, &destination).unwrap());
     }
-    assert_eq!(browse_folder(&db, first_source, "", &[]).books[0].content_hash(), Some(first));
-    assert_eq!(browse_folder(&db, second_source, "", &[]).books[0].content_hash(), Some(second));
+    assert_eq!(browse_folder(&db, first_source, "", &[]).books[0].book_id(), Some(first));
+    assert_eq!(browse_folder(&db, second_source, "", &[]).books[0].book_id(), Some(second));
     assert_eq!(browse_folder(&db, destination, "", &[]).books.len(), 2);
     assert!(db.has_book_named(&destination, "book901.epub").unwrap());
     assert!(db.has_book_named(&destination, "book902.epub").unwrap());
@@ -1718,6 +1740,6 @@ fn flat_book_copy_failure_keeps_the_successful_prefix() {
     let missing = BookId::new(&"f".repeat(64));
     assert!(db.copy_book_to_directory(&first, None, &destination).unwrap());
     assert!(db.copy_book_to_directory(&missing, None, &destination).is_err());
-    assert_eq!(browse_folder(&db, destination, "", &[]).books[0].content_hash(), Some(first));
-    assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).books[0].content_hash(), Some(first));
+    assert_eq!(browse_folder(&db, destination, "", &[]).books[0].book_id(), Some(first));
+    assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).books[0].book_id(), Some(first));
 }

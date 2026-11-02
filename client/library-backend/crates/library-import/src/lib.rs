@@ -47,15 +47,30 @@ pub use client_platform_native::filesystem::{ImportReader as DirectoryImportRead
 pub use client_platform_web::transport::import_io::{ImportReader as DirectoryImportReader, ImportReaderFuture as DirectoryImportReaderFuture, ImportSource};
 
 pub struct LibraryImport {
-    pub library_id: sync_common::LibraryId,
-    pub database: Arc<Database>,
-    pub assets: AssetStore,
-    pub cpu: Arc<dyn cpu_host::CpuHost>,
-    pub events: LibraryEventRouter,
-    pub placement: Arc<LibraryPlacement>,
+    database: Arc<Database>,
+    assets: AssetStore,
+    cpu: Arc<dyn cpu_host::CpuHost>,
+    events: LibraryEventRouter,
+    placement: Arc<LibraryPlacement>,
     /// The library folder dropped files are placed into.
     #[cfg(not(target_arch = "wasm32"))]
-    pub root: String,
+    root: std::path::PathBuf,
+}
+
+impl LibraryImport {
+    /// Import and placement share one storage owner. In particular, callers
+    /// cannot pair its placement policy with another database, root or router.
+    pub fn new(placement: Arc<LibraryPlacement>, cpu: Arc<dyn cpu_host::CpuHost>) -> Self {
+        Self {
+            database: placement.database().clone(),
+            assets: placement.assets().clone(),
+            events: placement.events().clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            root: placement.assets().native_library_root().to_path_buf(),
+            placement,
+            cpu,
+        }
+    }
 }
 
 /// A selected directory tree whose files can be opened one at a time while

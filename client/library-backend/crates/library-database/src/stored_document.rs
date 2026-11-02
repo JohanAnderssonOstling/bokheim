@@ -29,7 +29,7 @@ mod tests {
         for bytes in [encode(&toc).unwrap(), serde_json::to_vec(&toc).unwrap()] {
             assert_eq!(decode::<Vec<BookTocEntry>>(&bytes).unwrap(), toc);
         }
-        let pdf = PdfReaderMetadata { version: 1, content_hash: "a".repeat(64), pages: vec![PdfStoredPage { width: 595.0, height: 842.0, rotation: 0 }; 100], skippable_pages: Some(vec![1, 3]), annotations: vec![], dependencies: None };
+        let pdf = PdfReaderMetadata { version: 1, book_id: "a".repeat(64), pages: vec![PdfStoredPage { width: 595.0, height: 842.0, rotation: 0 }; 100], skippable_pages: Some(vec![1, 3]), annotations: vec![], dependencies: None };
         let binary = encode(&pdf).unwrap();
         let json = serde_json::to_vec(&pdf).unwrap();
         assert!(binary.len() * 3 < json.len());

@@ -62,7 +62,7 @@ class LinuxInstallTests(unittest.TestCase):
         self.assertEqual(self.installed.read_bytes(), self.image.read_bytes())
         self.assertTrue(os.access(self.installed, os.X_OK))
         self.assertEqual((self.bin / 'bokheim').resolve(), self.installed)
-        self.assertIn(f'Exec="{self.installed}" %u\n', self.desktop.read_text())
+        self.assertIn(f'Exec="{self.installed}" %U\n', self.desktop.read_text())
         self.assertEqual((self.data / 'icons/hicolor/512x512/apps/se.bokheim.Bokheim.png').read_text(), 'image icon')
         self.assertFalse(list(self.installed.parent.glob('.install-*')))
 

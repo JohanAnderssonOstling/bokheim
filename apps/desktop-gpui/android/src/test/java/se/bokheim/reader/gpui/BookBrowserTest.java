@@ -264,7 +264,7 @@ public class BookBrowserTest {
         assertEquals("one.epub", started.get(url("/one.epub")).getString("name"));
         assertEquals(2, finished.size());
         assertFalse(finished.get(url("/one.epub")).has("error"));
-        assertTrue(finished.get(url("/two.pdf")).getString("error").contains("HTTP 500"));
+        assertEquals("Couldn’t download this book. Check your connection and try again.", finished.get(url("/two.pdf")).getString("error"));
         assertTrue(progress);
         assertEquals("closed", events.get(events.size() - 1).getString("kind"));
     }
@@ -416,8 +416,6 @@ public class BookBrowserTest {
         assertEquals("https://example.com/books", Shadows.shadowOf(browser.web).getLastLoadedUrl());
         browser.command(new JSONObject().put("command", "focus_controls"));
         assertTrue(anchor.hasFocus());
-        browser.backPressed();
-        assertEquals("back_pressed", events.get(events.size() - 1).getString("kind"));
         browser.setBounds(10, 120, 240, 200);
         assertEquals(200, browser.web.getLayoutParams().height);
         browser.close();

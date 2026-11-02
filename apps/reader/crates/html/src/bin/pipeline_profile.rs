@@ -4,12 +4,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use html::engine::Engine;
-use html::layout::{FontSlant, GlyphId, GlyphMetric, GlyphRegistry, GlyphShaper, LayoutConstraints, LayoutTimings, ShapedTextRun, TextRunShapeRequest};
-use html::pipeline::{
-    BookStylesheetCache, BuildPipelineTimings, DocumentFactory, FontEnvironmentRevision, ImageMetricsRevision, PaintSettingsRevision, PipelineInputs, ResourceRevision, SourceRevision, StyleEnvironment, StylesheetRevision,
-    parse_html_document,
+use html_pipeline::PipelineSession;
+use html_pipeline::engine::{LayoutConstraints, LayoutTimings};
+use html::{
+    text::{
+        GlyphId, GlyphMetric, GlyphRequest, GlyphResourceGeneration, GlyphShaper, ShapeError,
+        ShapedGlyph,
+    },
 };
+use html_pipeline::{
+    BookStylesheetCache, BuildPipelineTimings, DocumentFactory, FontEnvironmentRevision,
+    ImageMetricsRevision, PaintSettingsRevision, PipelineInputs, ResourceRevision, SourceRevision,
+    StyleEnvironment, StylesheetRevision,
+};
+use html::document::parse_html_document;
 use html::resources::ResourceProvider;
 #[path = "../book.rs"]
 mod book;
@@ -19,45 +27,26 @@ use book_content::BookFormat as BookSourceFormat;
 #[derive(Default)]
 struct ProfileShaper {
     glyphs: HashMap<(char, u32), GlyphId>,
+    generation: GlyphResourceGeneration,
 }
 
 impl GlyphShaper for ProfileShaper {
+    fn resource_generation(&self) -> GlyphResourceGeneration {
+        self.generation
+    }
+
     fn reset(&mut self) {
         self.glyphs.clear();
+        self.generation = GlyphResourceGeneration::default();
     }
 
-    fn shape_glyph<'a>(&mut self, glyph_metrics: &mut GlyphRegistry<'a>, ch: char, font_size: f32, _font_weight: u16, _font_slant: FontSlant, _color: u32, _family: Option<&str>) -> Result<GlyphId, html::layout::ShapeError> {
-        let key = (ch, font_size.to_bits());
-        if let Some(&glyph) = self.glyphs.get(&key) {
-            return Ok(glyph);
-        }
-
-        let metric = GlyphMetric::try_new(ch, font_size * 0.5, font_size * 0.75, font_size * 0.25, 0.0).map_err(html::layout::ShapeError::rejected_metric)?;
-        let glyph = glyph_metrics.register(metric)?;
-        self.glyphs.insert(key, glyph);
-        Ok(glyph)
-    }
-
-    fn shape_glyph_run<'a>(&mut self, glyph_metrics: &mut GlyphRegistry<'a>, request: TextRunShapeRequest<'_>, glyphs: &mut [GlyphId]) -> Result<Option<ShapedTextRun>, html::layout::ShapeError> {
-        let mut ascii = [GlyphId::MAX; 128];
-        let mut non_ascii = HashMap::<char, GlyphId>::new();
-        let style = request.style();
-        for (slot, character) in glyphs.iter_mut().zip(request.text().chars()) {
-            let cached = if character.is_ascii() { ascii[character as usize] } else { non_ascii.get(&character).copied().unwrap_or(GlyphId::MAX) };
-            let glyph = if cached != GlyphId::MAX {
-                cached
-            } else {
-                let glyph = self.shape_glyph(glyph_metrics, character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family())?;
-                if character.is_ascii() {
-                    ascii[character as usize] = glyph;
-                } else {
-                    non_ascii.insert(character, glyph);
-                }
-                glyph
-            };
-            *slot = glyph;
-        }
-        Ok(None)
+    fn shape_glyph(&mut self, request: GlyphRequest<'_>) -> Result<ShapedGlyph, ShapeError> {
+        let key = (request.character, request.style.font_size.to_bits());
+        let next = self.glyphs.len() as GlyphId;
+        let handle = *self.glyphs.entry(key).or_insert(next);
+        let size = request.style.font_size;
+        let metric = GlyphMetric::new(request.character, size * 0.5, size * 0.75, size * 0.25);
+        Ok(ShapedGlyph::from_metric(handle, metric))
     }
 }
 
@@ -314,7 +303,7 @@ fn profile_warm_file(provider: Arc<dyn ResourceProvider>, uri: &str, totals: &mu
     let html = provider.read_string(uri).map_err(|error| error.to_string())?;
     let inputs = PipelineInputs {
         source: html.into(),
-        markup_syntax: html::pipeline::MarkupSyntax::from_uri(uri),
+        markup_syntax: html::document::MarkupSyntax::from_uri(uri),
         user_styles: Vec::new(),
         reader_overrides: Default::default(),
         note_flow: Default::default(),
@@ -325,17 +314,11 @@ fn profile_warm_file(provider: Arc<dyn ResourceProvider>, uri: &str, totals: &mu
         style_environment: StyleEnvironment::default(),
         font_environment: FontEnvironmentRevision::INITIAL,
         image_metrics_revision: ImageMetricsRevision::INITIAL,
-        layout: html::pipeline::LayoutConstraints {
-            viewport_width: 600.0,
-            viewport_height: None,
-            line_height: 16.0,
-            image_sizing_policy: html::pipeline::ImageSizingPolicy::WebCompatible,
-            text_composition_policy: html::pipeline::TextCompositionPolicy::WebCompatible,
-        },
+        layout: html_pipeline::engine::LayoutConstraints::new(600.0, 16.0).unwrap(),
         image_metrics: Default::default(),
         paint: PaintSettingsRevision::INITIAL,
     };
-    let mut session = Engine::new(provider);
+    let mut session = PipelineSession::new(provider);
     let mut shaper = ProfileShaper::default();
     let started = Instant::now();
     session.update(inputs.clone(), &mut shaper).map_err(|error| error.to_string())?;

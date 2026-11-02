@@ -10,11 +10,11 @@ use library_files::AssetStore;
 use library_runtime::events::LibraryEventRouter;
 
 mod asset_workflow;
+#[cfg(not(target_arch = "wasm32"))]
+mod import_directories;
 mod management;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_edit;
-#[cfg(not(target_arch = "wasm32"))]
-mod import_directories;
 #[cfg(not(target_arch = "wasm32"))]
 pub use import_directories::StagedImportDirectories;
 
@@ -25,7 +25,25 @@ pub use asset_workflow::{prepare_directory, replay_directories};
 /// Folder organization for one library: each change is a database write
 /// followed by a contents notification.
 pub struct LibraryPlacement {
-    pub database: Arc<Database>,
-    pub assets: AssetStore,
-    pub events: LibraryEventRouter,
+    database: Arc<Database>,
+    assets: AssetStore,
+    events: LibraryEventRouter,
+}
+
+impl LibraryPlacement {
+    pub fn new(database: Arc<Database>, assets: AssetStore, events: LibraryEventRouter) -> Self {
+        Self { database, assets, events }
+    }
+
+    pub fn database(&self) -> &Arc<Database> {
+        &self.database
+    }
+
+    pub fn assets(&self) -> &AssetStore {
+        &self.assets
+    }
+
+    pub fn events(&self) -> &LibraryEventRouter {
+        &self.events
+    }
 }

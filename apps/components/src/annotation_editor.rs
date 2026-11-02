@@ -1,4 +1,6 @@
 //! Canonical annotation controls shared by reader popups and notebook overlays.
+use ui_text::text;
+
 use crate as components;
 use book_model::{Annotation, AnnotationStyle, BookId, RecurringScope};
 use gpui::prelude::*;
@@ -40,35 +42,35 @@ pub fn recurring_annotation_editor_controls<C: AnnotationEditorTarget>(current: 
             let id = book.annotations.first()?.0.clone();
             let target = target.clone();
             Some(
-                components::settings_choice_button(("annotation-origin-book", index), book.title.clone(), book.id == current.content_hash, theme)
+                components::settings_choice_button(("annotation-origin-book", index), book.title.clone(), book.id == current.book_id, theme)
                     .debug_selector(move || format!("annotation-origin-book-{index}"))
                     .on_click(move |_, window, cx| target.update(cx, |this, cx| this.select_editor_annotation(id.clone(), window, cx))),
             )
         });
         extra = extra.child(components::reader_choice_button_group("annotation-origin-books", books, theme));
     }
-    if let Some(book) = context.books.iter().find(|book| book.id == current.content_hash).filter(|book| book.annotations.len() > 1) {
+    if let Some(book) = context.books.iter().find(|book| book.id == current.book_id).filter(|book| book.annotations.len() > 1) {
         let notes = book.annotations.iter().enumerate().map(|(index, (id, note))| {
             let selected = current.id == *id;
             let id = id.clone();
             let target = target.clone();
-            let label = if note.trim().is_empty() { format!("Note {}", index + 1) } else { note.chars().take(45).collect() };
+            let label = if note.trim().is_empty() { format!(text!(common::note), index + 1) } else { note.chars().take(45).collect() };
             components::settings_choice_button(("annotation-origin-note", index), label, selected, theme).on_click(move |_, window, cx| target.update(cx, |this, cx| this.select_editor_annotation(id.clone(), window, cx)))
         });
         extra = extra.child(components::reader_choice_button_group("annotation-origin-notes", notes, theme));
     }
     if context.scope_editable {
         let current = current.anchor.recurring_scope();
-        let scopes = [(None, "Selection"), (Some(RecurringScope::Chapter), "Chapter"), (Some(RecurringScope::Book), "Book"), (Some(RecurringScope::Library), "Library")];
+        let scopes = [(None, text!(common::selection)), (Some(RecurringScope::Chapter), text!(audiobook::chapter)), (Some(RecurringScope::Book), text!(reader::book)), (Some(RecurringScope::Library), text!(common::library))];
         let buttons = scopes.into_iter().enumerate().filter(|(_, (scope, _))| *scope != Some(RecurringScope::Chapter) || context.chapter_available).map(|(index, (scope, label))| {
             let target = target.clone();
             components::settings_choice_button(("annotation-scope", index), label, current == scope, theme)
                 .debug_selector(move || format!("annotation-scope-{index}"))
                 .on_click(move |_, _, cx| target.update(cx, |this, cx| this.set_annotation_scope(scope, cx)))
         });
-        extra = extra.child(components::reader_setting_row_smallcaps("Repeat in", theme).child(components::reader_choice_button_group("annotation-scopes", buttons, theme)));
+        extra = extra.child(components::reader_setting_row_smallcaps(text!(common::repeat_in), theme).child(components::reader_choice_button_group("annotation-scopes", buttons, theme)));
     } else {
-        extra = extra.child(components::reader_state_note("Library recurring note · edits apply everywhere", theme));
+        extra = extra.child(components::reader_state_note(text!(common::library_recurring_note_edits_apply_everywhere), theme));
     }
     extra.into_any_element()
 }
@@ -76,9 +78,12 @@ pub fn recurring_annotation_editor_controls<C: AnnotationEditorTarget>(current: 
 /// The shared style, colour, keyboard and deletion controls.
 pub fn annotation_editor_controls<C: AnnotationEditorTarget>(id_prefix: &'static str, current: &Annotation, target: &Entity<C>, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>) -> AnyElement {
     let mut styles = components::action_row().w_full().min_w_0().flex_none().flex_nowrap().debug_selector(|| "reader-annotation-style-row".into());
-    for (style, label, suffix) in
-        [(AnnotationStyle::Highlight, "Highlight", "highlight"), (AnnotationStyle::Underline, "Underline", "underline"), (AnnotationStyle::Squiggly, "Squiggly", "squiggly"), (AnnotationStyle::Strikethrough, "Strike", "strike")]
-    {
+    for (style, label, suffix) in [
+        (AnnotationStyle::Highlight, text!(common::highlight), "highlight"),
+        (AnnotationStyle::Underline, text!(common::underline), "underline"),
+        (AnnotationStyle::Squiggly, text!(common::squiggly), "squiggly"),
+        (AnnotationStyle::Strikethrough, text!(common::strike), "strike"),
+    ] {
         let target = target.clone();
         styles = styles.child(components::reader_annotation_action_button(SharedString::from(format!("{id_prefix}-{suffix}")), label, current.style == style, theme).flex_grow(1.0).flex_shrink(1.0).min_w_0().on_click(move |_, _, cx| {
             target.update(cx, |this, cx| this.save_annotation_changes(Some(style.clone()), None, cx));
@@ -122,7 +127,7 @@ pub fn annotation_editor_controls<C: AnnotationEditorTarget>(id_prefix: &'static
     }
     let colors = colors.when(!current.is_external_pdf_annotation(), |colors| {
         let target = target.clone();
-        colors.child(components::delete_icon_button(SharedString::from(format!("{id_prefix}-delete")), "Delete annotation", theme).debug_selector(|| "reader-annotation-editor-delete".into()).on_click(move |_, window, cx| {
+        colors.child(components::delete_icon_button(SharedString::from(format!("{id_prefix}-delete")), text!(common::delete_annotation), theme).debug_selector(|| "reader-annotation-editor-delete".into()).on_click(move |_, window, cx| {
             cx.stop_propagation();
             target.update(cx, |this, cx| this.delete_edited_annotation(window, cx));
         }))
@@ -133,7 +138,7 @@ pub fn annotation_editor_controls<C: AnnotationEditorTarget>(id_prefix: &'static
 
 /// The growing note field used in both reader and notebook editors.
 pub fn annotation_note_input(window: &mut Window, cx: &mut Context<InputState>) -> InputState {
-    InputState::new(window, cx).placeholder("Add a note").auto_grow(components::READER_NOTE_MIN_ROWS, components::READER_NOTE_MAX_ROWS)
+    InputState::new(window, cx).placeholder(text!(common::add_a_note)).auto_grow(components::READER_NOTE_MIN_ROWS, components::READER_NOTE_MAX_ROWS)
 }
 
 /// The complete highlighted passage when its context is outside the reader.

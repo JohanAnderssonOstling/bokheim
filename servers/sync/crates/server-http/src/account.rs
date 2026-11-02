@@ -20,6 +20,6 @@ pub(crate) async fn get_snapshot(State(state): State<AppState>, user: AuthUser, 
 
 pub(crate) async fn get_book_storage(State(state): State<AppState>, user: AuthUser, headers: HeaderMap) -> Result<Response, StatusCode> {
     let books = state.assets.book_storage_usage(&user.user_id, MAX_ACCOUNT_STORAGE_BOOKS).await.map_err(asset_error)?;
-    let books: Vec<_> = books.into_iter().map(|book| BookStorageUsage { content_hash: book.content_hash, used_bytes: book.used_bytes }).collect();
+    let books: Vec<_> = books.into_iter().map(|book| BookStorageUsage { book_id: book.book_id, used_bytes: book.used_bytes }).collect();
     server_wire_http::response(&headers, books)
 }

@@ -18,13 +18,14 @@ The installer:
   on Linux, then detects mounted volumes containing Kobo's `.kobo` marker directory;
 - displays the exact mount path and requires an explicit **Install Bokheim**
   click;
-- accepts package entries only below `.adds` and `Bokheim`;
+- accepts package entries only in Bokheim's own directories and menu entry;
 - identifies the model from `.kobo/version` and checks the package's supported
   model IDs before writing files;
 - replaces individual files through temporary and backup files; and
 - verifies that the launcher, FBInk, executable, PDFium runtime, and NickelMenu entry exist
   after extraction;
-- queues the pinned NickelMenu v0.6.0 build with Bokheim direct-launch support; and
+- preserves existing NickelMenu installations and other applications' menu entries,
+  and queues the pinned NickelMenu v0.6.0 build only when NickelMenu is missing; and
 - attempts to safely eject the Kobo when installation finishes.
 
 With a package supporting on-device updates, open **Settings → Kobo → Check
@@ -41,13 +42,11 @@ recovers installation failures; it does not roll back database migrations
 after a successfully installed release. Older launchers need one USB install
 of a package with on-device update support.
 
-Tapping **Bokheim** in Kobo's bottom navigation opens Bokheim immediately.
-The button uses Bokheim's logo, with gray and black versions for its normal
-and active states. The installer embeds both icons even for older app packages.
-The installer supplies a small NickelMenu extension and replaces older Bokheim
-menu configuration. Configuration errors fall back to the regular menu.
-Firmware before 4.23.15505 keeps the original menu behavior. See the
-[extension build instructions](../desktop-gpui/kobo/nickelmenu-direct/README.md).
+Open **NickelMenu** and select **Bokheim Kobo** to launch Bokheim. The installer
+adds only Bokheim's menu entry, leaving the shared button and other applications
+such as KOReader visible. Reinstalling replaces older Bokheim menu configurations
+that renamed the button or launched Bokheim directly. Existing NickelMenu plugin
+files and other applications' configurations are preserved.
 
 On the reader, **Settings → Kobo → Uninstall Bokheim** asks for confirmation,
 then removes the program and its menu entry and returns to Kobo's built-in
@@ -55,8 +54,8 @@ reader. Books and settings are kept, as are other NickelMenu configurations
 and separately installed developer SSH tools. This requires a Kobo package
 built with uninstall support; older launchers report that a reinstall is needed.
 
-NickelMenu installs when the Kobo disconnects and restarts. Firmware must be
-4.6 or later in the 4.x series. An existing unrelated firmware update is
+When NickelMenu is missing, it installs when the Kobo disconnects and restarts.
+Firmware must be 4.6 or later in the 4.x series. An existing unrelated firmware update is
 preserved and blocks installation until that update finishes.
 
 ## Sleep and battery diagnostics

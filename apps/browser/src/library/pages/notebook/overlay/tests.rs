@@ -17,14 +17,14 @@ impl Render for Fixture {
 async fn notebook_editor_confirms_saves_keeps_failed_drafts_and_gates_navigation(cx: &mut TestAppContext) {
     let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_directory, session, original) = LibrarySession::test_context(cx).await;
-    let entry = original.app().create_library_with_asset_storage("Editor fixture".into(), false).await.unwrap();
+    let entry = original.app().management.create_library_with_asset_storage("Editor fixture".into(), false).await.unwrap();
     let opened = Rc::new(Cell::new(0));
     let recorded = opened.clone();
     let library = cx.update(|cx| {
         let app = Rc::new(original.app().clone());
-        let backend = Rc::new(app.library(*entry.library_id()));
+        let backend = Rc::new(app.management.library(*entry.library_id()));
         let updates = crate::library::LibraryUpdateBridge::create(app.clone(), *entry.library_id(), cx);
-        LibraryContext::new(app, backend, Rc::new(move |_, _, _, _, _| recorded.set(recorded.get() + 1)), updates, session.downgrade(), cx.new(|_| crate::NowPlaying::default()))
+        LibraryContext::new(app, original.catalog().clone(), backend, Rc::new(move |_, _, _, _, _| recorded.set(recorded.get() + 1)), updates, session.downgrade(), cx.new(|_| crate::NowPlaying::default()))
     });
     let backend = library.backend().clone();
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/library-backend/crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
@@ -50,7 +50,7 @@ async fn notebook_editor_confirms_saves_keeps_failed_drafts_and_gates_navigation
     let id = book.library_file().unwrap();
     let annotation = Annotation {
         id: "editor-save-fixture".into(),
-        content_hash: id,
+        book_id: id,
         anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:0)"),
         exact_text: "The complete highlighted passage.".into(),
         style: AnnotationStyle::Highlight,

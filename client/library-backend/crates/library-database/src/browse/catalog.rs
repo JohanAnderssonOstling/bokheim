@@ -291,7 +291,7 @@ pub(super) fn load_cards_in(db: &Connection, ids: &[i64]) -> Result<Vec<BookCard
         let hash: Option<BookId> = row.get(1)?;
         let key: BookId = row.get(0)?;
         cards.push(BookCardRow {
-            source: hash.map_or(BookSource::ExternalCatalog { entry: CardKey::from(key), downloadable: row.get(6)? }, |content_hash| BookSource::Catalog { content_hash }),
+            source: hash.map_or(BookSource::ExternalCatalog { entry: CardKey::from(key), downloadable: row.get(6)? }, |book_id| BookSource::Catalog { book_id }),
             title: row.get(2)?,
             subtitle: row.get(3)?,
             author: row.get(4)?,
@@ -301,6 +301,7 @@ pub(super) fn load_cards_in(db: &Connection, ids: &[i64]) -> Result<Vec<BookCard
             format_category: file_type_of(row.get(5)?),
             audiobook_duration_ms: row.get::<_, Option<i64>>(7)?.map(u64::try_from).transpose().map_err(|error| invalid_integer_column(7, error.to_string()))?,
             added_at: 0,
+            description: String::new(),
             source_directory: None,
         });
         Ok(())
@@ -321,7 +322,7 @@ fn ordered_cards(books: &[CatalogBook], selected: &BTreeSet<i64>, options: &Brow
 
 fn card(book: &CatalogBook) -> BookCardRow {
     BookCardRow {
-        source: book.hash.map_or(BookSource::ExternalCatalog { entry: book.key, downloadable: book.audiobook_download_url().is_some() }, |content_hash| BookSource::Catalog { content_hash }),
+        source: book.hash.map_or(BookSource::ExternalCatalog { entry: book.key, downloadable: book.audiobook_download_url().is_some() }, |book_id| BookSource::Catalog { book_id }),
         title: book.title.clone(),
         subtitle: book.subtitle.clone(),
         author: book.author.clone(),
@@ -331,6 +332,7 @@ fn card(book: &CatalogBook) -> BookCardRow {
         format_category: file_type_of(Some(book.format() as i64)),
         audiobook_duration_ms: book.audiobook_duration_ms,
         added_at: 0,
+        description: String::new(),
         source_directory: None,
     }
 }
@@ -932,7 +934,7 @@ mod tests {
         query.languages = vec!["en".into()];
         let external = card(&books[0]);
         assert!(matches!(external.source, BookSource::ExternalCatalog { .. }));
-        assert!(external.content_hash().is_none());
+        assert!(external.book_id().is_none());
         assert_eq!(matching_books(&books, &candidates, &HashSet::from([hash]), &BrowseOptions::from_query(&query, true)).books, candidates);
         query.file_types = vec![LibraryFileTypeFilter::Pdf];
         assert!(matching_books(&books, &candidates, &held, &BrowseOptions::from_query(&query, true)).books.is_empty());

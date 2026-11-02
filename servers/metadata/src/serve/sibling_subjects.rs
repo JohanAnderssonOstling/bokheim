@@ -1,6 +1,6 @@
 //! A sibling fallback needs agreement between directly classified editions.
 use super::subject_identity::{self, Candidate};
-use metadata_contract::{classification_consensus_notation, ClassificationEvidence, ClassificationScheme, ClassificationSource, EditionIdentityQuery, SiblingSubjectConsensus, SiblingSubjectSupport};
+use metadata_contract::{classification_consensus_notation, ClassificationEvidence, ClassificationMethod, ClassificationScheme, ClassificationSource, EditionIdentityQuery, SiblingSubjectConsensus, SiblingSubjectSupport};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use subject_projection::{most_specific_concept_ids, unified_concept_id, unified_subject_paths, unified_taxonomy_revision_id, unified_taxonomy_routes, LCC_SYSTEM_ID};
@@ -65,19 +65,22 @@ pub(super) fn consensus(query: &EditionIdentityQuery, candidates: &[Candidate]) 
         return result;
     }
     let works = subject_identity::verified_works(query, candidates);
-    let compatible = candidates.iter().map(|(_, _, _, candidate)| candidate)
-        .filter(|candidate| subject_identity::title_agrees(query, candidate, &works)
-            && !candidate.open_library_edition_id.is_empty()
-            && subject_identity::author_count(query, candidate, &works) > 0)
+    let compatible = candidates
+        .iter()
+        .map(|(_, _, _, candidate)| candidate)
+        .filter(|candidate| subject_identity::title_agrees(query, candidate, &works) && !candidate.open_library_edition_id.is_empty() && subject_identity::author_count(query, candidate, &works) > 0)
         .collect::<Vec<_>>();
     // Unclassified editions can expose an author conflict, but cannot vote.
     if subject_identity::conflicting_authors(query, &compatible) {
         tracing::debug!("Sibling consensus abstained because author credits conflict");
         return result;
     }
-    let eligible = compatible.into_iter().filter(|candidate| candidate.classifications.iter().any(|code|
-        code.scheme == ClassificationScheme::LibraryOfCongress && code.source == ClassificationSource::ExactEdition
-            && classification_consensus_notation(code.scheme, &code.notation).is_some())).collect::<Vec<_>>();
+    let eligible = compatible
+        .into_iter()
+        .filter(|candidate| {
+            candidate.classifications.iter().any(|code| code.scheme == ClassificationScheme::LibraryOfCongress && code.source == ClassificationSource::ExactEdition && classification_consensus_notation(code.scheme, &code.notation).is_some())
+        })
+        .collect::<Vec<_>>();
     // Extra credits on an unclassified edition must not disqualify directly
     // classified editions that credit the author but omit a translator/editor.
     let best = eligible.iter().map(|candidate| subject_identity::author_count(query, candidate, &works)).max().unwrap_or(0);
@@ -103,7 +106,7 @@ pub(super) fn consensus(query: &EditionIdentityQuery, candidates: &[Candidate]) 
                 }
             }
             let evidence = ClassificationEvidence {
-                method: format!("direct_edition_lcc:{}", classification.notation),
+                method: ClassificationMethod::DirectEditionLcc { notation: classification.notation.clone() },
                 isbn13: candidate.canonical_isbn13.clone(),
                 open_library_work_id: candidate.open_library_work_id.clone().unwrap_or_default(),
                 open_library_edition_id: candidate.open_library_edition_id.clone(),
@@ -139,15 +142,8 @@ pub(super) fn consensus(query: &EditionIdentityQuery, candidates: &[Candidate]) 
             }
         }
     }
-    let eligible = support
-        .iter()
-        .filter(|(concept, _)| graph.paths.get(concept).is_some_and(|paths| paths.iter().all(|path| path.contains(" / "))))
-        .collect::<Vec<_>>();
-    let mut qualifying = eligible
-        .iter()
-        .filter(|(_, supported)| supported.weight / editions.len() as f64 + SUPPORT_EPSILON >= MIN_PERCENT as f64 / 100.0)
-        .map(|(concept, _)| **concept)
-        .collect::<BTreeSet<_>>();
+    let eligible = support.iter().filter(|(concept, _)| graph.paths.get(concept).is_some_and(|paths| paths.iter().all(|path| path.contains(" / ")))).collect::<Vec<_>>();
+    let mut qualifying = eligible.iter().filter(|(_, supported)| supported.weight / editions.len() as f64 + SUPPORT_EPSILON >= MIN_PERCENT as f64 / 100.0).map(|(concept, _)| **concept).collect::<BTreeSet<_>>();
     if qualifying.is_empty() {
         let maximum = eligible.iter().map(|(_, supported)| supported.weight).fold(0.0_f64, f64::max);
         if maximum > 0.0 {
@@ -158,12 +154,7 @@ pub(super) fn consensus(query: &EditionIdentityQuery, candidates: &[Candidate]) 
     for concept in most_specific_concept_ids(qualifying) {
         let supported = support.remove(&concept).expect("qualifying concept votes");
         let Some(path) = graph.paths.get(&concept).and_then(|paths| paths.iter().next()).cloned() else { continue };
-        result.subjects.push(SiblingSubjectSupport {
-            path,
-            supporting_editions: supported.voters.len(),
-            support_fraction: supported.weight / editions.len() as f64,
-            evidence: supported.voters.into_values().flatten().collect(),
-        });
+        result.subjects.push(SiblingSubjectSupport { path, supporting_editions: supported.voters.len(), support_fraction: supported.weight / editions.len() as f64, evidence: supported.voters.into_values().flatten().collect() });
     }
     result
 }

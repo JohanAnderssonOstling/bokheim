@@ -1,5 +1,7 @@
 //! Library creation, selection, and switcher overlay rendering.
 
+use ui_text::text;
+
 use app::LibraryEntry;
 use ui_components::user_facing_error;
 
@@ -29,30 +31,44 @@ pub(super) struct LibraryNameDialog {
 impl Sidebar {
     fn open_library_menu(&mut self, id: LibraryId, window: &mut Window, cx: &mut Context<Self>) {
         let opds = self.libraries.read(cx).entries().iter().any(|entry| *entry.library_id() == id && entry.is_opds());
+        let downloads = {
+            let libraries = self.libraries.read(cx);
+            let name = libraries.entries().iter().find(|entry| *entry.library_id() == id).map(|entry| entry.library_name().to_owned()).unwrap_or_default();
+            let enabled = !opds && self.sync_state.read(cx).sync_statuses.iter().any(|status| status.library_id == id && status.asset_storage_enabled);
+            let busy = self.sync_state.read(cx).sync_statuses.iter().any(|status| status.library_id == id && status.book_file_activity.blocks_file_changes());
+            (libraries.backend_client(), name, enabled, busy)
+        };
         let rename = cx.entity();
         let delete = cx.entity();
-        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
-            #[cfg(not(target_arch = "wasm32"))]
+        let libraries = self.libraries.clone();
+        let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
+            let menu = crate::universal::library_book_menu(menu, downloads.0.clone(), id, downloads.1.clone(), downloads.2, downloads.3);
+            let menu = libraries.read(cx).annotation_export_menu(id, menu);
+            #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
             let menu = if opds {
                 menu
             } else {
-                let export = rename.clone();
-                menu.item(components::menu_item("Export annotations…", move |_, window, cx| {
-                    export.update(cx, |navigation, cx| {
-                        navigation.libraries.update(cx, |libraries, cx| libraries.open_annotation_export(id, window, cx));
-                    });
-                }))
+                let relocate = rename.clone();
+                menu.item(
+                    components::menu_item(text!(browse::move_library), move |_, _, cx| {
+                        relocate.update(cx, |navigation, cx| navigation.choose_move_library(id, cx));
+                    })
+                    .disabled(downloads.3),
+                )
             };
             let menu = if opds {
                 menu
             } else {
-                menu.item(components::menu_item("Rename", move |_, window, cx| {
+                menu.item(components::menu_item(text!(browse::rename), move |_, window, cx| {
                     rename.update(cx, |navigation, cx| navigation.open_library_name_dialog(id, window, cx));
                 }))
             };
-            menu.item(components::menu_item("Remove", move |_, window, cx| {
-                delete.update(cx, |navigation, cx| navigation.prompt_delete_library(id, window, cx));
-            }))
+            menu.item(
+                components::menu_item(text!(browse::remove), move |_, window, cx| {
+                    delete.update(cx, |navigation, cx| navigation.prompt_delete_library(id, window, cx));
+                })
+                .disabled(downloads.3),
+            )
         });
         let subscription = cx.subscribe_in(&menu, window, |navigation, _, _: &gpui::DismissEvent, window, cx| {
             navigation.library_menu = None;
@@ -66,6 +82,22 @@ impl Sidebar {
         cx.notify();
     }
 
+    #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
+    fn choose_move_library(&mut self, id: LibraryId, cx: &mut Context<Self>) {
+        let selection = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(browse::choose_library_destination).into()) });
+        cx.spawn(async move |navigation, cx| {
+            let Ok(Ok(Some(mut paths))) = selection.await else { return };
+            if paths.len() != 1 {
+                return;
+            }
+            let destination = paths.remove(0).to_string_lossy().into_owned();
+            let _ = navigation.update_in(cx, |navigation, window, cx| {
+                navigation.libraries.update(cx, |libraries, cx| libraries.move_library(id, destination, window, cx));
+            });
+        })
+        .detach();
+    }
+
     fn open_library_name_dialog(&mut self, id: LibraryId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(library) = self.libraries.read(cx).entries().iter().find(|library| *library.library_id() == id) else { return };
         self.begin_library_name(Some(id), library.library_name().to_owned().into(), window, cx);
@@ -76,7 +108,7 @@ impl Sidebar {
     }
 
     fn begin_library_name(&mut self, id: Option<LibraryId>, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Library name"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(browse::library_name)));
         if id.is_some() {
             input.update(cx, |input, cx| input.set_value(name, window, cx));
         }
@@ -119,11 +151,11 @@ impl Sidebar {
         let name = dialog.input.read(cx).value().trim().to_owned();
         if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
             let message = if name.is_empty() {
-                "Enter a library name."
+                text!(browse::enter_a_library_name)
             } else if name.len() > 255 {
-                "This library name is too long. Enter a shorter name."
+                text!(browse::this_library_name_is_too_long_enter_a_shorter_name)
             } else {
-                "Remove line breaks, tabs, and other invisible characters from the library name."
+                text!(browse::remove_line_breaks_tabs_and_other_invisible_characters_from_the_library_name)
             };
             dialog.error = Some(message.into());
             cx.notify();
@@ -148,7 +180,7 @@ impl Sidebar {
                     Err(error) => {
                         if let Some(dialog) = navigation.library_name_dialog.as_mut() {
                             dialog.busy = false;
-                            dialog.error = Some(user_facing_error(&error, "Could not save the library changes. Please try again.").into());
+                            dialog.error = Some(user_facing_error(&error, text!(browse::could_not_save_the_library_changes_please_try_again)).into());
                         }
                     }
                 }
@@ -168,14 +200,14 @@ impl Sidebar {
         let submit = emitter.clone();
         let panel = components::modal_form_surface(theme)
             .w(gpui::px(360.0))
-            .child(gpui::div().text_color(theme.text).child(if dialog.id.is_none() { "Create library" } else { "Rename library" }))
+            .child(gpui::div().text_color(theme.text).child(if dialog.id.is_none() { text!(browse::create_library) } else { text!(browse::rename_library) }))
             .child(Input::new(&dialog.input).disabled(dialog.busy || dialog.folders.is_some()))
-            .children(dialog.folders.as_ref().filter(|folders| folders.iter().any(|folder| folder.local_path.is_none())).map(|_| gpui::div().child("Books will be copied into Bokheim. The originals will stay in the selected folder.")))
+            .children(dialog.folders.as_ref().filter(|folders| folders.iter().any(|folder| folder.local_path.is_none())).map(|_| gpui::div().child(text!(browse::books_will_be_copied_into_bokheim_the_originals_will_stay_in_the))))
             .children((dialog.id.is_none()).then(|| {
                 let toggle = emitter.clone();
                 let estimate = match dialog.estimate {
                     Some(estimate) => crate::navigation::folder_creation::estimate_label(estimate),
-                    None => "Estimating book size…".to_owned(),
+                    None => text!(browse::estimating_book_size).to_owned(),
                 };
                 gpui::div()
                     .flex()
@@ -183,14 +215,16 @@ impl Sidebar {
                     .gap(gpui::px(components::SPACE_SM))
                     .child(estimate)
                     .children(signed_in.then(|| {
-                        Checkbox::new("library-upload-choice").label("Cloud storage").checked(dialog.asset_storage_enabled && cloud_blocker.is_none()).disabled(dialog.busy || cloud_blocker.is_some()).on_click(move |checked, _, cx| {
-                            toggle.update(cx, |navigation, cx| {
-                                if let Some(dialog) = &mut navigation.library_name_dialog {
-                                    dialog.asset_storage_enabled = *checked;
-                                }
-                                cx.notify();
-                            })
-                        })
+                        Checkbox::new("library-upload-choice").label(text!(browse::cloud_storage)).checked(dialog.asset_storage_enabled && cloud_blocker.is_none()).disabled(dialog.busy || cloud_blocker.is_some()).on_click(
+                            move |checked, _, cx| {
+                                toggle.update(cx, |navigation, cx| {
+                                    if let Some(dialog) = &mut navigation.library_name_dialog {
+                                        dialog.asset_storage_enabled = *checked;
+                                    }
+                                    cx.notify();
+                                })
+                            },
+                        )
                     }))
                     .children(signed_in.then_some(cloud_blocker).flatten().map(|message| components::form_hint(message, theme)))
             }))
@@ -200,22 +234,22 @@ impl Sidebar {
                     .flex()
                     .justify_end()
                     .gap(gpui::px(components::SPACE_SM))
-                    .child(components::dialog_cancel_button("cancel-library-rename", "Cancel").disabled(dialog.busy).on_click(move |_, window, cx| {
+                    .child(components::dialog_cancel_button("cancel-library-rename", text!(common::cancel)).disabled(dialog.busy).on_click(move |_, window, cx| {
                         cancel.update(cx, |navigation, cx| navigation.cancel_library_name(window, cx));
                     }))
                     .child(
                         components::base_button("save-library-rename")
                             .primary()
                             .label(if dialog.id.is_none() {
-                                if dialog.busy { "Creating…" } else { "Create" }
+                                if dialog.busy { text!(browse::creating) } else { text!(browse::create) }
                             } else if dialog.busy {
-                                "Renaming…"
+                                text!(browse::renaming)
                             } else {
-                                "Rename"
+                                text!(browse::rename)
                             })
                             // Folder-import review disables the input, so its
                             // submit button has no Enter shortcut to advertise.
-                            .when(dialog.folders.is_none(), |button| button.tooltip(components::shortcut_tooltip(if dialog.id.is_none() { "Create" } else { "Rename" }, "enter")))
+                            .when(dialog.folders.is_none(), |button| button.tooltip(components::shortcut_tooltip(if dialog.id.is_none() { text!(browse::create) } else { text!(browse::rename) }, "enter")))
                             .disabled(dialog.busy || dialog.estimate.is_none() || dialog.input.read(cx).value().trim().is_empty())
                             .on_click(move |_, _, cx| submit.update(cx, |navigation, cx| navigation.submit_library_name(cx))),
                     ),
@@ -333,13 +367,13 @@ impl Sidebar {
     fn prompt_delete_library(&mut self, id: LibraryId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(library) = self.libraries.read(cx).entries().iter().find(|library| *library.library_id() == id) else { return };
         let opds = library.is_opds();
-        let question: SharedString = format!("Remove “{}”?", library.library_name()).into();
+        let question: SharedString = format!(text!(browse::remove_2), library.library_name()).into();
         let navigation = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, window, cx| {
             let theme = components::browser_theme(cx);
             let navigation = navigation.clone();
-            let cancel = components::dialog_cancel_button("cancel-delete-library", "Cancel").on_click(|_, window, cx| window.close_dialog(cx));
-            let delete = components::base_button("delete-library").label("Remove").danger().on_click(move |_, window, cx| {
+            let cancel = components::dialog_cancel_button("cancel-delete-library", text!(common::cancel)).on_click(|_, window, cx| window.close_dialog(cx));
+            let delete = components::base_button("delete-library").label(text!(browse::remove)).danger().on_click(move |_, window, cx| {
                 window.close_dialog(cx);
                 // The switcher stays open: deleting is a management action,
                 // and there is usually more than one to do. Closing it also
@@ -352,7 +386,7 @@ impl Sidebar {
                 });
             });
             components::confirmation_dialog_row(components::confirmation_dialog(dialog, window), question.clone(), cancel, delete, theme).child(components::form_hint(
-                if opds { "Removes this OPDS connection. Permanent downloads and notes stay on this device." } else { "Cloud libraries are kept locally after every book is saved. If saving fails, the cloud library is kept." },
+                if opds { text!(browse::removes_this_opds_connection_permanent_downloads_and_notes_stay_on_this_device) } else { text!(browse::cloud_libraries_are_kept_locally_after_every_book_is_saved_if_saving) },
                 theme,
             ))
         });
@@ -393,7 +427,7 @@ impl Sidebar {
     }
 
     pub(crate) fn choose_library_folders(&mut self, cx: &mut Context<Self>) {
-        let selection = cx.prompt_for_directories(PathPromptOptions { files: false, directories: true, multiple: true, prompt: Some("Choose library folders".into()) });
+        let selection = cx.prompt_for_directories(PathPromptOptions { files: false, directories: true, multiple: true, prompt: Some(text!(browse::choose_library_folders).into()) });
         cx.spawn(async move |navigation, cx| {
             let Ok(Ok(Some(directories))) = selection.await else { return };
             if directories.is_empty() {
@@ -411,7 +445,7 @@ impl Sidebar {
         }
         let (books, bytes, unavailable) = estimate_selected_files(&directories);
         let locators: Vec<String> = directories.iter().filter_map(|directory| directory.local_path.as_ref().map(|path| path.to_string_lossy().into_owned())).collect();
-        let title = if directories.len() == 1 { directories[0].name.clone() } else { format!("{} library folders", directories.len()) };
+        let title = if directories.len() == 1 { directories[0].name.clone() } else { format!(text!(browse::library_folders), directories.len()) };
         self.open_create_library_dialog(window, cx);
         self.switcher_open = false;
         let Some(dialog) = self.library_name_dialog.as_mut() else {
@@ -431,7 +465,7 @@ impl Sidebar {
                         match estimate {
                             Ok((local_books, local_bytes, local_unavailable)) => dialog.estimate = Some((books + local_books, bytes.saturating_add(local_bytes), unavailable + local_unavailable)),
                             Err(error) => {
-                                dialog.error = Some(user_facing_error(&error, "Could not check the selected folders. Check that they are available, then try again.").into());
+                                dialog.error = Some(user_facing_error(&error, text!(browse::could_not_check_the_selected_folders_check_that_they_are_available_then)).into());
                                 dialog.estimate = Some((books, bytes, unavailable + 1));
                             }
                         }
@@ -452,7 +486,7 @@ impl Sidebar {
 
     pub(super) fn active_library_name(&self, cx: &gpui::App) -> SharedString {
         let libraries = self.libraries.read(cx);
-        libraries.entries().iter().find(|library| Some(*library.library_id()) == libraries.selected_id()).map(|library| library.library_name().to_owned().into()).unwrap_or_else(|| "Libraries".into())
+        libraries.entries().iter().find(|library| Some(*library.library_id()) == libraries.selected_id()).map(|library| library.library_name().to_owned().into()).unwrap_or_else(|| text!(common::libraries).into())
     }
 
     fn render_library_switcher_overlay(&self, emitter: Entity<Self>, window: &gpui::Window, cx: &gpui::App) -> gpui::AnyElement {
@@ -462,7 +496,11 @@ impl Sidebar {
         let library_count = libraries.len();
         let cursor = self.switcher_cursor;
         let keys = emitter.clone();
-        let header = components::library_switcher_header("Libraries", theme).flex_none().child(self.render_add_library_control(emitter.clone(), components::library_switcher_add_button(matches!(cursor, SwitcherCursor::Add), theme), true));
+        let header = components::library_switcher_header(text!(common::libraries), theme).flex_none().child(self.render_add_library_control(
+            emitter.clone(),
+            components::library_switcher_add_button(matches!(cursor, SwitcherCursor::Add), theme),
+            true,
+        ));
         let panel = components::library_switcher_panel()
             .flex_1()
             .min_h_0()
@@ -563,12 +601,23 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = app::AppClient::start_native(launch).unwrap();
-        let first = backend.create_library_with_asset_storage("First".into(), true).await.unwrap();
-        let second = backend.create_library_with_asset_storage("Second".into(), true).await.unwrap();
+        let first = backend.management.create_library_with_asset_storage("First".into(), true).await.unwrap();
+        let second = backend.management.create_library_with_asset_storage("Second".into(), true).await.unwrap();
         let first_id = *first.library_id();
         let second_id = *second.library_id();
-        let entries = backend.libraries().await.unwrap();
-        let services = crate::services::AppServices::new(backend.clone(), crate::AppStartup { libraries: entries.clone(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let entries = backend.management.libraries().await.unwrap();
+        let services = crate::services::AppServices::new(
+            backend.clone(),
+            crate::AppStartup {
+                libraries: entries.clone(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             components::init_page_scrolling(cx);

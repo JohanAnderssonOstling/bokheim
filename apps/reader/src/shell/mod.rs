@@ -17,6 +17,7 @@ pub(crate) mod history;
 pub(crate) mod input;
 pub(crate) mod keyboard_settings;
 mod layout;
+mod lookups;
 pub(crate) mod marks;
 pub(crate) mod bookmarks;
 pub(crate) mod recurring;

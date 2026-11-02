@@ -7,7 +7,9 @@ destination checks. Its archive visitor is shared by validation, USB installatio
 and on-device staging. HTTP transport and installation orchestration stay with
 each host; durable file writes use `shared/update-files`.
 
-The USB policy accepts older installation packages. The on-device policy limits
+The USB policy accepts older installation packages, limited to Bokheim's own
+directories and its menu entry so packages cannot replace other applications
+or shared NickelMenu configurations. The on-device policy limits
 replacement to program files and additionally requires the recovery helper and
 build information. Both policies preserve libraries, preferences, and updater
 state. Release serialization preserves the on-device `ready.json` format.

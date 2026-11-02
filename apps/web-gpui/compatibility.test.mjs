@@ -18,13 +18,13 @@ function supportedEnvironment(wasm) {
 test('browsers with only legacy exception handling receive an update message', () => {
     const issues = requiredCapabilities(supportedEnvironment({JSTag: {}, validate: () => false}));
     assert.equal(issues.length, 1);
-    assert.match(issues[0], /exception handling.*Update your browser/);
+    assert.match(issues[0], /browser can’t run Bokheim.*Update it/);
 });
 
 test('modern exception instructions require the JavaScript exception tag too', () => {
     const issues = requiredCapabilities(supportedEnvironment({validate: () => true}));
     assert.equal(issues.length, 1);
-    assert.match(issues[0], /exception handling/);
+    assert.match(issues[0], /browser can’t run Bokheim/);
 });
 
 test('supported exception handling passes the capability gate', () => {
@@ -34,5 +34,5 @@ test('supported exception handling passes the capability gate', () => {
 test('a restricted WebAssembly validator reports incompatibility without throwing', () => {
     const issues = requiredCapabilities(supportedEnvironment({JSTag: {}, validate() { throw new Error('blocked'); }}));
     assert.equal(issues.length, 1);
-    assert.match(issues[0], /exception handling/);
+    assert.match(issues[0], /browser can’t run Bokheim/);
 });

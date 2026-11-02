@@ -4,14 +4,15 @@ pub mod battery;
 #[cfg(target_os = "linux")]
 pub mod bluetooth;
 pub mod brightness;
-pub mod natural_light;
+pub mod control;
 mod frontlight;
-pub mod profile;
-pub mod settings;
+pub mod natural_light;
 #[cfg(target_os = "linux")]
 pub mod power;
+pub mod profile;
 #[cfg(target_os = "linux")]
 mod rtc;
+pub mod settings;
 #[cfg(target_os = "linux")]
 pub mod wifi;
 

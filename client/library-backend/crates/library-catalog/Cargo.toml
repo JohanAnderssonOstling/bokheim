@@ -13,13 +13,18 @@ content-address = { path = "../../../../shared/content-address" }
 thumbnail = { path = "../thumbnail" }
 library-database = { path = "../library-database" }
 library-model = { path = "../../../library-model" }
+update-client = { path = "../../../update-client" }
 reqwest = { workspace = true, features = ["stream"] }
 futures-util = "0.3"
 log = "0.4"
 web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+client-platform-native = { path = "../../../platforms/native" }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+client-platform-web = { path = "../../../platforms/web" }
 
 [dev-dependencies]
 rusqlite = { version = "0.40.0", features = ["bundled"] }

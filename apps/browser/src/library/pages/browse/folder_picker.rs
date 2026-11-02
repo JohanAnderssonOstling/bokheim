@@ -1,5 +1,7 @@
 //! Pure folder destination selection for folder-scoped browse actions.
 
+use ui_text::text;
+
 use std::collections::HashSet;
 
 use gpui::prelude::*;
@@ -83,12 +85,7 @@ impl FolderPicker {
     fn step_within_column(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(parent) = self.destination(self.selected_id).and_then(|destination| destination.parent_id) else { return };
         let siblings = self.children_of(parent);
-        let next = if delta < 0 {
-            siblings.take_while(|destination| destination.id != self.selected_id).last()
-        } else {
-            siblings.skip_while(|destination| destination.id != self.selected_id).nth(1)
-        }
-        .map(|destination| destination.id);
+        let next = if delta < 0 { siblings.take_while(|destination| destination.id != self.selected_id).last() } else { siblings.skip_while(|destination| destination.id != self.selected_id).nth(1) }.map(|destination| destination.id);
         if let Some(next) = next {
             self.select(next, cx);
         }
@@ -215,13 +212,13 @@ impl Render for FolderPicker {
                     .border_b_1()
                     .border_color(theme.rule)
                     .child(div().flex_1())
-                    .child(components::dialog_cancel_button("cancel-folder-picker", "Cancel").on_click(cx.listener(|picker, _, _, cx| picker.cancel(cx))))
+                    .child(components::dialog_cancel_button("cancel-folder-picker", text!(common::cancel)).on_click(cx.listener(|picker, _, _, cx| picker.cancel(cx))))
                     .child(
                         components::base_button("confirm-folder-picker")
                             .primary()
                             .disabled(!can_select)
-                            .label("Choose")
-                            .tooltip(components::shortcut_tooltip("Choose", "enter"))
+                            .label(text!(browse::choose))
+                            .tooltip(components::shortcut_tooltip(text!(browse::choose), "enter"))
                             .on_click(cx.listener(|picker, _, _, cx| picker.confirm(cx))),
                     ),
             )

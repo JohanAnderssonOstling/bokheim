@@ -10,7 +10,7 @@ use crate::library::remote_access::{authenticated_file_request, range_backend_er
 
 pub(super) async fn describe(library: &LibrarySession, hash: BookId) -> Result<(RemoteFile, Vec<u8>), BackendError> {
     let account = library.account()?;
-    let client = &library.sync.http_client;
+    let client = library.sync.http_client();
     let id = library.id;
     authenticated_file_request(&account, |session| async move {
         let url = sync_transport::blob_endpoint(session.server_url(), &id, &hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
@@ -40,5 +40,5 @@ pub(super) async fn open(library: &LibrarySession, hash: BookId, path: String, f
     let source = SparseBookSource::remote(file.length, file.length - tail.len() as u64, tail, access.clone().fetch()).map_err(BackendError::operation)?;
     let source = source.with_remote_prefetch(access.batch_fetch()).map_err(BackendError::operation)?;
     let source = if format == BookFormat::Epub { prepare_epub(source).await? } else { AsyncBookSource::from(source) };
-    Ok(ResolvedBook::Document(DocumentBook::from_async_source(path, format, source)))
+    Ok(ResolvedBook::Document(DocumentBook::from_async_source(path, format.try_into()?, source)))
 }

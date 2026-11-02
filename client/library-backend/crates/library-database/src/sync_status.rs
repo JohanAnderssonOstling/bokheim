@@ -1,5 +1,6 @@
 //! Presentation state derived from one library's durable synchronization data.
 
+use library_model::BookFileActivity;
 use serde::{Deserialize, Serialize};
 use sync_common::storage::LibraryStorage;
 use sync_common::{LibraryId, MutationIssue};
@@ -47,6 +48,8 @@ pub struct LibrarySyncStatus {
     #[serde(default = "default_asset_storage_enabled")]
     pub asset_storage_enabled: bool,
     #[serde(default)]
+    pub book_file_activity: BookFileActivity,
+    #[serde(default)]
     pub storage: LibraryStorage,
     pub library_id: LibraryId,
     pub state: LibrarySyncState,
@@ -67,6 +70,16 @@ impl LibrarySyncStatus {
     /// unknown library is "checking" or "local only" depends on sign-in,
     /// which the library does not know.
     pub fn placeholder(library_id: LibraryId, state: LibrarySyncState) -> Self {
-        Self { asset_storage_enabled: default_asset_storage_enabled(), storage: LibraryStorage::default(), library_id, state, has_unsynced_changes: false, last_synced_at: None, issues: SyncIssueSummary::default(), issue_details: Vec::new() }
+        Self {
+            book_file_activity: BookFileActivity::Idle,
+            asset_storage_enabled: default_asset_storage_enabled(),
+            storage: LibraryStorage::default(),
+            library_id,
+            state,
+            has_unsynced_changes: false,
+            last_synced_at: None,
+            issues: SyncIssueSummary::default(),
+            issue_details: Vec::new(),
+        }
     }
 }

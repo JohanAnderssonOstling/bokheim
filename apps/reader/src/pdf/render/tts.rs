@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use super::PdfReaderView;
 use crate::shell::persistence::StoredPosition;
 use crate::shell::tts::{self, TtsReader};
@@ -8,19 +10,19 @@ use ui_components::user_facing_error;
 
 impl PdfReaderView {
     pub(super) fn tts_navigation_changed(&mut self, cx: &mut Context<Self>) {
-        if !self.tts.playing || self.pdf.read(cx).navigation_revision() == self.tts_navigation_revision {
+        if !self.tts.is_active() || self.pdf.read(cx).navigation_revision() == self.tts_navigation_revision {
             return;
         }
         self.tts_navigation_revision = self.pdf.read(cx).navigation_revision();
         self.tts_request += 1;
         self.tts.navigated();
         self.pdf.update(cx, |pdf, cx| pdf.set_reading_highlight(None, cx));
-        if !self.tts.paused {
+        if !self.tts.is_paused() {
             let timer = cx.background_executor().timer(Duration::from_millis(100));
-            self.tts.navigation_task = Some(cx.spawn(async move |this, cx| {
+            self.tts.navigate_with(cx.spawn(async move |this, cx| {
                 timer.await;
                 let _ = this.update(cx, |reader, cx| {
-                    if reader.tts.playing && !reader.tts.paused {
+                    if reader.tts.is_running() {
                         reader.start_tts(cx);
                     }
                 });
@@ -31,12 +33,11 @@ impl PdfReaderView {
 
     fn advance_tts_page(&mut self, cx: &mut Context<Self>) {
         if self.tts_page + 1 >= self.page_count {
-            self.stop_tts(cx);
-            self.tts.status = "Finished".into();
+            self.stop_tts_with_status(text!(reader::finished), cx);
             return;
         }
-        if self.tts.sleep.and_then(|plan| plan.chapter()).is_some_and(|chapter| self.toc.chapter_at(self.tts_page + 1) > chapter) {
-            self.tts.finished = true;
+        if self.tts.sleep_chapter().is_some_and(|chapter| self.toc.chapter_at(self.tts_page + 1) > chapter) {
+            self.tts.finish_batch();
             self.sleep_tts(cx);
             return;
         }
@@ -65,11 +66,11 @@ impl TtsReader for PdfReaderView {
 
     fn skip_tts_element(&mut self, forward: bool, cx: &mut Context<Self>) {
         self.tts_navigation_changed(cx);
-        if !self.tts.playing || self.tts.needs_restart {
+        if !self.tts.can_skip() {
             return;
         }
-        let Some(index) = tts::adjacent_item(self.tts.current.unwrap_or(0), self.tts_fragments.len(), forward) else { return };
-        if self.tts.end_fragment.is_some_and(|end| index >= end) {
+        let Some(index) = tts::adjacent_item(self.tts.current_item().unwrap_or(0), self.tts_fragments.len(), forward) else { return };
+        if self.tts.at_limit(index) {
             self.sleep_tts(cx);
         }
         self.tts.skip_to(index);
@@ -79,21 +80,20 @@ impl TtsReader for PdfReaderView {
     }
 
     fn start_tts(&mut self, cx: &mut Context<Self>) {
-        let continuation = self.tts.playing;
-        if continuation && self.tts.service.as_ref().is_some_and(|service| !service.is_current()) {
+        let continuation = self.tts.is_active();
+        if continuation && self.tts.lost_playback() {
             self.stop_tts(cx);
             return;
         }
         let current_page = self.pdf.read(cx).current_page();
         let Some(page) = self.toc.narration_start_page(current_page, self.page_count) else {
-            self.stop_tts(cx);
-            self.tts.status = "Finished".into();
+            self.stop_tts_with_status(text!(reader::finished), cx);
             cx.notify();
             return;
         };
         if page != current_page {
-            if self.tts.sleep.and_then(|plan| plan.chapter()).is_some_and(|chapter| self.toc.chapter_at(page) > chapter) {
-                self.tts.finished = true;
+            if self.tts.sleep_chapter().is_some_and(|chapter| self.toc.chapter_at(page) > chapter) {
+                self.tts.finish_batch();
                 self.sleep_tts(cx);
                 cx.notify();
                 return;
@@ -104,24 +104,21 @@ impl TtsReader for PdfReaderView {
         let position = pdf.full_page_position();
         self.tts_navigation_revision = pdf.navigation_revision();
         let Some(request) = pdf.reading_request(page) else {
-            self.tts.status = "The document is still loading.".into();
+            self.tts.wait_for_page(text!(reader::the_document_is_still_loading));
             cx.notify();
             return;
         };
         self.tts_request += 1;
         let revision = self.tts_request;
-        self.tts.navigated();
-        self.tts.playing = true;
-        self.tts.paused = false;
-        self.tts.status = "Preparing this page…".into();
+        self.tts.prepare_page();
         self.tts_page = page;
-        self.tts.navigation_task = Some(cx.spawn(async move |this, cx| {
+        self.tts.navigate_with(cx.spawn(async move |this, cx| {
             let result = request.await;
             let _ = this.update(cx, |reader, cx| {
-                if revision != reader.tts_request || !reader.tts.playing || reader.tts.paused {
+                if revision != reader.tts_request || !reader.tts.is_active() || reader.tts.is_paused() {
                     return;
                 }
-                if continuation && reader.tts.service.as_ref().is_some_and(|service| !service.is_current()) {
+                if continuation && reader.tts.lost_playback() {
                     reader.stop_tts(cx);
                     return;
                 }
@@ -129,26 +126,23 @@ impl TtsReader for PdfReaderView {
                     Ok(fragments) => {
                         let start = fragments.iter().position(|fragment| fragment.rects.iter().any(|rect| rect.bottom() >= position)).unwrap_or(fragments.len());
                         if fragments.is_empty() {
-                            reader.stop_tts(cx);
-                            reader.tts.status = "No readable text here. Scanned pages require OCR.".into();
+                            reader.stop_tts_with_status(text!(reader::no_readable_text_here_scanned_pages_require_ocr), cx);
                         } else {
                             // PDF fragments are geometry-based reading blocks.
                             let (rects, passages) = fragments.into_iter().map(|fragment| (fragment.rects, SpeechPassage::new(fragment.text, true))).unzip();
                             reader.tts_fragments = rects;
                             reader.tts.set_chapter(reader.chapter_label(cx));
                             match reader.tts.start(passages, start) {
-                                Ok(Some(events)) => reader.tts.events_task = Some(tts::listen(events, cx)),
+                                Ok(Some(events)) => reader.tts.watch_events(events, cx),
                                 Ok(None) => {}
                                 Err(error) => {
-                                    reader.stop_tts(cx);
-                                    reader.tts.status = error.user_message().to_owned();
+                                    reader.stop_tts_with_status(error.user_message(), cx);
                                 }
                             }
                         }
                     }
                     Err(error) => {
-                        reader.stop_tts(cx);
-                        reader.tts.status = user_facing_error(&error.to_string(), "Couldn't read this PDF page's text. Try another page or reopen the book.").to_owned();
+                        reader.stop_tts_with_status(user_facing_error(&error.to_string(), text!(reader::couldn_t_read_this_pdf_page_s_text_try_another_page_or)), cx);
                     }
                 }
                 cx.notify();
@@ -158,18 +152,10 @@ impl TtsReader for PdfReaderView {
     }
 
     fn toggle_tts_pause(&mut self, cx: &mut Context<Self>) {
-        if self.tts.paused {
-            if self.tts.needs_restart {
-                self.tts.paused = false;
-                self.start_tts(cx);
-            } else if self.tts.finished {
-                self.tts.resume();
-                self.advance_tts_page(cx);
-            } else {
-                self.tts.resume();
-            }
-        } else {
-            self.tts.pause();
+        match self.tts.toggle_pause() {
+            tts::PlaybackContinuation::Restart => self.start_tts(cx),
+            tts::PlaybackContinuation::Advance => self.advance_tts_page(cx),
+            tts::PlaybackContinuation::None => {}
         }
         cx.notify();
     }
@@ -219,15 +205,14 @@ impl TtsReader for PdfReaderView {
                 }
             }
             SpeechEvent::Finished { .. } => {
-                if self.tts.paused {
-                    self.tts.finished = true;
+                if self.tts.is_paused() {
+                    self.tts.finish_batch();
                 } else {
                     self.advance_tts_page(cx);
                 }
             }
             SpeechEvent::Failed { failure, message, .. } => {
-                self.stop_tts(cx);
-                self.tts.status = tts::speech_error_message(failure, &message).to_owned();
+                self.stop_tts_with_status(tts::speech_error_message(failure, &message), cx);
             }
         }
         cx.notify();

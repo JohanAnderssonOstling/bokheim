@@ -8,8 +8,8 @@ mod update_bridge;
 pub(crate) use context::feed_detail;
 pub(crate) use context::{LibraryContext, OpenBook};
 pub(crate) use undo::{UndoEntry, UndoStack, UndoStep};
-pub(crate) use update_bridge::{DownloadSubscription, LibraryContentsChanged, LibraryCoversChanged, LibraryDownloadChanged, LibraryScanChanged, LibraryUpdateBridge, initial_download_state};
 pub(crate) use update_bridge::LibraryAnnotationsChanged;
+pub(crate) use update_bridge::{DownloadSubscription, LibraryContentsChanged, LibraryCoversChanged, LibraryDownloadChanged, LibraryFileActionsChanged, LibraryScanChanged, LibraryUpdateBridge, initial_download_state};
 
 /// How selected books or folders are placed in their chosen destination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

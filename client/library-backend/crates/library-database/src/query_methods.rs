@@ -1,5 +1,6 @@
 //! SQL methods shared by library operations and their callers.
 //! SQL text and parameter declarations remain in feature files.
+use crate::DatabaseError;
 use rusqlite::{
     Error as SqlError, Row,
     types::{Type, ValueRef},
@@ -16,6 +17,25 @@ macro_rules! impl_sql {
             $(include_sqlite_sql::impl_method! { $kind $name () () ($($param $variant $ptype)*) => ($($variant $param)*) $($text)+ })+
         }
     };
+}
+
+/// Borrow required TEXT without allocating a String for the query row.
+pub(crate) fn text_column<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<&'a str> {
+    text_value(row, index, row.get_ref(index)?)
+}
+
+pub(crate) fn optional_text_column<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<Option<&'a str>> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        value => text_value(row, index, value).map(Some),
+    }
+}
+
+fn text_value<'a>(row: &Row<'_>, index: usize, value: ValueRef<'a>) -> rusqlite::Result<&'a str> {
+    match value {
+        ValueRef::Text(bytes) => std::str::from_utf8(bytes).map_err(|error| SqlError::Utf8Error(index, error)),
+        value => Err(SqlError::InvalidColumnType(index, row.as_ref().column_name(index)?.to_owned(), value.data_type())),
+    }
 }
 
 /// Borrow a required BLOB while its query row remains alive.
@@ -79,6 +99,24 @@ pub(crate) fn query_rows<T>(
         Ok(())
     })?;
     Ok(rows)
+}
+
+/// Process generated query rows directly, preserving database errors from
+/// visitors that perform further reads or validate stored state.
+pub(crate) fn try_for_each_row(query: impl FnOnce(&mut dyn FnMut(&Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>, mut visit: impl FnMut(&Row<'_>) -> Result<(), DatabaseError>) -> Result<(), DatabaseError> {
+    let mut failure = None;
+    let result = query(&mut |row| {
+        visit(row).map_err(|error| {
+            failure = Some(error);
+            // Generated queries require a rusqlite error to stop iteration.
+            // The original visitor error is returned below instead.
+            SqlError::InvalidQuery
+        })
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    result.map_err(DatabaseError::from)
 }
 
 /// Borrowed SQL values retain their caller's lifetime.

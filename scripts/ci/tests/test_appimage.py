@@ -215,7 +215,7 @@ class DesktopBuildTests(unittest.TestCase):
                 self.assertEqual(run.call_args_list[0].kwargs['env']['CC_x86_64_unknown_linux_gnu'], 'sdk-cc')
                 linux_environment.assert_called_once_with(offline=True)
                 if not without_browser:
-                    self.assertIn('opds-webview', commands[1])
+                    self.assertIn('embedded-browser-ui', commands[1])
                     self.assertEqual(commands[1][:2], ['cargo', 'rustc'])
                     self.assertEqual(commands[1][-3:], ['--', '-C', 'link-arg=-Wl,--allow-shlib-undefined'])
                     self.assertEqual(run.call_args_list[1].kwargs['env']['PKG_CONFIG'], 'browser-pkg-config')

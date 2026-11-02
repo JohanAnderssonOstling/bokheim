@@ -1,3 +1,20 @@
+use ui_text::text;
+
+#[cfg(feature = "store")]
+mod store;
+#[cfg(feature = "store")]
+pub use store::PreferenceStore;
+#[cfg(feature = "store")]
+mod service;
+#[cfg(feature = "store")]
+pub use service::{Service, TextSearchIndexCleanup};
+#[cfg(feature = "store")]
+mod client;
+#[cfg(feature = "store")]
+pub use client::Client;
+#[cfg(feature = "store")]
+pub mod library_folder;
+
 use serde::de::Error as DeserializeError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -33,9 +50,9 @@ impl ReaderFontWeight {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Light => "Light",
-            Self::Normal => "Normal",
-            Self::Heavy => "Heavy",
+            Self::Light => text!(settings::light),
+            Self::Normal => text!(settings::normal),
+            Self::Heavy => text!(settings::heavy),
         }
     }
 }
@@ -55,9 +72,9 @@ impl ReaderHyphenation {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Book => "Book",
-            Self::Off => "Off",
-            Self::On => "On",
+            Self::Book => text!(reader::book),
+            Self::Off => text!(common::off),
+            Self::On => text!(common::on),
         }
     }
 }
@@ -177,15 +194,15 @@ impl ApplicationTheme {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Warm => "Warm",
-            Self::Cool => "Cool",
+            Self::Warm => text!(settings::warm),
+            Self::Cool => text!(settings::cool),
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Warm => "Cream surfaces with a muted green accent.",
-            Self::Cool => "Neutral greys and white cards with a muted slate accent.",
+            Self::Warm => text!(settings::cream_surfaces_with_a_muted_green_accent),
+            Self::Cool => text!(settings::neutral_greys_and_white_cards_with_a_muted_slate_accent),
         }
     }
 }
@@ -202,8 +219,8 @@ pub enum UiFontFamily {
 impl UiFontFamily {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Serif => "Serif",
-            Self::SansSerif => "Sans serif",
+            Self::Serif => text!(common::serif),
+            Self::SansSerif => text!(common::sans_serif),
         }
     }
 
@@ -315,11 +332,7 @@ impl BrowsingPreferences {
         self.custom_ui_font_family().is_some() && self.custom_ui_font_enabled.unwrap_or(true)
     }
     pub fn ui_font_name(&self) -> &str {
-        if self.custom_ui_font_active() {
-            self.custom_ui_font_family().unwrap()
-        } else {
-            self.ui_font_family.family_name()
-        }
+        if self.custom_ui_font_active() { self.custom_ui_font_family().unwrap() } else { self.ui_font_family.family_name() }
     }
     pub fn cover_text(&self) -> CoverText {
         self.cover_text
@@ -354,8 +367,8 @@ pub enum CatalogGrouping {
 impl CatalogGrouping {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Subject => "Subject",
-            Self::Author => "Author",
+            Self::Subject => text!(browse::subject),
+            Self::Author => text!(browse::author),
         }
     }
 }
@@ -375,9 +388,9 @@ impl ReaderFirstLineIndent {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Book => "Book",
-            Self::Off => "Off",
-            Self::Custom => "Custom",
+            Self::Book => text!(reader::book),
+            Self::Off => text!(common::off),
+            Self::Custom => text!(common::custom),
         }
     }
 }
@@ -386,10 +399,17 @@ impl<'de> Deserialize<'de> for ReaderFirstLineIndent {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(rename_all = "snake_case")]
-        enum Mode { Book, Off, Custom }
+        enum Mode {
+            Book,
+            Off,
+            Custom,
+        }
         #[derive(Deserialize)]
         #[serde(untagged)]
-        enum Saved { Mode(Mode), Legacy(bool) }
+        enum Saved {
+            Mode(Mode),
+            Legacy(bool),
+        }
         Ok(match Saved::deserialize(deserializer)? {
             Saved::Mode(Mode::Book) | Saved::Legacy(false) => Self::Book,
             Saved::Mode(Mode::Off) => Self::Off,
@@ -416,15 +436,15 @@ pub enum CoverText {
 impl CoverText {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Always => "Always",
-            Self::CoverOnly => "Cover only",
+            Self::Always => text!(settings::always),
+            Self::CoverOnly => text!(settings::cover_only),
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Always => "Title and subtitle under every cover.",
-            Self::CoverOnly => "Covers carry their own title; a book with no cover art gets a generated one.",
+            Self::Always => text!(settings::title_and_subtitle_under_every_cover),
+            Self::CoverOnly => text!(settings::covers_carry_their_own_title_a_book_with_no_cover_art_gets),
         }
     }
 }
@@ -527,13 +547,17 @@ pub enum ReaderTextAlignment {
 /// are synchronized separately; layout-sensitive fields remain in a local
 /// device or web form-factor profile. Neither belongs in the library event log.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ReaderPreferences {
+    #[serde(alias = "font_size")]
     font_size_px: FontSize,
+    #[serde(alias = "column_width")]
     max_line_width_px: LineWidth,
     #[serde(default = "default_min_line_width_ch")]
     min_line_width_ch: LineWidthCh,
     #[serde(default = "default_max_line_width_ch")]
     max_line_width_ch: LineWidthCh,
+    #[serde(alias = "scale")]
     zoom: Zoom,
     line_height: LineHeight,
     /// Keep the last custom value when publisher line spacing is selected.
@@ -785,21 +809,79 @@ impl Default for ReaderPreferences {
 }
 
 impl ReaderPreferences {
-    pub fn paragraph_spacing_em(self) -> f32 { self.paragraph_spacing_em.get() }
-    pub fn override_paragraph_spacing(self) -> bool { self.override_paragraph_spacing }
-    pub fn first_line_indent_em(self) -> f32 { self.first_line_indent_em.get() }
-    pub fn first_line_indent(self) -> ReaderFirstLineIndent { self.first_line_indent }
+    /// Preference updates between two validated snapshots. Local UI state
+    /// stays outside this model and cannot enter a synchronized patch.
+    pub fn patches_to(&self, next: &Self) -> Vec<ReaderPreferencePatch> {
+        let mut patches = Vec::new();
+        macro_rules! changed {
+            ($field:ident, $patch:ident) => {
+                if self.$field() != next.$field() {
+                    patches.push(ReaderPreferencePatch::$patch(next.$field()));
+                }
+            };
+        }
+        changed!(font_size_px, FontSizePx);
+        changed!(max_line_width_px, MaxLineWidthPx);
+        changed!(min_line_width_ch, MinLineWidthCh);
+        changed!(max_line_width_ch, MaxLineWidthCh);
+        changed!(zoom, Zoom);
+        changed!(line_height, LineHeight);
+        changed!(override_line_height, OverrideLineHeight);
+        changed!(paragraph_spacing_em, ParagraphSpacingEm);
+        changed!(override_paragraph_spacing, OverrideParagraphSpacing);
+        changed!(first_line_indent_em, FirstLineIndentEm);
+        changed!(first_line_indent, FirstLineIndent);
+        changed!(hyphenation, Hyphenation);
+        changed!(word_spacing_percent, WordSpacingPercent);
+        changed!(font_weight, FontWeight);
+        changed!(font_family, FontFamily);
+        changed!(text_alignment, TextAlignment);
+        changed!(max_column_count, MaxColumnCount);
+        changed!(horizontal_margin_px, HorizontalMarginPx);
+        changed!(vertical_margin_px, VerticalMarginPx);
+        changed!(min_column_gap_px, MinColumnGapPx);
+        changed!(pdf_zoom_mode, PdfZoomMode);
+        changed!(pdf_page_count, PdfPageCount);
+        changed!(pdf_zoom, PdfZoom);
+        changed!(pdf_horizontal_margin_px, PdfHorizontalMarginPx);
+        changed!(pdf_vertical_margin_px, PdfVerticalMarginPx);
+        changed!(pdf_page_gap_px, PdfPageGapPx);
+        changed!(comic_horizontal_margin_px, ComicHorizontalMarginPx);
+        changed!(comic_vertical_margin_px, ComicVerticalMarginPx);
+        changed!(comic_page_gap_px, ComicPageGapPx);
+        changed!(pdf_trim_margins, PdfTrimMargins);
+        changed!(audiobook_speed, AudiobookSpeed);
+        changed!(flow, Flow);
+        patches
+    }
+
+    pub fn paragraph_spacing_em(self) -> f32 {
+        self.paragraph_spacing_em.get()
+    }
+    pub fn override_paragraph_spacing(self) -> bool {
+        self.override_paragraph_spacing
+    }
+    pub fn first_line_indent_em(self) -> f32 {
+        self.first_line_indent_em.get()
+    }
+    pub fn first_line_indent(self) -> ReaderFirstLineIndent {
+        self.first_line_indent
+    }
 
     pub fn set_paragraph_spacing_em(&mut self, value: f32) -> Result<(), PreferenceValueError> {
         self.paragraph_spacing_em = ParagraphSpacing::new(value)?;
         Ok(())
     }
-    pub fn set_override_paragraph_spacing(&mut self, value: bool) { self.override_paragraph_spacing = value; }
+    pub fn set_override_paragraph_spacing(&mut self, value: bool) {
+        self.override_paragraph_spacing = value;
+    }
     pub fn set_first_line_indent_em(&mut self, value: f32) -> Result<(), PreferenceValueError> {
         self.first_line_indent_em = FirstLineIndent::new(value)?;
         Ok(())
     }
-    pub fn set_first_line_indent(&mut self, value: ReaderFirstLineIndent) { self.first_line_indent = value; }
+    pub fn set_first_line_indent(&mut self, value: ReaderFirstLineIndent) {
+        self.first_line_indent = value;
+    }
 
     pub fn word_spacing_percent(self) -> f32 {
         self.word_spacing_percent.get()
@@ -1193,7 +1275,9 @@ mod tests {
         assert_eq!(preferences.first_line_indent(), super::ReaderFirstLineIndent::Book);
         assert_eq!(preferences.paragraph_spacing_em(), 1.0);
         assert_eq!(preferences.first_line_indent_em(), 1.5);
-        for patch in [ReaderPreferencePatch::ParagraphSpacingEm(0.7), ReaderPreferencePatch::FirstLineIndentEm(2.1), ReaderPreferencePatch::OverrideParagraphSpacing(true), ReaderPreferencePatch::FirstLineIndent(super::ReaderFirstLineIndent::Custom)] {
+        for patch in
+            [ReaderPreferencePatch::ParagraphSpacingEm(0.7), ReaderPreferencePatch::FirstLineIndentEm(2.1), ReaderPreferencePatch::OverrideParagraphSpacing(true), ReaderPreferencePatch::FirstLineIndent(super::ReaderFirstLineIndent::Custom)]
+        {
             let decoded: ReaderPreferencePatch = serde_json::from_value(serde_json::to_value(patch).unwrap()).unwrap();
             decoded.apply(&mut preferences).unwrap();
         }

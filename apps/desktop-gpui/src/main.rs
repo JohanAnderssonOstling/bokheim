@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+use ui_text::text;
+
 use app::{AppDataLocation, host::BackendLaunch};
 use desktop_gpui::{DesktopInstance, ReaderActivation};
 use std::cell::RefCell;
@@ -16,7 +18,7 @@ fn main() -> Result<(), String> {
     };
     #[cfg(not(target_os = "linux"))]
     let activation_token = None;
-    let activation = ReaderActivation::from_launch_args(std::env::args().skip(1), activation_token)?;
+    let activation = ReaderActivation::from_launch_args(std::env::args_os().skip(1), activation_token)?;
     run(activation)
 }
 
@@ -25,8 +27,11 @@ fn run(activation: ReaderActivation) -> Result<(), String> {
     if desktop_gpui::update_entry::candidate_entry() {
         return Ok(());
     }
-    let backend_context = BackendLaunch::initialize(AppDataLocation::SharedDesktop).map_err(|error| format!("failed to initialize backend app-data directory: {error}"))?;
-    app::host::configure_opds_browser(backend_context.app_data_dir().join("opds-webview"));
+    let backend_context = BackendLaunch::initialize(AppDataLocation::SharedDesktop).map_err(|error| {
+        log::error!("failed_to_initialize_backend_app_data_directory: {error}");
+        text!(startup::failed_to_initialize_backend_app_data_directory).to_owned()
+    })?;
+    embedded_browser::configure(backend_context.app_data_dir().join("opds-webview"));
     app::init_logging();
     // Carry the initial request explicitly through updater/helper relaunches.
     #[cfg(any(target_os = "linux", target_os = "windows"))]

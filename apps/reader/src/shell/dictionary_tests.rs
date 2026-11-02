@@ -1,5 +1,5 @@
 use super::*;
-use dictionary::{ClientFuture, DictionaryDownloads, DictionaryFile, DictionaryInfo, DictionaryMatches};
+use dictionary::{ClientFuture, DictionaryDownloads, DictionaryImport, DictionaryInfo, DictionaryMatches, DictionarySnapshot, Request, Response};
 use gpui::{Entity, TestAppContext, point, size};
 use std::{
     cell::{Cell, RefCell},
@@ -79,29 +79,23 @@ fn unexpected_request<T>() -> ClientFuture<'static, T> {
 }
 
 impl DictionaryClient for SettingsClient {
-    fn list(&self) -> ClientFuture<'_, Vec<DictionaryInfo>> {
-        Box::pin(async { Ok(Vec::new()) })
+    fn request(&self, request: Request) -> ClientFuture<'_, Response> {
+        match request {
+            Request::Snapshot { languages } => {
+                self.languages.borrow_mut().push(languages);
+                Box::pin(async { Ok(Response::Snapshot(DictionarySnapshot { dictionaries: Vec::new(), downloads: DictionaryDownloads { available: Vec::new(), recommended: Vec::new(), active: None, error: None } })) })
+            }
+            Request::List => Box::pin(async { Ok(Response::Dictionaries(Vec::new())) }),
+            _ => unexpected_request(),
+        }
     }
-    fn downloads(&self, languages: Vec<String>) -> ClientFuture<'_, DictionaryDownloads> {
-        self.languages.borrow_mut().push(languages);
-        Box::pin(async { Ok(DictionaryDownloads { available: Vec::new(), recommended: Vec::new(), active: None, error: None }) })
+    fn lookup(&self, _: String, _: Vec<String>) -> ClientFuture<'_, DictionaryLookup> {
+        unexpected_request()
     }
     fn changes(&self) -> ClientFuture<'_, watch::Receiver<()>> {
         Box::pin(async { Ok(self.changes.subscribe()) })
     }
-    fn import(&self, _: Vec<DictionaryFile>) -> ClientFuture<'_, Vec<DictionaryInfo>> {
-        unexpected_request()
-    }
-    fn download(&self, _: String) -> ClientFuture<'_, Vec<DictionaryInfo>> {
-        unexpected_request()
-    }
-    fn configure(&self, _: String, _: bool, _: i8) -> ClientFuture<'_, Vec<DictionaryInfo>> {
-        unexpected_request()
-    }
-    fn remove(&self, _: String) -> ClientFuture<'_, Vec<DictionaryInfo>> {
-        unexpected_request()
-    }
-    fn lookup(&self, _: String, _: Vec<String>) -> ClientFuture<'_, DictionaryLookup> {
+    fn import(&self, _: DictionaryImport) -> ClientFuture<'_, Vec<DictionaryInfo>> {
         unexpected_request()
     }
 }
@@ -163,7 +157,12 @@ fn successful_wikipedia_is_restored_without_retry_when_dictionary_availability_c
                 let attempts = attempts.clone();
                 popup.wikipedia_request = Some(Rc::new(move |_, _| {
                     attempts.set(attempts.get() + 1);
-                    Box::pin(std::future::ready(Some(WikipediaLookup::Article(WikipediaArticle { title: "Haus".into(), extract: "A building.".into(), url: "https://de.wikipedia.org/wiki/Haus".into(), language: "de".into() }))))
+                    Box::pin(std::future::ready(Some(WikipediaLookup::Article(WikipediaArticle {
+                        title: "Haus".into(),
+                        extract: "A building.".into(),
+                        url: "https://de.wikipedia.org/wiki/Haus".into(),
+                        language: LanguageTag::parse("de").unwrap(),
+                    }))))
                 }));
                 popup.refresh_wikipedia(cx);
                 popup
@@ -318,13 +317,13 @@ fn wikipedia_pager_caches_successes_and_failed_hits_without_retries(cx: &mut Tes
             popup.wikipedia_attempted = true;
             popup.wikipedia_hits = ["Mercury (planet)", "Mercury (element)", "Mercury (mythology)"]
                 .into_iter()
-                .map(|title| WikipediaChoice { title: title.into(), description: format!("About {title}"), language: "en".into(), url: "https://en.wikipedia.org/wiki/Mercury".into() })
+                .map(|title| WikipediaChoice { title: title.into(), description: format!("About {title}"), language: LanguageTag::parse("en").unwrap(), url: "https://en.wikipedia.org/wiki/Mercury".into() })
                 .collect();
             let attempts = attempts.clone();
             popup.wikipedia_request = Some(Rc::new(move |query, _| {
                 attempts.borrow_mut().push(query.clone());
-                let result =
-                    (query != "Mercury (element)").then(|| WikipediaLookup::Article(WikipediaArticle { title: query, extract: "An article summary.".into(), url: "https://en.wikipedia.org/wiki/Mercury".into(), language: "en".into() }));
+                let result = (query != "Mercury (element)")
+                    .then(|| WikipediaLookup::Article(WikipediaArticle { title: query, extract: "An article summary.".into(), url: "https://en.wikipedia.org/wiki/Mercury".into(), language: LanguageTag::parse("en").unwrap() }));
                 Box::pin(std::future::ready(result))
             }));
             popup.wikipedia_hit(0, cx);
@@ -628,7 +627,7 @@ fn lookup_keyboard_focus_stays_inside_and_escape_closes_from_a_button(cx: &mut T
                         popup.result = Some(Ok(multiple_dictionary_matches()));
                     }
                     if has_article {
-                        popup.wikipedia = Some(WikipediaArticle { title: "Haus".into(), extract: "A building.".into(), url: "https://de.wikipedia.org/wiki/Haus".into(), language: "de".into() });
+                        popup.wikipedia = Some(WikipediaArticle { title: "Haus".into(), extract: "A building.".into(), url: "https://de.wikipedia.org/wiki/Haus".into(), language: LanguageTag::parse("de").unwrap() });
                         if has_alternatives {
                             for title in ["Haus", "Häuser", "Haushalt"] {
                                 let mut article = popup.wikipedia.clone().unwrap();
@@ -727,7 +726,7 @@ fn lookup_restores_focus_when_result_controls_disappear(cx: &mut TestAppContext)
                     if change == "pager" {
                         popup.result = Some(Ok(multiple_dictionary_matches()));
                     } else {
-                        popup.wikipedia = Some(WikipediaArticle { title: "Haus".into(), extract: "A building.".into(), url: "https://de.wikipedia.org/wiki/Haus".into(), language: "de".into() });
+                        popup.wikipedia = Some(WikipediaArticle { title: "Haus".into(), extract: "A building.".into(), url: "https://de.wikipedia.org/wiki/Haus".into(), language: LanguageTag::parse("de").unwrap() });
                     }
                     popup.wikipedia_attempted = true;
                     popup

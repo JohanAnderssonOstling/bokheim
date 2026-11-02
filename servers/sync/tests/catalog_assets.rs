@@ -58,7 +58,7 @@ impl Fixture {
         let alice = LibraryId::new_v4();
         let bob = LibraryId::new_v4();
         for (user, library) in [("alice", alice), ("bob", bob)] {
-            sync.create_library(user, &LibraryNameRequest { library_id: library, library_name: "Books".into(), storage: Default::default() }).await.unwrap();
+            sync.create_library(user, &LibraryNameRequest { library_id: library, library_name: "Books".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
         }
         Self { database, admin, schema, root, catalog, assets, sync, alice, bob }
     }
@@ -74,7 +74,7 @@ impl Fixture {
     }
 
     async fn claim(&self, user: &str, library: LibraryId, hash: BookId, size_bytes: u64) -> BlobManifestResponse {
-        self.assets.negotiate_books(user, &library, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes }]).await.unwrap()
+        self.assets.negotiate_books(user, &library, vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes }]).await.unwrap()
     }
 
     async fn read(&self, user: &str, library: LibraryId, hash: BookId) -> Option<Vec<u8>> {
@@ -102,7 +102,7 @@ async fn account_book_storage_ranks_unique_owned_books_and_excludes_other_accoun
     let first = LibraryId::new_v4();
     let second = LibraryId::new_v4();
     for library in [first, second] {
-        f.sync.create_library(owner, &LibraryNameRequest { library_id: library, library_name: "Storage".into(), storage: Default::default() }).await.unwrap();
+        f.sync.create_library(owner, &LibraryNameRequest { library_id: library, library_name: "Storage".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
     }
     let small = hash(b"abc");
     let large = hash(b"123456789");
@@ -113,10 +113,10 @@ async fn account_book_storage_ranks_unique_owned_books_and_excludes_other_accoun
     f.assets.put_book("bob", &f.bob, &other, 33, Box::new(Cursor::new(b"a different account's larger book"))).await.unwrap();
 
     let ranked = f.assets.book_storage_usage(owner, 100).await.unwrap();
-    assert_eq!(ranked.iter().map(|book| (book.content_hash, book.used_bytes)).collect::<Vec<_>>(), [(large, 9), (small, 3)]);
+    assert_eq!(ranked.iter().map(|book| (book.book_id, book.used_bytes)).collect::<Vec<_>>(), [(large, 9), (small, 3)]);
     assert_eq!(f.assets.book_storage_usage(owner, 1).await.unwrap(), ranked[..1]);
     assert!(f.assets.book_storage_usage("charlie", 100).await.unwrap().is_empty());
-    assert_eq!(f.assets.book_storage_usage("bob", 100).await.unwrap()[0].content_hash, other);
+    assert_eq!(f.assets.book_storage_usage("bob", 100).await.unwrap()[0].book_id, other);
 
     let app = sync_server::app(f.database.clone(), accounts, sync_server::AppConfig { books: f.root.path().join("sync/books"), thumbnails: f.root.path().join("sync/thumbnails"), catalog: Some(f.catalog.clone()), ..Default::default() })
         .await
@@ -126,7 +126,7 @@ async fn account_book_storage_ranks_unique_owned_books_and_excludes_other_accoun
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), wire::MAX_DECODED_RESPONSE_BYTES).await.unwrap();
     let books: Vec<account_contract::BookStorageUsage> = wire::decode(&bytes, wire::MAX_DECODED_RESPONSE_BYTES).unwrap();
-    assert_eq!(books.iter().map(|book| book.content_hash).collect::<Vec<_>>(), [large, small]);
+    assert_eq!(books.iter().map(|book| book.book_id).collect::<Vec<_>>(), [large, small]);
     f.finish().await;
 }
 
@@ -155,7 +155,7 @@ async fn catalog_claims_share_one_inode_charge_each_account_once_and_survive_unp
     }
     assert_eq!(std::fs::read_dir(&f.catalog.pins).unwrap().count(), 1);
     let second = LibraryId::new_v4();
-    f.sync.create_library("alice", &LibraryNameRequest { library_id: second, library_name: "Second".into(), storage: Default::default() }).await.unwrap();
+    f.sync.create_library("alice", &LibraryNameRequest { library_id: second, library_name: "Second".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
     assert_eq!(f.claim("alice", second, hash, 3).await.owned, vec![hash]);
     assert_eq!(f.assets.storage_usage("alice").await.unwrap().used_bytes, 3);
     let breakdown = f.assets.library_storage_usage("alice").await.unwrap();
@@ -167,7 +167,7 @@ async fn catalog_claims_share_one_inode_charge_each_account_once_and_survive_unp
     // A retained link must not make a removed catalog entry available by hash
     // to a new account, just as another user's private upload is not available.
     let third = LibraryId::new_v4();
-    f.sync.create_library("charlie", &LibraryNameRequest { library_id: third, library_name: "Third".into(), storage: Default::default() }).await.unwrap();
+    f.sync.create_library("charlie", &LibraryNameRequest { library_id: third, library_name: "Third".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
     assert_eq!(f.claim("charlie", third, hash, 3).await.upload, vec![hash]);
     assert!(f.read("charlie", third, hash).await.is_none());
 
@@ -193,12 +193,12 @@ async fn public_claims_reject_wrong_sizes_quota_overruns_and_unowned_libraries()
     assert_eq!(wrong.rejected[0].reason, BlobManifestRejectionReason::SizeMismatch);
     server_postgres::configure_user_storage_quota(&f.database, "alice", 2).await.unwrap();
     assert_eq!(f.claim("alice", f.alice, hash, 3).await.rejected[0].reason, BlobManifestRejectionReason::QuotaExceeded);
-    assert!(matches!(f.assets.negotiate_books("bob", &f.alice, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await, Err(AssetError::Forbidden)));
+    assert!(matches!(f.assets.negotiate_books("bob", &f.alice, vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes: 3 }]).await, Err(AssetError::Forbidden)));
     let usage = f.assets.storage_usage("alice").await.unwrap();
     assert_eq!((usage.used_bytes, usage.reserved_bytes), (0, 0));
     assert_eq!(std::fs::read_dir(&f.catalog.pins).unwrap().count(), 0);
     f.sync.set_cloud_storage("bob", &f.bob, uuid::Uuid::new_v4(), false).await.unwrap();
-    assert!(matches!(f.assets.negotiate_books("bob", &f.bob, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await, Err(AssetError::Forbidden)));
+    assert!(matches!(f.assets.negotiate_books("bob", &f.bob, vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes: 3 }]).await, Err(AssetError::Forbidden)));
     assert_eq!(std::fs::read_dir(&f.catalog.pins).unwrap().count(), 0);
     f.finish().await;
 }
@@ -298,7 +298,7 @@ async fn incorrect_catalog_bytes_never_authorize_another_accounts_private_copy()
     let hash = hash(b"abc");
     f.assets.put_book("alice", &f.alice, &hash, 3, Box::new(Cursor::new(b"abc"))).await.unwrap();
     std::fs::write(f.catalog.books.join(format!("{hash}.epub")), b"def").unwrap();
-    assert!(matches!(f.assets.negotiate_books("bob", &f.bob, vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }]).await, Err(AssetError::HashMismatch)));
+    assert!(matches!(f.assets.negotiate_books("bob", &f.bob, vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes: 3 }]).await, Err(AssetError::HashMismatch)));
     assert_eq!(f.assets.storage_usage("bob").await.unwrap().used_bytes, 0);
     assert!(f.read("bob", f.bob, hash).await.is_none());
     assert_eq!(f.read("alice", f.alice, hash).await.unwrap(), b"abc");
@@ -316,11 +316,11 @@ async fn existing_http_manifest_protocol_adopts_and_serves_catalog_without_a_put
     let user = accounts.ensure_configured_user("reader@example.com", "catalog-test-password").await.unwrap();
     let session = accounts.login("reader@example.com", "catalog-test-password").await.unwrap();
     let library = LibraryId::new_v4();
-    f.sync.create_library(&user.user_id, &LibraryNameRequest { library_id: library, library_name: "Catalog".into(), storage: Default::default() }).await.unwrap();
+    f.sync.create_library(&user.user_id, &LibraryNameRequest { library_id: library, library_name: "Catalog".into(), storage: Default::default(), kind: Default::default() }).await.unwrap();
     let app = sync_server::app(f.database.clone(), accounts, sync_server::AppConfig { books: f.root.path().join("sync/books"), thumbnails: f.root.path().join("sync/thumbnails"), catalog: Some(f.catalog.clone()), ..Default::default() })
         .await
         .unwrap();
-    let manifest = BlobManifestRequest { blobs: vec![BlobManifestEntry { byte_checksum: None, content_hash: hash, size_bytes: 3 }] };
+    let manifest = BlobManifestRequest { blobs: vec![BlobManifestEntry { byte_checksum: None, book_id: hash, size_bytes: 3 }] };
     let response = app
         .clone()
         .oneshot(
@@ -345,7 +345,7 @@ async fn existing_http_manifest_protocol_adopts_and_serves_catalog_without_a_put
     assert!(!f.private_copy(hash).exists());
     let checksum = hash.content_hash().unwrap();
     let logical = BookId::for_local_content(library.as_bytes(), checksum);
-    let manifest = BlobManifestRequest { blobs: vec![BlobManifestEntry { byte_checksum: Some(checksum), content_hash: logical, size_bytes: 3 }] };
+    let manifest = BlobManifestRequest { blobs: vec![BlobManifestEntry { byte_checksum: Some(checksum), book_id: logical, size_bytes: 3 }] };
     let response = app.clone().oneshot(Request::post(format!("/api/libraries/{library}/blobs/negotiate"))
         .header(header::AUTHORIZATION, format!("Bearer {}", session.token)).header(header::CONTENT_TYPE, wire::MEDIA_TYPE)
         .header(header::ACCEPT, wire::MEDIA_TYPE).body(Body::from(wire::encode(&manifest).unwrap())).unwrap()).await.unwrap();

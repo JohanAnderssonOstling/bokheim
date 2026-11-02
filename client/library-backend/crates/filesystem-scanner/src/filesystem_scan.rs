@@ -277,7 +277,7 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
                     } else {
                         crate::ingestion::ingest_file_with_pdf_reader(path, file.name.clone(), host, cached_pdf.as_deref().cloned()).await?
                     };
-                    let crate::ingestion::IngestedFile { source_identity, content_hash, size_bytes, fingerprint, format, inspection } = ingested;
+                    let crate::ingestion::IngestedFile { source_identity, book_id, size_bytes, fingerprint, format, inspection } = ingested;
                     let extension = format.canonical_extension().to_owned();
                     Ok(ScannedBook {
                         source_identity,
@@ -285,7 +285,7 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
                         name: file.name.clone(),
                         path: file.path.clone(),
                         fingerprint,
-                        content_hash,
+                        book_id,
                         size_bytes,
                         extension,
                         inspection,
@@ -371,7 +371,7 @@ mod tests {
                     name: name.into(),
                     path: name.into(),
                     fingerprint,
-                    content_hash: hash,
+                    book_id: hash,
                     size_bytes: 4,
                     extension: format.canonical_extension().into(),
                     inspection: InspectedBook {
@@ -402,7 +402,7 @@ mod tests {
                 let inspected = inspect(root.path(), &discovery, &snapshot, &host()).await;
                 assert!(inspected.readable);
                 assert_eq!(reopened.apply_filesystem_scan_batch(&mut snapshot, &discovery, inspected, true, None).unwrap(), ScanApplyResult::Applied);
-                assert_eq!(reopened.library_trash().unwrap().books[0].content_hash, hash);
+                assert_eq!(reopened.library_trash().unwrap().books[0].book_id, hash);
                 assert!(path.exists(), "Trash must retain the physical book");
 
                 reopened.restore_book(&hash).unwrap();
@@ -669,7 +669,7 @@ mod tests {
             tombstoned_files: vec![],
 
             books: vec![library_database::ScanKnownBook {
-                content_hash: BookId::new(&"a".repeat(64)),
+                book_id: BookId::new(&"a".repeat(64)),
                 directory: ROOT_DIR_ID,
                 name: "book.epub".into(),
                 fingerprint: 42,
@@ -712,7 +712,7 @@ mod tests {
             directories: vec![],
             tombstoned_files: vec![],
             books: vec![library_database::ScanKnownBook {
-                content_hash: BookId::new(&"a".repeat(64)),
+                book_id: BookId::new(&"a".repeat(64)),
                 directory: ROOT_DIR_ID,
                 name: "book.pdf".into(),
                 fingerprint: 42,
@@ -752,7 +752,7 @@ mod tests {
             placements: vec![],
             tombstoned_files: vec![],
             books: vec![library_database::ScanKnownBook {
-                content_hash: BookId::new(&"a".repeat(64)),
+                book_id: BookId::new(&"a".repeat(64)),
                 directory: ROOT_DIR_ID,
                 name: "Audio".into(),
                 fingerprint: 42,

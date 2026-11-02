@@ -88,10 +88,12 @@ SELECT content_hash,COALESCE(NULLIF(title,''),'Untitled'),author,format,deleted_
 
 -- name: library_trash_select_2?
 -- The parent's name is the folder it was in, or NULL when that was the root.
-SELECT dir.id,dir.name,dir.deleted_at,CASE WHEN dir.parent_id='00000000-0000-0000-0000-000000000000' THEN NULL ELSE parent.name END
+-- Directory deleted_at is a visibility marker; the lifecycle winner owns the deletion time.
+SELECT dir.id,dir.name,v.changed_at,CASE WHEN dir.parent_id='00000000-0000-0000-0000-000000000000' THEN NULL ELSE parent.name END
 FROM dir LEFT JOIN dir parent ON parent.id=dir.parent_id
+JOIN sync_state_version v ON v.state_kind='directory_lifecycle' AND v.state_key=dir.id AND v.state_subkey='' AND v.body IS NOT NULL
 WHERE dir.deleted_at IS NOT NULL AND dir.lifecycle=1
-AND EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_kind='directory_lifecycle' AND v.state_key=dir.id AND v.state_subkey='' AND v.body IS NOT NULL) ORDER BY dir.deleted_at DESC,dir.name_key,dir.id;
+ORDER BY v.changed_at DESC,dir.name_key,dir.id;
 
 -- name: purge_book_record_select?
 -- param: content_hash: &BookId

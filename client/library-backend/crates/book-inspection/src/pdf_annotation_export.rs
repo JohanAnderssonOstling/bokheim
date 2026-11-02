@@ -84,7 +84,7 @@ fn write_document_annotations(mut document: Document, mut writer: impl Write, mu
     }
     for annotation in annotations.iter().filter(|a| !a.deleted && !a.is_external_pdf_annotation()) {
         annotation.validate()?;
-        if annotation.content_hash != source.book_id {
+        if annotation.book_id != source.book_id {
             return Err("annotation belongs to a different PDF".into());
         }
         let anchor = annotation.anchor.pdf_anchor().ok_or("PDF annotation has no page geometry")?;
@@ -287,7 +287,7 @@ pub fn prepare_pdf_annotation_export(mut reader: impl Read + Seek + Send + 'stat
     if PdfSourceIdentity::from_document(&document).is_some_and(|source| source.book_id != book) {
         return Err("PDF source identity belongs to another book".into());
     }
-    if known.iter().any(|annotation| annotation.content_hash != book) {
+    if known.iter().any(|annotation| annotation.book_id != book) {
         return Err("PDF annotations belong to another book".into());
     }
     Ok(PreparedPdfAnnotationExport { document })

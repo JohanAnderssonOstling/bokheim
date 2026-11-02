@@ -8,14 +8,6 @@ pub use crate::api::BackendLaunch;
 #[cfg(target_arch = "wasm32")]
 pub use crate::runtime::BackendWorkerHost;
 pub use crate::runtime::{decode_worker_message, encode_worker_message, AppWorkerClientMessage, AppWorkerRequest, AppWorkerStartupMessage, WorkerCommand, WorkerDispatchResult, WorkerPayload, WorkerSubscription};
-#[cfg(target_os = "android")]
-pub use library_opds::browser::android as android_browser;
-#[cfg(not(target_arch = "wasm32"))]
-pub use library_opds::browser::configure as configure_opds_browser;
-#[cfg(not(target_arch = "wasm32"))]
-pub use library_opds::browser::BrowserFeedback;
-#[cfg(not(target_arch = "wasm32"))]
-pub use library_opds::browser::address as browser_address;
 #[cfg(not(target_arch = "wasm32"))]
 pub use library_registry::LIBRARY_MANIFEST_FILENAME;
 

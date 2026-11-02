@@ -1,5 +1,7 @@
 //! Bounded, non-destructive recovery while opening a book.
 
+use ui_text::text;
+
 use app::BackendError;
 use html::resources::ResourceProvider;
 use skrift_column_paginator::{RendererInitialConfig, RendererPreparation};
@@ -30,11 +32,11 @@ impl OpeningRecovery {
 
     pub(crate) fn notice(&self) -> Option<String> {
         let reason = match &self.alternate_chapter {
-            Some(chapter) => format!("Opened “{chapter}” because the requested chapter couldn't be displayed."),
-            None if self.saved_position_unavailable => "Opened at the beginning because your saved reading position couldn't be read.".to_owned(),
+            Some(chapter) => format!(text!(reader::opened_because_the_requested_chapter_couldn_t_be_displayed), chapter = chapter),
+            None if self.saved_position_unavailable => text!(reader::opened_at_the_beginning_because_your_saved_reading_position_couldn_t_be).to_owned(),
             None => return None,
         };
-        Some(format!("{reason} Your previous progress has been kept. Reading progress won't be saved during this session."))
+        Some(format!(text!(reader::your_previous_progress_has_been_kept_reading_progress_won_t_be_saved), reason = reason))
     }
 
     pub(crate) fn prepare_document(&mut self, provider: Arc<dyn ResourceProvider>, documents: &[String], nav_state: Option<&str>, initial_target: Option<&str>, mut config: RendererInitialConfig) -> Result<RendererPreparation, String> {

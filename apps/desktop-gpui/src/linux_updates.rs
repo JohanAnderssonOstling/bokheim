@@ -16,8 +16,8 @@ pub fn initialize(data: &Path) -> Result<Startup, String> {
     let appimage = std::env::var_os("APPIMAGE").filter(|_| std::env::var_os("BOKHEIM_DISABLE_SELF_UPDATE").is_none()).map(PathBuf::from).map(|p| p.canonicalize().map_err(|e| e.to_string())).transpose()?;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut host = Host::open(data, env!("CARGO_PKG_VERSION"), config, appimage, executable)?;
-    let args = std::env::args().collect::<Vec<_>>();
-    let trial = args.windows(2).find(|a| a[0] == "--bokheim-update-trial").map(|a| a[1].as_str());
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let trial = args.windows(2).find(|a| a[0] == "--bokheim-update-trial").and_then(|a| a[1].to_str());
     let startup = host.startup(trial)?;
     if matches!(startup, Startup::Run) {
         crate::update_binding::store(host)?;

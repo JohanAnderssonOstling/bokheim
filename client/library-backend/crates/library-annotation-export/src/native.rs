@@ -1,7 +1,7 @@
 use crate::failure::{failure, failure_details, input, tracking};
 use crate::reader_profiles::{ProfileTarget, ReaderProfiles, readest_hash};
 use crate::{foliate, markdown, plan, readest, reconcile};
-use book_content::{AnnotationTocIndex, Book, BookFormat as ContentFormat};
+use book_content::{Book, BookFormat as ContentFormat, BookToc};
 use book_inspection::{PdfSourceIdentity, PreparedPdfAnnotationExport, prepare_pdf_annotation_export};
 use book_model::Annotation;
 use client_platform_native::file_fingerprint::file_fingerprint;
@@ -312,7 +312,7 @@ async fn prepare_json(
                 if let Some(bases) = reading.publication_cfi_bases() {
                     crate::foliate::upgrade_legacy(&mut resolving, &bases)?;
                 }
-                let toc = AnnotationTocIndex::new(&reading, &resolving.toc);
+                let toc = BookToc::from_reading(&reading, &resolving.toc);
                 for (value, resolved) in incoming.iter_mut().zip(&resolving.annotations) {
                     value.toc_ordinal = resolved.anchor.epub_cfi_value().and_then(|cfi| toc.ordinal_for_cfi(cfi));
                 }
@@ -344,7 +344,7 @@ async fn markdown_document(assets: &AssetStore, library: LibraryId, book: Annota
                 if let Some(bases) = reading.publication_cfi_bases() {
                     crate::foliate::upgrade_legacy(&mut resolved, &bases)?;
                 }
-                let toc = AnnotationTocIndex::new(&reading, &resolved.toc);
+                let toc = BookToc::from_reading(&reading, &resolved.toc);
                 for annotation in &mut resolved.annotations {
                     annotation.toc_ordinal = annotation.anchor.epub_cfi_value().and_then(|cfi| toc.flattened_ordinal_for_cfi(cfi));
                 }

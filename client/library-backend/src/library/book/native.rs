@@ -29,10 +29,10 @@ pub(super) async fn local(library: &LibrarySession, hash: BookId, info: &LocalBo
         let source = open_with_replay(library, hash, &mut path, async |path| library.assets.open_async_book_at_path(path).await).await?;
         profile.mark("open_async_source");
         let source = source.ok_or_else(|| "book content is not downloaded")?;
-        return Ok(Some(ResolvedBook::Document(DocumentBook::from_async_source(path.to_string(), format, source))));
+        return Ok(Some(ResolvedBook::Document(DocumentBook::from_async_source(path.to_string(), format.try_into()?, source))));
     }
     if format == BookFormat::Pdf {
-        return Ok(Some(ResolvedBook::Document(local_pdf(library, hash, &mut path).await?)));
+        return Ok(Some(ResolvedBook::Pdf(local_pdf(library, hash, &mut path).await?)));
     }
     #[cfg(target_os = "android")]
     let playback_file = if format == BookFormat::M4b { library.assets.open_playback_file(&path)? } else { None };
@@ -41,25 +41,21 @@ pub(super) async fn local(library: &LibrarySession, hash: BookId, info: &LocalBo
     #[cfg(not(target_os = "android"))]
     let reader = open_with_replay(library, hash, &mut path, async |path| library.assets.open_book_at_path(path).await).await?;
     let reader = reader.ok_or_else(|| "book content is not downloaded")?;
-    let book = if format == BookFormat::M4b {
-        ResolvedBook::Audiobook(crate::library::AudiobookBook {
-            format,
-            path: path.to_string(),
-            reader,
-            stream_control: None,
-            #[cfg(target_os = "android")]
-            playback_file,
-        })
-    } else {
-        ResolvedBook::Document(DocumentBook::new(path.to_string(), format, reader))
-    };
+    let book = ResolvedBook::Audiobook(crate::library::AudiobookBook {
+        format,
+        path: path.to_string(),
+        reader,
+        stream_control: None,
+        #[cfg(target_os = "android")]
+        playback_file,
+    });
     Ok(Some(book))
 }
 
 // Pin a file revision and its matching metadata while publication is excluded.
 // The returned reader retains its file handle, not the book lease: exports can
 // atomically replace the library file while this reader keeps the old revision.
-async fn local_pdf(library: &LibrarySession, hash: BookId, path: &mut RelativeBookPath) -> Result<DocumentBook, BackendError> {
+async fn local_pdf(library: &LibrarySession, hash: BookId, path: &mut RelativeBookPath) -> Result<PdfBook, BackendError> {
     let opened = open_with_replay(library, hash, path, async |path| {
         // Acquire for each attempt so a missing path releases the lease before
         // replaying placement work, which may itself need exclusive access.
@@ -70,19 +66,17 @@ async fn local_pdf(library: &LibrarySession, hash: BookId, path: &mut RelativeBo
     })
     .await?;
     let (reader, metadata) = opened.ok_or("book content is not downloaded")?;
-    let mut document = DocumentBook::new(path.to_string(), BookFormat::Pdf, reader);
-    document.pdf_metadata = metadata;
-    Ok(document)
+    Ok(PdfBook { path: path.to_string(), reader, metadata })
 }
 
 // A placement move can land between reading `info.path` and opening it.
 // Drain this hash's pending work and retry once against the fresh path.
-async fn open_with_replay<T>(library: &LibrarySession, content_hash: BookId, path: &mut RelativeBookPath, mut open: impl AsyncFnMut(RelativeBookPath) -> Result<Option<T>, AssetStoreError>) -> Result<Option<T>, BackendError> {
+async fn open_with_replay<T>(library: &LibrarySession, book_id: BookId, path: &mut RelativeBookPath, mut open: impl AsyncFnMut(RelativeBookPath) -> Result<Option<T>, AssetStoreError>) -> Result<Option<T>, BackendError> {
     if let Some(reader) = open(path.clone()).await? {
         return Ok(Some(reader));
     }
-    let _ = library_placement::run_file_jobs_for(&library.assets, &library.db, &content_hash).await;
-    if let Some(fresh) = library.db.local_book_info(&content_hash)?.path {
+    let _ = library_placement::run_file_jobs_for(&library.assets, &library.db, &book_id).await;
+    if let Some(fresh) = library.db.local_book_info(&book_id)?.path {
         *path = fresh;
         return Ok(open(path.clone()).await?);
     }
@@ -102,9 +96,7 @@ pub(super) async fn remote(library: &LibrarySession, hash: BookId, info: &LocalB
     if info.format == BookFormat::Pdf {
         let fetch = book_access::remote_file::native_bundle_fetch(access.batch_fetch()).map_err(BackendError::operation)?;
         let reader = book_access::pdf_bundle::open(length, prefix, fetch).map_err(BackendError::operation)?;
-        let mut book = DocumentBook::new(path.to_string(), info.format, reader);
-        book.pdf_metadata = pdf_metadata;
-        return Ok(ResolvedBook::Document(book));
+        return Ok(ResolvedBook::Pdf(PdfBook { path: path.to_string(), reader, metadata: pdf_metadata }));
     }
     if info.format == BookFormat::M4b {
         let (reader, stream_control) = book_access::remote_file::native_audio_reader(length, prefix, access.fetch()).map_err(BackendError::operation)?;
@@ -119,12 +111,9 @@ pub(super) async fn remote(library: &LibrarySession, hash: BookId, info: &LocalB
     }
     if matches!(info.format, BookFormat::Epub | BookFormat::Mobi | BookFormat::Fb2 | BookFormat::Cbz) {
         let source = access.async_source(length, prefix)?;
-        return Ok(ResolvedBook::Document(DocumentBook::from_async_source(path.to_string(), info.format, source)));
+        return Ok(ResolvedBook::Document(DocumentBook::from_async_source(path.to_string(), info.format.try_into()?, source)));
     }
-    let reader = book_access::remote_file::native_reader(length, prefix, access.fetch()).map_err(BackendError::operation)?;
-    let mut document = DocumentBook::new(path.to_string(), info.format, reader);
-    document.pdf_metadata = pdf_metadata;
-    Ok(ResolvedBook::Document(document))
+    Err(BackendError::message("unsupported remote book format"))
 }
 
 impl LibrarySession {
@@ -222,7 +211,7 @@ mod tests {
                     parent_id: ROOT_DIR_ID,
                     file_name: name.clone(),
                     format,
-                    content_hash: hash,
+                    book_id: hash,
                     size_bytes: bytes.len() as u64,
                     inspection_version: 1,
                     inspection: Some(InspectedBook { pdf: None, audiobook: None, metadata: BookRecord { metadata: Default::default(), description: String::new() }, toc: Vec::new() }),
@@ -239,6 +228,10 @@ mod tests {
             let opened = local(library, hash, &stale).await.unwrap().expect("the moved book remains downloaded");
             let mut content = Vec::new();
             let path = match opened {
+                ResolvedBook::Pdf(mut book) => {
+                    book.reader.read_to_end(&mut content).unwrap();
+                    book.path
+                }
                 ResolvedBook::Document(document) => {
                     match document.source {
                         DocumentSource::Async(source) => {

@@ -5,6 +5,7 @@ command -v brotli >/dev/null 2>&1 || { echo "error: install the brotli command t
 
 app_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace_dir="$(cd "$app_dir/../.." && pwd)"
+python3 "$workspace_dir/apps/ui-text/export.py" --web-only
 python3 "$workspace_dir/shared/pdfium/prepare.py" --target wasm32-unknown-unknown
 output_dir="${BOKHEIM_WEB_OUTPUT_DIR:-$app_dir/dist}"
 target_dir="${CARGO_TARGET_DIR:-$workspace_dir/target}"
@@ -152,7 +153,7 @@ if [[ -f "$app_dir/assetlinks.json" ]]; then
     mkdir -p "$output_dir/.well-known"
     cp "$app_dir/assetlinks.json" "$output_dir/.well-known/assetlinks.json"
 fi
-cp "$app_dir/index.html" "$output_dir/index.html"
+python3 "$workspace_dir/apps/ui-text/export.py" --output-dir "$output_dir"
 cp "$app_dir/compatibility.mjs" "$output_dir/compatibility.mjs"
 cp "$app_dir/startup.mjs" "$output_dir/startup.mjs"
 cp "$app_dir/backend-startup.mjs" "$output_dir/backend-startup.mjs"

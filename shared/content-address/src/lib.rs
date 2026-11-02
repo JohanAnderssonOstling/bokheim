@@ -86,17 +86,7 @@ impl fmt::Debug for ContentHash {
 }
 impl serde::Serialize for ContentHash {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        struct Encoding<'a>(&'a ContentHash);
-        impl serde::Serialize for Encoding<'_> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                if serializer.is_human_readable() {
-                    serializer.collect_str(self.0)
-                } else {
-                    serializer.serialize_bytes(self.0.as_bytes())
-                }
-            }
-        }
-        serializer.serialize_newtype_struct("ContentHash", &Encoding(self))
+        serde_transport::text_or_bytes(self, self.as_bytes(), serializer)
     }
 }
 impl<'de> serde::Deserialize<'de> for ContentHash {

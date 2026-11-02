@@ -1,7 +1,7 @@
 //! Convert MOBI navigation offsets and links into prepared document anchors.
 
 use super::*;
-use crate::TocEntry;
+use crate::BookTocEntry;
 use crate::book::PreparedText;
 use crate::resources::MAX_PREPARED_TEXT_BYTES;
 use crate::toc::root_href;
@@ -46,7 +46,7 @@ pub(super) struct ReadingText {
     text: String,
     sections: Vec<Range<usize>>,
     targets: BTreeMap<usize, (usize, usize)>,
-    entries: Vec<TocEntry>,
+    entries: Vec<BookTocEntry>,
     named_targets: HashMap<String, usize>,
 }
 
@@ -143,10 +143,10 @@ impl ReadingText {
         Some(root_href(format!("mobi/sections/{document}.html#filepos{position}")))
     }
 
-    fn index_toc(&self, entries: Vec<index::Entry>) -> Vec<TocEntry> {
+    fn index_toc(&self, entries: Vec<index::Entry>) -> Vec<BookTocEntry> {
         crate::toc::nest_entries(entries.into_iter().filter_map(|entry| {
             let link = self.target(entry.position)?;
-            Some((entry.level, TocEntry { title: entry.title, link, children: Vec::new() }))
+            Some((entry.level, BookTocEntry { title: entry.title, target: link, children: Vec::new() }))
         }))
     }
 
@@ -155,7 +155,7 @@ impl ReadingText {
         Some(root_href(format!("mobi/sections/{document}.html#{id}")))
     }
 
-    fn inline_toc(&self) -> Vec<TocEntry> {
+    fn inline_toc(&self) -> Vec<BookTocEntry> {
         let document = Html::parse_document(&self.text);
         let Some(contents) = document
             .root_element()
@@ -196,7 +196,7 @@ impl ReadingText {
         })
     }
 
-    pub(super) fn toc(&self) -> Option<Vec<TocEntry>> {
+    pub(super) fn toc(&self) -> Option<Vec<BookTocEntry>> {
         (!self.entries.is_empty()).then(|| self.entries.clone())
     }
 

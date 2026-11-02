@@ -1,5 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use ui_text::text;
+
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::env;
@@ -15,10 +17,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 // The packager appends a ZIP, then this fixed trailer: magic, length, SHA-256.
 const MAGIC: &[u8; 16] = b"BOKHEIM-SFX-V1\0\0";
 const TRAILER_SIZE: u64 = 56;
-const REQUIRED: &[&str] = &[
-    "Bokheim.exe", "Bokheim.ico", "bokheim-opds-webview.exe", "taxonomy.sqlite3",
-    "tts/alba/en_GB-alba-medium.onnx", "tts/george/model.onnx",
-];
+const REQUIRED: &[&str] = &["Bokheim.exe", "Bokheim.ico", "bokheim-opds-webview.exe", "taxonomy.sqlite3", "tts/alba/en_GB-alba-medium.onnx", "tts/george/model.onnx"];
 
 struct Payload {
     file: File,
@@ -31,14 +30,17 @@ impl Payload {
     fn open(path: &Path) -> Result<Self> {
         let mut file = File::open(path)?;
         let size = file.metadata()?.len();
-        if size < TRAILER_SIZE { return Err("The standalone download is incomplete.".into()); }
+        if size < TRAILER_SIZE {
+            return Err(text!(startup::the_standalone_download_is_incomplete).into());
+        }
         file.seek(SeekFrom::End(-(TRAILER_SIZE as i64)))?;
         let mut trailer = [0; TRAILER_SIZE as usize];
         file.read_exact(&mut trailer)?;
-        if &trailer[..16] != MAGIC { return Err("The standalone package trailer is missing.".into()); }
+        if &trailer[..16] != MAGIC {
+            return Err(text!(startup::the_standalone_package_trailer_is_missing).into());
+        }
         let length = u64::from_le_bytes(trailer[16..24].try_into()?);
-        let offset = size.checked_sub(TRAILER_SIZE).and_then(|end| end.checked_sub(length))
-            .filter(|offset| *offset >= 2 && length > 0).ok_or("Invalid standalone payload length.")?;
+        let offset = size.checked_sub(TRAILER_SIZE).and_then(|end| end.checked_sub(length)).filter(|offset| *offset >= 2 && length > 0).ok_or(text!(startup::invalid_standalone_payload_length))?;
         Ok(Self { file, offset, length, digest: trailer[24..].try_into()? })
     }
 
@@ -53,25 +55,31 @@ impl Payload {
         let mut buffer = [0; 64 * 1024];
         loop {
             let count = source.read(&mut buffer)?;
-            if count == 0 { break; }
+            if count == 0 {
+                break;
+            }
             hash.update(&buffer[..count]);
         }
         let digest: [u8; 32] = hash.finalize().into();
         if source.limit() != 0 || digest != self.digest {
-            return Err("The standalone download is damaged. Download it again.".into());
+            return Err(text!(startup::the_standalone_download_is_damaged_download_it_again).into());
         }
         Ok(())
     }
 }
 
 fn valid_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains(['\\', ':', '\0']) && name.split('/').all(|part| {
-        let base = part.split('.').next().unwrap_or("").to_ascii_uppercase();
-        !part.is_empty() && part != "." && part != ".." && !part.ends_with(['.', ' '])
-            && !matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            && !(base.len() == 4 && (base.starts_with("COM") || base.starts_with("LPT"))
-                && matches!(base.as_bytes()[3], b'1'..=b'9'))
-    })
+    !name.is_empty()
+        && !name.contains(['\\', ':', '\0'])
+        && name.split('/').all(|part| {
+            let base = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.ends_with(['.', ' '])
+                && !matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                && !(base.len() == 4 && (base.starts_with("COM") || base.starts_with("LPT")) && matches!(base.as_bytes()[3], b'1'..=b'9'))
+        })
 }
 
 fn complete(directory: &Path) -> bool {
@@ -89,17 +97,25 @@ fn extract(payload: &mut Payload, directory: &Path) -> Result<()> {
         let mut entry = archive.by_index(index)?;
         let name = entry.name().trim_end_matches('/').to_owned();
         if !valid_name(&name) || entry.is_symlink() || !names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Unsafe or duplicate standalone entry: {name}").into());
+            eprintln!("Unsafe or duplicate standalone entry: {name}");
+            return Err(text!(startup::unsafe_or_duplicate_standalone_entry_name).into());
         }
         let path = directory.join(&name);
-        if entry.is_dir() { fs::create_dir_all(path)?; continue; }
-        fs::create_dir_all(path.parent().ok_or("Missing runtime file parent.")?)?;
+        if entry.is_dir() {
+            fs::create_dir_all(path)?;
+            continue;
+        }
+        fs::create_dir_all(path.parent().ok_or(text!(startup::missing_runtime_file_parent))?)?;
         let mut output = OpenOptions::new().write(true).create_new(true).open(path)?;
         let bytes = io::copy(&mut entry, &mut output)?;
-        if bytes != entry.size() { return Err("Incomplete standalone runtime file.".into()); }
+        if bytes != entry.size() {
+            return Err(text!(startup::incomplete_standalone_runtime_file).into());
+        }
         output.sync_all()?;
     }
-    if !complete(directory) { return Err("The standalone package is missing runtime files.".into()); }
+    if !complete(directory) {
+        return Err(text!(startup::the_standalone_package_is_missing_runtime_files).into());
+    }
     Ok(())
 }
 
@@ -128,7 +144,7 @@ impl Seek for PayloadReader<'_> {
             SeekFrom::End(offset) => i128::from(self.length) + i128::from(offset),
         };
         if position < 0 || position > i128::from(self.length) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Seek outside standalone payload"));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, text!(startup::seek_outside_standalone_payload)));
         }
         self.position = position as u64;
         Ok(self.position)
@@ -145,14 +161,20 @@ fn prepare(executable: &Path, cache: &Path) -> Result<PathBuf> {
     lock.lock()?;
     let directory = cache.join(&key);
     if fs::read_to_string(directory.join(".ready")).is_ok_and(|marker| marker == key) {
-        if !complete(&directory) { return Err("The cached app runtime is incomplete. Remove its cache folder and launch again.".into()); }
+        if !complete(&directory) {
+            return Err(text!(startup::the_cached_app_runtime_is_incomplete_remove_its_cache_folder_and_launch).into());
+        }
         // The application updater owns this directory after extraction. Never
         // overwrite a newer application with the version embedded in this EXE.
         return Ok(directory);
     }
-    if directory.exists() { return Err("The app cache folder has no completion marker.".into()); }
+    if directory.exists() {
+        return Err(text!(startup::the_app_cache_folder_has_no_completion_marker).into());
+    }
     let staging = cache.join(format!("{key}.partial"));
-    if staging.exists() { fs::remove_dir_all(&staging)?; }
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
     fs::create_dir(&staging)?;
     let result: Result<()> = (|| {
         extract(&mut payload, &staging)?;
@@ -164,13 +186,15 @@ fn prepare(executable: &Path, cache: &Path) -> Result<PathBuf> {
         fs::rename(&staging, &directory)?;
         Ok(())
     })();
-    if result.is_err() { let _ = fs::remove_dir_all(&staging); }
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
     result?;
     Ok(directory)
 }
 
 fn run() -> Result<i32> {
-    let local = env::var_os("LOCALAPPDATA").ok_or("Windows LOCALAPPDATA is unavailable.")?;
+    let local = env::var_os("LOCALAPPDATA").ok_or(text!(startup::windows_localappdata_is_unavailable))?;
     let cache = PathBuf::from(local).join("Bokheim/Standalone");
     let directory = prepare(&env::current_exe()?, &cache)?;
     // Preserve the caller's working directory so relative book paths keep their
@@ -188,10 +212,12 @@ fn main() {
             {
                 use std::ptr::null_mut;
                 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-                let message: Vec<u16> = format!("Couldn't start the app.\n\n{error}\0").encode_utf16().collect();
-                let title: Vec<u16> = "Bokheim\0".encode_utf16().collect();
+                let message: Vec<u16> = text!(startup::couldn_t_start_the_app).encode_utf16().chain(std::iter::once(0)).collect();
+                let title: Vec<u16> = text!(common::bokheim).encode_utf16().chain(std::iter::once(0)).collect();
                 // Both UTF-16 strings remain alive for the synchronous dialog.
-                unsafe { MessageBoxW(null_mut(), message.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR); }
+                unsafe {
+                    MessageBoxW(null_mut(), message.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
+                }
             }
             process::exit(1);
         }

@@ -1,9 +1,10 @@
-//! Deliver external reader links to a live application window.
+//! Deliver external reader links and book files to a live application window.
 
 use application_shell::ApplicationRoot;
 use gpui::{App, Context, Render, WeakEntity, Window};
 use gpui_component::{Root, WindowExt, notification::Notification};
 use serde::{Deserialize, Serialize};
+use ui_text::text;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReaderActivation {
@@ -20,15 +21,32 @@ impl From<Vec<String>> for ReaderActivation {
 
 #[cfg(feature = "desktop")]
 impl ReaderActivation {
-    pub fn from_launch_args(arguments: impl IntoIterator<Item = String>, activation_token: Option<String>) -> Result<Self, String> {
+    pub fn from_launch_args(arguments: impl IntoIterator<Item = impl Into<std::ffi::OsString>>, activation_token: Option<String>) -> Result<Self, String> {
+        use std::path::{Path, absolute};
+        use url::Url;
         let mut arguments = arguments.into_iter();
         let mut urls = Vec::new();
         let mut forwarded_token = None;
+        let mut positional = false;
         while let Some(argument) = arguments.next() {
-            if argument == "--bokheim-activation-token" {
-                forwarded_token = Some(arguments.next().ok_or("missing forwarded activation token")?);
-            } else if argument.starts_with("bokheim:") {
-                urls.push(argument);
+            let argument = argument.into();
+            let text = argument.to_str().unwrap_or_default();
+            if !positional && text == "--" {
+                positional = true;
+            } else if !positional && text == "--bokheim-activation-token" {
+                forwarded_token = Some(arguments.next().ok_or("missing forwarded activation token")?.into().into_string().map_err(|_| "invalid forwarded activation token")?);
+            } else if !positional && matches!(text, "--bokheim-supervised-launch" | "--bokheim-update-helper" | "--bokheim-update-trial" | "--bokheim-prepare-update") {
+                // Update arguments carry paths/IDs that are not book requests.
+                arguments.next().ok_or("missing update argument value")?;
+            } else if !positional && text.starts_with('-') {
+                continue;
+            } else if text.starts_with("bokheim:") || text.starts_with("file:") {
+                urls.push(text.to_owned());
+            } else {
+                // Resolve in the launching process, before forwarding to an
+                // instance that may have a different working directory.
+                let path = absolute(Path::new(&argument)).map_err(|error| error.to_string())?;
+                urls.push(Url::from_file_path(path).map_err(|_| "invalid book file path")?.into());
             }
         }
         Ok(Self { urls, activation_token: activation_token.or(forwarded_token) })
@@ -65,6 +83,10 @@ fn deliver_reader_links(activation: ReaderActivation, fallback: &WeakEntity<Appl
     }
     let mut token = activation.activation_token;
     for url in activation.urls {
+        if url.starts_with("file:") {
+            open_book_file(url, token.take(), fallback.clone(), cx);
+            continue;
+        }
         let link = library_model::ReaderLink::parse(&url);
         let locator = link.as_ref().ok().map(|link| link.locator.clone());
         with_reader_window(
@@ -79,6 +101,44 @@ fn deliver_reader_links(activation: ReaderActivation, fallback: &WeakEntity<Appl
         )?;
     }
     Ok(())
+}
+
+fn open_book_file(url: String, token: Option<String>, fallback: WeakEntity<ApplicationRoot>, cx: &mut App) {
+    let staged = cx.background_executor().spawn(async move {
+        use std::{fs::File, io};
+        let path = url::Url::parse(&url).map_err(|error| error.to_string())?.to_file_path().map_err(|_| "invalid local book URL")?;
+        let name = path.file_name().ok_or("book file has no name")?.to_string_lossy().into_owned();
+        if !path.metadata().map_err(|error| error.to_string())?.is_file() {
+            return Err("book path is not a regular file".to_owned());
+        }
+        let mut source = File::open(&path).map_err(|error| error.to_string())?;
+        // The import flow consumes its staging file. Never give it the original.
+        let mut staged = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+        io::copy(&mut source, &mut staged).map_err(|error| error.to_string())?;
+        Ok((name, staged.into_temp_path()))
+    });
+    cx.spawn(async move |cx| {
+        let staged = staged.await;
+        let result = cx.update(|cx| {
+            with_reader_window(
+                &fallback,
+                token.as_deref(),
+                cx,
+                |_, _| true,
+                |root, window, cx| {
+                    let result = staged.and_then(|(name, staged)| staged.keep().map(|path| (name, path)).map_err(|error| error.to_string()));
+                    match result {
+                        Ok((name, path)) => root.import_and_open_path(name, path, window, cx),
+                        Err(error) => window.push_notification(Notification::error(format!(text!(browse::could_not_prepare_this_book_for_import), error)), cx),
+                    }
+                },
+            )
+        });
+        if let Err(error) = result {
+            log::warn!("could not deliver book file activation: {error}");
+        }
+    })
+    .detach();
 }
 
 fn forward_activations<T: Render>(links: async_channel::Receiver<ReaderActivation>, fallback: WeakEntity<T>, deliver: impl Fn(ReaderActivation, &WeakEntity<T>, &mut App) -> Result<(), String> + 'static, cx: &mut App) {

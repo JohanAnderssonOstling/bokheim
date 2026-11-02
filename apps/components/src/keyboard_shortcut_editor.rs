@@ -1,5 +1,7 @@
 //! The same shortcut controls embedded in the settings of their owning page.
 
+use ui_text::text;
+
 use std::{cell::Cell, rc::Rc};
 
 use app_preferences::KeyboardShortcuts;
@@ -65,7 +67,7 @@ impl KeyboardShortcutEditor {
             let result = saved.await;
             let _ = editor.update(cx, |editor, cx| {
                 editor.saving = None;
-                editor.warning = result.err().map(|error| format!("Keyboard shortcuts were not saved. {}", components::user_facing_error(&*error, "Please try again.")).into());
+                editor.warning = result.err().map(|error| format!(text!(common::keyboard_shortcuts_were_not_saved), components::user_facing_error(&*error, text!(common::please_try_again))).into());
                 cx.notify();
             });
         })
@@ -114,7 +116,7 @@ impl Render for KeyboardShortcutEditor {
         while self.rows.len() < settings.len() {
             self.rows.push(ShortcutRow { focus: cx.focus_handle(), bounds: Rc::new(Cell::new(Bounds::default())) });
         }
-        let restore = components::browser_settings_header_button(format!("restore-{}-shortcuts", self.page.label()), "Restore defaults", false, theme)
+        let restore = components::browser_settings_header_button(format!("restore-{}-shortcuts", self.page.label()), text!(common::restore_defaults), false, theme)
             .w(rems(SHORTCUT_BUTTON_WIDTH_REM))
             .max_w_full()
             .disabled(!settings.iter().any(|setting| overrides.contains_key(setting.id)))
@@ -133,17 +135,21 @@ impl Render for KeyboardShortcutEditor {
             let id = setting.id;
             let keys = configured_shortcuts(setting, &overrides);
             let recording = self.capturing == Some(id);
-            let label = if recording { "Press shortcut…".to_owned() } else { keys.first().map(|key| Keystroke::parse(key).map(|key| Kbd::format(&key)).unwrap_or_else(|_| key.clone())).unwrap_or_else(|| "Not assigned".into()) };
+            let label = if recording {
+                text!(common::press_shortcut).to_owned()
+            } else {
+                keys.first().map(|key| Keystroke::parse(key).map(|key| Kbd::format(&key)).unwrap_or_else(|_| key.clone())).unwrap_or_else(|| text!(common::not_assigned).into())
+            };
             let capture_focus = self.rows[row].focus.clone();
             let control = components::browser_settings_header_button(format!("{id}-shortcut"), label, recording, theme)
                 .w(rems(SHORTCUT_BUTTON_WIDTH_REM))
                 .max_w_full()
                 .tooltip(if self.saving.is_some() {
-                    "Saving keyboard shortcuts…"
+                    text!(common::saving_keyboard_shortcuts)
                 } else if recording {
-                    "Press a shortcut, or click to cancel"
+                    text!(common::press_a_shortcut_or_click_to_cancel)
                 } else {
-                    "Click to change shortcut"
+                    text!(common::click_to_change_shortcut)
                 })
                 .on_click(cx.listener(move |editor, _, window, cx| {
                     if editor.saving.is_some() {

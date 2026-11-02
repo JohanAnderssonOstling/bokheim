@@ -1,10 +1,10 @@
-use crate::http::{authenticated_request, decode_response, send, with_body};
-use crate::session::{AuthError, Session, validate_email, validate_identity};
-use account_contract::{AccountSnapshotResponse, BookStorageUsage, MAX_ACCOUNT_STORAGE_BOOKS, MeResponse, OtherSessionsRevocationResponse, SessionRevocationResponse, SessionSummary};
+use crate::http::{authenticated_request, decode_response, with_body};
+use crate::session::{validate_email, validate_identity, AuthError, Session};
+use account_contract::{AccountSnapshotResponse, BookStorageUsage, MeResponse, OtherSessionsRevocationResponse, SessionRevocationResponse, SessionSummary, MAX_ACCOUNT_STORAGE_BOOKS};
 use reqwest::Method;
-use sync_common::LibraryId;
 use sync_common::api::libraries::{CloudStorageChange, DeleteLibraryResponse, LibraryCloudStorage, LibraryNameRequest, LibrarySummary};
-use sync_common::api::opds_feeds::{OpdsFeed, OpdsFeedId};
+use sync_common::storage::{LibraryKind, LibraryStorage};
+use sync_common::LibraryId;
 
 pub async fn current_account(session: &Session) -> Result<MeResponse, AuthError> {
     let account: MeResponse = decode_response(authenticated_request(session, Method::GET, "api/auth/me")?).await?;
@@ -23,7 +23,7 @@ pub async fn account_snapshot(session: &Session) -> Result<AccountSnapshotRespon
 pub async fn book_storage_usage(session: &Session) -> Result<Vec<BookStorageUsage>, AuthError> {
     let books: Vec<BookStorageUsage> = decode_response(authenticated_request(session, Method::GET, "api/account/storage/books")?).await?;
     let mut seen = std::collections::HashSet::new();
-    if books.len() > MAX_ACCOUNT_STORAGE_BOOKS || books.iter().any(|book| !seen.insert(book.content_hash)) {
+    if books.len() > MAX_ACCOUNT_STORAGE_BOOKS || books.iter().any(|book| !seen.insert(book.book_id)) {
         return Err(AuthError::InvalidData("invalid account book storage response".into()));
     }
     Ok(books)
@@ -47,31 +47,22 @@ pub async fn create_library(session: &Session, library_id: LibraryId, library_na
     create_library_with_storage(session, library_id, library_name, Default::default()).await
 }
 
-pub async fn create_library_with_storage(session: &Session, library_id: LibraryId, library_name: String, storage: sync_common::storage::LibraryStorage) -> Result<LibrarySummary, AuthError> {
-    let request = LibraryNameRequest { library_id, library_name, storage };
+pub async fn create_library_with_storage(session: &Session, library_id: LibraryId, library_name: String, storage: LibraryStorage) -> Result<LibrarySummary, AuthError> {
+    create_library_with_kind(session, library_id, library_name, storage, Default::default()).await
+}
+
+pub async fn create_library_with_kind(session: &Session, library_id: LibraryId, library_name: String, storage: LibraryStorage, kind: LibraryKind) -> Result<LibrarySummary, AuthError> {
+    let request = LibraryNameRequest { library_id, library_name, storage, kind };
     decode_response(with_body(authenticated_request(session, Method::POST, "api/libraries")?, &request)?).await
 }
 
 pub async fn rename_library(session: &Session, library_id: LibraryId, library_name: String) -> Result<LibrarySummary, AuthError> {
-    let request = LibraryNameRequest { library_id, library_name, storage: Default::default() };
+    let request = LibraryNameRequest { library_id, library_name, storage: Default::default(), kind: Default::default() };
     decode_response(with_body(authenticated_request(session, Method::PUT, "api/libraries")?, &request)?).await
 }
 
 pub async fn delete_library(session: &Session, library_id: &LibraryId) -> Result<DeleteLibraryResponse, AuthError> {
     decode_response(authenticated_request(session, Method::DELETE, &format!("api/libraries/{library_id}"))?).await
-}
-
-pub async fn opds_feeds(session: &Session) -> Result<Vec<OpdsFeed>, AuthError> {
-    decode_response(authenticated_request(session, Method::GET, "api/opds-feeds")?).await
-}
-
-pub async fn put_opds_feed(session: &Session, feed: &OpdsFeed) -> Result<OpdsFeed, AuthError> {
-    decode_response(with_body(authenticated_request(session, Method::PUT, "api/opds-feeds")?, feed)?).await
-}
-
-pub async fn delete_opds_feed(session: &Session, id: OpdsFeedId) -> Result<(), AuthError> {
-    send(authenticated_request(session, Method::DELETE, &format!("api/opds-feeds/{id}"))?).await?;
-    Ok(())
 }
 
 pub async fn cloud_storage(session: &Session) -> Result<Vec<LibraryCloudStorage>, AuthError> {
@@ -86,12 +77,12 @@ pub async fn set_cloud_storage(session: &Session, id: LibraryId, change: CloudSt
 mod tests {
     use super::*;
     use crate::Url;
-    use axum::Router;
     use axum::body::Bytes;
     use axum::extract::Path;
-    use axum::http::{HeaderMap, StatusCode, header};
+    use axum::http::{header, HeaderMap, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::{delete, get, post};
+    use axum::Router;
     use sync_common::transport as wire;
 
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -106,14 +97,14 @@ mod tests {
     async fn account_book_storage_preserves_auth_and_server_prefix_and_rejects_duplicate_books() {
         use account_contract::BookStorageUsage;
         use std::sync::{
-            Arc,
             atomic::{AtomicBool, Ordering},
+            Arc,
         };
         use sync_common::BookId;
 
         let duplicate = Arc::new(AtomicBool::new(false));
         let mode = duplicate.clone();
-        let expected = vec![BookStorageUsage { content_hash: BookId::from_bytes([1; 32]), used_bytes: 1234 }];
+        let expected = vec![BookStorageUsage { book_id: BookId::from_bytes([1; 32]), used_bytes: 1234 }];
         let response = expected.clone();
         let app = Router::new().route(
             "/prefix/api/account/storage/books",
@@ -142,43 +133,32 @@ mod tests {
         let request: LibraryNameRequest = wire::decode(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
         assert_eq!(request.library_id.to_string(), LIBRARY_ID);
         assert_eq!(request.library_name, if method == Method::POST { "Classics" } else { "Renamed" });
-        wire::encode(&LibrarySummary { library_id: request.library_id, library_name: request.library_name, storage: Default::default() }).unwrap()
+        wire::encode(&LibrarySummary { library_id: request.library_id, library_name: request.library_name, storage: Default::default(), kind: Default::default() }).unwrap()
     }
 
     #[tokio::test]
     async fn account_mutations_preserve_methods_headers_bodies_and_status_errors() {
-        let app = Router::new()
-            .route("/api/libraries", post(write_library).put(write_library))
-            .route(
-                "/api/libraries/:id",
-                delete(|Path(id): Path<LibraryId>, headers: HeaderMap| async move {
-                    check_auth(&headers);
-                    assert!(headers.get(header::CONTENT_TYPE).is_none());
-                    if id.is_nil() {
-                        return StatusCode::UNAUTHORIZED.into_response();
-                    }
-                    assert_eq!(id.to_string(), LIBRARY_ID);
-                    wire::encode(&DeleteLibraryResponse { library_id: id }).unwrap().into_response()
-                }),
-            )
-            .route(
-                "/api/opds-feeds/:id",
-                delete(|Path(id): Path<OpdsFeedId>, headers: HeaderMap| async move {
-                    check_auth(&headers);
-                    assert_eq!(id.to_string(), LIBRARY_ID);
-                    StatusCode::NO_CONTENT
-                }),
-            );
+        let app = Router::new().route("/api/libraries", post(write_library).put(write_library)).route(
+            "/api/libraries/:id",
+            delete(|Path(id): Path<LibraryId>, headers: HeaderMap| async move {
+                check_auth(&headers);
+                assert!(headers.get(header::CONTENT_TYPE).is_none());
+                if id.is_nil() {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+                assert_eq!(id.to_string(), LIBRARY_ID);
+                wire::encode(&DeleteLibraryResponse { library_id: id }).unwrap().into_response()
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let session = Session::try_new(origin, "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into()).unwrap();
         let id = LIBRARY_ID.parse().unwrap();
 
-        assert_eq!(create_library(&session, id, "Classics".into()).await.unwrap(), LibrarySummary { library_id: id, library_name: "Classics".into(), storage: Default::default() });
-        assert_eq!(rename_library(&session, id, "Renamed".into()).await.unwrap(), LibrarySummary { library_id: id, library_name: "Renamed".into(), storage: Default::default() });
+        assert_eq!(create_library(&session, id, "Classics".into()).await.unwrap(), LibrarySummary { library_id: id, library_name: "Classics".into(), storage: Default::default(), kind: Default::default() });
+        assert_eq!(rename_library(&session, id, "Renamed".into()).await.unwrap(), LibrarySummary { library_id: id, library_name: "Renamed".into(), storage: Default::default(), kind: Default::default() });
         assert_eq!(delete_library(&session, &id).await.unwrap().library_id, id);
-        delete_opds_feed(&session, id).await.unwrap();
         assert!(delete_library(&session, &LibraryId::nil()).await.unwrap_err().is_unauthorized());
         server.abort();
     }

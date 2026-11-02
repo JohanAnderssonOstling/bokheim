@@ -10,7 +10,6 @@ use skrift_column_paginator::RendererEvent;
 use crate::epub::marks;
 use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
-use crate::settings::ReaderSettings;
 use crate::shell::persistence::StoredPosition;
 
 impl ReaderView {
@@ -45,9 +44,6 @@ impl ReaderView {
                 self.tts_navigation_changed(cx);
                 notify(cx, Component::ReaderShell, "reading_position_changed");
             }
-            // Compatibility signals remain available to other renderer hosts.
-            // This reader projects all position state from the settled snapshot.
-            RendererEvent::CfiChanged(_) | RendererEvent::NavAnchorChanged { .. } | RendererEvent::ReadingProgress { .. } => {}
             RendererEvent::TitleChanged(title) => {
                 let title = title.clone().unwrap_or_else(|| self.book_title.clone());
                 if self.title != title {
@@ -55,7 +51,6 @@ impl ReaderView {
                     notify(cx, Component::ReaderShell, "title_changed");
                 }
             }
-            RendererEvent::HistoryAvailability { .. } => {}
             RendererEvent::SearchActiveChanged(active) => {
                 if self.search.query.is_some() != *active {
                     if *active {
@@ -66,19 +61,10 @@ impl ReaderView {
                     notify(cx, Component::ReaderShell, "search_visibility_changed");
                 }
             }
-            // Font controls persist their requested value before reflow. An
-            // initial snapshot or delayed acknowledgement must not revert it.
-            RendererEvent::FontSizeChanged(_) => {}
-            RendererEvent::ColumnWidthChanged(column_width) => {
-                if ReaderSettings::update(cx, |preferences| preferences.column_width = *column_width) {
-                    notify(cx, Component::ReaderShell, "column_width_changed");
-                }
-            }
-            RendererEvent::ScaleChanged(scale) => {
-                if ReaderSettings::update(cx, |preferences| preferences.scale = *scale) {
-                    notify(cx, Component::ReaderShell, "scale_changed");
-                }
-            }
+            // Controls persist requests before reflow. Delayed acknowledgements
+            // must not revert them, and viewport-derived column widths belong
+            // to each window rather than to the shared preferences.
+            RendererEvent::FontSizeChanged(_) | RendererEvent::ColumnWidthChanged(_) | RendererEvent::ScaleChanged(_) => {}
             RendererEvent::SelectionFinished { cfi_range, .. } => {
                 // A released handle can queue several ranges. Ignore snapshots
                 // that were superseded or dismissed before they reach the shell.

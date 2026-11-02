@@ -86,7 +86,7 @@ mod tests {
             navigation: None,
             pdf: Some(pdf_view_common::PdfReaderMetadata {
                 version: 1,
-                content_hash: hash.to_string(),
+                book_id: hash.to_string(),
                 pages: vec![pdf_view_common::PdfStoredPage { width: 600.0, height: 800.0, rotation: 0 }],
                 skippable_pages: None,
                 annotations: vec![],
@@ -95,7 +95,7 @@ mod tests {
             recording: None,
             enrichment: Some(EnrichmentResult::NoMatch),
         };
-        let state = LibraryStateEntry::BookAdd { content_hash: hash, value };
+        let state = LibraryStateEntry::BookAdd { book_id: hash, value };
         let bytes = transport::encode(&state).unwrap();
         let prefix = format!("00000000-0000-0000-0000-000000000001\tbook_add\t{}", hex(hash.as_bytes()));
         assert!(compact(&format!("{prefix}\t{}", hex(&bytes))).unwrap().is_none());

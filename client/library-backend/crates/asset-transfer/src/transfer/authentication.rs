@@ -1,5 +1,6 @@
 //! Library account renewal around a transfer operation, with at most one retry.
 use crate::TransferError;
+use library_runtime::account::{authenticated_request, AccountSessionError, AuthenticatedRequestError, RefreshPolicy};
 use std::future::Future;
 
 impl super::AssetExecutor {
@@ -11,17 +12,21 @@ impl super::AssetExecutor {
         Fut: Future<Output = Result<T, TransferError>>,
     {
         let credentials = self.credentials()?;
-        let user = self.account.as_ref().and_then(|account| account.current().ok().flatten()).map(|session| session.user_id().to_owned());
-        match operation().await {
-            Err(TransferError::AuthenticationRequired) => {}
-            result => return result,
-        }
-        let Some(account) = &self.account else { return Err(TransferError::AuthenticationRequired) };
-        let refreshed = account.refresh_after_unauthorized(credentials.access_token()).await.map_err(TransferError::retryable)?.ok_or(TransferError::AuthenticationRequired)?;
-        if user.as_deref() != Some(refreshed.user_id()) {
-            return Err(TransferError::AuthenticationRequired);
-        }
-        self.check_transfer_account(&credentials)?;
-        operation().await
+        let Some(account) = &self.account else { return operation().await };
+        authenticated_request(
+            account,
+            RefreshPolicy::OnRejection,
+            |_| {
+                let pending = self.check_transfer_account(&credentials).map(|_| operation());
+                async move { pending?.await }
+            },
+            |error| matches!(error, TransferError::AuthenticationRequired),
+        )
+        .await
+        .map_err(|error| match error {
+            AuthenticatedRequestError::Request(error) => error,
+            AuthenticatedRequestError::Session(AccountSessionError::Changed) | AuthenticatedRequestError::MissingSession => TransferError::AuthenticationRequired,
+            AuthenticatedRequestError::Session(error) => TransferError::retryable(error),
+        })
     }
 }

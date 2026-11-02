@@ -72,7 +72,7 @@ mod linux {
                 parent_id: ROOT_DIR_ID,
                 file_name: file_name.clone(),
                 format: BookFormat::Epub,
-                content_hash: book,
+                book_id: book,
                 size_bytes: bytes.len() as u64,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { metadata: BookRecord { metadata: BookDetails { title: format!("Book {index:05}"), ..Default::default() }, description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
@@ -83,7 +83,7 @@ mod linux {
             let incoming = (0..annotations)
                 .map(|number| Annotation {
                     id: format!("memory-{index}-{number}"),
-                    content_hash: book,
+                    book_id: book,
                     anchor: AnnotationAnchor::epub_publication_cfi(format!("epubcfi(/6/2!/4/{},/1:0,/1:246)", (number + 1) * 2)),
                     exact_text: "A highlighted passage with some context. ".repeat(6),
                     note: "A personal annotation about this passage. ".repeat(3),

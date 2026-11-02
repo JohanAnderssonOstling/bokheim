@@ -153,7 +153,7 @@ mod tests {
         let observed = Arc::clone(&received_old_refresh);
         let library_id = sync_common::LibraryId::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
         let expected_snapshot = account_contract::AccountSnapshotResponse {
-            libraries: vec![sync_common::api::libraries::LibrarySummary { library_id, library_name: "Classics".to_owned(), storage: Default::default() }],
+            libraries: vec![sync_common::api::libraries::LibrarySummary { library_id, library_name: "Classics".to_owned(), storage: Default::default(), kind: Default::default() }],
             deleted_library_ids: Vec::new(),
             storage: account_contract::StorageUsageResponse { used_bytes: 40, reserved_bytes: 2, quota_bytes: 100 },
             library_storage: vec![account_contract::LibraryStorageUsage { library_id: library_id.to_string(), used_bytes: 40 }],

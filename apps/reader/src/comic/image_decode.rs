@@ -34,6 +34,7 @@ pub(super) fn decode(bytes: Vec<u8>) -> Result<DecodedPage, String> {
     for pixel in rgba.pixels_mut() {
         pixel.0.swap(0, 2);
     }
+    let (width, height) = rgba.dimensions();
     Ok(DecodedPage { pixels: rgba, width, height })
 }
 

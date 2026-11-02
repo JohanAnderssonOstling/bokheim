@@ -1,14 +1,16 @@
 //! Classification-only authority evidence, independent of an ISBN or OL identity.
-use crate::{AuthoritySubjectMatch, ClassificationEvidence, ClassificationScheme, ClassificationSource, EditionIdentityQuery, RichWorkMetadataMatch};
-pub const METHOD_PREFIX: &str = "library_of_congress_title_author:";
+use crate::{AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod, ClassificationProvider, ClassificationScheme, ClassificationSource, EditionIdentityQuery, RichWorkMetadataMatch};
 pub const OPEN_LIBRARY_WORK_PROVIDER: &str = "openlibrary_work";
 
 pub fn classification_record(query: &EditionIdentityQuery, matched: &AuthoritySubjectMatch) -> Option<RichWorkMetadataMatch> {
     use crate::matching::{matching_author_count_with_title, NormalizedTitle};
-    if !matches!(matched.provider_id.as_str(), "library_of_congress" | "wikidata" | OPEN_LIBRARY_WORK_PROVIDER) || matched.record_ids.is_empty() || matched.record_ids.len() > 128 || matched.record_ids.iter().any(|id| id.is_empty() || id.len() > 256) {
+    let provider = ClassificationProvider::from_provider_id(&matched.provider_id)?;
+    if matched.record_ids.is_empty() || matched.record_ids.len() > 128 || matched.record_ids.iter().any(|id| id.is_empty() || id.len() > 256) {
         return None;
     }
-    if matched.provider_id == OPEN_LIBRARY_WORK_PROVIDER && matched.record_ids.iter().any(|id| !id.strip_prefix("OL").and_then(|id| id.strip_suffix('W')).is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u64>().is_ok_and(|id| id > 0))) {
+    if matched.provider_id == OPEN_LIBRARY_WORK_PROVIDER
+        && matched.record_ids.iter().any(|id| !id.strip_prefix("OL").and_then(|id| id.strip_suffix('W')).is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u64>().is_ok_and(|id| id > 0)))
+    {
         return None;
     }
     if matched.provider_id == "wikidata" && matched.record_ids.iter().any(|id| !id.strip_prefix('Q').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<u64>().is_ok_and(|n| n > 0))) {
@@ -34,13 +36,15 @@ pub fn classification_record(query: &EditionIdentityQuery, matched: &AuthoritySu
     for c in &mut classifications {
         c.source = ClassificationSource::Work;
         let supplied = &c.evidence;
-        let ids = matched.record_ids.iter().filter(|id| supplied.is_empty() || supplied.iter().any(|e| e.method == format!("{}_title_author:{id}", matched.provider_id))).collect::<Vec<_>>();
+        let ids = matched
+            .record_ids
+            .iter()
+            .filter(|id| supplied.is_empty() || supplied.iter().any(|e| matches!(&e.method, ClassificationMethod::TitleAuthor { provider: evidence_provider, record_id } if *evidence_provider == provider && record_id == *id)))
+            .collect::<Vec<_>>();
         c.evidence = ids
             .into_iter()
             .map(|id| ClassificationEvidence {
-                // The method prefix identifies the lookup, and its suffix preserves
-                // the MARC control number even when no ISBN exists.
-                method: format!("{}_title_author:{id}", matched.provider_id),
+                method: ClassificationMethod::TitleAuthor { provider, record_id: (*id).clone() },
                 isbn13: String::new(),
                 open_library_work_id: if matched.provider_id == OPEN_LIBRARY_WORK_PROVIDER { (*id).clone() } else { String::new() },
                 open_library_edition_id: String::new(),

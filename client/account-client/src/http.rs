@@ -1,10 +1,11 @@
 use crate::{AuthError, Session, Url};
-use reqwest::{header, Method, RequestBuilder, Response};
-use serde::{de::DeserializeOwned, Serialize};
+use http_response::run;
+use reqwest::{Method, RequestBuilder, Response, header};
+use serde::{Serialize, de::DeserializeOwned};
 use sync_common::transport as wire;
 
 pub(crate) fn request(server_url: &Url, method: Method, endpoint: &str) -> Result<RequestBuilder, AuthError> {
-    Ok(http_response::client_builder().build()?.request(method, server_url.join(endpoint)?).header(header::ACCEPT, wire::MEDIA_TYPE))
+    http_response::with_runtime(|| Ok(http_response::try_client()?.request(method, server_url.join(endpoint)?).header(header::ACCEPT, wire::MEDIA_TYPE))).map_err(AuthError::Runtime)?
 }
 
 pub(crate) fn authenticated_request(session: &Session, method: Method, endpoint: &str) -> Result<RequestBuilder, AuthError> {
@@ -16,7 +17,7 @@ pub(crate) fn with_body(request: RequestBuilder, body: &impl Serialize) -> Resul
 }
 
 pub(crate) async fn send(request: RequestBuilder) -> Result<Response, AuthError> {
-    Ok(request.send().await?.error_for_status()?)
+    run(async move { Ok(request.send().await?.error_for_status()?) }).await.map_err(AuthError::Runtime)?
 }
 
 pub(crate) async fn post_empty(server_url: &Url, endpoint: &str, body: &impl Serialize) -> Result<(), AuthError> {
@@ -24,6 +25,10 @@ pub(crate) async fn post_empty(server_url: &Url, endpoint: &str, body: &impl Ser
 }
 
 pub(crate) async fn decode_response<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, AuthError> {
-    let response = send(request).await?;
-    Ok(wire::decode(&response.bytes().await?, wire::MAX_DECODED_RESPONSE_BYTES)?)
+    run(async move {
+        let response = send(request).await?;
+        Ok(wire::decode(&response.bytes().await?, wire::MAX_DECODED_RESPONSE_BYTES)?)
+    })
+    .await
+    .map_err(AuthError::Runtime)?
 }

@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use crate::{CONTENT_INSET, topbar_action_height_rem};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -178,7 +180,16 @@ pub fn annotation_editor_panel(passage: Option<AnyElement>, note: impl IntoEleme
 /// The values are canonical: an annotation stores the `0xRRGGBB` it was given, so this
 /// is the one place a colour may be named, and both the swatch and the renderer
 /// read it from here.
-pub const READER_ANNOTATION_COLORS: [(&str, u32); 8] = [("Yellow", 0xe0bb4b), ("Orange", 0xe09a57), ("Red", 0xd57868), ("Pink", 0xc880b2), ("Purple", 0x9d80c9), ("Blue", 0x6e9dcb), ("Teal", 0x57aaa1), ("Green", 0x94ad65)];
+pub const READER_ANNOTATION_COLORS: [(&str, u32); 8] = [
+    (text!(common::yellow), 0xe0bb4b),
+    (text!(common::orange), 0xe09a57),
+    (text!(common::red), 0xd57868),
+    (text!(common::pink), 0xc880b2),
+    (text!(common::purple), 0x9d80c9),
+    (text!(common::blue), 0x6e9dcb),
+    (text!(common::teal), 0x57aaa1),
+    (text!(common::green), 0x94ad65),
+];
 
 /// The colour a new annotation takes.
 pub const READER_ANNOTATION_DEFAULT_COLOR: u32 = READER_ANNOTATION_COLORS[0].1;
@@ -225,7 +236,7 @@ pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, color: u32, name
         .when(selected, |swatch| swatch.bg(theme.accent_wash))
         .hover(move |style| style.bg(theme.hover))
         .focus_visible(move |style| style.bg(theme.accent_wash))
-        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if selected { format!("{name} (selected)") } else { name.to_owned() }).build(window, cx))
+        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if selected { format!(text!(common::selected), name = name) } else { name.to_owned() }).build(window, cx))
         .child(
             div()
                 .size(px(16.0))
@@ -338,7 +349,7 @@ impl ReaderDestination {
                 .when(!theme.custom_ui_font, |text| text.font_family(theme.ui_font_family.family_name()))
                 .text_size(gpui::rems(size_rem))
                 .line_height_auto()
-                .child("Aa")
+                .child(text!(common::aa))
                 .into_any_element()
         } else {
             self.icon().size(gpui::rems(size_rem)).into_any_element()
@@ -347,13 +358,13 @@ impl ReaderDestination {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Library => "Library",
-            Self::Contents => "Contents",
-            Self::Notes => "Notes",
-            Self::Bookmarks => "Bookmarks",
-            Self::Search => "Search",
-            Self::Settings => "Settings",
-            Self::Tts => "TTS",
+            Self::Library => text!(common::library),
+            Self::Contents => text!(common::contents),
+            Self::Notes => text!(common::notes),
+            Self::Bookmarks => text!(common::bookmarks),
+            Self::Search => text!(common::search),
+            Self::Settings => text!(common::settings),
+            Self::Tts => text!(common::tts),
         }
     }
 
@@ -406,7 +417,7 @@ pub fn reader_top_bar_title(title: impl Into<SharedString>, chapter: impl Into<S
     } else if chapter.is_empty() || chapter == title {
         title.to_owned()
     } else {
-        format!("{title}: {chapter}")
+        format!(text!(common::book_chapter_title), chapter = chapter, title = title)
     };
     div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(heading)
 }
@@ -612,7 +623,7 @@ pub fn reader_numeric_tile(id: &'static str, value: impl Into<SharedString>, sel
                 .role(Role::Button)
                 .debug_selector(move || format!("{id}-value"))
                 .on_click(select)
-                .aria_label(format!("Use custom value: {value}"))
+                .aria_label(format!(text!(common::use_custom_value), value = value))
                 .aria_selected(selected)
                 .flex_1()
                 .min_w_0()
@@ -636,7 +647,7 @@ pub fn reader_tile_picture(path: &'static str) -> gpui_component::Icon {
 /// A typeface tile's sample: "Aa" set in the face it selects. `None` is the
 /// book's own face, which the panel can only suggest with the interface serif.
 pub fn reader_typeface_sample(family: Option<&'static str>) -> Div {
-    div().h(gpui::rems(2.25)).flex().items_center().text_size(gpui::rems(1.5)).when_some(family, |sample, family| sample.font_family(family)).child("Aa")
+    div().h(gpui::rems(2.25)).flex().items_center().text_size(gpui::rems(1.5)).when_some(family, |sample, family| sample.font_family(family)).child(text!(common::aa))
 }
 
 /// The query field fills the space beside the search controls.
@@ -718,7 +729,7 @@ impl ReaderContextMenu {
     /// A PDF selection can become an annotation or be copied.
     pub fn pdf_selection(mut self, on_annotate: impl Fn(&mut Window, &mut App) + 'static, on_copy: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self = self.begin_section();
-        self.menu = self.menu.item(menu_item("Annotation", move |_, window, cx| on_annotate(window, cx))).item(menu_item("Copy", move |_, window, cx| on_copy(window, cx)));
+        self.menu = self.menu.item(menu_item(text!(common::annotation), move |_, window, cx| on_annotate(window, cx))).item(menu_item(text!(common::copy), move |_, window, cx| on_copy(window, cx)));
         self
     }
 
@@ -726,15 +737,15 @@ impl ReaderContextMenu {
         self = self.begin_section();
         self.menu = self
             .menu
-            .item(menu_item("Copy Table as Markdown", move |_, window, cx| on_markdown(window, cx)))
-            .item(menu_item("Copy Table as Unstyled HTML", move |_, window, cx| on_unstyled_html(window, cx)))
-            .item(menu_item("Copy Table as Styled HTML", move |_, window, cx| on_styled_html(window, cx)));
+            .item(menu_item(text!(common::copy_table_as_markdown), move |_, window, cx| on_markdown(window, cx)))
+            .item(menu_item(text!(common::copy_table_as_unstyled_html), move |_, window, cx| on_unstyled_html(window, cx)))
+            .item(menu_item(text!(common::copy_table_as_styled_html), move |_, window, cx| on_styled_html(window, cx)));
         self
     }
 
     pub fn image(mut self, on_copy: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self = self.begin_section();
-        self.menu = self.menu.item(menu_item("Copy Image", move |_, window, cx| on_copy(window, cx)));
+        self.menu = self.menu.item(menu_item(text!(common::copy_image), move |_, window, cx| on_copy(window, cx)));
         self
     }
 
@@ -809,8 +820,8 @@ impl RenderOnce for ReaderImagePopup {
             .child(
                 crate::action_row()
                     .flex_none()
-                    .child(crate::topbar_action_button("reader-image-copy", "Copy image", IconName::Copy, theme).on_click(move |_, window, cx| copy(window, cx)))
-                    .child(crate::topbar_action_button("reader-image-close", "Close", IconName::Close, theme).on_click(move |_, window, cx| dismiss_button(window, cx))),
+                    .child(crate::topbar_action_button("reader-image-copy", text!(common::copy_image_action), IconName::Copy, theme).on_click(move |_, window, cx| copy(window, cx)))
+                    .child(crate::topbar_action_button("reader-image-close", text!(common::close), IconName::Close, theme).on_click(move |_, window, cx| dismiss_button(window, cx))),
             );
 
         ReaderModal::new(gpui::size(px(panel_width), px(panel_height)), content).on_dismiss(move |window, cx| dismiss_modal(window, cx))

@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use crate::Button;
 use crate::{
     BOOK_CARD_SUBTITLE_SIZE, BOOK_COVER_BADGE_INSET, BOOK_COVER_RADIUS, COMPACT_HIERARCHY_ITEM_CONTENT_GAP, COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING, COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM, CONTENT_INSET, DOWNLOAD_ACTION_SIZE_REM,
@@ -23,16 +25,16 @@ use crate::{
 /// separates the art from the words, `SPACE_XS` separates the words from each
 /// other. Previously the wider first gap was a margin on the title fighting the
 /// column's own gap, which meant two spacing mechanisms in one component.
-/// Selected cards use the accent with its contrasting text colour. The
-/// keyboard cursor gets a light accent fill around the entire card.
+/// Selection and the keyboard cursor use the same light accent fill as
+/// containers. Selected cards also keep an accent outline.
 ///
-/// Selected cards hover to `accent_hover` so the highlight remains visible
-/// under the pointer. Plain cards use the translucent hover wash.
+/// Highlighted cards hover to `accent_wash_hover` so the highlight remains
+/// visible under the pointer. Plain cards use the translucent hover wash.
 ///
 /// Disable hover while selecting a band or when a section's outer keyboard
 /// frame already paints hover for the whole cell.
 pub fn book_card(id: impl Into<ElementId>, focused: bool, selected: bool, hover_enabled: bool, theme: BrowserTheme) -> Stateful<Div> {
-    let hovered = if selected { theme.accent_hover } else if focused { theme.accent_wash_hover } else { theme.hover };
+    let hovered = if selected || focused { theme.accent_wash_hover } else { theme.hover };
     div()
         .id(id)
         .relative()
@@ -48,8 +50,8 @@ pub fn book_card(id: impl Into<ElementId>, focused: bool, selected: bool, hover_
         .p(px((crate::BOOK_CARD_PADDING - 2.0).max(0.0)))
         .gap(px(BOOK_CARD_COVER_CONTENT_GAP))
         .rounded(px(RADIUS_MD))
-        .when(focused && !selected, |card| card.bg(theme.accent_wash))
-        .when(selected, |card| card.bg(theme.accent).text_color(theme.accent_text))
+        .text_color(theme.text)
+        .when(focused || selected, |card| card.bg(theme.accent_wash))
         .when(hover_enabled, |card| card.hover(move |style| style.bg(hovered)))
 }
 
@@ -102,12 +104,12 @@ pub fn book_cover_audiobook_length(duration_ms: Option<u64>, theme: BrowserTheme
         Some(duration) => {
             let total_minutes = (duration / 60_000).max(1);
             match (total_minutes / 60, total_minutes % 60) {
-                (0, minutes) => format!("{minutes} m"),
-                (hours, 0) => format!("{hours} h"),
-                (hours, minutes) => format!("{hours} h {minutes} m"),
+                (0, minutes) => format!(text!(common::minutes_m), minutes = minutes),
+                (hours, 0) => format!(text!(common::hours_h), hours = hours),
+                (hours, minutes) => format!(text!(common::hours_h_minutes_m), hours = hours, minutes = minutes),
             }
         }
-        None => "Unknown".to_owned(),
+        None => text!(common::unknown).to_owned(),
     };
     div()
         .absolute()
@@ -882,11 +884,6 @@ pub fn book_cover_add_badge(id: impl Into<ElementId>, pending: bool, theme: Brow
     book_cover_action_badge(id, pending, download_glyph(), theme)
 }
 
-/// The same corner for a feed book its feed sells: opening its store page.
-pub fn book_cover_buy_badge(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
-    book_cover_action_badge(id, false, buy_glyph().size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)), theme)
-}
-
 /// The same corner for a catalog book the library already holds: a mark,
 /// not an action.
 pub fn book_cover_in_library_badge(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
@@ -935,11 +932,6 @@ pub fn download_glyph() -> Icon {
     Icon::empty().path("icons/cloud-download.svg").size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM))
 }
 
-/// Buying a book at its store.
-pub fn buy_glyph() -> Icon {
-    Icon::empty().path("icons/shopping-bag.svg")
-}
-
 /// The pill that follows the pointer while items are being dragged. It names
 /// what is being carried rather than miniaturising it: a half-transparent copy
 /// of three book covers reads as a rendering fault, and a count does not.
@@ -974,8 +966,16 @@ fn folder_breadcrumb_separator(theme: BrowserTheme) -> Icon {
 /// When the root is among them it takes the root's inset.
 fn folder_breadcrumb_fold(labels: &[SharedString], folded: std::ops::Range<usize>, theme: BrowserTheme) -> Stateful<Div> {
     let hidden = SharedString::from(labels[folded.clone()].iter().map(|label| label.as_ref()).collect::<Vec<&str>>().join(" › "));
-    let fold =
-        div().id("folder-breadcrumb-fold").flex_none().whitespace_nowrap().text_size(gpui::rems(TEXT_MD)).px(px(SPACE_XS)).py(px(SPACE_XS)).text_color(theme.text_muted).when(folded.start == 0, |fold| fold.pl(px(CONTENT_INSET))).child("…");
+    let fold = div()
+        .id("folder-breadcrumb-fold")
+        .flex_none()
+        .whitespace_nowrap()
+        .text_size(gpui::rems(TEXT_MD))
+        .px(px(SPACE_XS))
+        .py(px(SPACE_XS))
+        .text_color(theme.text_muted)
+        .when(folded.start == 0, |fold| fold.pl(px(CONTENT_INSET)))
+        .child(text!(common::ellipsis));
     if hidden.is_empty() {
         return fold;
     }

@@ -1,24 +1,26 @@
 //! Actionable messages for book downloads and imports, worded from how the
 //! transfer failed. Diagnostics stay in the logs where they arose.
 
+use ui_text::text;
+
 use operation_failure::Failure;
 
 pub fn book_transfer_error_message(failure: Option<Failure>) -> &'static str {
     match failure {
-        Some(Failure::DrmProtected) => "DRM-protected downloads aren't supported.",
-        Some(Failure::StorageFull) => "Not enough storage to save this book. Free up space on the library's device or drive, then retry.",
-        Some(Failure::CloudStorageFull) => "Cloud storage is full. Free up account space and retry. Your local books are kept.",
-        Some(Failure::ReadOnlyStorage) => "Your library is read-only. Allow changes or choose a writable library folder.",
-        Some(Failure::PermissionDenied) => "Couldn't save to your library. Check its folder permissions or choose another library.",
-        Some(Failure::NotFound) => "The download link is no longer available. Try another edition or the source website.",
-        Some(Failure::Unauthorized | Failure::SignInRequired | Failure::CatalogCredentialsRejected) => "Sign in to the catalog, then retry the download.",
-        Some(Failure::Forbidden) => "The source blocked this download. Try its website or another edition.",
-        Some(Failure::RateLimited | Failure::ServiceUnavailable) => "Download service unavailable. Try again later.",
-        Some(Failure::TimedOut) => "Download timed out. Check your internet connection and retry.",
-        Some(Failure::Offline) => "Download couldn't finish. Check your internet connection and retry.",
-        Some(Failure::UnreadableBook | Failure::NotACatalog) => "Couldn't open the book file. Download it again or try another edition.",
-        Some(Failure::LibraryFolderUnavailable) => "Library folder unavailable. Reconnect its drive or choose another library.",
-        Some(Failure::ClientUpgradeRequired) => "This client and server are incompatible. Reload the web app or check for app updates, then retry. If it persists, report the problem.",
-        _ => "Couldn't download or save the book. Retry or try another edition.",
+        Some(Failure::DrmProtected) => text!(common::drm_protected_downloads_aren_t_supported),
+        Some(Failure::StorageFull) => text!(common::not_enough_storage_to_save_this_book_free_up_space_on_the),
+        Some(Failure::CloudStorageFull) => text!(common::cloud_storage_is_full_free_up_account_space_and_retry_your_local),
+        Some(Failure::ReadOnlyStorage) => text!(common::your_library_is_read_only_allow_changes_or_choose_a_writable_library),
+        Some(Failure::PermissionDenied) => text!(common::couldn_t_save_to_your_library_check_its_folder_permissions_or_choose),
+        Some(Failure::NotFound) => text!(common::the_download_link_is_no_longer_available_try_another_edition_or_the),
+        Some(Failure::Unauthorized | Failure::SignInRequired | Failure::CatalogCredentialsRejected) => text!(common::sign_in_to_the_catalog_then_retry_the_download),
+        Some(Failure::Forbidden) => text!(common::the_source_blocked_this_download_try_its_website_or_another_edition),
+        Some(Failure::RateLimited | Failure::ServiceUnavailable) => text!(common::download_service_unavailable_try_again_later),
+        Some(Failure::TimedOut) => text!(common::download_timed_out_check_your_internet_connection_and_retry),
+        Some(Failure::Offline) => text!(common::download_couldn_t_finish_check_your_internet_connection_and_retry),
+        Some(Failure::UnreadableBook | Failure::NotACatalog) => text!(common::couldn_t_open_the_book_file_download_it_again_or_try_another),
+        Some(Failure::LibraryFolderUnavailable) => text!(common::library_folder_unavailable_reconnect_its_drive_or_choose_another_library),
+        Some(Failure::ClientUpgradeRequired) => text!(common::this_client_and_server_are_incompatible_reload_the_web_app_or_check),
+        _ => text!(common::couldn_t_download_or_save_the_book_retry_or_try_another_edition),
     }
 }

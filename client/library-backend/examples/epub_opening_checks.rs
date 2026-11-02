@@ -2,17 +2,15 @@
 #![cfg(target_arch = "wasm32")]
 
 use book_access::remote_file;
-use book_content::{comic::ComicBook, Book, BookFormat};
+use book_content::{Book, BookFormat, comic::ComicBook};
 use book_model::BookFormat as ContainerFormat;
 use library_backend::{
-    library::{
-        commands::LibraryReply,
-        web_reader::{resolve_book, BookTransport},
-        LibraryCommand, PendingCommand,
-    },
     BackendError, BookId, BookSource, ResolvedBookData,
+    library::{
+        DirectPlayback, PlaybackSource, RemoteFile,
+        web_reader::{BookTransport, resolve_book},
+    },
 };
-use serde_json::Value;
 use wasm_bindgen::prelude::*;
 
 #[derive(Clone)]
@@ -23,20 +21,28 @@ struct Transport {
 }
 
 impl BookTransport for Transport {
-    async fn request<T: LibraryReply>(&self, command: LibraryCommand) -> Result<T, BackendError> {
-        let value = match command {
-            LibraryCommand::Pending(PendingCommand::OpenRemoteAudio { .. }) => Value::Null,
-            LibraryCommand::Pending(PendingCommand::ReadFileRange { source, offset, length }) => {
-                let bytes = remote_file::fetch_range(&self.client, self.url.clone(), &source, "fixture", offset, length).await.map_err(BackendError::operation)?;
-                serde_json::to_value(serde_bytes::ByteBuf::from(bytes)).map_err(BackendError::operation)?
-            }
-            LibraryCommand::Pending(PendingCommand::ReadFileRanges { source, ranges }) => {
-                let bytes = remote_file::fetch_ranges(&self.client, self.url.clone(), &source, "fixture", &ranges).await.map_err(BackendError::operation)?;
-                serde_json::to_value(serde_bytes::ByteBuf::from(bytes)).map_err(BackendError::operation)?
-            }
-            _ => return Err(BackendError::message("unexpected browser EPUB command")),
-        };
-        serde_json::from_value(value).map_err(BackendError::operation)
+    async fn open_remote_audio(&self, _: BookId) -> Result<Option<PlaybackSource>, BackendError> {
+        Ok(None)
+    }
+
+    async fn renew_remote_audio(&self, _: BookId) -> Result<DirectPlayback, BackendError> {
+        Err(BackendError::message("browser ZIP source does not provide audio"))
+    }
+
+    async fn read_book_range(&self, _: String, _: u64, _: usize) -> Result<Vec<u8>, BackendError> {
+        Err(BackendError::message("browser ZIP source does not provide local file capabilities"))
+    }
+
+    async fn read_file_range(&self, source: RemoteFile, offset: u64, length: usize) -> Result<Vec<u8>, BackendError> {
+        remote_file::fetch_range(&self.client, self.url.clone(), &source, "fixture", offset, length).await.map_err(BackendError::operation)
+    }
+
+    async fn read_file_ranges(&self, source: RemoteFile, ranges: Vec<(u64, usize)>) -> Result<Vec<u8>, BackendError> {
+        remote_file::fetch_ranges(&self.client, self.url.clone(), &source, "fixture", &ranges).await.map_err(BackendError::operation)
+    }
+
+    async fn read_file_bundle(&self, source: RemoteFile, ranges: Vec<(u64, usize)>) -> Result<Vec<u8>, BackendError> {
+        self.read_file_ranges(source, ranges).await
     }
 
     async fn subscribe_book(&self, hash: BookId) -> Result<(async_channel::Receiver<()>, ResolvedBookData), BackendError> {

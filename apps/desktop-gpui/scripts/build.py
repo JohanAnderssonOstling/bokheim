@@ -53,7 +53,7 @@ def main():
     if args.offline:
         command += ["--offline"]
     subprocess.run(command, cwd=ROOT, check=True, env=environment)
-    helper = ["cargo", "build", "--release", "-p", "opds-webview"]
+    helper = ["cargo", "build", "--release", "-p", "embedded-browser-ui", "--bin", "bokheim-opds-webview"]
     if not args.diagnostics:
         helper += ["--features", "release-logging"]
     if requested_target:

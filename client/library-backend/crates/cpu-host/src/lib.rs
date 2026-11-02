@@ -37,7 +37,8 @@ pub enum BookTask {
     Inspect {
         source_name: String,
         format: book_model::BookFormat,
-        content_hash: Option<BookId>,
+        #[serde(rename = "content_hash")]
+        book_id: Option<BookId>,
         #[serde(default)]
         cached_pdf: Option<book_inspection::CachedPdfReader>,
     },
@@ -129,16 +130,16 @@ pub fn execute_book_with_mobi<R: Read + Seek + Send + Sync + 'static>(task: Book
     match task {
         BookTask::TextMatches { format, locations, query } => text_search::previews(format, Box::new(reader), locations, &query).map(CpuResponse::TextMatches),
         BookTask::IndexText { format } => text_search::index(format, Box::new(reader)).map(CpuResponse::TextIndex),
-        BookTask::Inspect { source_name, format, content_hash, cached_pdf } => {
+        BookTask::Inspect { source_name, format, book_id, cached_pdf } => {
             let path = Path::new(&source_name);
             if format != book_model::BookFormat::Mobi {
-                return book_inspection::inspect_book_reader_with_cached_pdf(path, format, reader, content_hash, cached_pdf).map(CpuResponse::Inspection).map_err(BackendError::operation);
+                return book_inspection::inspect_book_reader_with_cached_pdf(path, format, reader, book_id, cached_pdf).map(CpuResponse::Inspection).map_err(BackendError::operation);
             }
             // Page evidence joins the file facts the metadata server is asked about.
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).map_err(BackendError::operation)?;
             let evidence = mobi_pages(path, &bytes).ok();
-            let mut inspected = book_inspection::inspect_book_reader_with_hash(path, format, Cursor::new(bytes), content_hash).map_err(BackendError::operation)?;
+            let mut inspected = book_inspection::inspect_book_reader_with_hash(path, format, Cursor::new(bytes), book_id).map_err(BackendError::operation)?;
             if let Some(evidence) = evidence {
                 let book = &mut inspected.metadata.book;
                 for identifier in evidence.identifiers {
@@ -217,7 +218,7 @@ macro_rules! book_operations {
 book_operations! {
     IndexText { format: book_model::BookFormat } => book_model::BookTextIndex, CpuResponse::TextIndex(index) => index;
     TextMatches { format: book_model::BookFormat, locations: Vec<book_model::BookTextLocation>, query: String } => Vec<book_model::BookTextMatch>, CpuResponse::TextMatches(matches) => matches;
-    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<BookId>, cached_pdf: Option<book_inspection::CachedPdfReader> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
+    Inspect { source_name: String, format: book_model::BookFormat, book_id: Option<BookId>, cached_pdf: Option<book_inspection::CachedPdfReader> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     InspectEpubMetadata { source_name: String } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     Thumbnail { extension: String } => Option<ThumbnailBytes>, CpuResponse::Thumbnail(versions) => versions;
 }

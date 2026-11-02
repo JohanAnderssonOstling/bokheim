@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use gpui::{AppContext, Context, Entity, EventEmitter, Subscription, Task, WeakEntity};
 use library_backend::LibraryClient;
-use library_model::LibraryUpdate;
+use library_model::{BookFileActivity, LibraryUpdate};
 use sync_common::{BookId, LibraryId};
 
 /// Rows seed availability until the download stream publishes a newer state.
@@ -20,19 +20,20 @@ pub(crate) fn initial_download_state(downloaded: bool, requested: bool) -> Downl
 
 pub(crate) struct LibraryContentsChanged;
 pub(crate) struct LibraryAnnotationsChanged;
+pub(crate) struct LibraryFileActionsChanged;
 
 pub(crate) struct LibraryScanChanged;
 
 pub(crate) struct LibraryCoversChanged {
-    content_hashes: Rc<[BookId]>,
+    book_ids: Rc<[BookId]>,
 }
 
 /// Library-wide invalidation, emitted only when file availability changes.
 pub(crate) struct LibraryDownloadChanged;
 
 impl LibraryCoversChanged {
-    pub(crate) fn contains(&self, content_hash: &BookId) -> bool {
-        self.content_hashes.contains(content_hash)
+    pub(crate) fn contains(&self, book_id: &BookId) -> bool {
+        self.book_ids.contains(book_id)
     }
 }
 
@@ -49,6 +50,7 @@ pub(crate) struct DownloadSubscription {
 pub(crate) struct LibraryUpdateBridge {
     library: LibraryClient,
     downloads: HashMap<BookId, DownloadState>,
+    book_file_activity: BookFileActivity,
     download_events: HashMap<BookId, WeakEntity<BookDownload>>,
     scanning: Option<bool>,
     importing: bool,
@@ -58,6 +60,7 @@ pub(crate) struct LibraryUpdateBridge {
 }
 
 impl EventEmitter<LibraryContentsChanged> for LibraryUpdateBridge {}
+impl EventEmitter<LibraryFileActionsChanged> for LibraryUpdateBridge {}
 impl EventEmitter<LibraryAnnotationsChanged> for LibraryUpdateBridge {}
 impl EventEmitter<LibraryCoversChanged> for LibraryUpdateBridge {}
 impl EventEmitter<LibraryDownloadChanged> for LibraryUpdateBridge {}
@@ -70,7 +73,7 @@ impl LibraryUpdateBridge {
     }
 
     fn new(backend: Rc<app::AppClient>, library_id: LibraryId, cx: &mut Context<Self>) -> Self {
-        let library = backend.library(library_id);
+        let library = backend.management.library(library_id);
         let update_library = library.clone();
         let task = cx.spawn(async move |bridge, cx| {
             let (updates, scanning) = match update_library.updates().await {
@@ -107,7 +110,8 @@ impl LibraryUpdateBridge {
                 cx.defer_update(bridge.clone(), move |bridge, cx| bridge.apply(batch, cx));
             }
         });
-        let mut bridge = Self { library, downloads: HashMap::new(), download_events: HashMap::new(), scanning: None, importing: false, book_count: None, _updates: task, _book_count_request: None };
+        let mut bridge =
+            Self { library, book_file_activity: BookFileActivity::Idle, downloads: HashMap::new(), download_events: HashMap::new(), scanning: None, importing: false, book_count: None, _updates: task, _book_count_request: None };
         bridge.refresh_book_count(cx);
         bridge
     }
@@ -134,14 +138,14 @@ impl LibraryUpdateBridge {
         self.book_count
     }
 
-    pub(crate) fn download_state(&self, content_hash: BookId) -> Option<DownloadState> {
-        self.downloads.get(&content_hash).cloned()
+    pub(crate) fn download_state(&self, book_id: BookId) -> Option<DownloadState> {
+        self.downloads.get(&book_id).cloned()
     }
 
-    pub(super) fn download_source(&mut self, content_hash: BookId, cx: &mut Context<Self>) -> Entity<BookDownload> {
-        self.download_events.get(&content_hash).and_then(WeakEntity::upgrade).unwrap_or_else(|| {
+    pub(super) fn download_source(&mut self, book_id: BookId, cx: &mut Context<Self>) -> Entity<BookDownload> {
+        self.download_events.get(&book_id).and_then(WeakEntity::upgrade).unwrap_or_else(|| {
             let source = cx.new(|_| BookDownload);
-            self.download_events.insert(content_hash, source.downgrade());
+            self.download_events.insert(book_id, source.downgrade());
             source
         })
     }
@@ -154,19 +158,27 @@ impl LibraryUpdateBridge {
     /// Book rows bootstrap the display only once. From then on the update
     /// stream owns the state; a later browse response cannot roll progress or
     /// completion back to an older row snapshot.
-    pub(crate) fn track_download(&mut self, content_hash: BookId, downloaded: bool, requested: bool) {
-        self.downloads.entry(content_hash).or_insert_with(|| initial_download_state(downloaded, requested));
+    pub(crate) fn track_download(&mut self, book_id: BookId, downloaded: bool, requested: bool) {
+        self.downloads.entry(book_id).or_insert_with(|| initial_download_state(downloaded, requested));
     }
 
-    fn set_download_state(&mut self, content_hash: BookId, state: DownloadState, cx: &mut Context<Self>) {
-        if self.downloads.get(&content_hash) == Some(&state) {
+    pub(crate) fn downloads_blocked(&self) -> bool {
+        self.book_file_activity.blocks_download_requests()
+    }
+
+    pub(crate) fn files_busy(&self) -> bool {
+        self.book_file_activity.blocks_file_changes()
+    }
+
+    fn set_download_state(&mut self, book_id: BookId, state: DownloadState, cx: &mut Context<Self>) {
+        if self.downloads.get(&book_id) == Some(&state) {
             return;
         }
-        self.downloads.insert(content_hash, state.clone());
-        if let Some(source) = self.download_events.get(&content_hash).and_then(WeakEntity::upgrade) {
+        self.downloads.insert(book_id, state.clone());
+        if let Some(source) = self.download_events.get(&book_id).and_then(WeakEntity::upgrade) {
             source.update(cx, |_, cx| cx.emit(state.clone()));
         } else {
-            self.download_events.remove(&content_hash);
+            self.download_events.remove(&book_id);
         }
         // Only navigators need library-wide availability invalidation. Progress
         // goes directly to subscribers of this book, without visiting other cards.
@@ -176,8 +188,8 @@ impl LibraryUpdateBridge {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_download_state_for_test(&mut self, content_hash: BookId, state: DownloadState, cx: &mut Context<Self>) {
-        self.set_download_state(content_hash, state, cx);
+    pub(crate) fn set_download_state_for_test(&mut self, book_id: BookId, state: DownloadState, cx: &mut Context<Self>) {
+        self.set_download_state(book_id, state, cx);
     }
 
     fn refresh_book_count(&mut self, cx: &mut Context<Self>) {
@@ -198,6 +210,12 @@ impl LibraryUpdateBridge {
 
     fn apply(&mut self, batch: UpdateBatch, cx: &mut Context<Self>) {
         let UpdateBatch { contents, covers, downloads, scanning, .. } = batch;
+        if let Some(activity) = batch.book_file_activity {
+            if self.book_file_activity != activity {
+                self.book_file_activity = activity;
+                cx.emit(LibraryFileActionsChanged);
+            }
+        }
         if let Some(scanning) = scanning {
             self.scanning = Some(scanning);
             if !scanning {
@@ -219,10 +237,10 @@ impl LibraryUpdateBridge {
             cx.emit(removal);
         }
         if !covers.is_empty() {
-            cx.emit(LibraryCoversChanged { content_hashes: covers.into() });
+            cx.emit(LibraryCoversChanged { book_ids: covers.into() });
         }
         for status in downloads {
-            self.set_download_state(status.content_hash, status.state, cx);
+            self.set_download_state(status.book_id, status.state, cx);
         }
     }
 }
@@ -232,6 +250,7 @@ impl LibraryUpdateBridge {
 #[derive(Default)]
 struct UpdateBatch {
     contents: bool,
+    book_file_activity: Option<BookFileActivity>,
     annotations: bool,
     text_search_removals: Vec<library_model::TextSearchRemoval>,
     covers: Vec<BookId>,
@@ -248,16 +267,17 @@ impl UpdateBatch {
             LibraryUpdate::Contents | LibraryUpdate::ReadingProgress(_) => self.contents = true,
             LibraryUpdate::Annotations => self.annotations = true,
             LibraryUpdate::TextSearchRemoved(removal) => self.text_search_removals.push(removal),
-            LibraryUpdate::Covers(content_hashes) => self.covers.extend(content_hashes),
+            LibraryUpdate::Covers(book_ids) => self.covers.extend(book_ids),
             LibraryUpdate::Download(status) => {
-                self.downloads.retain(|existing| existing.content_hash != status.content_hash);
+                self.downloads.retain(|existing| existing.book_id != status.book_id);
                 self.downloads.push(status);
             }
-            LibraryUpdate::DownloadFailed { content_hash, failure } => {
-                self.download_failures.retain(|(hash, _)| *hash != content_hash);
-                self.download_failures.push((content_hash, failure));
+            LibraryUpdate::DownloadFailed { book_id, failure } => {
+                self.download_failures.retain(|(hash, _)| *hash != book_id);
+                self.download_failures.push((book_id, failure));
             }
             LibraryUpdate::Scanning(scanning) => self.scanning = Some(scanning),
+            LibraryUpdate::BookFileActivity(activity) => self.book_file_activity = Some(activity),
             // These have their own subscribers and do not change book views.
             LibraryUpdate::CatalogImport { .. } | LibraryUpdate::SyncStatusChanged | LibraryUpdate::AnnotationExportStatusChanged => {}
         }
@@ -286,9 +306,9 @@ mod tests {
         let second = BookId::from_bytes([2; 32]);
         let mut batch = UpdateBatch::default();
         use ui_components::Failure;
-        batch.absorb(LibraryUpdate::DownloadFailed { content_hash: first, failure: Some(Failure::StorageFull) });
+        batch.absorb(LibraryUpdate::DownloadFailed { book_id: first, failure: Some(Failure::StorageFull) });
         batch.absorb(LibraryUpdate::Download(BookDownloadStatus::new(first, DownloadState::NotDownloaded)));
-        batch.absorb(LibraryUpdate::DownloadFailed { content_hash: second, failure: Some(Failure::PermissionDenied) });
+        batch.absorb(LibraryUpdate::DownloadFailed { book_id: second, failure: Some(Failure::PermissionDenied) });
         assert_eq!(batch.download_failures, vec![(first, Some(Failure::StorageFull)), (second, Some(Failure::PermissionDenied))]);
         assert_eq!(batch.downloads, vec![BookDownloadStatus::new(first, DownloadState::NotDownloaded)]);
     }

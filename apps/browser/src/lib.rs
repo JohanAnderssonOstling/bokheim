@@ -6,6 +6,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+use ui_text::text;
+
 mod library;
 mod model;
 mod navigation;
@@ -15,7 +17,9 @@ mod session;
 mod stores;
 mod universal;
 
-pub(crate) const BOOK_IMPORT_EXTENSIONS: [&str; 10] = ["epub", "pdf", "mobi", "azw", "azw3", "m4b", "fb2", "fbz", "zip", "cbz"];
+use book_model::BookFormat;
+
+pub(crate) const BOOK_IMPORT_EXTENSIONS: [&str; BookFormat::IMPORT_EXTENSIONS.len()] = BookFormat::IMPORT_EXTENSIONS;
 
 use gpui::{App, KeyBinding, Window, actions};
 pub use gpui_component::menu::OpenContextMenu;
@@ -143,36 +147,46 @@ actions!(
 #[action(no_json)]
 pub(crate) struct ToggleGridSelection(pub(crate) CursorMove);
 
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub(crate) struct MoveSettingRow(pub(crate) i32);
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub(crate) struct AdjustSettingValue(pub(crate) i32);
+
 const GRID_SELECTION_KEY_CONTEXT: &str = "BrowseSelection && !BrowseItem && !Input && !PopupMenu && !Dialog";
 const BOOK_CLIPBOARD_KEY_CONTEXT: &str = "BrowseClipboard && !Input && !PopupMenu && !Dialog";
 
 pub fn bind_keys(cx: &mut App) {
     use ui_components::{ShortcutPage::Browse, bind_shortcut};
-    bind_shortcut(cx, Browse, "browse.dismiss", "Close settings", &["escape"], DismissSettings, "Browser");
-    bind_shortcut(cx, Browse, "browse.font_decrease", "Decrease interface font size", &["secondary--"], DecreaseUiFontSize, "Browser");
-    bind_shortcut(cx, Browse, "browse.font_increase", "Increase interface font size", &["secondary-="], IncreaseUiFontSize, "Browser");
-    bind_shortcut(cx, Browse, "browse.previous_destination", "Previous destination", &["secondary-up"], PreviousDestination, "Browser");
-    bind_shortcut(cx, Browse, "browse.next_destination", "Next destination", &["secondary-down"], NextDestination, "Browser");
+    bind_shortcut(cx, Browse, "browse.dismiss", text!(browse::close_settings), &["escape"], DismissSettings, "Browser");
+    bind_shortcut(cx, Browse, "browse.font_decrease", text!(common::decrease_interface_font_size), &["secondary--"], DecreaseUiFontSize, "Browser");
+    bind_shortcut(cx, Browse, "browse.font_increase", text!(common::increase_interface_font_size), &["secondary-="], IncreaseUiFontSize, "Browser");
+    bind_shortcut(cx, Browse, "browse.previous_destination", text!(browse::previous_destination), &["secondary-up"], PreviousDestination, "Browser");
+    bind_shortcut(cx, Browse, "browse.next_destination", text!(browse::next_destination), &["secondary-down"], NextDestination, "Browser");
     // Selection contexts retain precedence over destination navigation.
-    bind_shortcut(cx, Browse, "browse.select_left", "Toggle selection to the left", &["secondary-left"], ToggleGridSelection(CursorMove::Left), GRID_SELECTION_KEY_CONTEXT);
-    bind_shortcut(cx, Browse, "browse.select_right", "Toggle selection to the right", &["secondary-right"], ToggleGridSelection(CursorMove::Right), GRID_SELECTION_KEY_CONTEXT);
-    bind_shortcut(cx, Browse, "browse.select_up", "Toggle selection above", &["secondary-up"], ToggleGridSelection(CursorMove::Up), GRID_SELECTION_KEY_CONTEXT);
-    bind_shortcut(cx, Browse, "browse.select_down", "Toggle selection below", &["secondary-down"], ToggleGridSelection(CursorMove::Down), GRID_SELECTION_KEY_CONTEXT);
-    bind_shortcut(cx, Browse, "browse.undo", "Undo library action", &["secondary-z"], UndoLibraryAction, "Browser");
+    bind_shortcut(cx, Browse, "browse.select_left", text!(browse::toggle_selection_to_the_left), &["secondary-left"], ToggleGridSelection(CursorMove::Left), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_right", text!(browse::toggle_selection_to_the_right), &["secondary-right"], ToggleGridSelection(CursorMove::Right), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_up", text!(browse::toggle_selection_above), &["secondary-up"], ToggleGridSelection(CursorMove::Up), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_down", text!(browse::toggle_selection_below), &["secondary-down"], ToggleGridSelection(CursorMove::Down), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.undo", text!(browse::undo_library_action), &["secondary-z"], UndoLibraryAction, "Browser");
     cx.bind_keys([
         KeyBinding::new("secondary-c", CopyBooks, Some(BOOK_CLIPBOARD_KEY_CONTEXT)),
         KeyBinding::new("secondary-x", CutBooks, Some(BOOK_CLIPBOARD_KEY_CONTEXT)),
         KeyBinding::new("secondary-v", PasteBooks, Some(BOOK_CLIPBOARD_KEY_CONTEXT)),
         #[cfg(not(target_os = "android"))]
         KeyBinding::new("back", DismissSettings, Some("Browser")),
-        // Settings is a form rather than a grid, so it is walked control by
-        // control. The arrows do what Tab does, for the devices whose only
-        // keyboard is a four-way pad; a text field keeps them for its cursor,
-        // and Tab still leaves the field.
+        // Tab retains control-by-control form navigation. Embedded editors
+        // keep their own keys; ordinary settings use the reader's row model.
         KeyBinding::new("tab", FocusNextSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
-        KeyBinding::new("down", FocusNextSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
+        KeyBinding::new("down", FocusNextSetting, Some("BrowserSettings && (ShortcutSettings || BrowserSettingsHeader || BrowserFontPicker)")),
         KeyBinding::new("shift-tab", FocusPreviousSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
-        KeyBinding::new("up", FocusPreviousSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
+        KeyBinding::new("up", FocusPreviousSetting, Some("BrowserSettings && (ShortcutSettings || BrowserSettingsHeader || BrowserFontPicker)")),
+        KeyBinding::new("down", MoveSettingRow(1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
+        KeyBinding::new("up", MoveSettingRow(-1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
+        KeyBinding::new("left", AdjustSettingValue(-1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
+        KeyBinding::new("right", AdjustSettingValue(1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
     ]);
 }
 

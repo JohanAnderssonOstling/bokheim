@@ -167,13 +167,13 @@ impl BrowseDestination {
 /// streams books it does not hold instead of downloading them, and catalog
 /// and feed books are added to the library, not downloaded.
 pub(super) fn can_download(child: &BrowseRow) -> bool {
-    cfg!(not(target_arch = "wasm32")) && !matches!(child.id, BrowseLocation::Catalog(_) | BrowseLocation::CatalogAuthor(_) | BrowseLocation::Opds { .. } | BrowseLocation::Store(_)) && child.downloaded_book_count < child.book_count
+    cfg!(not(target_arch = "wasm32")) && !matches!(child.id, BrowseLocation::Catalog(_) | BrowseLocation::CatalogAuthor(_) | BrowseLocation::Opds { .. }) && child.downloaded_book_count < child.book_count
 }
 
 /// The count a chip or card row shows. A feed gives a link's count only
 /// sometimes, and one it does not give arrives as 0; a feed itself has none.
 pub(super) fn shown_count(child: &BrowseRow) -> Option<usize> {
-    (!matches!(child.id, BrowseLocation::Opds { .. } | BrowseLocation::Store(_)) || child.book_count > 0).then_some(child.book_count)
+    (!matches!(child.id, BrowseLocation::Opds { .. }) || child.book_count > 0).then_some(child.book_count)
 }
 
 /// Whether a chip carries the download mark: only when it is partly on this
@@ -267,8 +267,8 @@ impl BrowseListing {
         // A search lists its matches flat; the sections are the unsearched
         // listing's, and the page lays its children out as cards only if any.
         // A feed page has no sections: its navigation links are chips, as
-        // only the page itself is fetched. The catalog root's feeds and
-        // stores have no section either, and stay chips beside the sections;
+        // only the page itself is fetched. The catalog root's feeds have
+        // no section either, and stay chips beside the sections;
         // a child the sections leave out is otherwise not listed.
         let sections = if searched { Vec::new() } else { sections };
         self.page = page;
@@ -277,9 +277,9 @@ impl BrowseListing {
             contents.children
         } else if let Some(page) = &self.page {
             let section_ids: HashSet<_> = page.section_ids.iter().copied().collect();
-            contents.children.into_iter().filter(|child| section_ids.contains(&child.id) || matches!(child.id, BrowseLocation::Opds { .. } | BrowseLocation::Store(_))).collect()
+            contents.children.into_iter().filter(|child| section_ids.contains(&child.id) || matches!(child.id, BrowseLocation::Opds { .. })).collect()
         } else {
-            let feeds = contents.children.into_iter().filter(|child| matches!(child.id, BrowseLocation::Opds { page: None, .. } | BrowseLocation::Store(_)));
+            let feeds = contents.children.into_iter().filter(|child| matches!(child.id, BrowseLocation::Opds { page: None, .. }));
             sections.iter().map(|section| section.parent.clone()).chain(feeds).collect()
         };
         let books = contents.books;
@@ -506,7 +506,7 @@ mod tests {
         let mut listing = BrowseListing::new(library, BrowseKind::Catalog, Rc::new(|_, _, _| {}), false);
         let child = |index| BrowseRow { id: BrowseLocation::Folder(DirId::from_u128(index)), name: format!("Link {index}"), path: None, book_count: 0, downloaded_book_count: 0 };
         let book = |index| BookCardRow {
-            source: BookSource::Catalog { content_hash: BookId::from_bytes([index; 32]) },
+            source: BookSource::Catalog { book_id: BookId::from_bytes([index; 32]) },
             title: format!("Book {index}"),
             subtitle: None,
             author: "Writer".into(),
@@ -516,6 +516,7 @@ mod tests {
             format_category: LibraryFileTypeFilter::Book,
             audiobook_duration_ms: None,
             added_at: 0,
+            description: String::new(),
             source_directory: None,
         };
         let next = BrowseLocation::Folder(DirId::from_u128(10));

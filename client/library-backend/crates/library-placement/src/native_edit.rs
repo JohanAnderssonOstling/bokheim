@@ -25,7 +25,7 @@ impl PreparedEdit {
         if let NativePlacementResult::CopiedDirectory(id) = plan.result {
             let root = plan.directories.iter().find(|directory| directory.id == id).ok_or("copied folder has no filesystem path")?;
             let directories = plan.directories.iter().map(|directory| (directory.id, directory.relative_path.as_str()));
-            let books = plan.files.iter().filter(|file| file.work.operation == "materialize").map(|file| (file.work.content_hash, &file.resolved_path, file.book_paths.as_slice()));
+            let books = plan.files.iter().filter(|file| file.work.operation == "materialize").map(|file| (file.work.book_id, &file.resolved_path, file.book_paths.as_slice()));
             let (tree, files) = assets.prepare_directory_copy(&root.relative_path, directories, books)?;
             prepared.files.push(tree);
             prepared.materialized_files = files;
@@ -37,8 +37,8 @@ impl PreparedEdit {
             prepared.materialized_directories.push(directory.id);
         }
         for file in plan.files.iter().filter(|file| file.work.operation == "materialize") {
-            let movable = plan.files.iter().filter(|other| !copy_move && other.work.operation == "remove" && other.work.content_hash == file.work.content_hash).map(|other| &other.work.original_path);
-            if let Some(output) = assets.prepare_placement(&file.work.content_hash, &file.resolved_path, &file.book_paths, movable)? {
+            let movable = plan.files.iter().filter(|other| !copy_move && other.work.operation == "remove" && other.work.source_root.is_none() && other.work.book_id == file.work.book_id).filter_map(|other| other.work.cleanup_path.as_ref());
+            if let Some(output) = assets.prepare_placement(&file.work.book_id, &file.resolved_path, &file.book_paths, movable)? {
                 prepared.files.push(output);
                 prepared.materialized_files.push(file.resolved_path.to_string());
             }
@@ -75,7 +75,7 @@ impl LibraryPlacement {
         let mut plan = self.database.plan_native_placement(edit)?;
         // Leases coordinate the source bytes with background eviction and
         // replay while the actor remains available for queries and other work.
-        let mut hashes = plan.files.iter().map(|file| file.work.content_hash).collect::<Vec<_>>();
+        let mut hashes = plan.files.iter().map(|file| file.work.book_id).collect::<Vec<_>>();
         hashes.sort();
         hashes.dedup();
         let mut leases = Vec::new();
@@ -202,7 +202,7 @@ mod tests {
                 parent_id: ROOT_DIR_ID,
                 file_name: "book.epub".into(),
                 format: BookFormat::Epub,
-                content_hash: hash,
+                book_id: hash,
                 size_bytes: BYTES.len() as u64,
                 inspection_version: 1,
                 inspection: Some(InspectedBook { pdf: None, audiobook: None, metadata: BookRecord { metadata: BookDetails { title: "Book".into(), ..Default::default() }, description: String::new() }, toc: vec![] }),
@@ -475,7 +475,7 @@ mod tests {
         assert!(placement.move_book_placement(&book, &ROOT_DIR_ID, &destination).await.unwrap());
         assert_eq!(fs::read(other.path().join("book.epub")).unwrap(), BYTES);
         assert!(!root.path().join("book.epub").exists(), "the source is retired before committing the move");
-        assert!(placement.database.native_file_work().unwrap().iter().any(|work| work.operation == "remove" && work.original_path.file_name().starts_with(".bokheim-move-")));
+        assert!(placement.database.native_file_work().unwrap().iter().any(|work| work.operation == "remove" && work.cleanup_path.as_ref().is_some_and(|path| path.file_name().starts_with(".bokheim-move-"))));
         crate::run_file_jobs(&placement.assets, &placement.database).await.unwrap();
         assert!(!root.path().join("book.epub").exists());
         // Permissions on the copy are ordinary file permissions, not a stored cache.
@@ -505,7 +505,7 @@ mod tests {
             fs::set_permissions(root.path(), permissions).unwrap();
             assert!(blocked.is_err());
             assert_eq!(fs::read(root.path().join(staged.as_str().trim_start_matches('/'))).unwrap(), BYTES);
-            assert!(reopened.native_file_work().unwrap().iter().any(|work| work.operation == "remove" && work.original_path == staged));
+            assert!(reopened.native_file_work().unwrap().iter().any(|work| work.operation == "remove" && work.cleanup_path.as_ref() == Some(&staged)));
         }
         crate::run_file_jobs(&placement.assets, &reopened).await.unwrap();
         assert_eq!(fs::read(root.path().join("book.epub")).unwrap(), BYTES);

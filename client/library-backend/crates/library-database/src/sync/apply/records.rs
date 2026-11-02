@@ -1,11 +1,11 @@
 //! Completed immutable book additions. The server accepts the
 //! first publication; its deliveries are authoritative, regardless of clocks.
-use super::registers::{next_sequence, read_merge_state, schedule};
+use super::registers::{allocate_sequences, next_sequence, read_merge_state, schedule};
 use crate::DatabaseError;
 use crate::SqlParam;
 use library_replica::LibraryStateEntry;
-use rusqlite::{Connection, OptionalExtension};
-use sync_common::{ConflictRank, StateKey, VersionKey, Versioned, wire};
+use rusqlite::{Connection, OptionalExtension, ToSql, params_from_iter};
+use sync_common::{ConflictRank, ReplicaSeq, StateKey, VersionKey, Versioned, wire};
 
 pub(crate) fn is_record(kind: &str) -> bool {
     kind == "book_add"
@@ -29,7 +29,7 @@ pub(crate) fn stage(conn: &Connection, hash: &sync_common::BookId, value: librar
     if conn.records_contains(&"book_add", &hash, |row| row.get::<_, bool>(0))? {
         return Ok(());
     }
-    let body = wire::encode(&LibraryStateEntry::BookAdd { content_hash: *hash, value }).map_err(DatabaseError::operation)?;
+    let body = wire::encode(&LibraryStateEntry::BookAdd { book_id: *hash, value }).map_err(DatabaseError::operation)?;
     if conn.records_stage(&hash, &body)? != 0 {
         conn.records_mark_projection_dirty(&"book_add", &hash)?;
     }
@@ -48,6 +48,49 @@ pub(crate) fn insert(conn: &Connection, body: &LibraryStateEntry) -> Result<(), 
     let token = VersionKey::new(0, ConflictRank::Update, replica.parse().map_err(DatabaseError::operation)?, next_sequence(conn)?);
     store(conn, body, &token)?;
     schedule(conn, &address.kind, &address.entity_key, "", Some(&token))
+}
+
+/// Publish a bounded batch of additions proven absent under the caller's
+/// writer transaction. A conflicting insertion fails the entire transaction.
+pub(crate) fn insert_new_batch(conn: &Connection, values: impl IntoIterator<Item = LibraryStateEntry>) -> Result<(), DatabaseError> {
+    let encoded = values
+        .into_iter()
+        .map(|value| {
+            value.validate().map_err(DatabaseError::operation)?;
+            let LibraryStateEntry::BookAdd { book_id, .. } = &value else {
+                return Err(DatabaseError::message("immutable batch requires book additions"));
+            };
+            Ok((*book_id, wire::encode(&value).map_err(DatabaseError::operation)?))
+        })
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+    if encoded.is_empty() {
+        return Ok(());
+    }
+    let (first, replica) = allocate_sequences(conn, encoded.len())?;
+    let mut publications = Vec::with_capacity(encoded.len());
+    let mut records = Vec::with_capacity(encoded.len());
+    for (index, (hash, body)) in encoded.into_iter().enumerate() {
+        let sequence = first + index as i64;
+        let token = VersionKey::new(0, ConflictRank::Update, replica, ReplicaSeq::new(u64::try_from(sequence).map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?);
+        records.push((hash, body, wire::encode(&token).map_err(DatabaseError::operation)?));
+        publications.push((hash, sequence));
+    }
+    let mut sql = String::from("INSERT INTO sync_book_record(state_kind,content_hash,body,publication) VALUES ");
+    let mut bindings: Vec<&dyn ToSql> = Vec::with_capacity(records.len() * 3);
+    for (index, (hash, body, publication)) in records.iter().enumerate() {
+        if index != 0 {
+            sql.push(',');
+        }
+        sql.push_str("('book_add',?,?,?)");
+        bindings.extend([hash as &dyn ToSql, body as &dyn ToSql, publication as &dyn ToSql]);
+    }
+    conn.prepare(&sql)?.execute(params_from_iter(bindings))?;
+    let publications = serde_json::to_string(&publications).map_err(DatabaseError::operation)?;
+    conn.records_reset_cover_checks_batch(&publications)?;
+    conn.records_discard_drafts_batch(&publications)?;
+    conn.records_mark_projection_dirty_batch(&publications)?;
+    conn.records_schedule_batch(&publications)?;
+    Ok(())
 }
 
 /// Adopt the server's accepted record. An earlier local candidate can differ.

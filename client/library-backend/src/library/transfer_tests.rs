@@ -37,7 +37,7 @@ async fn cross_library_copy_preserves_nested_empty_folders_bytes_and_reader_stat
     src.db.update_reading_position(&hash, "epubcfi(/6/2)", Some(42.0), None).unwrap();
     let note = Annotation {
         id: "transfer-note".into(),
-        content_hash: hash,
+        book_id: hash,
         anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
         exact_text: "Text".into(),
         style: AnnotationStyle::Underline,
@@ -162,7 +162,7 @@ async fn cross_library_import_rejects_wrong_bytes_before_publishing() {
     let (destination_actor, _, _) = fixture(second.path(), "http://127.0.0.1:1".parse().unwrap());
     let hash = seed(&source_actor.session, ROOT_DIR_ID, "Novel.epub", EPUB).await;
     let state = source_actor.session.db.book_transfer_state(hash).unwrap();
-    let result = destination_actor.session.import.import_transferred_book(ROOT_DIR_ID, "Novel.epub".into(), Box::new(std::io::Cursor::new(b"bad bytes".to_vec())), state).await;
+    let result = destination_actor.session.import.import_transferred_book(ROOT_DIR_ID, "Novel.epub".into(), Box::new(std::io::Cursor::new(b"bad bytes".to_vec())), b"bad bytes".len() as u64, state).await;
     assert!(result.unwrap_err().to_string().contains("verification"));
     assert!(destination_actor.session.db.book_paths(&hash).unwrap().is_empty());
     assert!(!second.path().join("Novel.epub").exists());

@@ -5,6 +5,8 @@
 //! themselves stay with each reader, because an EPUB annotation and a PDF
 //! annotation genuinely offer different actions.
 
+use ui_text::text;
+
 use gpui::prelude::*;
 use gpui::{AnyElement, App, ClickEvent, Context, IntoElement, Window, div, px};
 use std::cell::Cell;
@@ -244,7 +246,7 @@ fn fitted_sidebar_width(window: &Window, cx: &App) -> f32 {
     let preferences = ReaderSettings::preferences(cx);
     let mut width = preferences.toc_width;
     if preferences.active_sidebar_tab == SidebarTab::Settings {
-        let choices = ui_components::equal_choice_group_width(&["Book", "Serif", "Sans serif", "Custom"], ui_components::TEXT_XS, 2.0, ui_components::SPACE_SM, window, cx);
+        let choices = ui_components::equal_choice_group_width(&[text!(reader::book), text!(common::serif), text!(common::sans_serif), text!(common::custom)], ui_components::TEXT_XS, 2.0, ui_components::SPACE_SM, window, cx);
         width = width.max(f32::from(choices) + 2.0 * ui_components::SPACE_MD);
     }
     clamp_reader_sidebar_width(width.min(f32::from(window.viewport_size().width)))

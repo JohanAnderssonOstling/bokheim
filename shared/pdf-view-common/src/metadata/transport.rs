@@ -159,20 +159,21 @@ mod tests {
     #[derive(Serialize)]
     struct Previous<'a> {
         version: u32,
-        content_hash: &'a str,
+        #[serde(rename = "content_hash")]
+        book_id: &'a str,
         pages: &'a [PdfStoredPage],
         skippable_pages: &'a Option<Vec<usize>>,
         annotations: &'a [crate::PdfStoredAnnotation],
         dependencies: &'a Option<PdfDependencyIndex>,
     }
     fn previous(metadata: &PdfReaderMetadata) -> Previous<'_> {
-        Previous { version: metadata.version, content_hash: &metadata.content_hash, pages: &metadata.pages, skippable_pages: &metadata.skippable_pages, annotations: &metadata.annotations, dependencies: &metadata.dependencies }
+        Previous { version: metadata.version, book_id: &metadata.book_id, pages: &metadata.pages, skippable_pages: &metadata.skippable_pages, annotations: &metadata.annotations, dependencies: &metadata.dependencies }
     }
     fn metadata(count: usize) -> PdfReaderMetadata {
         let shared = PdfByteRange { offset: 128, length: 256 };
         PdfReaderMetadata {
             version: 1,
-            content_hash: "a".repeat(64),
+            book_id: "a".repeat(64),
             pages: vec![PdfStoredPage { width: 600.0, height: 800.0, rotation: 0 }; count],
             skippable_pages: Some(Vec::new()),
             annotations: Vec::new(),

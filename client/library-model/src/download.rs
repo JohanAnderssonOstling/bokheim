@@ -30,7 +30,7 @@ pub struct BrowserDownloadUpdate {
     pub message: Option<String>,
 }
 
-/// Source download observations before a catalog entry has a library file hash.
+/// Source download observations before a catalog entry has a library book identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogImportProgress {
     Waiting,
@@ -79,12 +79,13 @@ pub enum DownloadState {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BookDownloadStatus {
-    pub content_hash: BookId,
+    #[serde(rename = "content_hash")]
+    pub book_id: BookId,
     pub state: DownloadState,
 }
 
 impl BookDownloadStatus {
-    pub fn new(content_hash: BookId, state: DownloadState) -> Self {
-        Self { content_hash, state }
+    pub fn new(book_id: BookId, state: DownloadState) -> Self {
+        Self { book_id, state }
     }
 }

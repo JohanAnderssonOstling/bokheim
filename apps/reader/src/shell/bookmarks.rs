@@ -1,5 +1,7 @@
 //! Named reading locations, carried by the same durable registers as annotations.
 
+use ui_text::text;
+
 use book_model::{Annotation, AnnotationAnchor, AnnotationStyle, BOOKMARK_ID_PREFIX};
 use content_address::BookId;
 use gpui::prelude::*;
@@ -39,7 +41,7 @@ pub(crate) fn bookmark(book: BookId, anchor: AnnotationAnchor, toc_ordinal: usiz
     let now = super::marks::now_millis();
     Annotation {
         id: format!("{BOOKMARK_ID_PREFIX}{}", uuid::Uuid::new_v4()),
-        content_hash: book,
+        book_id: book,
         anchor,
         exact_text: String::new(),
         style: AnnotationStyle::Highlight,
@@ -56,7 +58,7 @@ pub(crate) fn bookmark(book: BookId, anchor: AnnotationAnchor, toc_ordinal: usiz
 /// The header's icon-only action saves the current reading location.
 pub(crate) fn create_button<C: BookmarkTarget>(target: &Entity<C>, enabled: bool) -> AnyElement {
     let target = target.clone();
-    components::outlined_icon_button("reader-create-bookmark", "Create bookmark at current location", IconName::Plus)
+    components::outlined_icon_button("reader-create-bookmark", text!(reader::create_bookmark_at_current_location), IconName::Plus)
         .debug_selector(|| "reader-create-bookmark".into())
         .disabled(!enabled)
         .on_click(move |_, window, cx| {
@@ -67,7 +69,7 @@ pub(crate) fn create_button<C: BookmarkTarget>(target: &Entity<C>, enabled: bool
 }
 
 pub(crate) fn filter_input<C: BookmarkTarget>(window: &mut Window, cx: &mut Context<C>) -> Entity<InputState> {
-    let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter bookmarks"));
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(reader::filter_bookmarks)));
     cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
         if matches!(event, InputEvent::Change) {
             this.filter_bookmarks(cx);
@@ -117,10 +119,10 @@ pub(crate) fn card<C: AnnotationSidebarTarget>(target: &Entity<C>, index: usize,
             let rename_id = id.clone();
             let delete = menu_target.clone();
             let delete_id = id.clone();
-            menu.item(components::menu_item("Rename bookmark", move |_, window, cx| {
+            menu.item(components::menu_item(text!(reader::rename_bookmark), move |_, window, cx| {
                 rename.update(cx, |this, cx| this.select_sidebar_annotation(rename_id.clone(), window, cx));
             }))
-            .item(components::menu_item("Delete bookmark", move |_, _, cx| {
+            .item(components::menu_item(text!(reader::delete_bookmark), move |_, _, cx| {
                 delete.update(cx, |this, cx| this.delete_sidebar_annotation(delete_id.clone(), cx));
             }))
         })

@@ -1,11 +1,13 @@
-//! Ingestion output tied to the exact PDF bytes, independent of a renderer.
+//! Ingestion output for a book identity and its PDF byte revision, independent
+//! of a renderer.
 #[path = "metadata/transport.rs"]
 mod transport;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PdfReaderMetadata {
     pub version: u32,
-    pub content_hash: String,
+    #[serde(rename = "content_hash")]
+    pub book_id: String,
     #[serde(with = "transport::pages")]
     pub pages: Vec<PdfStoredPage>,
     /// Legacy serialized field, retained only to decode existing caches and sync data.
@@ -30,11 +32,11 @@ pub struct PdfStoredPage {
 }
 
 impl PdfReaderMetadata {
-    pub fn valid_for(&self, content_hash: &str) -> bool {
+    pub fn valid_for(&self, book_id: &str) -> bool {
         self.version == 1
-            && self.content_hash == content_hash
-            && (content_hash.len() == 64 || (content_hash.len() == 66 && (content_hash.starts_with("01") || content_hash.starts_with("02"))))
-            && content_hash.bytes().all(|c| c.is_ascii_hexdigit())
+            && self.book_id == book_id
+            && (book_id.len() == 64 || (book_id.len() == 66 && (book_id.starts_with("01") || book_id.starts_with("02"))))
+            && book_id.bytes().all(|c| c.is_ascii_hexdigit())
             && !self.pages.is_empty()
             && self.pages.len() <= 32767
             && self.pages.iter().all(|p| p.width.is_finite() && p.height.is_finite() && p.width > 0.0 && p.height > 0.0 && matches!(p.rotation, 0 | 90 | 180 | 270))
@@ -128,18 +130,18 @@ mod tests {
     use super::*;
     #[test]
     fn old_snapshots_default_optional_fields_and_large_notes_stay_syncable() {
-        let content_hash = "a".repeat(64);
+        let book_id = "a".repeat(64);
         let mut metadata: PdfReaderMetadata = serde_json::from_value(serde_json::json!({
-            "version":1,"content_hash":content_hash,"pages":[{"width":600,"height":800,"rotation":0}],"outline":[]
+            "version":1,"content_hash":book_id,"pages":[{"width":600,"height":800,"rotation":0}],"outline":[]
         }))
         .unwrap();
-        assert!(metadata.valid_for(&content_hash));
+        assert!(metadata.valid_for(&book_id));
         let note = PdfStoredAnnotation { page_index: 0, index: 0, kind: PdfStoredAnnotationKind::Note, rects: vec![[0.1, 0.1, 0.2, 0.1]], color: "#abcdef".into(), text: String::new(), note: "\n".repeat(16384) };
         metadata.annotations = vec![note; 200];
-        assert!(!metadata.valid_for(&content_hash));
+        assert!(!metadata.valid_for(&book_id));
         metadata.bound_optional_data();
         assert!(!metadata.annotations.is_empty());
-        assert!(metadata.valid_for(&content_hash));
+        assert!(metadata.valid_for(&book_id));
         assert!(serde_json::to_vec(&metadata).unwrap().len() < 4 * 1024 * 1024);
     }
 }

@@ -6,18 +6,16 @@ use client_runtime::Failure;
 use std::future::Future;
 use std::time::Duration;
 
-use super::LibrarySession;
 use super::events::{LibraryEvent, LibraryEventRouter};
+use super::LibrarySession;
 use crate::BackendError;
 #[cfg(all(feature = "kobo", target_os = "linux"))]
 use client_platform_kobo::device::wifi::{self, Phase as WifiPhase};
 #[cfg(not(target_arch = "wasm32"))]
 use client_platform_runtime::startup_profile::StartupProfile;
 use client_platform_runtime::transfers;
-use futures_util::{FutureExt, future::LocalBoxFuture};
-use library_database::Database;
+use futures_util::{future::LocalBoxFuture, FutureExt};
 use library_runtime::scheduler::SyncRequest;
-use library_sync::LibrarySync;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 
@@ -66,7 +64,16 @@ impl WorkerKind {
     async fn run(self, session: &LibrarySession, requests: async_channel::Receiver<SyncRequest>) {
         // All four workers share one scheduler and panic-recovery future.
         // Box only the active pass so its large state does not fill the root.
-        run_timed(self.name(), move |remote| self.pass(session, remote), requests).await;
+        run_timed(
+            self.name(),
+            move |remote| async move {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _cache = session.database_cache_work();
+                self.pass(session, remote).await
+            },
+            requests,
+        )
+        .await;
     }
 }
 
@@ -93,11 +100,15 @@ pub(super) async fn run_workers(session: Rc<LibrarySession>, requests: WorkerReq
         profile.mark("ready");
     }
     let session = &*session;
-    if !session.is_opds() {
-        if let Err(error) = session.db.refresh_taxonomy_assignments() {
-            log::warn!("library taxonomy refresh will retry next launch: {error}");
-        } else {
-            session.events.publish_update(library_model::LibraryUpdate::Contents);
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _cache = session.database_cache_work();
+        if !session.is_opds() {
+            if let Err(error) = session.db.refresh_taxonomy_assignments() {
+                log::warn!("library taxonomy refresh will retry next launch: {error}");
+            } else {
+                session.events.publish_update(library_model::LibraryUpdate::Contents);
+            }
         }
     }
     // Keep each scoped worker on the heap: their state machines contain large
@@ -175,7 +186,9 @@ async fn recover_pass(name: &str, pass: impl Future<Output = Result<(), ()>>) ->
 }
 
 /// Create the remote library once for the current server and user.
-pub(super) async fn ensure_remote_library(sync: &LibrarySync, database: &Database) -> Result<(), BackendError> {
+pub(super) async fn ensure_remote_library(library: &LibrarySession) -> Result<(), BackendError> {
+    let sync = &library.sync;
+    let database = &library.db;
     let account = sync.account().ok_or_else(|| BackendError::message("library has no account capability"))?;
     let session = account.require().map_err(crate::BackendError::operation)?;
     let identity = format!("{}|{}", session.server_url(), session.user_id());
@@ -183,13 +196,14 @@ pub(super) async fn ensure_remote_library(sync: &LibrarySync, database: &Databas
         return Ok(());
     }
     let name = database.sync_metadata("remote_library_name")?.ok_or_else(|| BackendError::message("library has no remote name"))?;
-    account.create_library(sync.library_id, name, database.storage_policy()?).await.map_err(crate::BackendError::operation)?;
+    account.create_library(sync.library_id(), name, database.storage_policy()?, library.kind.clone()).await.map_err(crate::BackendError::operation)?;
     database.set_sync_metadata("server_library_created", &identity)?;
     Ok(())
 }
 
 async fn sync_pass(session: &LibrarySession, remote: bool) -> Result<(), ()> {
-    if session.is_opds() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if session.opds.as_ref().is_some_and(super::opds::OpdsLibrary::is_catalog) {
         return Ok(());
     }
     wait_for_network().await?;
@@ -202,8 +216,12 @@ async fn sync_pass(session: &LibrarySession, remote: bool) -> Result<(), ()> {
             // until the account observer wakes us on sign-in.
             return Err(BackendError::message("waiting for account session"));
         }
-        ensure_remote_library(sync, &session.db).await?;
-        if remote { sync.synchronize_state_mode(false).await.map(|_| ()).map_err(crate::BackendError::operation) } else { sync.drain_outbox().await.map(|_| ()).map_err(crate::BackendError::operation) }
+        ensure_remote_library(session).await?;
+        if remote {
+            sync.synchronize_state_mode(false).await.map(|_| ()).map_err(crate::BackendError::operation)
+        } else {
+            sync.drain_outbox().await.map(|_| ()).map_err(crate::BackendError::operation)
+        }
     }
     .await;
     // Unrelated sync work may run before a reading position's quiet period ends.
@@ -290,7 +308,11 @@ async fn replay_and_prepare(session: &LibrarySession) -> Result<(), ()> {
     }
 
     session.emit(LibraryEvent::FilesPrepared);
-    if failed { Err(()) } else { Ok(()) }
+    if failed {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
@@ -313,7 +335,16 @@ async fn run_scan_worker(session: &LibrarySession) {
     wake.wake();
     let wake = &wake;
     // The debounce is the quiet period while a file manager is still copying.
-    library_runtime::scheduler::run_timed(async move |_| recover_pass("filesystem scan", async { scan_and_watch(session, wake, &mut watcher).await }).await, requests, Duration::from_secs(30), Duration::from_millis(500)).await;
+    library_runtime::scheduler::run_timed(
+        async move |_| {
+            let _cache = session.database_cache_work();
+            recover_pass("filesystem scan", async { scan_and_watch(session, wake, &mut watcher).await }).await
+        },
+        requests,
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+    )
+    .await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]

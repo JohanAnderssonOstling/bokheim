@@ -1,5 +1,5 @@
 //! Builds the snapshot clients attach, and the files they download.
-use crate::curation;
+use crate::{covers::CoverAssets, curation};
 use book_model::{AuthorId, BookMetadata, BookRecord, Scheme, Scope};
 use metadata_contract::catalog::{source_evidence, SOURCE_PERCENTILES_SQL};
 use metadata_contract::matching::author_match_keys;
@@ -250,24 +250,13 @@ pub fn publish(dir: &Path, db: &Connection, out: &Path, release_id: u64) -> Resu
     let mut descriptions = Descriptions::default();
     let mut total_file_bytes = 0;
     for (hash, record, book_sources) in &books {
-        crate::covers::generate_cards(dir, hash)?;
-        for file in [
-            format!("books/{hash}.epub"),
-            format!("covers/{hash}-card.jpg"),
-            format!("covers/{hash}-detail.jpg"),
-            format!("covers/{hash}-{}.jpg", thumbnail::card_thumbnail_suffix(thumbnail::BROWSE_THUMBNAIL_WIDTH)),
-            format!("covers/{hash}-{}.jpg", thumbnail::card_thumbnail_suffix(thumbnail::THUMBNAIL_WIDTH)),
-        ] {
-            let (from, to) = (dir.join(&file), out.join(&file));
-            if from.exists() && !to.exists() {
-                if file.starts_with("books/") {
-                    // Content-addressed EPUBs are immutable; share their blocks
-                    // with local publication when both trees use one filesystem.
-                    std::fs::hard_link(&from, &to).or_else(|_| std::fs::copy(&from, &to).map(|_| ())).map_err(|e| format!("{}: {e}", from.display()))?;
-                } else {
-                    std::fs::copy(&from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
-                }
-            }
+        CoverAssets::new(dir, hash).publish(out)?;
+        let file = format!("books/{hash}.epub");
+        let (from, to) = (dir.join(&file), out.join(&file));
+        if from.exists() && !to.exists() {
+            // Content-addressed EPUBs are immutable; share their blocks
+            // with local publication when both trees use one filesystem.
+            std::fs::hard_link(&from, &to).or_else(|_| std::fs::copy(&from, &to).map(|_| ())).map_err(|e| format!("{}: {e}", from.display()))?;
         }
         let file_bytes = std::fs::metadata(dir.join(format!("books/{hash}.epub"))).map_err(|e| e.to_string())?.len();
         let description = descriptions.store(&snapshot, &record.description)?;
@@ -319,14 +308,7 @@ pub fn publish(dir: &Path, db: &Connection, out: &Path, release_id: u64) -> Resu
         authors.store(&snapshot, &key, &record)?;
         store_metadata(&snapshot, &key, &record.book)?;
         // External identities address cover assets only, never hosted book files.
-        crate::covers::generate_cards(dir, &key)?;
-        for size in ["card".to_owned(), "detail".to_owned(), thumbnail::card_thumbnail_suffix(thumbnail::BROWSE_THUMBNAIL_WIDTH), thumbnail::card_thumbnail_suffix(thumbnail::THUMBNAIL_WIDTH)] {
-            let file = format!("covers/{key}-{size}.jpg");
-            let (from, to) = (dir.join(&file), out.join(&file));
-            if from.exists() && !to.exists() {
-                std::fs::copy(&from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
-            }
-        }
+        CoverAssets::new(dir, &key).publish(out)?;
         external_count += 1;
     }
     // Native source identities and audit URLs stay in curation. Clients only
@@ -759,5 +741,4 @@ mod tests {
         assert_eq!(reopened.query_row("SELECT format FROM external_book WHERE entry_id='epub'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         assert_eq!(reopened.query_row("SELECT format FROM external_book WHERE entry_id='audio'", [], |row| row.get::<_, i64>(0)).unwrap(), 16);
     }
-
 }

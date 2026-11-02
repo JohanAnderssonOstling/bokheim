@@ -1,11 +1,11 @@
 //! The reader's HTML-engine adapter for renderer-independent book content.
 
 use book_content::{Book, BookFormat as BookSourceFormat, ReadingBook};
-use book_model::{AnnotationAnchor, PUBLICATION_CFI_PREFIX};
+use book_model::{AnnotationAnchor, BookTocEntry, PUBLICATION_CFI_PREFIX};
 use futures_lite::future::block_on;
 use html::document::ImageSource;
-use html::search::SearchIndex;
 use html::resources::{ImageLoadCompletion, ImageLoader, ImageResourceContext, ResourceMetadata, ResourceProvider, load_image_bytes_async};
+use html::search::SearchIndex;
 use skrift_column_paginator::cfi::PublicationCfi;
 use std::future::Future;
 use std::io::{self, Read, Seek};
@@ -135,7 +135,7 @@ impl BookSource {
     pub fn document_uris(&self) -> &[String] {
         self.content.document_uris()
     }
-    pub fn toc(&self) -> &[book_content::TocEntry] {
+    pub fn toc(&self) -> &[BookTocEntry] {
         &self.content.toc
     }
     pub fn document_weights(&self) -> &[u64] {
@@ -153,8 +153,8 @@ impl BookSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use html::pipeline::{DocumentFactory, ResourceContext};
     use html::resources::{ImagePipeline, ImageService, InlineJobSpawner};
+    use html_pipeline::{DocumentFactory, ResourceContext};
     use std::collections::HashSet;
     use std::io::{Cursor, Write};
     use std::time::{Duration, Instant};
@@ -270,7 +270,7 @@ mod tests {
         pipeline.ensure_window(document.images(), &HashSet::from([image_idx as u32]));
         let deadline = Instant::now() + Duration::from_secs(2);
         while pipeline.get_decoded(image_idx as u32).is_none() && Instant::now() < deadline {
-            pipeline.poll();
+            pipeline.poll(document.images());
             std::thread::yield_now();
         }
         let html::resources::DecodedImage::Svg { bytes, .. } = pipeline.get_decoded(image_idx as u32).expect("decoded inline SVG") else { panic!("inline SVG must remain a vector resource") };

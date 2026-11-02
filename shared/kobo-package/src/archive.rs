@@ -62,7 +62,9 @@ pub fn sanitize_path(path: &Path, kind: EntryType, policy: Policy) -> io::Result
         return Err(invalid(format!("Kobo package attempts to overwrite user data: {name}")));
     }
     if policy == Policy::Usb {
-        if parts[0] != ".adds" && parts[0] != "Bokheim" {
+        let app = name == ".adds/bokheim" || name.starts_with(".adds/bokheim/");
+        let shared_directory = kind.is_dir() && matches!(name.as_str(), ".adds" | ".adds/nm");
+        if !app && !shared_directory && name != MENU_CONFIGURATION && parts[0] != "Bokheim" {
             return Err(invalid(format!("Unexpected path in Kobo package: {name}")));
         }
     } else {

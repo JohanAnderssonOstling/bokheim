@@ -14,8 +14,8 @@ impl Database {
     /// Everything one book's page states, in one snapshot rather than a request
     /// per panel: the card, its folder trail, its credits, its navigation, and
     /// where the reader is inside it.
-    pub fn browse_book_detail(&self, content_hash: &BookId) -> Result<BookDetail, DatabaseError> {
-        let hash = &content_hash;
+    pub fn browse_book_detail(&self, book_id: &BookId) -> Result<BookDetail, DatabaseError> {
+        let hash = &book_id;
         self.with_browse_snapshot(|| {
             let found = query_last(
                 |read| self.connection.book_detail_book(hash, read),
@@ -27,7 +27,7 @@ impl Database {
             )?;
             // A book the library does not hold may be in the catalog.
             let Some((id, audiobook_chapter_count, record, duration_ms)) = found else {
-                let detail: Result<BookDetail, DatabaseError> = super::catalog::detail(content_hash)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into());
+                let detail: Result<BookDetail, DatabaseError> = super::catalog::detail(book_id)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into());
                 return self.with_catalog_subjects(detail?);
             };
             let year = year_from_record(record)?;
@@ -62,7 +62,7 @@ impl Database {
             // Chapter intervals use the original stored headings, before
             // display numbering accounts for any non-chapter navigation entries.
             let chapter = if is_audiobook {
-                match (self.audiobook_reading_position(content_hash)?, duration_ms) {
+                match (self.audiobook_reading_position(book_id)?, duration_ms) {
                     (Some(position), Some(duration_ms)) => chapters_from_navigation(&toc, duration_ms.max(0) as u64).find(|chapter| position >= chapter.start_ms && position < chapter.end_ms),
                     _ => None,
                 }
@@ -90,7 +90,7 @@ impl Database {
                 }
             };
 
-            let mut chapter_read_status = self.chapter_read_status(content_hash)?;
+            let mut chapter_read_status = self.chapter_read_status(book_id)?;
             chapter_read_status.update_parents(&toc);
             Ok(BookDetail { book, external_url: None, audiobook_chapter_count, description, subjects, year, source_directory_id, path, authors, credits, current_entry, current_target, toc, chapter_read_status })
         })

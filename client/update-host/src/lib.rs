@@ -13,7 +13,7 @@ use update_client::native_files::parent_directory;
 use update_client::{
     DiscoveryConfig,
     activation::{self, Journal, Replacement, State},
-    coordinator::{ArtifactKind, Coordinator, DeviceVersion, Phase, UpdateView, WaitReason},
+    coordinator::{ApplicationActivation, ArtifactKind, Coordinator, DeviceVersion, Phase, UpdateView, WaitReason},
     native_state::{SqliteStore, UpdateLock},
 };
 use update_files::{probe_write, same_volume};

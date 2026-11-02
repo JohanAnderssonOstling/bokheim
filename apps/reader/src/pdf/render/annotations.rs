@@ -1,5 +1,7 @@
 //! PDF annotation loading, editing, navigation, and sidebar presentation.
 
+use ui_text::text;
+
 use crate::invalidation::notify;
 use crate::shell::bookmarks::{self, BookmarkTarget};
 use crate::shell::marks::BookmarkChange;
@@ -32,7 +34,7 @@ impl BookmarkEditorTarget for PdfReaderView {
 
 impl AnnotationEditorTarget for PdfReaderView {
     fn set_annotation_scope(&mut self, scope: Option<RecurringScope>, cx: &mut Context<Self>) {
-        if self.marks.selected().is_none_or(|annotation| annotation.is_external_pdf_annotation() || annotation.content_hash != self.locator.content_hash() || annotation.exact_text.trim().is_empty()) {
+        if self.marks.selected().is_none_or(|annotation| annotation.is_external_pdf_annotation() || annotation.book_id != self.locator.book_id() || annotation.exact_text.trim().is_empty()) {
             return;
         }
         self.save_selected_annotation(None, None, cx);
@@ -46,7 +48,7 @@ impl AnnotationEditorTarget for PdfReaderView {
         let bookmark = self.marks.annotation(&id).is_some_and(Annotation::is_bookmark);
         let note = self.marks.select(id);
         self.annotation_note_input.update(cx, |input, cx| {
-            input.set_placeholder(if bookmark { "Name bookmark" } else { "Add a note" }, window, cx);
+            input.set_placeholder(if bookmark { text!(reader::name_bookmark) } else { text!(common::add_a_note) }, window, cx);
             input.set_value(note, window, cx);
             if bookmark {
                 input.focus(window, cx);
@@ -125,11 +127,11 @@ impl PdfReaderView {
         }
     }
     pub(super) fn load_reader_state(&mut self, cx: &mut Context<Self>) {
-        let content_hash = self.locator.content_hash();
+        let book_id = self.locator.book_id();
         let revision = self.marks.revision();
         self.annotation_load_generation = self.annotation_load_generation.wrapping_add(1);
         let generation = self.annotation_load_generation;
-        crate::shell::marks::load_annotations(cx, self.library.clone(), content_hash, &self.marks, move |this, cx, (mut annotations, inherited)| {
+        crate::shell::marks::load_annotations(cx, self.library.clone(), book_id, &self.marks, move |this, cx, (mut annotations, inherited)| {
             if generation != this.annotation_load_generation {
                 return;
             }
@@ -152,7 +154,7 @@ impl PdfReaderView {
                 .flat_map(|(page, characters)| {
                     let characters = characters.collect::<Vec<_>>();
                     let text = characters.iter().map(|(character, _)| *character).collect::<String>();
-                    crate::pdf::recurring::matched_page_occurrences(self.marks.recurring_matches(&text), self.locator.content_hash(), page, &characters, |page| self.toc.chapter_at(page))
+                    crate::pdf::recurring::matched_page_occurrences(self.marks.recurring_matches(&text), self.locator.book_id(), page, &characters, |page| self.toc.chapter_at(page))
                 })
                 .collect()
         };
@@ -183,7 +185,7 @@ impl PdfReaderView {
         let now = crate::shell::marks::now_millis();
         let annotation = Annotation {
             id: uuid::Uuid::new_v4().to_string(),
-            content_hash: self.locator.content_hash(),
+            book_id: self.locator.book_id(),
             anchor,
             exact_text: selection.text,
             style: AnnotationStyle::Highlight,
@@ -200,7 +202,7 @@ impl PdfReaderView {
         let note = self.marks.select(annotation_id.clone());
         self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(Some(annotation_id), cx));
         self.annotation_note_input.update(cx, |input, cx| {
-            input.set_placeholder("Add a note", window, cx);
+            input.set_placeholder(text!(common::add_a_note), window, cx);
             input.set_value(note, window, cx);
         });
         self.refresh_annotation_overlays(cx);
@@ -217,7 +219,7 @@ impl PdfReaderView {
             occurrence.annotation_id.clone()
         } else {
             self.recurring.editor_overlay = None;
-            self.recurring.editor_passage = self.marks.annotation(&id).filter(|annotation| annotation.content_hash == self.locator.content_hash()).and_then(|annotation| {
+            self.recurring.editor_passage = self.marks.annotation(&id).filter(|annotation| annotation.book_id == self.locator.book_id()).and_then(|annotation| {
                 let anchor = annotation.anchor.pdf_anchor()?;
                 Some(PdfSelectionSnapshot { page_index: anchor.page_index as usize, text: annotation.exact_text.clone(), rects: anchor.rects.iter().map(|rect| NormalizedRect::new(rect.left, rect.top, rect.width, rect.height)).collect() })
             });
@@ -235,7 +237,7 @@ impl PdfReaderView {
         let active = self.recurring.editor_overlay.clone().unwrap_or(id);
         self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(Some(active), cx));
         self.annotation_note_input.update(cx, |input, cx| {
-            input.set_placeholder(if bookmark { "Name bookmark" } else { "Add a note" }, window, cx);
+            input.set_placeholder(if bookmark { text!(reader::name_bookmark) } else { text!(common::add_a_note) }, window, cx);
             input.set_value(note, window, cx);
             if bookmark {
                 input.focus(window, cx);
@@ -286,14 +288,14 @@ impl PdfReaderView {
     }
 
     pub(super) fn render_annotations_body(&mut self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let rows = reader_state_rows(self.marks.annotations(), "No notes yet. Select PDF text, then choose Annotation to add a note.", |annotation: &Annotation| {
+        let rows = reader_state_rows(self.marks.annotations(), text!(reader::no_notes_yet_select_pdf_text_then_choose_annotation_to_add_a), |annotation: &Annotation| {
             let page = annotation.anchor.pdf_anchor().map(|anchor| anchor.page_index as usize);
             if let Some(page) = page
                 && let Some(title) = self.toc.chapter_title_at(page)
             {
                 return (format!("chapter:{}", self.toc.chapter_at(page)), title.to_owned());
             }
-            if let Some(page) = page { (format!("page:{page}"), format!("Page {}", page + 1)) } else { ("other".to_owned(), "Other notes".to_owned()) }
+            if let Some(page) = page { (format!("page:{page}"), format!(text!(reader::page), page + 1)) } else { ("other".to_owned(), text!(reader::other_notes).to_owned()) }
         });
         let selected = self.marks.selected_id();
         let selected_row = selected.and_then(|id| rows.iter().position(|row| row.annotation_id() == Some(id)));
@@ -328,7 +330,7 @@ impl PdfReaderView {
             })
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
-        let context = self.marks.editor_context(self.locator.content_hash(), text, &local_ids, self.toc.has_entries());
+        let context = self.marks.editor_context(self.locator.book_id(), text, &local_ids, self.toc.has_entries());
         annotation_editor::recurring_editor("pdf-popup", &cx.entity(), &annotation, context, geometry, &self.annotation_note_input, components::browser_theme(cx), window, cx)
     }
 }
@@ -347,10 +349,10 @@ impl BookmarkTarget for PdfReaderView {
         let position = self.pdf.read(cx).source_position();
         let page = position.page_index();
         let anchor = AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(page as u32, vec![PdfAnnotationRect::new(0.0, position.page_y(), 0.0, 0.0)], None));
-        let bookmark = bookmarks::bookmark(self.locator.content_hash(), anchor, self.toc.bookmark_ordinal_at(page), book_model::pdf_page_progress(page, self.page_count));
+        let bookmark = bookmarks::bookmark(self.locator.book_id(), anchor, self.toc.bookmark_ordinal_at(page), book_model::pdf_page_progress(page, self.page_count));
         self.marks.start_bookmark(bookmark);
         self.annotation_note_input.update(cx, |input, cx| {
-            input.set_placeholder("Name bookmark", window, cx);
+            input.set_placeholder(text!(reader::name_bookmark), window, cx);
             input.set_value("", window, cx);
             input.focus(window, cx);
         });
@@ -371,10 +373,10 @@ impl PdfReaderView {
 
     pub(super) fn refresh_bookmark_rows(&mut self, cx: &mut Context<Self>) {
         let bookmarks = self.marks.bookmarks();
-        let groups = reader_state_rows(bookmarks, "No bookmarks yet.", |bookmark| {
+        let groups = reader_state_rows(bookmarks, text!(reader::no_bookmarks_yet), |bookmark| {
             let page = bookmark.anchor.pdf_anchor().map_or(0, |anchor| anchor.page_index as usize);
             let chapter = bookmark.toc_ordinal.and_then(|ordinal| usize::try_from(ordinal).ok()).and_then(|ordinal| self.toc.chapter_for_ordinal(ordinal));
-            if let Some((start, title)) = chapter { (format!("chapter:{start}"), title.to_owned()) } else { (format!("page:{page}"), format!("Page {}", page + 1)) }
+            if let Some((start, title)) = chapter { (format!("chapter:{start}"), title.to_owned()) } else { (format!("page:{page}"), format!(text!(reader::page), page + 1)) }
         });
         self.bookmark_list.replace(groups, bookmarks, &self.bookmark_filter_input.read(cx).value(), self.marks.selected_id());
     }

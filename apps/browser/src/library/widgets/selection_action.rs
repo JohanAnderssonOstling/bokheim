@@ -1,19 +1,30 @@
+use ui_text::text;
+
 use std::rc::Rc;
 
 use gpui::{App, SharedString, Window};
-use ui_components::Button;
 use gpui_component::menu::PopupMenu;
-use gpui_component::{Disableable, Icon};
+use gpui_component::{Disableable, Icon, IconName};
 use ui_components as components;
+use ui_components::Button;
 
 /// One command shared by the selection's context menu and footer.
 #[derive(Clone)]
 pub(crate) struct SelectionAction {
     pub(crate) id: &'static str,
+    pub(crate) kind: SelectionActionKind,
     label: &'static str,
     icon: Icon,
     disabled: bool,
     run: Rc<dyn Fn(&mut Window, &mut App)>,
+}
+
+/// Menu placement is independent of command identifiers and producer order.
+#[derive(Clone, Copy)]
+pub(crate) enum SelectionActionKind {
+    OpenWindow,
+    Download,
+    Other,
 }
 
 impl SelectionAction {
@@ -29,7 +40,15 @@ impl SelectionAction {
     }
 
     pub(crate) fn new(id: &'static str, label: &'static str, icon: impl Into<Icon>, run: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        Self { id, label, icon: icon.into(), disabled: false, run: Rc::new(run) }
+        Self { id, kind: SelectionActionKind::Other, label, icon: icon.into(), disabled: false, run: Rc::new(run) }
+    }
+
+    pub(crate) fn download(label: &'static str, icon: impl Into<Icon>, run: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        Self { kind: SelectionActionKind::Download, ..Self::new("download", label, icon, run) }
+    }
+
+    pub(crate) fn new_window(run: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        Self { kind: SelectionActionKind::OpenWindow, ..Self::new("new-window", text!(browse::open_in_new_window), IconName::ExternalLink, run) }
     }
 
     pub(crate) fn disabled(mut self, disabled: bool) -> Self {

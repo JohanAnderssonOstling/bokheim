@@ -46,7 +46,7 @@ impl LibraryImport {
         }
         self.assets.write_thumbnail_set(&hash, &versions.high_density, &versions.browse, &versions.card_high_density).await.map_err(BackendError::operation)?;
         self.database.complete_thumbnail_work(&hash, true).map_err(BackendError::operation)?;
-        self.events.emit(LibraryEvent::ThumbnailGenerated { content_hash: hash });
+        self.events.emit(LibraryEvent::ThumbnailGenerated { book_id: hash });
         Ok(true)
     }
 
@@ -109,7 +109,7 @@ mod tests {
                 parent_id: ROOT_DIR_ID,
                 file_name: "Story".into(),
                 format: BookFormat::Mp3Folder,
-                content_hash: hash,
+                book_id: hash,
                 size_bytes: 10,
                 inspection_version: 1,
                 inspection: Some(book_inspection::InspectedBook { metadata: record.clone(), pdf: None, audiobook: None, toc: Vec::new() }),
@@ -121,7 +121,7 @@ mod tests {
         let cpu = Arc::new(client_platform_native::cpu_host::NativeHost);
         let epub_path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../book-inspection/tests/fixtures/back-matter-evidence.epub"));
         let inspected = filesystem_scanner::ingestion::ingest_file(epub_path.clone(), "fixture.epub".into(), &*cpu).await.unwrap();
-        let epub_hash = inspected.content_hash;
+        let epub_hash = inspected.book_id;
         let epub_bytes = std::fs::read(epub_path).unwrap();
         let catalog = Connection::open_in_memory().unwrap();
         catalog.execute_batch(include_str!("../../library-database/tests/sql/catalog_pagination.sql")).unwrap();
@@ -149,8 +149,8 @@ mod tests {
         let (files, _) = SyncScheduler::new();
         let (enrichment, _) = SyncScheduler::new();
         let (events, _) = LibraryEventRouter::new(sync, asset_work, files, enrichment);
-        let placement = Arc::new(LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
-        let importer = LibraryImport { library_id: DirId::new_v4(), database: database.clone(), assets: assets.clone(), cpu: cpu.clone(), events, placement, root: root.path().to_str().unwrap().into() };
+        let placement = Arc::new(LibraryPlacement::new(database.clone(), assets.clone(), events.clone()));
+        let importer = LibraryImport::new(placement, cpu.clone());
         // A renamed copy uses the catalog only when its actual bytes match.
         let added = importer.import_downloaded_book(ROOT_DIR_ID, "renamed.epub", epub_bytes.clone()).await.unwrap();
         assert!(added.is_local());
@@ -172,12 +172,12 @@ mod tests {
         let books = InspectedFilesystemScan {
             readable: true,
             books: vec![ScannedBook {
-            source_identity: None,
-            directory: ROOT_DIR_ID,
+                source_identity: None,
+                directory: ROOT_DIR_ID,
                 name: "discovered.epub".into(),
                 path: "discovered.epub".into(),
                 fingerprint: inspected.fingerprint,
-                content_hash: epub_hash,
+                book_id: epub_hash,
                 size_bytes: inspected.size_bytes,
                 extension: "epub".into(),
                 inspection: inspected.inspection,

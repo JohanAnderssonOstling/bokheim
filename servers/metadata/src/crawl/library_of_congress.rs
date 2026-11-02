@@ -4,13 +4,14 @@
 //! This module neither bundles classification schedules nor matches embedded
 //! book subjects against them.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
 use crate::{Classification, ClassificationScheme, ClassificationSource, Isbn13, MetadataError, SubjectHeading};
 use futures_util::StreamExt;
+use metadata_contract::ClassificationMethod;
 use reqwest::Url;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 const PROVIDER_ID: &str = "library_of_congress";
@@ -237,7 +238,7 @@ fn match_isbn_verified(isbn: Isbn13, records: &[LibraryOfCongressRecord]) -> Res
     let mut classifications = record.classifications.clone();
     for c in &mut classifications {
         c.evidence.push(metadata_contract::ClassificationEvidence {
-            method: format!("loc_api_isbn:{}", record.provider_record_id.as_deref().unwrap_or("unknown")),
+            method: ClassificationMethod::LibraryOfCongressIsbn { record_id: record.provider_record_id.clone().unwrap_or_else(|| "unknown".into()) },
             isbn13: isbn.to_string(),
             open_library_work_id: String::new(),
             open_library_edition_id: String::new(),
@@ -348,13 +349,12 @@ mod tests {
   </recordData></record></records>
 </searchRetrieveResponse>"#;
 
-
     async fn lookup_one(client: &LibraryOfCongressClient, isbn: &str) -> Result<LibraryOfCongressLookup, MetadataError> {
         client.lookup_batch(&[Isbn13::parse(isbn).unwrap()]).await?.pop().ok_or_else(|| MetadataError("empty LC result".into()))
     }
     #[tokio::test]
     async fn cache_survives_reopen_and_http_errors_are_retryable() {
-        use axum::{Router, routing::get};
+        use axum::{routing::get, Router};
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
@@ -362,7 +362,7 @@ mod tests {
         let path = dir.path().join("cache.sqlite");
         let client = LibraryOfCongressClient::with_endpoint(&endpoint).unwrap().with_cache(&path).unwrap();
         let found = lookup_one(&client, "9780306406157").await.unwrap();
-        assert!(matches!(&found,LibraryOfCongressLookup::Matched{classifications,..} if classifications.len()==2 && classifications[0].evidence[0].method.starts_with("loc_api_isbn:")));
+        assert!(matches!(&found,LibraryOfCongressLookup::Matched{classifications,..} if classifications.len()==2 && matches!(classifications[0].evidence[0].method, ClassificationMethod::LibraryOfCongressIsbn { .. })));
         assert_eq!(lookup_one(&client, "9781691706631").await.unwrap(), LibraryOfCongressLookup::NoMatch);
         task.abort();
         drop(client);
@@ -388,7 +388,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn rate_reservation_is_shared_and_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -407,7 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_pages_map_exact_isbns_and_keep_other_books_separate() {
-        use axum::{Router, extract::Query, routing::get};
+        use axum::{extract::Query, routing::get, Router};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
@@ -444,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_later_page_caches_neither_positive_nor_negative_results() {
-        use axum::{Router, extract::Query, http::StatusCode, routing::get};
+        use axum::{extract::Query, http::StatusCode, routing::get, Router};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
@@ -453,7 +452,11 @@ mod tests {
                 Router::new().route(
                     "/",
                     get(|Query(q): Query<HashMap<String, String>>| async move {
-                        if q["startRecord"] == "1" { (StatusCode::OK, MARC_RESPONSE.replace("<numberOfRecords>1", "<numberOfRecords>2")) } else { (StatusCode::INTERNAL_SERVER_ERROR, "error".into()) }
+                        if q["startRecord"] == "1" {
+                            (StatusCode::OK, MARC_RESPONSE.replace("<numberOfRecords>1", "<numberOfRecords>2"))
+                        } else {
+                            (StatusCode::INTERNAL_SERVER_ERROR, "error".into())
+                        }
                     }),
                 ),
             )
@@ -470,5 +473,4 @@ mod tests {
         }
         task.abort();
     }
-
 }

@@ -1,5 +1,7 @@
 //! PDF search visibility and renderer navigation.
 
+use ui_text::text;
+
 use crate::shell::search;
 use crate::shell::toolbar::SidebarTarget;
 use gpui::prelude::*;
@@ -30,7 +32,7 @@ impl PdfReaderView {
 
     fn render_search_row(&self, row: usize, target: &Entity<Self>, theme: components::BrowserTheme, cx: &App) -> AnyElement {
         match self.search_list.list.rows.get(row) {
-            Some(SearchRow::Heading(page)) => components::reader_annotation_group_heading(format!("Page {}", page + 1), theme).into_any_element(),
+            Some(SearchRow::Heading(page)) => components::reader_annotation_group_heading(format!(text!(reader::page), page + 1), theme).into_any_element(),
             Some(SearchRow::Match(index)) => {
                 let index = *index;
                 let Some(hit) = self.pdf.read(cx).search_hits().get(index) else { return div().into_any_element() };

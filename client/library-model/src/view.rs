@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use crate::BookTocEntry;
 use book_model::AuthorId;
 use content_address::BookId;
@@ -14,20 +16,41 @@ pub const FINISHED_PROGRESS_THRESHOLD: f32 = 98.0;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BookLocator {
     library_id: LibraryId,
-    content_hash: BookId,
+    #[serde(rename = "content_hash")]
+    book_id: BookId,
 }
 
 impl BookLocator {
-    pub fn new(library_id: LibraryId, content_hash: BookId) -> Self {
-        Self { library_id, content_hash }
+    pub fn new(library_id: LibraryId, book_id: BookId) -> Self {
+        Self { library_id, book_id }
     }
 
     pub fn library_id(&self) -> &LibraryId {
         &self.library_id
     }
 
-    pub fn content_hash(&self) -> BookId {
-        self.content_hash
+    pub fn book_id(&self) -> BookId {
+        self.book_id
+    }
+}
+
+/// Backend activity that determines which book-file actions may be admitted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookFileActivity {
+    #[default]
+    Idle,
+    Downloading,
+    BulkOperation,
+}
+
+impl BookFileActivity {
+    pub const fn blocks_file_changes(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    pub const fn blocks_download_requests(self) -> bool {
+        matches!(self, Self::BulkOperation)
     }
 }
 
@@ -39,7 +62,8 @@ pub enum LibraryUpdate {
     Download(crate::BookDownloadStatus),
     /// A queued user action failed after its initial command was accepted.
     DownloadFailed {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
         /// Why it failed, when known; the diagnostic stays in the backend log.
         failure: Option<operation_failure::Failure>,
     },
@@ -48,6 +72,8 @@ pub enum LibraryUpdate {
         progress: crate::CatalogImportProgress,
     },
     Scanning(bool),
+    /// The backend admission state for user book-file actions changed.
+    BookFileActivity(BookFileActivity),
     /// Durable sync progress changed after a completed exchange.
     SyncStatusChanged,
     /// Annotation text, anchors or deletion state changed locally.
@@ -78,10 +104,10 @@ impl LibraryFileTypeFilter {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::All => "All",
-            Self::Book => "Books",
-            Self::Pdf => "PDF",
-            Self::Audiobook => "Audiobooks",
+            Self::All => text!(browse::all),
+            Self::Book => text!(browse::books),
+            Self::Pdf => text!(browse::pdf),
+            Self::Audiobook => text!(browse::audiobooks),
         }
     }
 
@@ -112,10 +138,10 @@ impl BrowseChipSort {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Alphabetical => "Alphabetical",
-            Self::BookCount => "Book count",
-            Self::Popularity => "Popularity",
-            Self::DefaultOrder => "Default order",
+            Self::Alphabetical => text!(browse::alphabetical),
+            Self::BookCount => text!(browse::book_count),
+            Self::Popularity => text!(browse::popularity),
+            Self::DefaultOrder => text!(browse::default_order),
         }
     }
 }
@@ -137,10 +163,10 @@ impl BrowseBookSort {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Alphabetical => "Alphabetical",
-            Self::RecentlyRead => "Recently read",
-            Self::Popularity => "Popularity",
-            Self::DefaultOrder => "Default order",
+            Self::Alphabetical => text!(browse::alphabetical),
+            Self::RecentlyRead => text!(browse::recently_read),
+            Self::Popularity => text!(browse::popularity),
+            Self::DefaultOrder => text!(browse::default_order),
         }
     }
 }
@@ -167,9 +193,6 @@ pub enum BrowseLocation {
         source: OpdsSourceId,
         page: Option<u32>,
     },
-    /// A store's chip at the catalog root. Opening it opens the store's
-    /// window; there is nothing to browse.
-    Store(StoreId),
     TextSearch(crate::NotebookSort),
 }
 
@@ -194,9 +217,9 @@ pub enum HomeShelf {
 impl HomeShelf {
     pub fn label(self) -> &'static str {
         match self {
-            Self::RecentlyRead => "Recently read",
-            Self::Finished => "Finished",
-            Self::RecentlyAdded => "Recently added",
+            Self::RecentlyRead => text!(browse::recently_read),
+            Self::Finished => text!(reader::finished),
+            Self::RecentlyAdded => text!(browse::recently_added),
         }
     }
 
@@ -226,7 +249,6 @@ impl std::fmt::Display for BrowseLocation {
             Self::CatalogAuthor(Some(id)) => write!(formatter, "catalog-author:{id}"),
             Self::Opds { source, page: None } => write!(formatter, "opds:{source}"),
             Self::Opds { source, page: Some(page) } => write!(formatter, "opds:{source}:{page}"),
-            Self::Store(id) => write!(formatter, "store:{id}"),
         }
     }
 }
@@ -376,39 +398,32 @@ pub struct Dir {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BookSource {
     Library {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
     },
     /// A catalog book the library does not hold; catalog browsing leaves out
     /// the ones it does.
     Catalog {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
     },
     /// A publication in one of the user's OPDS feeds. It has no file, and so
     /// no content hash, until it is downloaded into the library, where it
     /// is listed as a library book.
-    /// `downloadable` when the feed offers it openly, as an EPUB or PDF;
-    /// `buyable` when it links a store page that sells it and this system
-    /// can open a store window. A book sold only with DRM is not listed.
-    Opds {
-        source: OpdsSourceId,
-        entry: CardKey,
-        downloadable: bool,
-        buyable: bool,
-    },
+    /// `downloadable` when the feed offers it openly, as an EPUB or PDF.
+    /// A book sold only with DRM is not listed.
+    Opds { source: OpdsSourceId, entry: CardKey, downloadable: bool },
     /// A catalog entry whose book stays on the source's website.
     /// Its opaque entry key identifies metadata, never a downloaded file.
     /// `downloadable` when the source offers the audiobook as an archive,
     /// which adding the entry downloads into the library.
-    ExternalCatalog {
-        entry: CardKey,
-        downloadable: bool,
-    },
+    ExternalCatalog { entry: CardKey, downloadable: bool },
 }
 
-/// A user's OPDS feed, by the id of its synced entry.
+/// An OPDS library or local catalog subscription, identified on this device.
 pub type OpdsSourceId = uuid::Uuid;
 
-/// One of the library's OPDS feeds: where it is and what it is called.
+/// An OPDS browsing source: where it is and what it is called.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpdsSource {
     pub id: OpdsSourceId,
@@ -433,18 +448,6 @@ impl OpdsPublication {
     pub fn book_id(&self) -> BookId {
         BookId::for_opds_entry(&self.entry.0)
     }
-}
-
-/// A bookstore added on this device, by the id it was added under.
-pub type StoreId = uuid::Uuid;
-
-/// A bookstore's website: opened in a window of its own, where what is
-/// bought and downloaded goes into the library's root.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Store {
-    pub id: StoreId,
-    pub name: String,
-    pub url: String,
 }
 
 /// Adding a feed can pause until this device supplies credentials.
@@ -495,7 +498,7 @@ pub struct FeedFacet {
     pub active: bool,
 }
 
-/// Everything a browsing card renders for one book.
+/// One book in a browse result, including feed-provided details when available.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BookCardRow {
     /// Which book this is, and so what the card offers.
@@ -504,6 +507,9 @@ pub struct BookCardRow {
     #[serde(default)]
     pub subtitle: Option<String>,
     pub author: String,
+    /// Description supplied by a feed listing; library details load their own metadata.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     pub progress: f32,
     pub downloaded: bool,
     pub download_requested: bool,
@@ -522,19 +528,24 @@ pub struct BookCardRow {
 /// What identifies a card in a listing. A book with a file is keyed by its
 /// content hash; a book known only by its entry in a feed is keyed by an id
 /// derived from that entry. Never a file's identity: code that reaches the
-/// book's file uses `content_hash()`.
+/// book's stable identity uses `book_id()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CardKey(pub [u8; 32]);
 
 impl From<BookId> for CardKey {
     fn from(id: BookId) -> Self {
-        if id.is_local() { Self(*blake3::hash(id.as_bytes()).as_bytes()) }
-        else { Self(*id.identity_digest()) }
+        if id.is_local() {
+            Self(*blake3::hash(id.as_bytes()).as_bytes())
+        } else {
+            Self(*id.identity_digest())
+        }
     }
 }
 
 impl From<&BookId> for CardKey {
-    fn from(id: &BookId) -> Self { Self::from(*id) }
+    fn from(id: &BookId) -> Self {
+        Self::from(*id)
+    }
 }
 
 impl std::fmt::Display for CardKey {
@@ -546,7 +557,7 @@ impl std::fmt::Display for CardKey {
 impl BookCardRow {
     pub fn key(&self) -> CardKey {
         match self.source {
-            BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => CardKey::from(content_hash),
+            BookSource::Library { book_id } | BookSource::Catalog { book_id, .. } => CardKey::from(book_id),
             BookSource::Opds { entry, .. } | BookSource::ExternalCatalog { entry, .. } => entry,
         }
     }
@@ -555,16 +566,15 @@ impl BookCardRow {
     /// which are added rather than read or downloaded.
     pub fn library_file(&self) -> Option<BookId> {
         match self.source {
-            BookSource::Library { content_hash } => Some(content_hash),
+            BookSource::Library { book_id } => Some(book_id),
             BookSource::Catalog { .. } | BookSource::Opds { .. } | BookSource::ExternalCatalog { .. } => None,
         }
     }
 
-    /// The book's file, when it has one: a feed book has none until it is
-    /// downloaded.
-    pub fn content_hash(&self) -> Option<BookId> {
+    /// The stable book identity, when known. A feed entry gains one on import.
+    pub fn book_id(&self) -> Option<BookId> {
         match self.source {
-            BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => Some(content_hash),
+            BookSource::Library { book_id } | BookSource::Catalog { book_id, .. } => Some(book_id),
             BookSource::Opds { .. } | BookSource::ExternalCatalog { .. } => None,
         }
     }
@@ -572,7 +582,8 @@ impl BookCardRow {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrashedBook {
-    pub content_hash: BookId,
+    #[serde(rename = "content_hash")]
+    pub book_id: BookId,
     pub title: String,
     pub author: String,
     pub format: String,
@@ -716,7 +727,7 @@ mod tests {
     #[test]
     fn local_and_legacy_books_with_the_same_initial_digest_have_distinct_card_keys() {
         let digest = content_address::ContentHash::from_bytes([9; 32]);
-        assert_ne!(CardKey::from(BookId::from(digest)), CardKey::from(BookId::for_local_content(&[4;16], digest)));
+        assert_ne!(CardKey::from(BookId::from(digest)), CardKey::from(BookId::for_local_content(&[4; 16], digest)));
     }
 
     #[test]

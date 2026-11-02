@@ -14,6 +14,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 pub(crate) use std::sync::Arc;
 use std::{future::Future, pin::Pin};
+use uuid::Uuid;
 
 use super::subscriptions::LibraryUpdates;
 use super::transfer::TransferResource;
@@ -38,6 +39,7 @@ pub struct LibrarySession {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) opds: Option<super::OpdsLibrary>,
     pub(crate) id: LibraryId,
+    pub(crate) kind: sync_common::storage::LibraryKind,
     pub(crate) db: std::sync::Arc<Database>,
     pub(crate) assets: AssetStore,
     pub(crate) enrichment: library_enrichment::LibraryEnrichment,
@@ -110,13 +112,23 @@ pub(crate) struct LibraryActor {
     pub(crate) session: Rc<LibrarySession>,
     requests: Option<super::workers::WorkerRequests>,
     #[cfg(not(target_arch = "wasm32"))]
-    restart: Option<(super::LibraryOpenConfig, async_channel::Sender<Result<(), BackendError>>)>,
+    restart: Option<RootRestart>,
     /// Browser book readers and Blob URLs are thread-local resources.
     /// The actor retains them for the lifetime of the page subscription; only
     /// a Send cancellation guard leaves the actor.
     #[cfg(target_arch = "wasm32")]
     pub(crate) books: super::book::browser::BookResources,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+enum RootRestart {
+    Recover { config: super::LibraryOpenConfig, reply: async_channel::Sender<Result<(), BackendError>> },
+    Move { config: super::LibraryOpenConfig, operation: RootMoveOperation, reply: async_channel::Sender<Result<(), BackendError>> },
+}
+
+/// The application commits device-owned registry policy while workers are stopped.
+#[cfg(not(target_arch = "wasm32"))]
+pub type RootMoveOperation = Box<dyn FnOnce(String) -> (String, Result<(), BackendError>) + Send>;
 
 impl Drop for LibraryActor {
     fn drop(&mut self) {
@@ -159,12 +171,38 @@ impl LibraryActor {
             break;
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let Some((config, reply)) = self.restart.take() else { break };
+                let Some(restart) = self.restart.take() else { break };
+                let (config, reply, move_result) = match restart {
+                    RootRestart::Recover { config, reply } => (config, reply, None),
+                    RootRestart::Move { mut config, operation, reply } => {
+                        let source_identity = self.session.assets.native_storage_identity().to_owned();
+                        let outcome = match crate::executor::run_blocking(move || operation(source_identity)).await {
+                            Ok((root, result)) => {
+                                config.root = root;
+                                result
+                            }
+                            Err(error) => Err(BackendError::operation(error)),
+                        };
+                        (config, reply, Some(outcome))
+                    }
+                };
+                if move_result.is_some() && config.root == self.session._scanner.root() {
+                    // A failed preparation still uses this session. Preserve
+                    // its observations and durable work on the original root.
+                    self.session.events.sync.wake();
+                    self.session.events.assets.wake();
+                    self.session.events.files.wake();
+                    let _ = reply.try_send(move_result.expect("move result"));
+                    continue;
+                }
                 // Drop workers and old requests before rebuilding storage. Keep
                 // this actor's command channel and UI subscriptions alive.
                 self.operations = Default::default();
-                let spec = super::LibraryRuntimeSpec { config, account: self.session.account.clone(), notification_interest: self.session.sync.notification_interest.clone(), root_failures: self.session.root_failures.clone() };
-                let result = LibrarySession::recover(spec).map(|mut session| {
+                let spec = super::LibraryRuntimeSpec { config, account: self.session.account.clone(), notification_interest: self.session.sync.notification_interest().clone(), root_failures: self.session.root_failures.clone() };
+                let reopened = if move_result.is_some() { LibrarySession::open(spec) } else { LibrarySession::recover(spec) };
+                let mut result = reopened.map(|mut session| {
+                    session.runtime.local_book_retentions.replace(self.session.runtime.local_book_retentions.take());
+                    session.runtime.database_cache_users.replace(self.session.runtime.database_cache_users.take());
                     self.coordination.restart(session.initial_coordination.take().expect("new session coordination"));
                     self.requests = session.requests.take();
                     observers = Box::pin(super::workers::observe_account(session.account.clone(), session.events.clone()));
@@ -172,7 +210,15 @@ impl LibraryActor {
                     session.events.assets.wake();
                     session.events.files.wake();
                     self.session = Rc::new(session);
+                    self.publish_book_file_activity();
                 });
+                if move_result.is_some() && result.is_ok() && self.session._scanner.enabled() {
+                    result = self.session.scan_folder().await.map(|_| ());
+                }
+                if let Some(outcome) = move_result {
+                    result = result.and(outcome);
+                    self.session.events.publish_update(library_model::LibraryUpdate::Contents);
+                }
                 let _ = reply.try_send(result);
             }
         }
@@ -223,6 +269,14 @@ impl LibraryActor {
             }
         }
         self.coordination.apply(event, &self.session.events);
+        self.publish_book_file_activity();
+    }
+
+    fn publish_book_file_activity(&mut self) {
+        match self.session.book_file_activity() {
+            Ok(activity) => self.coordination.publish_book_file_activity(activity),
+            Err(error) => log::warn!("could not refresh library file activity: {error}"),
+        }
     }
 
     fn drain_events(&mut self) {
@@ -237,12 +291,48 @@ impl LibraryActor {
         self.drain_events();
         match command {
             #[cfg(not(target_arch = "wasm32"))]
+            LibraryActorCommand::PrepareBrowserDownloads { reply } => {
+                let _ = reply.try_send(self.session.prepare_browser_downloads());
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            LibraryActorCommand::RetainDatabaseCache { token, reply } => {
+                self.session.runtime.database_cache_users.borrow_mut().insert(token);
+                let _ = reply.try_send(Ok(()));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            LibraryActorCommand::ReleaseDatabaseCache { token } => {
+                self.session.runtime.database_cache_users.borrow_mut().remove(&token);
+                self.session.release_inactive_database_cache();
+            }
+            LibraryActorCommand::RetainLocalBooks { token, reply } => {
+                self.session.runtime.local_book_retentions.borrow_mut().insert(token);
+                let _ = reply.try_send(Ok(()));
+            }
+            LibraryActorCommand::ReleaseLocalBooks { token } => {
+                self.session.runtime.local_book_retentions.borrow_mut().remove(&token);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             LibraryActorCommand::RecoverRoot { config, reply } => {
-                self.restart = Some((config, reply));
+                self.restart = Some(RootRestart::Recover { config: *config, reply });
                 return false;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            LibraryActorCommand::MoveRoot { config, operation, reply } => {
+                if let Err(error) = self.session.check_book_file_changes() {
+                    let _ = reply.try_send(Err(error));
+                } else if !self.session.assets.root_available() {
+                    let _ = reply.try_send(Err(BackendError::message("library folder is unavailable; reconnect it before moving the library")));
+                } else if !self.operations.is_empty() || self.session.runtime.local_work_running() || !self.session.runtime.annotation_exports.is_empty() || !self.session.runtime.reader_imports.is_empty() {
+                    let _ = reply.try_send(Err(BackendError::message("wait for current library operations to finish before moving the library")));
+                } else {
+                    self.restart = Some(RootRestart::Move { config: *config, operation, reply });
+                    return false;
+                }
             }
             LibraryActorCommand::SubscribeUpdates { reply } => {
                 if !reply.is_closed() {
+                    // Include persisted requests before the first worker event.
+                    self.publish_book_file_activity();
                     // Registration and the initial snapshot are one synchronous
                     // actor operation, so no event can fall between them.
                     let updates = self.coordination.subscribe_updates();
@@ -262,16 +352,16 @@ impl LibraryActor {
                 }
             }
             #[cfg(target_arch = "wasm32")]
-            LibraryActorCommand::SubscribeBook { content_hash, reply } => {
+            LibraryActorCommand::SubscribeBook { book_id, reply } => {
                 let session = self.session.clone();
-                self.operations.submit(OperationKind::Read, PendingTask::Book(PendingWork::new(PendingReply::new(reply), Box::pin(async move { session.prepare_book_for_reader(content_hash).await }))));
+                self.operations.submit(OperationKind::Read, PendingTask::Book(PendingWork::new(PendingReply::new(reply), Box::pin(async move { session.prepare_book_for_reader(book_id).await }))));
             }
             #[cfg(target_arch = "wasm32")]
             LibraryActorCommand::ReleaseBook { id } => {
                 drop(self.books.take(id));
             }
             #[cfg(not(target_arch = "wasm32"))]
-            LibraryActorCommand::ResolveBook { content_hash, reply } => {
+            LibraryActorCommand::ResolveBook { book_id, reply } => {
                 let session = self.session.clone();
                 let mut profile = StartupProfile::new("book_lookup_actor");
                 profile.mark("received");
@@ -281,7 +371,7 @@ impl LibraryActor {
                         PendingReply::new(reply),
                         Box::pin(async move {
                             profile.mark("operation_start");
-                            let result = session.prepare_book_for_reader(content_hash).await;
+                            let result = session.prepare_book_for_reader(book_id).await;
                             profile.mark("operation_complete");
                             result
                         }),
@@ -289,13 +379,13 @@ impl LibraryActor {
                 );
             }
             #[cfg(not(target_arch = "wasm32"))]
-            LibraryActorCommand::ResolveAudiobookTrack { content_hash, index, reply } => {
+            LibraryActorCommand::ResolveAudiobookTrack { book_id, index, reply } => {
                 let session = self.session.clone();
-                self.operations.submit(OperationKind::Read, PendingTask::ResolvedBook(PendingWork::new(PendingReply::new(reply), Box::pin(async move { session.prepare_audiobook_track(content_hash, index).await }))));
+                self.operations.submit(OperationKind::Read, PendingTask::ResolvedBook(PendingWork::new(PendingReply::new(reply), Box::pin(async move { session.prepare_audiobook_track(book_id, index).await }))));
             }
-            LibraryActorCommand::ExportTransferBook { content_hash, reply } => {
+            LibraryActorCommand::ExportTransferBook { book_id, reply } => {
                 let session = self.session.clone();
-                self.operations.submit(OperationKind::Read, PendingTask::ExportTransferBook(PendingWork::new(PendingReply::new(reply), Box::pin(async move { session.export_transfer_book(content_hash).await }))));
+                self.operations.submit(OperationKind::Read, PendingTask::ExportTransferBook(PendingWork::new(PendingReply::new(reply), Box::pin(async move { session.export_transfer_book(book_id).await }))));
             }
             LibraryActorCommand::ImportTransferBook { parent_id, file_name, resource, reply } => {
                 let session = self.session.clone();
@@ -308,13 +398,17 @@ impl LibraryActor {
                                 return Err("this OPDS library is read only".into());
                             }
                             let _activity = session.directory_import_activity();
-                            session.import_transfer_resource(parent_id, file_name, resource).await
+                            session.import_transfer_resource(parent_id, file_name, *resource).await
                         }),
                     )),
                 );
             }
             #[cfg(not(target_arch = "wasm32"))]
             LibraryActorCommand::ImportDirectory { parent_id, directory, create_root, reply } => {
+                if let Err(error) = self.session.check_book_file_changes() {
+                    let _ = reply.try_send(Err(error));
+                    return true;
+                }
                 let session = self.session.clone();
                 let cancelled = reply.clone();
                 self.operations.submit(
@@ -337,12 +431,8 @@ impl LibraryActor {
                 }
             }
             LibraryActorCommand::Control(LibraryControl::SetAssetStorage { enabled, reset_cloud_presence }) => {
-                if let Err(error) = self.session.db.set_asset_storage_policy(enabled, reset_cloud_presence) {
+                if let Err(error) = self.session.apply_storage_policy(enabled, reset_cloud_presence) {
                     log::warn!("could not update cloud-storage policy for {}: {error}", self.session.id);
-                } else {
-                    self.session.sync.set_asset_storage_enabled(enabled);
-                    self.session.events.assets.wake();
-                    self.session.events.sync.request_remote_refresh();
                 }
             }
             LibraryActorCommand::Control(LibraryControl::Rename { name, refresh_remote }) => {
@@ -361,7 +451,7 @@ impl LibraryActor {
                         Ok(hashes) => {
                             for hash in hashes {
                                 self.coordination.reset_download(&hash);
-                                self.session.events.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::NotDownloaded });
+                                self.session.events.emit(LibraryEvent::DownloadStatusChanged { book_id: hash, state: DownloadState::NotDownloaded });
                             }
                             self.session.events.publish_update(library_model::LibraryUpdate::Contents);
                         }
@@ -399,6 +489,8 @@ impl LibraryActor {
                 }));
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.session.release_inactive_database_cache();
     }
 
     pub(crate) fn submit(&mut self, kind: OperationKind, reply: PendingReply<Reply>, operation: LocalBoxFuture<'static, Result<Reply, BackendError>>) {
@@ -412,6 +504,36 @@ impl LibraryActor {
 pub struct LibraryHandle {
     pub(crate) id: LibraryId,
     pub commands: async_channel::Sender<LibraryActorCommand>,
+}
+
+/// Keeps a selected library's caches warm until its last view leaves.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct DatabaseCacheRetention {
+    commands: async_channel::Sender<LibraryActorCommand>,
+    token: Uuid,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DatabaseCacheRetention {
+    fn drop(&mut self) {
+        // The unbounded inbox preserves acquire/release order on cancellation.
+        let _ = self.commands.try_send(LibraryActorCommand::ReleaseDatabaseCache { token: self.token });
+    }
+}
+
+/// Keeps local eviction blocked until a host storage transition completes.
+/// Dropping it also releases protection when the caller fails or is cancelled.
+pub struct LocalBookRetention {
+    commands: async_channel::Sender<LibraryActorCommand>,
+    token: Uuid,
+}
+
+impl Drop for LocalBookRetention {
+    fn drop(&mut self) {
+        // The actor's inbox is unbounded. Release follows any policy command
+        // already queued by the caller, even when its acknowledgement is cancelled.
+        let _ = self.commands.try_send(LibraryActorCommand::ReleaseLocalBooks { token: self.token });
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -436,8 +558,34 @@ pub enum LibraryControl {
 
 pub enum LibraryActorCommand {
     #[cfg(not(target_arch = "wasm32"))]
+    PrepareBrowserDownloads {
+        reply: async_channel::Sender<Result<tempfile::TempDir, BackendError>>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    RetainDatabaseCache {
+        token: Uuid,
+        reply: async_channel::Sender<Result<(), BackendError>>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    ReleaseDatabaseCache {
+        token: Uuid,
+    },
+    RetainLocalBooks {
+        token: Uuid,
+        reply: async_channel::Sender<Result<(), BackendError>>,
+    },
+    ReleaseLocalBooks {
+        token: Uuid,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
     RecoverRoot {
-        config: super::LibraryOpenConfig,
+        config: Box<super::LibraryOpenConfig>,
+        reply: async_channel::Sender<Result<(), BackendError>>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    MoveRoot {
+        config: Box<super::LibraryOpenConfig>,
+        operation: RootMoveOperation,
         reply: async_channel::Sender<Result<(), BackendError>>,
     },
     SubscribeUpdates {
@@ -450,7 +598,7 @@ pub enum LibraryActorCommand {
     },
     #[cfg(target_arch = "wasm32")]
     SubscribeBook {
-        content_hash: BookId,
+        book_id: BookId,
         reply: async_channel::Sender<Result<(Reply, u64), BackendError>>,
     },
     #[cfg(target_arch = "wasm32")]
@@ -462,23 +610,24 @@ pub enum LibraryActorCommand {
     /// produce are not `Send`, so these never cross the browser actor channel.
     #[cfg(not(target_arch = "wasm32"))]
     ResolveBook {
-        content_hash: BookId,
+        book_id: BookId,
         reply: async_channel::Sender<Result<ResolvedBook, BackendError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
     ResolveAudiobookTrack {
-        content_hash: BookId,
+        book_id: BookId,
         index: usize,
         reply: async_channel::Sender<Result<ResolvedBook, BackendError>>,
     },
     ExportTransferBook {
-        content_hash: BookId,
+        book_id: BookId,
         reply: async_channel::Sender<Result<TransferResource, BackendError>>,
     },
     ImportTransferBook {
         parent_id: DirId,
         file_name: String,
-        resource: TransferResource,
+        // Transfer metadata must not inflate every slot in the command queue.
+        resource: Box<TransferResource>,
         reply: async_channel::Sender<Result<ImportedBook, BackendError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
@@ -506,6 +655,30 @@ impl Drop for BookSubscription {
 }
 
 impl LibraryHandle {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn prepare_browser_downloads(&self) -> Result<tempfile::TempDir, BackendError> {
+        let (reply, result) = async_channel::bounded(1);
+        self.commands.send(LibraryActorCommand::PrepareBrowserDownloads { reply }).await.map_err(|_| BackendError::message("library stopped before preparing browser downloads"))?;
+        result.recv().await.map_err(|_| BackendError::message("library stopped before preparing browser downloads"))?
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn retain_database_cache(&self) -> Result<DatabaseCacheRetention, BackendError> {
+        let retention = DatabaseCacheRetention { commands: self.commands.clone(), token: Uuid::new_v4() };
+        let (reply, result) = async_channel::bounded(1);
+        self.commands.send(LibraryActorCommand::RetainDatabaseCache { token: retention.token, reply }).await.map_err(|_| BackendError::message("library stopped before retaining its database cache"))?;
+        result.recv().await.map_err(|_| BackendError::message("library stopped before retaining its database cache"))??;
+        Ok(retention)
+    }
+
+    pub async fn retain_local_books(&self) -> Result<LocalBookRetention, BackendError> {
+        let retention = LocalBookRetention { commands: self.commands.clone(), token: Uuid::new_v4() };
+        let (reply, result) = async_channel::bounded(1);
+        self.commands.send(LibraryActorCommand::RetainLocalBooks { token: retention.token, reply }).await.map_err(|_| BackendError::message("library stopped before retaining its books"))?;
+        result.recv().await.map_err(|_| BackendError::message("library stopped before retaining its books"))??;
+        Ok(retention)
+    }
+
     /// Open one complete library runtime.  The returned handle is the only
     /// object the application may retain; resource setup and worker startup
     /// are entirely session-owned.
@@ -520,6 +693,11 @@ impl LibraryHandle {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(spec: super::LibraryRuntimeSpec, _executor: &BackendExecutor) -> Result<Self, BackendError> {
         Self::open_with(spec, LibrarySession::open)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn open_catalog(spec: super::LibraryRuntimeSpec, _executor: &BackendExecutor) -> Result<Self, BackendError> {
+        Self::open_with(spec, LibrarySession::open_catalog)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -568,6 +746,13 @@ impl LibraryHandle {
         let _ = self.commands.try_send(LibraryActorCommand::Control(LibraryControl::RefreshCatalog));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn move_root(&self, config: super::LibraryOpenConfig, operation: RootMoveOperation) -> Result<(), BackendError> {
+        let (reply, result) = async_channel::bounded(1);
+        self.commands.send(LibraryActorCommand::MoveRoot { config: Box::new(config), operation, reply }).await.map_err(|_| BackendError::message("library stopped before moving its folder"))?;
+        result.recv().await.map_err(|_| BackendError::message("library stopped while moving its folder"))?
+    }
+
     pub fn shutdown(&self) {
         // Channel closure rejects admission and terminates update receivers
         // immediately, even before the owning actor is next polled.
@@ -599,19 +784,19 @@ impl LibraryHandle {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub async fn subscribe_book(&self, content_hash: BookId) -> Result<(Reply, BookSubscription), BackendError> {
+    pub async fn subscribe_book(&self, book_id: BookId) -> Result<(Reply, BookSubscription), BackendError> {
         let (reply, result) = async_channel::bounded(1);
-        self.commands.send(LibraryActorCommand::SubscribeBook { content_hash, reply }).await.map_err(|_| "library actor is no longer running".to_owned())?;
+        self.commands.send(LibraryActorCommand::SubscribeBook { book_id, reply }).await.map_err(|_| "library actor is no longer running".to_owned())?;
         let (initial, id) = result.recv().await.map_err(|_| "library actor stopped before replying".to_owned())??;
         Ok((initial, BookSubscription { commands: self.commands.clone(), id }))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn resolve_book(&self, content_hash: BookId) -> Result<ResolvedBook, BackendError> {
+    pub async fn resolve_book(&self, book_id: BookId) -> Result<ResolvedBook, BackendError> {
         let mut profile = StartupProfile::new("book_lookup_handle");
         let (reply, result) = async_channel::bounded(1);
         profile.mark("request_ready");
-        self.commands.send(LibraryActorCommand::ResolveBook { content_hash, reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
+        self.commands.send(LibraryActorCommand::ResolveBook { book_id, reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
         profile.mark("command_send");
         let result = result.recv().await.map_err(|_| BackendError::message("library actor stopped before replying"))?;
         profile.mark("reply_wait");
@@ -619,20 +804,20 @@ impl LibraryHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn resolve_audiobook_track(&self, content_hash: BookId, index: usize) -> Result<ResolvedBook, BackendError> {
+    pub async fn resolve_audiobook_track(&self, book_id: BookId, index: usize) -> Result<ResolvedBook, BackendError> {
         let (reply, result) = async_channel::bounded(1);
-        self.commands.send(LibraryActorCommand::ResolveAudiobookTrack { content_hash, index, reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
+        self.commands.send(LibraryActorCommand::ResolveAudiobookTrack { book_id, index, reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
         result.recv().await.map_err(|_| BackendError::message("library actor stopped before replying"))?
     }
 
-    pub(crate) async fn export_transfer_book(&self, content_hash: BookId) -> Result<TransferResource, BackendError> {
+    pub(crate) async fn export_transfer_book(&self, book_id: BookId) -> Result<TransferResource, BackendError> {
         let (reply, result) = async_channel::bounded(1);
-        self.commands.send(LibraryActorCommand::ExportTransferBook { content_hash, reply }).await.map_err(|_| BackendError::message("source library is no longer running"))?;
+        self.commands.send(LibraryActorCommand::ExportTransferBook { book_id, reply }).await.map_err(|_| BackendError::message("source library is no longer running"))?;
         result.recv().await.map_err(|_| BackendError::message("source library stopped before replying"))?
     }
     pub(crate) async fn import_transfer_book(&self, parent_id: DirId, file_name: String, resource: TransferResource) -> Result<ImportedBook, BackendError> {
         let (reply, result) = async_channel::bounded(1);
-        self.commands.send(LibraryActorCommand::ImportTransferBook { parent_id, file_name, resource, reply }).await.map_err(|_| BackendError::message("destination library is no longer running"))?;
+        self.commands.send(LibraryActorCommand::ImportTransferBook { parent_id, file_name, resource: Box::new(resource), reply }).await.map_err(|_| BackendError::message("destination library is no longer running"))?;
         result.recv().await.map_err(|_| BackendError::message("destination library stopped before replying"))?
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -644,6 +829,20 @@ impl LibraryHandle {
 }
 
 impl LibrarySession {
+    pub(crate) fn apply_storage_policy(&self, enabled: bool, reset_cloud_presence: bool) -> Result<(), BackendError> {
+        // A failed cache write must not allow stale server-presence flags to
+        // authorize eviction after the durable account policy turned off.
+        if !enabled {
+            self.sync.set_asset_storage_enabled(false);
+        }
+        self.db.set_asset_storage_policy(enabled, reset_cloud_presence)?;
+        self.sync.set_asset_storage_enabled(enabled);
+        self.events.assets.wake();
+        self.events.sync.request_remote_refresh();
+        self.events.publish_update(library_model::LibraryUpdate::SyncStatusChanged);
+        Ok(())
+    }
+
     /// Combines library-owned durable sync details with the application-owned
     /// account/discovery snapshot for settings presentation.
     pub(crate) fn sync_status(&self, signed_in: bool, remote_present: Option<bool>) -> Result<LibrarySyncStatus, BackendError> {
@@ -668,6 +867,7 @@ impl LibrarySession {
             }
         };
         Ok(LibrarySyncStatus {
+            book_file_activity: self.book_file_activity()?,
             asset_storage_enabled: self.sync.asset_storage_enabled(),
             storage: self.db.storage_policy()?,
             library_id: self.id,
@@ -739,14 +939,7 @@ impl LibrarySession {
     }
 
     pub(crate) fn is_opds(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.opds.is_some()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            false
-        }
+        self.kind.is_opds()
     }
 
     pub fn scanner_running(&self) -> bool {
@@ -814,7 +1007,7 @@ impl LibrarySession {
                 continue;
             }
             for book in &inspected.books {
-                let checksum = book.content_hash.content_hash().ok_or_else(|| BackendError::message("scanned bytes have no checksum"))?;
+                let checksum = book.book_id.content_hash().ok_or_else(|| BackendError::message("scanned bytes have no checksum"))?;
                 let identity = self.db.resolve_scanned_content(checksum, book.source_identity)?;
                 self.assets.remember_local_content(identity, checksum)?;
             }
@@ -841,16 +1034,16 @@ impl LibrarySession {
         Ok(result)
     }
 
-    pub(crate) fn download_state(&self, coordination: &LibraryEventState, content_hash: BookId) -> Result<DownloadState, BackendError> {
-        let durable = self.persistent_download_state(content_hash)?;
-        Ok(match (&durable, coordination.download_state(&content_hash).cloned()) {
+    pub(crate) fn download_state(&self, coordination: &LibraryEventState, book_id: BookId) -> Result<DownloadState, BackendError> {
+        let durable = self.persistent_download_state(book_id)?;
+        Ok(match (&durable, coordination.download_state(&book_id).cloned()) {
             (DownloadState::Queued, Some(state @ DownloadState::Downloading(_))) => state,
             _ => durable,
         })
     }
 
-    pub(crate) fn queue_download(&self, coordination: &mut LibraryEventState, content_hash: BookId) -> Result<DownloadState, BackendError> {
-        let state = self.download_state(coordination, content_hash)?;
+    pub(crate) fn queue_download(&self, coordination: &mut LibraryEventState, book_id: BookId) -> Result<DownloadState, BackendError> {
+        let state = self.download_state(coordination, book_id)?;
         if matches!(state, DownloadState::Downloaded | DownloadState::Downloading(_)) {
             return Ok(state);
         }
@@ -858,9 +1051,9 @@ impl LibrarySession {
             return Err(BackendError::message("sign in before downloading this book"));
         }
         {
-            coordination.reset_download(&content_hash);
+            coordination.reset_download(&book_id);
         }
-        self.request_downloads(&[content_hash])?;
+        self.request_downloads(&[book_id])?;
         Ok(DownloadState::Queued)
     }
 
@@ -885,6 +1078,10 @@ pub(super) mod concurrency_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "transfer_tests.rs"]
 mod transfer_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "browser_tests.rs"]
+mod browser_tests;
 
 #[cfg(all(test, feature = "watcher", not(target_arch = "wasm32")))]
 mod watcher_recovery_tests {

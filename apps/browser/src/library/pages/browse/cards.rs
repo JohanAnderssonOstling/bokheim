@@ -141,8 +141,8 @@ impl CardView {
         let navigator = self.navigator.read(cx);
         let library_id = navigator.library_id();
         let (kind, sections, children, books, items) = (navigator.kind, navigator.listing.sections.clone(), navigator.listing.children.clone(), navigator.listing.books.clone(), navigator.listing.items.clone());
-        // Only a folder listing can be dragged: its children are directories,
-        // and its books sit in a folder a move can name as their source.
+        // Folder listings preserve the displayed placement as the move source.
+        // Query listings carry book identities without a source folder.
         let source = navigator.destination.location.folder();
         let revision = navigator.listing.revision;
         let mut cards = HashMap::new();

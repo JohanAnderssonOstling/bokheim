@@ -1,11 +1,13 @@
 //! The storage worker owns connections; cloneable handles carry only IDs and
 //! immutable locators. Every request returns values, never a SQLite borrow.
-use super::{DATABASE_FILENAME, LibraryEntry, LocalRegistry, RegistryResult, join_locator};
+use super::{DATABASE_FILENAME, LibraryConfiguration, LibraryEntry, LocalRegistry, RegistryResult, join_locator};
 use client_platform_runtime::storage_queue::{self, Priority};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use std::sync::Arc;
 use sync_common::LibraryId;
 use uuid::Uuid;
@@ -70,6 +72,14 @@ mod tests {
 
         let registry = LibraryRegistry::open(root.path().to_string_lossy())?;
         assert!(registry.accessible_to_account(&id, Some("server|first"))?);
+        let reopened = registry.create_with_asset_storage("Books", Some(entry.storage_locator().to_owned()), false)?;
+        assert_eq!(*reopened.library_id(), id);
+        assert!(registry.has_account(&id)?, "registering an existing root must preserve its owner");
+        assert!(!registry.accessible_to_account(&id, Some("server|second"))?);
+        assert!(registry.asset_storage_enabled(&id)?, "registration must preserve the existing storage choice");
+        assert!(registry.read_value(&format!("pending-cloud-storage:{id}"))?.is_none());
+        assert!(registry.make_device_only(&id).is_err(), "turning off book storage must preserve account ownership");
+        assert!(registry.has_account(&id)?);
         registry.begin_local_removal(&id)?;
         assert_eq!(registry.pending_server_deletions()?, [id]);
         assert!(!registry.accessible_to_account(&id, Some("server|second"))?, "pending deletion retains its original account");
@@ -82,7 +92,7 @@ mod tests {
         let registry = LibraryRegistry::open(root.path().to_string_lossy())?;
         let id = *registry.create("Legacy cache", None)?.library_id();
         registry.run(move |local| {
-            local.connection.execute("DELETE FROM library_account WHERE library_id=?1", [id.to_string()])?;
+            local.connection.execute("DELETE FROM library_configuration WHERE library_id=?1", [id.to_string()])?;
             Ok(())
         })?;
         registry.bind_unowned_libraries("server|second")?;
@@ -214,6 +224,17 @@ impl LibraryRegistry {
         })
     }
 
+    pub fn configuration(&self, id: &LibraryId) -> RegistryResult<LibraryConfiguration> {
+        let id = *id;
+        self.run(move |registry| registry.configuration(&id))
+    }
+
+    pub fn configure_cloud_storage(&self, id: &LibraryId, enabled: bool, account: Option<&str>) -> RegistryResult<()> {
+        let id = *id;
+        let account = account.map(str::to_owned);
+        self.run(move |registry| registry.configure_cloud_storage(&id, enabled, account.as_deref()))
+    }
+
     pub fn device_only(&self, id: &LibraryId) -> RegistryResult<bool> {
         let id = *id;
         self.run(move |registry| registry.device_only(&id))
@@ -263,6 +284,26 @@ impl LibraryRegistry {
         self.run(move |registry| registry.remember_library_root(&id))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn validate_move_destination(&self, id: LibraryId, source: PathBuf, destination: PathBuf) -> RegistryResult<PathBuf> {
+        self.run(move |registry| registry.validate_move_destination(&id, &source, &destination))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn commit_library_move(&self, id: LibraryId, source: PathBuf, destination: PathBuf, source_identity: String, cleanup: Vec<u8>) -> RegistryResult<LibraryEntry> {
+        self.run(move |registry| registry.commit_library_move(&id, &source, &destination, &source_identity, &cleanup))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn retire_library_move_source(&self, id: LibraryId, source: PathBuf, source_identity: String) -> RegistryResult<()> {
+        self.run(move |registry| registry.retire_library_move_source(&id, &source, &source_identity))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn library_move_cleanup_keys(&self) -> RegistryResult<Vec<String>> {
+        self.run(|registry| Ok(registry.connection.prepare("SELECT key FROM app_value WHERE key GLOB 'library-cleanup:v1:*' ORDER BY key")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?))
+    }
+
     pub fn asset_storage_enabled(&self, id: &LibraryId) -> RegistryResult<bool> {
         let id = *id;
         self.run(move |registry| registry.asset_storage_enabled(&id))
@@ -276,6 +317,11 @@ impl LibraryRegistry {
     pub fn cache_remote_storage(&self, id: &LibraryId, storage: super::LibraryStorage) -> RegistryResult<()> {
         let id = *id;
         self.run(move |registry| registry.cache_remote_storage(&id, storage))
+    }
+
+    pub fn create_with_kind(&self, name: &str, locator: Option<String>, storage: super::LibraryStorage, kind: super::LibraryKind) -> RegistryResult<LibraryEntry> {
+        let name = name.to_owned();
+        self.run(move |registry| registry.create_with_kind(&name, locator, storage, kind))
     }
 
     pub fn create_with_storage(&self, name: &str, locator: Option<String>, storage: super::LibraryStorage) -> RegistryResult<LibraryEntry> {
@@ -316,20 +362,20 @@ impl LibraryRegistry {
         self.run(move |registry| registry.create_with_asset_storage(&name, locator, asset_storage_enabled))
     }
 
+    pub fn set_kind(&self, id: &LibraryId, kind: super::LibraryKind) -> RegistryResult<()> {
+        let id = *id;
+        self.run(move |registry| registry.set_kind(&id, kind))
+    }
+
     pub fn attach_remote(&self, id: &LibraryId, name: &str) -> RegistryResult<LibraryEntry> {
         let id = *id;
         let name = name.to_owned();
         self.run(move |registry| registry.attach_remote(&id, &name))
     }
 
-    pub fn default_library_save_location(&self) -> RegistryResult<Option<String>> {
-        self.run(move |registry| registry.default_library_save_location())
-    }
-
-    /// Changes the destination for future libraries. Registered roots never move.
-    pub fn set_default_library_save_location(&self, path: &str) -> RegistryResult<String> {
-        let path = path.to_owned();
-        self.run(move |registry| registry.set_default_library_save_location(&path))
+    /// Platform fallback used when no destination preference has been saved.
+    pub fn default_library_root(&self) -> &str {
+        &self.0.default_library_root
     }
 
     pub fn is_detached(&self, library_id: &LibraryId) -> RegistryResult<bool> {

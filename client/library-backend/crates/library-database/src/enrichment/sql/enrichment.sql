@@ -19,10 +19,12 @@ SELECT EXISTS(SELECT 1 FROM book_transfer WHERE content_hash = :content_hash AND
 
 -- name: thumbnail_remote_presence_candidates?
 -- param: after: Option<&BookId>
-SELECT DISTINCT b.content_hash FROM book b
-JOIN book_dir bd ON bd.book_row_id = b.row_id AND bd.deleted_at IS NULL
-JOIN dir d ON d.id = bd.dir_id AND d.deleted_at IS NULL
+SELECT b.content_hash FROM book b
 WHERE b.content_hash > COALESCE(:after,X'') AND b.deleted_at IS NULL
+  AND EXISTS(
+    SELECT 1 FROM book_dir bd JOIN dir d ON d.id = bd.dir_id
+    WHERE bd.book_row_id = b.row_id AND bd.deleted_at IS NULL AND d.deleted_at IS NULL
+  )
 ORDER BY b.content_hash LIMIT 512;
 
 -- name: thumbnail_set_result!
@@ -30,6 +32,16 @@ ORDER BY b.content_hash LIMIT 512;
 -- param: state: &str
 INSERT INTO book_transfer(content_hash, cover_state) SELECT content_hash, :state FROM book WHERE content_hash = :content_hash
 ON CONFLICT(content_hash) DO UPDATE SET cover_state = excluded.cover_state;
+
+-- name: thumbnail_complete_if_current!
+-- param: content_hash: &BookId
+-- param: expected: Option<&str>
+INSERT INTO book_transfer(content_hash,cover_state)
+SELECT content_hash,'ready' FROM book
+WHERE content_hash=:content_hash
+  AND (SELECT cover_state FROM book_transfer WHERE content_hash=:content_hash) IS :expected
+ON CONFLICT(content_hash) DO UPDATE SET cover_state='ready'
+WHERE book_transfer.cover_state IS :expected;
 
 -- name: thumbnail_discard!
 -- param: content_hash: &BookId
@@ -77,4 +89,3 @@ JOIN book b ON b.content_hash = unhex(json_extract(member.value, '$[0]'))
 WHERE b.deleted_at IS NULL
 ON CONFLICT(content_hash) DO UPDATE SET upload_prepared = excluded.upload_prepared
 WHERE upload_prepared IS NOT excluded.upload_prepared;
-

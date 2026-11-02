@@ -10,6 +10,8 @@ use client_runtime::BackendError;
 use library_database::transfer::{BookTransferState, ImportedBook};
 use library_files::asset_store::StagedBook;
 #[cfg(not(target_arch = "wasm32"))]
+use library_files::BoxedBookReader;
+#[cfg(not(target_arch = "wasm32"))]
 use library_placement::stage_import;
 use sync_common::DirId;
 
@@ -25,14 +27,15 @@ fn transfer_file_name(name: &str, format: BookFormat) -> Result<String, BackendE
 }
 
 impl LibraryImport {
+    /// The source length pins transfers whose stable identity has no checksum yet.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn import_transferred_book(&self, parent_id: DirId, file_name: String, reader: library_files::BoxedBookReader, state: BookTransferState) -> Result<ImportedBook, BackendError> {
-        self.import_transferred_book_inner(parent_id, file_name, reader, state, false, None).await
+    pub async fn import_transferred_book(&self, parent_id: DirId, file_name: String, reader: BoxedBookReader, size_bytes: u64, state: BookTransferState) -> Result<ImportedBook, BackendError> {
+        self.import_transferred_book_inner(parent_id, file_name, reader, state, Some(size_bytes), false, None).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     async fn import_transferred_book_inner(
-        &self, parent_id: DirId, file_name: String, reader: library_files::BoxedBookReader, state: BookTransferState, inspected: bool, mut batch: Option<&mut ReaderImportBatch>,
+        &self, parent_id: DirId, file_name: String, reader: BoxedBookReader, state: BookTransferState, expected_size: Option<u64>, inspected: bool, mut batch: Option<&mut ReaderImportBatch>,
     ) -> Result<ImportedBook, BackendError> {
         let format = state.addition.facts.format;
         let import_name = format!("book.{}", format.canonical_extension());
@@ -40,7 +43,7 @@ impl LibraryImport {
             Some(batch) => batch.validate_import(self, parent_id, &import_name)?,
             None => self.validate_import(&parent_id, &import_name)?,
         };
-        let file_name = self.database.transfer_destination_name(&state.content_hash, &parent_id).map_err(BackendError::operation)?.unwrap_or(file_name);
+        let file_name = self.database.transfer_destination_name(&state.book_id, &parent_id).map_err(BackendError::operation)?.unwrap_or(file_name);
         import.file_name = transfer_file_name(&file_name, format)?;
         let (name, copied) = if let Some(batch) = batch.as_deref_mut() {
             batch.prepare_directory(self, parent_id).await?;
@@ -51,14 +54,14 @@ impl LibraryImport {
         };
         import.file_name = name;
         let checksum = state.expected_checksum();
-        let staged = copied.verify_transfer_bytes(checksum, None).await.map_err(BackendError::operation)?;
+        let staged = copied.verify_transfer_bytes(checksum, expected_size).await.map_err(BackendError::operation)?;
         Box::pin(self.finish_transferred_book(import, staged, state, inspected, batch)).await
     }
 
     /// Native reader adapters have already hashed the source and prepared its
     /// metadata. A local Copy batch defers only the final metadata transaction.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn import_verified_reader_state(&self, parent: DirId, name: String, reader: library_files::BoxedBookReader, state: BookTransferState, mut batch: Option<&mut ReaderImportBatch>) -> Result<ImportedBook, BackendError> {
+    pub(crate) async fn import_verified_reader_state(&self, parent: DirId, name: String, reader: BoxedBookReader, state: BookTransferState, mut batch: Option<&mut ReaderImportBatch>) -> Result<ImportedBook, BackendError> {
         let import = match batch.as_ref() {
             Some(batch) => batch.validate_import(self, parent, &name)?,
             None => self.validate_import(&parent, &name)?,
@@ -69,7 +72,7 @@ impl LibraryImport {
         if let Some(imported) = self.reuse_transferred_book(&import, &state, batch.as_deref_mut()).await? {
             return Ok(imported);
         }
-        self.import_transferred_book_inner(parent, name, reader, state, true, batch).await
+        self.import_transferred_book_inner(parent, name, reader, state, None, true, batch).await
     }
 
     /// Verify an existing placement before allocating or writing another copy.
@@ -123,7 +126,7 @@ impl LibraryImport {
         if PathBuf::from(&self.root).canonicalize()?.join(relative.as_str().trim_start_matches('/')) != path || fingerprint(&path)? != revision {
             return Err(BackendError::message("destination changed during transfer verification; retry the import"));
         }
-        let content = ImportContent { content_hash: identity, byte_checksum: checksum, size_bytes, source_identity: None };
+        let content = ImportContent { book_id: identity, byte_checksum: checksum, size_bytes, source_identity: None };
         let import = ValidatedImport { parent_id: import.parent_id, file_name: name.clone(), format: state.addition.facts.format };
         let published = PublishedStagedBook { name, relative_path: relative.to_string(), published: true, fingerprint: Some(revision.to_string()) };
         let version = reader_inspection_version(import.format);
@@ -131,7 +134,7 @@ impl LibraryImport {
         let state = state.clone().retarget(identity)?;
         if let Some(batch) = batch {
             batch.push(commit, state, _lease);
-            return Ok(Some(ImportedBook { content_hash: identity, created: false }));
+            return Ok(Some(ImportedBook { book_id: identity, created: false }));
         }
         self.commit_transferred_import(commit, state, true).map(Some)
     }
@@ -150,21 +153,21 @@ impl LibraryImport {
         let byte_checksum = staged.byte_checksum();
         state.byte_checksum = Some(byte_checksum);
         let content = self.resolve_import_content(byte_checksum, staged.size_bytes(), None)?;
-        let content_hash = content.content_hash;
+        let book_id = content.book_id;
         #[cfg(not(target_arch = "wasm32"))]
         let assets = batch.as_ref().map_or(&self.assets, |batch| &batch.assets);
         #[cfg(target_arch = "wasm32")]
         let assets = &self.assets;
-        let staged = staged.with_local_identity(assets, content_hash).await.map_err(BackendError::operation)?;
-        let state = state.retarget(content_hash).map_err(BackendError::operation)?;
-        if let Some(name) = self.database.transfer_destination_name(&content_hash, &parent_id).map_err(BackendError::operation)? {
+        let staged = staged.with_local_identity(assets, book_id).await.map_err(BackendError::operation)?;
+        let state = state.retarget(book_id).map_err(BackendError::operation)?;
+        if let Some(name) = self.database.transfer_destination_name(&book_id, &parent_id).map_err(BackendError::operation)? {
             import.file_name = name;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(batch) = &batch {
-            import.file_name = match batch.destination_name(parent_id, content_hash) {
+            import.file_name = match batch.destination_name(parent_id, book_id) {
                 Some(name) => name.to_owned(),
-                None if self.database.transfer_destination_name(&content_hash, &parent_id)?.is_none() => batch.available_name(parent_id, &import.file_name, self.database.shared_occupied_file_names(&parent_id)?),
+                None if self.database.transfer_destination_name(&book_id, &parent_id)?.is_none() => batch.available_name(parent_id, &import.file_name, self.database.shared_occupied_file_names(&parent_id)?),
                 None => import.file_name,
             };
         }
@@ -192,14 +195,14 @@ impl LibraryImport {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(batch) = batch {
             batch.push(commit, state, _lease);
-            return Ok(ImportedBook { content_hash, created: true });
+            return Ok(ImportedBook { book_id, created: true });
         }
         self.commit_transferred_import(commit, state, inspected)
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn import_transferred_staged_book(&self, parent_id: DirId, file_name: String, staged: library_files::asset_store::StagedBook, state: BookTransferState) -> Result<ImportedBook, BackendError> {
-        if state.expected_checksum().is_some_and(|expected| staged.content_hash().content_hash() != Some(expected)) {
+        if state.expected_checksum().is_some_and(|expected| staged.book_id().content_hash() != Some(expected)) {
             return Err(BackendError::message("transferred book failed content verification"));
         }
         let mut import = self.validate_import(&parent_id, &format!("book.{}", state.addition.facts.format.canonical_extension()))?;

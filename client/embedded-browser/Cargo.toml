@@ -1,0 +1,20 @@
+[package]
+name = "embedded-browser"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+app-preferences = { path = "../preferences" }
+base64 = "0.22"
+blake3 = { workspace = true }
+client-runtime = { path = "../client-runtime" }
+library-model = { path = "../library-model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "time"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -35,14 +35,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "2"
-  RUSTUP_TOOLCHAIN: stable
   RUSTC_BOOTSTRAP: "1"
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   BOKHEIM_PACKAGE_SOURCE_ROOT: ${{ github.workspace }}/bokheim
   RELEASE_REPOSITORY: JohanAnderssonOstling/bokheim-release
-  GPUI_FORK_REF: ee2460ecfcc7c3b485c839924d36c6c6c83ece79
-  HTML_ENGINE_REF: 0b5befffa0479a8ccf6148687fe734cfa6086585
-  HTML_VIEW_CORE_REF: c74e5eb0a30ba7a9fff2eb8e349d3b17d24d8b5a
 
 jobs:
   build:
@@ -73,7 +69,21 @@ jobs:
         with:
           path: release-packager
           ref: ${{ github.sha }}
-          sparse-checkout: apps/desktop-gpui/macos/package.py
+          sparse-checkout: |
+            apps/desktop-gpui/macos/package.py
+            scripts/ci/release_config.py
+            scripts/ci/release-config.json
+      - name: Load release configuration
+        shell: python {0}
+        env:
+          BOKHEIM_UPDATE_PUBLIC_KEY_HEX: ${{ vars.BOKHEIM_UPDATE_PUBLIC_KEY_HEX }}
+          BOKHEIM_UPDATE_KEY_ID: ${{ vars.BOKHEIM_UPDATE_KEY_ID }}
+          BOKHEIM_UPDATE_ENDPOINT: ${{ vars.BOKHEIM_UPDATE_ENDPOINT }}
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          source = Path(os.environ['GITHUB_WORKSPACE']) / 'release-packager'
+          subprocess.run([sys.executable, str(source / 'scripts/ci/release_config.py'), '--github-env'], check=True)
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/GPUI-Fork

@@ -101,11 +101,9 @@ WHERE content_hash = :content_hash AND id = :work_id;
 UPDATE book_dir SET file_name=:name WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
 
 -- name: native_file_work_rows?
-SELECT id,operation,content_hash,relative_path FROM local_file_work ORDER BY id;
+SELECT id,operation,content_hash,dir_id,relative_path,source_root,source_identity,source_library FROM local_file_work ORDER BY id;
 
--- Lazy file-work resolution: current live placements for a hash; Rust adds
--- each one's path. The queued path is only a hint; a directory
--- move after queueing must not strand the job.
+-- Current placement names and ancestry are resolved only when work starts.
 -- name: native_live_placement_paths?
 -- param: content_hash: &BookId
 SELECT bd.dir_id, bd.file_name FROM book_dir bd JOIN book ON book.row_id=bd.book_row_id WHERE book.content_hash=:content_hash AND bd.deleted_at IS NULL AND book.deleted_at IS NULL;
@@ -120,8 +118,14 @@ SELECT dir_id, relative_path FROM local_file_projection WHERE content_hash=:cont
 -- param: id: i64
 -- param: operation: &str
 -- param: content_hash: &BookId
--- param: relative_path: &str
-SELECT EXISTS(SELECT 1 FROM local_file_work WHERE id=:id AND operation=:operation AND content_hash=:content_hash AND relative_path=:relative_path);
+-- param: dir_id: Option<&str>
+-- param: relative_path: Option<&str>
+-- param: source_root: Option<&str>
+-- param: source_identity: Option<&str>
+-- param: source_library: Option<&str>
+SELECT EXISTS(SELECT 1 FROM local_file_work WHERE id=:id AND operation=:operation AND content_hash=:content_hash
+AND dir_id IS :dir_id AND relative_path IS :relative_path AND source_root IS :source_root
+AND source_identity IS :source_identity AND source_library IS :source_library);
 
 -- name: native_request_thumbnail!
 -- param: content_hash: &BookId
@@ -150,7 +154,7 @@ SELECT EXISTS(SELECT 1 FROM local_purge_work);
 -- param: upper: &str
 UPDATE OR REPLACE local_file_work
 SET relative_path = :replacement || substr(relative_path, length(:prefix) + 1)
-WHERE relative_path >= :prefix AND relative_path < :upper;
+WHERE source_root IS NULL AND relative_path >= :prefix AND relative_path < :upper;
 
 -- name: native_has_pending_file_work ->
 SELECT EXISTS(SELECT 1 FROM local_directory_work)

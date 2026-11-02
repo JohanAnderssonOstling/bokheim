@@ -88,17 +88,18 @@ impl ReaderView {
 mod tests {
     use crate::epub::search::search_groups;
     use crate::epub::toc::TocState;
-    use skrift_column_paginator::TocEntry;
+    use book_content::BookToc;
+    use book_model::BookTocEntry;
     use skrift_column_paginator::{BookSearchMatch, BookSearchTarget};
 
     #[test]
     fn excerpts_group_nested_sections_by_chapter_and_keep_unmapped_documents_in_order() {
         let entries = vec![
-            TocEntry { title: "First".into(), link: "first".into(), children: vec![TocEntry { title: "Section".into(), link: "section".into(), children: vec![] }] },
-            TocEntry { title: "Second".into(), link: "second".into(), children: vec![] },
+            BookTocEntry { title: "First".into(), target: "first".into(), children: vec![BookTocEntry { title: "Section".into(), target: "section".into(), children: vec![] }] },
+            BookTocEntry { title: "Second".into(), target: "second".into(), children: vec![] },
         ];
         let mut toc = TocState::default();
-        let resolutions = TocState::resolve(&entries, |link| match link {
+        let resolutions = BookToc::resolve(&entries, |link| match link {
             "first" => Some((1, None)),
             "section" => Some((1, Some("section".into()))),
             "second" => Some((2, None)),

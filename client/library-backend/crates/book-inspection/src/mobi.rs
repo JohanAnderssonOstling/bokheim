@@ -13,7 +13,7 @@ pub fn inspect_mobi_metadata_reader(path: &Path, reader: impl Read) -> MetadataR
 pub fn inspect_mobi_reader(path: &Path, reader: impl Read + Seek + Send + 'static) -> MetadataResult<(BookRecord, Vec<BookTocEntry>)> {
     let mut book = Book::open_reader(ContainerFormat::Mobi, reader)?;
     let metadata = metadata_from_book(path, &mut book)?;
-    let toc = book_toc_entries(book.toc()?.unwrap_or_default());
+    let toc = sanitize_toc_entries(book.toc()?.unwrap_or_default());
     Ok((metadata, toc))
 }
 

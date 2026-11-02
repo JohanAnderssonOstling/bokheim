@@ -237,9 +237,9 @@ impl LibraryImport {
             (import, ingest_file(path, name.to_owned(), &*self.cpu).await?)
         };
 
-        let byte_checksum = ingested.content_hash.content_hash().ok_or_else(|| BackendError::message("imported bytes have no checksum"))?;
+        let byte_checksum = ingested.book_id.content_hash().ok_or_else(|| BackendError::message("imported bytes have no checksum"))?;
         let content = self.resolve_import_content(byte_checksum, ingested.size_bytes, ingested.source_identity)?;
-        let identity = content.content_hash;
+        let identity = content.book_id;
         self.assets.remember_local_content(identity, byte_checksum)?;
         let _lease = self.lease_import_content(&content).await?;
         // A concurrent folder move must not register these bytes at another path.
@@ -382,8 +382,8 @@ mod tests {
         let (files, _) = SyncScheduler::new();
         let (enrichment, _) = SyncScheduler::new();
         let (events, _) = LibraryEventRouter::new(sync, asset_work, files, enrichment);
-        let placement = Arc::new(LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
-        LibraryImport { library_id: DirId::new_v4(), database, assets, cpu: Arc::new(client_platform_native::cpu_host::NativeHost), events, placement, root: root.to_str().unwrap().into() }
+        let placement = Arc::new(LibraryPlacement::new(database.clone(), assets.clone(), events.clone()));
+        LibraryImport::new(placement, Arc::new(client_platform_native::cpu_host::NativeHost))
     }
 
     #[tokio::test]

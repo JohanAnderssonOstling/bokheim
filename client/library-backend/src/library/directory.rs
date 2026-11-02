@@ -148,6 +148,12 @@ impl LibraryDirectory {
         self.open_with(spec, executor, LibraryHandle::open)
     }
 
+    /// Open a local catalog cache without account synchronization.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_catalog(&self, spec: LibraryRuntimeSpec, executor: &BackendExecutor) -> Result<bool, BackendError> {
+        self.open_with(spec, executor, LibraryHandle::open_catalog)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_recovered(&self, spec: LibraryRuntimeSpec, executor: &BackendExecutor) -> Result<bool, BackendError> {
         self.open_with(spec, executor, LibraryHandle::open_recovered)

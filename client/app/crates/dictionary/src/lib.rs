@@ -3,19 +3,32 @@
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "client")]
+mod import_source;
+#[cfg(feature = "client")]
+pub use import_source::{DictionaryImport, DictionarySource};
+#[cfg(all(feature = "client", not(target_arch = "wasm32")))]
+pub use import_source::{ImportReader, ImportReaderFuture};
+#[cfg(feature = "client")]
 mod model;
+#[cfg(feature = "client")]
+mod protocol;
 mod stardict;
 #[cfg(feature = "store")]
 mod store;
 #[cfg(feature = "client")]
 pub use client::{Client, ClientFuture};
 #[cfg(feature = "client")]
-pub use model::{DictionaryDownloads, DictionaryInfo, DictionaryLookup, DictionaryMatches};
-#[cfg(all(feature = "store", not(target_arch = "wasm32")))]
-pub use store::native;
+pub use model::{DictionaryDownloads, DictionaryInfo, DictionaryLookup, DictionaryMatches, DictionarySnapshot};
+#[cfg(feature = "client")]
+pub use protocol::{Request, Response};
 #[cfg(feature = "store")]
-pub use store::{DictionaryStore, Storage};
+pub use store::{DictionaryStore, LocalStorage, Storage};
+#[cfg(feature = "store")]
+mod service;
+#[cfg(feature = "store")]
+pub use service::LocalClient;
 
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom};
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +36,25 @@ use serde::{Deserialize, Serialize};
 pub use stardict::{Body, DICT_FILE, DICTZIP_FILE, Dictionary, DictionaryFile, IDX_FILE, IFO_FILE, SYN_FILE, prepare_import};
 
 pub type Result<T> = std::result::Result<T, String>;
+
+/// Random reads work with native readers and asynchronous browser file slices.
+pub trait ReadAt {
+    fn size(&mut self) -> impl Future<Output = Result<u64>>;
+    fn read_at(&mut self, offset: u64, length: usize) -> impl Future<Output = Result<Vec<u8>>>;
+}
+
+impl<R: Read + Seek> ReadAt for R {
+    async fn size(&mut self) -> Result<u64> {
+        self.seek(SeekFrom::End(0)).map_err(|error| error.to_string())
+    }
+
+    async fn read_at(&mut self, offset: u64, length: usize) -> Result<Vec<u8>> {
+        self.seek(SeekFrom::Start(offset)).map_err(|error| error.to_string())?;
+        let mut bytes = vec![0; length];
+        self.read_exact(&mut bytes).map_err(|error| error.to_string())?;
+        Ok(bytes)
+    }
+}
 pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_IMPORT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_INDEX_BYTES: u64 = 128 * 1024 * 1024;
@@ -58,12 +90,5 @@ fn bounded_read(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
     if bytes.len() as u64 > limit {
         return Err("Dictionary file exceeds the size limit".into());
     }
-    Ok(bytes)
-}
-
-fn read_at<R: Read + Seek>(reader: &mut R, offset: u64, length: usize) -> Result<Vec<u8>> {
-    reader.seek(SeekFrom::Start(offset)).map_err(|error| error.to_string())?;
-    let mut bytes = vec![0; length];
-    reader.read_exact(&mut bytes).map_err(|error| error.to_string())?;
     Ok(bytes)
 }

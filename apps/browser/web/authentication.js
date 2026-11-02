@@ -1,3 +1,46 @@
+// BEGIN GENERATED UI TEXT
+// From apps/ui-text/english.json; run export.py to update.
+const authenticationMessages = {
+    "account.a_new_pin_has_been_requested_check_your_email_and_use_the": "A new PIN has been requested. Check your email and use the latest PIN.",
+    "account.at_least_minimum_characters": "At least {minimum} characters.",
+    "account.back_to_sign_in": "Back to sign in",
+    "account.check_your_email": "Check your email",
+    "account.check_your_email_for_a_reset_code": "Check your email for a reset code.",
+    "account.close_sign_in": "Close sign in",
+    "account.create_account": "Create account",
+    "account.email": "Email",
+    "account.email_me_a_reset_code": "Email me a reset code",
+    "account.enter_the_six_digit_pin_sent_to_email": "Enter the six-digit PIN sent to {email}.",
+    "account.forgot_your_password": "Forgot your password?",
+    "account.hide_password": "Hide password",
+    "account.new_password": "New password",
+    "account.password_updated_sign_in_with_your_new_password": "Password updated. Sign in with your new password.",
+    "account.please_wait": "Please wait…",
+    "account.resend_pin": "Resend PIN",
+    "account.resend_pin_s": "Resend PIN ({seconds}s)",
+    "account.reset_code_from_your_email": "Reset code from your email",
+    "account.reset_your_password": "Reset your password",
+    "account.set_a_new_password": "Set a new password",
+    "account.set_new_password": "Set new password",
+    "account.show_password": "Show password",
+    "account.use_a_different_email": "Use a different email",
+    "account.use_a_password_with_at_least_minimum_characters": "Use a password with at least {minimum} characters.",
+    "account.verification_pin": "Verification PIN",
+    "account.verify_email": "Verify email",
+    "common.password": "Password",
+    "common.sign_in": "Sign in"
+};
+
+function uiText(key, parameters = {}) {
+    const message = authenticationMessages[key];
+    if (message === undefined) throw new Error(`Unknown UI text key: ${key}`);
+    return message.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (_, name) => {
+        if (!(name in parameters)) throw new Error(`Missing UI text parameter: ${key}.${name}`);
+        return String(parameters[name]);
+    });
+}
+// END GENERATED UI TEXT
+
 // Keep credential fields in the ordinary DOM, with stable form/field identities.
 // Signup credentials stay in this dialog's memory until PIN verification ends.
 const registeredFonts = new Set();
@@ -54,7 +97,7 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
     const content = document.createElement('div');
     const close = button('×', () => destroy());
     close.className = 'auth-close';
-    close.setAttribute('aria-label', 'Close sign in');
+    close.setAttribute('aria-label', uiText('account.close_sign_in'));
     dialog.append(style, heading, close, content);
     let flow = 'login', busy = false, closed = false;
     let form, links, error, status;
@@ -105,16 +148,16 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
                 const visible = input.type === 'password';
                 input.type = visible ? 'text' : 'password';
                 slash.style.display = visible ? '' : 'none';
-                reveal.title = visible ? 'Hide password' : 'Show password';
+                reveal.title = visible ? uiText('account.hide_password') : uiText('account.show_password');
                 reveal.setAttribute('aria-pressed', String(visible));
-                reveal.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+                reveal.setAttribute('aria-label', visible ? uiText('account.hide_password') : uiText('account.show_password'));
             });
             reveal.className = 'auth-reveal';
-            reveal.title = 'Show password';
+            reveal.title = uiText('account.show_password');
             reveal.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="auth-eye-slash" d="m3 3 18 18"/></svg>';
             const slash = reveal.querySelector('.auth-eye-slash');
             slash.style.display = 'none';
-            reveal.setAttribute('aria-label', 'Show password');
+            reveal.setAttribute('aria-label', uiText('account.show_password'));
             reveal.setAttribute('aria-controls', input.id);
             reveal.setAttribute('aria-pressed', 'false');
             row.append(input, reveal);
@@ -123,7 +166,7 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
                 const hint = document.createElement('p');
                 hint.id = `${input.id}-hint`;
                 hint.className = 'auth-hint';
-                hint.textContent = `At least ${minimum} characters.`;
+                hint.textContent = uiText('account.at_least_minimum_characters', {minimum});
                 input.setAttribute('aria-describedby', hint.id);
                 group.append(hint);
             }
@@ -131,12 +174,12 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
         form.append(group);
         return input;
     }
-    const titles = {login:'Sign in', register:'Create account', verify:'Check your email', 'request-reset':'Reset your password', reset:'Set a new password'};
-    const actions = {login:'Sign in', register:'Create account', verify:'Verify email', 'request-reset':'Email me a reset code', reset:'Set new password'};
+    const titles = {login:uiText('common.sign_in'), register:uiText('account.create_account'), verify:uiText('account.check_your_email'), 'request-reset':uiText('account.reset_your_password'), reset:uiText('account.set_a_new_password')};
+    const actions = {login:uiText('common.sign_in'), register:uiText('account.create_account'), verify:uiText('account.verify_email'), 'request-reset':uiText('account.email_me_a_reset_code'), reset:uiText('account.set_new_password')};
     function updateResend() {
         if (!resendButton) return;
         const seconds = Math.max(0, Math.ceil((resendAvailableAt - Date.now()) / 1000));
-        resendButton.textContent = seconds ? `Resend PIN (${seconds}s)` : 'Resend PIN';
+        resendButton.textContent = seconds ? uiText('account.resend_pin_s', {seconds}) : uiText('account.resend_pin');
         resendButton.disabled = busy || seconds > 0;
         if (!seconds) clearInterval(resendTimer);
     }
@@ -168,18 +211,18 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
         status.setAttribute('role', 'status');
         status.textContent = message;
         form.append(error, status);
-        if (flow !== 'verify') field('username', 'Email', 'email', 'username', email);
+        if (flow !== 'verify') field('username', uiText('account.email'), 'email', 'username', email);
         if (flow === 'login' || flow === 'register' || flow === 'reset') {
-            field('password', flow === 'reset' ? 'New password' : 'Password', 'password', flow === 'login' ? 'current-password' : 'new-password');
+            field('password', flow === 'reset' ? uiText('account.new_password') : uiText('common.password'), 'password', flow === 'login' ? 'current-password' : 'new-password');
         }
         if (flow === 'verify') {
-            const pin = field('pin', 'Verification PIN', 'text', 'one-time-code');
+            const pin = field('pin', uiText('account.verification_pin'), 'text', 'one-time-code');
             pin.inputMode = 'numeric';
             pin.pattern = '[0-9]{6}';
             pin.maxLength = 6;
         }
         if (flow === 'reset') {
-            field('token', 'Reset code from your email', 'text', 'off');
+            field('token', uiText('account.reset_code_from_your_email'), 'text', 'off');
         }
         const primary = document.createElement('button');
         primary.type = 'submit';
@@ -188,7 +231,7 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
         actionRow.append(primary);
         if (flow === 'login') {
             actionRow.className = 'auth-actions';
-            actionRow.append(button('Create account', () => {
+            actionRow.append(button(uiText('account.create_account'), () => {
                 if (!busy) render('register', form.elements.namedItem('username').value.trim());
             }));
         }
@@ -200,13 +243,13 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
             if (!busy) render(next, currentEmail());
         }));
         if (flow === 'login') {
-            change('Forgot your password?', 'request-reset');
+            change(uiText('account.forgot_your_password'), 'request-reset');
         } else if (flow === 'verify') {
-            resendButton = button('Resend PIN', () => void perform('resend'));
+            resendButton = button(uiText('account.resend_pin'), () => void perform('resend'));
             links.append(resendButton);
-            change('Use a different email', 'register');
-            change('Back to sign in', 'login');
-        } else { change('Back to sign in', 'login'); }
+            change(uiText('account.use_a_different_email'), 'register');
+            change(uiText('account.back_to_sign_in'), 'login');
+        } else { change(uiText('account.back_to_sign_in'), 'login'); }
         content.replaceChildren(form, links);
         if (dialog.open) form.elements.namedItem(flow === 'verify' ? 'pin' : 'username').focus();
     }
@@ -219,7 +262,7 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
         const value = name => form.elements.namedItem(name)?.value ?? '';
         const password = registration?.password ?? value('password');
         if ((action === 'register' || action === 'reset') && Array.from(password).length < minimum) {
-            error.textContent = `Use a password with at least ${minimum} characters.`;
+            error.textContent = uiText('account.use_a_password_with_at_least_minimum_characters', {minimum});
             return;
         }
         // Each action sends exactly its own fields; Rust parses this into an enum.
@@ -234,7 +277,7 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
         const request = JSON.stringify({action, ...requests[action]()});
         busy = true;
         error.textContent = '';
-        status.textContent = 'Please wait…';
+        status.textContent = uiText('account.please_wait');
         form.setAttribute('aria-busy', 'true');
         // Keep credential inputs discoverable until the server confirms success.
         for (const input of form.querySelectorAll('input')) input.readOnly = true;
@@ -245,15 +288,15 @@ export function openAuthentication(themeJson, minimum, submit, resendCooldownSec
             if (action === 'login' || action === 'verify') { destroy(); return; }
             if (action === 'register') {
                 registration = {email, password};
-                render('verify', email, `Enter the six-digit PIN sent to ${email}.`);
+                render('verify', email, uiText('account.enter_the_six_digit_pin_sent_to_email', {email}));
                 startResendCooldown();
             }
             if (action === 'resend') {
-                status.textContent = 'A new PIN has been requested. Check your email and use the latest PIN.';
+                status.textContent = uiText('account.a_new_pin_has_been_requested_check_your_email_and_use_the');
                 startResendCooldown();
             }
-            if (action === 'request-reset') render('reset', email, 'Check your email for a reset code.');
-            if (action === 'reset') render('login', email, 'Password updated. Sign in with your new password.');
+            if (action === 'request-reset') render('reset', email, uiText('account.check_your_email_for_a_reset_code'));
+            if (action === 'reset') render('login', email, uiText('account.password_updated_sign_in_with_your_new_password'));
         } catch (failure) {
             if (!closed) { status.textContent = ''; error.textContent = String(failure); }
         } finally {

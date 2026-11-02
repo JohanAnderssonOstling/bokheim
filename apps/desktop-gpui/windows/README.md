@@ -20,6 +20,12 @@ does not travel with the extracted folder. Keep the extracted folder writable fo
 automatic updates. The executable needs its accompanying runtime files, so copying
 only `Bokheim.exe` to another folder is insufficient.
 
+The setup installer adds Bokheim to “Open with” for EPUB, PDF, MOBI/AZW/AZW3,
+FictionBook, CBZ and M4B files. Opening a file imports a copy into the selected
+library and opens it for reading or playback, preserving the original. A running
+instance receives the request. Portable and single-file builds also accept book
+paths when chosen manually through “Open with” or passed on the command line.
+
 The single-file launcher stores its extracted runtime in
 `%LOCALAPPDATA%\Bokheim\Standalone\<payload-sha256>`. It verifies the embedded ZIP
 before extraction, publishes the folder only after every file is written, and

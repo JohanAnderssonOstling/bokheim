@@ -1,0 +1,223 @@
+[
+  {
+    "variant": "Epub",
+    "code": 1,
+    "kind": "Text",
+    "canonical_extension": "epub",
+    "browser_download": true,
+    "android_view": true,
+    "files": [
+      {
+        "extensions": [
+          "epub"
+        ],
+        "mime_types": [
+          {
+            "name": "EPUB",
+            "value": "application/epub+zip",
+            "acquisition_priority": 0
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "variant": "Pdf",
+    "code": 2,
+    "kind": "Pdf",
+    "canonical_extension": "pdf",
+    "browser_download": true,
+    "android_view": true,
+    "files": [
+      {
+        "extensions": [
+          "pdf"
+        ],
+        "mime_types": [
+          {
+            "name": "PDF",
+            "value": "application/pdf",
+            "acquisition_priority": 3
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "variant": "Mobi",
+    "code": 4,
+    "kind": "Text",
+    "canonical_extension": "mobi",
+    "browser_download": true,
+    "android_view": true,
+    "files": [
+      {
+        "extensions": [
+          "mobi"
+        ],
+        "mime_types": [
+          {
+            "name": "MOBI",
+            "value": "application/x-mobipocket-ebook"
+          }
+        ]
+      },
+      {
+        "extensions": [
+          "azw"
+        ],
+        "mime_types": [
+          {
+            "name": "AZW",
+            "value": "application/vnd.amazon.ebook"
+          }
+        ],
+        "picker_mime_types": [
+          "application/vnd.amazon.ebook",
+          "application/x-mobi8-ebook"
+        ]
+      },
+      {
+        "extensions": [
+          "azw3"
+        ],
+        "mime_types": [
+          {
+            "name": "AZW3",
+            "value": "application/x-mobi8-ebook"
+          }
+        ],
+        "picker_mime_types": [
+          "application/vnd.amazon.ebook",
+          "application/x-mobi8-ebook"
+        ]
+      }
+    ]
+  },
+  {
+    "variant": "M4b",
+    "code": 8,
+    "kind": "Audio",
+    "canonical_extension": "m4b",
+    "browser_download": true,
+    "android_view": true,
+    "files": [
+      {
+        "extensions": [
+          "m4b"
+        ],
+        "mime_types": [
+          {
+            "name": "M4B",
+            "value": "audio/x-m4b"
+          },
+          {
+            "name": "AUDIO_MP4",
+            "value": "audio/mp4"
+          }
+        ],
+        "picker_mime_types": [
+          "audio/mp4",
+          "audio/x-m4b"
+        ]
+      }
+    ]
+  },
+  {
+    "variant": "Mp3Folder",
+    "code": 16,
+    "kind": "Audio",
+    "canonical_extension": "mp3folder",
+    "browser_download": false,
+    "android_view": false,
+    "files": [
+      {
+        "extensions": [
+          "mp3folder"
+        ],
+        "mime_types": [],
+        "picker_extensions": []
+      }
+    ]
+  },
+  {
+    "variant": "Fb2",
+    "code": 32,
+    "kind": "Text",
+    "canonical_extension": "fb2",
+    "browser_download": true,
+    "android_view": true,
+    "files": [
+      {
+        "extensions": [
+          "fb2"
+        ],
+        "mime_types": [
+          {
+            "name": "FB2",
+            "value": "application/x-fictionbook+xml",
+            "acquisition_priority": 1
+          }
+        ],
+        "picker_mime_types": [
+          "application/x-fictionbook+xml",
+          "text/xml",
+          "application/xml"
+        ]
+      },
+      {
+        "extensions": [
+          "fb2.zip",
+          "fbz"
+        ],
+        "mime_types": [
+          {
+            "name": "FB2_ZIP",
+            "value": "application/x-zip-compressed-fb2",
+            "acquisition_priority": 2
+          }
+        ],
+        "picker_extensions": [
+          "fbz",
+          "zip"
+        ],
+        "picker_mime_types": [
+          "application/zip",
+          "application/x-zip-compressed-fb2"
+        ]
+      }
+    ]
+  },
+  {
+    "variant": "Cbz",
+    "code": 64,
+    "kind": "Comic",
+    "canonical_extension": "cbz",
+    "browser_download": true,
+    "android_view": true,
+    "files": [
+      {
+        "extensions": [
+          "cbz"
+        ],
+        "mime_types": [
+          {
+            "name": "CBZ",
+            "value": "application/vnd.comicbook+zip",
+            "acquisition_priority": 4
+          },
+          {
+            "name": "CBZ_LEGACY",
+            "value": "application/x-cbz",
+            "acquisition_priority": 5
+          }
+        ],
+        "picker_mime_types": [
+          "application/vnd.comicbook+zip",
+          "application/x-cbz",
+          "application/zip"
+        ]
+      }
+    ]
+  }
+]

@@ -1,18 +1,18 @@
 //! Verified copy/move admission shared by reader-specific metadata adapters.
 use crate::{
-    LibraryImport,
     foliate::FoliateBook,
     native_move::MovePreparation,
     reader_batch::ReaderImportBatch,
     reader_import::ImportMode,
     readest::{self, ReadestBook, ReadestConfig},
+    LibraryImport,
 };
 use book_inspection::InspectedBook;
-use book_model::{AUTHOR_MARC_RELATOR_CODE, BookFormat, BookRecord, BookSubject, BookTocDocument, Contributor, Identifier, LanguageTag, Scheme, Scope};
+use book_model::{BookFormat, BookRecord, BookSubject, BookTocDocument, Contributor, Identifier, LanguageTag, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
 use client_platform_runtime::executor::run_blocking;
 use client_runtime::BackendError;
 use content_address::ContentHash;
-use filesystem_scanner::ingestion::{IngestedFile, READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION, ingest_file_with_inspection_caches, ingest_reader_file_with_cached_inspection};
+use filesystem_scanner::ingestion::{ingest_file_with_inspection_caches, ingest_reader_file_with_cached_inspection, IngestedFile, READER_EPUB_METADATA_VERSION, READER_PDF_METADATA_VERSION};
 use library_database::transfer::BookTransferState;
 use library_replica::{BookAddition, BookFacts, EnrichmentResult};
 use serde_json::Value;
@@ -54,7 +54,7 @@ pub(crate) fn reader_inspection_version(format: BookFormat) -> i64 {
 
 #[derive(Debug)]
 pub struct ReaderBookResult {
-    pub content_hash: BookId,
+    pub book_id: BookId,
     pub created: bool,
     pub source_removed: bool,
     /// The import committed, but cleanup of private staging failed.
@@ -78,7 +78,7 @@ pub(crate) async fn import_reader_book(
             return Err(BackendError::message("reader source is already inside the destination library"));
         }
         let (moved, warnings) = importer.move_book_from_path_prepared(parent, source, MovePreparation::Reader(prepare)).await?;
-        return Ok(ReaderBookResult { content_hash: moved.content_hash, created: moved.created, source_removed: true, cleanup_error: moved.cleanup_error, skipped_pdf_annotations: 0, warnings });
+        return Ok(ReaderBookResult { book_id: moved.book_id, created: moved.created, source_removed: true, cleanup_error: moved.cleanup_error, skipped_pdf_annotations: 0, warnings });
     }
     if let Some(batch) = batch {
         return import_batched_copy(importer, parent, source, name, batch, prepare).await;
@@ -96,7 +96,7 @@ pub(crate) async fn import_reader_book(
     .await
     .map_err(BackendError::operation)??;
     let imported = importer.import_verified_reader_state(parent, name, Box::new(File::open(source)?), state, None).await?;
-    Ok(ReaderBookResult { content_hash: imported.content_hash, created: imported.created, source_removed: false, cleanup_error: None, skipped_pdf_annotations: 0, warnings })
+    Ok(ReaderBookResult { book_id: imported.book_id, created: imported.created, source_removed: false, cleanup_error: None, skipped_pdf_annotations: 0, warnings })
 }
 
 /// Reader PDFs use external metadata; EPUBs still need their navigation and
@@ -115,7 +115,11 @@ pub(crate) async fn ingest_import_file(importer: &LibraryImport, source: &Path, 
         name,
         &*importer.cpu,
         |hash| {
-            if format == BookFormat::Pdf { importer.database.cached_pdf_reader(hash).map_err(io::Error::other) } else { Ok(None) }
+            if format == BookFormat::Pdf {
+                importer.database.cached_pdf_reader(hash).map_err(io::Error::other)
+            } else {
+                Ok(None)
+            }
         },
         |hash| cached_inspection(importer, source, format, metadata, hash),
     )
@@ -145,7 +149,7 @@ fn cached_inspection(importer: &LibraryImport, source: &Path, format: BookFormat
         }
         // Ingestion and adapter state describe these byte hashes; the
         // transfer commit retargets them back to the stable library ID.
-        pdf.content_hash = hash.to_hex();
+        pdf.book_id = hash.to_hex();
     }
     Ok(inspection)
 }
@@ -183,7 +187,7 @@ async fn import_batched_copy(importer: &LibraryImport, parent: DirId, source: &P
         let ingested = ingest_verified_reader_file(importer, &path, name.clone(), digest).await?;
         (ingested, Some(copied), path)
     };
-    let checksum = ingested.content_hash.content_hash().ok_or("reader book has no checksum")?;
+    let checksum = ingested.book_id.content_hash().ok_or("reader book has no checksum")?;
     let check_source = source.clone();
     let (state, warnings) = run_blocking(move || {
         let mut warnings = Vec::new();
@@ -204,7 +208,7 @@ async fn import_batched_copy(importer: &LibraryImport, parent: DirId, source: &P
     if let Some(path) = source.to_str() {
         batch.sources.push((path.to_owned(), revision, checksum));
     }
-    Ok(ReaderBookResult { content_hash: imported.content_hash, created: imported.created, source_removed: false, cleanup_error: None, skipped_pdf_annotations: 0, warnings })
+    Ok(ReaderBookResult { book_id: imported.book_id, created: imported.created, source_removed: false, cleanup_error: None, skipped_pdf_annotations: 0, warnings })
 }
 
 pub(crate) fn metadata_values(value: &Value) -> Vec<String> {
@@ -234,11 +238,11 @@ pub(crate) struct ReaderMetadata<'a> {
 }
 impl ReaderMetadata<'_> {
     pub fn transfer_state(&self, ingested: &IngestedFile, warnings: &mut Vec<String>) -> Result<BookTransferState, BackendError> {
-        let checksum = ingested.content_hash.content_hash().ok_or("reader source has no byte checksum")?;
+        let checksum = ingested.book_id.content_hash().ok_or("reader source has no byte checksum")?;
         let mut inspection = ingested.inspection.clone();
         self.apply_to(&mut inspection.metadata, warnings)?;
         Ok(BookTransferState {
-            content_hash: ingested.content_hash,
+            book_id: ingested.book_id,
             byte_checksum: Some(checksum),
 
             addition: BookAddition {
@@ -339,8 +343,8 @@ pub(crate) fn test_importer(root: &Path) -> LibraryImport {
     let (files, _) = SyncScheduler::new();
     let (enrichment, _) = SyncScheduler::new();
     let (events, _) = LibraryEventRouter::new(sync, work, files, enrichment);
-    let placement = Arc::new(LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
-    LibraryImport { library_id: uuid::Uuid::new_v4(), database, assets, cpu: Arc::new(client_platform_native::cpu_host::NativeHost), events, placement, root: root.to_str().unwrap().into() }
+    let placement = Arc::new(LibraryPlacement::new(database.clone(), assets.clone(), events.clone()));
+    LibraryImport::new(placement, Arc::new(client_platform_native::cpu_host::NativeHost))
 }
 
 #[cfg(test)]
@@ -395,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn repeats_reuse_inspection_and_placement_but_general_transfers_verify_bytes() {
-        use crate::readest::{ReadestBook, ReadestConfig, import_book_in_batch};
+        use crate::readest::{import_book_in_batch, ReadestBook, ReadestConfig};
         use sync_common::ROOT_DIR_ID;
         let source = tempfile::tempdir().unwrap();
         let destination = tempfile::tempdir().unwrap();
@@ -404,25 +408,25 @@ mod tests {
         let book: ReadestBook = serde_json::from_value(json!({"hash":"reader-book","format":"EPUB","title":"Book","filePath":path})).unwrap();
         let mut importer = test_importer(destination.path());
         let first = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &ReadestConfig::default(), ImportMode::Copy, None).await.unwrap();
-        assert!(importer.database.has_import_inspection(&first.content_hash, BookFormat::Epub, READER_EPUB_METADATA_VERSION).unwrap());
-        assert!(!importer.database.has_import_inspection(&first.content_hash, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap());
-        assert!(importer.database.book_transfer_state(first.content_hash).unwrap().addition.record.book.identifiers.is_empty(), "reader admission must skip the fixture's page-only ISBN");
+        assert!(importer.database.has_import_inspection(&first.book_id, BookFormat::Epub, READER_EPUB_METADATA_VERSION).unwrap());
+        assert!(!importer.database.has_import_inspection(&first.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap());
+        assert!(importer.database.book_transfer_state(first.book_id).unwrap().addition.record.book.identifiers.is_empty(), "reader admission must skip the fixture's page-only ISBN");
         let published = destination.path().join("book.epub");
         let revision = library_files::filesystem::fingerprint(&published).unwrap();
         importer.cpu = Arc::new(NoInspection);
         let config = ReadestConfig { booknotes: vec![json!({"id":"new-note","type":"annotation","cfi":"epubcfi(/6/2!/4/2/1:0)","text":"New quote","createdAt":1})], ..Default::default() };
         let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, ImportMode::Copy, None).await.unwrap();
         assert!(!repeat.created);
-        assert_eq!(importer.database.annotations(first.content_hash).unwrap().len(), 1, "cached inspection must still merge new reader notes");
-        let state = importer.database.book_transfer_state(first.content_hash).unwrap();
+        assert_eq!(importer.database.annotations(first.book_id).unwrap().len(), 1, "cached inspection must still merge new reader notes");
+        let state = importer.database.book_transfer_state(first.book_id).unwrap();
         let duplicate = importer.import_verified_reader_state(ROOT_DIR_ID, "book.epub".into(), Box::new(Unreadable), state.clone(), None).await.unwrap();
         assert!(!duplicate.created);
         assert_eq!(library_files::filesystem::fingerprint(&published).unwrap(), revision);
         let other_root = tempfile::tempdir().unwrap();
         let other = test_importer(other_root.path());
-        let transferred = other.import_transferred_book(ROOT_DIR_ID, "book.epub".into(), Box::new(File::open(&path).unwrap()), state.clone()).await.unwrap();
-        assert!(!other.database.has_import_inspection(&transferred.content_hash, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap(), "general transfers must not claim a current parser inspection");
-        assert!(importer.import_transferred_book(ROOT_DIR_ID, "book.epub".into(), Box::new(std::io::Cursor::new(b"wrong bytes")), state).await.is_err());
+        let transferred = other.import_transferred_book(ROOT_DIR_ID, "book.epub".into(), Box::new(File::open(&path).unwrap()), fs::metadata(&path).unwrap().len(), state.clone()).await.unwrap();
+        assert!(!other.database.has_import_inspection(&transferred.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap(), "general transfers must not claim a current parser inspection");
+        assert!(importer.import_transferred_book(ROOT_DIR_ID, "book.epub".into(), Box::new(std::io::Cursor::new(b"wrong bytes")), b"wrong bytes".len() as u64, state).await.is_err());
         assert_eq!(fs::read_dir(destination.path()).unwrap().filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().contains(".part-")).count(), 0);
     }
 
@@ -440,7 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_pdfs_copy_move_and_repeat_without_inspection_or_background_rescan() {
-        use crate::readest::{ReadestBook, ReadestConfig, import_book_in_batch};
+        use crate::readest::{import_book_in_batch, ReadestBook, ReadestConfig};
         use filesystem_scanner::filesystem_scan::{discover, inspect};
         use sync_common::ROOT_DIR_ID;
         const PDF: &[u8] = include_bytes!("../../../../../shared/pdf-reader-core/tests/fixtures/cover-annotations.pdf");
@@ -457,18 +461,18 @@ mod tests {
             assert!(first.created);
             assert_eq!(first.skipped_pdf_annotations, 1);
             assert_eq!(path.exists(), mode == ImportMode::Copy);
-            let state = importer.database.book_transfer_state(first.content_hash).unwrap();
+            let state = importer.database.book_transfer_state(first.book_id).unwrap();
             assert_eq!(state.addition.record.title, "PDF book");
             assert_eq!(state.addition.record.authors().map(|credit| credit.name()).collect::<Vec<_>>(), vec!["Reader author"]);
             assert!(state.addition.pdf.is_none());
             assert!(state.addition.navigation.is_none());
             assert!(state.annotations.is_empty());
-            assert_eq!(importer.database.reading_position(&first.content_hash).unwrap().as_deref(), Some("pdfpage(2)"));
-            assert!(importer.database.has_import_inspection(&first.content_hash, BookFormat::Pdf, READER_PDF_METADATA_VERSION).unwrap());
-            assert!(!importer.database.has_import_inspection(&first.content_hash, BookFormat::Pdf, book_inspection::inspection_version(BookFormat::Pdf)).unwrap());
+            assert_eq!(importer.database.reading_position(&first.book_id).unwrap().as_deref(), Some("pdfpage(2)"));
+            assert!(importer.database.has_import_inspection(&first.book_id, BookFormat::Pdf, READER_PDF_METADATA_VERSION).unwrap());
+            assert!(!importer.database.has_import_inspection(&first.book_id, BookFormat::Pdf, book_inspection::inspection_version(BookFormat::Pdf)).unwrap());
             fs::write(&path, PDF).unwrap();
             let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, mode, None).await.unwrap();
-            assert_eq!(repeat.content_hash, first.content_hash);
+            assert_eq!(repeat.book_id, first.book_id);
             assert!(!repeat.created);
             let snapshot = importer.database.scan_snapshot().unwrap();
             let scan = discover(destination.path(), &snapshot);
@@ -480,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_pdf_without_a_header_fails_and_restores_move_source() {
-        use crate::readest::{ReadestBook, ReadestConfig, import_book_in_batch};
+        use crate::readest::{import_book_in_batch, ReadestBook, ReadestConfig};
         use sync_common::ROOT_DIR_ID;
         for mode in [ImportMode::Copy, ImportMode::Move] {
             let source = tempfile::tempdir().unwrap();

@@ -16,10 +16,10 @@ impl CpuHost for InspectHost {
     fn book(&self, task: BookTask, mut reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
         Box::pin(async move {
             use std::io::{Read as _, Seek as _};
-            let BookTask::Inspect { content_hash, .. } = &task else { panic!("unexpected task") };
+            let BookTask::Inspect { book_id, .. } = &task else { panic!("unexpected task") };
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).unwrap();
-            assert_eq!(*content_hash, Some(BookId::from(blake3::hash(&bytes))));
+            assert_eq!(*book_id, Some(BookId::from(blake3::hash(&bytes))));
             reader.rewind().unwrap();
             cpu_host::execute_book_with_mobi(task, reader, |_, _| Err("subject page inspection is not supported for this format".into()))
         })
@@ -89,7 +89,7 @@ async fn copied_imports_and_scanned_files_have_identical_ingestion_results() {
             let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, name, Box::new(Cursor::new(bytes.to_vec())), ImportOptions { direct }).await.unwrap();
             assert_eq!(std::fs::read(copied.path()).unwrap(), bytes, "copy must leave ingestion to the shared function");
             let ingested = filesystem_scanner::ingestion::ingest_file(copied.path().to_owned(), name.clone(), &*host).await.unwrap();
-            let expected_hash = ingested.content_hash;
+            let expected_hash = ingested.book_id;
             let expected_size = ingested.size_bytes;
             let expected_metadata = inspection_facts(&ingested.inspection);
             let staged = copied.into_staged(expected_hash, expected_size);
@@ -103,7 +103,7 @@ async fn copied_imports_and_scanned_files_have_identical_ingestion_results() {
             assert!(inspected.readable);
             assert_eq!(inspected.books.len(), 1);
             let scanned = &inspected.books[0];
-            assert_eq!(scanned.content_hash, expected_hash);
+            assert_eq!(scanned.book_id, expected_hash);
             assert_eq!(scanned.size_bytes, expected_size);
             assert_eq!(inspection_facts(&scanned.inspection), expected_metadata);
             assert_eq!(std::fs::read(root.path().join(published.relative_path.trim_start_matches('/'))).unwrap(), published_bytes);

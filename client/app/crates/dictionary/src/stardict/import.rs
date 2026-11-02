@@ -96,7 +96,7 @@ pub fn prepare_import(files: Vec<DictionaryFile>) -> Result<(Metadata, Vec<Dicti
         }
     }
     let index = selected.get(".idx").ok_or("Missing matching .idx or .idx.gz file")?;
-    let mut metadata = Dictionary::validate(ifo, index, selected.get(".syn").map(Vec::as_slice), Body::open(Cursor::new(body), compressed)?.len())?;
+    let mut metadata = Dictionary::validate(ifo, index, selected.get(".syn").map(Vec::as_slice), futures_lite::future::block_on(Body::open(Cursor::new(body), compressed))?.len())?;
     for suffix in [".license.txt", ".attribution.txt"] {
         if let Some(bytes) = selected.get(suffix) {
             let text = std::str::from_utf8(bytes).map_err(|_| "Dictionary attribution is not UTF-8")?;

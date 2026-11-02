@@ -4,7 +4,7 @@ use super::LibrarySession;
 use crate::BackendError;
 use client_platform_runtime::executor::run_blocking;
 use futures_util::FutureExt;
-use library_annotation_export::{export_prepared, plan_with_existing, validate_export_folder, ExportControl};
+use library_annotation_export::{ExportControl, export_prepared, plan_with_existing, validate_export_folder};
 use library_model::{
     AnnotationExportBook, AnnotationExportConflict, AnnotationExportDestination, AnnotationExportFormat, AnnotationExportOptions, AnnotationExportOutcome, AnnotationExportReport, AutomaticAnnotationExportStatus, LibraryUpdate,
 };
@@ -23,7 +23,7 @@ use library_model::{AnnotationExportFailure, AnnotationExportFailureKind};
 use status::ExportState;
 use sync_common::BookId;
 use tempfile::NamedTempFile;
-use tokio::time::{sleep, sleep_until, timeout, Instant};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 
 #[derive(Default)]
 pub(crate) struct AutomaticExport {
@@ -216,6 +216,7 @@ async fn save_receipts(session: &LibrarySession, receipts: &[Receipt], path: &Pa
 }
 
 async fn pass(session: &LibrarySession, receipts: &mut Vec<Receipt>, receipts_path: &Path) -> Result<bool, BackendError> {
+    let _cache = session.database_cache_work();
     if session.scanner_running() || !session.runtime.annotation_exports.is_empty() {
         return Ok(true);
     }
@@ -372,9 +373,6 @@ async fn pass(session: &LibrarySession, receipts: &mut Vec<Receipt>, receipts_pa
 }
 
 pub(super) async fn run(session: &LibrarySession) {
-    if session.is_opds() {
-        return;
-    }
     let path = session.db.path().with_extension("annotation-export-receipts.json");
     let read_path = path.clone();
     let mut receipts = match run_blocking(move || read_json::<Vec<Receipt>>(&read_path)).await {
@@ -427,13 +425,13 @@ mod reader_lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::handle::concurrency_tests::fixture;
     use crate::BookId;
+    use crate::library::handle::concurrency_tests::fixture;
     use book_model::{Annotation, AnnotationAnchor, AnnotationStyle, BookDetails, BookFormat, PdfAnnotationAnchor, PdfAnnotationRect};
     use library_annotation_export::plan;
     use library_database::ImportCommit;
     use library_model::PublishedStagedBook;
-    use lopdf::{dictionary, Document, Object};
+    use lopdf::{Document, Object, dictionary};
     use pdf_view_common::{PdfReaderMetadata, PdfStoredPage};
     use std::io::{Read, Seek};
     use sync_common::ROOT_DIR_ID;
@@ -441,7 +439,7 @@ mod tests {
     fn note(book: BookId, anchor: AnnotationAnchor) -> Annotation {
         Annotation {
             id: "auto-note".into(),
-            content_hash: book,
+            book_id: book,
             anchor,
             exact_text: "Quote".into(),
             style: AnnotationStyle::Highlight,
@@ -508,20 +506,20 @@ mod tests {
         let receipts_path = root.path().join("receipts.json");
         let mut receipts = Vec::new();
         assert!(!pass(session, &mut receipts, &receipts_path).await.unwrap());
-        let other_path = receipts.iter().find(|receipt| receipt.destination.book_id == notes[1].content_hash).unwrap().destination.path.clone();
+        let other_path = receipts.iter().find(|receipt| receipt.destination.book_id == notes[1].book_id).unwrap().destination.path.clone();
         let other_bytes = fs::read(&other_path).unwrap();
         // A read trap in the other book proves that no full-library snapshot
         // or post-reconciliation reload is used for the next annotation edit.
         let connection = rusqlite::Connection::open(session.db.path()).unwrap();
-        let changed = connection.execute("UPDATE local_book_draft SET body=x'00' WHERE content_hash=?1", [notes[1].content_hash]).unwrap()
-            + connection.execute("UPDATE sync_book_record SET body=x'00' WHERE content_hash=?1", [notes[1].content_hash]).unwrap();
+        let changed =
+            connection.execute("UPDATE local_book_draft SET body=x'00' WHERE content_hash=?1", [notes[1].book_id]).unwrap() + connection.execute("UPDATE sync_book_record SET body=x'00' WHERE content_hash=?1", [notes[1].book_id]).unwrap();
         assert!(changed > 0);
         assert!(session.db.annotation_export_snapshot().is_err());
         notes[0].note = "Only this book changed".into();
         notes[0].modified_at += 1;
         session.db.upsert_annotation(&notes[0]).unwrap();
         assert!(!pass(session, &mut receipts, &receipts_path).await.unwrap());
-        let first_path = &receipts.iter().find(|receipt| receipt.destination.book_id == notes[0].content_hash).unwrap().destination.path;
+        let first_path = &receipts.iter().find(|receipt| receipt.destination.book_id == notes[0].book_id).unwrap().destination.path;
         assert!(fs::read_to_string(first_path).unwrap().contains("Only this book changed"));
         assert_eq!(fs::read(other_path).unwrap(), other_bytes);
         assert!(session.runtime.automatic_export.pending.borrow().is_empty());
@@ -761,12 +759,12 @@ mod tests {
                 parent_id: ROOT_DIR_ID,
                 file_name: "Book.pdf".into(),
                 format: BookFormat::Pdf,
-                content_hash: book,
+                book_id: book,
                 size_bytes: original.len() as u64,
                 inspection_version: 1,
                 inspection: Some(book_inspection::InspectedBook {
                     metadata: book_model::BookRecord { metadata: BookDetails { title: "PDF book".into(), ..Default::default() }, description: String::new() },
-                    pdf: Some(PdfReaderMetadata { version: 1, content_hash: book.to_hex(), pages: vec![PdfStoredPage { width: 600.0, height: 800.0, rotation: 0 }], skippable_pages: None, annotations: vec![], dependencies: None }),
+                    pdf: Some(PdfReaderMetadata { version: 1, book_id: book.to_hex(), pages: vec![PdfStoredPage { width: 600.0, height: 800.0, rotation: 0 }], skippable_pages: None, annotations: vec![], dependencies: None }),
                     audiobook: None,
                     toc: vec![],
                 }),
@@ -782,9 +780,9 @@ mod tests {
         futures_util::pin_mut!(opening);
         assert!(timeout(Duration::from_millis(100), &mut opening).await.is_err(), "reader must wait for publication before selecting a revision");
         drop(publishing);
-        let opened = opening.await.unwrap().into_document().unwrap();
-        assert!(opened.pdf_metadata.is_some(), "the initial revision has matching cached metadata");
-        let mut reader = opened.source.into_reader().unwrap();
+        let opened = opening.await.unwrap().into_pdf().unwrap();
+        assert!(opened.metadata.is_some(), "the initial revision has matching cached metadata");
+        let mut reader = opened.reader;
         assert!(session.assets.try_exclusive_lease(&book).unwrap().is_some(), "an open reader must not block PDF export");
 
         let annotation = note(book, AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(0, vec![PdfAnnotationRect::new(0.1, 0.2, 0.3, 0.1)], None)));
@@ -832,10 +830,10 @@ mod tests {
         pinned.clear();
         reader.read_to_end(&mut pinned).unwrap();
         assert_eq!(pinned, original, "further exports must not invalidate the active reader's snapshot");
-        let reopened = session.prepare_book_for_reader(book).await.unwrap().into_document().unwrap();
-        assert!(reopened.pdf_metadata.is_none(), "a rewritten PDF must not reuse its original cached metadata");
+        let mut reopened = session.prepare_book_for_reader(book).await.unwrap().into_pdf().unwrap();
+        assert!(reopened.metadata.is_none(), "a rewritten PDF must not reuse its original cached metadata");
         let mut latest = Vec::new();
-        reopened.source.into_reader().unwrap().read_to_end(&mut latest).unwrap();
+        reopened.reader.read_to_end(&mut latest).unwrap();
         assert_eq!(latest, fs::read(&path).unwrap(), "new readers must see the exported revision");
         assert_ne!(latest, original);
     }
@@ -843,9 +841,9 @@ mod tests {
     #[tokio::test]
     async fn worker_coalesces_local_commands_and_received_annotation_changes() {
         use crate::library::{
-            commands::{prepare_library_request, PreparedRequest},
-            events::LibraryEvent,
             LibraryCommand, ReadyCommand,
+            commands::{PreparedRequest, prepare_library_request},
+            events::LibraryEvent,
         };
         let root = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();

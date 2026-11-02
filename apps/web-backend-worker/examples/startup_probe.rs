@@ -1,6 +1,6 @@
 //! Browser integration fixture for early transport adoption and host handover.
 #![cfg(target_arch = "wasm32")]
-use app::{host::web::backend_configuration, AppClient};
+use app::{AppClient, host::web::backend_configuration};
 use js_sys::Error;
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
@@ -19,7 +19,7 @@ pub async fn connect(broker_url: String) -> Result<u32, JsValue> {
 #[wasm_bindgen]
 pub async fn libraries() -> Result<u32, JsValue> {
     let client = CLIENT.with(|slot| slot.borrow().clone()).ok_or_else(|| Error::new("probe is not connected"))?;
-    let libraries = client.libraries().await.map_err(|error| Error::new(&error.to_string()))?;
+    let libraries = client.management.libraries().await.map_err(|error| Error::new(&error.to_string()))?;
     Ok(libraries.len() as u32)
 }
 
@@ -27,8 +27,8 @@ pub async fn libraries() -> Result<u32, JsValue> {
 #[wasm_bindgen]
 pub async fn create_library(name: String) -> Result<String, JsValue> {
     let client = CLIENT.with(|slot| slot.borrow().clone()).ok_or_else(|| Error::new("probe is not connected"))?;
-    let entry = client.create_library_with_asset_storage(name, false).await.map_err(|error| Error::new(&error.to_string()))?;
-    let count = client.library(*entry.library_id()).book_count().await.map_err(|error| Error::new(&error.to_string()))?;
+    let entry = client.management.create_library_with_asset_storage(name, false).await.map_err(|error| Error::new(&error.to_string()))?;
+    let count = client.management.library(*entry.library_id()).book_count().await.map_err(|error| Error::new(&error.to_string()))?;
     if count != 0 {
         return Err(Error::new("new fixture library is not empty").into());
     }

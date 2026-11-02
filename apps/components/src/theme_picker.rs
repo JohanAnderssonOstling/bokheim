@@ -1,9 +1,11 @@
 //! Compact palette samples shared by Browse and Reader settings.
 
+use ui_text::text;
+
+use crate::Button;
 use app_preferences::{ApplicationTheme, ResolvedAppearance};
 use gpui::prelude::*;
 use gpui::{Div, ElementId, px, rems, rgb};
-use crate::Button;
 use gpui_component::{Icon, IconName};
 
 use crate::theme::palette;
@@ -29,7 +31,7 @@ pub fn theme_choice_selected(selected: Option<(ApplicationTheme, ResolvedAppeara
 
 /// What a theme choice is called: its palette and its appearance.
 pub fn theme_choice_label(theme: ApplicationTheme, appearance: ResolvedAppearance) -> String {
-    format!("{} {}", theme.label(), if appearance == ResolvedAppearance::Dark { "dark" } else { "light" })
+    format!(text!(common::theme_appearance), theme.label(), if appearance == ResolvedAppearance::Dark { text!(common::dark_appearance) } else { text!(common::light_appearance) })
 }
 
 /// Fixed-size squares. The space between them expands with the panel,
@@ -45,7 +47,7 @@ pub fn theme_picker_swatch(id: impl Into<ElementId>, theme: ApplicationTheme, ap
     let border = if selected { accent } else { rgb(colors.rule) };
     let label = theme_choice_label(theme, appearance);
 
-    let letters = gpui::div().text_color(rgb(colors.ink_text)).text_size(rems(1.5)).child("Aa");
+    let letters = gpui::div().text_color(rgb(colors.ink_text)).text_size(rems(1.5)).child(text!(common::aa));
 
     let sample = gpui::div()
         .relative()

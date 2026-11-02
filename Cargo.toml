@@ -1,10 +1,14 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/ui-text",
     "shared/description-storage",
+    "shared/path-label",
     "shared/dictionary-catalog",
     "client/app/crates/dictionary",
     "client/app",
+    "client/embedded-browser",
+    "client/reader-lookups",
     "client/client-runtime",
     "shared/http-response",
     "client/library-backend",
@@ -36,6 +40,7 @@ members = [
     "shared/wire",
     "shared/wasm-callback",
     "shared/protobuf-wire",
+    "shared/serde-transport",
     "shared/metadata-contract",
     "shared/update-protocol",
     "shared/update-files",
@@ -46,7 +51,7 @@ members = [
     "client/kobo-update",
     "shared/sync-common",
     "apps/desktop-gpui",
-    "apps/opds-webview",
+    "apps/browser/crates/embedded-browser-ui",
     "apps/web-gpui",
     "apps/web-backend-worker",
     "apps/kobo-device",

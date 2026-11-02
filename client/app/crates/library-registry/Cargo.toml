@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+app-preferences = { path = "../../../preferences", features = ["store"] }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 device-sqlite = { path = "../../../device-sqlite" }
 sync-common = { path = "../../../../shared/sync-common" }

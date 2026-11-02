@@ -1,5 +1,7 @@
 //! Image-only fixed-page reader. Archive access and rendering remain separate.
 
+use ui_text::text;
+
 mod controls;
 mod image_decode;
 mod layout;
@@ -85,17 +87,20 @@ impl ComicReaderView {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let current = initial_page.min(reader.pages.len().saturating_sub(1));
+        cx.observe_global::<ReaderSettings>(|_: &mut Self, cx| cx.notify()).detach();
         let mut sidebar = SidebarState::from_preferences(cx);
         if sidebar.is_visible() && !matches!(sidebar.effective_or_default(true), SidebarTab::Contents | SidebarTab::Settings) {
             sidebar.show(SidebarTab::Contents);
         }
+        let positions = ReadingPositionWriter::new(cx, locator.book_id(), library).with_saving_enabled(save_progress);
+        positions.watch(cx);
         let mut view = Self {
             right_to_left: reader.right_to_left,
             reader,
             title,
             current,
             columns: 1,
-            page_gap: ReaderSettings::preferences(cx).comic_page_gap_px,
+            page_gap: ReaderSettings::preferences(cx).synchronized.comic_page_gap_px(),
             zoom: if offset > 0.0 { Zoom::FitWidth } else { Zoom::FitPage },
             offset,
             pan_x: 0.0,
@@ -110,7 +115,7 @@ impl ComicReaderView {
             requested_pages: VecDeque::new(),
             loading_page: None,
             page_sizes: HashMap::new(),
-            positions: ReadingPositionWriter::new(cx, locator.content_hash(), library).with_saving_enabled(save_progress),
+            positions,
             navigation_revision: 0,
             history: Default::default(),
             sidebar,
@@ -169,6 +174,7 @@ impl ComicReaderView {
                                 view.pages.insert_protected(index, Arc::new(page), bytes, |key| visible.contains(&key));
                             }
                             Err(error) => {
+                                log::warn!("Could not display comic page {}: {error}", index + 1);
                                 view.errors.insert(index, error);
                             }
                         }
@@ -320,10 +326,10 @@ impl Render for ComicReaderView {
         self.chrome.sync_system_bars(visible, cx);
         let preferences = ReaderSettings::preferences(cx);
         let available_width = f32::from(window.viewport_size().width) - chrome::sidebar_width(active_tab.is_some(), window, cx);
-        let horizontal_margin = preferences.comic_horizontal_margin_px.min(((available_width - 100.0) / 2.0).max(0.0));
-        let vertical_margin = preferences.comic_vertical_margin_px.min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
-        if self.page_gap != preferences.comic_page_gap_px {
-            self.page_gap = preferences.comic_page_gap_px;
+        let horizontal_margin = preferences.synchronized.comic_horizontal_margin_px().min(((available_width - 100.0) / 2.0).max(0.0));
+        let vertical_margin = preferences.synchronized.comic_vertical_margin_px().min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
+        if self.page_gap != preferences.synchronized.comic_page_gap_px() {
+            self.page_gap = preferences.synchronized.comic_page_gap_px();
             self.clamp_position();
             self.request_pages(cx);
         }
@@ -343,9 +349,9 @@ impl Render for ComicReaderView {
                     let top = (row.height - layout.height).max(0.0) * 0.5;
                     document = document.child(cell.child(img(page.image.clone()).absolute().left(px(layout.left)).top(px(top)).w(px(layout.width)).h(px(layout.height)).bg(gpui::rgb(0xffffff))));
                 } else {
-                    let message = self.errors.get(&index).map(|error| format!("Could not display page {}: {error}", index + 1)).unwrap_or_else(|| format!("Loading page {}…", index + 1));
+                    let message = if self.errors.contains_key(&index) { format!(text!(reader::could_not_display_page), index + 1) } else { format!(text!(reader::loading_page), index + 1) };
                     document = document.child(cell.flex().items_center().justify_center().text_color(gpui::rgb(0xffffff)).child(message).when(self.errors.contains_key(&index), |body| {
-                        body.child(components::outlined_text_button(("comic-retry", index), "Retry").on_click(cx.listener(move |view, _, _, cx| {
+                        body.child(components::outlined_text_button(("comic-retry", index), text!(common::retry)).on_click(cx.listener(move |view, _, _, cx| {
                             view.errors.remove(&index);
                             view.request_pages(cx);
                         })))
@@ -470,14 +476,14 @@ impl Render for ComicReaderView {
             }));
         let count = self.reader.pages.len();
         let percent = book_model::pdf_page_progress(visible_pages.end - 1, count);
-        let progress_label = format!("{percent:.0}%");
+        let progress_label = format!(text!(reader::percent_rounded), percent = percent);
         let sidebar = active_tab.map(|tab| {
             let body = self.render_panel(tab, window, cx);
             let content = SidebarContent::new(body);
             toolbar::reader_sidebar(self, &entity, content, theme, window, cx)
         });
         let surface = ReaderSurface {
-            document: components::reader_document_body().px(px(horizontal_margin)).py(px(vertical_margin)).bg(gpui::rgb(0x242424)).child(document).into_any_element(),
+            document: self.positions.with_notice(components::reader_document_body().px(px(horizontal_margin)).py(px(vertical_margin)).bg(gpui::rgb(0x242424)).child(document).into_any_element(), theme),
             dock: None,
             sidebar,
             active_tab,
@@ -485,7 +491,7 @@ impl Render for ComicReaderView {
             document_ready: true,
             loading_focus: self.focus.clone(),
             title: self.title.clone(),
-            chapter: format!("Page {} of {count}", self.current + 1),
+            chapter: format!(text!(reader::page_of_count), self.current + 1, count = count),
             progress_label,
             progress_fraction: percent / 100.0,
             progress_detail: format!("{}/{count}", self.current + 1),

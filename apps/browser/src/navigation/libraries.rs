@@ -1,5 +1,7 @@
 //! Cached page sessions and coarse lifecycle operations for every library.
 
+use ui_text::text;
+
 use crate::services::{import_failure_message, notify_warning};
 use library_backend::{ImportFailure, ROOT_DIR_ID};
 use std::cell::Cell;
@@ -8,6 +10,7 @@ use std::rc::Rc;
 
 use app::{AppClient, LibraryEntry, LibraryFolderError, LibraryFolderStep};
 use gpui::{App, AppContext, Context, Entity, Task, Window};
+use gpui_component::menu::PopupMenu;
 use sync_common::LibraryId;
 use ui_components::user_facing_error;
 
@@ -29,6 +32,8 @@ pub(crate) struct Libraries {
     selection_epoch: Rc<Cell<u64>>,
     _list_updates: Task<()>,
     #[cfg(not(target_arch = "wasm32"))]
+    database_cache: Option<Task<()>>,
+    #[cfg(not(target_arch = "wasm32"))]
     annotation_export_notifications: HashMap<LibraryId, Task<()>>,
 }
 
@@ -44,7 +49,7 @@ impl Libraries {
         let now_playing = cx.new(|_| crate::NowPlaying::default());
         let selection_epoch = Rc::new(Cell::new(0));
         let list_epoch = selection_epoch.clone();
-        let list_backend = backend.clone();
+        let list_backend = backend.management.clone();
         let list_updates = cx.spawn(async move |sessions, cx| {
             let mut changes = match list_backend.library_list_changes().await {
                 Ok(changes) => changes,
@@ -89,11 +94,28 @@ impl Libraries {
             selection_epoch,
             _list_updates: list_updates,
             #[cfg(not(target_arch = "wasm32"))]
+            database_cache: None,
+            #[cfg(not(target_arch = "wasm32"))]
             annotation_export_notifications: HashMap::new(),
         };
         #[cfg(not(target_arch = "wasm32"))]
+        libraries.retain_selected_database_cache(cx);
+        #[cfg(not(target_arch = "wasm32"))]
         libraries.watch_annotation_exports(cx);
         libraries
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn retain_selected_database_cache(&mut self, cx: &mut Context<Self>) {
+        // Dropping the previous task releases its lease, including on window close.
+        // Each window owns a lease, so another window can keep the library warm.
+        self.database_cache = self.selected_id.map(|id| {
+            let library = self.backend.management.library(id);
+            cx.spawn(async move |_, _| match library.retain_database_cache().await {
+                Ok(_cache) => std::future::pending::<()>().await,
+                Err(error) => log::warn!("could not retain database cache for library {id}: {error}"),
+            })
+        });
     }
 
     pub(crate) fn set_now_playing(&self, book: Option<crate::NowPlayingBook>, cx: &mut App) {
@@ -111,10 +133,23 @@ impl Libraries {
         &self.entries
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn open_annotation_export(&self, library_id: LibraryId, window: &mut Window, cx: &mut App) {
-        let Some(entry) = self.entries.iter().find(|entry| *entry.library_id() == library_id) else { return };
-        crate::universal::open_annotation_export(self.backend.clone(), library_id, entry.library_name().to_owned(), window, cx);
+    pub(crate) fn annotation_export_available(&self) -> bool {
+        cfg!(not(target_arch = "wasm32"))
+    }
+
+    pub(crate) fn annotation_export_menu(&self, library_id: LibraryId, menu: PopupMenu) -> PopupMenu {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(entry) = self.entries.iter().find(|entry| *entry.library_id() == library_id) else { return menu };
+            let backend = self.backend.clone();
+            let name = entry.library_name().to_owned();
+            menu.item(ui_components::menu_item(text!(browse::export_annotations), move |_, window, cx| crate::universal::open_annotation_export(backend.clone(), library_id, name.clone(), window, cx)))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = library_id;
+            menu
+        }
     }
     pub(crate) fn selected_is_opds(&self) -> bool {
         self.entries.iter().any(|entry| Some(*entry.library_id()) == self.selected_id && entry.is_opds())
@@ -147,7 +182,7 @@ impl Libraries {
         }
         let backend = self.backend.clone();
         cx.spawn(async move |sessions, cx| {
-            let result = backend.libraries().await;
+            let result = backend.management.libraries().await;
             let _ = sessions.update_in(cx, |sessions, window, cx| {
                 if sessions.selection_epoch.get() != epoch {
                     return;
@@ -171,9 +206,33 @@ impl Libraries {
                 Ok(None)
             } else {
                 // No locator means the configured default library location.
-                backend.create_library_with_asset_storage(name, asset_storage_enabled).await.map(|entry| Some(*entry.library_id()))
+                backend.management.create_library_with_asset_storage(name, asset_storage_enabled).await.map(|entry| Some(*entry.library_id()))
             }
         }
+    }
+
+    #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
+    pub(crate) fn move_library(&mut self, library_id: LibraryId, destination: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(guard) = crate::services::library_removal::begin_library_removal(library_id, cx) else { return };
+        let preparation = crate::services::library_removal::prepare_library_removal(library_id, cx);
+        let backend = self.backend.clone();
+        crate::services::notify_info("library-move", text!(browse::moving_library), window, cx);
+        cx.spawn(async move |sessions, cx| {
+            let _guard = guard;
+            let result = crate::services::library_removal::prepared_removal(preparation, backend.move_library(library_id, destination)).await;
+            let _ = sessions.update_in(cx, |sessions, window, cx| match result {
+                Ok(entry) => {
+                    sessions.selection_epoch.set(sessions.selection_epoch.get().wrapping_add(1));
+                    if let Some(old) = sessions.entries.iter_mut().find(|old| *old.library_id() == library_id) {
+                        *old = entry;
+                    }
+                    crate::services::notify_info("library-move", text!(browse::library_moved), window, cx);
+                    cx.notify();
+                }
+                Err(error) => sessions.notify_error(error, window, cx),
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn delete_library(&mut self, library_id: LibraryId, cx: &mut Context<Self>) {
@@ -223,7 +282,7 @@ impl Libraries {
             for directory in directories.into_iter().filter(|directory| directory.local_path.is_none()) {
                 let directory = crate::directory_import(directory);
                 let name = directory.name.clone();
-                match backend.create_library_with_asset_storage(name.clone(), asset_storage_enabled).await {
+                match backend.management.create_library_with_asset_storage(name.clone(), asset_storage_enabled).await {
                     Ok(entry) => {
                         created.push((entry, directory));
                     }
@@ -258,7 +317,7 @@ impl Libraries {
                 let library_id = *entry.library_id();
                 let name = entry.library_name();
                 let _progress = sessions.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(window, cx)).ok();
-                let result = backend.library(library_id).import_directory(ROOT_DIR_ID, directory, false).await;
+                let result = backend.management.library(library_id).import_directory(ROOT_DIR_ID, directory, false).await;
                 let _ = sessions.update(cx, |sessions, cx| {
                     if let Some(session) = sessions.sessions.get(&library_id) {
                         session.update(cx, |session, cx| session.set_importing(false, cx));
@@ -270,7 +329,7 @@ impl Libraries {
                         let _ = sessions.update_in(cx, |_, window, cx| notify_warning("library-import-warning", import_failure_summary(&failures), window, cx));
                     }
                     Err(error) => {
-                        let message = format!("Couldn't import books from “{name}”. {}", user_facing_error(&error, "Retry the import. If it fails again, report the problem."));
+                        let message = format!(text!(browse::couldn_t_import_books_from), user_facing_error(&error, text!(browse::retry_the_import_if_it_fails_again_report_the_problem)), name = name);
                         let _ = sessions.update_in(cx, |_, window, cx| notify_warning("library-import-warning", message, window, cx));
                     }
                     _ => {}
@@ -307,6 +366,8 @@ impl Libraries {
                 Some(id) => self.set_selected_library(id, cx),
                 None => {
                     self.selected_id = None;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.retain_selected_database_cache(cx);
                 }
             }
         }
@@ -320,19 +381,25 @@ impl Libraries {
             let opds = self.entries.iter().any(|entry| *entry.library_id() == library_id && entry.is_opds());
             self.sessions.entry(library_id).or_insert_with(|| cx.new(|cx| LibrarySession::with_now_playing(backend, open_book, library_id, self.now_playing.clone(), opds, cx)));
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let changed = self.selected_id != Some(library_id);
         self.selected_id = Some(library_id);
+        #[cfg(not(target_arch = "wasm32"))]
+        if changed {
+            self.retain_selected_database_cache(cx);
+        }
         cx.notify();
     }
 
     fn notify_error(&self, error: app::BackendError, window: &mut Window, cx: &mut App) {
-        crate::services::notify_error("library-operation-error", user_facing_error(&error, "Could not finish the library action. Please try again."), window, cx);
+        crate::services::notify_error("library-operation-error", user_facing_error(&error, text!(browse::could_not_finish_the_library_action_please_try_again)), window, cx);
     }
 }
 
 fn import_failure_summary(failures: &[ImportFailure]) -> String {
     let mut summary = failures.iter().take(3).map(import_failure_message).collect::<Vec<_>>().join(". ");
     if failures.len() > 3 {
-        summary.push_str(&format!(". {} more imports failed.", failures.len() - 3));
+        summary.push_str(&format!(text!(browse::more_imports_failed), failures.len() - 3));
     }
     summary
 }
@@ -347,7 +414,7 @@ mod tests {
         let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_directory, _session, library) = LibrarySession::test_context(cx).await;
         let backend = Rc::new(library.app().clone());
-        let initial = backend.libraries().await.unwrap();
+        let initial = backend.management.libraries().await.unwrap();
         let original = *library.backend().id();
         let window = cx.add_window(|window, cx| {
             let view = cx.new(|_| gpui::Empty);
@@ -362,7 +429,7 @@ mod tests {
             libraries.create_selected_libraries(vec![SelectedDirectory { local_path: None, name: "Provider library".into(), directories: Vec::new(), files: Vec::new() }], true, cx);
         });
         cx.condition(&libraries, |libraries, _| !libraries.creating_libraries() && libraries.entries().iter().any(|entry| entry.library_name() == "Provider library")).await;
-        let created = backend.libraries().await.unwrap().into_iter().find(|entry| entry.library_name() == "Provider library").unwrap();
+        let created = backend.management.libraries().await.unwrap().into_iter().find(|entry| entry.library_name() == "Provider library").unwrap();
         let id = *created.library_id();
         libraries.read_with(cx, |libraries, _| {
             let entry = libraries.entries().iter().find(|entry| *entry.library_id() == id).unwrap();

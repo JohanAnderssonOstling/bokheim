@@ -1,4 +1,6 @@
 //! Window-owned export alerts, including libraries without an open page session.
+use ui_text::text;
+
 use super::Libraries;
 use app::AppClient;
 use gpui::{App, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
@@ -56,12 +58,12 @@ fn clear(library: LibraryId, window: &mut Window, cx: &mut App) {
 fn message(status: &AutomaticAnnotationExportStatus, name: &str) -> String {
     let blocked = |format| status.outputs.iter().any(|output| output.destination.format == format && output.failure.kind == AnnotationExportFailureKind::Busy && !output.failure.file_written);
     let readers = match (blocked(AnnotationExportFormat::Foliate), blocked(AnnotationExportFormat::Readest)) {
-        (true, true) => "Foliate and Readest",
-        (true, false) => "Foliate",
-        (false, true) => "Readest",
-        _ => return format!("Automatic annotation export needs attention in “{name}”."),
+        (true, true) => text!(browse::foliate_and_readest),
+        (true, false) => text!(browse::foliate),
+        (false, true) => text!(browse::readest),
+        _ => return format!(text!(browse::automatic_annotation_export_needs_attention_in), name = name),
     };
-    format!("Close {readers} to finish exporting annotations in “{name}”. Exports will resume automatically.")
+    format!(text!(browse::close_to_finish_exporting_annotations_in_exports_will_resume_automatically), name = name, readers = readers)
 }
 
 fn show(backend: Rc<AppClient>, library: LibraryId, name: String, status: &AutomaticAnnotationExportStatus, window: &mut Window, cx: &mut App) {
@@ -77,7 +79,7 @@ fn show(backend: Rc<AppClient>, library: LibraryId, name: String, status: &Autom
                 .items_center()
                 .gap(px(ui_components::SPACE_SM))
                 .child(div().flex_1().min_w_0().child(message.clone()))
-                .child(Button::new("view-annotation-exports").label("View exports").ghost().small().on_click(move |_, window, cx| {
+                .child(Button::new("view-annotation-exports").label(text!(browse::view_exports)).ghost().small().on_click(move |_, window, cx| {
                     notification.update(cx, |notification, cx| notification.dismiss(window, cx));
                     crate::universal::open_annotation_export(backend.clone(), library, name.clone(), window, cx);
                 }))
@@ -101,7 +103,7 @@ impl Libraries {
             let id = *entry.library_id();
             self.annotation_export_notifications.entry(id).or_insert_with(|| {
                 let backend = self.backend.clone();
-                let source = backend.library(id);
+                let source = backend.management.library(id);
                 cx.spawn(async move |libraries, cx| {
                     let Ok((updates, _)) = source.updates().await else { return };
                     let mut notices = Notices::default();

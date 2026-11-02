@@ -141,8 +141,6 @@ pub fn router_with_operational_limits(
         .route("/api/libraries/:library_id/cloud-storage", axum::routing::put(sync::set_cloud_storage))
         .route("/api/libraries", post(sync::create_library).put(sync::rename_library))
         .route("/api/libraries/:library_id", delete(sync::delete_library))
-        .route("/api/opds-feeds", get(sync::list_opds_feeds).put(sync::put_opds_feed))
-        .route("/api/opds-feeds/:id", delete(sync::delete_opds_feed))
         .route("/api/libraries/:library_id/blobs/:hash", head(assets::head_blob).get(assets::get_blob).put(assets::put_blob))
         .route("/api/libraries/:library_id/blobs/:hash/playback", post(playback::issue))
         .route("/api/playback/:ticket", get(playback::read).head(playback::read).delete(playback::revoke))

@@ -2,7 +2,9 @@
 //! dialog). Each form sends JSON that is parsed once, at its bridge, into this
 //! enum; every action carries exactly the fields it uses.
 
+use account_client::api_server_url;
 use app::AppClient;
+use library_backend::BackendError;
 use serde::Deserialize;
 use ui_components::AccountAction;
 
@@ -38,12 +40,12 @@ impl AuthenticationRequest {
     pub async fn submit(self, backend: &AppClient) -> Result<(), &'static str> {
         let action = self.action();
         let result = match self {
-            Self::Login { email, password } => backend.login(email, password).await.map(|_| ()),
-            Self::Register { email, password } => backend.request_public_registration(email, password).await,
-            Self::Verify { email, pin, password } => backend.verify_email(email, pin, password).await.map(|_| ()),
-            Self::Resend { email } => backend.resend_verification(email).await,
-            Self::RequestReset { email } => backend.request_password_reset(email).await,
-            Self::Reset { token, password } => backend.reset_password(token, password).await,
+            Self::Login { email, password } => backend.account.login(email, password).await.map(|_| ()),
+            Self::Register { email, password } => account_client::request_public_registration(&api_server_url(), &email, &password).await.map_err(BackendError::operation),
+            Self::Verify { email, pin, password } => backend.account.verify_email(email, pin, password).await.map(|_| ()),
+            Self::Resend { email } => account_client::resend_verification(&api_server_url(), &email).await.map_err(BackendError::operation),
+            Self::RequestReset { email } => account_client::request_password_reset(&api_server_url(), &email).await.map_err(BackendError::operation),
+            Self::Reset { token, password } => account_client::reset_password(&api_server_url(), &token, &password).await.map_err(BackendError::operation),
         };
         result.map_err(|error| ui_components::authentication_error(&error, action))
     }

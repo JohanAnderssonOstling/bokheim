@@ -8,6 +8,7 @@ rust-version = "1.89"
 [workspace]
 
 [dependencies]
+ui-text = { path = "../../../ui-text" }
 sha2 = "0.10.9"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 

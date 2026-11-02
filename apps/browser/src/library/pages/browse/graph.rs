@@ -4,6 +4,8 @@
 //! The location being browsed is the graph's selection. Tapping or navigating
 //! to a node browses it; the graph then moves that node to the camera centre.
 
+use ui_text::text;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -182,8 +184,8 @@ impl BrowseGraph {
 
     pub(super) fn layout_control(&self, cx: &Context<Self>) -> AnyElement {
         let (icon, next_label) = match self.layout_kind() {
-            components::GraphLayoutKind::Columns => (IconName::GraphColumns, "Switch to circle graph"),
-            components::GraphLayoutKind::AdaptiveRadial => (IconName::GraphCircle, "Switch to column graph"),
+            components::GraphLayoutKind::Columns => (IconName::GraphColumns, text!(browse::switch_to_circle_graph)),
+            components::GraphLayoutKind::AdaptiveRadial => (IconName::GraphCircle, text!(browse::switch_to_column_graph)),
         };
         components::outlined_icon_button("toggle-graph-layout", next_label, icon)
             .on_click(cx.listener(|graph, _, _, cx| {

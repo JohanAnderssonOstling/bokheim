@@ -1,5 +1,7 @@
 //! Native keyboard labels shared by controls and their bindings.
 
+use ui_text::text;
+
 use gpui::{Keystroke, SharedString};
 use gpui_component::kbd::Kbd;
 
@@ -27,7 +29,7 @@ pub fn shortcut_tooltip_with_alternatives(label: impl Into<SharedString>, shortc
     if keys.is_empty() {
         return label;
     }
-    format!("{label} ({keys})").into()
+    format!(text!(common::shortcut_with_keys), keys = keys, label = label).into()
 }
 
 #[cfg(test)]

@@ -39,7 +39,7 @@ fn annotations_round_trip_their_binary_form() {
     ] {
         let annotation = Annotation {
             id: "note-1".into(),
-            content_hash: BookId::new(&"a".repeat(64)),
+            book_id: BookId::new(&"a".repeat(64)),
             anchor,
             exact_text: "Text".into(),
             style: AnnotationStyle::Underline,
@@ -92,7 +92,7 @@ fn recurring_scopes_keep_creation_anchors_and_round_trip_storage_and_sync() {
     let original = AnnotationAnchor::epub_publication_cfi("epubcfi(/8/4!/4/2,/1:0,/1:9)");
     let mut annotation = Annotation {
         id: "recurring-name".into(),
-        content_hash: BookId::from_bytes([3; 32]),
+        book_id: BookId::from_bytes([3; 32]),
         anchor: original.clone(),
         exact_text: "Elizabeth".into(),
         style: AnnotationStyle::Underline,

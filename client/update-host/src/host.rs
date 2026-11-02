@@ -6,6 +6,10 @@ use update_client::{blocking, native_files::sync_file};
 pub trait Platform: Sized {
     fn target(&self) -> String;
 
+    fn application_activation(&self) -> ApplicationActivation {
+        ApplicationActivation::Restart
+    }
+
     fn workspace(&self, host: &NativeHost<Self>) -> Result<u64, String> {
         databases::workspace(&host.data)
     }
@@ -43,7 +47,7 @@ impl<P: Platform> NativeHost<P> {
         let mut installed = device(version, taxonomy.as_ref())?;
         installed.target = platform.target();
         let session = format!("{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
-        let coordinator = Coordinator::open(SqliteStore::open(&root)?, config, installed, session)?;
+        let coordinator = Coordinator::open(SqliteStore::open(&root)?, config, installed, session, platform.application_activation())?;
         Ok((Self { root, data: data.into(), version: version.into(), coordinator, trial: false, platform }, lock, taxonomy))
     }
 
@@ -220,9 +224,15 @@ impl<P: Platform> NativeHost<P> {
 
     pub(crate) fn workspace_bytes(&self) -> Result<u64, String> {
         if self.coordinator.is_taxonomy_only() {
-            return self.coordinator.record().approved.as_ref().ok_or("missing approved taxonomy")?.artifacts.iter().try_fold(0_u64, |bytes, artifact| {
-                bytes.checked_add(artifact.artifact.bytes.checked_mul(2).ok_or("taxonomy workspace overflow")?).ok_or_else(|| "taxonomy workspace overflow".into())
-            });
+            return self
+                .coordinator
+                .record()
+                .approved
+                .as_ref()
+                .ok_or("missing approved taxonomy")?
+                .artifacts
+                .iter()
+                .try_fold(0_u64, |bytes, artifact| bytes.checked_add(artifact.artifact.bytes.checked_mul(2).ok_or("taxonomy workspace overflow")?).ok_or_else(|| "taxonomy workspace overflow".into()));
         }
         self.platform.workspace(self)
     }

@@ -1,10 +1,11 @@
 //! Mutable register merging and shared publication helpers.
 pub(crate) use super::*;
 use crate::SqlParam;
-use crate::query_methods::query_rows;
-use content_address::BookId;
+use crate::query_methods::{optional_blob_column, query_rows, try_for_each_row};
+use content_address::{BookId, ContentHash};
 pub(crate) use rusqlite::{Connection, OptionalExtension};
-use sync_common::StateKey;
+use rusqlite::{ToSql, limits::Limit, params_from_iter};
+use sync_common::{ReplicaId, StateKey, wire};
 
 pub(super) struct MergeState {
     version: Option<VersionKey>,
@@ -35,13 +36,13 @@ pub(crate) fn book_key(body: &LibraryStateEntry) -> Option<&BookId> {
     match body {
         LibraryStateEntry::Reserved9(never) => match *never {},
         LibraryStateEntry::DirectoryName { .. } | LibraryStateEntry::DirectoryParent { .. } | LibraryStateEntry::DirectoryLifecycle { .. } => None,
-        LibraryStateEntry::Annotation { value, .. } => Some(&value.content_hash),
-        LibraryStateEntry::BookAdd { content_hash, .. }
-        | LibraryStateEntry::BookContent { content_hash, .. }
-        | LibraryStateEntry::BookLifecycle { content_hash, .. }
-        | LibraryStateEntry::Placement { content_hash, .. }
-        | LibraryStateEntry::ReadingPosition { content_hash, .. }
-        | LibraryStateEntry::ChapterReadStatus { content_hash, .. } => Some(content_hash),
+        LibraryStateEntry::Annotation { value, .. } => Some(&value.book_id),
+        LibraryStateEntry::BookAdd { book_id, .. }
+        | LibraryStateEntry::BookContent { book_id, .. }
+        | LibraryStateEntry::BookLifecycle { book_id, .. }
+        | LibraryStateEntry::Placement { book_id, .. }
+        | LibraryStateEntry::ReadingPosition { book_id, .. }
+        | LibraryStateEntry::ChapterReadStatus { book_id, .. } => Some(book_id),
     }
 }
 
@@ -64,9 +65,9 @@ pub(crate) fn merge_inner<T: std::borrow::Borrow<LibraryStateEntry>>(conn: &Conn
         }
         _ => {}
     }
-    if let LibraryStateEntry::BookContent { content_hash, checksum, size_bytes, .. } = body {
-        conn.execute("INSERT OR IGNORE INTO book(content_hash) VALUES(?1)", [content_hash])?;
-        crate::content_identity::freeze_content(conn, *content_hash, *checksum, *size_bytes)?;
+    if let LibraryStateEntry::BookContent { book_id, checksum, size_bytes, .. } = body {
+        conn.execute("INSERT OR IGNORE INTO book(content_hash) VALUES(?1)", [book_id])?;
+        crate::content_identity::freeze_content(conn, *book_id, *checksum, *size_bytes)?;
     }
     let (kind, key, subkey) = sync_state_identity(body);
     let current = read_merge_state(conn, kind, &key, &subkey, book_key(body))?;
@@ -129,6 +130,106 @@ fn replica_id(conn: &Connection) -> Result<uuid::Uuid, DatabaseError> {
 pub(crate) fn next_sequence(conn: &Connection) -> Result<ReplicaSeq, DatabaseError> {
     let sequence: i64 = conn.registers_allocate_sequence(|r| r.get(0))?;
     ReplicaSeq::new(nonnegative_u64(sequence, 0, "replica sequence")?).map_err(DatabaseError::operation)
+}
+
+pub(crate) fn allocate_sequences(conn: &Connection, count: usize) -> Result<(i64, ReplicaId), DatabaseError> {
+    let count = i64::try_from(count).map_err(DatabaseError::operation)?;
+    if count <= 0 {
+        return Err(DatabaseError::message("publication batch must be non-empty"));
+    }
+    let (last, replica) = conn.registers_allocate_batch(count, |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+    Ok((last - count + 1, replica.parse().map_err(DatabaseError::operation)?))
+}
+
+/// Publish distinct uploaded books already canonicalized under this writer.
+/// Admission and version ordering match record_local, without repeating the
+/// canonical-content writes or issuing SQL separately for every register.
+pub(crate) fn record_uploaded_contents(conn: &Connection, contents: &[(BookId, ContentHash, Option<u64>)]) -> Result<(), DatabaseError> {
+    if contents.is_empty() {
+        return Ok(());
+    }
+    let values = contents
+        .iter()
+        .map(|(book, checksum, size)| {
+            let value = LibraryStateEntry::BookContent { book_id: *book, checksum: *checksum, size_bytes: *size, pdf: None };
+            value.validate().map_err(DatabaseError::operation)?;
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+    let hashes = serde_json::to_string(&contents.iter().map(|(book, _, _)| book).collect::<Vec<_>>()).map_err(DatabaseError::operation)?;
+    let mut pending = Vec::new();
+    try_for_each_row(
+        |read| conn.registers_content_inputs(&hashes, read),
+        |row| {
+            let index = usize::try_from(row.get::<_, i64>(0)?).map_err(DatabaseError::operation)?;
+            let body = optional_blob_column(row, 1)?;
+            if let Some(body) = body {
+                let current = wire::decode::<LibraryStateEntry>(body, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?;
+                if current == values[index] {
+                    return Ok(());
+                }
+            }
+            let version = match row.get::<_, Option<i64>>(2)? {
+                Some(time) => StoredVersion::decode(time, row.get(3)?, row.get(4)?, row.get(5)?, [2, 3, 4, 5])?.map(|value| value.0),
+                None => None,
+            };
+            pending.push((index, version, body.is_some(), row.get::<_, Option<BookId>>(6)?));
+            Ok(())
+        },
+    )?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    // Preserve the caller's order even if the query planner changes its scan.
+    pending.sort_unstable_by_key(|(index, _, _, _)| *index);
+    let now = crate::sync::unix_millis()? as u64;
+    let (first, replica) = allocate_sequences(conn, pending.len())?;
+    let replica_text = replica.to_string();
+    let mut rows = Vec::new();
+    let mut previous_books = Vec::new();
+    let mut publications = Vec::new();
+    for (offset, (index, current, has_body, previous_book)) in pending.into_iter().enumerate() {
+        let value = &values[index];
+        let time = match &current {
+            Some(current) => now.max(current.changed_at.checked_add(1).ok_or_else(|| DatabaseError::message("register clock exhausted"))?),
+            None => now,
+        };
+        let sequence = first + offset as i64;
+        let version = VersionKey::new(time, value.conflict_rank(), replica, ReplicaSeq::new(u64::try_from(sequence).map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?);
+        if current.as_ref().is_some_and(|current| &version < current || (&version == current && has_body)) {
+            continue;
+        }
+        let book = contents[index].0;
+        if let Some(previous) = previous_book.filter(|previous| *previous != book) {
+            previous_books.push(previous);
+        }
+        rows.push((book, storage_i64(time, "register timestamp")?, sequence, wire::encode(value).map_err(DatabaseError::operation)?));
+        publications.push((book, sequence));
+    }
+    let chunk_size = (conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)?.max(6) as usize) / 6;
+    for chunk in rows.chunks(chunk_size) {
+        let mut sql = String::from("INSERT INTO sync_state_version(state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,body,book_key) VALUES ");
+        let mut bindings: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() * 6);
+        for (index, (book, time, sequence, body)) in chunk.iter().enumerate() {
+            if index != 0 {
+                sql.push(',');
+            }
+            sql.push_str("('book_content',?,'',?,0,?,?,?,?)");
+            bindings.extend([book as &dyn ToSql, time as &dyn ToSql, &replica_text as &dyn ToSql, sequence as &dyn ToSql, body as &dyn ToSql, book as &dyn ToSql]);
+        }
+        sql.push_str(" ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank,replica_id=excluded.replica_id,replica_seq=excluded.replica_seq,body=excluded.body,book_key=excluded.book_key");
+        conn.prepare(&sql)?.execute(params_from_iter(bindings))?;
+    }
+    if !previous_books.is_empty() {
+        let hashes = serde_json::to_string(&previous_books).map_err(DatabaseError::operation)?;
+        conn.registers_books_projection_batch(&hashes)?;
+    }
+    if !publications.is_empty() {
+        let publications = serde_json::to_string(&publications).map_err(DatabaseError::operation)?;
+        conn.registers_content_projection_batch(&publications)?;
+        conn.registers_content_schedule_batch(&publications)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn accept_value(conn: &Connection, body: &LibraryStateEntry, time: u64) -> Result<(), DatabaseError> {
@@ -254,7 +355,7 @@ mod merge_tests {
         let tx = conn.unchecked_transaction().unwrap();
         let hash = BookId::new(&"a".repeat(64));
         let other = BookId::new(&"b".repeat(64));
-        let placement = LibraryStateEntry::Placement { dir_id: ROOT_DIR_ID, content_hash: hash, present: true, origin_folder_id: None };
+        let placement = LibraryStateEntry::Placement { dir_id: ROOT_DIR_ID, book_id: hash, present: true, origin_folder_id: None };
         let mut incoming = state(placement, 10);
         incoming.version.conflict_rank = ConflictRank::Delete;
         // Missing books are ignored before rank admission, as before.
@@ -293,7 +394,7 @@ mod merge_tests {
             record: book_model::BookRecord { metadata: Default::default(), description: "Server value".into() },
             navigation: None, pdf: None, recording: None, enrichment: Some(EnrichmentResult::NoMatch),
         };
-        let incoming = state(LibraryStateEntry::BookAdd { content_hash: hash, value: addition }, 20);
+        let incoming = state(LibraryStateEntry::BookAdd { book_id: hash, value: addition }, 20);
         assert!(!records::confirm(&tx, &incoming).unwrap());
         tx.execute("INSERT INTO book(content_hash) VALUES(?1)", [&hash]).unwrap();
         tx.execute("INSERT INTO local_book_draft(content_hash,body) VALUES(?1,x'00')", [&hash]).unwrap();

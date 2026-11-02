@@ -421,8 +421,8 @@ Run the browser and download checks with:
 
 ```sh
 gradle testReleaseUnitTest --tests se.bokheim.reader.gpui.BookBrowserTest -x buildRustRelease
-cargo test -p library-opds --lib
-cargo test -p desktop-gpui --lib --no-default-features --features mobile,reader-ui/native-audio book_browser
+cargo test -p embedded-browser --lib
+cargo test -p embedded-browser-ui --lib --no-default-features --features ui-components/mobile android
 ```
 
 On a device, check a signed-in store, an EPUB/PDF download, redirect handling,

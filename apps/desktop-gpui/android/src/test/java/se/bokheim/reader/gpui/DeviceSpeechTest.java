@@ -122,7 +122,7 @@ public class DeviceSpeechTest {
         tts.substitute = true;
         synthesize(42);
         assertEquals(0, tts.syntheses);
-        assertTrue(completions.get(0).contains("activated"));
+        assertTrue(completions.get(0).contains("Choose another voice"));
     }
     @Test public void cancellationDeletesPrivateAudioAndIgnoresLateCompletion() throws Exception {
         catalogue();

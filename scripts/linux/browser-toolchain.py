@@ -63,7 +63,7 @@ def main():
     environment = build_environment(args.offline)
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
-        command = ['cargo', 'rustc', '--release', '-p', 'opds-webview']
+        command = ['cargo', 'rustc', '--release', '-p', 'embedded-browser-ui', '--bin', 'bokheim-opds-webview']
         if args.offline:
             command.append('--offline')
         # Host GUI libraries are not bundled. Their internal libc references

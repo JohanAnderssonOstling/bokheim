@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use crate::epub::{LoadState, ReaderView};
 use crate::shell::persistence::StoredPosition;
 use crate::shell::tts::{self, TtsReader};
@@ -29,9 +31,8 @@ fn follow_passage_in_language(view: &mut HtmlView, target: &ReadingTarget, langu
 
 impl ReaderView {
     pub(super) fn tts_document_failed(&mut self, message: &str, cx: &mut Context<Self>) {
-        if self.tts.playing && (self.tts.needs_restart || self.tts.finished) {
-            self.stop_tts(cx);
-            self.tts.status = user_facing_error(message, "Couldn't read the next passage. Restart read aloud.").to_owned();
+        if self.tts.awaiting_page() {
+            self.stop_tts_with_status(user_facing_error(message, text!(reader::couldn_t_read_the_next_passage_restart_read_aloud)), cx);
         }
     }
 
@@ -41,12 +42,12 @@ impl ReaderView {
             return;
         }
         self.tts_navigation_revision = view.read(cx).navigation_revision();
-        if !self.tts.playing {
+        if !self.tts.is_active() {
             return;
         }
         self.tts.navigated();
         self.with_renderer(cx, |view, cx| view.apply(RendererCommand::SetReadingTarget(None), cx));
-        if !self.tts.paused {
+        if !self.tts.is_paused() {
             self.schedule_tts(cx);
         }
         cx.notify();
@@ -54,11 +55,11 @@ impl ReaderView {
 
     fn schedule_tts(&mut self, cx: &mut Context<Self>) {
         let timer = cx.background_executor().timer(Duration::from_millis(100));
-        self.tts.navigation_task = Some(cx.spawn(async move |this, cx| {
+        self.tts.navigate_with(cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |reader, cx| {
-                if reader.tts.playing && !reader.tts.paused {
-                    if reader.tts.finished {
+                if reader.tts.is_running() {
+                    if reader.tts.is_finished() {
                         let ready = match &reader.load_state {
                             LoadState::Ready(view) => view.read(cx).reading_document(),
                             _ => None,
@@ -80,30 +81,27 @@ impl ReaderView {
         if let LoadState::Ready(view) = &self.load_state
             && view.read(cx).reading_document().is_none()
         {
-            self.tts.finished = true;
-            self.tts.status = "Waiting for navigation…".into();
-            if !self.tts.paused {
+            self.tts.wait_for_navigation();
+            if !self.tts.is_paused() {
                 self.schedule_tts(cx);
             }
             return;
         }
         if self.tts_doc + 1 >= self.book.document_uris().len() {
-            self.stop_tts(cx);
-            self.tts.status = "Finished".into();
+            self.stop_tts_with_status(text!(reader::finished), cx);
             return;
         }
-        if self.tts.sleep.and_then(|plan| plan.chapter()).is_some_and(|chapter| self.toc.chapter_for_document(self.tts_doc + 1).unwrap_or(self.tts_doc + 1) > chapter) {
-            self.tts.finished = true;
+        if self.tts.sleep_chapter().is_some_and(|chapter| self.toc.chapter_for_document(self.tts_doc + 1).unwrap_or(self.tts_doc + 1) > chapter) {
+            self.tts.finish_batch();
             self.sleep_tts(cx);
             return;
         }
-        self.tts.navigated();
-        self.tts.status = "Loading the next chapter…".into();
+        self.tts.load_next_chapter();
         self.with_renderer(cx, |view, cx| {
             view.apply(RendererCommand::SetReadingTarget(None), cx);
             view.advance_reading_document(cx);
         });
-        if !self.tts.paused {
+        if !self.tts.is_paused() {
             self.schedule_tts(cx);
         }
     }
@@ -119,7 +117,7 @@ impl TtsReader for ReaderView {
 
     fn chapter_key(&self, cx: &App) -> usize {
         let cfi = match &self.load_state {
-            LoadState::Ready(view) => self.tts.current.and_then(|index| self.tts_fragments.get(index)).and_then(|fragment| view.read(cx).reading_target_cfi(fragment)).or_else(|| view.read(cx).current_cfi()),
+            LoadState::Ready(view) => self.tts.current_item().and_then(|index| self.tts_fragments.get(index)).and_then(|fragment| view.read(cx).reading_target_cfi(fragment)).or_else(|| view.read(cx).current_cfi()),
             _ => None,
         };
         let cfi = cfi.or_else(|| self.reading_position.as_ref().and_then(|position| self.book.cfi.source_position_cfi(&position.source)));
@@ -130,11 +128,11 @@ impl TtsReader for ReaderView {
     fn chapter_label(&self, cx: &App) -> String {
         let key = self.chapter_key(cx);
         let number = self.toc.chapter_ordinals().iter().position(|chapter| *chapter == key).unwrap_or(self.tts_doc) + 1;
-        self.toc.title_for_ordinal(key).filter(|title| !title.trim().is_empty()).map_or_else(|| format!("Chapter {number}"), |title| format!("Chapter {number} · {title}"))
+        self.toc.title_for_ordinal(key).filter(|title| !title.trim().is_empty()).map_or_else(|| format!(text!(reader::chapter), number = number), |title| format!(text!(reader::chapter_with_title), number = number, title = title))
     }
 
     fn update_tts_chapter_limit(&mut self, cx: &mut Context<Self>) {
-        let end = self.tts.sleep.and_then(|plan| plan.chapter()).and_then(|chapter| {
+        let end = self.tts.sleep_chapter().and_then(|chapter| {
             let LoadState::Ready(view) = &self.load_state else { return None };
             let view = view.read(cx);
             self.tts_fragments.iter().position(|fragment| view.reading_target_cfi(fragment).as_deref().and_then(|cfi| self.toc.chapter_for_cfi(cfi)).unwrap_or(self.tts_doc) > chapter)
@@ -144,11 +142,11 @@ impl TtsReader for ReaderView {
 
     fn skip_tts_element(&mut self, forward: bool, cx: &mut Context<Self>) {
         self.tts_navigation_changed(cx);
-        if !self.tts.playing || self.tts.needs_restart {
+        if !self.tts.can_skip() {
             return;
         }
-        let Some(index) = tts::adjacent_item(self.tts.current.unwrap_or(0), self.tts_fragments.len(), forward) else { return };
-        if self.tts.end_fragment.is_some_and(|end| index >= end) {
+        let Some(index) = tts::adjacent_item(self.tts.current_item().unwrap_or(0), self.tts_fragments.len(), forward) else { return };
+        if self.tts.at_limit(index) {
             self.sleep_tts(cx);
         }
         self.tts.skip_to(index);
@@ -158,21 +156,18 @@ impl TtsReader for ReaderView {
     }
 
     fn start_tts(&mut self, cx: &mut Context<Self>) {
-        if self.tts.playing && self.tts.service.as_ref().is_some_and(|service| !service.is_current()) {
+        if self.tts.lost_playback() {
             self.stop_tts(cx);
             return;
         }
-        if let Some(reason) = self.tts.unavailable_reason.clone() {
-            self.stop_tts(cx);
-            self.tts.status = reason;
+        if let Some(reason) = self.tts.unavailable_reason().map(str::to_owned) {
+            self.stop_tts_with_status(reason, cx);
             return;
         }
         let LoadState::Ready(view) = &self.load_state else { return };
         let Some((doc, _, glyph_start, mut fragments)) = view.read(cx).reading_items() else {
-            self.tts.playing = true;
-            self.tts.needs_restart = true;
-            self.tts.status = "Loading the chapter…".into();
-            if !self.tts.paused {
+            self.tts.wait_for_page(text!(reader::loading_the_chapter));
+            if !self.tts.is_paused() {
                 self.schedule_tts(cx);
             }
             cx.notify();
@@ -184,20 +179,18 @@ impl TtsReader for ReaderView {
         self.tts_navigation_revision = view.read(cx).navigation_revision();
         self.tts_fragments = fragments;
         if self.tts_fragments.is_empty() {
-            self.tts.playing = true;
-            self.tts.paused = false;
+            self.tts.prepare_items(0);
             self.advance_tts_document(cx);
             cx.notify();
             return;
         }
-        self.tts.current = Some(start);
+        self.tts.prepare_items(start);
         self.tts.set_chapter(self.chapter_label(cx));
         match self.tts.start_items(self.tts_fragments.len(), start, glyph_start) {
-            Ok(Some(events)) => self.tts.events_task = Some(tts::listen(events, cx)),
+            Ok(Some(events)) => self.tts.watch_events(events, cx),
             Ok(None) => {}
             Err(error) => {
-                self.tts.stop();
-                self.tts.status = error.user_message().to_owned();
+                self.stop_tts_with_status(error.user_message(), cx);
             }
         }
         self.update_tts_chapter_limit(cx);
@@ -205,18 +198,10 @@ impl TtsReader for ReaderView {
     }
 
     fn toggle_tts_pause(&mut self, cx: &mut Context<Self>) {
-        if self.tts.paused {
-            if self.tts.needs_restart {
-                self.tts.paused = false;
-                self.start_tts(cx);
-            } else if self.tts.finished {
-                self.tts.resume();
-                self.advance_tts_document(cx);
-            } else {
-                self.tts.resume();
-            }
-        } else {
-            self.tts.pause();
+        match self.tts.toggle_pause() {
+            tts::PlaybackContinuation::Restart => self.start_tts(cx),
+            tts::PlaybackContinuation::Advance => self.advance_tts_document(cx),
+            tts::PlaybackContinuation::None => {}
         }
         cx.notify();
     }
@@ -250,16 +235,14 @@ impl TtsReader for ReaderView {
             SpeechEvent::Requested { generation, index, glyph_start, max_chars } => {
                 if let Some(target) = self.tts_fragments.get(index)
                     && let LoadState::Ready(view) = &self.load_state
-                    && let Some(service) = &self.tts.service
                 {
                     let chunk = speech_chunk_in_language(view.read(cx), target, glyph_start, max_chars, &self.tts.chunk_language());
-                    service.provide_chunk(generation, index, glyph_start, chunk);
+                    self.tts.provide_chunk(generation, index, glyph_start, chunk);
                 }
                 return;
             }
             SpeechEvent::Started { index, glyph_ranges, .. } => {
-                self.tts.current = Some(index);
-                self.tts.status = if self.tts.paused { "Paused" } else { "Reading" }.into();
+                self.tts.started_item(index);
                 if let Some(fragment) = self.tts_fragments.get(index) {
                     let target = ReadingTarget { element: fragment.element, glyph_ranges };
                     if let LoadState::Ready(view) = &self.load_state
@@ -272,18 +255,17 @@ impl TtsReader for ReaderView {
                 }
             }
             SpeechEvent::Finished { .. } => {
-                if self.tts.end_fragment.is_some() && self.tts.sleep.and_then(|plan| plan.chapter()).is_some() {
-                    self.tts.finished = true;
+                if self.tts.chapter_limit_reached() {
+                    self.tts.finish_batch();
                     self.sleep_tts(cx);
-                } else if self.tts.paused {
-                    self.tts.finished = true;
+                } else if self.tts.is_paused() {
+                    self.tts.finish_batch();
                 } else {
                     self.advance_tts_document(cx);
                 }
             }
             SpeechEvent::Failed { failure, message, .. } => {
-                self.stop_tts(cx);
-                self.tts.status = tts::speech_error_message(failure, &message).to_owned();
+                self.stop_tts_with_status(tts::speech_error_message(failure, &message), cx);
             }
         }
         cx.notify();

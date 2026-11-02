@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use app::AppClient;
 use futures_util::future::{Either, select};
 use gpui::AsyncWindowContext;
@@ -13,15 +15,15 @@ use crate::library::mark_feed_book_added;
 /// and completion feedback for its particular surface.
 pub(crate) async fn import_catalog_book(app: &AppClient, library: &LibraryClient, source: BookSource, destination: DirId) -> Result<BookId, BackendError> {
     match source {
-        BookSource::Catalog { content_hash } => library.add_catalog_book(destination, content_hash).await,
+        BookSource::Catalog { book_id } => library.add_catalog_book(destination, book_id).await,
         BookSource::ExternalCatalog { entry, downloadable: true } => library.add_external_catalog_audiobook(destination, entry).await,
         BookSource::Opds { source, entry, downloadable: true, .. } => {
-            let (name, bytes) = app.download_opds_book(source, entry).await?;
+            let (name, bytes) = app.management.library(source).download_opds_book(entry).await?;
             library.import_downloaded_book(destination, name, bytes).await
         }
-        BookSource::Library { content_hash } => Ok(content_hash),
-        BookSource::ExternalCatalog { downloadable: false, .. } => Err("this book is read on its source website".into()),
-        BookSource::Opds { downloadable: false, .. } => Err("this book is not offered for download".into()),
+        BookSource::Library { book_id } => Ok(book_id),
+        BookSource::ExternalCatalog { downloadable: false, .. } => Err(text!(browse::this_book_is_read_on_its_source_website).into()),
+        BookSource::Opds { downloadable: false, .. } => Err(text!(browse::this_book_is_not_offered_for_download).into()),
     }
 }
 

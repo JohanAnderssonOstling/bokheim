@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import release_config
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTEXT = 'bokheim/shared-tests-v1'
@@ -38,12 +39,10 @@ def git(*args, directory=ROOT):
 def clean_revision(expected):
     if git('rev-parse', 'HEAD') != expected or git('status', '--porcelain', '--untracked-files=normal'):
         raise RuntimeError('Reporting requires an unchanged, clean checkout of the tested commit')
-    workflow = (ROOT / '.github/workflows/desktop-release.yml').read_text()
-    for directory, variable in [('GPUI-Fork', 'GPUI_FORK_REF'), ('HtmlEngine', 'HTML_ENGINE_REF'), ('HtmlViewCore', 'HTML_VIEW_CORE_REF')]:
-        pin = re.search(rf'^  {variable}: ([0-9a-f]{{40}})$', workflow, re.M).group(1)
+    for directory, pin in release_config.load()['dependencies'].items():
         sibling = ROOT.parent / directory
         if git('rev-parse', 'HEAD', directory=sibling) != pin or git('status', '--porcelain', directory=sibling):
-            raise RuntimeError(f'{directory} must be clean and at the release workflow pin {pin}')
+            raise RuntimeError(f'{directory} must be clean and at the release configuration pin {pin}')
 
 
 def report(repository, sha, state):

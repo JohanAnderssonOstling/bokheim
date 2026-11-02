@@ -1,7 +1,9 @@
+use ui_text::text;
+
 use super::{ComicReaderView, MAX_COLUMNS, Zoom};
 use crate::settings::ReaderSettings;
 use crate::shell::settings_navigation::SettingsRow;
-use app_preferences::{READER_SPACING_MAX, READER_SPACING_MIN};
+use app_preferences::{READER_SPACING_MAX, READER_SPACING_MIN, ReaderPreferencePatch};
 
 const SPACING_STEP_PX: f32 = 8.0;
 use crate::shell::{
@@ -19,15 +21,15 @@ use ui_components as components;
 impl ComicReaderView {
     pub(super) fn adjust_spacing(&mut self, row: SettingsRow, delta: f32, cx: &mut Context<Self>) {
         if ReaderSettings::update(cx, |preferences| {
-            let value = match row {
-                SettingsRow::SideMargins => &mut preferences.comic_horizontal_margin_px,
-                SettingsRow::VerticalMargins => &mut preferences.comic_vertical_margin_px,
-                SettingsRow::ColumnGap => &mut preferences.comic_page_gap_px,
+            let (value, patch): (f32, fn(f32) -> ReaderPreferencePatch) = match row {
+                SettingsRow::SideMargins => (preferences.synchronized.comic_horizontal_margin_px(), ReaderPreferencePatch::ComicHorizontalMarginPx),
+                SettingsRow::VerticalMargins => (preferences.synchronized.comic_vertical_margin_px(), ReaderPreferencePatch::ComicVerticalMarginPx),
+                SettingsRow::ColumnGap => (preferences.synchronized.comic_page_gap_px(), ReaderPreferencePatch::ComicPageGapPx),
                 _ => return,
             };
-            *value = (*value + delta).clamp(READER_SPACING_MIN, READER_SPACING_MAX);
+            preferences.apply_preference(patch((value + delta).clamp(READER_SPACING_MIN, READER_SPACING_MAX)));
         }) {
-            self.page_gap = ReaderSettings::preferences(cx).comic_page_gap_px;
+            self.page_gap = ReaderSettings::preferences(cx).synchronized.comic_page_gap_px();
             self.clamp_position();
             self.request_pages(cx);
             cx.notify();
@@ -44,7 +46,7 @@ impl ComicReaderView {
                     let theme = components::browser_theme(cx);
                     range
                         .map(|index| {
-                            let label = view.reader.pages[index].bookmark.as_ref().map(|name| format!("{} · {name}", index + 1)).unwrap_or_else(|| format!("Page {}", index + 1));
+                            let label = view.reader.pages[index].bookmark.as_ref().map(|name| format!(text!(reader::page_with_bookmark), index + 1, name = name)).unwrap_or_else(|| format!(text!(reader::page), index + 1));
                             components::reader_state_card(("comic-page", index), index == view.current, theme).h(px(44.0)).flex_none().cursor_pointer().child(label).on_click(cx.listener(move |view, _, window, cx| {
                                 view.go_to(index, cx);
                                 if components::uses_mobile_reader_controls(window) {
@@ -61,7 +63,7 @@ impl ComicReaderView {
         let fit = components::reader_choice_button_group(
             "comic-fit",
             [
-                components::settings_choice_button("comic-fit-page", "Whole page", self.zoom == Zoom::FitPage, theme).on_click(cx.listener(|view, _, _, cx| {
+                components::settings_choice_button("comic-fit-page", text!(reader::whole_page), self.zoom == Zoom::FitPage, theme).on_click(cx.listener(|view, _, _, cx| {
                     view.zoom = Zoom::FitPage;
                     view.offset = 0.0;
                     view.pan_x = 0.0;
@@ -70,7 +72,7 @@ impl ComicReaderView {
                     view.request_pages(cx);
                     cx.notify();
                 })),
-                components::settings_choice_button("comic-fit-width", "Fit width", self.zoom == Zoom::FitWidth, theme).on_click(cx.listener(|view, _, _, cx| {
+                components::settings_choice_button("comic-fit-width", text!(reader::fit_width), self.zoom == Zoom::FitWidth, theme).on_click(cx.listener(|view, _, _, cx| {
                     view.zoom = Zoom::FitWidth;
                     view.pan_x = 0.0;
                     view.clamp_position();
@@ -81,8 +83,8 @@ impl ComicReaderView {
             ],
             theme,
         );
-        let columns = components::reader_setting_row("Pages").child(components::settings_stepper(
-            components::settings_stepper_button("comic-pages-decrease", "−", self.columns == 1).debug_selector(|| "comic-pages-decrease".into()).on_click(cx.listener(|view, _, _, cx| view.adjust_columns(-1, cx))),
+        let columns = components::reader_setting_row(text!(reader::pages)).child(components::settings_stepper(
+            components::settings_stepper_button("comic-pages-decrease", text!(reader::minus), self.columns == 1).debug_selector(|| "comic-pages-decrease".into()).on_click(cx.listener(|view, _, _, cx| view.adjust_columns(-1, cx))),
             self.columns.to_string(),
             components::settings_stepper_button("comic-pages-increase", "+", self.columns == MAX_COLUMNS).debug_selector(|| "comic-pages-increase".into()).on_click(cx.listener(|view, _, _, cx| view.adjust_columns(1, cx))),
             theme,
@@ -90,11 +92,11 @@ impl ComicReaderView {
         let direction = components::reader_choice_button_group(
             "comic-direction",
             [
-                components::settings_choice_button("comic-ltr", "Left to right", !self.right_to_left, theme).on_click(cx.listener(|view, _, _, cx| {
+                components::settings_choice_button("comic-ltr", text!(reader::left_to_right), !self.right_to_left, theme).on_click(cx.listener(|view, _, _, cx| {
                     view.right_to_left = false;
                     cx.notify();
                 })),
-                components::settings_choice_button("comic-rtl", "Right to left", self.right_to_left, theme).on_click(cx.listener(|view, _, _, cx| {
+                components::settings_choice_button("comic-rtl", text!(reader::right_to_left), self.right_to_left, theme).on_click(cx.listener(|view, _, _, cx| {
                     view.right_to_left = true;
                     cx.notify();
                 })),
@@ -104,20 +106,20 @@ impl ComicReaderView {
         let zoom = components::reader_choice_button_group(
             "comic-zoom",
             [
-                components::settings_choice_button("comic-zoom-out", "−", false, theme).on_click(cx.listener(|view, _, _, cx| view.adjust_zoom(1.0 / 1.2, cx))),
+                components::settings_choice_button("comic-zoom-out", text!(reader::minus), false, theme).on_click(cx.listener(|view, _, _, cx| view.adjust_zoom(1.0 / 1.2, cx))),
                 components::settings_choice_button("comic-zoom-in", "+", false, theme).on_click(cx.listener(|view, _, _, cx| view.adjust_zoom(1.2, cx))),
             ],
             theme,
         );
         let preferences = ReaderSettings::preferences(cx);
         let spacing = [
-            (SettingsRow::SideMargins, "Side margins", preferences.comic_horizontal_margin_px),
-            (SettingsRow::VerticalMargins, "Vertical margins", preferences.comic_vertical_margin_px),
-            (SettingsRow::ColumnGap, "Page gap", preferences.comic_page_gap_px),
+            (SettingsRow::SideMargins, text!(reader::side_margins), preferences.synchronized.comic_horizontal_margin_px()),
+            (SettingsRow::VerticalMargins, text!(reader::vertical_margins), preferences.synchronized.comic_vertical_margin_px()),
+            (SettingsRow::ColumnGap, text!(reader::page_gap), preferences.synchronized.comic_page_gap_px()),
         ];
         let spacing = spacing.into_iter().enumerate().map(|(index, (row, label, value))| {
             components::reader_setting_row(label).child(components::settings_stepper(
-                components::settings_stepper_button(("comic-spacing-decrease", index), "−", value <= READER_SPACING_MIN)
+                components::settings_stepper_button(("comic-spacing-decrease", index), text!(reader::minus), value <= READER_SPACING_MIN)
                     .debug_selector(move || format!("comic-spacing-decrease-{index}"))
                     .on_click(cx.listener(move |this, _, _, cx| this.adjust_spacing(row, -SPACING_STEP_PX, cx))),
                 format!("{value:.0}px"),
@@ -127,13 +129,13 @@ impl ComicReaderView {
                 theme,
             ))
         });
-        let fullscreen = if window.is_fullscreen() { "Exit full screen" } else { "Enter full screen" };
+        let fullscreen = if window.is_fullscreen() { text!(reader::exit_full_screen) } else { text!(reader::enter_full_screen) };
         components::reader_settings_tab_body(theme)
-            .child(components::reader_settings_section("Page display", theme).child(fit))
+            .child(components::reader_settings_section(text!(reader::page_display), theme).child(fit))
             .child(components::reader_settings_group(theme).child(columns))
             .child(components::reader_settings_group(theme).children(spacing))
-            .child(components::reader_settings_section("Reading direction", theme).child(direction))
-            .child(components::reader_settings_section("Zoom", theme).child(zoom))
+            .child(components::reader_settings_section(text!(reader::reading_direction), theme).child(direction))
+            .child(components::reader_settings_section(text!(reader::zoom), theme).child(zoom))
             .when(super::super::shell::settings_navigation::DESKTOP_FULLSCREEN, |panel| {
                 panel.child(components::settings_choice_button("comic-fullscreen", fullscreen, window.is_fullscreen(), theme).on_click(|_, window, _| window.toggle_fullscreen()))
             })

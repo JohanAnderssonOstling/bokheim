@@ -15,7 +15,7 @@ fn import() -> ImportCommit {
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
         format: book_model::BookFormat::Epub,
-        content_hash: hash,
+        book_id: hash,
         size_bytes: 10,
         inspection_version: 1,
         inspection: Some(book_inspection::InspectedBook {
@@ -38,7 +38,7 @@ fn import() -> ImportCommit {
 fn downloaded_book() -> (Database, BookId) {
     let db = database();
     let commit = import();
-    let hash = commit.content_hash;
+    let hash = commit.book_id;
     db.commit_import(commit).unwrap();
     db.sync_request_book_downloads(&[hash], library_model::TransferOrigin::UserInitiated).unwrap();
     db.complete_local_book_request(&hash).unwrap();

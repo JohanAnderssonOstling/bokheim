@@ -52,7 +52,8 @@ pub enum LibrarySubscription {
     Updates,
     #[cfg(target_arch = "wasm32")]
     Book {
-        content_hash: BookId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
     },
 }
 
@@ -79,8 +80,8 @@ impl super::LibraryHandle {
                 Ok((Reply::new(scanning), LibraryEvents::Updates(events)))
             }
             #[cfg(target_arch = "wasm32")]
-            LibrarySubscription::Book { content_hash } => {
-                let (initial, lease) = self.subscribe_book(content_hash).await?;
+            LibrarySubscription::Book { book_id } => {
+                let (initial, lease) = self.subscribe_book(book_id).await?;
                 Ok((initial, LibraryEvents::Book(Box::new(lease))))
             }
         }

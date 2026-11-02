@@ -1,5 +1,7 @@
 //! EPUB-specific appearance controls in the shared sidebar.
 
+use ui_text::text;
+
 use skrift_column_paginator::RendererCommand;
 
 use gpui::prelude::*;
@@ -108,17 +110,21 @@ struct TileRow {
     label: &'static str,
 }
 
-const TYPEFACES: [(ReaderFontFamily, &str, Option<&str>); 3] = [(ReaderFontFamily::Publisher, "Book", None), (ReaderFontFamily::Serif, "Serif", Some("NV Garamond")), (ReaderFontFamily::SansSerif, "Sans serif", Some("Raleway"))];
-const SYSTEM_FONT_PICKER: bool = !cfg!(any(target_arch = "wasm32", feature = "kobo"));
+const TYPEFACES: [(ReaderFontFamily, &str, Option<&str>); 3] =
+    [(ReaderFontFamily::Publisher, text!(reader::book), None), (ReaderFontFamily::Serif, text!(common::serif), Some("NV Garamond")), (ReaderFontFamily::SansSerif, text!(common::sans_serif), Some("Raleway"))];
+const SYSTEM_FONT_PICKER: bool = !cfg!(target_arch = "wasm32");
 const SPACING_STEP_PX: f32 = 8.0;
 const ALIGNMENTS: Steps<ReaderTextAlignment> = [
-    (ReaderTextAlignment::Publisher, "Book", "icons/reader-settings/align-book.svg"),
-    (ReaderTextAlignment::Start, "Left", "icons/reader-settings/align-left.svg"),
-    (ReaderTextAlignment::Justify, "Justify", "icons/reader-settings/align-justify.svg"),
+    (ReaderTextAlignment::Publisher, text!(reader::book), "icons/reader-settings/align-book.svg"),
+    (ReaderTextAlignment::Start, text!(reader::left), "icons/reader-settings/align-left.svg"),
+    (ReaderTextAlignment::Justify, text!(reader::justify), "icons/reader-settings/align-justify.svg"),
 ];
 /// Minimum and maximum line length in characters.
-const LINE_LENGTHS: Steps<(f64, f64)> =
-    [((35.0, 50.0), "Short", "icons/reader-settings/line-length-short.svg"), ((45.0, 65.0), "Medium", "icons/reader-settings/line-length-medium.svg"), ((60.0, 85.0), "Long", "icons/reader-settings/line-length-long.svg")];
+const LINE_LENGTHS: Steps<(f64, f64)> = [
+    ((35.0, 50.0), text!(reader::short), "icons/reader-settings/line-length-short.svg"),
+    ((45.0, 65.0), text!(reader::medium), "icons/reader-settings/line-length-medium.svg"),
+    ((60.0, 85.0), text!(reader::long), "icons/reader-settings/line-length-long.svg"),
+];
 
 fn step_values<T: Copy>(steps: &Steps<T>) -> [T; 3] {
     steps.map(|(value, _, _)| value)
@@ -162,11 +168,11 @@ impl ReaderView {
                 SettingsRow::Theme => settings_navigation::adjust_theme(direction, cx),
                 SettingsRow::Fullscreen => settings_navigation::set_fullscreen(direction > 0, window),
                 SettingsRow::Typeface => {
-                    if SYSTEM_FONT_PICKER && direction > 0 && (current.custom_fonts_active() || current.font_family == ReaderFontFamily::SansSerif) {
+                    if SYSTEM_FONT_PICKER && direction > 0 && (current.custom_fonts_active() || current.synchronized.font_family() == ReaderFontFamily::SansSerif) {
                         self.select_custom_fonts(window, cx);
                         return true;
                     }
-                    let family = if current.custom_fonts_active() { ReaderFontFamily::SansSerif } else { adjacent_value(&TYPEFACES.map(|(family, _, _)| family), current.font_family, direction) };
+                    let family = if current.custom_fonts_active() { ReaderFontFamily::SansSerif } else { adjacent_value(&TYPEFACES.map(|(family, _, _)| family), current.synchronized.font_family(), direction) };
                     self.set_reader_font_family(family, cx);
                 }
                 SettingsRow::CjkTypeface => {
@@ -176,24 +182,24 @@ impl ReaderView {
                         self.set_cjk_font_choice(CjkFontChoice::Publisher, cx);
                     }
                 }
-                SettingsRow::Alignment => self.set_reader_text_alignment(adjacent_value(&step_values(&ALIGNMENTS), current.text_alignment, direction), cx),
+                SettingsRow::Alignment => self.set_reader_text_alignment(adjacent_value(&step_values(&ALIGNMENTS), current.synchronized.text_alignment(), direction), cx),
                 SettingsRow::FontSize => self.adjust_font_size(direction as f32, cx),
-                SettingsRow::Hyphenation => self.set_hyphenation(adjacent_value(&ReaderHyphenation::ALL, current.hyphenation, direction), cx),
+                SettingsRow::Hyphenation => self.set_hyphenation(adjacent_value(&ReaderHyphenation::ALL, current.synchronized.hyphenation(), direction), cx),
                 SettingsRow::WordSpacing => self.adjust_word_spacing(direction as f32 * WORD_SPACING_STEP_PERCENT, cx),
-                SettingsRow::FontWeight => self.set_font_weight(adjacent_value(&ReaderFontWeight::ALL, current.font_weight, direction), cx),
+                SettingsRow::FontWeight => self.set_font_weight(adjacent_value(&ReaderFontWeight::ALL, current.synchronized.font_weight(), direction), cx),
                 SettingsRow::LineHeightMode => self.set_override_line_height(direction > 0, cx),
                 SettingsRow::LineHeight => self.adjust_line_height(direction as f32 * 0.1, cx),
                 SettingsRow::ParagraphSpacingMode => self.set_override_paragraph_spacing(direction > 0, cx),
                 SettingsRow::ParagraphSpacing => self.adjust_paragraph_spacing(direction as f32 * PARAGRAPH_STEP_EM, cx),
-                SettingsRow::FirstLineIndentMode => self.set_first_line_indent(adjacent_value(&ReaderFirstLineIndent::ALL, current.first_line_indent, direction), cx),
+                SettingsRow::FirstLineIndentMode => self.set_first_line_indent(adjacent_value(&ReaderFirstLineIndent::ALL, current.synchronized.first_line_indent(), direction), cx),
                 SettingsRow::FirstLineIndent => self.adjust_first_line_indent(direction as f32 * PARAGRAPH_STEP_EM, cx),
                 SettingsRow::ReadingRuler => self.set_reading_ruler_enabled(direction > 0, cx),
                 SettingsRow::ReadingRulerStyle => self.set_reading_ruler(adjacent_value(&[ReadingRulerStyle::Band, ReadingRulerStyle::Focus, ReadingRulerStyle::Underline], current.reading_ruler, direction), cx),
                 SettingsRow::ReadingRulerLines => self.set_reading_ruler_lines(adjacent_step(&[1, 2, 3, 4, 5], current.reading_ruler_lines, direction), cx),
-                SettingsRow::LineLength => self.set_line_width_range(adjacent_step(&step_values(&LINE_LENGTHS), (current.min_line_width_ch, current.max_line_width_ch), direction), window, cx),
-                SettingsRow::SideMargins => self.set_horizontal_margin(current.horizontal_margin_px + direction as f32 * SPACING_STEP_PX, cx),
-                SettingsRow::VerticalMargins => self.set_vertical_margin(current.vertical_margin_px + direction as f32 * SPACING_STEP_PX, cx),
-                SettingsRow::ColumnGap => self.set_min_column_gap(current.min_column_gap_px + direction as f32 * SPACING_STEP_PX, cx),
+                SettingsRow::LineLength => self.set_line_width_range(adjacent_step(&step_values(&LINE_LENGTHS), (current.synchronized.min_line_width_ch(), current.synchronized.max_line_width_ch()), direction), window, cx),
+                SettingsRow::SideMargins => self.set_horizontal_margin(current.synchronized.horizontal_margin_px() + direction as f32 * SPACING_STEP_PX, cx),
+                SettingsRow::VerticalMargins => self.set_vertical_margin(current.synchronized.vertical_margin_px() + direction as f32 * SPACING_STEP_PX, cx),
+                SettingsRow::ColumnGap => self.set_min_column_gap(current.synchronized.min_column_gap_px() + direction as f32 * SPACING_STEP_PX, cx),
                 _ => return false,
             }
         }
@@ -206,113 +212,111 @@ impl ReaderView {
         let rows = self.settings_rows(cx);
         let theme = components::browser_theme(cx);
         let current = ReaderSettings::preferences(cx).clone();
-        let general = components::reader_settings_tab_body(theme)
-            .when(!cfg!(feature = "kobo"), |body| body.child(components::reader_settings_group(theme).child(self.settings_navigation.row(SettingsRow::Theme, &rows, crate::shell::theme_picker::reader_theme_picker(cx, theme), theme))))
-            .children(self.settings_navigation.fullscreen_group(&rows, window, theme))
-            .child(self.reading_ruler_settings(current.reading_ruler, current.reading_ruler_lines, theme, cx))
-            .child(
-                components::reader_settings_group(theme)
-                    .gap(px(components::SPACE_MD))
-                    .child(div().w_full().min_w_0().flex().flex_col().gap(px(components::SPACE_MD)).child(self.typeface_row(current.font_family, theme, cx)).children(self.cjk_typeface_row(theme, cx)).child(self.tile_row(
-                        TileRow { id: "reader-alignment", row: SettingsRow::Alignment, label: "Alignment" },
-                        &ALIGNMENTS,
-                        current.text_alignment,
-                        theme,
-                        cx,
-                        |this, alignment, _, cx| this.set_reader_text_alignment(alignment, cx),
-                    )))
-                    .child(div().w_full().min_w_0().flex().flex_col().gap(px(components::SPACE_MD)).child(self.font_weight_settings(theme, cx)).child(self.hyphenation_settings(theme, cx)))
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(components::SPACE_XS))
-                            .child(
-                                components::reader_setting_row("Font size").map(|row| self.settings_navigation.row(SettingsRow::FontSize, &rows, row, theme)).child(components::settings_stepper(
-                                    components::settings_stepper_button("font-size-smaller", "−", false)
-                                        .tooltip(components::configured_shortcut_tooltip("Decrease font size", "reader.font_decrease", cx))
-                                        .on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(-1.0, cx))),
-                                    format!("{:.0}px", current.font_size),
-                                    components::settings_stepper_button("font-size-larger", "+", false)
-                                        .tooltip(components::configured_shortcut_tooltip("Increase font size", "reader.font_increase", cx))
-                                        .on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(1.0, cx))),
-                                    theme,
-                                )),
-                            )
-                            .child(self.word_spacing_settings(theme, cx)),
-                    ),
-            )
-            .child(
-                components::reader_settings_group(theme)
-                    .gap(px(components::SPACE_MD))
-                    .child(self.tile_row(
-                        TileRow { id: "reader-line-length", row: SettingsRow::LineLength, label: "Line length" },
-                        &LINE_LENGTHS,
-                        (current.min_line_width_ch, current.max_line_width_ch),
-                        theme,
-                        cx,
-                        |this, range, window, cx| this.set_line_width_range(range, window, cx),
-                    ))
-                    .child(self.line_height_settings(theme, cx)),
-            )
-            .child(components::reader_settings_group(theme).child(self.paragraph_spacing_settings(theme, cx)))
-            .child(components::reader_settings_group(theme).child(self.first_line_indent_settings(theme, cx)))
-            .child(
-                components::reader_settings_group(theme)
-                    .child(
-                        components::reader_setting_row("Side margins").map(|row| self.settings_navigation.row(SettingsRow::SideMargins, &rows, row, theme)).child(components::settings_stepper(
-                            components::settings_stepper_button("reader-side-margins-decrease", "−", current.horizontal_margin_px <= READER_SPACING_MIN)
-                                .on_click(cx.listener(move |this, _, _, cx| this.set_horizontal_margin(current.horizontal_margin_px - SPACING_STEP_PX, cx))),
-                            format!("{:.0}px", current.horizontal_margin_px),
-                            components::settings_stepper_button("reader-side-margins-increase", "+", current.horizontal_margin_px >= READER_SPACING_MAX)
-                                .on_click(cx.listener(move |this, _, _, cx| this.set_horizontal_margin(current.horizontal_margin_px + SPACING_STEP_PX, cx))),
+        let general =
+            components::reader_settings_tab_body(theme)
+                .when(!cfg!(feature = "kobo"), |body| body.child(components::reader_settings_group(theme).child(self.settings_navigation.row(SettingsRow::Theme, &rows, crate::shell::theme_picker::reader_theme_picker(cx, theme), theme))))
+                .children(self.settings_navigation.fullscreen_group(&rows, window, theme))
+                .child(self.reading_ruler_settings(current.reading_ruler, current.reading_ruler_lines, theme, cx))
+                .child(
+                    components::reader_settings_group(theme)
+                        .gap(px(components::SPACE_MD))
+                        .child(div().w_full().min_w_0().flex().flex_col().gap(px(components::SPACE_MD)).child(self.typeface_row(current.synchronized.font_family(), theme, cx)).children(self.cjk_typeface_row(theme, cx)).child(
+                            self.tile_row(TileRow { id: "reader-alignment", row: SettingsRow::Alignment, label: text!(reader::alignment) }, &ALIGNMENTS, current.synchronized.text_alignment(), theme, cx, |this, alignment, _, cx| {
+                                this.set_reader_text_alignment(alignment, cx)
+                            }),
+                        ))
+                        .child(div().w_full().min_w_0().flex().flex_col().gap(px(components::SPACE_MD)).child(self.font_weight_settings(theme, cx)).child(self.hyphenation_settings(theme, cx)))
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(components::SPACE_XS))
+                                .child(
+                                    components::reader_setting_row(text!(reader::font_size)).map(|row| self.settings_navigation.row(SettingsRow::FontSize, &rows, row, theme)).child(components::settings_stepper(
+                                        components::settings_stepper_button("font-size-smaller", text!(reader::minus), false)
+                                            .tooltip(components::configured_shortcut_tooltip(text!(reader::decrease_font_size), "reader.font_decrease", cx))
+                                            .on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(-1.0, cx))),
+                                        format!("{:.0}px", current.synchronized.font_size_px()),
+                                        components::settings_stepper_button("font-size-larger", "+", false)
+                                            .tooltip(components::configured_shortcut_tooltip(text!(reader::increase_font_size), "reader.font_increase", cx))
+                                            .on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(1.0, cx))),
+                                        theme,
+                                    )),
+                                )
+                                .child(self.word_spacing_settings(theme, cx)),
+                        ),
+                )
+                .child(
+                    components::reader_settings_group(theme)
+                        .gap(px(components::SPACE_MD))
+                        .child(self.tile_row(
+                            TileRow { id: "reader-line-length", row: SettingsRow::LineLength, label: text!(reader::line_length) },
+                            &LINE_LENGTHS,
+                            (current.synchronized.min_line_width_ch(), current.synchronized.max_line_width_ch()),
                             theme,
-                        )),
-                    )
-                    .child(
-                        components::reader_setting_row("Vertical margins").map(|row| self.settings_navigation.row(SettingsRow::VerticalMargins, &rows, row, theme)).child(components::settings_stepper(
-                            components::settings_stepper_button("reader-vertical-margins-decrease", "−", current.vertical_margin_px <= READER_SPACING_MIN)
-                                .on_click(cx.listener(move |this, _, _, cx| this.set_vertical_margin(current.vertical_margin_px - SPACING_STEP_PX, cx))),
-                            format!("{:.0}px", current.vertical_margin_px),
-                            components::settings_stepper_button("reader-vertical-margins-increase", "+", current.vertical_margin_px >= READER_SPACING_MAX)
-                                .on_click(cx.listener(move |this, _, _, cx| this.set_vertical_margin(current.vertical_margin_px + SPACING_STEP_PX, cx))),
-                            theme,
-                        )),
-                    )
-                    .child(
-                        components::reader_setting_row("Column gap").map(|row| self.settings_navigation.row(SettingsRow::ColumnGap, &rows, row, theme)).child(components::settings_stepper(
-                            components::settings_stepper_button("reader-column-gap-decrease", "−", current.min_column_gap_px <= READER_SPACING_MIN)
-                                .on_click(cx.listener(move |this, _, _, cx| this.set_min_column_gap(current.min_column_gap_px - SPACING_STEP_PX, cx))),
-                            format!("{:.0}px", current.min_column_gap_px),
-                            components::settings_stepper_button("reader-column-gap-increase", "+", current.min_column_gap_px >= READER_SPACING_MAX)
-                                .on_click(cx.listener(move |this, _, _, cx| this.set_min_column_gap(current.min_column_gap_px + SPACING_STEP_PX, cx))),
-                            theme,
-                        )),
-                    ),
-            )
-            .into_any_element();
+                            cx,
+                            |this, range, window, cx| this.set_line_width_range(range, window, cx),
+                        ))
+                        .child(self.line_height_settings(theme, cx)),
+                )
+                .child(components::reader_settings_group(theme).child(self.paragraph_spacing_settings(theme, cx)))
+                .child(components::reader_settings_group(theme).child(self.first_line_indent_settings(theme, cx)))
+                .child(
+                    components::reader_settings_group(theme)
+                        .child(
+                            components::reader_setting_row(text!(reader::side_margins)).map(|row| self.settings_navigation.row(SettingsRow::SideMargins, &rows, row, theme)).child(components::settings_stepper(
+                                components::settings_stepper_button("reader-side-margins-decrease", text!(reader::minus), current.synchronized.horizontal_margin_px() <= READER_SPACING_MIN)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.set_horizontal_margin(current.synchronized.horizontal_margin_px() - SPACING_STEP_PX, cx))),
+                                format!("{:.0}px", current.synchronized.horizontal_margin_px()),
+                                components::settings_stepper_button("reader-side-margins-increase", "+", current.synchronized.horizontal_margin_px() >= READER_SPACING_MAX)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.set_horizontal_margin(current.synchronized.horizontal_margin_px() + SPACING_STEP_PX, cx))),
+                                theme,
+                            )),
+                        )
+                        .child(
+                            components::reader_setting_row(text!(reader::vertical_margins)).map(|row| self.settings_navigation.row(SettingsRow::VerticalMargins, &rows, row, theme)).child(components::settings_stepper(
+                                components::settings_stepper_button("reader-vertical-margins-decrease", text!(reader::minus), current.synchronized.vertical_margin_px() <= READER_SPACING_MIN)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.set_vertical_margin(current.synchronized.vertical_margin_px() - SPACING_STEP_PX, cx))),
+                                format!("{:.0}px", current.synchronized.vertical_margin_px()),
+                                components::settings_stepper_button("reader-vertical-margins-increase", "+", current.synchronized.vertical_margin_px() >= READER_SPACING_MAX)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.set_vertical_margin(current.synchronized.vertical_margin_px() + SPACING_STEP_PX, cx))),
+                                theme,
+                            )),
+                        )
+                        .child(
+                            components::reader_setting_row(text!(reader::column_gap)).map(|row| self.settings_navigation.row(SettingsRow::ColumnGap, &rows, row, theme)).child(components::settings_stepper(
+                                components::settings_stepper_button("reader-column-gap-decrease", text!(reader::minus), current.synchronized.min_column_gap_px() <= READER_SPACING_MIN)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.set_min_column_gap(current.synchronized.min_column_gap_px() - SPACING_STEP_PX, cx))),
+                                format!("{:.0}px", current.synchronized.min_column_gap_px()),
+                                components::settings_stepper_button("reader-column-gap-increase", "+", current.synchronized.min_column_gap_px() >= READER_SPACING_MAX)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.set_min_column_gap(current.synchronized.min_column_gap_px() + SPACING_STEP_PX, cx))),
+                                theme,
+                            )),
+                        ),
+                )
+                .into_any_element();
         crate::shell::keyboard_settings::with_keyboard_settings(general, window, cx)
     }
 
     fn hyphenation_settings(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
         let rows = self.settings_rows(cx);
-        let selected = ReaderSettings::preferences(cx).hyphenation;
+        let selected = ReaderSettings::preferences(cx).synchronized.hyphenation();
         let buttons = ReaderHyphenation::ALL
             .into_iter()
             .enumerate()
             .map(|(index, mode)| components::settings_choice_button(("reader-hyphenation", index), mode.label(), mode == selected, theme).on_click(cx.listener(move |reader, _, _, cx| reader.set_hyphenation(mode, cx))));
-        let group = components::reader_setting_row_smallcaps("Hyphenation", theme).child(components::reader_choice_button_group("reader-hyphenation", buttons, theme));
+        let group = components::reader_setting_row_smallcaps(text!(reader::hyphenation), theme).child(components::reader_choice_button_group("reader-hyphenation", buttons, theme));
         self.settings_navigation.row(SettingsRow::Hyphenation, &rows, group, theme)
     }
 
     fn word_spacing_settings(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
         let rows = self.settings_rows(cx);
-        let percent = ReaderSettings::preferences(cx).word_spacing_percent;
-        let row = components::reader_setting_row("Word spacing").child(components::settings_stepper(
-            components::settings_stepper_button("reader-word-spacing-decrease", "−", percent <= WORD_SPACING_MIN_PERCENT).on_click(cx.listener(|reader, _, _, cx| reader.adjust_word_spacing(-WORD_SPACING_STEP_PERCENT, cx))),
-            format!("{percent:.0}%"),
+        let percent = ReaderSettings::preferences(cx).synchronized.word_spacing_percent();
+        let row = components::reader_setting_row(text!(reader::word_spacing)).child(components::settings_stepper(
+            components::settings_stepper_button("reader-word-spacing-decrease", text!(reader::minus), percent <= WORD_SPACING_MIN_PERCENT).on_click(cx.listener(|reader, _, _, cx| reader.adjust_word_spacing(-WORD_SPACING_STEP_PERCENT, cx))),
+            format!(text!(reader::percent_rounded), percent = percent),
             components::settings_stepper_button("reader-word-spacing-increase", "+", percent >= WORD_SPACING_MAX_PERCENT).on_click(cx.listener(|reader, _, _, cx| reader.adjust_word_spacing(WORD_SPACING_STEP_PERCENT, cx))),
             theme,
         ));
@@ -321,69 +325,75 @@ impl ReaderView {
 
     fn font_weight_settings(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
         let rows = self.settings_rows(cx);
-        let selected = ReaderSettings::preferences(cx).font_weight;
+        let selected = ReaderSettings::preferences(cx).synchronized.font_weight();
         let buttons = ReaderFontWeight::ALL
             .into_iter()
             .enumerate()
             .map(|(index, weight)| components::settings_choice_button(("reader-font-weight", index), weight.label(), weight == selected, theme).on_click(cx.listener(move |reader, _, _, cx| reader.set_font_weight(weight, cx))));
-        let group = components::reader_setting_row_smallcaps("Font weight", theme).child(components::reader_choice_button_group("reader-font-weight", buttons, theme));
+        let group = components::reader_setting_row_smallcaps(text!(reader::font_weight), theme).child(components::reader_choice_button_group("reader-font-weight", buttons, theme));
         self.settings_navigation.row(SettingsRow::FontWeight, &rows, group, theme)
     }
 
     fn line_height_settings(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
         let rows = self.settings_rows(cx);
         let current = ReaderSettings::preferences(cx).clone();
-        let book = components::reader_picture_tile("reader-line-spacing-book", components::reader_tile_picture("icons/reader-settings/align-book.svg"), "Book", !current.override_line_height, theme)
+        let book = components::reader_picture_tile("reader-line-spacing-book", components::reader_tile_picture("icons/reader-settings/align-book.svg"), text!(reader::book), !current.synchronized.override_line_height(), theme)
             .on_click(cx.listener(|this, _, _, cx| this.set_override_line_height(false, cx)));
         let custom = components::reader_numeric_tile(
             "reader-line-spacing-custom",
-            format!("{:.1}×", current.line_height),
-            current.override_line_height,
-            components::settings_stepper_button("reader-line-height-decrease", "−", current.line_height <= LINE_HEIGHT_MIN).tooltip("Decrease line spacing").on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.adjust_line_height(-0.1, cx);
-            })),
-            components::settings_stepper_button("reader-line-height-increase", "+", current.line_height >= LINE_HEIGHT_MAX).tooltip("Increase line spacing").on_click(cx.listener(|this, _, _, cx| {
+            format!(text!(reader::spacing_multiplier), current.synchronized.line_height()),
+            current.synchronized.override_line_height(),
+            components::settings_stepper_button("reader-line-height-decrease", text!(reader::minus), current.synchronized.line_height() <= LINE_HEIGHT_MIN).tooltip(text!(reader::decrease_line_spacing)).on_click(cx.listener(
+                |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.adjust_line_height(-0.1, cx);
+                },
+            )),
+            components::settings_stepper_button("reader-line-height-increase", "+", current.synchronized.line_height() >= LINE_HEIGHT_MAX).tooltip(text!(reader::increase_line_spacing)).on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
                 this.adjust_line_height(0.1, cx);
             })),
             theme,
             cx.listener(|this, _, _, cx| this.set_override_line_height(true, cx)),
         )
-        .aria_label("Custom line spacing");
+        .aria_label(text!(reader::custom_line_spacing));
         let choices = components::reader_tile_group("reader-line-spacing-mode")
             .flex_wrap()
             .child(self.settings_navigation.row(SettingsRow::LineHeightMode, &rows, div().flex().flex_1().min_w(rems(3.0)).child(book), theme))
             .child(self.settings_navigation.row(SettingsRow::LineHeight, &rows, div().flex().flex_1().min_w(rems(components::reader_numeric_tile_width_rem())).child(custom), theme));
-        components::reader_setting_row_smallcaps("Line spacing", theme).child(choices)
+        components::reader_setting_row_smallcaps(text!(reader::line_spacing), theme).child(choices)
     }
 
     fn paragraph_spacing_settings(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
         let rows = self.settings_rows(cx);
         let current = ReaderSettings::preferences(cx).clone();
-        let book = components::reader_picture_tile("reader-paragraph-spacing-book", components::reader_tile_picture("icons/reader-settings/align-book.svg"), "Book", !current.override_paragraph_spacing, theme)
+        let book = components::reader_picture_tile("reader-paragraph-spacing-book", components::reader_tile_picture("icons/reader-settings/align-book.svg"), text!(reader::book), !current.synchronized.override_paragraph_spacing(), theme)
             .on_click(cx.listener(|this, _, _, cx| this.set_override_paragraph_spacing(false, cx)));
         let custom = components::reader_numeric_tile(
             "reader-paragraph-spacing-custom",
-            format!("{:.1} em", current.paragraph_spacing_em),
-            current.override_paragraph_spacing,
-            components::settings_stepper_button("reader-paragraph-spacing-decrease", "−", current.paragraph_spacing_em <= 0.0).tooltip("Decrease paragraph spacing").on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.adjust_paragraph_spacing(-PARAGRAPH_STEP_EM, cx);
-            })),
-            components::settings_stepper_button("reader-paragraph-spacing-increase", "+", current.paragraph_spacing_em >= PARAGRAPH_SPACING_MAX_EM).tooltip("Increase paragraph spacing").on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.adjust_paragraph_spacing(PARAGRAPH_STEP_EM, cx);
-            })),
+            format!(text!(reader::em), current.synchronized.paragraph_spacing_em()),
+            current.synchronized.override_paragraph_spacing(),
+            components::settings_stepper_button("reader-paragraph-spacing-decrease", text!(reader::minus), current.synchronized.paragraph_spacing_em() <= 0.0).tooltip(text!(reader::decrease_paragraph_spacing)).on_click(cx.listener(
+                |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.adjust_paragraph_spacing(-PARAGRAPH_STEP_EM, cx);
+                },
+            )),
+            components::settings_stepper_button("reader-paragraph-spacing-increase", "+", current.synchronized.paragraph_spacing_em() >= PARAGRAPH_SPACING_MAX_EM).tooltip(text!(reader::increase_paragraph_spacing)).on_click(cx.listener(
+                |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.adjust_paragraph_spacing(PARAGRAPH_STEP_EM, cx);
+                },
+            )),
             theme,
             cx.listener(|this, _, _, cx| this.set_override_paragraph_spacing(true, cx)),
         )
-        .aria_label("Custom paragraph spacing");
+        .aria_label(text!(reader::custom_paragraph_spacing));
         let choices = components::reader_tile_group("reader-paragraph-spacing-mode")
             .flex_wrap()
             .child(self.settings_navigation.row(SettingsRow::ParagraphSpacingMode, &rows, div().flex().flex_1().min_w(rems(3.0)).child(book), theme))
             .child(self.settings_navigation.row(SettingsRow::ParagraphSpacing, &rows, div().flex().flex_1().min_w(rems(components::reader_numeric_tile_width_rem())).child(custom), theme));
-        components::reader_setting_row_smallcaps("Paragraph spacing", theme).child(choices)
+        components::reader_setting_row_smallcaps(text!(reader::paragraph_spacing), theme).child(choices)
     }
 
     fn first_line_indent_settings(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
@@ -391,31 +401,35 @@ impl ReaderView {
         let current = ReaderSettings::preferences(cx).clone();
         let buttons = [ReaderFirstLineIndent::Book, ReaderFirstLineIndent::Off].into_iter().enumerate().map(|(index, mode)| {
             let picture = if mode == ReaderFirstLineIndent::Book { "icons/reader-settings/align-book.svg" } else { "icons/reader-settings/align-left.svg" };
-            components::reader_picture_tile(("reader-first-line-indent-mode", index), components::reader_tile_picture(picture), mode.label(), current.first_line_indent == mode, theme)
+            components::reader_picture_tile(("reader-first-line-indent-mode", index), components::reader_tile_picture(picture), mode.label(), current.synchronized.first_line_indent() == mode, theme)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_first_line_indent(mode, cx)))
         });
         let modes = components::reader_tile_group("reader-first-line-indent-presets").children(buttons);
         let custom = components::reader_numeric_tile(
             "reader-first-line-indent-custom",
-            format!("{:.1} em", current.first_line_indent_em),
-            current.first_line_indent == ReaderFirstLineIndent::Custom,
-            components::settings_stepper_button("reader-first-line-indent-decrease", "−", current.first_line_indent_em <= 0.0).tooltip("Decrease first-line indentation").on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.adjust_first_line_indent(-PARAGRAPH_STEP_EM, cx);
-            })),
-            components::settings_stepper_button("reader-first-line-indent-increase", "+", current.first_line_indent_em >= FIRST_LINE_INDENT_MAX_EM).tooltip("Increase first-line indentation").on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.adjust_first_line_indent(PARAGRAPH_STEP_EM, cx);
-            })),
+            format!(text!(reader::em), current.synchronized.first_line_indent_em()),
+            current.synchronized.first_line_indent() == ReaderFirstLineIndent::Custom,
+            components::settings_stepper_button("reader-first-line-indent-decrease", text!(reader::minus), current.synchronized.first_line_indent_em() <= 0.0).tooltip(text!(reader::decrease_first_line_indentation)).on_click(cx.listener(
+                |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.adjust_first_line_indent(-PARAGRAPH_STEP_EM, cx);
+                },
+            )),
+            components::settings_stepper_button("reader-first-line-indent-increase", "+", current.synchronized.first_line_indent_em() >= FIRST_LINE_INDENT_MAX_EM).tooltip(text!(reader::increase_first_line_indentation)).on_click(
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.adjust_first_line_indent(PARAGRAPH_STEP_EM, cx);
+                }),
+            ),
             theme,
             cx.listener(|this, _, _, cx| this.set_first_line_indent(ReaderFirstLineIndent::Custom, cx)),
         )
-        .aria_label("Custom first-line indentation");
+        .aria_label(text!(reader::custom_first_line_indentation));
         let choices = components::reader_tile_group("reader-first-line-indent-mode")
             .flex_wrap()
             .child(self.settings_navigation.row(SettingsRow::FirstLineIndentMode, &rows, div().flex().flex_1().min_w(rems(6.5)).child(modes), theme))
             .child(self.settings_navigation.row(SettingsRow::FirstLineIndent, &rows, div().flex().flex_1().min_w(rems(components::reader_numeric_tile_width_rem())).child(custom), theme));
-        components::reader_setting_row_smallcaps("First-line indentation", theme).child(choices)
+        components::reader_setting_row_smallcaps(text!(reader::first_line_indentation), theme).child(choices)
     }
 
     fn reading_ruler_settings(&self, current: ReadingRulerStyle, lines: usize, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
@@ -462,11 +476,11 @@ impl ReaderView {
             components::reader_picture_tile(("reader-typeface", index), components::reader_typeface_sample(face), name, !custom && family == current, theme)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_reader_font_family(family, cx)))
         });
-        components::reader_setting_row_smallcaps(if self.cjk_font.is_some() { "Latin typeface" } else { "Typeface" }, theme)
+        components::reader_setting_row_smallcaps(if self.cjk_font.is_some() { text!(reader::latin_typeface) } else { text!(reader::typeface) }, theme)
             .map(|element| self.settings_navigation.row(SettingsRow::Typeface, &rows, element, theme))
             .child(components::reader_tile_group("reader-typeface").children(tiles).when(SYSTEM_FONT_PICKER, |group| {
                 let sample = components::reader_typeface_sample(None).when_some(custom_face, |sample, family| sample.font_family(family));
-                group.child(components::reader_picture_tile("reader-custom-fonts", sample, "Custom", custom, theme).on_click(cx.listener(|this, _, window, cx| this.select_custom_fonts(window, cx))))
+                group.child(components::reader_picture_tile("reader-custom-fonts", sample, text!(common::custom), custom, theme).on_click(cx.listener(|this, _, window, cx| this.select_custom_fonts(window, cx))))
             }))
             .when(SYSTEM_FONT_PICKER, |row| row.child(self.font_picker.clone()))
     }
@@ -479,14 +493,14 @@ impl ReaderView {
         let system_family = preferences.saved_cjk_font_family().map(str::to_owned);
         let custom_sample = sample().when_some(system_family.clone().filter(|family| cx.text_system().font_id(&font(family.clone())).is_ok()), |sample, family| sample.font_family(family));
         let has_custom = system_family.is_some();
-        let custom_label = system_family.unwrap_or_else(|| "Custom".into());
+        let custom_label = system_family.unwrap_or_else(|| text!(common::custom).into());
         Some(
-            components::reader_setting_row_smallcaps("CJK typeface", theme)
+            components::reader_setting_row_smallcaps(text!(reader::cjk_typeface), theme)
                 .map(|element| self.settings_navigation.row(SettingsRow::CjkTypeface, &rows, element, theme))
                 .child(
                     components::reader_tile_group("reader-cjk-typeface")
                         .child(
-                            components::reader_picture_tile("reader-cjk-publisher", sample(), "Book", preferences.cjk_font_choice == CjkFontChoice::Publisher, theme)
+                            components::reader_picture_tile("reader-cjk-publisher", sample(), text!(reader::book), preferences.cjk_font_choice == CjkFontChoice::Publisher, theme)
                                 .on_click(cx.listener(|this, _, _, cx| this.set_cjk_font_choice(CjkFontChoice::Publisher, cx))),
                         )
                         .when(SYSTEM_FONT_PICKER, |group| {
@@ -504,7 +518,7 @@ impl ReaderView {
                         }),
                 )
                 .when(SYSTEM_FONT_PICKER && has_custom && preferences.cjk_font_choice == CjkFontChoice::Custom, |row| {
-                    row.child(components::outlined_text_button("reader-cjk-change-font", "Change font").on_click(cx.listener(|this, _, window, cx| this.open_cjk_font_picker(window, cx))))
+                    row.child(components::outlined_text_button("reader-cjk-change-font", text!(reader::change_font)).on_click(cx.listener(|this, _, window, cx| this.open_cjk_font_picker(window, cx))))
                 })
                 .when(SYSTEM_FONT_PICKER, |row| row.child(self.cjk_font_picker.clone())),
         )

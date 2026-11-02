@@ -1,4 +1,5 @@
-use gpui::{FontWeight, Styled};
+use gpui::{FontFeatures, FontWeight, Styled};
+use std::sync::OnceLock;
 use crate::Button;
 
 use crate::theme::BrowserTheme;
@@ -182,8 +183,11 @@ pub const DISPLAY_FONT_FAMILY: &str = "Bodoni Moda";
 ///
 /// Small caps stand at 0.483em against the face's 0.429em x-height, so text
 /// set this way runs slightly larger than its nominal size suggests.
-pub fn small_caps() -> gpui::FontFeatures {
-    gpui::FontFeatures(std::sync::Arc::new(vec![("smcp".to_owned(), 1), ("c2sc".to_owned(), 1)]))
+pub fn small_caps() -> FontFeatures {
+    static FEATURES: OnceLock<FontFeatures> = OnceLock::new();
+    FEATURES
+        .get_or_init(|| FontFeatures::new(vec![("smcp".to_owned(), 1), ("c2sc".to_owned(), 1)]))
+        .clone()
 }
 
 /// Placeholder proportions and the tallest cover frame reserved by book cards.
@@ -194,7 +198,7 @@ pub const BOOK_COVER_ASPECT_RATIO: f32 = 1.0 / 1.6;
 /// what the reader scans.
 pub const BOOK_GRID_MINIMUM_COLUMNS: usize = 2;
 /// Cover width in logical pixels, independent of the UI font size.
-pub const BOOK_CARD_CONTENT_WIDTH: f32 = 200.0;
+pub const BOOK_CARD_CONTENT_WIDTH: f32 = 150.0;
 pub const BOOK_CARD_WIDTH: f32 = BOOK_CARD_CONTENT_WIDTH + BOOK_CARD_PADDING * 2.0;
 /// Regular cards grow by up to 25% before spare row width expands gaps.
 pub const BOOK_CARD_MAXIMUM_WIDTH: f32 = BOOK_CARD_WIDTH * 1.25;

@@ -162,17 +162,7 @@ impl fmt::Debug for BookId {
 
 impl Serialize for BookId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        struct Encoding<'a>(&'a BookId);
-        impl Serialize for Encoding<'_> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                if serializer.is_human_readable() {
-                    serializer.collect_str(self.0)
-                } else {
-                    serializer.serialize_bytes(&self.0.storage_bytes())
-                }
-            }
-        }
-        serializer.serialize_newtype_struct("BookId", &Encoding(self))
+        serde_transport::text_or_bytes(self, &self.storage_bytes(), serializer)
     }
 }
 

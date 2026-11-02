@@ -1,5 +1,7 @@
 //! One-page import from the default desktop reader library.
 
+use ui_text::text;
+
 use super::background_job::{self, BackgroundJobView};
 use gpui::prelude::*;
 use gpui::{App, Context, FocusHandle, KeyDownEvent, Role, SharedString, Task, Toggled, Window, div, px, rems};
@@ -80,7 +82,7 @@ impl ReaderImportDialog {
                 view.loading = false;
                 match result {
                     Ok(summary) => view.summary = Some(summary),
-                    Err(error) => view.error = Some(format!("{}: {}", source.name(), user_facing_error(&error, "Could not read the library in its default location.")).into()),
+                    Err(error) => view.error = Some(format!("{}: {}", source.name(), user_facing_error(&error, text!(browse::could_not_read_the_library_in_its_default_location))).into()),
                 }
                 cx.notify();
             });
@@ -206,7 +208,7 @@ impl ReaderImportDialog {
                 view.poll = None;
                 match result {
                     Ok(report) => view.report = Some(report),
-                    Err(error) => view.error = Some(format!("{}: {}", source.name(), user_facing_error(&error, "Could not import the selected books. Please try again.")).into()),
+                    Err(error) => view.error = Some(format!("{}: {}", source.name(), user_facing_error(&error, text!(browse::could_not_import_the_selected_books_please_try_again))).into()),
                 }
                 cx.notify();
             });
@@ -221,21 +223,21 @@ impl Render for ReaderImportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let locked = self.loading || self.summary.is_none() || self.active.is_some() || self.report.is_some();
-        let heading = div().flex().items_center().justify_between().gap(px(components::SPACE_MD)).child(div().text_size(rems(1.5)).child(format!("Import from {}", self.source.name()))).child(
-            components::outlined_icon_button("reader-close", "Close", IconName::Close).disabled(self.cancelling && self.active.is_some()).on_click(cx.listener(|view, _, window, cx| {
+        let heading = div().flex().items_center().justify_between().gap(px(components::SPACE_MD)).child(div().text_size(rems(1.5)).child(format!(text!(browse::import_from), self.source.name()))).child(
+            components::outlined_icon_button("reader-close", text!(common::close), IconName::Close).disabled(self.cancelling && self.active.is_some()).on_click(cx.listener(|view, _, window, cx| {
                 if view.request_close(cx) {
                     window.close_dialog(cx);
                 }
             })),
         );
-        let label = self.group.as_deref().map(|group| if group.is_empty() { "Ungrouped".to_owned() } else { group.replace('/', " / ") }).unwrap_or_else(|| "All groups".into());
+        let label = self.group.as_deref().map(|group| if group.is_empty() { text!(browse::ungrouped).to_owned() } else { group.replace('/', " / ") }).unwrap_or_else(|| text!(browse::all_groups).into());
         let summary = self.summary.clone();
         let selected = self.group.clone();
         let view = cx.entity();
         let selector = components::base_button("reader-group").label(label).icon(IconName::ChevronDown).disabled(locked).dropdown_menu(move |mut menu, _, _| {
             let all = view.clone();
             menu = menu.item(
-                components::menu_item("All groups", move |_, _, cx| {
+                components::menu_item(text!(browse::all_groups), move |_, _, cx| {
                     all.update(cx, |view, cx| {
                         if view.options().is_some() {
                             view.group = None;
@@ -248,8 +250,8 @@ impl Render for ReaderImportDialog {
             if let Some(summary) = &summary {
                 for group in &summary.groups {
                     let name = group.name.clone();
-                    let label = if name.is_empty() { "Ungrouped".to_owned() } else { name.replace('/', " / ") };
-                    let label = format!("{label} ({})", group.counts.total());
+                    let label = if name.is_empty() { text!(browse::ungrouped).to_owned() } else { name.replace('/', " / ") };
+                    let label = format!(text!(browse::import_group_count), group.counts.total(), label = label);
                     let checked = selected.as_ref() == Some(&name);
                     let view = view.clone();
                     menu = menu.item(
@@ -270,36 +272,39 @@ impl Render for ReaderImportDialog {
         let counts = self.counts();
         let mut body = div().flex().flex_col().gap(px(components::SPACE_MD));
         if self.source == ReaderImportSource::Readest {
-            body = body.child(div().flex().items_center().gap(px(components::SPACE_SM)).child("Group").child(div().flex_1().min_w_0().child(selector)));
+            body = body.child(div().flex().items_center().gap(px(components::SPACE_SM)).child(text!(browse::group)).child(div().flex_1().min_w_0().child(selector)));
         }
         if self.loading {
             body = body.child(Progress::new("reader-loading").loading(true).color(theme.accent));
         } else if self.summary.is_some() {
-            body = body.child(components::form_hint(SharedString::from(format!("{} {} selected · {} EPUB, {} PDF", counts.total(), if counts.total() == 1 { "book" } else { "books" }, counts.epub, counts.pdf)), theme));
+            body = body.child(components::form_hint(
+                SharedString::from(format!(text!(browse::selected_epub_pdf), counts.total(), if counts.total() == 1 { text!(browse::book) } else { text!(browse::books_plural) }, counts.epub, counts.pdf)),
+                theme,
+            ));
         }
         body = body.child(
             div()
                 .id("reader-file-modes")
                 .role(Role::RadioGroup)
-                .aria_label("Book files")
+                .aria_label(text!(browse::book_files))
                 .flex()
                 .flex_wrap()
                 .gap(px(components::SPACE_MD))
-                .child(self.mode_choice(ReaderImportMode::Copy, "Copy files", locked, window, cx))
-                .child(self.mode_choice(ReaderImportMode::Move, "Move files", locked || !self.summary.as_ref().is_some_and(|summary| summary.can_move), window, cx)),
+                .child(self.mode_choice(ReaderImportMode::Copy, text!(browse::copy_files), locked, window, cx))
+                .child(self.mode_choice(ReaderImportMode::Move, text!(browse::move_files), locked || !self.summary.as_ref().is_some_and(|summary| summary.can_move), window, cx)),
         );
         if let Some(progress) = &self.progress {
             if self.active.is_some() {
                 body = body
                     .child(Progress::new("reader-progress").loading(progress.total == 0).value(if progress.total == 0 { 0.0 } else { progress.completed as f32 / progress.total as f32 * 100.0 }).color(theme.accent))
-                    .child(components::form_hint(SharedString::from(if self.cancelling { "Finishing the current book…".into() } else { format!("{} of {} books", progress.completed, progress.total) }), theme));
+                    .child(components::form_hint(SharedString::from(if self.cancelling { text!(browse::finishing_the_current_book).into() } else { format!(text!(browse::of_books), progress.completed, progress.total) }), theme));
             }
         }
         if let Some(report) = &self.report {
             let message = if report.cancelled {
-                format!("Stopped after {} of {} books.", report.completed, if report.total == 0 { counts.total() } else { report.total })
+                format!(text!(browse::stopped_after_of_books), report.completed, if report.total == 0 { counts.total() } else { report.total })
             } else {
-                format!("{} imported · {} already present · {} failed", report.imported, report.already_present, report.failures.len())
+                format!(text!(browse::imported_already_present_failed), report.imported, report.already_present, report.failures.len())
             };
             body = body.child(components::form_hint(SharedString::from(message), theme));
             for failure in report.failures.iter().take(3) {
@@ -314,9 +319,9 @@ impl Render for ReaderImportDialog {
         }
         let mut buttons = div().flex().justify_end().gap(px(components::SPACE_SM));
         if self.report.is_some() {
-            buttons = buttons.child(components::base_button("reader-done").primary().label("Done").on_click(|_, window, cx| window.close_dialog(cx)));
+            buttons = buttons.child(components::base_button("reader-done").primary().label(text!(browse::done)).on_click(|_, window, cx| window.close_dialog(cx)));
         } else {
-            buttons = buttons.child(components::dialog_cancel_button("reader-cancel", if self.cancelling { "Stopping…" } else { "Cancel" }).disabled(self.cancelling).on_click(cx.listener(|view, _, window, cx| {
+            buttons = buttons.child(components::dialog_cancel_button("reader-cancel", if self.cancelling { text!(browse::stopping) } else { text!(common::cancel) }).disabled(self.cancelling).on_click(cx.listener(|view, _, window, cx| {
                 if view.request_close(cx) {
                     window.close_dialog(cx);
                 }
@@ -326,7 +331,7 @@ impl Render for ReaderImportDialog {
                 buttons = buttons.child(
                     components::base_button("reader-import")
                         .primary()
-                        .label(format!("Import {count} {}", if count == 1 { "book" } else { "books" }))
+                        .label(format!(text!(browse::import), if count == 1 { text!(browse::book) } else { text!(browse::books_plural) }, count = count))
                         .disabled(self.options().is_none())
                         .on_click(cx.listener(|view, _, _, cx| view.start_import(cx))),
                 );

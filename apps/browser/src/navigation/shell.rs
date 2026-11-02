@@ -4,6 +4,8 @@
 //! and per-library page state. Settings belongs to this shell.
 //! The sidebar draws whichever route it is handed.
 
+use ui_text::text;
+
 use ui_components::user_facing_error;
 
 use crate::services::notify_error;
@@ -107,10 +109,10 @@ impl BrowserShell {
         self.libraries.read(cx).selected_session()?.read(cx).shown_book_detail(cx)
     }
 
-    pub(crate) fn open_book_detail(&mut self, library_id: LibraryId, content_hash: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_book_detail(&mut self, library_id: LibraryId, book_id: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
         self.libraries.update(cx, |libraries, cx| libraries.select_library(library_id, cx));
         let Some(session) = self.libraries.read(cx).selected_session() else { return };
-        session.update(cx, |session, cx| session.open_book_detail(content_hash, window, cx));
+        session.update(cx, |session, cx| session.open_book_detail(book_id, window, cx));
     }
 
     /// Builds the browser around the restored session and starts background subscriptions.
@@ -225,7 +227,7 @@ impl BrowserShell {
     fn empty_libraries(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         if self.libraries.read(cx).creating_libraries() {
-            return components::library_section_content().child(components::browser_loading_message("Adding library…", theme)).into_any_element();
+            return components::library_section_content().child(components::browser_loading_message(text!(browse::adding_library), theme)).into_any_element();
         }
         let create = self.navigation.clone();
         let open = self.navigation.clone();
@@ -235,15 +237,15 @@ impl BrowserShell {
             .justify_center()
             .when(components::uses_mobile_navigation(window), |actions| actions.flex_col())
             .gap(gpui::px(components::SPACE_SM))
-            .child(components::primary_action_button("create-first-library", "Create new library", IconName::Plus, false).on_click(move |_, window, cx| {
+            .child(components::primary_action_button("create-first-library", text!(browse::create_new_library), IconName::Plus, false).on_click(move |_, window, cx| {
                 create.update(cx, |navigation, cx| navigation.open_create_library_dialog(window, cx));
             }))
             .when(cfg!(not(target_arch = "arm")), |actions| {
-                actions.child(components::secondary_action_button("open-first-library-folder", "Open library from folder", IconName::FolderOpen, false).on_click(move |_, _, cx| {
+                actions.child(components::secondary_action_button("open-first-library-folder", text!(browse::open_library_from_folder), IconName::FolderOpen, false).on_click(move |_, _, cx| {
                     open.update(cx, |navigation, cx| navigation.choose_library_folders(cx));
                 }))
             });
-        components::library_section_content().child(components::browser_actionable_empty("No libraries yet", actions, theme).size_full()).into_any_element()
+        components::library_section_content().child(components::browser_actionable_empty(text!(browse::no_libraries_yet), actions, theme).size_full()).into_any_element()
     }
 
     pub(crate) fn restore_navigation(&mut self, saved: NavigationSession, window: &mut Window, cx: &mut Context<Self>) {
@@ -309,7 +311,7 @@ impl BrowserShell {
         let open_book = self.open_book.clone();
         cx.spawn(async move |root, cx| {
             let result = async {
-                let library = backend.library_for_import(library_id).await?;
+                let library = backend.management.library_for_import(library_id).await?;
                 let _progress = root.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(window, cx)).ok();
                 let hash = library.import_stored_book(ROOT_DIR_ID, name, path.clone()).await?;
                 Ok::<_, app::BackendError>(library_model::BookLocator::new(*library.id(), hash))
@@ -329,7 +331,7 @@ impl BrowserShell {
 
     /// Reports a failure that occurred before an incoming file reached the library.
     pub fn incoming_import_failed(&mut self, error: app::BackendError, window: &mut Window, cx: &mut Context<Self>) {
-        notify_error("incoming-book-stage-error", format!("Could not prepare this book for import. {}", user_facing_error(&error, "Please try again.")), window, cx);
+        notify_error("incoming-book-stage-error", format!(text!(browse::could_not_prepare_this_book_for_import), user_facing_error(&error, text!(common::please_try_again))), window, cx);
     }
 
     /// Replaces the current page with the view represented by `route`.
@@ -482,7 +484,7 @@ impl Render for BrowserShell {
         let mobile_heading = components::uses_mobile_navigation(window).then(|| route).and_then(|route| match route {
             Route::Global(super::GlobalRoute::Settings) => {
                 let theme = components::browser_theme(cx);
-                Some(components::mobile_navigation_bar("Settings", super::mobile_back(true), theme))
+                Some(components::mobile_navigation_bar(text!(common::settings), super::mobile_back(true), theme))
             }
             // Browse pages, Home among them, own their current title.
             _ => None,
@@ -546,9 +548,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = app::AppClient::start_native(launch).unwrap();
-        let first = *backend.create_library_with_asset_storage("First".into(), true).await.unwrap().library_id();
-        let second = *backend.create_library_with_asset_storage("Second".into(), true).await.unwrap().library_id();
-        let startup = AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status };
+        let first = *backend.management.create_library_with_asset_storage("First".into(), true).await.unwrap().library_id();
+        let second = *backend.management.create_library_with_asset_storage("Second".into(), true).await.unwrap().library_id();
+        let startup = AppStartup {
+            libraries: backend.management.libraries().await.unwrap(),
+
+            default_library_root: startup.default_library_root,
+            dictionary_storage_root: startup.dictionary_storage_root,
+            preference_storage_root: startup.preference_storage_root,
+            browsing_preferences: startup.browsing_preferences,
+            account_status: startup.account_status,
+        };
         let services = AppServices::new(backend, startup);
         cx.update(|cx| {
             gpui_component::init(cx);

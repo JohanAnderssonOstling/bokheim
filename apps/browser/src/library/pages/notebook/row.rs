@@ -1,3 +1,5 @@
+use ui_text::text;
+
 use super::super::pagination::{merge_page, page_request_for_slots};
 use super::overlay;
 use crate::library::services::LibraryContext;
@@ -312,7 +314,7 @@ impl NotebookRow {
                     let key = target.clone();
                     let click_target = hit.target.clone();
                     let key_target = hit.target.clone();
-                    let excerpt = StyledText::new(if hit.excerpt.is_empty() { "Preview unavailable.".to_owned() } else { hit.excerpt.clone() })
+                    let excerpt = StyledText::new(if hit.excerpt.is_empty() { text!(browse::preview_unavailable).to_owned() } else { hit.excerpt.clone() })
                         .with_highlights(hit.excerpt_matches.iter().cloned().map(|range| (range, HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() })));
                     components::reader_state_card(("book-text-match", index), false, theme)
                         .border_b_0()
@@ -343,7 +345,7 @@ impl NotebookRow {
         let stale = matches.stale;
         let placeholder = PaginatorChild::new(move |_, _, cx| {
             let theme = components::browser_theme(cx);
-            div().size_full().p(rems(0.75)).bg(theme.page_bg).child(components::reader_state_note(if stale { "Search again to refresh these results." } else { "Loading…" }, theme)).into_any_element()
+            div().size_full().p(rems(0.75)).bg(theme.page_bg).child(components::reader_state_note(if stale { text!(browse::search_again_to_refresh_these_results) } else { text!(common::loading) }, theme)).into_any_element()
         })
         .with_own_cell();
         let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(rems(RESULT_CARD_WIDTH_REM)), PaginatorSizing::pixels(height), px(0.0))
@@ -444,20 +446,24 @@ impl Render for NotebookRow {
             .flex()
             .justify_end()
             .gap(rems(0.25))
-            .child(components::outlined_icon_button("notebook-previous", if self.text_matches.is_some() { "Previous matches" } else { "Previous annotations" }, IconName::ChevronLeft).opacity(if can_previous { 1.0 } else { 0.35 }).on_click(
-                cx.listener(move |row, _, _, cx| {
-                    if can_previous {
-                        row.turn(false, cx);
-                    }
-                }),
-            ))
-            .child(components::outlined_icon_button("notebook-next", if self.text_matches.is_some() { "Next matches" } else { "Next annotations" }, IconName::ChevronRight).opacity(if can_next { 1.0 } else { 0.35 }).on_click(cx.listener(
-                move |row, _, _, cx| {
-                    if can_next {
-                        row.turn(true, cx);
-                    }
-                },
-            )));
+            .child(
+                components::outlined_icon_button("notebook-previous", if self.text_matches.is_some() { text!(browse::previous_matches) } else { text!(browse::previous_annotations) }, IconName::ChevronLeft)
+                    .opacity(if can_previous { 1.0 } else { 0.35 })
+                    .on_click(cx.listener(move |row, _, _, cx| {
+                        if can_previous {
+                            row.turn(false, cx);
+                        }
+                    })),
+            )
+            .child(
+                components::outlined_icon_button("notebook-next", if self.text_matches.is_some() { text!(browse::next_matches) } else { text!(browse::next_annotations) }, IconName::ChevronRight)
+                    .opacity(if can_next { 1.0 } else { 0.35 })
+                    .on_click(cx.listener(move |row, _, _, cx| {
+                        if can_next {
+                            row.turn(true, cx);
+                        }
+                    })),
+            );
         div()
             .id(("notebook-row", self.book.entity_id()))
             .debug_selector(|| "notebook-row-viewport".into())

@@ -1,6 +1,7 @@
 //! EPUB appearance preferences and matching renderer commands.
 
 use crate::invalidation::notify;
+use app_preferences::ReaderPreferencePatch;
 use app_preferences::{
     FIRST_LINE_INDENT_MAX_EM, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, PARAGRAPH_SPACING_MAX_EM, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFirstLineIndent, ReaderFontFamily,
     ReaderHyphenation, ReaderTextAlignment, WORD_SPACING_MAX_PERCENT, WORD_SPACING_MIN_PERCENT,
@@ -31,9 +32,9 @@ fn horizontal_insets(document_width: f32, requested_margin: f32, edge_inset: f32
 }
 
 fn line_width_range_px(preferences: &ReaderPreferences) -> (f64, f64) {
-    let ch = f64::from(preferences.font_size) * CH_ADVANCE_EM;
-    let minimum = (preferences.min_line_width_ch * ch).clamp(LINE_WIDTH_MIN, LINE_WIDTH_MAX);
-    let maximum = (preferences.max_line_width_ch * ch).clamp(minimum, LINE_WIDTH_MAX);
+    let ch = f64::from(preferences.synchronized.font_size_px()) * CH_ADVANCE_EM;
+    let minimum = (preferences.synchronized.min_line_width_ch() * ch).clamp(LINE_WIDTH_MIN, LINE_WIDTH_MAX);
+    let maximum = (preferences.synchronized.max_line_width_ch() * ch).clamp(minimum, LINE_WIDTH_MAX);
     (minimum, maximum)
 }
 
@@ -104,55 +105,42 @@ impl ReaderView {
         let frame = gpui_component::window_paddings(window);
         let document_width = (f32::from(window.viewport_size().width - frame.left - frame.right) - sidebar_width).max(1.0);
         let edge_inset = if cfg!(feature = "kobo") { KOBO_READER_EDGE_INSET } else { 0.0 };
-        let (inset, available_width) = horizontal_insets(document_width, ReaderSettings::preferences(cx).horizontal_margin_px, edge_inset);
+        let (inset, available_width) = horizontal_insets(document_width, ReaderSettings::preferences(cx).synchronized.horizontal_margin_px(), edge_inset);
         (sidebar_width, inset, available_width)
     }
 
     pub(in crate::epub) fn fitted_column_width(&self, available_width: f64, cx: &Context<Self>) -> f64 {
         let preferences = ReaderSettings::preferences(cx);
-        let scale = preferences.scale.max(0.1);
+        let scale = preferences.synchronized.zoom().max(0.1);
         let viewport_width = available_width.max(1.0) / scale;
-        let gap = f64::from(preferences.min_column_gap_px) / scale;
+        let gap = f64::from(preferences.synchronized.min_column_gap_px()) / scale;
         let (minimum, maximum) = line_width_range_px(preferences);
         fitted_columns_and_width(viewport_width, gap, self.desired_column_count, minimum, maximum).1
     }
 
     pub(in crate::epub) fn max_columns_for_gap(&self, available_width: f64, cx: &Context<Self>) -> u8 {
         let preferences = ReaderSettings::preferences(cx);
-        let scale = preferences.scale.max(0.1);
+        let scale = preferences.synchronized.zoom().max(0.1);
         let (minimum, maximum) = line_width_range_px(preferences);
-        fitted_columns_and_width(available_width / scale, f64::from(preferences.min_column_gap_px) / scale, self.desired_column_count, minimum, maximum).0
+        fitted_columns_and_width(available_width / scale, f64::from(preferences.synchronized.min_column_gap_px()) / scale, self.desired_column_count, minimum, maximum).0
     }
 
-    /// Persists a preference, applies its renderer command, and refreshes the
-    /// reader only when the value actually changed.
-    fn apply_appearance(&self, cx: &mut Context<Self>, update: impl FnOnce(&mut ReaderPreferences), command: impl FnOnce(&ReaderPreferences) -> RendererCommand) {
+    /// Shared preferences are reconciled by each renderer when it next paints.
+    fn apply_style_override(&self, cx: &mut Context<Self>, update: impl FnOnce(&mut ReaderPreferences)) {
         if !ReaderSettings::update(cx, update) {
             return;
         }
-        let command = command(ReaderSettings::preferences(cx));
-        self.with_renderer(cx, |renderer, cx| renderer.queue_appearance(command, cx));
         notify(cx, Component::ReaderShell, "preferences_changed");
     }
 
-    fn apply_style_override(&self, cx: &mut Context<Self>, update: impl FnOnce(&mut ReaderPreferences)) {
-        // Read before the update: the overrides carry the theme's two lightness
-        // ends, and those come from the application rather than from any reader
-        // preference.
-        let theme = crate::settings::library_theme_adaptation(cx);
-        let link_foreground = crate::settings::library_link_foreground(cx);
-        let cjk = self.cjk_font;
-        self.apply_appearance(cx, update, move |preferences| RendererCommand::SetReaderStyleOverrides(preferences.style_overrides_for_book(cjk, Some(theme), link_foreground)));
-    }
-
     pub(in crate::epub) fn adjust_font_size(&self, delta: f32, cx: &mut Context<Self>) {
-        let font_size = (ReaderSettings::preferences(cx).font_size + delta).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
-        self.apply_appearance(cx, |preferences| preferences.font_size = font_size, |_| RendererCommand::SetFontSize(font_size));
+        let font_size = (ReaderSettings::preferences(cx).synchronized.font_size_px() + delta).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::FontSizePx(font_size)));
     }
 
     pub(in crate::epub) fn set_reader_font_family(&self, font_family: ReaderFontFamily, cx: &mut Context<Self>) {
         self.apply_style_override(cx, |preferences| {
-            preferences.font_family = font_family;
+            preferences.apply_preference(ReaderPreferencePatch::FontFamily(font_family));
             preferences.custom_fonts_enabled = Some(false);
         });
         self.font_picker.update(cx, |picker, cx| picker.hide(cx));
@@ -184,61 +172,61 @@ impl ReaderView {
     }
 
     pub(in crate::epub) fn set_reader_text_alignment(&self, text_alignment: ReaderTextAlignment, cx: &mut Context<Self>) {
-        self.apply_style_override(cx, |preferences| preferences.text_alignment = text_alignment);
+        self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::TextAlignment(text_alignment)));
     }
 
     pub(in crate::epub) fn set_line_height(&self, line_height: f32, cx: &mut Context<Self>) {
         let line_height = line_height.clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
         self.apply_style_override(cx, |preferences| {
-            preferences.override_line_height = true;
-            preferences.line_height = line_height;
+            preferences.apply_preference(ReaderPreferencePatch::OverrideLineHeight(true));
+            preferences.apply_preference(ReaderPreferencePatch::LineHeight(line_height));
         });
     }
 
     pub(in crate::epub) fn adjust_line_height(&self, delta: f32, cx: &mut Context<Self>) {
-        let line_height = ((ReaderSettings::preferences(cx).line_height + delta) * 10.0).round() / 10.0;
+        let line_height = ((ReaderSettings::preferences(cx).synchronized.line_height() + delta) * 10.0).round() / 10.0;
         self.set_line_height(line_height, cx);
     }
 
     pub(in crate::epub) fn set_override_line_height(&self, enabled: bool, cx: &mut Context<Self>) {
-        self.apply_style_override(cx, |preferences| preferences.override_line_height = enabled);
+        self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::OverrideLineHeight(enabled)));
     }
 
     pub(in crate::epub) fn set_override_paragraph_spacing(&self, enabled: bool, cx: &mut Context<Self>) {
-        self.apply_style_override(cx, |preferences| preferences.override_paragraph_spacing = enabled);
+        self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::OverrideParagraphSpacing(enabled)));
     }
 
     pub(in crate::epub) fn adjust_paragraph_spacing(&self, delta: f32, cx: &mut Context<Self>) {
-        let value = ((ReaderSettings::preferences(cx).paragraph_spacing_em + delta) * 10.0).round() / 10.0;
+        let value = ((ReaderSettings::preferences(cx).synchronized.paragraph_spacing_em() + delta) * 10.0).round() / 10.0;
         self.apply_style_override(cx, |preferences| {
-            preferences.override_paragraph_spacing = true;
-            preferences.paragraph_spacing_em = value.clamp(0.0, PARAGRAPH_SPACING_MAX_EM);
+            preferences.apply_preference(ReaderPreferencePatch::OverrideParagraphSpacing(true));
+            preferences.apply_preference(ReaderPreferencePatch::ParagraphSpacingEm(value.clamp(0.0, PARAGRAPH_SPACING_MAX_EM)));
         });
     }
 
     pub(in crate::epub) fn set_first_line_indent(&self, mode: ReaderFirstLineIndent, cx: &mut Context<Self>) {
-        self.apply_style_override(cx, |preferences| preferences.first_line_indent = mode);
+        self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::FirstLineIndent(mode)));
     }
 
     pub(in crate::epub) fn adjust_first_line_indent(&self, delta: f32, cx: &mut Context<Self>) {
-        let value = ((ReaderSettings::preferences(cx).first_line_indent_em + delta) * 10.0).round() / 10.0;
+        let value = ((ReaderSettings::preferences(cx).synchronized.first_line_indent_em() + delta) * 10.0).round() / 10.0;
         self.apply_style_override(cx, |preferences| {
-            preferences.first_line_indent = ReaderFirstLineIndent::Custom;
-            preferences.first_line_indent_em = value.clamp(0.0, FIRST_LINE_INDENT_MAX_EM);
+            preferences.apply_preference(ReaderPreferencePatch::FirstLineIndent(ReaderFirstLineIndent::Custom));
+            preferences.apply_preference(ReaderPreferencePatch::FirstLineIndentEm(value.clamp(0.0, FIRST_LINE_INDENT_MAX_EM)));
         });
     }
 
     pub(in crate::epub) fn adjust_word_spacing(&self, delta_percent: f32, cx: &mut Context<Self>) {
-        let value = (ReaderSettings::preferences(cx).word_spacing_percent + delta_percent).clamp(WORD_SPACING_MIN_PERCENT, WORD_SPACING_MAX_PERCENT);
-        self.apply_style_override(cx, |preferences| preferences.word_spacing_percent = value);
+        let value = (ReaderSettings::preferences(cx).synchronized.word_spacing_percent() + delta_percent).clamp(WORD_SPACING_MIN_PERCENT, WORD_SPACING_MAX_PERCENT);
+        self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::WordSpacingPercent(value)));
     }
 
     pub(in crate::epub) fn set_hyphenation(&self, mode: ReaderHyphenation, cx: &mut Context<Self>) {
-        self.apply_style_override(cx, |preferences| preferences.hyphenation = mode);
+        self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::Hyphenation(mode)));
     }
 
     pub(in crate::epub) fn set_font_weight(&self, weight: app_preferences::ReaderFontWeight, cx: &mut Context<Self>) {
-        self.apply_style_override(cx, |preferences| preferences.font_weight = weight);
+        self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::FontWeight(weight)));
     }
 
     pub(in crate::epub) fn adjust_column_width(&self, delta: f64, window: &Window, cx: &mut Context<Self>) {
@@ -259,12 +247,12 @@ impl ReaderView {
 
     fn apply_line_width_range(&self, window: &Window, cx: &mut Context<Self>, change: impl FnOnce(&mut f64, &mut f64)) {
         let current = ReaderSettings::preferences(cx).clone();
-        let mut minimum = current.min_line_width_ch;
-        let mut maximum = current.max_line_width_ch;
+        let mut minimum = current.synchronized.min_line_width_ch();
+        let mut maximum = current.synchronized.max_line_width_ch();
         change(&mut minimum, &mut maximum);
         if !ReaderSettings::update(cx, |preferences| {
-            preferences.min_line_width_ch = minimum;
-            preferences.max_line_width_ch = maximum;
+            preferences.apply_preference(ReaderPreferencePatch::MinLineWidthCh(minimum));
+            preferences.apply_preference(ReaderPreferencePatch::MaxLineWidthCh(maximum));
         }) {
             return;
         }
@@ -277,21 +265,21 @@ impl ReaderView {
 
     pub(in crate::epub) fn set_horizontal_margin(&self, value: f32, cx: &mut Context<Self>) {
         let value = value.clamp(READER_SPACING_MIN, READER_SPACING_MAX);
-        if ReaderSettings::update(cx, |preferences| preferences.horizontal_margin_px = value) {
+        if ReaderSettings::update(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::HorizontalMarginPx(value))) {
             notify(cx, Component::ReaderShell, "horizontal_margin_changed");
         }
     }
 
     pub(in crate::epub) fn set_vertical_margin(&self, value: f32, cx: &mut Context<Self>) {
         let value = value.clamp(READER_SPACING_MIN, READER_SPACING_MAX);
-        if ReaderSettings::update(cx, |preferences| preferences.vertical_margin_px = value) {
+        if ReaderSettings::update(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::VerticalMarginPx(value))) {
             notify(cx, Component::ReaderShell, "vertical_margin_changed");
         }
     }
 
     pub(in crate::epub) fn set_min_column_gap(&self, value: f32, cx: &mut Context<Self>) {
         let value = value.clamp(READER_SPACING_MIN, READER_SPACING_MAX);
-        if ReaderSettings::update(cx, |preferences| preferences.min_column_gap_px = value) {
+        if ReaderSettings::update(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::MinColumnGapPx(value))) {
             notify(cx, Component::ReaderShell, "column_gap_changed");
         }
     }
@@ -330,7 +318,9 @@ mod tests {
 
     #[test]
     fn line_length_and_gap_choose_columns_that_fit_kobo_orientations() {
-        let preferences = ReaderPreferences { font_size: 20.0, min_line_width_ch: 35.0, max_line_width_ch: 50.0, ..Default::default() };
+        let mut preferences = ReaderPreferences::default();
+        preferences.apply_preference(ReaderPreferencePatch::MinLineWidthCh(35.0));
+        preferences.apply_preference(ReaderPreferencePatch::MaxLineWidthCh(50.0));
         let (minimum, maximum) = line_width_range_px(&preferences);
         let portrait = fitted_columns_and_width(628.0, 32.0, u8::MAX, minimum, maximum);
         let landscape = fitted_columns_and_width(836.0, 32.0, u8::MAX, minimum, maximum);

@@ -1,7 +1,7 @@
 //! Serialized Kobo Wi-Fi operations. Hardware and supplicant work never runs on GPUI.
 
-use std::ffi::OsStr;
 use crate::bluetooth::SleepGuard as BluetoothSleepGuard;
+use std::ffi::OsStr;
 mod control;
 mod events;
 use control::{Control, Result, decode_ssid, fields, hex};
@@ -126,7 +126,9 @@ fn publish(snapshot: &Snapshot) {
     publish_snapshot(snapshots(), snapshot);
     let online = snapshot.phase == Phase::Connected;
     connectivity().send_if_modified(|previous| {
-        if *previous == online { return false; }
+        if *previous == online {
+            return false;
+        }
         *previous = online;
         true
     });
@@ -138,7 +140,9 @@ fn snapshots() -> &'static watch::Sender<Snapshot> {
 
 fn publish_snapshot(sender: &watch::Sender<Snapshot>, snapshot: &Snapshot) {
     sender.send_if_modified(|previous| {
-        if previous == snapshot { return false; }
+        if previous == snapshot {
+            return false;
+        }
         *previous = snapshot.clone();
         true
     });
@@ -154,7 +158,9 @@ pub fn subscribe() -> Result<watch::Receiver<Snapshot>> {
 
 /// Bluetooth can cycle the shared module without making a Wi-Fi request.
 pub(crate) fn radio_changed() {
-    if let Some(Ok(worker)) = WORKER.get() { let _ = worker.send(Job::Refresh); }
+    if let Some(Ok(worker)) = WORKER.get() {
+        let _ = worker.send(Job::Refresh);
+    }
 }
 
 /// Automatic network work waits for device events instead of retrying offline.
@@ -178,7 +184,9 @@ fn worker() -> Result<&'static Sender> {
                 .spawn(move || {
                     let mut controller = Controller::new();
                     events.observe(controller.socket_path.as_deref());
-                    if let Err(error) = controller.refresh() { controller.snapshot.error = Some(error); }
+                    if let Err(error) = controller.refresh() {
+                        controller.snapshot.error = Some(error);
+                    }
                     publish(&controller.snapshot);
                     loop {
                         let job = events.receive(&receive, &controller);
@@ -189,21 +197,24 @@ fn worker() -> Result<&'static Sender> {
                                 let _ = reply.send_blocking(result);
                             }
                             Ok(Wake::Job(Job::Refresh)) => {
-                                if !controller.sleeping && let Err(error) = controller.refresh() {
+                                if !controller.sleeping
+                                    && let Err(error) = controller.refresh()
+                                {
                                     controller.snapshot.error = Some(error);
                                 }
                             }
                             Ok(Wake::Job(Job::PrepareSleep { reply, deadline })) => {
-                                let result =
-                                    if Instant::now() >= deadline { Err("Wi-Fi sleep preparation expired before it could start".into()) } else {
-                                        match BluetoothSleepGuard::prepare() {
-                                            Ok(bluetooth) => {
-                                                controller.bluetooth_sleep = Some(bluetooth);
-                                                controller.prepare_sleep_with(|controller| controller.power_before(false, deadline))
-                                            }
-                                            Err(error) => Err(format!("Could not prepare Bluetooth for sleep: {error}").into()),
+                                let result = if Instant::now() >= deadline {
+                                    Err("Wi-Fi sleep preparation expired before it could start".into())
+                                } else {
+                                    match BluetoothSleepGuard::prepare() {
+                                        Ok(bluetooth) => {
+                                            controller.bluetooth_sleep = Some(bluetooth);
+                                            controller.prepare_sleep_with(|controller| controller.power_before(false, deadline))
                                         }
-                                    };
+                                        Err(error) => Err(format!("Could not prepare Bluetooth for sleep: {error}").into()),
+                                    }
+                                };
                                 // Rendezvous with the caller: an expired request cannot leave
                                 // a late sleep guard holding the radio off after UI recovery.
                                 if reply.send(result).is_err() {
@@ -214,7 +225,9 @@ fn worker() -> Result<&'static Sender> {
                             Ok(Wake::Job(Job::FinishSleep)) => controller.sleeping = false,
                             Ok(Wake::Job(Job::UiReady)) => controller.resume_after_ui_with(|controller| controller.power(true)),
                             Ok(Wake::Refresh { service_changed, monitor_failed, monitor_only }) => {
-                                if service_changed || monitor_failed { controller.monitor = None; }
+                                if service_changed || monitor_failed {
+                                    controller.monitor = None;
+                                }
                                 let result = if monitor_only { controller.refresh_events() } else { controller.refresh() };
                                 if let Err(error) = result {
                                     controller.snapshot.error = Some(error);
@@ -351,7 +364,9 @@ fn valid_interface(value: &str) -> bool {
 
 impl Controller {
     fn poll_interval(&self, notifications_available: bool) -> Option<Duration> {
-        if self.sleeping { return None; }
+        if self.sleeping {
+            return None;
+        }
         if self.attempt.is_some() || self.scan_started.is_some() || self.address_requested || self.snapshot.phase == Phase::ObtainingAddress || self.dhcp.is_some() {
             Some(Duration::from_secs(2))
         } else if (self.radio_enabled || self.snapshot.phase != Phase::Off) && (self.monitor.is_none() || !notifications_available) {
@@ -403,11 +418,15 @@ impl Controller {
         Ok(())
     }
     fn resume_after_ui_with(&mut self, power_on: impl FnOnce(&mut Self) -> Result<()>) {
-        if self.sleeping { return; }
+        if self.sleeping {
+            return;
+        }
         if self.restore_after_ui {
             self.restore_after_ui = false;
             self.snapshot.error = None;
-            if let Err(error) = power_on(self) { self.snapshot.error = Some(error); }
+            if let Err(error) = power_on(self) {
+                self.snapshot.error = Some(error);
+            }
         }
         // Restore Bluetooth only after confirmed wake and Wi-Fi recovery. It
         // remains off across unsolicited kernel wakes and failed preparations.

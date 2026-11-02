@@ -34,7 +34,9 @@ pub struct BookFacts {
     pub recording: Option<crate::audible::LookupRequest>,
 }
 
-fn needs_cover_by_default() -> bool { true }
+fn needs_cover_by_default() -> bool {
+    true
+}
 
 /// One reading of a title or filename. `surname` is set instead of
 /// `authors` when only a surname was written, as in `Smith_Some_Title`.
@@ -70,6 +72,10 @@ pub struct BookEnrichment {
     /// Work-level participation evidence, independent of bibliographic metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub popularity: Option<crate::WorkPopularity>,
+    /// The failed pipeline stage; omitted by servers predating this field.
+    /// Missing or unrecognized stages must not trigger optional-cover recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<BookEnrichmentFailure>,
     #[serde(default)]
     pub detail: String,
 }
@@ -81,6 +87,16 @@ pub enum BookEnrichmentStatus {
     NoMatch,
     /// A lookup failed; ask again soon.
     Failed,
+}
+
+/// Structured recovery policy, independent of diagnostic wording or provider URL.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookEnrichmentFailure {
+    Lookup,
+    Cover,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Confirmed artwork fetched from the metadata server at `/v3/covers/{id}`.

@@ -6,13 +6,13 @@ use std::mem::swap;
 
 use crate::reading_positions::ReadingPositionPolicy;
 use crate::scheduler::SyncScheduler;
-use library_model::{BookDownloadStatus, DownloadState, LibraryUpdate};
-use sync_common::BookId;
-use tokio::sync::watch;
+use library_model::{BookDownloadStatus, BookFileActivity, DownloadState, LibraryUpdate};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+use sync_common::BookId;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Notify;
+use tokio::sync::watch;
 
 #[derive(Clone, Debug)]
 pub enum LibraryEvent {
@@ -25,12 +25,14 @@ pub enum LibraryEvent {
     /// File replay prepared durable uploads; enrichment can look again.
     FilesPrepared,
     ThumbnailGenerated {
-        content_hash: BookId,
+        book_id: BookId,
     },
     DownloadStatusChanged {
-        content_hash: BookId,
+        book_id: BookId,
         state: DownloadState,
     },
+    /// A bulk operation started or ended; the actor republishes admission state.
+    BookFileActivityChanged,
     ContentsChanged,
     /// A committed write whose notification is suppressed during a directory import.
     ContentsCommitted,
@@ -87,7 +89,7 @@ impl LibraryEventRouter {
                 files,
                 enrichment,
             },
-            LibraryEventState { receiver, position_updates, updates: Vec::new(), latest_downloads: HashMap::new(), directory_imports: HashSet::new(), closed: false },
+            LibraryEventState { receiver, position_updates, updates: Vec::new(), latest_downloads: HashMap::new(), book_file_activity: BookFileActivity::Idle, directory_imports: HashSet::new(), closed: false },
         )
     }
 
@@ -115,7 +117,8 @@ impl LibraryEventRouter {
             self.text_search.send_replace(());
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if matches!(event, LibraryEvent::ContentsChanged | LibraryEvent::BooksUploaded | LibraryEvent::ImportComplete { .. } | LibraryEvent::ScanComplete { .. } | LibraryEvent::DownloadStatusChanged { state: DownloadState::Downloaded, .. }) {
+        if matches!(event, LibraryEvent::ContentsChanged | LibraryEvent::BooksUploaded | LibraryEvent::ImportComplete { .. } | LibraryEvent::ScanComplete { .. } | LibraryEvent::DownloadStatusChanged { state: DownloadState::Downloaded, .. })
+        {
             self.annotation_exports.notify_one();
         }
         match event {
@@ -143,6 +146,7 @@ pub struct LibraryEventState {
     closed: bool,
     updates: Vec<Sender<LibraryUpdate>>,
     latest_downloads: HashMap<BookId, DownloadState>,
+    book_file_activity: BookFileActivity,
     directory_imports: HashSet<uuid::Uuid>,
 }
 
@@ -155,7 +159,11 @@ impl LibraryEventState {
         swap(&mut self.receiver, &mut next.receiver);
         swap(&mut self.position_updates, &mut next.position_updates);
         self.position_updates.send_replace(position_policy);
-        self.latest_downloads.clear();
+        for (book_id, state) in self.latest_downloads.drain() {
+            if matches!(state, DownloadState::Queued | DownloadState::Downloading(_)) {
+                send_update(&mut self.updates, LibraryUpdate::Download(BookDownloadStatus::new(book_id, DownloadState::NotDownloaded)));
+            }
+        }
         self.directory_imports.clear();
         send_update(&mut self.updates, LibraryUpdate::Scanning(false));
         send_update(&mut self.updates, LibraryUpdate::Contents);
@@ -192,9 +200,26 @@ impl LibraryEventState {
     pub fn subscribe_updates(&mut self) -> Receiver<LibraryUpdate> {
         let (sender, receiver) = async_channel::unbounded();
         if !self.closed {
+            if self.book_file_activity != BookFileActivity::Idle {
+                let _ = sender.try_send(LibraryUpdate::BookFileActivity(self.book_file_activity));
+            }
+            for (&book_id, state) in &self.latest_downloads {
+                if matches!(state, DownloadState::Queued | DownloadState::Downloading(_)) {
+                    let _ = sender.try_send(LibraryUpdate::Download(BookDownloadStatus::new(book_id, state.clone())));
+                }
+            }
             self.updates.push(sender);
         }
         receiver
+    }
+
+    /// Retains the actor's last snapshot for late subscribers; no policy is
+    /// calculated here or by consumers of the update stream.
+    pub fn publish_book_file_activity(&mut self, activity: BookFileActivity) {
+        if self.book_file_activity != activity {
+            self.book_file_activity = activity;
+            send_update(&mut self.updates, LibraryUpdate::BookFileActivity(activity));
+        }
     }
 
     pub fn directory_imports_active(&self) -> bool {
@@ -253,18 +278,19 @@ impl LibraryEventState {
         router.route(&event);
         let update = match event {
             LibraryEvent::Update(update) => update,
-            LibraryEvent::ThumbnailGenerated { content_hash } => LibraryUpdate::Covers(vec![content_hash]),
-            LibraryEvent::DownloadStatusChanged { content_hash, state } => {
-                if self.latest_downloads.get(&content_hash) == Some(&state) {
+            LibraryEvent::ThumbnailGenerated { book_id } => LibraryUpdate::Covers(vec![book_id]),
+            LibraryEvent::DownloadStatusChanged { book_id, state } => {
+                if self.latest_downloads.get(&book_id) == Some(&state) {
                     return;
                 }
-                if self.latest_downloads.get(&content_hash).is_some_and(|previous| matches!((previous, &state), (DownloadState::Downloaded, DownloadState::Queued | DownloadState::Downloading(_)))) {
+                if self.latest_downloads.get(&book_id).is_some_and(|previous| matches!((previous, &state), (DownloadState::Downloaded, DownloadState::Queued | DownloadState::Downloading(_)))) {
                     return;
                 }
-                self.latest_downloads.insert(content_hash, state.clone());
-                LibraryUpdate::Download(BookDownloadStatus::new(content_hash, state))
+                self.latest_downloads.insert(book_id, state.clone());
+                LibraryUpdate::Download(BookDownloadStatus::new(book_id, state))
             }
-            LibraryEvent::AssetWorkAvailable
+            LibraryEvent::BookFileActivityChanged
+            | LibraryEvent::AssetWorkAvailable
             | LibraryEvent::FilesPrepared
             | LibraryEvent::ContentsCommitted
             | LibraryEvent::DirectoryImportStarted { .. }
@@ -371,7 +397,7 @@ mod tests {
         let updates = state.subscribe_updates();
         let hash = BookId::from_bytes([7; 32]);
         for _ in 0..2 {
-            router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded });
+            router.emit(LibraryEvent::DownloadStatusChanged { book_id: hash, state: DownloadState::Downloaded });
         }
         state.drain(&router);
         for requests in [asset_requests, file_requests] {
@@ -391,20 +417,20 @@ mod tests {
         let (router, mut state, _) = fixture();
         let hash = BookId::from_bytes([7; 32]);
         let downloading = DownloadState::Downloading(DownloadProgress::ZERO);
-        router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: downloading.clone() });
+        router.emit(LibraryEvent::DownloadStatusChanged { book_id: hash, state: downloading.clone() });
         state.drain(&router);
         assert_eq!(state.download_state(&hash), Some(&downloading));
 
         let updates = state.subscribe_updates();
-        router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded });
-        router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: downloading });
+        router.emit(LibraryEvent::DownloadStatusChanged { book_id: hash, state: DownloadState::Downloaded });
+        router.emit(LibraryEvent::DownloadStatusChanged { book_id: hash, state: downloading });
         state.drain(&router);
         assert_eq!(state.download_state(&hash), Some(&DownloadState::Downloaded));
         assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Download(BookDownloadStatus::new(hash, DownloadState::Downloaded)));
         assert!(updates.try_recv().is_err());
 
         state.reset_download(&hash);
-        router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued });
+        router.emit(LibraryEvent::DownloadStatusChanged { book_id: hash, state: DownloadState::Queued });
         state.drain(&router);
         assert_eq!(state.download_state(&hash), Some(&DownloadState::Queued));
     }

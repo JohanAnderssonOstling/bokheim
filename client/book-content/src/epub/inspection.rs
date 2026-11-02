@@ -19,7 +19,7 @@ use std::sync::Arc;
 pub(crate) struct EpubSession {
     pub(super) archive: ArchiveReader,
     pub(crate) package: Arc<EpubPackage>,
-    toc_cache: Option<Option<Vec<TocEntry>>>,
+    toc_cache: Option<Option<Vec<BookTocEntry>>>,
 }
 impl EpubSession {
     #[cfg(test)]
@@ -128,7 +128,7 @@ impl EpubSession {
         self.archive.read_prefix(uri, max_bytes).await
     }
 
-    pub(crate) async fn toc(&mut self) -> io::Result<Option<Vec<TocEntry>>> {
+    pub(crate) async fn toc(&mut self) -> io::Result<Option<Vec<BookTocEntry>>> {
         if let Some(toc) = &self.toc_cache {
             return Ok(toc.clone());
         }
@@ -137,7 +137,7 @@ impl EpubSession {
         Ok(toc)
     }
 
-    async fn read_toc(&mut self) -> io::Result<Option<Vec<TocEntry>>> {
+    async fn read_toc(&mut self) -> io::Result<Option<Vec<BookTocEntry>>> {
         let manifest = self.package.get_or_parse_manifest().clone();
 
         if let Some(ref nav_href) = manifest.nav_href {
@@ -934,18 +934,23 @@ mod mislabeled_isbn_tests {
 }
 
 impl EpubPackage {
-    fn parse_nav_toc(nav_xml: &str) -> Option<Vec<TocEntry>> {
+    fn parse_nav_toc(nav_xml: &str) -> Option<Vec<BookTocEntry>> {
         let html = scraper::Html::parse_document(nav_xml);
-        let toc = html.root_element().descendants().filter_map(scraper::ElementRef::wrap).filter(|element| element.value().name() == "nav").find(|element| element.value().attr("epub:type").or_else(|| element.value().attr("type")).is_some_and(|kind| kind.split_whitespace().any(|kind| kind == "toc")))?;
+        let toc = html
+            .root_element()
+            .descendants()
+            .filter_map(scraper::ElementRef::wrap)
+            .filter(|element| element.value().name() == "nav")
+            .find(|element| element.value().attr("epub:type").or_else(|| element.value().attr("type")).is_some_and(|kind| kind.split_whitespace().any(|kind| kind == "toc")))?;
         let entries = crate::toc::html_entries(toc, |element| element.value().attr("href").map(str::to_owned));
         (!entries.is_empty()).then_some(entries)
     }
 
-    fn parse_ncx_toc(ncx_xml: &str) -> Option<Vec<TocEntry>> {
+    fn parse_ncx_toc(ncx_xml: &str) -> Option<Vec<BookTocEntry>> {
         let mut reader = quick_xml::Reader::from_str(ncx_xml);
         let mut buf = Vec::new();
-        let mut stack: Vec<TocEntry> = Vec::new();
-        let mut root: Vec<TocEntry> = Vec::new();
+        let mut stack: Vec<BookTocEntry> = Vec::new();
+        let mut root: Vec<BookTocEntry> = Vec::new();
         let mut in_text = false;
         let mut text_buf = String::new();
 
@@ -953,7 +958,7 @@ impl EpubPackage {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
                     if e.name().as_ref().ends_with(b"navPoint") {
-                        stack.push(TocEntry::default());
+                        stack.push(BookTocEntry::default());
                     } else if e.name().as_ref().ends_with(b"text") {
                         in_text = true;
                         text_buf.clear();
@@ -962,7 +967,7 @@ impl EpubPackage {
                             if attr.key.as_ref().ends_with(b"src")
                                 && let Some(entry) = stack.last_mut()
                             {
-                                entry.link = String::from_utf8_lossy(&attr.value).into_owned();
+                                entry.target = String::from_utf8_lossy(&attr.value).into_owned();
                             }
                         }
                     }
@@ -972,7 +977,7 @@ impl EpubPackage {
                         if attr.key.as_ref().ends_with(b"src")
                             && let Some(entry) = stack.last_mut()
                         {
-                            entry.link = String::from_utf8_lossy(&attr.value).into_owned();
+                            entry.target = String::from_utf8_lossy(&attr.value).into_owned();
                         }
                     }
                 }
@@ -1009,9 +1014,9 @@ impl EpubPackage {
     }
 }
 
-fn resolve_toc_links(base_path: &str, entries: &mut [TocEntry]) {
+fn resolve_toc_links(base_path: &str, entries: &mut [BookTocEntry]) {
     for entry in entries {
-        entry.link = root_href(resolve_toc_href(base_path, entry.link.as_str()));
+        entry.target = root_href(resolve_toc_href(base_path, entry.target.as_str()));
         resolve_toc_links(base_path, &mut entry.children);
     }
 }
