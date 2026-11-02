@@ -89,7 +89,9 @@ impl ImportMove {
         // a destination after a successful publication.
         self.published = Some(result.clone());
         self.published_fingerprint = Some(fingerprint(&result)?);
-        File::open(&result)?.sync_all()?;
+        // Windows requires write access for FlushFileBuffers; Unix can flush
+        // a read-only handle, preserving support for read-only source files.
+        OpenOptions::new().read(true).write(cfg!(windows)).open(&result)?.sync_all()?;
         sync_directory(directory)?;
         sync_directory(&self.directory)?;
         Ok(result)
