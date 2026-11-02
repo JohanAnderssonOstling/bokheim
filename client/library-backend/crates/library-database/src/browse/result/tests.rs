@@ -356,7 +356,7 @@ fn growing_lazy_orders_are_evicted_when_the_result_budget_is_exceeded() {
     let section = first.sections[0].parent.id;
     let cache = db.browse_results.borrow();
     let result = &cache.entries.back().unwrap().result;
-    let book = result.section_orders.lock().unwrap()[&section][0];
+    let book = result.section_orders.lock().unwrap()[&section][0].clone();
     // Model a large lazily prepared ordering without an enormous SQL fixture.
     result.section_orders.lock().unwrap().insert(section, Arc::new(vec![book; MAX_CACHED_BYTES / size_of::<Item>() + 1]));
     assert!(result.estimated_bytes() > MAX_CACHED_BYTES);
