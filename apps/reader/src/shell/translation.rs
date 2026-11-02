@@ -48,8 +48,6 @@ impl TranslationPopup {
             Some(SELECTION_TOO_LONG)
         } else if self.text.trim().is_empty() {
             Some("Select some text to translate.")
-        } else if self.source.is_none() {
-            Some("Choose the source language to translate this selection.")
         } else {
             None
         };
@@ -58,7 +56,11 @@ impl TranslationPopup {
             cx.notify();
             return;
         }
-        let source = self.source.clone().expect("validated source language");
+        let Some(source) = self.source.clone() else {
+            self.result = Some(Err("Choose the source language to translate this selection.".into()));
+            cx.notify();
+            return;
+        };
         let target = self.target.clone();
         if source == target {
             self.result = Some(Ok(self.text.clone()));

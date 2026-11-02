@@ -13,7 +13,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenu},
 };
-use library_model::{BrowsePageRequest, BrowsePageState, LibraryFileTypeFilter, NotebookQuery, NotebookRequest, NotebookSort, TextSearchRemoval};
+use library_model::{BrowsePageRequest, BrowsePageState, CardKey, LibraryFileTypeFilter, NotebookQuery, NotebookRequest, NotebookSort, TextSearchRemoval};
 use row::{NotebookRow, RowData};
 
 use std::{
@@ -21,7 +21,6 @@ use std::{
     mem,
     time::Duration,
 };
-use sync_common::BookId;
 use ui_components as components;
 
 const BOOK_PAGE_SIZE: usize = 8;
@@ -37,7 +36,7 @@ pub(crate) struct NotebookPage {
     query: NotebookQuery,
     displayed_query: Option<NotebookQuery>,
     rows: BTreeMap<usize, Entity<NotebookRow>>,
-    cached: HashMap<BookId, (Entity<NotebookRow>, [Subscription; 2])>,
+    cached: HashMap<CardKey, (Entity<NotebookRow>, [Subscription; 2])>,
     page: Option<BrowsePageState>,
     refresh_pending: bool,
     snapshot_loading: bool,
@@ -222,7 +221,7 @@ impl NotebookPage {
                         let library = page.library.clone();
                         let cached = &mut page.cached;
                         merge_page(&mut page.rows, contents.page.book_offset, contents.books, |data| {
-                            let book = data.book().library_file().expect("text search results contain library books");
+                            let book = data.book().key();
                             if let Some((row, _)) = cached.get(&book) {
                                 row.update(cx, |row, cx| row.replace_data(data, query.clone(), &revision, cx));
                                 row.clone()
@@ -293,7 +292,7 @@ impl NotebookPage {
                 groups.push(PaginatorGroup::from_slots(policy(placeholder_height), PaginatorChildren::sparse(index - position, placeholder.clone(), BTreeMap::new())));
             }
             let book = row.read(cx).book_card().clone();
-            let id = format!("notebook-book-{}", book.read(cx).content_hash().unwrap());
+            let id = format!("notebook-book-{}", book.read(cx).key());
             let height = row.read(cx).height(window, cx);
             let row = row.clone();
             let child = PaginatorChild::new(move |_, _, _| row.clone().into_any_element()).with_id(id).with_own_cell().with_prepare(move |window, cx| BookCardView::prefetch_for_window(&book, window, cx));

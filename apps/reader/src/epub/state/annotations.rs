@@ -34,8 +34,10 @@ impl ReaderView {
                 return;
             }
             for annotation in &mut annotations {
-                if let Some(anchor) = this.book.migrate_annotation_anchor(&annotation.anchor) {
-                    this.marks.persist_migration(annotation.id.clone(), annotation.anchor.epub_cfi_value().unwrap().to_owned(), anchor.epub_cfi_value().unwrap().to_owned());
+                if let Some(anchor) = this.book.migrate_annotation_anchor(&annotation.anchor)
+                    && let (Some(legacy_cfi), Some(publication_cfi)) = (annotation.anchor.epub_cfi_value(), anchor.epub_cfi_value())
+                {
+                    this.marks.persist_migration(annotation.id.clone(), legacy_cfi.to_owned(), publication_cfi.to_owned());
                     annotation.anchor = anchor;
                 }
             }

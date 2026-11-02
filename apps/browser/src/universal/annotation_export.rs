@@ -271,8 +271,9 @@ impl AnnotationExportDialog {
         match result {
             Ok(running) => {
                 self.running_readers = running;
-                if self.running_readers.is_empty() {
-                    let options = self.pending_options.take().unwrap();
+                if self.running_readers.is_empty()
+                    && let Some(options) = self.pending_options.take()
+                {
                     self.begin_export(options, cx);
                 }
             }
