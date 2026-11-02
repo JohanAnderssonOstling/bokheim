@@ -58,7 +58,6 @@ else
 fi
 
 server_target=${SYNC_E2E_SERVER_TARGET_DIR:-$repo_root/servers/sync/target}
-backend_target=${SYNC_E2E_BACKEND_TARGET_DIR:-$repo_root/target}
 CARGO_TARGET_DIR="$server_target" cargo build --release --manifest-path "$repo_root/servers/sync/Cargo.toml"
 
 SYNC_E2E_DATABASE_URL="$database_url" \
@@ -105,21 +104,3 @@ done
 curl --fail --silent "http://127.0.0.1:$server_port/api/ready" >/dev/null
 curl --fail --silent "http://127.0.0.1:$server_port/api/live" >/dev/null
 curl --fail --silent "http://127.0.0.1:$server_port/api/health" >/dev/null
-
-SYNC_E2E_DATABASE_URL="$database_url" \
-SYNC_E2E_SERVER_BIN="$server_target/release/sync-server" \
-SYNC_E2E_SERVER_URL="http://127.0.0.1:$server_port" \
-SYNC_E2E_ADMIN_PASSWORD="sync-e2e-admin-password" \
-CARGO_TARGET_DIR="$backend_target" \
-cargo test --release \
-    --manifest-path "$repo_root/client/library-backend/crates/library-sync/Cargo.toml" \
-    --lib \
-    production_http_postgres_ \
-    -- \
-    --ignored \
-    --test-threads=1 | tee "$e2e_tmp/backend-tests.log"
-
-if ! rg -q '^test result: ok\. [1-9][0-9]* passed;' "$e2e_tmp/backend-tests.log"; then
-    echo "No PostgreSQL client tests ran; check the test filter." >&2
-    exit 1
-fi

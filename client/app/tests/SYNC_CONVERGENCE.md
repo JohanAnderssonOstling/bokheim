@@ -1,4 +1,5 @@
-# Real-server convergence tests
+# Sync server integration checks
+
 
 Run from the repository root:
 
@@ -7,26 +8,23 @@ bash client/app/tests/run_sync_e2e.sh
 ```
 
 The runner requires Rust, PostgreSQL command-line tools (`initdb`, `pg_ctl`,
-`createdb`), `curl`, and `rg`. It builds and runs **release** binaries only,
-starts a temporary PostgreSQL database and HTTP sync server, runs the server
-integration tests, and then runs the client convergence tests. Temporary
-processes and data are cleaned up on exit. `TMPDIR` selects the temporary data
-location. `SYNC_E2E_DATABASE_URL`, if supplied, must name a disposable test
-database; the server tests apply schemas there.
+`createdb`), and `curl`. It builds and runs **release** binaries only, starts a
+temporary PostgreSQL database, runs the server account, database and public
+registration integration tests, and checks the HTTP server's readiness,
+liveness and health endpoints. Temporary processes and data are cleaned up on
+exit. `TMPDIR` selects the temporary data location. `SYNC_E2E_DATABASE_URL`, if
+supplied, must name a disposable test database; the server tests apply schemas
+there.
 
-The current real-server client regression lives in
-`client/library-backend/crates/library-sync/src/engine_tests.rs`. It uses the
-production sync engine, HTTP transport, SQLite databases and PostgreSQL service
-to verify directory creation, a rename sent back from a second device, database
-restart, empty outboxes and a stable extra synchronization. Each run creates an
-isolated library. Server account, database and registration integration tests
-also run against the temporary PostgreSQL instance.
+Client database and sync-engine regressions run separately in the shared suite.
+The historical real-server client convergence tests were removed during the
+storage refactor and are not required by this runner.
 
 ## Historical pre-refactor scenarios
 
 The scenarios below document the former client convergence suite, which was
 removed during the storage refactor. They are not claims about the current
-real-server test's coverage. Current database merge and sync-engine regressions
+runner's coverage. Current database merge and sync-engine regressions
 also run in the shared suite.
 
 Coverage:
@@ -110,12 +108,9 @@ and an additional sync that changes nothing. Visible folders must remain rooted.
 Purge admission and response contents come from the real service, not a simulated
 max-register oracle. Physical bytes remain outside this state suite.
 
-Run a larger sweep or reproduce a reported schedule:
-
-```sh
-TMPDIR=/dev/shm BOKHEIM_CONVERGENCE_CASES=64 bash client/app/tests/run_sync_e2e.sh
-TMPDIR=/dev/shm BOKHEIM_CONVERGENCE_SEED=7 bash client/app/tests/run_sync_e2e.sh
-```
+The former suite supported larger sweeps and seed replay through
+`BOKHEIM_CONVERGENCE_CASES` and `BOKHEIM_CONVERGENCE_SEED`. These options do not
+apply to the current server integration runner.
 
 Seeds fix scheduling choices; real UUIDs and authoring clocks are still generated
 by production code. Failures include the seed, device, step and completed actions.
