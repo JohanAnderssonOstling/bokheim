@@ -50,8 +50,11 @@ impl ImportMove {
             return Err(io::Error::other("only regular files can be moved into a library"));
         }
         let source = source.canonicalize()?;
+        // Keep staging and publication paths in the same canonical namespace,
+        // including the verbatim drive prefix used by Windows canonicalize.
+        let destination_directory = destination_directory.canonicalize()?;
         let name = source.file_name().ok_or_else(|| io::Error::other("source has no filename"))?;
-        let directory = tempfile::Builder::new().prefix(".bokheim-import-move-").tempdir_in(destination_directory)?;
+        let directory = tempfile::Builder::new().prefix(".bokheim-import-move-").tempdir_in(&destination_directory)?;
         let intent = Intent { source: source.clone(), staged: directory.path().join(name), destination: None, identity: Some(file_identity(&source)?) };
         let lease = OpenOptions::new().read(true).write(true).create_new(true).open(directory.path().join("recovery.lock"))?;
         FileExt::try_lock_exclusive(&lease)?;

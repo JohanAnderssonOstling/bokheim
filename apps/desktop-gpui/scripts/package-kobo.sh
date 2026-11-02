@@ -118,7 +118,7 @@ KOBO_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_ROOT/apps/desktop-g
 printf 'Bokheim shared GPUI UI for Kobo\nVersion: %s\nBuilt: %s\nTarget: armv7-unknown-linux-gnueabihf\nPDFium: 7961 (ARM glibc)\nRuntime: glibc 2.23 (Linux 2.6.32 baseline)\nCPU profile: %s\nRust flags: %s\nC flags: %s\nLTO: thin\nCodegen units: 1\n' \
     "$KOBO_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$KOBO_CPU_PROFILE" "$KOBO_RUSTFLAGS" "$KOBO_CFLAGS" >"$APP/BUILD-INFO.txt"
 if [ "$KOBO_CPU_PROFILE" = generic ]; then
-    printf 'Supported model IDs: %s\n' "$(cargo run --quiet -p kobo-profile --example devices -- --ids)" >>"$APP/BUILD-INFO.txt"
+    printf 'Supported model IDs: %s\n' "$(cargo run --release --quiet -p kobo-profile --example devices -- --ids)" >>"$APP/BUILD-INFO.txt"
 fi
 printf 'FBInk source: %s\n' 886f25f13368859ad8a899b88d04c26e19cda32e >>"$APP/BUILD-INFO.txt"
 printf 'UI crate codegen units: 16 (bounded build memory)\n' >>"$APP/BUILD-INFO.txt"
