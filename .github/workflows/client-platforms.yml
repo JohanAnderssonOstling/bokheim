@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/GPUI-Fork
-          ref: 94bb2c5b15b7c4ebe0ecfc0864d166d72e17d82b
+          ref: ee2460ecfcc7c3b485c839924d36c6c6c83ece79
           path: GPUI-Fork
       - uses: actions/checkout@v6
         with:

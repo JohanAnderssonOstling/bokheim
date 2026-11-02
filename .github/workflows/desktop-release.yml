@@ -34,7 +34,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "1"
   RUST_VERSION: stable
-  GPUI_FORK_REF: 94bb2c5b15b7c4ebe0ecfc0864d166d72e17d82b
+  GPUI_FORK_REF: ee2460ecfcc7c3b485c839924d36c6c6c83ece79
   HTML_ENGINE_REF: 95acf739a41a5dcb395ff30f2da04906e75bb852
   HTML_VIEW_CORE_REF: c74e5eb0a30ba7a9fff2eb8e349d3b17d24d8b5a
   LINUXDEPLOY_VERSION: 1-alpha-20251107-1
@@ -74,12 +74,6 @@ jobs:
         with:
           path: bokheim
           ref: ${{ inputs.source_commit || github.sha }}
-
-      - name: Prepare sibling checkout layout
-        shell: python
-        run: |
-          import runpy
-          runpy.run_path("bokheim/scripts/ci/checkout_layout.py", run_name="__main__")
 
       - name: Check out GPUI-Fork
         uses: actions/checkout@v6

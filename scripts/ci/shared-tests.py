@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from checkout_layout import prepare_checkout
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTEXT = 'bokheim/shared-tests-v1'
@@ -65,7 +64,6 @@ def main():
         return
     if args.report and not re.fullmatch(r'[\w.-]+/[\w.-]+', args.report):
         parser.error('invalid repository')
-    prepare_checkout()
     sha = git('rev-parse', 'HEAD')
     if args.report:
         clean_revision(sha)
