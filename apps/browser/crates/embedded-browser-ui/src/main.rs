@@ -67,7 +67,7 @@ fn main() {
         std::process::exit(if wry::webview_version().is_ok() { 0 } else { 1 });
     }
     // Older app executables launch the same helper with the `store` argument.
-    if std::env::args().nth(1).as_deref() == Some("browser" | "store") {
+    if matches!(std::env::args().nth(1).as_deref(), Some("browser" | "store")) {
         #[cfg(target_os = "linux")]
         // Wry's child window uses X11. This runs before creating any threads,
         // including when an older desktop executable launches the helper.
