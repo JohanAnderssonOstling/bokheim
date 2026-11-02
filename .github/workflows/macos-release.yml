@@ -41,7 +41,7 @@ env:
   BOKHEIM_PACKAGE_SOURCE_ROOT: ${{ github.workspace }}/bokheim
   RELEASE_REPOSITORY: JohanAnderssonOstling/bokheim-release
   GPUI_FORK_REF: ee2460ecfcc7c3b485c839924d36c6c6c83ece79
-  HTML_ENGINE_REF: 95acf739a41a5dcb395ff30f2da04906e75bb852
+  HTML_ENGINE_REF: 89a725ca36fe4deb46ba05cb081e6e6ffc6cc896
   HTML_VIEW_CORE_REF: c74e5eb0a30ba7a9fff2eb8e349d3b17d24d8b5a
 
 jobs:

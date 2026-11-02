@@ -3941,3 +3941,15 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "cosmic-text"
+version = "0.19.0"
+
+[[patch.unused]]
+name = "harfrust"
+version = "0.13.3"
+
+[[patch.unused]]
+name = "swash"
+version = "0.2.10"
