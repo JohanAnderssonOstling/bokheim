@@ -82,7 +82,7 @@ jobs:
         run: |
           import os, subprocess, sys
           from pathlib import Path
-          source = Path(os.environ['GITHUB_WORKSPACE']) / 'release-packager'
+          source = Path(os.environ['GITHUB_WORKSPACE']) / 'bokheim'
           subprocess.run([sys.executable, str(source / 'scripts/ci/release_config.py'), '--github-env'], check=True)
       - uses: actions/checkout@v6
         with:
@@ -114,7 +114,6 @@ jobs:
         with:
           prefix-key: bokheim-macos-v1
           shared-key: desktop-macos-${{ matrix.arch }}
-          key: gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}-app-${{ inputs.source_commit || github.sha }}-speech-v2
           workspaces: bokheim -> target
           cache-on-failure: true
           cache-workspace-crates: true

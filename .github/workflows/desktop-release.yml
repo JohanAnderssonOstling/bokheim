@@ -85,7 +85,7 @@ jobs:
         run: |
           import os, subprocess, sys
           from pathlib import Path
-          source = Path(os.environ['GITHUB_WORKSPACE']) / 'release-tools'
+          source = Path(os.environ['GITHUB_WORKSPACE']) / 'bokheim'
           subprocess.run([sys.executable, str(source / 'scripts/ci/release_config.py'), '--github-env'], check=True)
       - name: Check out GPUI-Fork
         uses: actions/checkout@v6
@@ -119,7 +119,6 @@ jobs:
         with:
           prefix-key: bokheim-windows-v1
           shared-key: desktop-windows-x86-64
-          key: gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}
           workspaces: bokheim -> target
           cache-on-failure: true
           cache-workspace-crates: true

@@ -5,6 +5,46 @@ workstation. GitHub-hosted runners build Windows and macOS. GitHub also stores n
 release downloads; it does not need to build the locally produced packages.
 Web deploys directly over SSH to our server.
 
+## Persistent dependency caches
+
+Downloaded crates use the shared Cargo home (`~/.cargo`, or `CARGO_HOME`). Local
+desktop, Android, Kobo and web build scripts keep compiled dependencies outside
+source checkouts, under `~/.cache/bokheim/builds/<platform>` on Linux. Set
+`BOKHEIM_BUILD_CACHE` to choose another local cache root, or `CARGO_TARGET_DIR` to
+override a particular build. Keep these directories when removing old release
+checkouts. Never use SSHFS for a build cache. Cargo checks compiler, target,
+features and flags before reusing artifacts; different targets need their own
+compiled dependencies.
+
+For direct Cargo commands, use the same cache as the packaging scripts:
+
+```bash
+python3 scripts/ci/build_cache.py run android -- cargo build --release --target aarch64-linux-android -p desktop-gpui --lib --no-default-features --features android
+python3 scripts/ci/build_cache.py path linux-glibc217
+```
+
+Dispatch hosted binary builds from the persistent `ci/release-builds` branch,
+with the application source pinned independently. GitHub caches are scoped to
+their workflow branch: creating a fresh branch for each release prevents it from
+restoring caches on previous release branches. Keep `ci/release-builds` across
+releases and update its workflow tooling with ordinary commits. Dependency pins
+come from the selected application source, rather than the workflow branch.
+
+```bash
+python3 scripts/ci/dispatch-build.py windows --source-commit FULL_PUSHED_COMMIT
+python3 scripts/ci/dispatch-build.py macos --source-commit FULL_PUSHED_COMMIT
+python3 scripts/ci/dispatch-build.py kobo --source-commit FULL_PUSHED_COMMIT
+```
+
+These commands build optimized binaries with tests and automatic publication
+disabled. In the Actions UI, select `ci/release-builds`, supply `source_commit`,
+and enable `build_only` for the same behavior. Hosted caches are separate for
+Windows desktop, both macOS architectures and both Kobo USB installers. Rust
+version and dependency changes use compatible cache fallbacks; cache keys do not
+include application or sibling-repository commit IDs. The Linux installer cache
+also tracks the glibc 2.17 toolchain inputs. Direct version-tag workflow runs have
+their own cache scope; use the persistent branch commands for cross-release reuse.
+
 ## macOS downloads
 
 `.github/workflows/macos-release.yml` builds optimized Apple Silicon and Intel
