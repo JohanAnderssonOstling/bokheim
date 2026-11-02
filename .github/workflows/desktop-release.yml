@@ -193,12 +193,18 @@ jobs:
           python apps/desktop-gpui/windows/package-update.py --binary target/release/bokheim.exe --icon apps/ui/design-tokens/assets/icon/favicon.ico --output release/Bokheim-Windows-x86_64-Update.zip --portable-output release/Bokheim-Windows-x86_64-Portable.zip
           if ($LASTEXITCODE -ne 0) { throw "Windows update packaging failed" }
 
-      - name: Build and test single-file Windows app
+      - name: Test single-file Windows launcher
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: |
           cargo test --release --locked --manifest-path apps/desktop-gpui/windows/standalone/Cargo.toml --target-dir target/windows-standalone
           if ($LASTEXITCODE -ne 0) { throw "Standalone launcher tests failed" }
+
+      - name: Build single-file Windows app
+        working-directory: bokheim
+        shell: pwsh
+        run: |
           python apps/desktop-gpui/windows/package-standalone.py --archive release/Bokheim-Windows-x86_64-Portable.zip --output release/Bokheim-Windows-x86_64-Standalone.exe
           if ($LASTEXITCODE -ne 0) { throw "Standalone executable packaging failed" }
 
@@ -226,6 +232,7 @@ jobs:
           $info | Set-Content -Encoding utf8 "release/update-info-windows-x86_64-zip.json"
 
       - name: Verify first and cached standalone launches
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: |
