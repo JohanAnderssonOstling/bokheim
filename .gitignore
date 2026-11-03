@@ -138,3 +138,6 @@ venv/
 /.pdfium-cache/
 /.pdfium/
 /.linux-toolchain/
+
+# Generated output from in-memory annotation databases.
+:memory:.annotation-export-baselines/
