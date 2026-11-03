@@ -184,16 +184,16 @@ pub fn open_ui(
         }
     };
     profile.mark("backend_start");
-    #[cfg(all(target_os = "android", feature = "android"))]
-    if cx.global::<browser_ui::AndroidStoragePolicy>().all_files_access_available {
-        android::watch_storage_access(backend_worker.clone(), android_private_library_root, cx);
-    }
     let AppStartupState { default_library_root, dictionary_storage_root, preference_storage_root, libraries, browsing_preferences, account_status, reader_preferences: shared_reader_preferences } = backend_startup;
     let startup = AppStartup { default_library_root, dictionary_storage_root, preference_storage_root, libraries, browsing_preferences, account_status };
     session_saves.update(cx, |owner, _| owner.session.reader_preferences.apply_synchronized(&shared_reader_preferences));
 
     let reader_session_saves = session_saves.clone();
     let reader_preferences_store = app_preferences::Client::new(startup.preference_storage_root.clone());
+    #[cfg(all(target_os = "android", feature = "android"))]
+    if cx.global::<browser_ui::AndroidStoragePolicy>().all_files_access_available {
+        android::watch_storage_access(reader_preferences_store.clone(), android_private_library_root, cx);
+    }
     let save_reader_settings: SaveReaderSettings = Rc::new(move |preferences: ReaderPreferences, patches, cx: &mut App| {
         reader_session_saves.update(cx, |owner, cx| {
             owner.session.reader_preferences = preferences;
