@@ -160,6 +160,7 @@ jobs:
           }
 
       - name: Verify the desktop dependency graph is GPUI-only
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: |
