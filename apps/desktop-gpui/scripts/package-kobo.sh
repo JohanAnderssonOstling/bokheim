@@ -7,8 +7,10 @@ GPUI_FORK=$(CDPATH= cd -- "$REPO_ROOT/../GPUI-Fork" && pwd)
 OUTPUT="$REPO_ROOT/target/desktop-gpui-kobo"
 FBINK_SOURCE="$REPO_ROOT/target/kobo-toolchain-cache/fbink-source"
 FBINK_RELEASE="$FBINK_SOURCE/Release"
-BUILD_TARGET=${CARGO_TARGET_DIR:-"$REPO_ROOT/target"}
+BUILD_TARGET=$(python3 "$REPO_ROOT/scripts/ci/build_cache.py" path kobo-armv7)
 case "$BUILD_TARGET" in /*) ;; *) BUILD_TARGET="$REPO_ROOT/$BUILD_TARGET" ;; esac
+CARGO_TARGET_DIR=$BUILD_TARGET
+export CARGO_TARGET_DIR
 
 # The default package uses the common ARMv7 hard-float baseline. Libra 2
 # tuning remains available for local comparisons, without declaring other models.

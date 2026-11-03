@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPOSITORY_ROOT=$(cd "$SCRIPT_DIR/../../../.." && pwd)
 PACKAGE_VERSION=${1:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPOSITORY_ROOT/apps/desktop-gpui/Cargo.toml" | head -n 1)}
 RELEASE_DIRECTORY=${RELEASE_DIRECTORY:-"$REPOSITORY_ROOT/release"}
-DESKTOP_BINARY=${DESKTOP_BINARY:-"$REPOSITORY_ROOT/target/release/bokheim"}
+DESKTOP_BINARY=${DESKTOP_BINARY:-"$(python3 "$REPOSITORY_ROOT/scripts/ci/build_cache.py" path linux-glibc217)/release/bokheim"}
 BROWSER_MODE=${BOKHEIM_BROWSER:-auto}
 if test "$BROWSER_MODE" = auto && test -n "${OPDS_BROWSER:-}"; then
   BROWSER_MODE=required

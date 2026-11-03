@@ -71,6 +71,7 @@ jobs:
           ref: ${{ github.sha }}
           sparse-checkout: |
             apps/desktop-gpui/macos/package.py
+            scripts/ci/build_cache.py
             scripts/ci/release_config.py
             scripts/ci/release-config.json
       - name: Load release configuration

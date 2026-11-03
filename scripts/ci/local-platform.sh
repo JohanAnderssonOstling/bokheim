@@ -5,6 +5,10 @@ platform=${1:?platform}
 output=${2:?fresh output directory}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
+cache_platform=$platform
+if [[ "$platform" == linux ]]; then cache_platform=linux-glibc217; fi
+CARGO_TARGET_DIR=$(python3 scripts/ci/build_cache.py path "$cache_platform")
+export CARGO_TARGET_DIR
 mkdir -p "$output"
 case "$platform" in
   linux)
@@ -36,8 +40,7 @@ case "$platform" in
     ;;
   android)
     : "${ANDROID_CERT_SHA256:?Production certificate SHA-256 is required}"
-    # Gradle stages Rust from the workspace target directory.
-    unset CARGO_TARGET_DIR
+    # Cargo and Gradle stage native libraries from the same persistent cache.
     cargo check --release -p client-platform-android --target aarch64-linux-android
     gradle -p apps/desktop-gpui/android --no-daemon assembleRelease testReleaseUnitTest
     cp apps/desktop-gpui/android/build/outputs/apk/release/*-release.apk "$output/Bokheim-Android-arm64.apk"

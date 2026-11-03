@@ -15,6 +15,9 @@ override a particular build. Keep these directories when removing old release
 checkouts. Never use SSHFS for a build cache. Cargo checks compiler, target,
 features and flags before reusing artifacts; different targets need their own
 compiled dependencies.
+Android release builds default to ThinLTO and 16 code-generation units, matching
+the release pipeline. Explicit Cargo profile overrides remain supported; changing
+them can require rebuilding dependencies.
 
 For direct Cargo commands, use the same cache as the packaging scripts:
 

@@ -32,6 +32,9 @@ def target_directory(platform, root=ROOT, environ=None):
 def environment(platform, root=ROOT, environ=None):
     result = dict(os.environ if environ is None else environ)
     result['CARGO_TARGET_DIR'] = str(target_directory(platform, root, result))
+    if platform == 'android':
+        result.setdefault('CARGO_PROFILE_RELEASE_LTO', 'thin')
+        result.setdefault('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', '16')
     return result
 
 

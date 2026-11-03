@@ -33,7 +33,9 @@ def main():
         parser.error("--speech-from-source currently requires x86_64-unknown-linux-gnu")
     prepare = runpy.run_path(str(ROOT / "shared/pdfium/prepare.py"))["prepare"]
     prepared = prepare(target, offline=args.offline)
-    environment = dict(os.environ)
+    build_cache = runpy.run_path(str(ROOT / "scripts/ci/build_cache.py"))
+    cache_platform = "linux-glibc217" if target == "x86_64-unknown-linux-gnu" else target
+    environment = build_cache["environment"](cache_platform)
     if target == "x86_64-unknown-linux-gnu":
         linux_environment = runpy.run_path(str(ROOT / "scripts/linux/toolchain.py"))["build_environment"]
         environment.update(linux_environment(offline=args.offline))
@@ -67,10 +69,11 @@ def main():
             # Apply this only to the helper; its direct glibc imports are audited below.
             helper[1] = "rustc"
             helper += ["--", "-C", "link-arg=-Wl,--allow-shlib-undefined"]
-            subprocess.run(helper, cwd=ROOT, check=True, env=browser_environment(offline=args.offline))
+            subprocess.run(helper, cwd=ROOT, check=True,
+                           env={**browser_environment(offline=args.offline), "CARGO_TARGET_DIR": environment["CARGO_TARGET_DIR"]})
         else:
-            subprocess.run(helper, cwd=ROOT, check=True)
-    output = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+            subprocess.run(helper, cwd=ROOT, check=True, env=environment)
+    output = Path(environment["CARGO_TARGET_DIR"])
     if not output.is_absolute():
         output = ROOT / output
     if requested_target:

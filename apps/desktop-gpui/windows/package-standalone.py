@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import runpy
 import shutil
 import struct
 import subprocess
@@ -55,7 +56,9 @@ def main():
         if 'windows' not in target:
             parser.error('Build on Windows, pass a Windows --target, or supply --launcher')
         manifest = Path(__file__).resolve().parent / 'standalone/Cargo.toml'
-        target_dir = (args.target_dir or manifest.parents[4] / 'target/windows-standalone').resolve()
+        root = manifest.parents[4]
+        cache = runpy.run_path(str(root / 'scripts/ci/build_cache.py'))
+        target_dir = (args.target_dir or cache['target_directory']('windows-standalone', root=root)).resolve()
         environment = dict(os.environ)
         environment['RUSTFLAGS'] = environment.get('RUSTFLAGS', '') + ' -C target-feature=+crt-static'
         subprocess.run(['cargo', 'build', '--locked', '--release', '--manifest-path', str(manifest),

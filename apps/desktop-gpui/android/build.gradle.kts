@@ -39,7 +39,12 @@ val releaseKeyAlias = signingSetting("BOKHEIM_ANDROID_KEY_ALIAS")
 val releaseKeyPassword = signingPassword("BOKHEIM_ANDROID_KEY_PASSWORD") ?: releaseStorePassword
 val productionSigning = listOf(releaseKeyStore, releaseStorePassword, releaseKeyAlias, releaseKeyPassword).all { !it.isNullOrEmpty() }
 val localSigning = providers.gradleProperty("bokheim.localSigning").orNull == "true"
-val cargoTargetDirectory = workspaceRoot.resolve(if (fdroidBuild) "target/fdroid" else "target")
+val cargoTargetDirectory = if (fdroidBuild) workspaceRoot.resolve("target/fdroid") else file(
+    providers.exec {
+        workingDir(workspaceRoot)
+        commandLine("python3", "scripts/ci/build_cache.py", "path", "android")
+    }.standardOutput.asText.get().trim()
+)
 val pdfiumDirectory = workspaceRoot.resolve(if (fdroidBuild) ".pdfium/fdroid/$rustTarget" else ".pdfium/$rustTarget")
 val rustDebugLibrary = cargoTargetDirectory.resolve("$rustTarget/debug/libdesktop_gpui.so")
 val rustReleaseLibrary = cargoTargetDirectory.resolve("$rustTarget/release/libdesktop_gpui.so")
@@ -394,6 +399,16 @@ val stageTaxonomyRelease by tasks.registering(Copy::class) {
 }
 
 tasks.configureEach {
+    if (!fdroidBuild && (name == "buildRustDebug" || name == "buildRustRelease")) {
+        (this as Exec).environment("CARGO_TARGET_DIR", cargoTargetDirectory.absolutePath)
+    }
+    if (!fdroidBuild && name == "buildRustRelease") {
+        val rustTask = this as Exec
+        rustTask.environment("CARGO_PROFILE_RELEASE_LTO",
+            providers.environmentVariable("CARGO_PROFILE_RELEASE_LTO").orElse("thin").get())
+        rustTask.environment("CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+            providers.environmentVariable("CARGO_PROFILE_RELEASE_CODEGEN_UNITS").orElse("16").get())
+    }
     if (name.contains("Manifest")) dependsOn(generateBookFormats)
     if (fdroidBuild && (name == "preparePdfium" || name == "prepareSpeech")) {
         (this as Exec).environment("SOURCE_DATE_EPOCH", fdroidToolchains["source_date_epoch"].toString())

@@ -8,8 +8,9 @@ workspace_dir="$(cd "$app_dir/../.." && pwd)"
 python3 "$workspace_dir/apps/ui-text/export.py" --web-only
 python3 "$workspace_dir/shared/pdfium/prepare.py" --target wasm32-unknown-unknown
 output_dir="${BOKHEIM_WEB_OUTPUT_DIR:-$app_dir/dist}"
-target_dir="${CARGO_TARGET_DIR:-$workspace_dir/target}"
+target_dir="$(python3 "$workspace_dir/scripts/ci/build_cache.py" path web)"
 if [[ "$target_dir" != /* ]]; then target_dir="$workspace_dir/$target_dir"; fi
+export CARGO_TARGET_DIR="$target_dir"
 bundle_dir="${output_dir}/pkg/.building"
 # Rebuild std for every module: Rust's distributed wasm std uses panic=abort.
 # Use standardized exception instructions in both isolated and shared memory.
