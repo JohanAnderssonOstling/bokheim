@@ -12,7 +12,7 @@ use jni::sys::{jboolean, jint, jlong, jstring};
 use std::borrow::Cow;
 use std::ffi::CString;
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
 use std::os::fd::FromRawFd as _;
 use std::path::Path;
 use std::rc::Rc;
@@ -38,7 +38,7 @@ struct StorageAccess {
 
 static STORAGE_ACCESS: Mutex<(Option<async_channel::Sender<StorageAccess>>, Option<StorageAccess>)> = Mutex::new((None, None));
 
-pub(crate) fn watch_storage_access(backend: app::AppClient, private_root: std::path::PathBuf, cx: &mut gpui::App) {
+pub(crate) fn watch_storage_access(preferences: app_preferences::Client, private_root: std::path::PathBuf, cx: &mut gpui::App) {
     let (sender, receiver) = async_channel::unbounded();
     {
         let mut state = STORAGE_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -51,16 +51,16 @@ pub(crate) fn watch_storage_access(backend: app::AppClient, private_root: std::p
         let private_root = private_root.to_string_lossy().into_owned();
         while let Ok(access) = receiver.recv().await {
             let outcome = async {
-                let current = backend.default_library_save_location().await?;
+                let current = preferences.default_library_save_location(&private_root).await?;
                 // Only switch our automatic destinations. Never replace a
                 // user's custom save location or move existing libraries.
                 if current.as_deref().is_none_or(|current| same_storage_root(current, &private_root) || same_storage_root(current, &access.documents_root)) {
                     let root = if access.granted { access.documents_root } else { private_root.clone() };
                     if !current.as_deref().is_some_and(|current| same_storage_root(current, &root)) {
-                        backend.set_default_library_save_location(root).await?;
+                        preferences.set_default_library_save_location(root).await?;
                     }
                 }
-                Ok::<_, app::BackendError>(())
+                Ok::<_, io::Error>(())
             }
             .await;
             if let Err(error) = outcome {
