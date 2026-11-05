@@ -57,9 +57,9 @@ final class BookBrowserSurface {
         if (!(anchor.getParent() instanceof FrameLayout)) throw new IllegalStateException("The GPUI surface has no browser container");
         host = (FrameLayout) anchor.getParent();
         downloads = new File(request.getString("downloads")).getCanonicalFile();
-        if (!downloads.isDirectory()) throw new java.io.IOException("The library download folder is unavailable");
+        if (!downloads.isDirectory()) throw new java.io.IOException(UiText.ANDROID_THE_LIBRARY_DOWNLOAD_FOLDER_IS_UNAVAILABLE);
         String initial = request.getString("url");
-        if (!initial.equals("about:blank") && !BookDownload.webAddress(initial)) throw new IllegalArgumentException("Unsupported browser address");
+        if (!initial.equals("about:blank") && !BookDownload.webAddress(initial)) throw new IllegalArgumentException(UiText.ANDROID_UNSUPPORTED_BROWSER_ADDRESS);
         web = new WebView(activity);
         web.setVisibility(View.INVISIBLE);
         configurePage(web);
@@ -69,9 +69,8 @@ final class BookBrowserSurface {
                 String url = request.getUrl().toString();
                 // Challenge widgets use inline documents in child frames.
                 if (!request.isForMainFrame() && url.equals("about:srcdoc")) return false;
-                if (url.startsWith("magnet:")) { emit("magnet", "url", url); return true; }
                 if (!BookDownload.webAddress(url) && !url.equals("about:blank")) {
-                    emit("status", "message", "This link cannot open in the book browser");
+                    emit("status", "message", UiText.ANDROID_THIS_LINK_CANNOT_OPEN_IN_THE_BOOK_BROWSER);
                     return true;
                 }
                 if (request.isForMainFrame() && BookDownload.bookAddress(url) && request.getMethod().equals("GET")) {
@@ -194,14 +193,6 @@ final class BookBrowserSurface {
         web.setVisibility(width > 0 && height > 0 ? View.VISIBLE : View.INVISIBLE);
     }
 
-    boolean isClosed() { return closed; }
-    void backPressed() {
-        if (!closed) {
-            navigation();
-            emit("back_pressed", null, null);
-        }
-    }
-
     private boolean atPageTop() { return web.getScrollY() == 0 && !web.canScrollVertically(-1); }
 
     private boolean pageTouch(MotionEvent event) {
@@ -271,16 +262,14 @@ final class BookBrowserSurface {
 
     private void navigate(String url) {
         if (closed) return;
-        if (url.startsWith("magnet:")) {
-            emit("magnet", "url", url);
-        } else if (BookDownload.bookAddress(url)) {
+        if (BookDownload.bookAddress(url)) {
             startDownload(url, web.getSettings().getUserAgentString(), null, null);
         } else if (BookDownload.webAddress(url) || url.equals("about:blank")) {
             if (!url.equals("about:blank")) focusPage();
             if (url.equals("about:blank") && !startPageHtml.isEmpty()) {
                 web.loadDataWithBaseURL("about:blank", startPageHtml, "text/html", "UTF-8", null);
             } else web.loadUrl(url);
-        } else emit("status", "message", "This link cannot open in the book browser");
+        } else emit("status", "message", UiText.ANDROID_THIS_LINK_CANNOT_OPEN_IN_THE_BOOK_BROWSER);
     }
 
     private void navigation() {
@@ -293,16 +282,16 @@ final class BookBrowserSurface {
 
     void startDownload(String url, String agent, String disposition, String mime) {
         if (closed || transferring.contains(url)) return;
-        if (!BookDownload.webAddress(url)) { emit("status", "message", "This download needs an HTTP or HTTPS link"); return; }
+        if (!BookDownload.webAddress(url)) { emit("status", "message", UiText.ANDROID_THIS_DOWNLOAD_NEEDS_AN_HTTP_OR_HTTPS_LINK); return; }
         transferring.add(url);
         BookDownload.Cancellation cancellation = new BookDownload.Cancellation();
         cancellations.put(url, cancellation);
         String referer = web.getUrl();
         String name;
         try { name = BookDownload.filename(url, disposition, mime); }
-        catch (java.io.IOException unknown) { name = "Book download"; }
+        catch (java.io.IOException unknown) { name = UiText.ANDROID_BOOK_DOWNLOAD; }
         final String downloadName = name;
-        downloadEvent("download_started", url, downloadName, null, null, false);
+        downloadEvent("download_started", url, downloadName, null, null);
         worker.execute(() -> {
             try {
                 final long[] lastPercent = {-2};
@@ -310,11 +299,8 @@ final class BookBrowserSurface {
                     long percent = total > 0 ? Math.min(100, bytes * 100 / total) : -1;
                     if (percent != lastPercent[0]) {
                         lastPercent[0] = percent;
-                        ui.post(() -> { if (!cancellation.isCancelled()) downloadEvent("download_progress", url, null, percent < 0 ? null : (int) percent, null, false); });
+                        ui.post(() -> { if (!cancellation.isCancelled()) downloadEvent("download_progress", url, null, percent < 0 ? null : (int) percent, null); });
                     }
-                }, () -> {
-                    lastPercent[0] = -2;
-                    ui.post(() -> { if (!cancellation.isCancelled()) downloadEvent("download_waiting", url, null, null, null, false); });
                 }, cancellation);
                 ui.post(() -> {
                     if (cancellation.isCancelled()) {
@@ -324,17 +310,17 @@ final class BookBrowserSurface {
                         finishIfIdle();
                         return;
                     }
-                    boolean torrent = file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".torrent");
-                    try { emit(new JSONObject().put("kind", torrent ? "torrent_file" : "downloaded").put("path", file.getAbsolutePath()).put("download", url)); }
+                    try { emit(new JSONObject().put("kind", "downloaded").put("path", file.getAbsolutePath()).put("download", url)); }
                     catch (org.json.JSONException impossible) { throw new IllegalStateException(impossible); }
-                    downloadEvent("download_finished", url, file.getName(), null, null, torrent);
+                    downloadEvent("download_finished", url, file.getName(), null, null);
                     transferring.remove(url);
                     cancellations.remove(url);
                     finishIfIdle();
                 });
             } catch (Exception error) {
+                android.util.Log.w("Bokheim", "Book download failed", error);
                 ui.post(() -> {
-                    if (!cancellation.isCancelled()) downloadEvent("download_finished", url, downloadName, null, "Could not download the book: " + error.getMessage(), false);
+                    if (!cancellation.isCancelled()) downloadEvent("download_finished", url, downloadName, null, UiText.ANDROID_COULD_NOT_DOWNLOAD_THE_BOOK);
                     transferring.remove(url);
                     cancellations.remove(url);
                     finishIfIdle();
@@ -343,13 +329,12 @@ final class BookBrowserSurface {
         });
     }
 
-    private void downloadEvent(String kind, String download, String name, Integer percent, String error, boolean torrent) {
+    private void downloadEvent(String kind, String download, String name, Integer percent, String error) {
         try {
             JSONObject event = new JSONObject().put("kind", kind).put("download", download);
             if (name != null) event.put("name", name);
             if (kind.equals("download_progress")) event.put("percent", percent == null ? JSONObject.NULL : percent);
             if (error != null) event.put("error", error);
-            if (torrent) event.put("torrent", true);
             emit(event);
         }
         catch (org.json.JSONException impossible) { throw new IllegalStateException(impossible); }

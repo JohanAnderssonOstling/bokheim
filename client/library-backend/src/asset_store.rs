@@ -1,15 +1,10 @@
 //! Host adapters for library-owned filesystem services.
 
 #[cfg(target_arch = "wasm32")]
-use std::sync::Arc;
-#[cfg(target_arch = "wasm32")]
 use crate::executor::BoxedBackendFuture;
 pub use library_files::asset_store::*;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn open(locator: &str) -> Result<AssetStore, AssetStoreError> {
-    AssetStore::open(locator)
-}
+#[cfg(target_arch = "wasm32")]
+use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn open(locator: &str, cpu: Arc<dyn cpu_host::CpuHost>) -> Result<AssetStore, AssetStoreError> {
@@ -41,7 +36,7 @@ impl library_files::hashing::HashSession for WorkerHashSession {
     fn update<'a>(&'a mut self, bytes: &'a [u8]) -> BoxedBackendFuture<'a, Result<(), AssetStoreError>> {
         Box::pin(async move { self.0.update(bytes).await.map_err(AssetStoreError::operation) })
     }
-    fn finish(self: Box<Self>) -> BoxedBackendFuture<'static, Result<sync_common::ContentHash, AssetStoreError>> {
+    fn finish(self: Box<Self>) -> BoxedBackendFuture<'static, Result<sync_common::BookId, AssetStoreError>> {
         Box::pin(async move { self.0.finish().await.map_err(AssetStoreError::operation) })
     }
 }

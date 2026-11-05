@@ -1,9 +1,11 @@
 //! One place to report a failed action to the user.
 
-use gpui::{App, SharedString, Window};
-use gpui_component::WindowExt;
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::notification::Notification;
+use ui_text::text;
+
+use gpui::{App, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
+use gpui_component::notification::{Notification, NotificationType};
+use gpui_component::{Sizable, WindowExt};
+use ui_components::Button;
 
 /// Namespaces every browser notification. The ids below are unique across the
 /// crate, so one namespace is enough to collapse repeats of the same failure.
@@ -30,16 +32,24 @@ pub(crate) fn notify_info(id: &'static str, message: impl Into<SharedString>, wi
 /// there. Undo is the same action the keyboard shortcut dispatches, so it undoes the last
 /// library action wherever it was taken. It still autohides.
 pub(crate) fn notify_undoable(id: &'static str, message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
-    let notification = Notification::info(message.into())
+    let message = message.into();
+    let notification = Notification::new()
+        .with_type(NotificationType::Info)
         .id1::<BrowserNotification>(id)
-        .action(|_, _, cx| {
+        .content(move |_, _, cx| {
             let notification = cx.entity();
-            Button::new("undo").label("Undo").tooltip(ui_components::shortcut_tooltip("Undo", "secondary-z")).ghost().on_click(move |_, window, cx| {
-                window.dispatch_action(Box::new(crate::UndoLibraryAction), cx);
-                notification.update(cx, |notification, cx| notification.dismiss(window, cx));
-            })
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(ui_components::SPACE_SM))
+                .child(div().flex_1().min_w_0().child(message.clone()))
+                .child(Button::new("undo").label(text!(browse::undo)).tooltip(ui_components::configured_shortcut_tooltip(text!(browse::undo), "browse.undo", cx)).ghost().small().on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(crate::UndoLibraryAction), cx);
+                    notification.update(cx, |notification, cx| notification.dismiss(window, cx));
+                }))
+                .into_any_element()
         })
-        // An action turns autohide off; a confirmation should still leave.
         .autohide(true);
     window.push_notification(notification, cx);
 }

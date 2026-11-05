@@ -11,36 +11,36 @@ autotests = false
 crate-type = ["rlib"]
 
 [features]
-kobo = ["client-platform-kobo/device"]
+linux-network-cost = ["client-platform-runtime/linux-network-cost"]
+kobo = ["client-platform-kobo/device", "library-backend/kobo", "library-management/kobo", "app-preferences/kobo"]
 
 [dependencies]
-client-runtime = { path = "../client-runtime" }
+client-protocol = { path = "../client-protocol", features = ["http"] }
 cpu-host = { path = "../library-backend/crates/cpu-host" }
-thumbnail = { path = "../library-backend/crates/thumbnail" }
-client-platform-desktop = { path = "crates/platform-desktop" }
-library-runtime = { path = "../library-backend/crates/library-runtime" }
+client-platform-desktop = { path = "../platforms/desktop" }
 client-platform-runtime = { path = "../platforms/runtime" }
-account-contract = { path = "../../shared/account-contract" }
-library-registry = { path = "crates/library-registry" }
-app-preferences = { path = "../preferences" }
+library-registry = { path = "../library-management/crates/registry" }
+app-preferences = { path = "../preferences", features = ["store"] }
 library-backend = { path = "../library-backend" }
+library-management = { path = "../library-management" }
 library-database = { path = "../library-backend/crates/library-database" }
 library-model = { path = "../library-model" }
+library-services = { path = "../library-backend/crates/library-services" }
 account-client = { path = "../account-client" }
 log = "0.4"
-env_logger = "0.11"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_bytes = "0.11"
 web-time = "1"
 uuid = { version = "1.0", features = ["v4"] }
 tokio = { version = "1.0", features = ["macros", "rt", "sync", "time"] }
 futures-util = { version = "0.3", features = ["io"] }
 async-channel = "2"
 sync-common = { path = "../../shared/sync-common" }
-update-client = { path = "../update-client" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm_thread = { git = "https://github.com/zed-industries/wasm_thread", rev = "0cf96c7708dfb97ccf3da50347e25edcf75d6937" }
+update-client = { path = "../updates/core" }
 library-sync = { path = "../library-backend/crates/library-sync" }
 client-platform-web = { path = "../platforms/web" }
 subject-projection = { path = "../../shared/subject-projection" }
@@ -51,24 +51,16 @@ getrandom-04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] 
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 wasm-bindgen = "0.2"
-web-sys = { version = "0.3", features = ["console", "Event", "EventTarget", "File", "DedicatedWorkerGlobalScope", "MessageChannel", "MessageEvent", "MessageEventInit", "MessagePort", "Response", "WorkerGlobalScope", "SharedWorker", "Worker", "WorkerOptions", "WorkerType"] }
+web-sys = { version = "0.3", features = ["Url", "Location", "Window", "console", "Event", "EventTarget", "File", "DedicatedWorkerGlobalScope", "MessageChannel", "MessageEvent", "MessageEventInit", "MessagePort", "Response", "WorkerGlobalScope", "Worker", "WorkerOptions", "WorkerType"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-client-platform-native = { path = "../platforms/native", features = ["websocket"] }
 client-platform-kobo = { path = "../platforms/kobo" }
-# OPDS feeds are native only: a browser may fetch only from servers that
-# allow it, and most OPDS servers do not.
-library-opds = { path = "../library-backend/crates/library-opds" }
-# A store window's downloads are placed into the library root from here.
-library-files = { path = "../library-backend/crates/library-files" }
-tempfile = "3"
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+content-address = { path = "../../shared/content-address" }
+account-contract = { path = "../../shared/account-contract" }
 tempfile = "3"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tokio = { version = "1.0", features = ["test-util"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 client-platform-android = { path = "../platforms/android" }

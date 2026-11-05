@@ -5,18 +5,21 @@ edition = "2021"
 publish = false
 
 [dependencies]
+http-response = { workspace = true }
+content-address = { path = "../../../../shared/content-address" }
 book-access = { path = "../book-access" }
-audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 book-model = { path = "../../../../shared/book-model" }
-client-runtime = { path = "../../../client-runtime" }
+client-protocol = { path = "../../../client-protocol", features = ["http"] }
 cpu-host = { path = "../cpu-host" }
 thumbnail = { path = "../thumbnail" }
 library-files = { path = "../library-files" }
 library-database = { path = "../library-database" }
-library-runtime = { path = "../library-runtime" }
+library-services = { path = "../library-services" }
+library-placement = { path = "../library-placement" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 futures-util = "0.3"
+thiserror = "2"
 
 library-model = { path = "../../../library-model" }
 log = "0.4"
@@ -27,14 +30,18 @@ tokio = { version = "1", features = ["macros", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+account-client = { path = "../../../account-client" }
+tempfile = "3"
+book-inspection = { path = "../book-inspection" }
 library-database = { path = "../library-database" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "test-util"] }
 
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { workspace = true, default-features = false, features = ["stream", "rustls-tls"] }
+pdf-reader-core = { path = "../../../../shared/pdf-reader-core" }
+reqwest = { workspace = true, features = ["stream", "rustls-no-provider"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 client-platform-web = { path = "../../../platforms/web" }
-reqwest = { workspace = true, default-features = false, features = ["stream"] }
+reqwest = { workspace = true, features = ["stream"] }

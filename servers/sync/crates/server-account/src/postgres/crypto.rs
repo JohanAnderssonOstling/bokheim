@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use crate::core::AuthError;
+use crate::core::{AccountEmailKind, AuthError};
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -60,7 +60,7 @@ impl TokenProtector {
         hex(context.sign().as_ref())
     }
 
-    pub(super) fn encrypt_outbox_token(&self, id: &str, recipient: &str, kind: &str, token: &str) -> Result<String, AuthError> {
+    pub(super) fn encrypt_outbox_token(&self, id: &str, recipient: &str, kind: AccountEmailKind, token: &str) -> Result<String, AuthError> {
         let mut nonce_bytes = [0_u8; OUTBOX_NONCE_BYTES];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
@@ -71,7 +71,7 @@ impl TokenProtector {
         Ok(format!("{OUTBOX_VERSION}.{}", URL_SAFE_NO_PAD.encode(encoded)))
     }
 
-    pub(super) fn decrypt_outbox_token(&self, id: &str, recipient: &str, kind: &str, protected: &str) -> Result<String, AuthError> {
+    pub(super) fn decrypt_outbox_token(&self, id: &str, recipient: &str, kind: AccountEmailKind, protected: &str) -> Result<String, AuthError> {
         let encoded = protected.strip_prefix("v1.").ok_or_else(|| AuthError::Internal("queued account email has an unsupported protection format".to_string()))?;
         let mut payload = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| AuthError::Internal("queued account email is corrupt".to_string()))?;
         if payload.len() < OUTBOX_NONCE_BYTES + aead::CHACHA20_POLY1305.tag_len() {
@@ -86,8 +86,8 @@ impl TokenProtector {
     }
 }
 
-fn outbox_aad(id: &str, recipient: &str, kind: &str) -> Vec<u8> {
-    [id.as_bytes(), &[0], recipient.as_bytes(), &[0], kind.as_bytes()].concat()
+fn outbox_aad(id: &str, recipient: &str, kind: AccountEmailKind) -> Vec<u8> {
+    [id.as_bytes(), &[0], recipient.as_bytes(), &[0], kind.stored_name().as_bytes()].concat()
 }
 
 pub(super) fn hash_password(password: &str) -> Result<String, AuthError> {

@@ -1,5 +1,7 @@
 #![cfg(target_family = "wasm")]
 
+use ui_text::text;
+
 use std::cell::OnceCell;
 use std::rc::Rc;
 
@@ -8,10 +10,10 @@ use application_shell::ApplicationRoot;
 use browser_ui::{AppServices, AppStartup, NavigationSession};
 use gpui::{App, AppContext, Bounds, SharedString, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
-use wasm_bindgen::{JsCast, JsValue, closure::Closure};
-use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen::{JsCast, JsValue};
 
 mod browser_back;
+mod reader_preferences;
 
 thread_local! {
     static APPLICATION: OnceCell<gpui::ApplicationHandle> = const { OnceCell::new() };
@@ -35,12 +37,23 @@ pub fn start() {
                 return;
             }
         };
-        let startup = AppStartup { libraries: state.libraries, browsing_preferences: state.browsing_preferences, account_status: state.account_status };
-        let mut preferences = reader_ui::ReaderPreferences::default();
+        let startup = AppStartup {
+            default_library_root: state.default_library_root,
+            dictionary_storage_root: state.dictionary_storage_root,
+            preference_storage_root: state.preference_storage_root,
+            libraries: state.libraries,
+            browsing_preferences: state.browsing_preferences,
+            account_status: state.account_status,
+        };
+        let mut preferences = reader_preferences::load();
         preferences.apply_synchronized(&state.reader_preferences);
-        let handle = application.run_embedded(move |cx| {
-            open_bokheim(backend, startup, preferences, cx);
-            notify_startup("__BOKHEIM_STARTUP_READY__", "");
+        let handle = application.run_embedded(move |cx| match open_bokheim(backend, startup, preferences, cx) {
+            Ok(()) => notify_startup("__BOKHEIM_STARTUP_READY__", ""),
+            Err(error) => {
+                log::error!("failed to open the Bokheim browser window: {error}");
+                notify_startup("__BOKHEIM_STARTUP_FAILED__", &error);
+                cx.quit();
+            }
         });
         APPLICATION.with(|application| assert!(application.set(handle).is_ok(), "web application already initialized"));
     });
@@ -55,58 +68,22 @@ fn notify_startup(name: &str, detail: &str) {
 }
 
 async fn connect_backend() -> Result<(AppClient, app::AppStartupState), String> {
-    const ATTEMPTS: usize = 6;
     let asset_base = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__BOKHEIM_ASSET_BASE__")).ok().and_then(|value| value.as_string()).unwrap_or_else(|| "./pkg".to_owned());
-    let broker_url = format!("{asset_base}/web_backend_worker_loader.js");
-    let mut last_error = String::new();
-    for attempt in 0..ATTEMPTS {
-        match AppClient::connect_web(backend_connection::configuration(&broker_url)).await {
-            Ok(initialized) => return Ok(initialized),
-            Err(error) => {
-                let error = error.to_string();
-                let access_handle_conflict = error.contains("creating sync access handle");
-                last_error = error;
-                if !access_handle_conflict || attempt + 1 == ATTEMPTS {
-                    break;
-                }
-                browser_delay(250 * (attempt as i32 + 1)).await;
-            }
-        }
-    }
-    if last_error.contains("creating sync access handle") {
-        Err(format!("{last_error}\n\nAn older Bokheim session is still using browser storage. Close Bokheim tabs opened before this update, then reload this page."))
-    } else {
-        Err(last_error)
-    }
+    AppClient::connect_web(&asset_base).await.map_err(|error| if error.failure() == Some(app::Failure::StorageBusy) { format!("BOKHEIM_STORAGE_BUSY: {error}") } else { error.to_string() })
 }
 
-async fn browser_delay(milliseconds: i32) {
-    let promise = js_sys::Promise::new(&mut |resolve, _| {
-        let callback = Closure::once_into_js(move || {
-            let _ = resolve.call0(&JsValue::UNDEFINED);
-        });
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), milliseconds);
-        }
-    });
-    let _ = JsFuture::from(promise).await;
-}
-
-fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: reader_ui::ReaderPreferences, cx: &mut App) {
-    if let Err(error) = ui_components::register_fonts(cx) {
-        log::warn!("failed to install Bokheim fonts: {error}");
-    }
-
+fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: reader_ui::ReaderPreferences, cx: &mut App) -> Result<(), String> {
     gpui_component::init(cx);
     ui_components::init_page_scrolling(cx);
     browser_ui::bind_keys(cx);
     reader_ui::bind_keys(cx);
-    let reader_preferences_backend = backend.clone();
-    let save_reader_settings: reader_ui::SaveReaderSettings = Rc::new(move |_, patches, cx| {
+    let reader_preferences_store = backend.preferences.clone();
+    let save_reader_settings: reader_ui::SaveReaderSettings = Rc::new(move |preferences, patches, cx| {
+        reader_preferences::save(&preferences);
         if !patches.is_empty() {
-            let backend = reader_preferences_backend.clone();
+            let preferences_store = reader_preferences_store.clone();
             cx.spawn(async move |_cx| {
-                if let Err(error) = backend.update_reader_preferences(patches).await {
+                if let Err(error) = preferences_store.update_reader(patches).await {
                     log::warn!("failed to persist reader preference: {error}");
                 }
             })
@@ -120,19 +97,19 @@ fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: rea
     let bounds = Bounds::centered(None, size(px(1240.0), px(820.0)), cx);
 
     cx.open_window(
-        WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some(SharedString::from("Bokheim")), ..Default::default() }), focus: true, ..Default::default() },
+        WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some(SharedString::from(text!(common::bokheim))), ..Default::default() }), focus: true, ..Default::default() },
         move |window, cx| {
             let application = cx.new(|cx| ApplicationRoot::new(services, browser_ui::WindowSession { initial: load_navigation_session(), save: Rc::new(save_navigation_session) }, application_backend, "Bokheim", None, window, cx));
             browser_back::install(window, cx);
             cx.new(|cx| Root::new(application, window, cx))
         },
     )
-    .expect("failed to open the Bokheim browser window");
+    .map_err(|error| error.to_string())?;
     cx.activate(true);
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
-mod backend_connection;
 
 const NAVIGATION_STORAGE_KEY: &str = "bokheim.navigation.v1";
 

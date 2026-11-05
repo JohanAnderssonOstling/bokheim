@@ -2,7 +2,7 @@
 
 Shared signed release manifests and artifact verification for clients and the update publisher.
 The crate has no HTTP, installation, or durable-state dependency. Client discovery and
-activation live in [`client/update-client`](../../client/update-client).
+activation live in [`client/updates/core`](../../client/updates/core).
 
 ## Protocol v1
 

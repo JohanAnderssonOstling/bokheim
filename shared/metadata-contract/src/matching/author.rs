@@ -53,9 +53,11 @@ pub(super) fn initial_expansion_variants(value: &str) -> Vec<String> {
             let prefix = &current[..start];
             let mut preceding = Vec::new();
             let mut offset = 0;
-            for raw in prefix.split_whitespace() {
-                let at = offset + prefix[offset..].find(raw).unwrap();
-                offset = at + raw.len();
+            for segment in prefix.split_inclusive(char::is_whitespace) {
+                let at = offset + segment.len() - segment.trim_start().len();
+                offset += segment.len();
+                let raw = segment.trim();
+                if raw.is_empty() { continue; }
                 let key = author_name_match_key(raw);
                 if !key.is_empty() {
                     preceding.push((at, key));

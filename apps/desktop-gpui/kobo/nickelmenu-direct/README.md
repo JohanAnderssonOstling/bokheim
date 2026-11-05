@@ -1,5 +1,10 @@
 # Bokheim direct launch
 
+The current installer uses a regular NickelMenu entry so other applications
+remain visible. It preserves existing NickelMenu installations. This optional
+extension is bundled for new installations, but direct launch is disabled in
+the default configuration.
+
 This extension builds on NickelMenu v0.6.0, commit
 `15a95f7e6aa32b053094b062a4157245aecb4cba`, and its pinned NickelHook submodule.
 The bottom navigation button runs the main-menu item named by

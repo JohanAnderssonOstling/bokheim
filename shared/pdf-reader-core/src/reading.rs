@@ -14,9 +14,6 @@ impl LocalDocumentSession {
         if let Some(analysis) = cached {
             return Ok(analysis.text.reading_fragments());
         }
-        if let Some(source) = &self.page_source {
-            source.prepare_page(page_index).map_err(PdfError::new)?;
-        }
         let page = self.document.pages().get(page_index as i32).map_err(|error| PdfError::new(error.to_string()))?;
         self.page_analysis(&page, page_index).map(|analysis| analysis.text.reading_fragments())
     }
@@ -56,8 +53,7 @@ impl PdfPageTextLayout {
                 let gap = line.bounds.top() - bounds.bottom();
                 line.bounds.top() > bounds.top() && gap >= -median_height * 0.3 && gap <= median_height * 0.8 && (line.bounds.left() - bounds.left()).abs() <= median_height * 2.0
             });
-            if continuation {
-                let fragment = result.last_mut().expect("previous reading line");
+            if let Some(fragment) = result.last_mut().filter(|_| continuation) {
                 fragment.text.push(' ');
                 fragment.text.push_str(&line.text);
                 fragment.rects.push(line.bounds);

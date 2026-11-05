@@ -20,11 +20,7 @@ fn library_path() -> Result<PathBuf, String> {
     }
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let directory = executable.parent().ok_or("executable has no parent directory")?;
-    let path = if cfg!(target_os = "macos") {
-        directory.join("../Frameworks").join(env!("PDFIUM_LIBRARY_NAME"))
-    } else {
-        directory.join("pdfium").join(env!("PDFIUM_LIBRARY_NAME"))
-    };
+    let path = if cfg!(target_os = "macos") { directory.join("../Frameworks").join(env!("PDFIUM_LIBRARY_NAME")) } else { directory.join("pdfium").join(env!("PDFIUM_LIBRARY_NAME")) };
     if !path.is_file() {
         return Err(format!("Packaged PDFium is missing: {}. Build/package the application with its PDFium artifacts.", path.display()));
     }
@@ -37,9 +33,7 @@ pub(crate) fn initialize() -> Result<Pdfium, String> {
     Pdfium::bind_to_library(&path).map(Pdfium::new).map_err(|error| format!("loading PDFium from {}: {error}", path.display()))
 }
 
-
 #[cfg(target_os = "windows")]
 pub(crate) fn initialize() -> Result<Pdfium, String> {
-    Pdfium::bind_to_statically_linked_library().map(Pdfium::new)
-        .map_err(|error| format!("initializing static PDFium: {error}"))
+    Pdfium::bind_to_statically_linked_library().map(Pdfium::new).map_err(|error| format!("initializing static PDFium: {error}"))
 }

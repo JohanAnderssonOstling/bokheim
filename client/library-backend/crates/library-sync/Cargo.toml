@@ -5,26 +5,23 @@ edition = "2021"
 publish = false
 
 [dependencies]
+client-protocol = { path = "../../../client-protocol" }
+http-response = { workspace = true }
 account-client = { path = "../../../account-client" }
-asset-transfer = { path = "../asset-transfer" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
-cpu-host = { path = "../cpu-host" }
 library-database = { path = "../library-database" }
-library-files = { path = "../library-files" }
 library-model = { path = "../../../library-model" }
 library-replica = { path = "../library-replica" }
-library-runtime = { path = "../library-runtime" }
+library-services = { path = "../library-services" }
 log = "0.4"
-reqwest = { workspace = true, default-features = false }
-rusqlite = { version = "0.40.0", features = ["bundled", "functions", "hooks"] }
+reqwest = { workspace = true }
+rusqlite = { version = "0.40.0", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive"] }
 sync-common = { path = "../../../../shared/sync-common" }
 sync-transport = { path = "../sync-transport" }
 tokio = { version = "1.0", features = ["rt", "sync"] }
 web-time = "1"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-futures-util = "0.3"
+thiserror = "2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 client-platform-web = { path = "../../../platforms/web" }
@@ -32,6 +29,7 @@ rmp-serde = "1.3"
 
 [dev-dependencies]
 axum = "0.7"
+book-model = { path = "../../../../shared/book-model" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt"] }
 rmp-serde = "1.3"

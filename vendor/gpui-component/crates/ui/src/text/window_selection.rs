@@ -885,8 +885,8 @@ mod tests {
         fn new(second_selectable: bool, cx: &mut Context<Self>) -> Self {
             Self {
                 focus_handle: cx.focus_handle(),
-                first: cx.new(|cx| TextViewState::markdown("Hello world", cx)),
-                second: cx.new(|cx| TextViewState::markdown("Second message", cx)),
+                first: cx.new(|cx| TextViewState::plain("Hello world", cx)),
+                second: cx.new(|cx| TextViewState::plain("Second message", cx)),
                 second_selectable,
                 top_offset: px(10.),
                 mid_gap: px(0.),
@@ -1270,7 +1270,7 @@ mod tests {
         fn new(cx: &mut Context<Self>) -> Self {
             Self {
                 focus_handle: cx.focus_handle(),
-                base: cx.new(|cx| TextViewState::markdown("Hello world", cx)),
+                base: cx.new(|cx| TextViewState::plain("Hello world", cx)),
             }
         }
     }
@@ -1330,7 +1330,7 @@ mod tests {
         cx: &mut VisualTestContext,
         text: &'static str,
     ) -> Entity<TextViewState> {
-        let state = cx.update(|_, cx| cx.new(|cx| TextViewState::markdown(text, cx)));
+        let state = cx.update(|_, cx| cx.new(|cx| TextViewState::plain(text, cx)));
         let state_for_builder = state.clone();
         cx.update(|window, cx| {
             Root::update(window, cx, |root, window, cx| {
@@ -1406,8 +1406,8 @@ mod tests {
         fn new(front_scope: SelectionScope, cx: &mut Context<Self>) -> Self {
             Self {
                 focus_handle: cx.focus_handle(),
-                behind: cx.new(|cx| TextViewState::markdown("Behind text", cx)),
-                front: cx.new(|cx| TextViewState::markdown("Front text", cx)),
+                behind: cx.new(|cx| TextViewState::plain("Behind text", cx)),
+                front: cx.new(|cx| TextViewState::plain("Front text", cx)),
                 front_scope,
             }
         }

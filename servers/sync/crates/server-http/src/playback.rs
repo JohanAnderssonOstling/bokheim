@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use sync_common::{ContentHash, LibraryId, api::assets::PlaybackGrant};
+use sync_common::{BookId, LibraryId, api::assets::PlaybackGrant};
 
 const LIFETIME: Duration = Duration::from_secs(15 * 60);
 const MAX_GRANTS: usize = 4096;
@@ -27,7 +27,7 @@ struct Grant {
     user: String,
     credential: Arc<str>,
     library: LibraryId,
-    hash: ContentHash,
+    hash: BookId,
     length: u64,
     expires: Instant,
 }
@@ -43,7 +43,7 @@ impl Grants {
         }
         // Two random UUIDs provide 244 random bits without exposing credentials.
         let ticket = format!("{}{}", LibraryId::new_v4().simple(), LibraryId::new_v4().simple());
-        let reply = PlaybackGrant { path: format!("/api/playback/{ticket}"), expires_in_seconds: LIFETIME.as_secs() as u32, content_hash: grant.hash, length: grant.length };
+        let reply = PlaybackGrant { path: format!("/api/playback/{ticket}"), expires_in_seconds: LIFETIME.as_secs() as u32, book_id: grant.hash, length: grant.length };
         entries.insert(ticket, grant);
         Ok(reply)
     }
@@ -54,7 +54,7 @@ impl Grants {
     }
 }
 
-pub(crate) async fn issue(State(state): State<AppState>, user: AuthUser, Path((library, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap) -> Result<Response, StatusCode> {
+pub(crate) async fn issue(State(state): State<AppState>, user: AuthUser, Path((library, hash)): Path<(LibraryId, BookId)>, headers: HeaderMap) -> Result<Response, StatusCode> {
     // Storage rechecks account/library ownership before issuing or serving.
     let asset = state.assets.open_from(&user.user_id, &library, AssetKind::Book, &hash, 0).await.map_err(asset_error)?.ok_or(StatusCode::NOT_FOUND)?;
     let now = Instant::now();
@@ -72,7 +72,7 @@ pub(crate) async fn read(State(state): State<AppState>, Path(ticket): Path<Strin
         return Err(StatusCode::FORBIDDEN);
     }
     let asset = state.assets.open_from(&grant.user, &grant.library, AssetKind::Book, &grant.hash, 0).await.map_err(asset_error)?.ok_or(StatusCode::NOT_FOUND)?;
-    if asset.content_hash != grant.hash {
+    if asset.book_id != grant.hash {
         return Err(StatusCode::PRECONDITION_FAILED);
     }
     let mut response = stream_asset(asset, AssetKind::Book, &headers, state.transfer_governor.clone(), grant.user).await?;
@@ -96,7 +96,7 @@ pub(crate) async fn read_track(State(state): State<AppState>, Path((ticket, inde
         return Err(StatusCode::FORBIDDEN);
     }
     let (asset, track) = state.assets.audiobook_track(&grant.user, &grant.library, &grant.hash, index).await.map_err(asset_error)?.ok_or(StatusCode::NOT_FOUND)?;
-    if asset.content_hash != grant.hash {
+    if asset.book_id != grant.hash {
         return Err(StatusCode::PRECONDITION_FAILED);
     }
     let mut response = stream_audio_track(asset, track.offset, track.length, &headers, state.transfer_governor.clone(), grant.user).await?;

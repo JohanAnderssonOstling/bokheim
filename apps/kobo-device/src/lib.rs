@@ -4,11 +4,15 @@ pub mod battery;
 #[cfg(target_os = "linux")]
 pub mod bluetooth;
 pub mod brightness;
+pub mod control;
+mod frontlight;
 pub mod natural_light;
 #[cfg(target_os = "linux")]
 pub mod power;
+pub mod profile;
 #[cfg(target_os = "linux")]
 mod rtc;
+pub mod settings;
 #[cfg(target_os = "linux")]
 pub mod wifi;
 
@@ -116,7 +120,7 @@ fn key_capability_contains(capabilities: &str, code: usize) -> bool {
 
 fn resume_hardware() -> io::Result<()> {
     write_value(POWER_STATE_EXTENDED, b"0").map_err(|error| power_error("reactivate touch", POWER_STATE_EXTENDED, error))?;
-    if matches!(std::env::var("PRODUCT").as_deref(), Ok("alyssum" | "dahlia")) {
+    if profile::current()?.needs_touch_reactivation() {
         write_value(LEGACY_TOUCH_COMMAND, b"a")?;
     }
     Ok(())

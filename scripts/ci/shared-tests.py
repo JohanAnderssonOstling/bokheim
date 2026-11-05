@@ -2,24 +2,30 @@
 """Run shared release tests off hosted runners; optionally attest the exact commit."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import release_config
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTEXT = 'bokheim/shared-tests-v1'
 
 
 def commands():
-    packages = ['account-client', 'book-access', 'library-enrichment', 'book-model',
+    packages = ['account-client', 'book-access', 'dictionary-catalog', 'dictionary', 'library-enrichment', 'book-model',
                 'library-files', 'asset-transfer', 'client-platform-runtime',
-                'client-runtime', 'client-platform-android', 'client-platform-kobo', 'library-sync', 'library-database',
-                'library-replica', 'library-backend', 'subject-projection']
+                'client-protocol', 'client-platform-android', 'client-platform-kobo', 'library-sync', 'library-database',
+                'library-replica', 'library-backend', 'subject-projection',
+                'kobo-profile', 'kobo-device', 'kobo-package', 'kobo-update']
     return [
         ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/ci/tests'],
+        ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/dictionaries'],
+        ['python3', '-m', 'unittest', 'discover', '-s', 'apps/desktop-gpui/scripts/tests'],
         ['cargo', 'test', '--release', '--no-default-features', '--manifest-path', 'apps/kobo-installer/Cargo.toml', '--lib'],
         ['python3', 'shared/pdfium/prepare.py', '--target', 'x86_64-unknown-linux-gnu'],
-        ['cargo', 'test', '--release', '--no-fail-fast', *sum((['-p', p] for p in packages), [])],
+        ['cargo', 'test', '--release', '--manifest-path', '../GPUI-Fork/crates/gpui_kobo/Cargo.toml', '--target-dir', 'target', '--lib'],
+        ['cargo', 'test', '--release', '--no-fail-fast', '--features', 'dictionary/store', *sum((['-p', p] for p in packages), [])],
         ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-protocol', '-p', 'update-client', '--features', 'update-client/native-state'],
         ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-publisher'],
         ['bash', 'client/app/tests/run_sync_e2e.sh'],
@@ -33,12 +39,10 @@ def git(*args, directory=ROOT):
 def clean_revision(expected):
     if git('rev-parse', 'HEAD') != expected or git('status', '--porcelain', '--untracked-files=normal'):
         raise RuntimeError('Reporting requires an unchanged, clean checkout of the tested commit')
-    workflow = (ROOT / '.github/workflows/desktop-release.yml').read_text()
-    for directory, variable in [('GPUI-Fork', 'GPUI_FORK_REF'), ('HtmlEngine', 'HTML_ENGINE_REF'), ('HtmlViewCore', 'HTML_VIEW_CORE_REF')]:
-        pin = re.search(rf'^  {variable}: ([0-9a-f]{{40}})$', workflow, re.M).group(1)
+    for directory, pin in release_config.load()['dependencies'].items():
         sibling = ROOT.parent / directory
         if git('rev-parse', 'HEAD', directory=sibling) != pin or git('status', '--porcelain', directory=sibling):
-            raise RuntimeError(f'{directory} must be clean and at the release workflow pin {pin}')
+            raise RuntimeError(f'{directory} must be clean and at the release configuration pin {pin}')
 
 
 def report(repository, sha, state):
@@ -63,9 +67,13 @@ def main():
         report(args.report, sha, 'pending')
     try:
         failures = []
+        environment = os.environ.copy()
+        # Integration executables use the linked PDF core without cfg(test).
+        environment.setdefault('BOKHEIM_PDFIUM_LIBRARY_PATH',
+                               str(ROOT / '.pdfium/x86_64-unknown-linux-gnu/libpdfium.so'))
         for command in commands():
             print('+ ' + ' '.join(command), flush=True)
-            result = subprocess.run(command, cwd=ROOT)
+            result = subprocess.run(command, cwd=ROOT, env=environment)
             if result.returncode:
                 if 'shared/pdfium/prepare.py' in command:
                     raise subprocess.CalledProcessError(result.returncode, command)

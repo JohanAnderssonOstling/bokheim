@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::time::Instant;
 use sync_common::transport::{self, WireError};
 use sync_common::{
-    ConflictRank, ContentHash, LibraryId, LibraryRevision, MutationRejection, MutationRejectionReason, OpaquePublication, OpaqueStateEntry, PullStateResponse, PushMutationsResponse, ReplicaId, ReplicaSeq, StateAddress, StateDelivery,
+    BookId, ConflictRank, LibraryId, LibraryRevision, MutationRejection, MutationRejectionReason, OpaquePublication, OpaqueStateEntry, PullStateResponse, PushMutationsResponse, ReplicaId, ReplicaSeq, StateAddress, StateDelivery,
     SyncCursor, SyncExchangeRequest, SyncExchangeResponse, VersionKey, Versioned,
 };
 
@@ -11,7 +11,7 @@ use sync_common::{
 #[derive(Serialize)]
 struct LegacyEntry<'a> {
     address: &'a StateAddress,
-    book: Option<ContentHash>,
+    book: Option<BookId>,
     bytes: &'a [u8],
 }
 
@@ -70,7 +70,7 @@ fn response(cells: usize, payload_bytes: usize) -> SyncExchangeResponse {
     let mutations = (0..cells)
         .map(|index| {
             let sequence = index as u64 + 1;
-            let book = ContentHash::from_bytes([index as u8; 32]);
+            let book = BookId::from_bytes([index as u8; 32]);
             let address = if index % 2 == 0 {
                 StateAddress { kind: "reading_position".into(), entity_key: book.into(), entity_subkey: "epub".into() }
             } else {
@@ -99,13 +99,13 @@ fn assert_response(decoded: SyncExchangeResponse, expected: &SyncExchangeRespons
 }
 
 #[test]
-fn sync_response_wire_bytes_and_historical_readers_remain_compatible() {
+fn sync_response_compacts_bookkeeping() {
     for payload in [0, 256, 128 * 1024] {
         let expected = response(4, payload);
         let legacy = transport::encode(&LegacyResponse::from(&expected)).unwrap();
         let compact = transport::encode(&expected).unwrap();
         assert_eq!(transport::encoded_len(&expected).unwrap(), compact.len());
-        assert_eq!(compact, legacy);
+        assert!(compact.len() < legacy.len());
         assert_response(transport::decode(&compact, transport::MAX_DECODED_RESPONSE_BYTES).unwrap(), &expected);
         assert_response(transport::decode_byte_fields(&legacy, transport::MAX_DECODED_RESPONSE_BYTES).unwrap(), &expected);
     }
@@ -154,7 +154,7 @@ fn compact_exchange_reads_empty_pull_push_and_request_lists() {
 
 #[test]
 fn counted_push_sizes_keep_exact_batch_limits_and_oversized_handling() {
-    use sync_common::{PushBatcher, MAX_PUSH_BATCH_BYTES};
+    use sync_common::{MAX_PUSH_BATCH_BYTES, PushBatcher};
     let make_publication = |sequence, payload| {
         let state = response(1, payload).pull.mutations.remove(0).state;
         OpaquePublication { publisher_seq: ReplicaSeq::new(sequence).unwrap(), state }
@@ -179,7 +179,7 @@ fn counted_push_sizes_keep_exact_batch_limits_and_oversized_handling() {
 
 #[test]
 fn incremental_batch_budget_recovers_after_deferrals_and_oversized_values() {
-    use sync_common::{PushBatcher, MAX_PUSH_BATCH_BYTES};
+    use sync_common::{MAX_PUSH_BATCH_BYTES, PushBatcher};
     let state = response(1, MAX_PUSH_BATCH_BYTES).pull.mutations.remove(0).state;
     let mut exact = OpaquePublication { publisher_seq: ReplicaSeq::new(1).unwrap(), state };
     let overhead = transport::encoded_len(&exact).unwrap() - MAX_PUSH_BATCH_BYTES;
@@ -204,9 +204,7 @@ fn incremental_batch_budget_recovers_after_deferrals_and_oversized_values() {
 #[test]
 fn incremental_batching_preserves_eager_batch_boundaries() {
     use sync_common::PushBatcher;
-    let publications: Vec<_> = response(40, 128 * 1024).pull.mutations.into_iter().map(|delivery| OpaquePublication {
-        publisher_seq: delivery.state.version.replica_seq, state: delivery.state,
-    }).collect();
+    let publications: Vec<_> = response(40, 128 * 1024).pull.mutations.into_iter().map(|delivery| OpaquePublication { publisher_seq: delivery.state.version.replica_seq, state: delivery.state }).collect();
     let mut eager = PushBatcher::new(publications.clone()).unwrap();
     let mut expected = Vec::new();
     while !eager.is_empty() { expected.push(eager.next_batch()); }
@@ -224,7 +222,7 @@ fn incremental_batching_preserves_eager_batch_boundaries() {
 fn deferred_books_preserve_other_publications_and_iterator_errors_stop_preparation() {
     let publications: Vec<_> = response(40, 16).pull.mutations.into_iter().map(|delivery| OpaquePublication { publisher_seq: delivery.state.version.replica_seq, state: delivery.state }).collect();
     for count in [0, 1, 15, 16, 32] {
-        let books: Vec<_> = (0..count).map(|index| ContentHash::from_bytes([index as u8; 32])).collect();
+        let books: Vec<_> = (0..count).map(|index| BookId::from_bytes([index as u8; 32])).collect();
         let expected: Vec<_> = publications.iter().filter(|publication| !publication.state.value.book.is_some_and(|book| books.contains(&book))).cloned().collect();
         let mut batcher = sync_common::PushBatcher::try_from_publications(publications.clone().into_iter().map(Ok)).unwrap();
         batcher.defer_book_fields(&books);
@@ -313,7 +311,7 @@ fn sync_outbox_queue_performance() {
     for cells in [1_000, 10_000, 100_000] {
         let publications: Vec<_> = response(cells, 128).pull.mutations.into_iter().map(|delivery| OpaquePublication { publisher_seq: delivery.state.version.replica_seq, state: delivery.state }).collect();
         for failed_books in [0, 128] {
-            let books: Vec<_> = (0..failed_books).map(|index| ContentHash::from_bytes([index as u8; 32])).collect();
+            let books: Vec<_> = (0..failed_books).map(|index| BookId::from_bytes([index as u8; 32])).collect();
             let mut samples = Vec::new();
             let mut drained = 0;
             for _ in 0..7 {

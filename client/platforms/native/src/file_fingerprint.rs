@@ -8,6 +8,10 @@ use std::os::unix::fs::MetadataExt;
 use std::{io, path::Path, time::UNIX_EPOCH};
 
 pub fn file_fingerprint(path: impl AsRef<Path>) -> io::Result<u64> {
+    crate::filesystem::retry_transient(|| fingerprint_once(path.as_ref()))
+}
+
+fn fingerprint_once(path: &Path) -> io::Result<u64> {
     #[cfg(windows)]
     let file = File::open(path)?;
     #[cfg(windows)]
@@ -29,7 +33,8 @@ pub fn file_fingerprint(path: impl AsRef<Path>) -> io::Result<u64> {
     }
     #[cfg(windows)]
     hash_windows_revision(&file, &mut hasher)?;
-    Ok(u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().expect("BLAKE3 digest contains eight bytes")))
+    let [a, b, c, d, e, f, g, h, ..] = *hasher.finalize().as_bytes();
+    Ok(u64::from_le_bytes([a, b, c, d, e, f, g, h]))
 }
 
 #[cfg(windows)]
@@ -115,5 +120,41 @@ mod tests {
         let fingerprint = file_fingerprint(file.path()).unwrap();
         assert_eq!(fs::read(file.path()).unwrap(), b"book");
         assert_eq!(fingerprint, file_fingerprint(file.path()).unwrap());
+    }
+}
+
+/// Stable file identity across renames, without timestamps or content revision.
+/// Used to prove ownership of a published file during interrupted-move recovery.
+pub fn file_identity(path: &Path) -> io::Result<[u64; 2]> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file() {
+            return Err(io::Error::other("move recovery requires a regular file"));
+        }
+        Ok([metadata.dev(), metadata.ino()])
+    }
+    #[cfg(windows)]
+    {
+        use std::mem::MaybeUninit;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+        if !std::fs::symlink_metadata(path)?.is_file() {
+            return Err(io::Error::other("move recovery requires a regular file"));
+        }
+        let file = File::open(path)?;
+        let mut identity = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: the live handle and correctly sized writable output remain
+        // valid for the call; success initializes the complete structure.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), identity.as_mut_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let identity = unsafe { identity.assume_init() };
+        Ok([u64::from(identity.dwVolumeSerialNumber), (u64::from(identity.nFileIndexHigh) << 32) | u64::from(identity.nFileIndexLow)])
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::other("stable file identity is unavailable"))
     }
 }

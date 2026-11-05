@@ -6,43 +6,52 @@ edition = "2024"
 [features]
 default = []
 filesystem-libraries = []
-kobo = ["mobile", "dep:gpui_kobo", "ui-components/kobo"]
+kobo = ["mobile", "app/kobo", "dep:gpui_kobo", "dep:kobo-device", "dep:kobo-update", "ui-components/kobo", "gpui-image-eviction/kobo"]
 mobile = ["ui-components/mobile"]
 
 [dependencies]
-update-client = { path = "../../client/update-client" }
+ui-text = { path = "../ui-text" }
+dictionary-settings = { path = "../dictionary-settings" }
+update-client = { path = "../../client/updates/core" }
 library-backend = { path = "../../client/library-backend" }
+library-management = { path = "../../client/library-management" }
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"
 account-contract = { path = "../../shared/account-contract" }
-app-preferences = { path = "../../client/preferences" }
+account-client = { path = "../../client/account-client" }
+app-preferences = { path = "../../client/preferences", features = ["store"] }
+dictionary = { path = "../../client/dictionaries/core", features = ["store"] }
 app = { path = "../../client/app", default-features = false }
 ui-components = { path = "../components" }
 gpui.workspace = true
-gpui-image-eviction = { path = "../../shared/gpui-image-eviction" }
+gpui-image-eviction = { path = "../../../HtmlEngine/adapters/gpui-image-eviction" }
 gpui-component.workspace = true
 gpui_kobo = { workspace = true, optional = true }
-image = { version = "0.25", default-features = false }
+kobo-update = { path = "../../client/updates/kobo", optional = true }
+kobo-device = { path = "../kobo-device", optional = true }
+image = { workspace = true }
 library-model = { path = "../../client/library-model" }
 log = "0.4"
 sys-locale = { version = "0.3", features = ["js"] }
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["io"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sync-common = { path = "../../shared/sync-common" }
 uuid = { version = "1", features = ["v4"] }
 web-time = "1"
 zune-core = "0.5"
 zune-jpeg = "0.5"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+embedded-browser = { path = "../../client/embedded-browser" }
+
 [target.'cfg(target_os = "android")'.dependencies]
-serde_json = "1"
 gpui_android = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-serde_json = "1"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

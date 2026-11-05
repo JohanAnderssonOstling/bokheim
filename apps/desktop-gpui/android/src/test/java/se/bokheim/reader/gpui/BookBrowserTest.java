@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
@@ -56,7 +57,6 @@ public class BookBrowserTest {
     }
 
     @After public void tearDown() throws Exception {
-        BookDownload.transfersAllowed = () -> true;
         if (browser != null) browser.close();
         server.close();
         controller.pause().stop().destroy();
@@ -167,27 +167,6 @@ public class BookBrowserTest {
         pageTouch(android.view.MotionEvent.ACTION_UP, 12, 150);
     }
 
-    @Test public void systemBackReportsCurrentHistoryAndSkipsTheInitialBlankPage() throws Exception {
-        List<JSONObject> events = new ArrayList<>();
-        browser = new BookBrowserSurface(activity, 22, new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath()), anchor, (id, message) -> {
-            try { events.add(new JSONObject(message)); } catch (Exception error) { throw new AssertionError(error); }
-        });
-        browser.web.clearHistory();
-        Shadows.shadowOf(browser.web).pushEntryToHistory("about:blank");
-        Shadows.shadowOf(browser.web).pushEntryToHistory("https://example.com/first");
-        browser.backPressed();
-        assertEquals("navigation", events.get(events.size() - 2).getString("kind"));
-        assertFalse(events.get(events.size() - 2).getBoolean("back"));
-        assertEquals("back_pressed", events.get(events.size() - 1).getString("kind"));
-        Shadows.shadowOf(browser.web).pushEntryToHistory("https://example.com/second");
-        browser.backPressed();
-        assertTrue(events.get(events.size() - 2).getBoolean("back"));
-        browser.command(new JSONObject().put("command", "back"));
-        assertEquals(1, Shadows.shadowOf(browser.web).getGoBackInvocations());
-        browser.backPressed();
-        assertFalse(events.get(events.size() - 2).getBoolean("back"));
-    }
-
     @Test public void hardwareBackBypassesGameActivityAndConsumesTheWholeKeyPress() throws Exception {
         List<JSONObject> events = new ArrayList<>();
         browser = new BookBrowserSurface(activity, 27, new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath()), anchor, (id, message) -> {
@@ -285,59 +264,9 @@ public class BookBrowserTest {
         assertEquals("one.epub", started.get(url("/one.epub")).getString("name"));
         assertEquals(2, finished.size());
         assertFalse(finished.get(url("/one.epub")).has("error"));
-        assertTrue(finished.get(url("/two.pdf")).getString("error").contains("HTTP 500"));
+        assertEquals("Couldn’t download this book. Check your connection and try again.", finished.get(url("/two.pdf")).getString("error"));
         assertTrue(progress);
         assertEquals("closed", events.get(events.size() - 1).getString("kind"));
-    }
-
-    @Test public void magnetClicksAreHandedToRustWithoutNavigatingThePage() throws Exception {
-        List<String> events = new ArrayList<>();
-        JSONObject request = new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath());
-        browser = new BookBrowserSurface(activity, 13, request, anchor, (id, message) -> events.add(message));
-        String magnet = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789";
-        android.webkit.WebResourceRequest link = new android.webkit.WebResourceRequest() {
-            public android.net.Uri getUrl() { return android.net.Uri.parse(magnet); }
-            public boolean isForMainFrame() { return true; }
-            public boolean isRedirect() { return false; }
-            public boolean hasGesture() { return true; }
-            public String getMethod() { return "GET"; }
-            public Map<String, String> getRequestHeaders() { return java.util.Collections.emptyMap(); }
-        };
-        assertTrue(Shadows.shadowOf(browser.web).getWebViewClient().shouldOverrideUrlLoading(browser.web, link));
-        JSONObject event = new JSONObject(events.get(events.size() - 1));
-        assertEquals("magnet", event.getString("kind"));
-        assertEquals(magnet, event.getString("url"));
-        assertEquals("about:blank", browser.web.getUrl());
-    }
-
-    @Test public void torrentDownloadsUseBrowserCookiesAndAreNotReportedAsBooks() throws Exception {
-        byte[] metadata = "torrent metadata".getBytes(StandardCharsets.UTF_8);
-        server.serve("/download", request -> {
-            assertEquals("session=signed-in", request.headers.get("cookie"));
-            request.respond(200, "Content-Type: application/x-bittorrent\r\n", metadata, metadata.length);
-        });
-        server.start();
-        CookieManager.getInstance().setCookie(url("/"), "session=signed-in");
-        List<String> events = new ArrayList<>();
-        JSONObject request = new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath());
-        browser = new BookBrowserSurface(activity, 14, request, anchor, (id, message) -> events.add(message));
-        browser.startDownload(url("/download"), "Bokheim-test", null, null);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        JSONObject torrent = null;
-        while (torrent == null && System.nanoTime() < deadline) {
-            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
-            for (String message : events) {
-                JSONObject event = new JSONObject(message);
-                assertNotEquals("downloaded", event.getString("kind"));
-                if (event.getString("kind").equals("torrent_file")) torrent = event;
-            }
-            Thread.sleep(10);
-        }
-        assertNotNull("torrent metadata reaches Rust", torrent);
-        assertEquals(url("/download"), torrent.getString("download"));
-        File file = new File(torrent.getString("path"));
-        assertTrue(file.getName().endsWith(".torrent"));
-        assertArrayEquals(metadata, Files.readAllBytes(file.toPath()));
     }
 
     @Test public void downloadedBookUsesBrowserCookiesAgentAndRedirects() throws Exception {
@@ -363,54 +292,36 @@ public class BookBrowserTest {
         assertEquals("a complete epub", new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
     }
 
-    @Test public void meteredDownloadsWaitAndRestartWithoutPublishingPartialFiles() throws Exception {
-        java.util.concurrent.atomic.AtomicBoolean allowed = new java.util.concurrent.atomic.AtomicBoolean(false);
-        java.util.concurrent.atomic.AtomicBoolean interrupted = new java.util.concurrent.atomic.AtomicBoolean(false);
-        java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
-        BookDownload.transfersAllowed = allowed::get;
+    @Test public void explicitDownloadsProceedOnMeteredNetworks() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger networkCost = new java.util.concurrent.atomic.AtomicInteger();
+        NetworkCostMonitor monitor = new NetworkCostMonitor(networkCost::set);
+        android.net.Network mobile = org.robolectric.shadows.ShadowNetwork.newInstance(2);
+        android.net.NetworkCapabilities metered = new android.net.NetworkCapabilities();
+        Shadows.shadowOf(metered).removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+        monitor.onAvailable(mobile);
+        monitor.onCapabilitiesChanged(mobile, metered);
+        assertEquals(2, networkCost.get());
         byte[] body = new byte[512 * 1024];
         java.util.Arrays.fill(body, (byte) 42);
-        server.serve("/metered.epub", request -> {
-            requests.incrementAndGet();
-            request.respond(200, "Content-Type: application/epub+zip\r\n", body, body.length);
-        });
+        server.serve("/metered.epub", request -> request.respond(200, "Content-Type: application/epub+zip\r\n", body, body.length));
         server.start();
-        CountDownLatch admission = new CountDownLatch(1);
-        CountDownLatch suspended = new CountDownLatch(1);
-        ExecutorService download = Executors.newSingleThreadExecutor();
-        try {
-            java.util.concurrent.Future<File> completed = download.submit(() -> BookDownload.save(url("/metered.epub"), null, null, null, null, directory,
-                (bytes, total) -> { if (interrupted.compareAndSet(false, true)) allowed.set(false); },
-                () -> { if (interrupted.get()) suspended.countDown(); else admission.countDown(); }));
-            assertTrue(admission.await(5, TimeUnit.SECONDS));
-            assertEquals(0, requests.get());
-            assertEquals(0, directory.list().length);
-            allowed.set(true);
-            assertTrue(suspended.await(5, TimeUnit.SECONDS));
-            assertFalse(completed.isDone());
-            assertEquals(0, directory.list().length);
-            allowed.set(true);
-            File file = completed.get(10, TimeUnit.SECONDS);
-            assertArrayEquals(body, Files.readAllBytes(file.toPath()));
-            assertEquals(2, requests.get());
-            assertEquals(1, directory.list().length);
-        } finally { allowed.set(true); download.shutdownNow(); }
-    }
-
-    @Test public void cancellingAWaitingDownloadDoesNotFetchOrImportIt() throws Exception {
-        BookDownload.transfersAllowed = () -> false;
         List<JSONObject> events = new ArrayList<>();
         browser = new BookBrowserSurface(activity, 31, new JSONObject().put("url", "about:blank").put("downloads", directory.getAbsolutePath()), anchor, (id, message) -> {
             try { events.add(new JSONObject(message)); } catch (Exception error) { throw new AssertionError(error); }
         });
-        String address = url("/waiting.epub");
-        browser.startDownload(address, null, null, null);
-        awaitEvent(events, "download_waiting");
-        browser.command(new JSONObject().put("command", "cancel_download").put("download", address));
-        assertEquals(address, awaitEvent(events, "cancel_download").getString("download"));
-        browser.close();
-        awaitEvent(events, "closed");
-        assertFalse(events.stream().anyMatch(event -> event.optString("kind").equals("downloaded") || event.optString("kind").equals("download_finished")));
+        browser.startDownload(url("/metered.epub"), null, null, null);
+        JSONObject downloaded = awaitEvent(events, "downloaded");
+        assertArrayEquals(body, Files.readAllBytes(new File(downloaded.getString("path")).toPath()));
+        assertFalse(awaitEvent(events, "download_finished").has("error"));
+        assertFalse(events.stream().anyMatch(event -> event.optString("kind").equals("download_waiting")));
+        assertEquals(1, directory.list().length);
+    }
+
+    @Test public void cancellingBeforeADownloadStartsDoesNotFetchOrPublishIt() throws Exception {
+        BookDownload.Cancellation cancellation = new BookDownload.Cancellation();
+        cancellation.cancel();
+        assertThrows(IOException.class, () -> BookDownload.save(url("/cancelled.epub"), null, null, null, null, directory,
+            (bytes, total) -> fail("A cancelled download must not report progress"), cancellation));
         assertEquals(0, directory.list().length);
     }
 
@@ -420,7 +331,7 @@ public class BookBrowserTest {
         server.start();
         BookDownload.Cancellation cancellation = new BookDownload.Cancellation();
         assertThrows(IOException.class, () -> BookDownload.save(url("/cancel.epub"), null, null, null, null, directory,
-                (bytes, total) -> cancellation.cancel(), () -> {}, cancellation));
+                (bytes, total) -> cancellation.cancel(), cancellation));
         assertTrue(cancellation.isCancelled());
         assertEquals(0, directory.list().length);
     }
@@ -505,8 +416,6 @@ public class BookBrowserTest {
         assertEquals("https://example.com/books", Shadows.shadowOf(browser.web).getLastLoadedUrl());
         browser.command(new JSONObject().put("command", "focus_controls"));
         assertTrue(anchor.hasFocus());
-        browser.backPressed();
-        assertEquals("back_pressed", events.get(events.size() - 1).getString("kind"));
         browser.setBounds(10, 120, 240, 200);
         assertEquals(200, browser.web.getLayoutParams().height);
         browser.close();

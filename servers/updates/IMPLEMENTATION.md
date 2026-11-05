@@ -139,7 +139,7 @@ remain external configuration dependencies.
   Update state is excluded from backups/device transfer. Release APK versions
   derive from Cargo; production packaging requires configured signing, with a
   separate explicit local-signing option for optimized test APKs.
-- Android data host in `client/update-host/src/android.rs` now gates data
+- Android data host in `client/updates/native-host/src/android.rs` now gates data
   activation on a later launch and the installed APK version, reverifies staged
   packages, prepares isolated database copies through a host-supplied helper,
   journals promotion, restores interrupted trials and commits on healthy startup.

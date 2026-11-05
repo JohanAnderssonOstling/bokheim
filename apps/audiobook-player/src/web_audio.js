@@ -8,6 +8,7 @@ export class BrowserAudio {
         this.audio = new Audio();
         this.direct = direct;
         this.renew = renew;
+
         this.tracks = metadata.tracks || [];
         this.localTrackUrls = metadata.localTrackUrls || [];
         this.bookDuration = metadata.bookDuration || 0;
@@ -53,7 +54,7 @@ export class BrowserAudio {
         this.listen('pause', () => {
             // Reaching the end fires pause before ended. Keep the play request
             // until ended has had a chance to advance to the next track.
-            if (!this.recovery && !this.switching && !this.audio.ended) this.wantsPlay = false;
+            if (!this.recovery && !this.switching && !this.audio.ended) { this.wantsPlay = false; }
         });
         this.listen('playing', () => { this.waiting = false; this.recoveryAttempts = 0; });
         this.listen('seeked', () => {
@@ -77,6 +78,7 @@ export class BrowserAudio {
                 return;
             }
             this.error = `Could not play this audiobook (media error ${this.audio.error?.code ?? 'unknown'}).`;
+
             this.update(true);
         });
         this.visibilitychange = () => this.update(true);
@@ -154,6 +156,7 @@ export class BrowserAudio {
     }
     startMedia() {
         const generation = ++this.playGeneration;
+
         if (this.audio.ended) this.seek(0);
         this.error = null;
         const result = this.audio.play();
@@ -164,6 +167,7 @@ export class BrowserAudio {
                 return;
             }
             this.wantsPlay = false;
+
             this.error = error.name === 'NotAllowedError'
                 ? 'Tap Play to allow audiobook playback in this browser.' : `Could not start playback: ${error.message}`;
         });
@@ -260,6 +264,7 @@ export class BrowserAudio {
         this.update(true);
         this.disposed = true;
         this.wantsPlay = false;
+
         this.cancelRecovery();
         this.revokeDirect(this.url);
         this.audio.pause();

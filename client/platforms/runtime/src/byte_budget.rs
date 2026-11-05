@@ -37,10 +37,7 @@ impl Drop for Reservation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        coordinator::{CpuJobs, SyncJobs},
-        worker_lifecycle::Connection,
-    };
+    use crate::{coordinator::CpuJobs, worker_lifecycle::Connection};
     #[test]
     fn budget_rejects_oversize_and_overflow_without_changing_usage() {
         let budget = ByteBudget::new(10);

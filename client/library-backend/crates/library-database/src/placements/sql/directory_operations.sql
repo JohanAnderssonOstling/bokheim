@@ -8,9 +8,66 @@ SELECT body FROM sync_state_version WHERE state_key=:state_key AND state_subkey=
 -- param: dir_id: &SqlParam<'_>
 SELECT parent_id,name FROM dir WHERE id=:dir_id AND deleted_at IS NULL;
 
--- name: directory_read_dir_parent_id_name_2 ?
--- param: dir_id: &SqlParam<'_>
-SELECT parent_id,name FROM dir WHERE id=:dir_id AND deleted_at IS NULL;
+-- name: directory_path_seeds?
+-- param: directories: &str
+-- param: books: &str
+-- param: root_id: &str
+-- Shallow selections need no recursive queue after reading their parents.
+WITH requested(id) AS (
+    SELECT value FROM json_each(:directories)
+    UNION ALL
+    SELECT DISTINCT bd.dir_id FROM json_each(:books) requested
+    JOIN book b ON b.content_hash=unhex(requested.value) AND b.deleted_at IS NULL
+    JOIN book_dir bd ON bd.book_row_id=b.row_id AND bd.deleted_at IS NULL
+), selected(id,parent_id) AS MATERIALIZED (
+    SELECT requested.id,d.parent_id FROM requested
+    LEFT JOIN dir d ON d.id=requested.id AND d.deleted_at IS NULL
+), seeds(id) AS (
+    SELECT id FROM selected
+    UNION SELECT parent_id FROM selected WHERE parent_id IS NOT NULL
+    UNION SELECT :root_id
+)
+SELECT seeds.id,d.parent_id,d.name FROM seeds
+LEFT JOIN dir d ON d.id=seeds.id AND d.deleted_at IS NULL;
+
+-- name: directory_path_ancestors?
+-- param: directories: &str
+-- param: root_id: &str
+-- Shared ancestors enter the recursive queue once. UNION also stops cycles.
+WITH RECURSIVE ancestors(id,parent_id,name) AS (
+    SELECT requested.value,d.parent_id,d.name FROM json_each(:directories) requested
+    LEFT JOIN dir d ON d.id=requested.value AND d.deleted_at IS NULL
+    UNION
+    SELECT parent.id,parent.parent_id,parent.name
+    FROM ancestors child JOIN dir parent ON parent.id=child.parent_id
+    WHERE child.id!=:root_id AND parent.deleted_at IS NULL
+)
+SELECT id,parent_id,name FROM ancestors;
+
+-- name: directory_all_live_paths?
+-- param: root_id: &str
+-- Every directory has one parent. A cycle cannot be reached from the root;
+-- exclude the root's own parent edge so each reachable folder is visited once.
+WITH RECURSIVE paths(id,relative_path) AS (
+    SELECT id,'' FROM dir WHERE id=:root_id AND deleted_at IS NULL
+    UNION ALL
+    SELECT child.id,CASE WHEN parent.id=:root_id THEN child.name ELSE parent.relative_path||'/'||child.name END
+    FROM paths parent JOIN dir child ON child.parent_id=parent.id
+    WHERE child.deleted_at IS NULL AND child.id!=:root_id
+)
+SELECT id,relative_path FROM paths;
+
+-- name: directory_folder_destinations?
+-- param: root_id: &str
+WITH RECURSIVE paths(id,display_path,parent_id,name) AS (
+    SELECT id,'',parent_id,name FROM dir WHERE id=:root_id AND deleted_at IS NULL
+    UNION ALL
+    SELECT child.id,CASE WHEN parent.display_path='' THEN child.name ELSE parent.display_path||' / '||child.name END,
+           child.parent_id,child.name
+    FROM paths parent JOIN dir child ON child.parent_id=parent.id
+    WHERE child.deleted_at IS NULL AND child.id!=:root_id
+)
+SELECT id,display_path,parent_id,name FROM paths;
 
 -- name: directory_work_roots ?
 SELECT dir_id FROM local_directory_work;

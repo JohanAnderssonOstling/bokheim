@@ -105,16 +105,10 @@ impl PdfDocumentSession {
         Self::load(move || LocalDocumentSession::from_reader(source_name, reader))
     }
 
-    pub fn from_reader_with_metadata<R: Read + Seek + Send + 'static>(source_name: impl Into<String>, reader: R, content_hash: &str, metadata: Option<PdfReaderMetadata>) -> PdfResult<Self> {
+    pub fn from_reader_with_metadata<R: Read + Seek + Send + 'static>(source_name: impl Into<String>, reader: R, book_id: &str, metadata: Option<PdfReaderMetadata>) -> PdfResult<Self> {
         let source_name = source_name.into();
-        let content_hash = content_hash.to_owned();
-        Self::load(move || LocalDocumentSession::from_reader_with_metadata(source_name, reader, &content_hash, metadata))
-    }
-
-    pub fn from_reader_with_page_source<R: Read + Seek + Send + 'static>(source_name: impl Into<String>, reader: R, content_hash: &str, metadata: Option<PdfReaderMetadata>, page_source: Option<Arc<dyn PdfPageSource>>) -> PdfResult<Self> {
-        let source_name = source_name.into();
-        let content_hash = content_hash.to_owned();
-        Self::load(move || LocalDocumentSession::from_reader_with_page_source(source_name, reader, &content_hash, metadata, page_source))
+        let book_id = book_id.to_owned();
+        Self::load(move || LocalDocumentSession::from_reader_with_metadata(source_name, reader, &book_id, metadata))
     }
 
     pub fn info(&self) -> &PdfDocumentInfo {
@@ -124,19 +118,6 @@ impl PdfDocumentSession {
     fn work<T: Send + 'static>(&self, work: impl FnOnce(&mut LocalDocumentSession) -> PdfResult<T> + Send + 'static) -> impl FnOnce() -> PdfResult<T> + Send + 'static {
         let handle = self.handle.clone();
         move || DOCUMENTS.with_borrow_mut(|documents| work(documents.get_mut(&handle.0).ok_or_else(|| PdfError::new("PDF document is closed"))?))
-    }
-
-    pub fn inspect_skippable_pages(&self) -> Vec<usize> {
-        // Failure must retain pages, rather than classify unreadable content as blank.
-        run(self.work(|document| Ok(document.inspect_skippable_pages()))).unwrap_or_default()
-    }
-
-    pub fn set_skippable_pages(&mut self, pages: Vec<usize>) {
-        self.info.skippable_pages = pages.clone();
-        let _ = run(self.work(move |document| {
-            document.set_skippable_pages(pages);
-            Ok(())
-        }));
     }
 
     pub fn render_page(&self, page_index: usize, target_width: Option<u16>) -> PdfResult<RenderedPdfPage> {
@@ -184,19 +165,20 @@ impl PdfDocumentSession {
         request(self.work(move |document| document.extract_reading_fragments(page_index))).await
     }
 
-    pub fn character_index_near_point(&self, page_index: usize, point: (f32, f32), tolerance: (f32, f32)) -> PdfResult<Option<usize>> {
-        run(self.work(move |document| document.character_index_near_point(page_index, point, tolerance)))
-    }
-
     pub(super) fn for_inspection(reader: impl Read + Seek + Send + 'static) -> PdfResult<Self> {
         Self::load(move || {
-            Ok(LocalDocumentSession {
-                document: load_document(reader)?,
-                info: PdfDocumentInfo { source_name: String::new(), pages: Vec::new(), outline: Vec::new(), skippable_pages: Vec::new() },
-                analysis: RefCell::new(PageAnalysisCache::default()),
-                page_source: None,
-            })
+            let document = load_document(reader)?;
+            let right_to_left = document.catalog().is_right_to_left();
+            Ok(LocalDocumentSession { document, info: PdfDocumentInfo { source_name: String::new(), pages: Vec::new(), outline: Vec::new(), right_to_left }, analysis: RefCell::new(PageAnalysisCache::default()) })
         })
+    }
+
+    pub(super) fn text_page_count(&self) -> PdfResult<usize> {
+        run(self.work(|session| Ok(session.document.pages().len() as usize)))
+    }
+
+    pub(super) fn text_page(&self, index: usize, with_bounds: bool) -> PdfResult<BookTextPart> {
+        run(self.work(move |session| extract_search_page(&session.document, index, with_bounds)))
     }
 
     pub(super) fn inspection_image(&self, number: usize) -> PdfResult<Option<RenderedPdfImage>> {
@@ -270,7 +252,6 @@ mod tests {
         let id = session.handle.0;
         session.render_page(0, Some(320))?;
         session.search_page(0, "text")?;
-        session.character_index_near_point(0, (0.5, 0.5), (1.0, 1.0))?;
         block_on(session.render_for_display(PageRenderKey::new(0, 320)))?;
         block_on(session.search_pages(0..1, "text".into()))?;
         let reads = observed.try_iter().collect::<Vec<_>>();

@@ -1,24 +1,48 @@
 //! Serializable book sources produced by a library session.
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+use book_access::RemoteFile;
+use library_model::PlaybackMetadata;
+use remote_book_access::DirectPlayback;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResolvedBookData {
     pub pdf_metadata: Option<pdf_view_common::PdfReaderMetadata>,
     pub format: book_model::BookFormat,
     pub source: BookSource,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum BookSource {
     Local {
         capability: String,
         length: u64,
     },
     Remote {
-        source: crate::library::RemoteFile,
+        source: RemoteFile,
         #[serde(with = "serde_bytes")]
         prefix: Vec<u8>,
     },
-    Audiobook(crate::library::PlaybackSource),
+    /// Bokheim ZIP-based books start with the tail; the reader plans entry ranges.
+    RemoteArchive {
+        source: RemoteFile,
+        #[serde(with = "serde_bytes")]
+        tail: Vec<u8>,
+    },
+    Audiobook(PlaybackSource),
     /// Native wire adapters can still return owned bytes; browsers use capabilities.
     Inline(#[serde(with = "serde_bytes")] Vec<u8>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PlaybackLocation {
+    LocalUrl(String),
+    LocalTracks(Vec<String>),
+    Direct(DirectPlayback),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlaybackSource {
+    pub metadata: PlaybackMetadata,
+    pub location: PlaybackLocation,
 }

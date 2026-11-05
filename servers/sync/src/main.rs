@@ -4,9 +4,10 @@ mod resend;
 use server_account::{AccountTokenKey, PostgresAccountService};
 use std::io;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use sync_server::transport::ServerConfig;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 const TEST_USER_QUOTA_BYTES: i64 = 1_000 * 1_000 * 1_000 * 1_000;
 
@@ -35,11 +36,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match arguments.next() {
         None => run_server().await,
         Some(command) if command == "migrate" && arguments.next().is_none() => run_migrate().await,
-        Some(command) if command == "upgrade" && arguments.next().is_none() => run_upgrade().await,
+        Some(command) if command == "upgrade" && arguments.next().is_none() => run_cloud_upgrade("apply"),
+        Some(command) if command == "check-upgrade" && arguments.next().is_none() => run_cloud_upgrade("check"),
         Some(command) if command == "verify-schema" && arguments.next().is_none() => run_verify_schema().await,
         Some(command) if command == "rotate-sync-generation" && arguments.next().is_none() => run_rotate_sync_generation().await,
-        Some(command) => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command, 'migrate', 'upgrade', 'verify-schema', or 'rotate-sync-generation'", command.to_string_lossy())).into()),
+        Some(command) => {
+            Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command, 'migrate', 'upgrade', 'check-upgrade', 'verify-schema', or 'rotate-sync-generation'", command.to_string_lossy()))
+                .into())
+        }
     }
+}
+
+fn run_cloud_upgrade(mode: &str) -> Result<(), Box<dyn Error>> {
+    let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
+    let tool = std::env::current_exe()?.with_file_name("library-cloud-upgrade");
+    let status = Command::new(tool).arg(mode).env("DATABASE_URL", database_url).status()?;
+    if !status.success() {
+        return Err(io::Error::other("cloud data upgrade did not complete; see the migration report").into());
+    }
+    Ok(())
 }
 
 /// Applies the initial schema to an empty database. The server
@@ -48,13 +63,6 @@ async fn run_migrate() -> Result<(), Box<dyn Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database = server_postgres::connect(&database_url).await?;
     server_postgres::migrate(&database).await?;
-    Ok(())
-}
-
-async fn run_upgrade() -> Result<(), Box<dyn Error>> {
-    let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
-    let database = server_postgres::connect(&database_url).await?;
-    server_postgres::upgrade_existing(&database).await?;
     Ok(())
 }
 
@@ -107,8 +115,9 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
     let request_limits = server_http::RequestLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let notification_config = server_http::NotificationConfig::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let upload_limits = server_asset_store::UploadLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let catalog = storage.catalog().cloned();
     let (books, thumbnails) = storage.into_parts();
-    let app = sync_server::app(pool, auth, sync_server::AppConfig { books, thumbnails, client_address_source: server.client_address_source(), transfer_limits, request_limits, upload_limits, notification_config }).await?;
+    let app = sync_server::app(pool, auth, sync_server::AppConfig { books, thumbnails, catalog, client_address_source: server.client_address_source(), transfer_limits, request_limits, upload_limits, notification_config }).await?;
     sync_server::transport::serve(server, app).await?;
     Ok(())
 }

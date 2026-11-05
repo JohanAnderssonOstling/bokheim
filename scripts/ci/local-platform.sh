@@ -5,16 +5,25 @@ platform=${1:?platform}
 output=${2:?fresh output directory}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
+cache_platform=$platform
+if [[ "$platform" == linux ]]; then cache_platform=linux-glibc217; fi
+CARGO_TARGET_DIR=$(python3 scripts/ci/build_cache.py path "$cache_platform")
+export CARGO_TARGET_DIR
 mkdir -p "$output"
 case "$platform" in
   linux)
     python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu
     cargo test --release -p client-platform-native -p client-platform-desktop --features client-platform-native/websocket
     cargo test --release -p linux-update-host
-    python3 apps/desktop-gpui/scripts/build.py
+    build_options=(--speech-from-source)
+    if [[ "${BOKHEIM_BROWSER:-auto}" == disabled || -n "${BOKHEIM_BROWSER_HELPER:-}" ]]; then
+      build_options+=(--without-browser)
+    fi
+    python3 apps/desktop-gpui/scripts/build.py "${build_options[@]}"
     export APPIMAGE_EXTRACT_AND_RUN=1
     RELEASE_DIRECTORY="$output" DESKTOP_BINARY="${CARGO_TARGET_DIR:-$root/target}/release/bokheim" \
       bash apps/desktop-gpui/linux/appimage/build-appimage.sh
+    bash -n "$output/install.sh"
     "$output/Bokheim-x86_64.AppImage" --bokheim-update-info > "$output/update-info-linux-x86_64-appimage.json"
     python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["schema"] > 0 and p["target"] == "linux-x86_64-appimage"' "$output/update-info-linux-x86_64-appimage.json"
     (cd "$output" && sha256sum --check Bokheim-x86_64.AppImage.sha256)
@@ -26,13 +35,12 @@ case "$platform" in
     test -e "$scratch/squashfs-root/se.bokheim.Bokheim.svg" -o -e "$scratch/squashfs-root/se.bokheim.Bokheim.png"
     ldd "$scratch/squashfs-root/usr/bin/bokheim" > "$scratch/ldd.txt"
     if grep -F 'not found' "$scratch/ldd.txt"; then exit 1; fi
-    bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$output/Bokheim-x86_64.AppImage" 2.35
-    bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$scratch/squashfs-root" 2.35
+    bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$output/Bokheim-x86_64.AppImage" 2.17
+    bash apps/desktop-gpui/linux/appimage/verify-appdir-compatibility.sh "$scratch/squashfs-root"
     ;;
   android)
     : "${ANDROID_CERT_SHA256:?Production certificate SHA-256 is required}"
-    # Gradle stages Rust from the workspace target directory.
-    unset CARGO_TARGET_DIR
+    # Cargo and Gradle stage native libraries from the same persistent cache.
     cargo check --release -p client-platform-android --target aarch64-linux-android
     gradle -p apps/desktop-gpui/android --no-daemon assembleRelease testReleaseUnitTest
     cp apps/desktop-gpui/android/build/outputs/apk/release/*-release.apk "$output/Bokheim-Android-arm64.apk"
@@ -58,9 +66,8 @@ case "$platform" in
     command -v wasm-bindgen >/dev/null
     python3 shared/pdfium/prepare.py --target wasm32-unknown-unknown
     cargo check --release -p client-platform-web --target wasm32-unknown-unknown
-    cargo check --release -p web-backend-worker --example cpu_worker --example sync_coordinator --target wasm32-unknown-unknown
     cargo check --release -p web-backend-worker -p web-gpui --target wasm32-unknown-unknown
-    node --test client/platforms/web/tests/signal.mjs
+    node --test client/platforms/web/tests/signal.mjs apps/web-gpui/compatibility.test.mjs apps/web-gpui/startup.test.mjs apps/reader/crates/speech/src/browser.test.mjs
     python3 -m unittest discover -s apps/web-gpui/scripts/tests
     BOKHEIM_WEB_OUTPUT_DIR="$output" bash apps/web-gpui/scripts/build.sh
     ;;

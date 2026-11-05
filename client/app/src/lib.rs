@@ -4,21 +4,18 @@ pub mod host;
 
 mod api;
 mod app;
-mod library_client;
 use client_platform_runtime::executor;
-pub(crate) use library_backend::integration as notification_interest;
-mod platform;
-pub(crate) mod runtime;
+pub use library_management::management::{LibraryFolderError, LibraryFolderStep, NotificationLease};
+pub(crate) mod hosting;
 
 pub use app::{API_SERVER_ORIGIN, METADATA_SERVER_ORIGIN, Url, api_server_url, metadata_server_url};
 pub use app::{APP_NAME, APP_NAME_LOWER};
 pub use app::{AccountSnapshot, AppClient, AppStartupState};
-pub use app::{AccountStatus, AppDataLocation, LibraryEntry, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
-pub use client_runtime::BackendError;
-pub(crate) type DeviceAccountSession = library_backend::integration::LibraryAccountSession<app::BackendContext>;
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) use platform::web_storage::initialize as initialize_web_storage;
+pub use app::{AccountStatus, AppDataLocation, LibraryEntry, ServerBookStorageUsage, ServerLibraryStorageUsage};
+pub use client_protocol::{BackendError, Classified, Failure, WifiFailure};
+pub(crate) use library_management::account::AccountSession as DeviceAccountSession;
+pub use library_management::management::LocalLibraryStorageUsage;
+pub use sync_common::storage::LibraryStorage;
 
 /// Initialize the logging system. Call this once at the start of your application.
 ///
@@ -46,7 +43,6 @@ pub(crate) use app::BackendContext;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
-#[cfg(all(feature = "kobo", not(target_arch = "wasm32")))]
-pub use api::app::BatteryStatus;
-#[cfg(all(feature = "kobo", target_os = "linux"))]
-pub use api::app::{BluetoothDevice, BluetoothRequest, BluetoothStatus, WifiNetwork, WifiPhase, WifiRequest, WifiSecurity, WifiSnapshot};
+#[cfg(test)]
+#[path = "../tests/library_folder_error/tests.rs"]
+mod library_folder_error_tests;

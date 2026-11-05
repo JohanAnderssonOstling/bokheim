@@ -7,7 +7,7 @@ use crate::DatabaseError;
 #[cfg(test)]
 use book_model::Contributor;
 use book_model::{BookFormat, BookRecord, BookTocEntry};
-use content_address::ContentHash;
+use content_address::BookId;
 use library_model::CardKey;
 use rusqlite::Connection;
 #[cfg(test)]
@@ -19,21 +19,21 @@ mod popularity;
 
 mod storage;
 pub use storage::{activate, activate_path, audiobook_candidates, audiobook_url, contains, entry};
-pub(crate) use storage::{read, read_snapshot};
+pub(crate) use storage::{browse_row, read, read_snapshot};
 
 /// Only identical hosted bytes of the same format supply an import answer.
 /// Source-linked entries have catalog identities rather than content hashes.
-pub fn import_record(hash: ContentHash, format: BookFormat) -> Result<Option<BookRecord>, DatabaseError> {
-    Ok(entry(CardKey(*hash.as_bytes()))?.filter(|book| book.hash == Some(hash) && book.format() == format).map(|book| book.record))
+pub fn import_record(hash: BookId, format: BookFormat) -> Result<Option<BookRecord>, DatabaseError> {
+    Ok(entry(CardKey::from(hash))?.filter(|book| book.hash == Some(hash) && book.format() == format).map(|book| book.record))
 }
 
-/// The single catalog snapshot layout this application reads.
-pub const FORMAT_VERSION: u32 = 8;
+/// The latest catalog snapshot layout.
+pub const FORMAT_VERSION: u32 = 11;
 
 /// One catalog book, with what browsing filters, sorts and shows, and the
 /// record a library adding it records as its enrichment answer.
 pub struct CatalogBook {
-    pub hash: Option<ContentHash>,
+    pub hash: Option<BookId>,
     pub key: CardKey,
     pub external_url: Option<String>,
     /// An external audiobook's archive on its source, which adding the
@@ -41,6 +41,8 @@ pub struct CatalogBook {
     pub download_url: Option<String>,
     /// Source media format, independent of hosting or download permissions.
     pub file_format: BookFormat,
+    /// Total recording time advertised by the source, when available.
+    pub audiobook_duration_ms: Option<u64>,
     /// Acquisition sources retained by the snapshot, including every source
     /// credited for a hosted file shared by several catalogs.
     pub sources: Vec<String>,
@@ -61,11 +63,6 @@ pub struct CatalogBook {
 }
 
 impl CatalogBook {
-    /// Public Domain Library editions lead catalog browsing by source quality.
-    pub(crate) fn is_preferred_source(&self) -> bool {
-        self.sources.iter().any(|source| source == "publicdomainlibrary.org")
-    }
-
     pub(crate) fn source_priority(&self) -> u8 {
         self.sources.iter().map(|source| popularity::source_priority(source)).min().unwrap_or_else(|| popularity::source_priority(""))
     }
@@ -82,26 +79,29 @@ impl CatalogBook {
 
 pub use metadata_contract::catalog::{CatalogPopularity, CombinedPopularity};
 
-fn read_sources(db: &Connection) -> Result<HashMap<String, Vec<String>>, DatabaseError> {
-    read_sources_for(db, None)
-}
-
-fn key_bytes(key: Option<&str>) -> Result<Option<Vec<u8>>, DatabaseError> {
-    key.map(|key| blake3::Hash::from_hex(key).map(|key| key.as_bytes().to_vec()).map_err(DatabaseError::operation)).transpose()
-}
-
-fn read_sources_for(db: &Connection, key: Option<&str>) -> Result<HashMap<String, Vec<String>>, DatabaseError> {
-    let mut sources = HashMap::<String, Vec<String>>::new();
-    let mut statement = db.prepare("SELECT lower(hex(book.key)),name FROM book_source credit JOIN book ON book.row_id=credit.book_row_id JOIN source ON source.id=credit.source_id WHERE (?1 IS NULL OR book.key=?1)
-        UNION SELECT lower(hex(entry_key)),name FROM external_book JOIN source ON source.id=external_book.source_id WHERE (?1 IS NULL OR entry_key=?1)
-        UNION SELECT lower(hex(book.key)),source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.hosted_row_id JOIN source ON source.id=credit.original_source_id WHERE (?1 IS NULL OR book.key=?1)
-        UNION SELECT lower(hex(book.key)),source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.external_row_id JOIN source ON source.id=credit.original_source_id WHERE (?1 IS NULL OR book.key=?1)
-        ORDER BY 1,2")?;
-    for row in statement.query_map([key_bytes(key)?], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
-        let (identity, source) = row?;
-        sources.entry(identity).or_default().push(source);
-    }
+fn read_sources(db: &Connection) -> Result<HashMap<[u8; 32], Vec<String>>, DatabaseError> {
+    let mut sources = HashMap::<[u8; 32], Vec<String>>::new();
+    visit_sources(db, None, |key, source| sources.entry(key).or_default().push(source))?;
     Ok(sources)
+}
+
+fn read_sources_for(db: &Connection, key: &[u8; 32]) -> Result<Vec<String>, DatabaseError> {
+    let mut sources = Vec::new();
+    visit_sources(db, Some(key), |_, source| sources.push(source))?;
+    Ok(sources)
+}
+
+fn visit_sources(db: &Connection, key: Option<&[u8; 32]>, mut receive: impl FnMut([u8; 32], String)) -> Result<(), DatabaseError> {
+    let mut statement = db.prepare("SELECT book.key,name FROM book_source credit JOIN book ON book.row_id=credit.book_row_id JOIN source ON source.id=credit.source_id WHERE (?1 IS NULL OR book.key=?1)
+        UNION SELECT entry_key,name FROM external_book JOIN source ON source.id=external_book.source_id WHERE (?1 IS NULL OR entry_key=?1)
+        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.hosted_row_id JOIN source ON source.id=credit.original_source_id WHERE (?1 IS NULL OR book.key=?1)
+        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.external_row_id JOIN source ON source.id=credit.original_source_id WHERE (?1 IS NULL OR book.key=?1)
+        ORDER BY 1,2")?;
+    for row in statement.query_map([key.map(|key| key.as_slice())], |row| Ok((row.get::<_, [u8; 32]>(0)?, row.get::<_, String>(1)?)))? {
+        let (identity, source) = row?;
+        receive(identity, source);
+    }
+    Ok(())
 }
 
 /// Some older source records put a comma-separated list of all creators in

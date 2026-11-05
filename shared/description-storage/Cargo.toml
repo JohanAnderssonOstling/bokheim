@@ -1,0 +1,12 @@
+[package]
+name = "description-storage"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rusqlite = { version = "0.40.0", features = ["functions"] }
+zstd = { version = "0.13", default-features = false }

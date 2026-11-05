@@ -2,60 +2,39 @@
 use crate::deadline::transfer_deadline;
 use crate::policy::SMALL_REQUEST_TIMEOUT;
 use crate::TransferError;
-use cpu_host::{CpuHost, cover, resize};
-use library_database::Database;
+use crate::transfer::AssetExecutor;
+use cpu_host::resize;
 use library_files::AssetStore;
 use library_model::BlobKind;
-use library_runtime::account::SharedSyncCredentials;
-use library_runtime::events::{LibraryEvent, LibraryEventRouter};
-use std::{collections::HashSet, sync::Arc};
-use sync_common::{ContentHash, LibraryId};
-use sync_transport::SyncCredentials;
+use std::collections::HashSet;
+use sync_common::BookId;
 const MAX_THUMBNAIL_BYTES: usize = sync_common::MAX_THUMBNAIL_BYTES as usize;
 use sync_common::api::assets::ThumbnailBatchEntry;
 
-/// Owns thumbnail byte handling and persistence; the host supplies CPU work and events.
-pub struct ThumbnailTransfers {
-    pub assets: AssetStore,
-    pub database: Arc<Database>,
-    pub http_client: reqwest::Client,
-    pub library_id: LibraryId,
-    pub credentials: SharedSyncCredentials,
-    pub cpu: Arc<dyn CpuHost>,
-    pub events: Option<LibraryEventRouter>,
-}
-impl ThumbnailTransfers {
-    fn credentials(&self) -> Result<SyncCredentials, TransferError> {
-        self.credentials.credentials().ok_or(TransferError::AuthenticationRequired)
-    }
-    fn check_transfer_account(&self, credentials: &SyncCredentials) -> Result<(), TransferError> {
-        if self.credentials()?.server_url() != credentials.server_url() {
-            return Err(TransferError::retryable("credentials changed during asset transfer"));
-        }
-        Ok(())
-    }
-    async fn upload_pair(&self, hash: ContentHash) -> Result<Option<ThumbnailBatchEntry>, TransferError> {
+impl AssetExecutor {
+    async fn upload_pair(&self, hash: BookId) -> Result<Option<ThumbnailBatchEntry>, TransferError> {
+        let assets = self.state.read().await.assets().clone();
         // Writers hold book leases while replacing local variants. An exclusive
         // lease keeps this upload snapshot from mixing two cover generations.
-        let _lease = self.assets.try_exclusive_lease(&hash)?.ok_or_else(|| TransferError::retryable("thumbnail is being updated"))?;
-        let Some(bytes) = self.assets.read_bytes(BlobKind::Thumbnail, &hash).await? else { return Ok(None) };
+        let _lease = assets.try_exclusive_lease(&hash)?.ok_or_else(|| TransferError::retryable("thumbnail is being updated"))?;
+        let Some(bytes) = assets.read_bytes(BlobKind::Thumbnail, &hash).await? else { return Ok(None) };
         if bytes.len() > MAX_THUMBNAIL_BYTES || !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-            self.discard_invalid_thumbnail(hash)?;
+            self.discard_invalid_thumbnail(&assets, hash).await?;
             return Ok(None);
         }
-        let browse_bytes = match self.assets.read_named(library_files::asset_store::thumbnail_variant_name(&hash, thumbnail::BROWSE_THUMBNAIL_WIDTH)).await? {
+        let browse_bytes = match assets.read_named(library_files::asset_store::thumbnail_variant_name(&hash, thumbnail::BROWSE_THUMBNAIL_WIDTH)).await? {
             Some(bytes) => bytes,
             None => resize(&*self.cpu, bytes.clone(), thumbnail::BROWSE_THUMBNAIL_WIDTH).await.map_err(TransferError::retryable)?,
         };
         if browse_bytes.len() > MAX_THUMBNAIL_BYTES || !browse_bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-            self.discard_invalid_thumbnail(hash)?;
+            self.discard_invalid_thumbnail(&assets, hash).await?;
             return Ok(None);
         }
-        Ok(Some(ThumbnailBatchEntry { content_hash: hash, bytes, browse_bytes }))
+        Ok(Some(ThumbnailBatchEntry { book_id: hash, bytes, browse_bytes }))
     }
 
     /// Upload a bounded page in one request, enforcing its aggregate byte bound.
-    pub async fn upload_thumbnail_batch(&self, hashes: &[ContentHash]) -> Result<(), TransferError> {
+    pub(crate) async fn upload_thumbnail_batch(&self, hashes: &[BookId]) -> Result<(), TransferError> {
         let mut thumbnails = Vec::with_capacity(hashes.len());
         let mut total_bytes = 0usize;
         for hash in hashes {
@@ -69,89 +48,81 @@ impl ThumbnailTransfers {
         if thumbnails.is_empty() {
             return Ok(());
         }
-        let credentials = self.credentials()?;
-        let uploaded = thumbnails.iter().map(|thumbnail| thumbnail.content_hash).collect::<Vec<_>>();
+        let credentials = self.credentials().await?;
+        let uploaded = thumbnails.iter().map(|thumbnail| thumbnail.book_id).collect::<Vec<_>>();
         let response = transfer_deadline(SMALL_REQUEST_TIMEOUT, crate::upload_thumbnail_batch(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, thumbnails)).await?;
-        self.check_transfer_account(&credentials)?;
+        self.check_transfer_account(&credentials).await?;
         response?;
-        self.database.record_server_covers(&uploaded)?;
+        self.database.record_server_covers(&uploaded).await?;
         Ok(())
     }
     /// Covers that are ready, received or missing are written once for the
     /// batch, also when it fails partway: what was stored still counts.
-    pub async fn download_thumbnail_batch(&self, hashes: &[ContentHash]) -> Result<(), TransferError> {
+    pub(crate) async fn download_thumbnail_batch(&self, hashes: &[BookId]) -> Result<(), TransferError> {
+        let assets = self.state.read().await.assets().clone();
         let mut ready = Vec::new();
         let mut received = Vec::new();
         let mut missing = Vec::new();
         let result: Result<(), TransferError> = async {
-            let mut requested = HashSet::<ContentHash>::new();
+            let mut remaining = HashSet::<BookId>::new();
             for thumbnail_hash in hashes {
-                let is_local = self.assets.thumbnail_set_exists(thumbnail_hash)?;
+                let is_local = assets.thumbnail_set_exists(thumbnail_hash).await?;
                 if is_local {
                     ready.push(*thumbnail_hash);
                     continue;
                 }
-                if let Some(bytes) = self.assets.read_bytes(BlobKind::Thumbnail, thumbnail_hash).await? {
-                    if bytes.len() <= MAX_THUMBNAIL_BYTES && bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-                        if let Ok(versions) = cover(&*self.cpu, bytes).await {
-                            self.assets.write_thumbnail_set(thumbnail_hash, &versions.high_density, &versions.browse, &versions.card_high_density).await?;
-                            ready.push(*thumbnail_hash);
-                            continue;
-                        }
-                    }
-                }
-                requested.insert(*thumbnail_hash);
+                // Fetch missing variants from the server instead of rebuilding
+                // them from a previously downloaded master on this device.
+                remaining.insert(*thumbnail_hash);
             }
-            if requested.is_empty() {
+            if remaining.is_empty() {
                 return Ok(());
             }
-            let credentials = self.credentials()?;
-            let response = transfer_deadline(SMALL_REQUEST_TIMEOUT, crate::download_thumbnail_batch(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, requested.iter().copied().collect())).await?;
-            self.check_transfer_account(&credentials)?;
+            let credentials = self.credentials().await?;
+            let response = transfer_deadline(SMALL_REQUEST_TIMEOUT, crate::download_thumbnail_batch(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, remaining.iter().copied().collect())).await?;
+            self.check_transfer_account(&credentials).await?;
             let response = response?;
-            let mut answered = HashSet::new();
             for thumbnail in response.thumbnails {
-                if !requested.contains(&thumbnail.content_hash) {
-                    return Err(TransferError::retryable("thumbnail batch returned an unrequested hash"));
+                if !remaining.remove(&thumbnail.book_id) {
+                    return Err(TransferError::retryable("thumbnail batch returned an unexpected or duplicate hash"));
                 }
-                if !answered.insert(thumbnail.content_hash) || thumbnail.bytes.len() > MAX_THUMBNAIL_BYTES || !thumbnail.bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+                if thumbnail.bytes.len() > MAX_THUMBNAIL_BYTES || !thumbnail.bytes.starts_with(&[0xff, 0xd8, 0xff]) {
                     return Err(TransferError::retryable("thumbnail batch returned invalid bytes"));
                 }
                 if thumbnail.browse_bytes.len() > MAX_THUMBNAIL_BYTES || !thumbnail.browse_bytes.starts_with(&[0xff, 0xd8, 0xff]) {
                     return Err(TransferError::retryable("thumbnail batch returned invalid browse bytes"));
                 }
-                // Derive current card geometry from the unmodified master,
-                // including when another client uploaded an older browse JPEG.
-                let versions = cover(&*self.cpu, thumbnail.bytes).await.map_err(TransferError::retryable)?;
-                self.assets.write_thumbnail_set(&thumbnail.content_hash, &versions.high_density, &versions.browse, &versions.card_high_density).await?;
-                self.check_transfer_account(&credentials)?;
-                received.push(thumbnail.content_hash);
-                ready.push(thumbnail.content_hash);
+                // Server artwork is already finished. The transfer supplies a
+                // browse JPEG and a master; use the master for dense cards too,
+                // preserving both images without cropping or re-encoding.
+                assets.write_thumbnail_set(&thumbnail.book_id, &thumbnail.bytes, &thumbnail.browse_bytes, &thumbnail.bytes).await?;
+                self.check_transfer_account(&credentials).await?;
+                received.push(thumbnail.book_id);
+                ready.push(thumbnail.book_id);
             }
-            self.check_transfer_account(&credentials)?;
+            self.check_transfer_account(&credentials).await?;
             for hash in response.missing {
-                if !requested.contains(&hash) || !answered.insert(hash) {
+                if !remaining.remove(&hash) {
                     return Err(TransferError::retryable("thumbnail batch returned an invalid missing hash"));
                 }
                 missing.push(hash);
             }
-            if answered.len() != requested.len() {
+            if !remaining.is_empty() {
                 return Err(TransferError::retryable("thumbnail batch omitted requested hashes"));
             }
             Ok(())
         }
         .await;
-        self.database.complete_cover_downloads(&ready, &received, &missing)?;
+        self.database.complete_cover_downloads(&ready, &received, &missing).await?;
         for hash in ready {
-            if let Some(events) = &self.events {
-                events.emit(LibraryEvent::ThumbnailGenerated { content_hash: hash });
-            }
+            self.events.cover_changed(hash);
         }
         result
     }
-    fn discard_invalid_thumbnail(&self, content_hash: ContentHash) -> Result<(), TransferError> {
-        self.assets.remove(BlobKind::Thumbnail, &content_hash)?;
-        self.database.request_missing_thumbnail(&content_hash)?;
+    /// The caller retains its exclusive book lease through deletion and retry scheduling.
+    async fn discard_invalid_thumbnail(&self, assets: &AssetStore, book_id: BookId) -> Result<(), TransferError> {
+        assets.remove(BlobKind::Thumbnail, &book_id).await?;
+        self.database.request_missing_thumbnail(&book_id).await?;
         Ok(())
     }
 }

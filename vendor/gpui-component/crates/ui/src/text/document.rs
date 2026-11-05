@@ -1,133 +1,42 @@
-use gpui::{
-    App, InteractiveElement as _, IntoElement, ListState, ParentElement as _, SharedString,
-    Styled as _, Window, div,
-};
+use super::inline::{Inline, InlineState};
+use gpui::{Div, InteractiveElement as _, IntoElement as _, ListState, ParentElement as _, SharedString, Stateful, Styled as _, div};
+use std::sync::{Arc, Mutex};
 
-use crate::text::node::{BlockNode, NodeContext};
-
-/// The parsed document AST.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct ParsedDocument {
-    pub(crate) source: SharedString,
-    pub(crate) blocks: Vec<BlockNode>,
+#[derive(Clone)]
+pub(super) struct TextDocument {
+    pub(super) source: SharedString,
+    inline: Arc<Mutex<InlineState>>,
 }
 
-#[derive(Default, Clone, Copy)]
-pub(crate) struct NodeRenderOptions {
-    pub(crate) ix: usize,
-    pub(crate) in_list: bool,
-    pub(crate) todo: bool,
-    pub(crate) ordered: bool,
-    pub(crate) depth: usize,
-    pub(crate) is_last: bool,
-}
-
-impl NodeRenderOptions {
-    pub(crate) fn is_last(mut self, is_last: bool) -> Self {
-        self.is_last = is_last;
-        self
+impl TextDocument {
+    pub(super) fn new(source: SharedString) -> Self {
+        let inline = Arc::new(Mutex::new(InlineState { text: source.clone(), selection: None }));
+        Self { source, inline }
     }
-}
 
-impl ParsedDocument {
     pub(super) fn text(&self) -> String {
-        let mut text = String::new();
-        for block in self.blocks.iter() {
-            text.push_str(&block.text());
-        }
-        text
+        self.source.to_string()
     }
 
     pub(super) fn selected_text(&self) -> String {
-        let mut text = String::new();
-        for block in self.blocks.iter() {
-            text.push_str(&block.selected_text());
-        }
-        text
+        let Ok(state) = self.inline.lock() else { return String::new() };
+        state.selection.as_ref().and_then(|selection| state.text.get(selection.start..selection.end)).unwrap_or_default().to_owned()
     }
 
-    /// Synchronously clear the selection stored in every inline state.
-    ///
-    /// This mirrors the [`selected_text`](Self::selected_text) traversal so the
-    /// stored selection can be cleared without relying on a repaint. Offscreen
-    /// (virtualized) views do not repaint, so their `InlineState.selection`
-    /// would otherwise retain stale values from the last painted frame.
     pub(super) fn clear_selection(&self) {
-        for block in self.blocks.iter() {
-            block.clear_selection();
+        if let Ok(mut state) = self.inline.lock() {
+            state.selection = None;
         }
     }
 
-    /// Converts the node to markdown format.
-    ///
-    /// This is used to generate markdown for test.
-    #[allow(dead_code)]
-    pub(crate) fn to_markdown(&self) -> String {
-        self.blocks
-            .iter()
-            .map(|child| child.to_markdown())
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
-
-    pub(super) fn render_root(
-        &self,
-        list_state: Option<ListState>,
-        node_cx: &NodeContext,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let Some(list_state) = list_state else {
-            let blocks_len = self.blocks.len();
-            return div()
-                .id("document")
-                .children(self.blocks.iter().enumerate().map(move |(ix, node)| {
-                    let is_last = ix + 1 == blocks_len;
-                    node.render_block(
-                        NodeRenderOptions {
-                            ix,
-                            is_last,
-                            ..Default::default()
-                        },
-                        node_cx,
-                        window,
-                        cx,
-                    )
-                }));
-        };
-
-        let options = NodeRenderOptions {
-            is_last: true,
-            ..Default::default()
-        };
-
-        let blocks = &self.blocks;
-
-        if list_state.item_count() != blocks.len() {
-            list_state.reset(blocks.len());
+    pub(super) fn render_root(&self, list_state: Option<ListState>) -> Stateful<Div> {
+        let row = |inline| div().w_full().min_w_0().child(Inline::new("text", inline));
+        let root = div().id("document").w_full();
+        let Some(list_state) = list_state else { return root.child(row(self.inline.clone())) };
+        if list_state.item_count() != 1 {
+            list_state.reset(1);
         }
-
-        div().id("document").size_full().child(
-            gpui::list(list_state, {
-                let node_cx = node_cx.clone();
-                let blocks = blocks.clone();
-                move |ix, window, cx| {
-                    let is_last = ix + 1 == blocks.len();
-                    blocks[ix]
-                        .render_block(
-                            NodeRenderOptions {
-                                ix,
-                                is_last,
-                                ..options
-                            },
-                            &node_cx,
-                            window,
-                            cx,
-                        )
-                        .into_any_element()
-                }
-            })
-            .size_full(),
-        )
+        let inline = self.inline.clone();
+        root.size_full().child(gpui::list(list_state, move |_, _, _| row(inline.clone()).into_any_element()).size_full())
     }
 }

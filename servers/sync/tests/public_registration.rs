@@ -6,8 +6,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use server_account::{AccountEmailKind, AccountTokenKey, ClientAddressSource, PostgresAccountService};
+use server_postgres::PostgresDatabase;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 async fn post<T: serde::Serialize + ?Sized>(app: &Router, path: &str, body: &T, bearer: Option<&str>) -> axum::response::Response {
     post_from(app, path, body, bearer, "203.0.113.20").await
@@ -40,7 +43,20 @@ fn accepted(request: axum::http::request::Builder) -> axum::http::request::Build
 #[ignore = "requires SYNC_E2E_DATABASE_URL"]
 async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     let database_url = std::env::var("SYNC_E2E_DATABASE_URL").expect("run through Backend/tests/run_sync_e2e.sh");
-    let database = server_postgres::connect(&database_url).await.unwrap();
+    let admin = PgPool::connect(&database_url).await.unwrap();
+    let schema = format!("public_registration_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}")).execute(&admin).await.unwrap();
+    let search_path = format!("SET search_path TO {schema}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(move |connection, _| {
+            let statement = search_path.clone();
+            Box::pin(async move { sqlx::query(&statement).execute(connection).await.map(|_| ()) })
+        })
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let database = PostgresDatabase::from_pool(pool);
     server_postgres::migrate(&database).await.unwrap();
     let accounts = Arc::new(PostgresAccountService::new(database.clone(), AccountTokenKey::from_base64("WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=").unwrap()));
     let disk = tempfile::tempdir().unwrap();
@@ -51,7 +67,7 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     )
     .await
     .unwrap();
-    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let unique = Uuid::new_v4().simple().to_string();
     let email = format!("public-{unique}@example.com");
     let original_password = "correct-horse-public-password";
 
@@ -60,17 +76,31 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(registered.status(), StatusCode::ACCEPTED);
     let stored_ciphertext: String = sqlx::query_scalar("SELECT token_ciphertext FROM account_email_outbox WHERE recipient=$1 AND message_kind='verify_email'").bind(&email).fetch_one(database.pool()).await.unwrap();
     assert!(stored_ciphertext.starts_with("v1."));
-    let verification = accounts.claim_email("registration-test").await.unwrap().unwrap();
+    let mut verification = accounts.claim_email("registration-test").await.unwrap().unwrap();
     assert_eq!(verification.kind, AccountEmailKind::VerifyEmail);
     assert_eq!(verification.recipient, email);
     assert_eq!(verification.token.len(), account_contract::EMAIL_VERIFICATION_PIN_DIGITS);
     assert!(verification.token.bytes().all(|byte| byte.is_ascii_digit()));
     assert_ne!(stored_ciphertext, verification.token, "PostgreSQL must not contain the recoverable PIN in plaintext");
-    assert_eq!(post(&app, "/api/auth/verify-email", &EmailVerificationRequest { email: "other@example.com".to_owned(), pin: verification.token.clone() }, None).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(post(&app, "/api/auth/verify-email", &EmailVerificationRequest { email: "other@example.com".to_owned(), pin: verification.token.clone(), password: original_password.to_owned() }, None).await.status(), StatusCode::UNAUTHORIZED);
+    // The mailed PIN alone does not verify: whoever enters it must also know
+    // the pending registration's password, or they would adopt another's.
+    let foreign_password = EmailVerificationRequest { email: email.clone(), pin: verification.token.clone(), password: "someone-elses-chosen-password".to_owned() };
+    assert_eq!(post(&app, "/api/auth/verify-email", &foreign_password, None).await.status(), StatusCode::UNAUTHORIZED);
+
+    let resend = EmailRequest { email: email.clone() };
+    assert_eq!(post(&app, "/api/auth/resend-verification", &resend, None).await.status(), StatusCode::ACCEPTED);
+    assert!(accounts.claim_email("registration-test").await.unwrap().is_none(), "resending during the cooldown must not queue an email");
+    // Advance the stored send time instead of making the test wait a minute.
+    sqlx::query("UPDATE pending_registration SET last_sent_at=now() - INTERVAL '61 seconds' WHERE email=$1").bind(&email).execute(database.pool()).await.unwrap();
+    assert_eq!(post(&app, "/api/auth/resend-verification", &resend, None).await.status(), StatusCode::ACCEPTED);
+    verification = accounts.claim_email("registration-test").await.unwrap().expect("resend after the cooldown must queue another PIN");
+    assert_eq!(verification.recipient, email);
+    assert_eq!(verification.kind, AccountEmailKind::VerifyEmail);
 
     // Existing account identifiers receive the same generic response and do
     // not create another pending account or leak an email.
-    let verification_request = EmailVerificationRequest { email: email.clone(), pin: verification.token };
+    let verification_request = EmailVerificationRequest { email: email.clone(), pin: verification.token, password: original_password.to_owned() };
     let verified = auth_response(post(&app, "/api/auth/verify-email", &verification_request, None).await).await;
     assert_eq!(verified.email, email);
     assert_eq!(post(&app, "/api/auth/verify-email", &verification_request, None).await.status(), StatusCode::UNAUTHORIZED);
@@ -85,13 +115,15 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(post(&app, "/api/auth/register", &locked_registration, None).await.status(), StatusCode::ACCEPTED);
     let locked_verification = accounts.claim_email("registration-test").await.unwrap().unwrap();
     let wrong_pin = if locked_verification.token == "000000" { "000001" } else { "000000" };
-    let wrong_request = EmailVerificationRequest { email: locked_email.clone(), pin: wrong_pin.to_owned() };
+    let wrong_request = EmailVerificationRequest { email: locked_email.clone(), pin: wrong_pin.to_owned(), password: original_password.to_owned() };
     for attempt in 0..5 {
         let address = format!("198.51.100.{}", attempt + 1);
         assert_eq!(post_from(&app, "/api/auth/verify-email", &wrong_request, None, &address).await.status(), StatusCode::UNAUTHORIZED);
     }
-    assert_eq!(post_from(&app, "/api/auth/verify-email", &wrong_request, None, "198.51.100.6").await.status(), StatusCode::TOO_MANY_REQUESTS);
-    let locked_correct = EmailVerificationRequest { email: locked_email, pin: locked_verification.token };
+    // A trailing-dot spelling names the same account and shares its bucket.
+    let respelled = EmailVerificationRequest { email: format!("{locked_email}."), pin: wrong_pin.to_owned(), password: original_password.to_owned() };
+    assert_eq!(post_from(&app, "/api/auth/verify-email", &respelled, None, "198.51.100.6").await.status(), StatusCode::TOO_MANY_REQUESTS);
+    let locked_correct = EmailVerificationRequest { email: locked_email, pin: locked_verification.token, password: original_password.to_owned() };
     assert_eq!(post_from(&app, "/api/auth/verify-email", &locked_correct, None, "198.51.100.7").await.status(), StatusCode::TOO_MANY_REQUESTS);
 
     assert_eq!(post(&app, "/api/auth/request-password-reset", &EmailRequest { email: "unknown@example.com".to_owned() }, None).await.status(), StatusCode::ACCEPTED);
@@ -149,7 +181,6 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(same.user_id, configured.user_id);
     assert_eq!(accounts.resolve_token(&configured_session.token).await.unwrap().user_id, configured.user_id);
 
-    let database = server_postgres::connect(&database_url).await.unwrap();
     let quota = 1_000_i64 * 1_000 * 1_000 * 1_000;
     assert_eq!(server_postgres::configure_user_storage_quota(&database, &configured.user_id, quota).await.unwrap(), quota);
     let snapshot: AccountSnapshotResponse =
@@ -182,4 +213,7 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert!(accounts.resolve_token(&configured_session.token).await.is_err());
     assert!(accounts.login(&configured_email, original_password).await.is_err());
     assert_eq!(accounts.login(&configured_email, rotated_password).await.unwrap().user.user_id, configured.user_id);
+    database.pool().close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE")).execute(&admin).await.unwrap();
+    admin.close().await;
 }

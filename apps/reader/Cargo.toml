@@ -7,25 +7,36 @@ edition = "2024"
 default = ["native-audio"]
 native-audio = ["audiobook-player/native-rodio"]
 native-tts = ["dep:reader-speech"]
-kobo = ["mobile", "dep:gpui_kobo", "app/kobo", "audiobook-player/kobo", "ui-components/kobo"]
+kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "library-backend/kobo", "audiobook-player/kobo", "ui-components/kobo", "gpui-image-eviction/kobo"]
 mobile = ["ui-components/mobile"]
 packaged-pdfium = ["pdf-reader-core/packaged-pdfium"]
 
 [dependencies]
-reader-speech = { path = "../../shared/reader-speech", optional = true }
+html-parse = { package = "skrift-parse", path = "../../../HtmlEngine/crates/02-html-parse" }
+html-resources = { package = "skrift-resources", path = "../../../HtmlEngine/crates/html-resources" }
+html-style-model = { package = "skrift-style-model", path = "../../../HtmlEngine/crates/html-style-model" }
+html-dom = { package = "skrift-dom", path = "../../../HtmlEngine/crates/html-dom" }
+html-pipeline = { package = "skrift-pipeline", path = "../../../HtmlEngine/crates/html-pipeline" }
+language-tags = { version = "0.3.2", features = ["serde"] }
+reader-lookups = { path = "crates/lookups" }
+ui-text = { path = "../ui-text" }
+dictionary = { path = "../../client/dictionaries/core", features = ["client"] }
+dictionary-settings = { path = "../dictionary-settings" }
+sys-locale = { version = "0.3", features = ["js"] }
 futures-lite = "2"
 library-backend = { path = "../../client/library-backend" }
 content-address = { path = "../../shared/content-address" }
 app-preferences = { path = "../../client/preferences" }
-app = { path = "../../client/app", default-features = false }
+client-protocol = { path = "../../client/client-protocol" }
 async-channel = "2"
 ui-components = { path = "../components" }
 audiobook-player = { path = "../audiobook-player", default-features = false }
-gpui.workspace = true
+gpui = { workspace = true, features = ["snapshot"] }
 gpui-component.workspace = true
 gpui_kobo = { workspace = true, optional = true }
-html-view-core.workspace = true
-html-view-gpui = { path = "crates/html/crates/html-view-gpui" }
+kobo-device = { path = "../kobo-device", optional = true }
+skrift-column-paginator.workspace = true
+html-view-gpui = { path = "../../../HtmlViewCore/adapters/html-view-gpui" }
 html.workspace = true
 book-content = { path = "../../client/book-content" }
 library-model = { path = "../../client/library-model" }
@@ -34,14 +45,30 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "js"] }
 web-time = "1"
+unicode-normalization.workspace = true
 pdf-reader-core = { path = "../../shared/pdf-reader-core" }
 pdf-view-gpui = { path = "crates/pdf/pdf-view" }
+fixed-page = { path = "crates/fixed-page", features = ["gpui"] }
+image = { workspace = true, features = ["bmp", "gif", "jpeg", "png", "webp", "tiff"] }
+gpui-image-eviction = { path = "../../../HtmlEngine/adapters/gpui-image-eviction" }
 
 [dev-dependencies]
+tempfile = "3"
+app = { path = "../../client/app", default-features = false }
+dictionary = { path = "../../client/dictionaries/core", features = ["store"] }
+html-engine-model = { package = "skrift-engine-model", path = "../../../HtmlEngine/crates/html-engine-model" }
+
+base64 = "0.22"
 book-access = { path = "../../client/library-backend/crates/book-access" }
 gpui = { workspace = true, features = ["test-support"] }
-gpui_platform.workspace = true
+gpui_platform = { workspace = true, features = ["snapshot"] }
 html-gpui.workspace = true
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 zip.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reader-speech = { path = "crates/speech", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reader-speech = { path = "crates/speech" }

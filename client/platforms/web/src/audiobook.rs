@@ -28,10 +28,13 @@ where
     pub fn new(metadata: M, url: String, local_tracks: Vec<String>, direct: Option<D>, lease: Option<async_channel::Receiver<()>>, renew: Option<AsyncCallback>) -> Self {
         Self { metadata, url, local_tracks, direct, renew, _lease: lease }
     }
+
     pub fn renewal(&self) -> JsValue {
         self.renew.as_ref().map(|renew| renew.value()).unwrap_or(JsValue::UNDEFINED)
     }
     pub fn direct_config(&self) -> Result<JsValue, String> {
-        self.direct.as_ref().map(|config| js_sys::JSON::parse(&serde_json::to_string(config).unwrap()).map_err(|_| "Invalid playback configuration".into())).unwrap_or(Ok(JsValue::UNDEFINED))
+        let Some(config) = &self.direct else { return Ok(JsValue::UNDEFINED) };
+        let json = serde_json::to_string(config).map_err(|error| format!("Invalid playback configuration: {error}"))?;
+        js_sys::JSON::parse(&json).map_err(|_| "Invalid playback configuration".into())
     }
 }

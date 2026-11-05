@@ -132,7 +132,7 @@ pub(crate) fn create_update(previous: &Path, output: &Path) -> Result<Connection
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{build::tests::snapshot_from, build_answers, build_answers_incremental, Classification, ClassificationScheme, ClassificationSource, MetadataService};
+    use crate::{build::tests::snapshot_from, build_answers_with_ratings, build_answers_incremental, Classification, ClassificationScheme, ClassificationSource, MetadataService};
 
     #[test]
     fn updates_and_deletions_do_not_copy_or_mutate_the_base_and_use_indexed_reads() {
@@ -146,7 +146,7 @@ mod tests {
         let provider_path = temp.path().join("provider.sqlite");
         let provider = crate::crawl::open_provider(&provider_path).unwrap();
         let base = temp.path().join("base.sqlite");
-        build_answers(&source, Some(&provider_path), None, None, &base).unwrap();
+        build_answers_with_ratings(&source, Some(&provider_path), None, None, None, &base).unwrap();
         // Extra base pages demonstrate that update size is independent of base
         // size, without adding irrelevant resolution work to the fixture.
         Connection::open(&base).unwrap().execute_batch("CREATE TABLE immutable_padding(value BLOB); INSERT INTO immutable_padding VALUES(zeroblob(8388608));
@@ -201,7 +201,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = snapshot_from(temp.path(), &[], &[], &[]);
         let base = temp.path().join("base.sqlite");
-        build_answers(&source, None, None, None, &base).unwrap();
+        build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
         let update = temp.path().join("update.sqlite");
         drop(create_update(&base, &update).unwrap());
         Connection::open(&base).unwrap().execute_batch("CREATE TABLE replacement(value BLOB); INSERT INTO replacement VALUES(zeroblob(8192));").unwrap();

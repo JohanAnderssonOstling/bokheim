@@ -13,8 +13,6 @@ pub struct PlaybackMetadata {
     pub chapters: Vec<book_model::AudiobookChapter>,
     #[serde(default)]
     pub tracks: Vec<book_model::AudiobookTrack>,
-    #[serde(with = "serde_bytes")]
-    pub cover: Vec<u8>,
 }
 
 fn default_audio_format() -> book_model::BookFormat {

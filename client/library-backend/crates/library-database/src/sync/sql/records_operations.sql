@@ -20,14 +20,27 @@ SELECT EXISTS(SELECT 1 FROM sync_book_record WHERE state_kind=:state_kind AND co
 -- name: records_replica_id ->
 SELECT replica_id FROM sync_metadata WHERE singleton=1;
 
--- name: records_book_exists ->
--- param: content_hash: &SqlParam<'_>
-SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=:content_hash);
+-- name: records_reset_cover_checks_batch!
+-- param: publications: &str
+UPDATE book_transfer SET cover_checked=0
+WHERE cover_checked!=0 AND content_hash IN (SELECT unhex(json_extract(value,'$[0]')) FROM json_each(:publications));
 
--- name: records_queued ->
--- param: state_kind: &SqlParam<'_>
--- param: state_key: &SqlParam<'_>
-SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE state_kind=:state_kind AND state_key=:state_key AND state_subkey='');
+-- name: records_discard_drafts_batch!
+-- param: publications: &str
+DELETE FROM local_book_draft
+WHERE content_hash IN (SELECT unhex(json_extract(value,'$[0]')) FROM json_each(:publications));
+
+-- name: records_mark_projection_dirty_batch!
+-- param: publications: &str
+INSERT OR IGNORE INTO sync_projection_dirty(state_kind,state_key,state_subkey)
+SELECT 'book_add',unhex(json_extract(value,'$[0]')),'' FROM json_each(:publications);
+
+-- name: records_schedule_batch!
+-- param: publications: &str
+INSERT INTO sync_outbox(replica_seq,state_kind,state_key,state_subkey)
+SELECT json_extract(value,'$[1]'),'book_add',unhex(json_extract(value,'$[0]')),'' FROM json_each(:publications)
+WHERE true
+ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET replica_seq=excluded.replica_seq,body=NULL,changed_at=NULL,winning_version=NULL;
 
 -- name: records_store !
 -- param: state_kind: &SqlParam<'_>

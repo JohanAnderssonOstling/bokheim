@@ -123,11 +123,11 @@ mod tests {
     #[gpui::test]
     fn graph_culls_before_building_nodes_using_current_bounds_camera_and_ghost_pose(cx: &mut TestAppContext) {
         let camera = cx.new(|_| InfiniteCanvas::new(0.1, 4.0));
-        let tree = GraphTree::new(vec![None, Some(0), Some(0)]);
-        let layout = graph_layout(GraphLayoutKind::Columns, &tree, 0, &|_, _| size(20.0, 20.0), &LayoutParams::desktop());
+        let tree = GraphTree::new(vec![None, Some(0), Some(0)]).unwrap();
+        let layout = graph_layout(GraphLayoutKind::Columns, &tree, 0, &|_, _| size(20.0, 20.0), &LayoutParams::desktop()).unwrap();
         let centers = [point(50.0, 50.0), point(250.0, 50.0), point(650.0, 50.0)];
-        let layout = Arc::new(layout.with_pose(&centers, &[1.0; 3]));
-        let departing = Arc::new(layout.with_pose(&[point(-200.0, 50.0), point(75.0, 50.0), point(800.0, 50.0)], &[1.0; 3]));
+        let layout = Arc::new(layout.posed(|node| Some((centers[node.node], 1.0))));
+        let departing = Arc::new(layout.posed(|node| Some(([point(-200.0, 50.0), point(75.0, 50.0), point(800.0, 50.0)][node.node], 1.0))));
         let built = Rc::new(RefCell::new(Vec::new()));
         let clicks = Rc::new(Cell::new(0));
         let root = cx.open_window(size(px(1000.0), px(400.0)), |_, _| GraphFixture { camera: camera.clone(), layout, departing, width: 100.0, built: built.clone(), clicks: clicks.clone() });

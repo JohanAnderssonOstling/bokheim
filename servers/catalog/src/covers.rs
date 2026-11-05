@@ -1,5 +1,8 @@
 //! Retained cover images for hosted books and source-linked entries.
-use crate::{cover_from_book, cover_from_image, get, manifest::verify_standardebooks_identity};
+use crate::{get, manifest::verify_standardebooks_identity};
+
+mod assets;
+pub(crate) use assets::CoverAssets;
 use reqwest::{blocking::Client, Url};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
@@ -44,7 +47,7 @@ pub fn extract_standardebooks(dir: &Path, output: &Path) -> Result<(), String> {
             return Err(format!("catalog EPUB does not match its content hash: {hash}"));
         }
         verify_standardebooks_identity(&bytes, identity)?;
-        if !cover_from_book(output, hash, &bytes)? {
+        if !CoverAssets::new(output, hash).extract_book(&bytes)? {
             return Err(format!("{identity}: EPUB has no embedded cover"));
         }
         receipt.push(json!({"hash":hash,"entry_id":identity}));
@@ -54,31 +57,6 @@ pub fn extract_standardebooks(dir: &Path, output: &Path) -> Result<(), String> {
     }
     fs::write(output.join("standardebooks-covers.json"), serde_json::to_vec_pretty(&receipt).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
     println!("{} Standard Ebooks covers extracted; source catalog unchanged", books.len());
-    Ok(())
-}
-
-/// Build versioned card derivatives from retained detail art. The source and
-/// its evidence remain intact, so publishing never compounds an earlier crop.
-pub fn generate_cards(dir: &Path, key: &str) -> Result<(), String> {
-    let source = dir.join("covers").join(format!("{key}-detail.jpg"));
-    if !source.exists() {
-        return Ok(());
-    }
-    let widths = [thumbnail::BROWSE_THUMBNAIL_WIDTH, thumbnail::THUMBNAIL_WIDTH];
-    let paths = widths.map(|width| dir.join("covers").join(format!("{key}-{}.jpg", thumbnail::card_thumbnail_suffix(width))));
-    if paths.iter().all(|path| path.exists()) {
-        return Ok(());
-    }
-    let bytes = fs::read(source).map_err(|error| error.to_string())?;
-    let format = image::guess_format(&bytes).map_err(|error| error.to_string())?;
-    let image = thumbnail::decode_cover_image(&bytes, format).map_err(|error| error.to_string())?;
-    for (width, path) in widths.into_iter().zip(paths) {
-        if path.exists() {
-            continue;
-        }
-        let bytes = thumbnail::encode_card_thumbnail_at_width(&image, width).map_err(|error| error.to_string())?;
-        fs::write(path, bytes).map_err(|error| error.to_string())?;
-    }
     Ok(())
 }
 
@@ -107,7 +85,7 @@ pub fn retain(dir: &Path, db: &Connection, http: &Client, manifest: &Path) -> Re
             Some(path) => fs::read(manifest.parent().unwrap_or(Path::new(".")).join(path)).map_err(|e| e.to_string())?,
             None => get(http, url)?,
         };
-        cover_from_image(dir, key, &bytes)?;
+        CoverAssets::new(dir, key).store_image(&bytes)?;
         let cover = json!({"source_url": entry.image_url, "image_blake3": blake3::hash(&bytes).to_hex().to_string(), "image_bytes": bytes.len()});
         evidence.push(cover);
         if (index + 1) % 75 == 0 {
@@ -203,12 +181,12 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("covers")).unwrap();
         let versions = thumbnail::ThumbnailVersions::from_image(&image::RgbImage::new(8, 8)).unwrap();
-        crate::store_cover(dir.path(), "retained", versions).unwrap();
+        CoverAssets::new(dir.path(), "retained").store(versions).unwrap();
         let retained = dir.path().join(format!("covers/retained-{}.jpg", thumbnail::card_thumbnail_suffix(thumbnail::BROWSE_THUMBNAIL_WIDTH)));
         let missing = dir.path().join(format!("covers/retained-{}.jpg", thumbnail::card_thumbnail_suffix(thumbnail::THUMBNAIL_WIDTH)));
         fs::write(&retained, b"retained card bytes").unwrap();
         fs::remove_file(&missing).unwrap();
-        generate_cards(dir.path(), "retained").unwrap();
+        CoverAssets::new(dir.path(), "retained").generate_cards().unwrap();
         assert_eq!(fs::read(retained).unwrap(), b"retained card bytes");
         assert!(missing.is_file());
     }

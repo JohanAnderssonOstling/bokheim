@@ -18,9 +18,10 @@ pub use folder_management::{file_name_candidates, folder_name_candidates, number
 pub use library_state::{portable_name_key, BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState};
 
 use serde::{Deserialize, Serialize};
+use serde_variant::to_variant_name;
 
-use std::collections::{hash_map::Entry, HashMap};
-use sync_common::ContentHash;
+use content_address::ContentHash;
+use sync_common::BookId;
 pub use sync_common::VersionKey;
 use sync_common::{ConflictRank, DirId, FileName, OpaqueStateEntry, Publication, ReplicaId, ReplicaSeq, StateAddress, StatePayload, UnixMillis, Versioned};
 
@@ -32,6 +33,8 @@ pub use directory_projection::{project_directories, DirectoryIntent, DirectoryPr
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BookAddition {
     pub facts: BookFacts,
+    /// File metadata while drafting; the finalized record after enrichment.
+    #[serde(with = "book_model::record_transport")]
     pub record: BookRecord,
     pub navigation: Option<BookTocDocument>,
     pub pdf: Option<PdfReaderMetadata>,
@@ -40,81 +43,116 @@ pub struct BookAddition {
     pub enrichment: Option<EnrichmentResult>,
 }
 
+impl BookAddition {
+    /// Complete the draft before publication.
+    pub fn apply_enrichment(&mut self, record: BookRecord, result: EnrichmentResult) {
+        let year = self.record.book.year.or(record.book.year);
+        self.record.metadata.book = record.metadata.book;
+        self.record.book.year = year;
+        self.record.metadata.contributors = record.metadata.contributors;
+        if self.record.description.trim().is_empty() {
+            self.record.description = record.description;
+        }
+        self.enrichment = Some(result);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum LibraryStateEntry {
-    DirectoryName { dir_id: DirId, name: FileName },
-    DirectoryParent { dir_id: DirId, parent_id: DirId },
-    DirectoryLifecycle { dir_id: DirId, value: DirectoryLifecycleState },
-    BookLifecycle { content_hash: ContentHash, value: BookLifecycleState },
-    Placement { dir_id: DirId, content_hash: ContentHash, present: bool, origin_folder_id: Option<String> },
-    ReadingPosition { content_hash: ContentHash, value: ReadingPositionState },
-    Annotation { value: Annotation },
-    BookAdd { content_hash: ContentHash, value: BookAddition },
+    DirectoryName {
+        dir_id: DirId,
+        name: FileName,
+    },
+    DirectoryParent {
+        dir_id: DirId,
+        parent_id: DirId,
+    },
+    DirectoryLifecycle {
+        dir_id: DirId,
+        value: DirectoryLifecycleState,
+    },
+    BookLifecycle {
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
+        value: BookLifecycleState,
+    },
+    Placement {
+        dir_id: DirId,
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
+        present: bool,
+        origin_folder_id: Option<String>,
+    },
+    ReadingPosition {
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
+        value: ReadingPositionState,
+    },
+    Annotation {
+        value: Annotation,
+    },
+    BookAdd {
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
+        value: BookAddition,
+    },
+    ChapterReadStatus {
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
+        value: book_model::ChapterReadStatus,
+    },
+    /// Byte revision fixed by the first successful upload.
+    BookContent {
+        #[serde(rename = "content_hash")]
+        book_id: BookId,
+        checksum: ContentHash,
+        #[serde(default)]
+        size_bytes: Option<u64>,
+        pdf: Option<PdfReaderMetadata>,
+    },
 }
 
 /// A publication uses the same envelope whether its state is decoded or opaque.
 pub type StatePublication = Publication<LibraryStateEntry>;
 
-/// Coalesce state by its original winning version, independently of the
-/// publication's retry ID, publishing replica, or queue sequence.
-pub fn coalesce_mutations_for_push(publications: Vec<StatePublication>) -> Vec<StatePublication> {
-    let mut entries = HashMap::<StateAddress, StatePublication>::new();
-    for publication in publications {
-        let address = publication.state.value.address();
-        match entries.entry(address) {
-            Entry::Occupied(mut current) => {
-                if current.get().state.version < publication.state.version {
-                    current.insert(publication);
-                }
-            }
-            Entry::Vacant(entry) => { entry.insert(publication); }
-        }
-    }
-    let mut reduced = entries.into_values().collect::<Vec<_>>();
-    reduced.sort_by_key(|publication| publication.publisher_seq);
-    reduced
-}
-
-pub fn prepare_push(mut publications: Vec<StatePublication>) -> Result<sync_common::PushBatcher, Box<dyn std::error::Error>> {
-    publications.sort_by_key(|publication| !matches!(publication.state.value, LibraryStateEntry::BookLifecycle { .. }));
-    Ok(sync_common::PushBatcher::try_from_publications(publications.into_iter().map(|publication| sync_common::transport::representation(&publication)))?)
-}
-
 impl LibraryStateEntry {
     /// Book bytes that must be uploaded before this state can be shared.
     /// Removals must remain possible even when a local import never uploaded.
-    pub fn upload_dependency(&self) -> Option<sync_common::ContentHash> {
+    pub fn upload_dependency(&self) -> Option<sync_common::BookId> {
         match self {
             Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } | Self::BookLifecycle { value: BookLifecycleState::Purged, .. } | Self::Placement { present: false, .. } => None,
-            Self::Annotation { value, .. } => (!value.deleted).then_some(value.content_hash),
-            Self::BookLifecycle { content_hash, .. } | Self::Placement { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::BookAdd { content_hash, .. } => Some(*content_hash),
+            Self::Annotation { value, .. } => (!value.deleted).then_some(value.book_id),
+            Self::BookLifecycle { book_id, .. } | Self::Placement { book_id, .. } | Self::ReadingPosition { book_id, .. } | Self::ChapterReadStatus { book_id, .. } | Self::BookAdd { book_id, .. } | Self::BookContent { book_id, .. } => {
+                Some(*book_id)
+            }
         }
     }
 
     /// The wire kind is the variant name provided by this type's Serde schema.
     pub fn kind(&self) -> &'static str {
-        use crate::serde_enum::NameSerializer;
-        self.serialize(NameSerializer).expect("state entries must serialize as enum variants")
+        to_variant_name(self).expect("state entries must serialize as enum variants")
     }
 
     /// Identity is projected from the entry, never kept in a parallel enum.
     pub fn address(&self) -> StateAddress {
         let (entity_key, entity_subkey) = match self {
             Self::DirectoryName { dir_id, .. } | Self::DirectoryParent { dir_id, .. } | Self::DirectoryLifecycle { dir_id, .. } => (dir_id.to_string().into(), String::new()),
-            Self::Placement { content_hash, dir_id, .. } => ((*content_hash).into(), dir_id.to_string()),
+            Self::Placement { book_id, dir_id, .. } => ((*book_id).into(), dir_id.to_string()),
             Self::Annotation { value } => (value.id.clone().into(), String::new()),
-            Self::BookLifecycle { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::BookAdd { content_hash, .. } => ((*content_hash).into(), String::new()),
+            Self::BookLifecycle { book_id, .. } | Self::ReadingPosition { book_id, .. } | Self::ChapterReadStatus { book_id, .. } | Self::BookAdd { book_id, .. } | Self::BookContent { book_id, .. } => ((*book_id).into(), String::new()),
         };
         StateAddress { kind: self.kind().to_owned(), entity_key, entity_subkey }
     }
 
     /// The book this value belongs to. The service purges and accounts by it.
-    pub fn book(&self) -> Option<sync_common::ContentHash> {
+    pub fn book(&self) -> Option<sync_common::BookId> {
         match self {
             Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } => None,
-            Self::Annotation { value, .. } => Some(value.content_hash),
-            Self::BookLifecycle { content_hash, .. } | Self::Placement { content_hash, .. } | Self::ReadingPosition { content_hash, .. } | Self::BookAdd { content_hash, .. } => Some(*content_hash),
+            Self::Annotation { value, .. } => Some(value.book_id),
+            Self::BookLifecycle { book_id, .. } | Self::Placement { book_id, .. } | Self::ReadingPosition { book_id, .. } | Self::ChapterReadStatus { book_id, .. } | Self::BookAdd { book_id, .. } | Self::BookContent { book_id, .. } => {
+                Some(*book_id)
+            }
         }
     }
 
@@ -132,6 +170,15 @@ impl LibraryStateEntry {
         use sync_common::transport::WireError;
         let invalid = |message: &str| WireError::Decode(message.to_owned());
         match self {
+            Self::BookContent { book_id, pdf, size_bytes, .. } => {
+                if size_bytes.is_some_and(|size| size == 0 || size > i64::MAX as u64) {
+                    return Err(invalid("invalid canonical book length"));
+                }
+                if pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&book_id.to_hex())) {
+                    return Err(invalid("invalid canonical PDF reader metadata"));
+                }
+            }
+
             Self::ReadingPosition { value, .. } => {
                 book_model::ReadProgress::new(value.progress).map_err(|error| invalid(&error.to_string()))?;
                 if let book_model::ReadingPosition::PdfAtPoint { full_page_position, .. } = value.location {
@@ -139,11 +186,16 @@ impl LibraryStateEntry {
                         return Err(invalid("invalid PDF full-page position"));
                     }
                 }
+                if let book_model::ReadingPosition::Cbz { full_page_position, .. } = value.location {
+                    if !full_page_position.is_finite() || !(0.0..=1.0).contains(&full_page_position) {
+                        return Err(invalid("invalid comic page position"));
+                    }
+                }
             }
             Self::Annotation { value, .. } => {
                 value.validate().map_err(|error| invalid(&error.to_string()))?;
             }
-            Self::BookAdd { content_hash, value } => {
+            Self::BookAdd { book_id, value } => {
                 let Some(enrichment) = &value.enrichment else {
                     return Err(invalid("book addition is awaiting enrichment"));
                 };
@@ -155,7 +207,7 @@ impl LibraryStateEntry {
                 if value.facts.added_at > i64::MAX as u64 {
                     return Err(invalid("book addition timestamp exceeds storage range"));
                 }
-                if value.pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&content_hash.to_hex())) {
+                if value.pdf.as_ref().is_some_and(|pdf| !pdf.valid_for(&book_id.to_hex())) {
                     return Err(invalid("invalid PDF reader metadata"));
                 }
                 if let Some(navigation) = &value.navigation {
@@ -183,6 +235,9 @@ impl LibraryStateEntry {
 
 impl StatePayload for LibraryStateEntry {
     fn recognizes_kind(kind: &str) -> bool {
+        if kind == "reserved9" {
+            return false;
+        }
         static VARIANTS: OnceLock<&'static [&'static str]> = OnceLock::new();
         VARIANTS
             .get_or_init(|| match Self::deserialize(serde::de::value::StrDeserializer::<serde_enum::Names>::new("")) {
@@ -195,17 +250,17 @@ impl StatePayload for LibraryStateEntry {
     fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
         let entry = OpaqueStateEntry { address: self.address(), book: self.book(), bytes: sync_common::transport::encode(self).map_err(serde::ser::Error::custom)? };
-        entry.serialize(serializer)
+        entry.serialize_entry(serializer)
     }
 
     fn deserialize_entry<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let entry = OpaqueStateEntry::deserialize(deserializer)?;
+        let entry = OpaqueStateEntry::deserialize_entry(deserializer)?;
         let decode = || -> Result<Self, sync_common::transport::WireError> {
             use sync_common::transport::WireError;
             if !Self::recognizes_kind(&entry.address.kind) {
                 return Err(WireError::Decode("unknown state kind".into()));
             }
-            let value: Self = sync_common::transport::decode_state(&entry.bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES)?;
+            let value: Self = sync_common::transport::decode(&entry.bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES)?;
             value.validate()?;
             if value.address() != entry.address || value.book() != entry.book {
                 return Err(WireError::Decode("state envelope does not match its value".to_owned()));
@@ -254,52 +309,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn coalescing_keeps_winning_versions_and_first_equal_candidate() {
-        let make = |name: &str, time, sequence| LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(1), name: name.into() }.publication(ReplicaId::from_u128(1), time, ReplicaSeq::new(sequence).unwrap());
-        let newest = make("winning", 3, 1);
-        let stale = make("stale retry", 2, 2);
-        let mut equal = make("equal candidate", 3, 1);
-        equal.publisher_seq = ReplicaSeq::new(99).unwrap();
-        let other = LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(2), name: "other".into() }.publication(ReplicaId::from_u128(1), 1, ReplicaSeq::new(3).unwrap());
-        assert_eq!(coalesce_mutations_for_push(vec![newest.clone(), stale, equal, other.clone()]), vec![newest, other]);
-    }
-
-    #[test]
-    fn streamed_preparation_preserves_lifecycle_and_publication_order() {
-        let publish = |state: LibraryStateEntry, sequence| state.publication(ReplicaId::from_u128(1), 1, ReplicaSeq::new(sequence).unwrap());
-        let directory = |id| LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(id), name: "directory".into() };
-        let lifecycle = |hash| LibraryStateEntry::BookLifecycle { content_hash: ContentHash::from_bytes([hash; 32]), value: BookLifecycleState::Present };
-        let input = vec![publish(directory(1), 1), publish(lifecycle(1), 2), publish(directory(2), 3), publish(lifecycle(2), 4)];
-        let expected: Vec<sync_common::OpaquePublication> = [1, 3, 0, 2].into_iter().map(|index| sync_common::transport::representation(&input[index]).unwrap()).collect();
-        let mut batcher = prepare_push(input).unwrap();
-        assert_eq!(batcher.next_batch(), expected);
-        assert!(batcher.is_empty());
-    }
-
-    #[test]
-    #[ignore = "release benchmark of typed outbox preparation; run in a separate process"]
-    fn outbox_preparation_performance() {
-        use std::time::Instant;
-        let publications = (1..=1_000).map(|sequence| {
-            LibraryStateEntry::BookAdd {
-                content_hash: ContentHash::from_bytes([sequence as u8; 32]),
-                value: BookAddition {
-                    facts: BookFacts { added_at: 1, format: book_model::BookFormat::Epub },
-                    record: BookRecord { metadata: Default::default(), description: "x".repeat(64 * 1024) },
-                    navigation: None, pdf: None, recording: None, enrichment: Some(EnrichmentResult::NoMatch),
-                },
-            }.publication(ReplicaId::from_u128(1), 1, ReplicaSeq::new(sequence).unwrap())
-        }).collect();
-        let started = Instant::now();
-        let mut batcher = prepare_push(publications).unwrap();
-        let prepared_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let mut drained = 0;
-        while !batcher.is_empty() { drained += batcher.next_batch().len(); }
-        assert_eq!(drained, 1_000);
-        println!("PREPARE cells={drained} payload_bytes={} elapsed_ms={prepared_ms:.3}", 1_000 * 64 * 1024);
-        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-            if let Some(line) = status.lines().find(|line| line.starts_with("VmHWM:")) { println!("PREPARE {line}"); }
-        }
+    fn canonical_content_keeps_its_persisted_discriminant() {
+        let value = LibraryStateEntry::BookContent { book_id: BookId::from_bytes([7; 32]), checksum: ContentHash::from_bytes([8; 32]), size_bytes: Some(42), pdf: None };
+        let encoded = sync_common::wire::encode(&value).unwrap();
+        assert_eq!(encoded[sync_common::wire::encode(&()).unwrap().len()], 10);
+        assert_eq!(sync_common::wire::decode::<LibraryStateEntry>(&encoded, 1024).unwrap(), value);
+        let mut removed = sync_common::wire::encode(&()).unwrap();
+        removed.push(9);
+        assert!(sync_common::wire::decode::<LibraryStateEntry>(&removed, 1024).is_err());
     }
 
     #[test]
@@ -322,7 +339,7 @@ mod tests {
             recording: None,
             enrichment: None,
         };
-        let publish = |value| LibraryStateEntry::BookAdd { content_hash: ContentHash::new(&"f".repeat(64)), value }.publication(ReplicaId::from_u128(1), 0, ReplicaSeq::new(1).unwrap());
+        let publish = |value| LibraryStateEntry::BookAdd { book_id: BookId::new(&"f".repeat(64)), value }.publication(ReplicaId::from_u128(1), 0, ReplicaSeq::new(1).unwrap());
         let draft = publish(addition.clone());
         assert!(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&draft).is_err());
         addition.enrichment = Some(EnrichmentResult::NoMatch);
@@ -331,5 +348,23 @@ mod tests {
         let encoded = sync_common::transport::encode(&complete).unwrap();
         let decoded: StatePublication = sync_common::transport::decode_byte_fields(&encoded, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
         assert_eq!(decoded, complete);
+    }
+
+    #[test]
+    fn chapter_completion_has_a_separate_register_and_preserves_reading_position_encoding() {
+        #[derive(Serialize)]
+        struct LegacyPosition {
+            location: book_model::ReadingPosition,
+            progress: f32,
+        }
+        let position = ReadingPositionState { location: book_model::ReadingPosition::Audiobook(1500), progress: 30.0 };
+        let legacy = LegacyPosition { location: position.location.clone(), progress: position.progress };
+        assert_eq!(sync_common::wire::encode(&position).unwrap(), sync_common::wire::encode(&legacy).unwrap());
+        let status = LibraryStateEntry::ChapterReadStatus { book_id: BookId::from_bytes([7; 32]), value: book_model::ChapterReadStatus::default() };
+        let encoded = sync_common::wire::encode(&status).unwrap();
+        assert_eq!(sync_common::wire::decode::<LibraryStateEntry>(&encoded, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap(), status);
+        assert_eq!(status.address().kind, "chapter_read_status");
+        let key = status.address().entity_key;
+        assert_eq!(sync_common::StateKey::from_storage("chapter_read_status", key.as_bytes()).unwrap(), key);
     }
 }

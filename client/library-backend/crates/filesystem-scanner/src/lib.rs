@@ -6,7 +6,7 @@
 //! applies the returned data through `library-database`.
 //!
 //! Native filesystem scanning only; consumers gate usage to non-wasm targets.
+pub mod discovery;
 pub mod estimate;
 pub mod filesystem_scan;
 pub mod ingestion;
-

@@ -4,110 +4,19 @@ This is the browser build of the same GPUI application used by the native
 targets. It renders GPUI into a browser canvas and keeps browser-specific
 storage behind the SQLite OPFS VFS used by the shared Rust backend.
 
+EPUB and PDF read aloud uses the browser's Web Speech synthesis service. The
+TTS button appears only when the speech API and at least one voice are available;
+the reader also watches for voices loaded asynchronously. Narration selects an
+available voice matching the book's language, or the default voice when no
+language is declared. No application TTS server or bundled speech model is used.
+Available voices, offline operation, and background playback depend on the
+browser and operating system. Browser voices control their own natural pauses;
+the longer pause settings add delays between chunks and paragraphs.
+
 Build the release bundle with:
 
 ```sh
 ./apps/web-gpui/scripts/build.sh
-```
-
-The build requires the `brotli` command and generates verified `.br` and `.gz`
-sidecars for WebAssembly, JavaScript, and other text assets, including PDFium.
-The local server and the deployment Caddy configuration negotiate Brotli first,
-then gzip, using the regular asset URLs and `Content-Encoding`. Browsers decode
-responses before WebAssembly streaming compilation; no JavaScript Brotli decoder
-or `DecompressionStream` support is required. Hosts that do not serve sidecars
-continue to serve the original assets. Production Brotli delivery requires
-installing and reloading the updated Caddy configuration as well as deploying
-the assets; the web-only deployment script does not reload Caddy.
-
-Then serve `apps/web-gpui/dist` with cross-origin isolation headers enabled.
-For an isolated test bundle, set `BOKHEIM_WEB_OUTPUT_DIR` to an absolute
-task-specific directory when building, then pass that path to the server's
-`--directory` option. `--port` selects a separate local test port.
-For local development, the included server configures the required headers:
-
-```sh
-python3 apps/web-gpui/scripts/serve.py
-```
-
-Before downloading the application module, the page checks browser version,
-secure context, cross-origin isolation, shared WASM memory, workers, private
-storage, and Web Locks. Unsupported browsers receive a short message with the
-required browser version; technical diagnostics are logged to the console.
-The version policy is Chromium desktop 109+, Chromium Android 148+, Firefox
-114+, and Safari/iOS 16.4+; these are necessary version floors, not a claim that
-every device running those versions has been validated. Unknown browser brands
-are checked by capability. Media Session is optional.
-
-The startup probe checks that a shared module worker can load. Tabs create the
-dedicated database and CPU workers, which communicate directly with the shared
-coordinator through MessagePorts. A tab lifetime lock detects a lost host; the
-coordinator selects a replacement and restores database connections. An
-exclusive database-worker lock prevents overlapping ownership. Interrupted
-requests fail without automatically replaying writes; subscriptions reconnect.
-Network requests execute asynchronously in the shared coordinator.
-
-The release bundle includes a content-addressed, gzip-compressed BISAC reference
-SQLite asset. Workers verify the compressed digest and decode directly into
-SQLite's fixed-size installation buffer, then cache the smaller database in
-their separate OPFS storage pools. The schema derives parent labels and path
-components instead of storing duplicate strings. Queries use a 128 KiB SQLite
-page-cache setting. Cached files track the full database artifact digest so
-schema and normalization changes are picked up on the next worker start.
-
-Browser Back dispatches the same `DismissSettings` action as native Android:
-the focused page dismisses its modal/search or climbs one breadcrumb level,
-the shell handles its overlays and global pages, and the application closes
-the reader. An unhandled Back leaves Bokheim for the preceding browser page.
-Sidebar selections do not create navigation history. Forward does not reopen
-dismissed screens.
-
-Compact browser windows and the mobile app use a shared Back button and current
-page title instead of breadcrumbs. Mobile EPUB/PDF readers show that same header
-above their reading controls. The header, controls, and search overlay the full
-book viewport, so showing or hiding them does not repaginate the book. On Android,
-the system status and navigation bars follow reader-control visibility and also
-overlay the page.
-
-The web shell arms a history guard after pointer or keyboard interaction and
-returns to it with `history.forward()` while GPUI consumes Back. It does not
-push replacement entries during `popstate`, which Chromium would mark as
-skippable by the next toolbar Back. Reloads reuse an existing guard. Browser
-history jumps can bypass it, and a directly opened tab with no preceding page
-stays open when Back is unhandled.
-
-The web build includes the shared audiobook player. Audiobooks open in a bottom
-dock; clicking its title expands the full player, and Back minimizes it without
-stopping playback. The session survives browsing and library switching while
-retaining its originating library for progress saves. A browser audio element
-plays M4B files, while Media Session exposes title, author, artwork, play/pause,
-15-second rewind, 30-second forward, and position/seek controls where supported.
-The browser and operating system choose the lock-screen layout. If automatic
-playback is blocked, tap Play in the dock or full player. No PWA installation is required.
-
-Playback position is saved from audio events (including external seeks and
-pause), rather than relying on the GPUI redraw timer. Hiding the page also
-requests a save. Explicitly closing the dock stops playback and releases its
-source. Reload restores the active dock paused; Play opens the media source.
-Closing or unloading the browser page stops playback; background
-behavior and supported M4B codecs depend on the browser.
-
-Local M4B playback uses a Blob URL backed by the stored file. Its worker
-subscription retains the file generation until playback closes. Remote M4B
-playback uses range requests through the audio service worker.
-
-Document readers receive a source descriptor rather than complete file bytes.
-Local sources use bounded range requests and retain their file generation for
-the subscription lifetime. After a database worker replacement, reopen the
-document to acquire a new source; its old capability is not restored.
-
-Audio checks, from the repository root:
-
-```sh
-node --test apps/audiobook-player/src/web_audio.test.mjs
-# Requires Playwright (or PLAYWRIGHT_MODULE) and a real M4B fixture:
-node apps/audiobook-player/src/web_audio.browser-test.mjs /path/to/book.m4b
-RUSTC_BOOTSTRAP=1 cargo check --release -p web-gpui --target wasm32-unknown-unknown
 ```
 
 ## PDF reading

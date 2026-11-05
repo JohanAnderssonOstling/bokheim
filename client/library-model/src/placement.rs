@@ -1,6 +1,6 @@
 //! Shared physical placement, upload intent, and validated library-relative paths.
 
-use content_address::ContentHash;
+use content_address::{BookId, ContentHash};
 use std::error::Error;
 use std::fmt;
 
@@ -20,6 +20,12 @@ impl Error for RelativeBookPathError {}
 
 impl RelativeBookPath {
     pub fn parse(value: &str) -> Result<Self, RelativeBookPathError> {
+        Self::validate(value)?;
+        let relative = value.strip_prefix('/').unwrap_or(value);
+        Ok(Self(format!("/{relative}")))
+    }
+    /// Check a stored path without allocating a normalized path value.
+    pub fn validate(value: &str) -> Result<(), RelativeBookPathError> {
         if value.is_empty() || value.contains(['\\', ':']) || value.chars().any(char::is_control) {
             return Err(RelativeBookPathError);
         }
@@ -27,7 +33,18 @@ impl RelativeBookPath {
         if relative.is_empty() || relative.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
             return Err(RelativeBookPathError);
         }
-        Ok(Self(format!("/{relative}")))
+        Ok(())
+    }
+    /// Check a placement without joining its folder and file name. An empty
+    /// folder denotes the library root.
+    pub fn validate_in_folder(folder: &str, file_name: &str) -> Result<(), RelativeBookPathError> {
+        if !folder.is_empty() {
+            Self::validate(folder)?;
+        }
+        if file_name.starts_with('/') {
+            return Err(RelativeBookPathError);
+        }
+        Self::validate(file_name)
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -53,19 +70,28 @@ impl fmt::Display for RelativeBookPath {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BookPlacement {
-    pub content_hash: ContentHash,
+    pub book_id: BookId,
     pub rel_path: RelativeBookPath,
 }
 impl BookPlacement {
-    pub const fn new(content_hash: ContentHash, rel_path: RelativeBookPath) -> Self {
-        Self { content_hash, rel_path }
+    pub const fn new(book_id: BookId, rel_path: RelativeBookPath) -> Self {
+        Self { book_id, rel_path }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CloudQuotaBook {
+    pub book_id: BookId,
+    pub byte_checksum: Option<ContentHash>,
+    pub size_bytes: u64,
+    pub server_has_book: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BookUploadIntent {
+    pub byte_checksum: Option<ContentHash>,
     pub id: i64,
-    pub content_hash: ContentHash,
+    pub book_id: BookId,
     pub size_bytes: u64,
 }
 

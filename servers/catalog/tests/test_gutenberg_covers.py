@@ -92,25 +92,6 @@ class CoverAuditTests(unittest.TestCase):
         self.assertFalse(covers.is_placeholder('1656-cover.png', [800, 1200], '1656'))
         self.assertFalse(covers.is_placeholder(None, None, '1656'))
 
-    def test_openlibrary_lookup_rejects_other_authors_and_collections(self):
-        row = dict(title='Utilitarianism', record=dict(contributors=[
-            dict(name='John Stuart Mill', role=[97, 117, 116]),
-            dict(name='Other Writer', role=[116, 114, 108])]))
-        docs = [dict(title='Utilitarianism and Other Essays', author_name=['John Stuart Mill'], cover_i=1),
-                dict(title='Utilitarianism', author_name=['Other Writer'], cover_i=2),
-                dict(title='Utilitarianism', author_name=['John Stuart Mill']),
-                dict(title='Utilitarianism', author_name=['John Stuart Mill'], cover_i=3)]
-        with patch.object(covers, 'request', return_value=json.dumps(dict(docs=docs)).encode()) as request:
-            match, evidence = covers.openlibrary_cover(row)
-        self.assertEqual(match['cover_i'], 3)
-        self.assertEqual(evidence['response']['docs'], docs)
-        self.assertIn('author=John+Stuart+Mill', request.call_args.args[0])
-
-    def test_openlibrary_lookup_without_author_does_not_guess(self):
-        with patch.object(covers, 'request') as request:
-            self.assertEqual(covers.openlibrary_cover(dict(title='Apology', record=dict(contributors=[]))), (None, None))
-        request.assert_not_called()
-
     def test_openlibrary_strict_matches_precede_looser_matches(self):
         row = dict(title='The Republic', record=dict(contributors=[
             dict(name='Plato', role=[97, 117, 116])], book=dict(languages=['en'])))

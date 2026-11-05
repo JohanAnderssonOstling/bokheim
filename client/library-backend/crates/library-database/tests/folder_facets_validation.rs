@@ -38,7 +38,6 @@ fn query(location: &str, search: &str) -> library_model::LibraryBrowseQuery {
         chip_sort: Default::default(),
         book_sort: Default::default(),
         hide_finished: false,
-        include_direct_child_books: false,
     }
 }
 #[test]
@@ -54,7 +53,7 @@ fn direct_descendants_and_directory_counts_follow_mutations() {
             _ => db.connection.fixtures_restore_folders_and_change_formats(),
         }
         .unwrap();
-        let ids = query_rows(|callback| db.connection.fixtures_read_dir_id(callback), |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let ids = query_rows(|callback| db.connection.fixtures_read_dir_id(callback), |r| r.get::<_, String>(0)).unwrap();
         for id in ids {
             for folder in db.browse_contents(&query(&id, ""), false).unwrap().children {
                 let library_model::BrowseLocation::Folder(folder_id) = folder.id else { panic!("folder browse returned a subject") };
@@ -63,10 +62,10 @@ fn direct_descendants_and_directory_counts_follow_mutations() {
             }
         }
         // Both cards and counts reflect the committed writes immediately.
-        let mut hashes = db.browse_contents(&query(TARGET, "book"), false).unwrap().books.iter().map(|b| b.content_hash().unwrap().to_string()).collect::<Vec<_>>();
+        let mut hashes = db.browse_contents(&query(TARGET, "book"), false).unwrap().books.iter().map(|b| b.book_id().unwrap().to_string()).collect::<Vec<_>>();
         hashes.sort();
 
-        let expected = query_rows(|callback| db.connection.fixtures_read_dir_subtree_id_id(&TARGET, callback), |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let expected = query_rows(|callback| db.connection.fixtures_read_dir_subtree_id_id(&TARGET, callback), |r| r.get::<_, String>(0)).unwrap();
         assert_eq!(hashes, expected, "{mutation}");
         let formats = db
             .browse(&query(ROOT, ""), false)
@@ -82,7 +81,7 @@ fn direct_descendants_and_directory_counts_follow_mutations() {
                 (category, i64::from(count.book_count))
             })
             .collect::<Vec<_>>();
-        let expected = query_rows(|callback| db.connection.fixtures_read_book_b_format_category(callback), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let expected = query_rows(|callback| db.connection.fixtures_read_book_b_format_category(callback), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap();
         assert_eq!(formats, expected, "{mutation}");
     }
 }

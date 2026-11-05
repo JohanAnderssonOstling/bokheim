@@ -21,7 +21,7 @@ SELECT DISTINCT v.state_key FROM sync_state_version v LEFT JOIN dir d ON d.id=v.
 SELECT body,changed_at FROM sync_state_version
 WHERE book_key=:book_key AND body IS NOT NULL
   AND (:full OR state_kind='book_lifecycle' OR state_kind IN (SELECT value FROM json_each(:changed_kinds)))
-UNION ALL SELECT body,0 FROM sync_book_record WHERE content_hash=:book_key
+UNION ALL SELECT body,0 FROM sync_book_record WHERE state_kind='book_add' AND content_hash=:book_key
   AND (:full OR 'book_add' IN (SELECT value FROM json_each(:changed_kinds)))
 UNION ALL SELECT body,0 FROM local_book_draft WHERE content_hash=:book_key
   AND (:full OR 'book_add' IN (SELECT value FROM json_each(:changed_kinds)));
@@ -67,27 +67,21 @@ SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=:content_hash);
 SELECT deleted_at IS NOT NULL FROM book WHERE content_hash=:content_hash;
 
 -- name: projection_set_book_facts !
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: format: Option<i64>
 -- param: added_at: Option<i64>
 UPDATE book SET format=:format,added_at=:added_at
 WHERE content_hash=:content_hash AND (format,added_at) IS NOT (:format,:added_at);
 
--- name: projection_set_book_popularity !
--- param: content_hash: &ContentHash
--- param: rating_count: Option<f64>
-UPDATE book SET popularity_rating_count=:rating_count
-WHERE content_hash=:content_hash AND popularity_rating_count IS NOT :rating_count;
-
 -- name: projection_set_book_lifecycle !
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: deleted_at: Option<i64>
 -- param: origin: Option<&str>
 UPDATE book SET deleted_at=:deleted_at,trash_origin_dir_id=:origin
 WHERE content_hash=:content_hash AND (deleted_at,trash_origin_dir_id) IS NOT (:deleted_at,:origin);
 
 -- name: projection_set_book_reading !
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: position: Option<&str>
 -- param: progress: f32
 -- param: read_at: Option<i64>
@@ -128,17 +122,6 @@ DELETE FROM annotation WHERE book_row_id=(SELECT row_id FROM book WHERE content_
 -- param: content_hash: &SqlParam<'_>
 DELETE FROM book_dir WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash) AND dir_id NOT IN
        (SELECT state_subkey FROM sync_state_version WHERE state_kind='placement' AND book_key=:content_hash AND body IS NOT NULL);
-
--- name: projection_placement_name ->
--- param: dir_id: &SqlParam<'_>
--- param: content_hash: &SqlParam<'_>
-SELECT COALESCE((SELECT file_name FROM book_dir WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash)),'Untitled');
-
--- name: projection_placement_name_conflict ->
--- param: dir_id: &SqlParam<'_>
--- param: content_hash: &SqlParam<'_>
--- param: file_name: &SqlParam<'_>
-SELECT EXISTS(SELECT 1 FROM book_dir WHERE dir_id=:dir_id AND deleted_at IS NULL AND portable_name_key(file_name)=:file_name AND book_row_id!=(SELECT row_id FROM book WHERE content_hash=:content_hash));
 
 -- name: projection_other_placement_names ?
 -- param: dir_id: &SqlParam<'_>

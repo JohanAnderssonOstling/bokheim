@@ -1,9 +1,10 @@
 //! Shared-memory range transport between dedicated browser workers.
 
-use std::cell::Cell;
 use super::{error_message, field};
 use js_sys::{Function, Uint8Array};
+use std::cell::Cell;
 use wasm_bindgen::prelude::*;
+use wasm_callback::future_to_promise_aborting;
 
 #[wasm_bindgen(inline_js = r#"
 export function serveBook(read, length) {
@@ -39,8 +40,7 @@ export function serveBook(read, length) {
     }};
 }
 export function closeBook(server) { server.close(); }
-// The SharedWorker brokers this port, but never receives shared memory.
-// Both dedicated workers belong to the same host tab's agent cluster.
+// Both dedicated workers belong to the same page and agent cluster.
 export function connectBook(source) {
     return new Promise((resolve, reject) => {
         const finish = error => {
@@ -104,7 +104,7 @@ pub struct Server {
 }
 impl Server {
     pub fn sync(length: u64, mut fetch: impl FnMut(u64, usize) -> Result<Vec<u8>, String> + 'static) -> Result<Self, String> {
-        let read = Closure::<dyn FnMut(f64, u32) -> Result<Uint8Array, JsValue>>::new(move |offset, length| fetch(offset as u64, length as usize).map(|bytes| Uint8Array::from(bytes.as_slice())).map_err(|e| JsValue::from_str(&e)));
+        let read = Closure::<dyn FnMut(f64, u32) -> Result<Uint8Array, JsValue>>::own_aborting(move |offset, length| fetch(offset as u64, length as usize).map(|bytes| Uint8Array::from(bytes.as_slice())).map_err(|e| JsValue::from_str(&e)));
         Self::attach(length, read)
     }
     pub fn asynchronous<F, Fut>(length: u64, mut fetch: F) -> Result<Self, String>
@@ -112,9 +112,9 @@ impl Server {
         F: FnMut(u64, usize) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Vec<u8>, String>> + 'static,
     {
-        let read = Closure::<dyn FnMut(f64, u32) -> js_sys::Promise>::new(move |offset, length| {
+        let read = Closure::<dyn FnMut(f64, u32) -> js_sys::Promise>::own_aborting(move |offset, length| {
             let future = fetch(offset as u64, length as usize);
-            wasm_bindgen_futures::future_to_promise(async move { future.await.map(|bytes| Uint8Array::from(bytes.as_slice()).into()).map_err(|e| JsValue::from_str(&e)) })
+            future_to_promise_aborting(async move { future.await.map(|bytes| Uint8Array::from(bytes.as_slice()).into()).map_err(|e| JsValue::from_str(&e)) })
         });
         Self::attach(length, read)
     }

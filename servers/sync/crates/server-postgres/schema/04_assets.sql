@@ -6,11 +6,11 @@
 -- they are adjusted in place by raw SQL ("reserved_bytes=reserved_bytes-$2"
 -- in sql/assets/adjust_reserved.sql), so an arithmetic bug there could drive
 -- a column negative in a way Rust's type system cannot catch. quota_bytes's
--- default is the account creation policy (5 GiB); ensure_exists.sql relies
+-- default is the account creation policy (5 GB); ensure_exists.sql relies
 -- on it by never passing quota_bytes explicitly.
 CREATE TABLE user_storage_account (
     user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    quota_bytes bigint NOT NULL DEFAULT '5368709120'::bigint CHECK (quota_bytes >= 0),
+    quota_bytes bigint NOT NULL DEFAULT '5000000000'::bigint CHECK (quota_bytes >= 0),
     used_bytes bigint NOT NULL DEFAULT 0 CHECK (used_bytes >= 0),
     reserved_bytes bigint NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0)
 );
@@ -20,11 +20,25 @@ CREATE TABLE user_storage_account (
 -- rules. size_bytes is always a validated non-negative cast from a byte length,
 -- never raw-SQL arithmetic, so it doesn't need the same treatment as the quota
 -- columns above.
+CREATE TABLE canonical_blob_object (
+    byte_checksum bytea PRIMARY KEY CHECK(octet_length(byte_checksum)=32),
+    size_bytes bigint NOT NULL CHECK(size_bytes>0)
+);
+CREATE TABLE user_canonical_charge (
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    byte_checksum bytea NOT NULL REFERENCES canonical_blob_object(byte_checksum) ON DELETE RESTRICT,
+    charged_at timestamp with time zone NOT NULL DEFAULT now(),
+    PRIMARY KEY(user_id,byte_checksum)
+);
+CREATE INDEX user_canonical_charge_checksum ON user_canonical_charge(byte_checksum);
 CREATE TABLE blob_object (
     content_hash bytea PRIMARY KEY,
+    byte_checksum bytea NOT NULL REFERENCES canonical_blob_object(byte_checksum) ON DELETE RESTRICT,
     size_bytes bigint NOT NULL,
     created_at timestamp with time zone NOT NULL DEFAULT now()
 );
+
+CREATE INDEX blob_object_checksum ON blob_object(byte_checksum,content_hash);
 
 CREATE TABLE user_blob_charge (
     user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,

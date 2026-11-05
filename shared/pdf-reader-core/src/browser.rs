@@ -23,8 +23,8 @@ thread_local! {
     static DOCUMENTS: RefCell<HashMap<u64, PdfDocumentSession>> = RefCell::new(HashMap::new());
     static PENDING: RefCell<HashMap<u64, Completion>> = RefCell::new(HashMap::new());
     static FAILED: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
-    static FAILURE_CALLBACK: Closure<dyn FnMut(String, bool)> = Closure::new(fail);
-    static COMPLETION_CALLBACK: Closure<dyn FnMut(String)> = Closure::new(complete);
+    static FAILURE_CALLBACK: Closure<dyn FnMut(String, bool)> = Closure::own_aborting(fail);
+    static COMPLETION_CALLBACK: Closure<dyn FnMut(String)> = Closure::own_aborting(complete);
 }
 
 fn fail(message: String, retryable: bool) {
@@ -166,6 +166,10 @@ impl BrowserSession {
 
     pub async fn page_geometry(&self, page_index: usize, trim_margins: bool) -> PdfResult<PdfPageGeometry> {
         self.with_document(move |document| document.page_geometry(page_index, trim_margins)).await
+    }
+
+    pub async fn reading_fragments(&self, page_index: usize) -> PdfResult<Vec<PdfReadingFragment>> {
+        self.with_document(move |document| document.extract_reading_fragments(page_index)).await
     }
 
     pub async fn render_for_display(&self, key: PageRenderKey) -> PdfResult<RenderedPdfBgraPage> {

@@ -3,7 +3,7 @@
 use crate::book::PreparedText;
 use crate::epub::EpubSession;
 use crate::resource_path::local_resource_uri;
-use crate::{PreparedResources, TocEntry};
+use crate::{BookTocEntry, PreparedResources};
 use futures_lite::future::block_on;
 use std::io;
 
@@ -16,12 +16,12 @@ enum DocumentSource<'a> {
 /// EPUB documents remain in the archive; MOBI exposes its prepared virtual HTML.
 pub struct DocumentInspection<'a> {
     documents: Vec<String>,
-    toc: Vec<TocEntry>,
+    toc: Vec<BookTocEntry>,
     source: DocumentSource<'a>,
 }
 
 impl<'a> DocumentInspection<'a> {
-    pub(crate) fn from_epub(epub: &'a mut EpubSession, documents: Vec<String>, toc: Vec<TocEntry>) -> Self {
+    pub(crate) fn from_epub(epub: &'a mut EpubSession, documents: Vec<String>, toc: Vec<BookTocEntry>) -> Self {
         Self { documents, toc, source: DocumentSource::Epub(epub) }
     }
 
@@ -33,7 +33,16 @@ impl<'a> DocumentInspection<'a> {
         &self.documents
     }
 
-    pub fn toc(&self) -> &[TocEntry] {
+    /// Use the same XHTML declaration as the reading resource provider.
+    pub fn media_type(&self, uri: &str) -> io::Result<Option<String>> {
+        let uri = local_resource_uri("", uri)?;
+        match &self.source {
+            DocumentSource::Epub(epub) => Ok(Some(if epub.package.resource_media_type(&uri).is_some_and(|kind| kind.eq_ignore_ascii_case("application/xhtml+xml")) { "application/xhtml+xml".to_owned() } else { "text/html".to_owned() })),
+            DocumentSource::Prepared(resources) => resources.media_type(&uri),
+        }
+    }
+
+    pub fn toc(&self) -> &[BookTocEntry] {
         &self.toc
     }
 

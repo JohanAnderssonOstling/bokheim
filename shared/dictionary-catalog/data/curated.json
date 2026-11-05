@@ -1,0 +1,290 @@
+[
+  {
+    "id": "ar-wiktionary-1.2.0",
+    "language": "ar",
+    "name": "Arabic",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-3.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/ar-ar.zip",
+    "bytes": 1120837,
+    "sha256": "6d1b548cdf69f50ca0aa91aec5e348820f329483a33669db3d1f51c97784dd4e",
+    "prepared": {
+      "bytes": 1133220,
+      "sha256": "038a87aa4153c9a470f26ba7dab68d0583df9835911d035e4cc4140ae2149176"
+    }
+  },
+  {
+    "id": "zh-wiktionary-1.2.0",
+    "language": "zh",
+    "name": "Chinese",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/zh-zh.zip",
+    "bytes": 5497534,
+    "sha256": "d7f92e36e436ccdbfe45daf88230f745ce42874e890b79900838036a9ce9f710",
+    "prepared": {
+      "bytes": 5522804,
+      "sha256": "9bf74c72ee2f2c121f661942909f296a370dea8ddd2ff3d9a6fa6b8276ecb953"
+    }
+  },
+  {
+    "id": "cs-wiktionary-1.2.0",
+    "language": "cs",
+    "name": "Czech",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/cs-cs.zip",
+    "bytes": 5575828,
+    "sha256": "9fb4b668981527475832d9becb7f166e8c7e18671f8667bbae54b33da6c8f8b3",
+    "prepared": {
+      "bytes": 5621068,
+      "sha256": "57dd9db352f8f0cb486179739f4dd940db142cb7c62cbfae1d60e72ec1a4b9d5"
+    }
+  },
+  {
+    "id": "nl-wiktionary-1.2.0",
+    "language": "nl",
+    "name": "Dutch",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/nl-nl.zip",
+    "bytes": 29226855,
+    "sha256": "adac4804d3dfb35e91c7bff384366b48a252d8bb1005b67e974a0950e3f476e1",
+    "prepared": {
+      "bytes": 29293799,
+      "sha256": "c321301f96cd8001fd6180f0ba400229c08831b744b415e88fa5873d035cad71"
+    }
+  },
+  {
+    "id": "en-wiktionary-1.2.0",
+    "language": "en",
+    "name": "English",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/en-en.zip",
+    "bytes": 91941511,
+    "sha256": "142327769b0f4e2cd0e442a826bc6e561e5246a7796934ff23618c1c6984ab3c",
+    "prepared": {
+      "bytes": 92336924,
+      "sha256": "ce9de0ae20f01f8eb6e74f3e5851bc949a3d15ae2bb7bbafd9c015f42058d263"
+    }
+  },
+  {
+    "id": "fr-wiktionary-1.2.0",
+    "language": "fr",
+    "name": "French",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/fr-fr.zip",
+    "bytes": 73065038,
+    "sha256": "66362d0fa6379276c62f6e5fbfab78217e20ea333ded873dd53a1c41bf4428d4",
+    "prepared": {
+      "bytes": 73436311,
+      "sha256": "0f57f1a480982faa1156d570e7fc3a5864eb5fbee1a7ba758efe2929ae1aa922"
+    }
+  },
+  {
+    "id": "de-wiktionary-1.2.0",
+    "language": "de",
+    "name": "German",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/de-de.zip",
+    "bytes": 33607127,
+    "sha256": "a882dd03107ce3d8c564ee3a743ca5dde686b34463af7540870d229cd0cc49ce",
+    "prepared": {
+      "bytes": 33742807,
+      "sha256": "58e97b20494d76f5011b558bdb0c5723358fce4698f803d9451d542f6eadd3c2"
+    }
+  },
+  {
+    "id": "el-wiktionary-1.2.0",
+    "language": "el",
+    "name": "Greek",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/el-el.zip",
+    "bytes": 18908898,
+    "sha256": "19bca17f13d78ff5aa2566c50523029dcd35504f3a2bc6f75f67d9799599f5eb",
+    "prepared": {
+      "bytes": 19070509,
+      "sha256": "4dd7c99ab22e53044f8e2375f26268e97b8513eb765e6440c0ea17c719013aa4"
+    }
+  },
+  {
+    "id": "id-wiktionary-1.2.0",
+    "language": "id",
+    "name": "Indonesian",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/id-id.zip",
+    "bytes": 3024038,
+    "sha256": "81c47cd9c565cf5b6ee9fe4adce8cf48bca01f49a716083a0247f199d90652d9",
+    "prepared": {
+      "bytes": 3063370,
+      "sha256": "4006ddbda7ecf82b7428608f4f2f78825fbbb746cecad3a3b892935218813da0"
+    }
+  },
+  {
+    "id": "it-wiktionary-1.2.0",
+    "language": "it",
+    "name": "Italian",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/it-it.zip",
+    "bytes": 6543346,
+    "sha256": "25ca5cf2347b225f10a9c013e550f8ab358f53011319ffcaed21381f49bee2b2",
+    "prepared": {
+      "bytes": 6583659,
+      "sha256": "638bee19d4ac6331bae3f2e7b8189fd1a4b5154eba4cc3d56bd277ddd25f1003"
+    }
+  },
+  {
+    "id": "ja-wiktionary-1.2.0",
+    "language": "ja",
+    "name": "Japanese",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/ja-ja.zip",
+    "bytes": 8847744,
+    "sha256": "af3e9f6d4675ff2167ec6a71cda8c722e21121b5e034cf83ff168ea1cdf4a355",
+    "prepared": {
+      "bytes": 8882973,
+      "sha256": "7d3023258d2e5d88a0227629e0116a944900511209142c4325d30e3748fffc57"
+    }
+  },
+  {
+    "id": "ko-wiktionary-1.2.0",
+    "language": "ko",
+    "name": "Korean",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/ko-ko.zip",
+    "bytes": 3615561,
+    "sha256": "df231132bf576b30bac5be0fa7d4a28558f512b174b4e4b547c2a842b7d70e30",
+    "prepared": {
+      "bytes": 3652737,
+      "sha256": "43761b4d0f9f8075d2347c51800a660155d1b86e70e0045188bca47d82d092b8"
+    }
+  },
+  {
+    "id": "pl-wiktionary-1.2.0",
+    "language": "pl",
+    "name": "Polish",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/pl-pl.zip",
+    "bytes": 13119955,
+    "sha256": "95cf085dce0d6be7149ebeae8a562c35305cedf9a428145261daf3fe58373811",
+    "prepared": {
+      "bytes": 13206174,
+      "sha256": "fd95cddb562c7e4e6ae98c38cd2fad45a8cda62157973d94dbab5822b0183018"
+    }
+  },
+  {
+    "id": "pt-wiktionary-1.2.0",
+    "language": "pt",
+    "name": "Portuguese",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/pt-pt.zip",
+    "bytes": 6641354,
+    "sha256": "75bcc638fb3ab30f91247a5cab21759fccd55334d7c9d4c9d4a9c2f1027a9ae5",
+    "prepared": {
+      "bytes": 6740186,
+      "sha256": "b419126137e9545ed438a81892db198b547b3108119217d5e3eb19665b25ff97"
+    }
+  },
+  {
+    "id": "ru-wiktionary-1.2.0",
+    "language": "ru",
+    "name": "Russian",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/ru-ru.zip",
+    "bytes": 47638244,
+    "sha256": "f34020bd911b49ac91928975794b57271647c4de0f5d81474eb2a88b7f2597ee",
+    "prepared": {
+      "bytes": 47892943,
+      "sha256": "9e8a4cdf1a1b9f222f0daeb8df581c5f026af5c8677f06aa0f1e6d830b6802d1"
+    }
+  },
+  {
+    "id": "es-wiktionary-1.2.0",
+    "language": "es",
+    "name": "Spanish",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/es-es.zip",
+    "bytes": 11743165,
+    "sha256": "d6856818b4982ac849c1b924c70b11bea0fb06f30da18a5127622195894a7c9b",
+    "prepared": {
+      "bytes": 11955593,
+      "sha256": "f02257a21de37dac531f88ef65ddfda462e958d713e46b9899b64dee8447c52a"
+    }
+  },
+  {
+    "id": "sv-wiktionary-2026-10-02",
+    "language": "sv",
+    "name": "Swedish",
+    "version": "2026-10-02",
+    "source": "reader.dict / Swedish Wiktionary",
+    "source_url": "https://www.reader-dict.com/download/sv",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://www.reader-dict.com/file/sv/dict-sv-sv-noetym.zip",
+    "bytes": 5747152,
+    "sha256": "43aa9a687a276cb98bd86724265acb8f098a9b391911647d49f7e74e3fb77baa",
+    "prepared": {
+      "bytes": 5770344,
+      "sha256": "cf724d8b1660a8df7896f7224800b303120706e64c0ef6d0313534f55937cac5"
+    }
+  },
+  {
+    "id": "tr-wiktionary-1.2.0",
+    "language": "tr",
+    "name": "Turkish",
+    "version": "1.2.0",
+    "source": "KOReader Dicts / Wiktionary",
+    "source_url": "https://github.com/DanielGregorini/koreader-dicts/releases/tag/v1.2.0",
+    "license": "CC-BY-SA-4.0",
+    "upstream_url": "https://github.com/DanielGregorini/koreader-dicts/releases/download/v1.2.0/tr-tr.zip",
+    "bytes": 14888871,
+    "sha256": "47609ad3b631abade5bcf9bb9f84ca51422e39fa904b5393e4b8601763c8bd12",
+    "prepared": {
+      "bytes": 15074991,
+      "sha256": "a7510934414abfa2a07ad58ccb8fc6a841086c7397e7dd72a6f85b96615fe9df"
+    }
+  }
+]

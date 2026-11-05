@@ -9,8 +9,9 @@ and synchronization logic. None of these crates depends on `app`.
 | `web` | OPFS storage plus worker creation, owned ports, cancellation, Fetch transport, and tab lifetimes. |
 | `desktop` | Conventional application, Documents, and home directory locations. |
 | `kobo` | Mounted-device discovery, destination validation, and file copying; optional on-device hardware services through the `device` feature. |
-| `native` | Shared native file fingerprints, discovery OS helpers, and SQLite connection behavior and diagnostics. |
+| `native` | Shared native file fingerprints, discovery OS helpers, and device integration. |
 | `runtime` | Target-selected async execution, cancellation, timers, and bounded storage scheduling. |
+| `sqlite` | Device-local SQLite opening policy and native recovery. |
 
 Android, desktop, and Kobo share native services. Browser execution uses local
 futures and worker timers; native execution uses Tokio. A single runtime crate
@@ -25,7 +26,8 @@ Desktop location resolution uses the portable `dirs` API, preserving the existin
 
 Shared application policy has explicit homes:
 
-- `client/app/crates/library-registry` owns registered libraries and app state.
+- `client/library-management/crates/registry` owns registered libraries and persisted profile state.
+  Management resolves saved destinations and passes storage roots to the registry.
 
 - `client/library` owns database mutations and durable library state.
 - `client/library-backend/crates/library-files` owns scanning and asset reconciliation policy.
@@ -36,7 +38,7 @@ Shared application policy has explicit homes:
   and scan progress to the application.
 - `client/app/src/contracts` contains opt-in browser integration contracts.
 
-`client/app/src/platform` only selects platform services. Native and browser
+Application startup selects platform services directly. Native and browser
 SQLite modules supply connection-opening behavior, single-owner requirements,
 and diagnostics; transaction and notification policy stays in shared storage.
 Browser worker mechanisms live in `web/src/transport`. Its session owner handles

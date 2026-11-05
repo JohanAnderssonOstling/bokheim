@@ -1,8 +1,10 @@
 //! Framework-independent PDF crop, coordinate, and text-selection geometry.
 
 mod metadata;
-pub use metadata::{PdfByteRange, PdfDependencyIndex, PdfPageSource, PdfReaderMetadata, PdfStoredAnnotation, PdfStoredAnnotationKind, PdfStoredPage};
+pub use metadata::{PdfReaderMetadata, PdfStoredAnnotation, PdfStoredAnnotationKind, PdfStoredPage};
 use std::collections::HashSet;
+use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
 
 const DEFAULT_CONTENT_DIFFERENCE_THRESHOLD: u8 = 24;
 const DEFAULT_PADDING_PIXELS: u32 = 12;
@@ -400,15 +402,6 @@ impl FitWidthAnchorPager {
         Ok(())
     }
 
-    /// Builds the locally visible layout at an offset from this viewport's
-    /// stable start anchor. The pager itself is not advanced; wheel scrolling
-    /// may therefore move backward by reducing the offset and running this
-    /// same forward pass again.
-    pub fn reflow_at(&self, display_offset: f32) -> Result<FitWidthPlan, FitWidthPlanError> {
-        let anchor = self.anchor_at_offset(display_offset).unwrap_or(self.window.start);
-        Ok(Self::build_window(&self.pages, self.viewport, self.column_count, anchor)?.plan)
-    }
-
     /// Moves through source content in display pixels. A wheel pixel always
     /// travels one pixel, regardless of how many columns fill a viewport.
     /// Scrolling commits the same source anchor used by page and line turns.
@@ -526,25 +519,6 @@ impl FitWidthAnchorPager {
             }
         }
         Some(FitWidthAnchor::new(self.pages.get(page_position)?.0.page_index(), self.pages.get(page_position)?.0.source_y(page_y)))
-    }
-
-    fn anchor_at_offset(&self, display_offset: f32) -> Option<FitWidthAnchor> {
-        let column_height = self.viewport.column_height().max(f32::EPSILON);
-        let display_column = (display_offset.max(0.0) / column_height).floor() as usize;
-        let mut y = display_offset.max(0.0) - display_column as f32 * column_height;
-        let columns = self.window.plan.columns.iter().filter(|column| column.display_column_index == display_column);
-        let mut last = None;
-        for column in columns {
-            y -= column.leading_page_gap;
-            if y <= column.display_height {
-                let fraction = (y / column.display_height.max(f32::EPSILON)).clamp(0.0, 1.0);
-                let page = self.pages.iter().find(|(page, _)| page.page_index() == column.page_index)?.0;
-                return Some(FitWidthAnchor::new(column.page_index, page.source_y(column.page_rect.top() + fraction * column.page_rect.height())));
-            }
-            y -= column.display_height;
-            last = Some(*column);
-        }
-        last.and_then(|column| self.pages.iter().find(|(page, _)| page.page_index() == column.page_index).map(|(page, _)| FitWidthAnchor::new(column.page_index, page.source_y(column.page_rect.bottom()))))
     }
 
     fn build_window(pages: &[(FitWidthPage, Vec<(f32, f32)>)], viewport: FitWidthViewport, column_count: usize, start: FitWidthAnchor) -> Result<FitWidthViewportWindow, FitWidthPlanError> {
@@ -1024,7 +998,6 @@ impl TextCharacter {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SelectionGranularity {
     #[default]
-    Character,
     Word,
     Paragraph,
 }
@@ -1061,7 +1034,7 @@ impl SelectionOptions {
 
 impl Default for SelectionOptions {
     fn default() -> Self {
-        Self { granularity: SelectionGranularity::Character, anchor_max_distance_squared: Some(DEFAULT_HIT_DISTANCE_SQUARED), focus_max_distance_squared: None, minimum_line_overlap: 0.3, maximum_line_gap: 0.05 }
+        Self { granularity: SelectionGranularity::Word, anchor_max_distance_squared: Some(DEFAULT_HIT_DISTANCE_SQUARED), focus_max_distance_squared: None, minimum_line_overlap: 0.3, maximum_line_gap: 0.05 }
     }
 }
 
@@ -1084,11 +1057,33 @@ impl TextHit {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PageTextGeometry {
     characters: Vec<TextCharacter>,
+    word_ranges: Vec<Range<usize>>,
 }
 
 impl PageTextGeometry {
     pub fn new(characters: impl IntoIterator<Item = TextCharacter>) -> Self {
-        Self { characters: characters.into_iter().collect() }
+        let characters: Vec<_> = characters.into_iter().collect();
+        // Segment once when the cached text layer is built, not on every drag.
+        // Non-word characters remain indivisible Unicode graphemes, as in HTML.
+        let text: String = characters.iter().map(|character| character.character).collect();
+        let mut word_ranges = Vec::new();
+        let mut position = 0;
+        for segment in text.split_word_bounds() {
+            if segment.unicode_words().next().is_some() {
+                let end = position + segment.chars().count();
+                word_ranges.push(position..end);
+                position = end;
+            } else {
+                for grapheme in segment.graphemes(true) {
+                    let end = position + grapheme.chars().count();
+                    if !grapheme.chars().all(char::is_whitespace) {
+                        word_ranges.push(position..end);
+                    }
+                    position = end;
+                }
+            }
+        }
+        Self { characters, word_ranges }
     }
 
     pub fn characters(&self) -> &[TextCharacter] {
@@ -1099,7 +1094,7 @@ impl PageTextGeometry {
         self.characters
             .iter()
             .enumerate()
-            .filter(|(_, character)| !character.character.is_control())
+            .filter(|(_, character)| !character.character.is_control() && !character.character.is_whitespace())
             .map(|(position, character)| (position, character, character.bounds.distance_squared(point)))
             .min_by(|left, right| left.2.total_cmp(&right.2))
             .filter(|(_, _, distance)| max_distance_squared.is_none_or(|maximum| *distance <= maximum))
@@ -1122,19 +1117,26 @@ impl PageTextGeometry {
         self.select_positions(anchor, focus.position, options)
     }
 
-    pub fn transformed(&self, transform: PageTransform) -> Self {
-        Self::new(self.characters.iter().filter_map(|character| transform.full_rect_to_display(character.bounds).map(|bounds| TextCharacter::new(character.source_index, character.character, bounds))))
-    }
-
     fn select_positions(&self, anchor: usize, focus: usize, options: SelectionOptions) -> Option<PageSelection> {
         let (first, last) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
-        let (first, last) = expand_range(&self.characters, first, last, options.granularity);
+        let (first, last) = match options.granularity {
+            SelectionGranularity::Word => (self.word_range(first)?.start, self.word_range(last)?.end - 1),
+            SelectionGranularity::Paragraph => (paragraph_start(&self.characters, first), paragraph_end(&self.characters, last)),
+        };
         let selected = self.characters.get(first..=last)?;
         let text = selected.iter().map(|character| character.character).collect::<String>();
-        let rects = merge_line_rects_with_options(selected.iter().filter(|character| !character.character.is_control()).map(|character| character.bounds), options.minimum_line_overlap, options.maximum_line_gap);
+        let rects = merge_line_rects_with_options(
+            selected.iter().filter(|character| !character.character.is_control() && character.bounds.width > 0.0 && character.bounds.height > 0.0).map(|character| character.bounds),
+            options.minimum_line_overlap,
+            options.maximum_line_gap,
+        );
         let first_source_index = selected.first()?.source_index;
         let last_source_index = selected.last()?.source_index;
         (!text.is_empty() && !rects.is_empty()).then_some(PageSelection { first_source_index, last_source_index, text, rects })
+    }
+
+    fn word_range(&self, position: usize) -> Option<&Range<usize>> {
+        self.word_ranges.get(self.word_ranges.partition_point(|range| range.end <= position)).filter(|range| range.contains(&position))
     }
 }
 
@@ -1329,24 +1331,6 @@ fn same_text_line(left: NormalizedRect, right: NormalizedRect, minimum_overlap: 
     overlap > left.height.min(right.height) * minimum_overlap && gap <= maximum_gap
 }
 
-fn expand_range(characters: &[TextCharacter], first: usize, last: usize, granularity: SelectionGranularity) -> (usize, usize) {
-    match granularity {
-        SelectionGranularity::Character => (first, last),
-        SelectionGranularity::Word => (word_start(characters, first), word_end(characters, last)),
-        SelectionGranularity::Paragraph => (paragraph_start(characters, first), paragraph_end(characters, last)),
-    }
-}
-
-fn word_start(characters: &[TextCharacter], position: usize) -> usize {
-    let class = word_class(characters[position].character);
-    (0..position).rev().take_while(|candidate| word_class(characters[*candidate].character) == class).last().unwrap_or(position)
-}
-
-fn word_end(characters: &[TextCharacter], position: usize) -> usize {
-    let class = word_class(characters[position].character);
-    ((position + 1)..characters.len()).take_while(|candidate| word_class(characters[*candidate].character) == class).last().unwrap_or(position)
-}
-
 fn paragraph_start(characters: &[TextCharacter], position: usize) -> usize {
     (0..position).rev().find_map(|candidate| paragraph_break_end(characters, candidate).filter(|end| *end < position)).map_or(0, |separator_end| separator_end + 1)
 }
@@ -1362,29 +1346,12 @@ fn paragraph_break_end(characters: &[TextCharacter], position: usize) -> Option<
     ((position + 1)..characters.len()).find(|candidate| !matches!(characters[*candidate].character, '\r' | ' ' | '\t')).filter(|candidate| characters[*candidate].character == '\n')
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WordClass {
-    Word,
-    Whitespace,
-    Punctuation,
-}
-
-fn word_class(character: char) -> WordClass {
-    if character.is_alphanumeric() || matches!(character, '_' | '\'' | '’') {
-        WordClass::Word
-    } else if character.is_whitespace() {
-        WordClass::Whitespace
-    } else {
-        WordClass::Punctuation
-    }
-}
-
 fn first_selectable_position(characters: &[TextCharacter]) -> Option<usize> {
-    characters.iter().position(|character| !character.character.is_control())
+    characters.iter().position(|character| !character.character.is_control() && !character.character.is_whitespace())
 }
 
 fn last_selectable_position(characters: &[TextCharacter]) -> Option<usize> {
-    characters.iter().rposition(|character| !character.character.is_control())
+    characters.iter().rposition(|character| !character.character.is_control() && !character.character.is_whitespace())
 }
 
 fn page_background(rgba: &[u8], width: u32, height: u32) -> [u8; 3] {

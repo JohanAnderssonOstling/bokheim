@@ -3,8 +3,8 @@
 //! file is books/<hash>.epub and its cover covers/<hash>-{card,detail}.jpg.
 //! A source-linked entry can have covers/<entry_key>-{card,detail}.jpg without
 //! a retained book file.
-use book_model::{AgentId, BookRecord, BookTocEntry, Contributor, AUTHOR_MARC_RELATOR_CODE};
-use rusqlite::{params, Connection, OptionalExtension};
+use book_model::{AUTHOR_MARC_RELATOR_CODE, AgentId, BookRecord, BookTocEntry, Contributor};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::time::Duration;
 
@@ -62,26 +62,6 @@ pub fn open(dir: &Path) -> Result<Connection, String> {
     db.busy_timeout(Duration::from_secs(30)).map_err(|e| e.to_string())?;
     db.execute_batch("PRAGMA foreign_keys=ON;").map_err(|e| e.to_string())?;
     db.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
-    let has_toc: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('book') WHERE name='toc')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-    if !has_toc {
-        db.execute_batch("ALTER TABLE book ADD COLUMN toc TEXT;").map_err(|e| e.to_string())?;
-    }
-    let has_format: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('external_book') WHERE name='format')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-    if !has_format {
-        let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
-        tx.execute_batch("ALTER TABLE external_book ADD COLUMN format INTEGER NOT NULL DEFAULT 1 CHECK(format IN (1,2,4,8,16));").map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
-    }
-    // Legacy workers can leave EPUB defaults even after the column exists.
-    // Repair those from the rendition's retained audio evidence before publishing.
-    db.execute(
-        "UPDATE external_book SET format=16 WHERE format=1 AND EXISTS(
-        SELECT 1 FROM source_entry WHERE external_entry_key=external_book.entry_key
-        AND (json_extract(metadata,'$.audiobook_download_url') IS NOT NULL OR json_extract(metadata,'$.audiobook_delivery')='external_download')
-    )",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
     authors::initialize(&db)?;
     Ok(db)
 }
@@ -169,34 +149,6 @@ pub fn toc(db: &Connection, hash: &str) -> Result<Vec<BookTocEntry>, String> {
     let json: Option<String> = db.query_row("SELECT toc FROM book WHERE hash=?1", [hash], |row| row.get(0)).map_err(|e| e.to_string())?;
     let json = json.ok_or_else(|| format!("{hash}: table of contents has not been extracted"))?;
     serde_json::from_str(&json).map_err(|e| format!("{hash}: invalid table of contents: {e}"))
-}
-
-/// Backfills navigation from already curated files without replacing enriched
-/// metadata or fetching anything. An empty list is a completed extraction.
-pub fn ensure_toc(dir: &Path, db: &Connection) -> Result<(), String> {
-    let mut statement = db.prepare("SELECT hash FROM book WHERE toc IS NULL ORDER BY hash").map_err(|e| e.to_string())?;
-    let hashes = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
-    drop(statement);
-    let mut extracted = Vec::new();
-    for hash in hashes {
-        let path = dir.join(format!("books/{hash}.epub"));
-        let mut file = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let actual = content_address::hash_reader(&mut file).map_err(|e| e.to_string())?;
-        if actual.to_hex() != hash {
-            return Err(format!("{} differs from the catalog's hash", path.display()));
-        }
-        let inspected = book_inspection::inspect_epub_metadata_with_toc(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        extracted.push((hash, inspected.toc));
-    }
-    let transaction = db.unchecked_transaction().map_err(|e| e.to_string())?;
-    for (hash, toc) in &extracted {
-        set_toc(&transaction, hash, toc)?;
-    }
-    transaction.commit().map_err(|e| e.to_string())?;
-    if !extracted.is_empty() {
-        eprintln!("Extracted table of contents for {} catalog books", extracted.len());
-    }
-    Ok(())
 }
 
 /// The authors as the library shows them on a card.

@@ -46,7 +46,7 @@ impl Database {
             };
             let (language_counts, format_counts) = self.library_facets(&options)?;
             let path = shelf.map(|shelf| library_model::BrowsePathSegment { id: BrowseLocation::Home(Some(shelf)), name: shelf.label().to_owned() }).into_iter().collect();
-            Ok(super::LibraryBrowseData { contents, sections, path, ancestors: Vec::new(), language_counts, format_counts, feed: None, page: None })
+            Ok(super::LibraryBrowseData { contents, sections, path, ancestors: Vec::new(), language_counts, format_counts, page: None })
         })
     }
 

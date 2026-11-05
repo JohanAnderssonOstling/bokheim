@@ -1,200 +1,123 @@
-//! Short storage commands. A command cannot retain storage while awaiting: the
-//! queue accepts synchronous closures and delivers owned results afterwards.
+//! Ordered synchronous transactions and persistence. Ordinary independent I/O
+//! uses the blocking pool; this boundary keeps admitted mutations in FIFO order.
 
-use std::collections::VecDeque;
+use crate::executor::{BackendOutput, BackendSend};
+#[cfg(target_arch = "wasm32")]
+use crate::executor::BackendExecutor;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Priority {
-    Interactive,
-    Background,
-}
-
-const INTERACTIVE_BURST: usize = 8;
 const MAX_QUEUED_COMMANDS: usize = 256;
 
-struct Queue<T> {
-    interactive: VecDeque<T>,
-    background: VecDeque<T>,
-    interactive_run: usize,
-}
-
-impl<T> Default for Queue<T> {
-    fn default() -> Self {
-        Self { interactive: VecDeque::new(), background: VecDeque::new(), interactive_run: 0 }
-    }
-}
-
-impl<T> Queue<T> {
-    fn push(&mut self, priority: Priority, command: T) -> Result<(), T> {
-        if self.interactive.len() + self.background.len() >= MAX_QUEUED_COMMANDS {
-            return Err(command);
-        }
-        match priority {
-            Priority::Interactive => self.interactive.push_back(command),
-            Priority::Background => self.background.push_back(command),
-        }
-        Ok(())
-    }
-
-    fn pop(&mut self) -> Option<T> {
-        if !self.background.is_empty() && (self.interactive.is_empty() || self.interactive_run >= INTERACTIVE_BURST) {
-            self.interactive_run = 0;
-            return self.background.pop_front();
-        }
-        if let Some(command) = self.interactive.pop_front() {
-            self.interactive_run += 1;
-            return Some(command);
-        }
-        self.interactive_run = 0;
-        None
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
-mod browser {
-    use super::*;
-    use std::cell::{Cell, RefCell};
-
-    thread_local! {
-        static COMMANDS: RefCell<Queue<Box<dyn FnOnce()>>> = RefCell::new(Queue::default());
-        static RUNNING: Cell<bool> = const { Cell::new(false) };
-    }
-
-    pub(super) async fn run<T: 'static>(priority: Priority, operation: impl FnOnce() -> T + 'static) -> Result<T, String> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let command: Box<dyn FnOnce()> = Box::new(move || {
-            // A cancelled caller must not start a queued write. Once a short
-            // command starts, its transaction completes atomically.
-            if !sender.is_closed() {
-                let result = operation();
-                let _ = sender.send(result);
-            }
-        });
-        COMMANDS.with(|commands| commands.borrow_mut().push(priority, command)).map_err(|_| "storage command queue is full; retry the operation".to_owned())?;
-        if !RUNNING.with(|running| running.replace(true)) {
-            wasm_bindgen_futures::spawn_local(async {
-                loop {
-                    // A macrotask boundary lets new interactive messages arrive;
-                    // chaining ready Rust futures alone would starve that loop.
-                    crate::executor::sleep(std::time::Duration::ZERO).await;
-                    let command = COMMANDS.with(|commands| commands.borrow_mut().pop());
-                    match command {
-                        Some(command) => command(),
-                        None => {
-                            RUNNING.with(|running| running.set(false));
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-        receiver.await.map_err(|_| "storage command stopped before returning a result".to_owned())
-    }
-}
+static PENDING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_QUEUED_COMMANDS);
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use super::*;
+    use super::MAX_QUEUED_COMMANDS;
     use std::cell::Cell;
-    use std::sync::{mpsc, Arc, Mutex, OnceLock};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
     type Command = Box<dyn FnOnce() + Send>;
-    static DISPATCHER: OnceLock<Result<Dispatcher, String>> = OnceLock::new();
+    static DISPATCHER: DispatcherSlot = DispatcherSlot(Mutex::new(None));
     thread_local! {
         static ON_WORKER: Cell<bool> = const { Cell::new(false) };
     }
 
+    #[derive(Clone)]
     struct Dispatcher {
-        commands: Arc<Mutex<Queue<Command>>>,
-        wake: mpsc::SyncSender<()>,
+        commands: mpsc::Sender<Command>,
+        queued: Arc<AtomicUsize>,
+    }
+
+    #[derive(Default)]
+    struct DispatcherSlot(Mutex<Option<Dispatcher>>);
+
+    impl DispatcherSlot {
+        fn get_or_start(&self, start: impl FnOnce() -> Result<Dispatcher, String>) -> Result<Dispatcher, String> {
+            let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(dispatcher) = &*slot {
+                return Ok(dispatcher.clone());
+            }
+            let dispatcher = start()?;
+            *slot = Some(dispatcher.clone());
+            Ok(dispatcher)
+        }
     }
 
     impl Dispatcher {
         fn new() -> Result<Self, String> {
-            let commands = Arc::new(Mutex::new(Queue::<Command>::default()));
-            let pending = commands.clone();
-            // Coalesce wakeups; command memory is bounded by Queue itself.
-            let (wake, ready) = mpsc::sync_channel(1);
+            let (commands, incoming) = mpsc::channel::<Command>();
             std::thread::Builder::new()
-                .name("storage-commands".into())
+                .name("storage-transactions".into())
                 .spawn(move || {
                     ON_WORKER.set(true);
-                    while ready.recv().is_ok() {
-                        loop {
-                            let command = pending.lock().unwrap().pop();
-                            let Some(command) = command else { break };
-                            // A failed command drops its reply, but cannot kill the
-                            // dispatcher and strand every subsequent operation.
-                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(command));
-                        }
+                    while let Ok(command) = incoming.recv() {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(command));
                     }
                 })
                 .map_err(|error| format!("cannot start storage worker: {error}"))?;
-            Ok(Self { commands, wake })
+            Ok(Self { commands, queued: Arc::new(AtomicUsize::new(0)) })
         }
 
-        fn submit<T: Send + 'static>(&self, priority: Priority, operation: impl FnOnce() -> T + Send + 'static) -> Result<tokio::sync::oneshot::Receiver<T>, String> {
+        fn enqueue(&self, operation: Command) -> Result<(), String> {
+            self.queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |queued| (queued < MAX_QUEUED_COMMANDS).then_some(queued + 1))
+                .map_err(|_| "storage transaction queue is full; retry the operation".to_owned())?;
+            let queued = self.queued.clone();
+            if self.commands.send(Box::new(move || {
+                queued.fetch_sub(1, Ordering::Relaxed);
+                operation();
+            })).is_err() {
+                self.queued.fetch_sub(1, Ordering::Relaxed);
+                return Err("storage worker stopped".into());
+            }
+            Ok(())
+        }
+
+        fn submit<T: Send + 'static>(&self, operation: impl FnOnce() -> T + Send + 'static) -> Result<tokio::sync::oneshot::Receiver<T>, String> {
             let (sender, receiver) = tokio::sync::oneshot::channel();
-            // Preserve the submitting runtime context previously supplied by
-            // spawn_blocking, including storage write observers.
             let runtime = tokio::runtime::Handle::try_current().ok();
-            let command: Command = Box::new(move || {
+            self.enqueue(Box::new(move || {
                 if !sender.is_closed() {
                     let _entered = runtime.as_ref().map(|handle| handle.enter());
-                    let result = operation();
-                    let _ = sender.send(result);
+                    let _ = sender.send(operation());
                 }
-            });
-            self.enqueue(priority, command)?;
+            }))?;
             Ok(receiver)
         }
 
-        fn enqueue(&self, priority: Priority, command: Command) -> Result<(), String> {
-            self.commands.lock().unwrap().push(priority, command).map_err(|_| "storage command queue is full; retry the operation".to_owned())?;
-            self.wake()
-        }
-
-        fn wake(&self) -> Result<(), String> {
-            match self.wake.try_send(()) {
-                Ok(()) | Err(mpsc::TrySendError::Full(())) => Ok(()),
-                Err(mpsc::TrySendError::Disconnected(())) => Err("storage worker stopped".into()),
-            }
-        }
-
         fn dispatch_cleanup(&self, operation: impl FnOnce() + Send + 'static) -> Result<(), String> {
-            // Closing already-admitted resources must still succeed when request
-            // admission is full. Cleanup does not allocate new storage resources.
-            self.commands.lock().unwrap().background.push_back(Box::new(operation));
-            self.wake()
+            // Already-admitted persistence and disposal bypass request admission,
+            // but share the same FIFO so shutdown barriers retain their meaning.
+            self.commands.send(Box::new(operation)).map_err(|_| "storage worker stopped".to_owned())
         }
     }
 
-    fn dispatcher() -> Result<&'static Dispatcher, String> {
-        DISPATCHER.get_or_init(Dispatcher::new).as_ref().map_err(Clone::clone)
+    fn dispatcher() -> Result<Dispatcher, String> {
+        DISPATCHER.get_or_start(Dispatcher::new)
     }
 
-    pub(super) fn run_sync<T: Send + 'static>(priority: Priority, operation: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    pub(super) fn run_sync<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
         if ON_WORKER.get() {
             return Ok(operation());
         }
         let (sender, receiver) = mpsc::sync_channel(1);
         let runtime = tokio::runtime::Handle::try_current().ok();
-        dispatcher()?.enqueue(
-            priority,
-            Box::new(move || {
-                let _entered = runtime.as_ref().map(|handle| handle.enter());
-                let _ = sender.send(operation());
-            }),
-        )?;
-        receiver.recv().map_err(|_| "storage command stopped before returning a result".to_owned())
+        dispatcher()?.enqueue(Box::new(move || {
+            let _entered = runtime.as_ref().map(|handle| handle.enter());
+            let _ = sender.send(operation());
+        }))?;
+        receiver.recv().map_err(|_| "storage transaction stopped before returning a result".to_owned())
     }
 
     pub(super) fn dispatch_cleanup(operation: impl FnOnce() + Send + 'static) -> Result<(), String> {
         dispatcher()?.dispatch_cleanup(operation)
     }
 
-    pub(super) async fn run<T: Send + 'static>(priority: Priority, operation: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
-        dispatcher()?.submit(priority, operation)?.await.map_err(|_| "storage command stopped before returning a result".to_owned())
+    pub(super) async fn run<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+        if ON_WORKER.get() {
+            return Ok(operation());
+        }
+        dispatcher()?.submit(operation)?.await.map_err(|_| "storage transaction stopped before returning a result".to_owned())
     }
 
     #[cfg(test)]
@@ -203,54 +126,28 @@ mod native {
         use std::time::Duration;
 
         #[test]
-        fn native_worker_prioritizes_interactive_and_skips_cancelled_writes() {
-            let dispatcher = Dispatcher::new().unwrap();
-            let (started, running) = mpsc::channel();
-            let (release, resume) = mpsc::channel();
-            let first = dispatcher
-                .submit(Priority::Background, move || {
-                    started.send(()).unwrap();
-                    resume.recv_timeout(Duration::from_secs(5)).unwrap();
-                })
-                .unwrap();
-            running.recv_timeout(Duration::from_secs(5)).unwrap();
-            let (observed, order) = mpsc::channel();
-            let cancelled = dispatcher
-                .submit(Priority::Background, {
-                    let observed = observed.clone();
-                    move || observed.send("cancelled").unwrap()
-                })
-                .unwrap();
-            drop(cancelled);
-            let background = dispatcher
-                .submit(Priority::Background, {
-                    let observed = observed.clone();
-                    move || observed.send("background").unwrap()
-                })
-                .unwrap();
-            let interactive = dispatcher.submit(Priority::Interactive, move || observed.send("interactive").unwrap()).unwrap();
-            release.send(()).unwrap();
-            first.blocking_recv().unwrap();
-            interactive.blocking_recv().unwrap();
-            background.blocking_recv().unwrap();
-            assert_eq!(order.recv_timeout(Duration::from_secs(5)).unwrap(), "interactive");
-            assert_eq!(order.recv_timeout(Duration::from_secs(5)).unwrap(), "background");
-            assert!(order.try_recv().is_err());
+        fn failed_startup_can_retry_without_replacing_a_running_worker() {
+            let slot = DispatcherSlot::default();
+            assert!(slot.get_or_start(|| Err("temporary thread-creation failure".into())).is_err());
+            let dispatcher = slot.get_or_start(Dispatcher::new).unwrap();
+            let owner = dispatcher.submit(|| std::thread::current().id()).unwrap().blocking_recv().unwrap();
+            let retained = slot.get_or_start(|| panic!("a running worker must be reused")).unwrap();
+            assert_eq!(retained.submit(|| std::thread::current().id()).unwrap().blocking_recv().unwrap(), owner);
         }
 
         #[test]
         fn panicking_command_does_not_strand_following_work() {
             let dispatcher = Dispatcher::new().unwrap();
-            let failed = dispatcher.submit(Priority::Background, || panic!("test command failure")).unwrap();
+            let failed = dispatcher.submit(|| panic!("test command failure")).unwrap();
             assert!(failed.blocking_recv().is_err());
-            assert_eq!(dispatcher.submit(Priority::Interactive, || 42).unwrap().blocking_recv().unwrap(), 42);
+            assert_eq!(dispatcher.submit(|| 42).unwrap().blocking_recv().unwrap(), 42);
         }
 
         #[test]
         fn nested_synchronous_commands_use_the_same_worker() {
-            let owner = run_sync(Priority::Interactive, || {
+            let owner = run_sync(|| {
                 let thread = std::thread::current().id();
-                assert_eq!(run_sync(Priority::Interactive, || std::thread::current().id()).unwrap(), thread);
+                assert_eq!(run_sync(|| std::thread::current().id()).unwrap(), thread);
                 thread
             })
             .unwrap();
@@ -263,14 +160,14 @@ mod native {
             let (started, running) = mpsc::channel();
             let (release, resume) = mpsc::channel();
             let first = dispatcher
-                .submit(Priority::Background, move || {
+                .submit(move || {
                     started.send(()).unwrap();
                     resume.recv_timeout(Duration::from_secs(5)).unwrap();
                 })
                 .unwrap();
             running.recv_timeout(Duration::from_secs(5)).unwrap();
-            let pending = (0..MAX_QUEUED_COMMANDS).map(|_| dispatcher.submit(Priority::Background, || ()).unwrap()).collect::<Vec<_>>();
-            assert!(dispatcher.submit(Priority::Interactive, || ()).is_err());
+            let pending = (0..MAX_QUEUED_COMMANDS).map(|_| dispatcher.submit(|| ()).unwrap()).collect::<Vec<_>>();
+            assert!(dispatcher.submit(|| ()).is_err());
             let (closed, observed) = mpsc::channel();
             dispatcher.dispatch_cleanup(move || closed.send(()).unwrap()).unwrap();
             release.send(()).unwrap();
@@ -283,27 +180,23 @@ mod native {
     }
 }
 
-/// Synchronous storage boundaries use the same owner as async commands. Nested
-/// operations on that owner execute directly rather than waiting on themselves.
-/// The browser already confines synchronous calls to its storage event loop.
-pub fn run_sync<T: crate::executor::BackendOutput>(priority: Priority, operation: impl FnOnce() -> T + crate::executor::BackendSend + 'static) -> Result<T, String> {
+/// Synchronous calls already on the owner execute directly, avoiding a nested
+/// request that would wait on itself. Browser callers must be on their OPFS owner.
+pub fn run_sync<T: BackendOutput>(operation: impl FnOnce() -> T + BackendSend + 'static) -> Result<T, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = priority;
         Ok(operation())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        native::run_sync(priority, operation)
+        native::run_sync(operation)
     }
 }
 
-/// Queues owner-side cleanup without waiting for it or cancelling it when the
-/// caller drops its handle. Cleanup must not retain a database across an await.
-pub fn dispatch_cleanup(operation: impl FnOnce() + crate::executor::BackendSend + 'static) -> Result<(), String> {
+pub fn dispatch_cleanup(operation: impl FnOnce() + BackendSend + Send + 'static) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {
-        wasm_bindgen_futures::spawn_local(async move { operation() });
+        crate::executor::storage_cleanup(operation);
         Ok(())
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -312,35 +205,27 @@ pub fn dispatch_cleanup(operation: impl FnOnce() + crate::executor::BackendSend 
     }
 }
 
-pub async fn run<T: crate::executor::BackendOutput>(priority: Priority, operation: impl FnOnce() -> T + crate::executor::BackendSend + 'static) -> Result<T, String> {
+pub async fn run<T: BackendOutput + Send>(operation: impl FnOnce() -> T + BackendSend + Send + 'static) -> Result<T, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        browser::run(priority, operation).await
+        let permit = PENDING.try_acquire().map_err(|_| "storage transaction queue is full; retry the operation".to_owned())?;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        BackendExecutor::default().dispatch_storage(move || {
+            drop(permit);
+            if !reply.is_closed() {
+                let _ = reply.send(operation());
+            }
+        }).map_err(|error| error.to_string())?;
+        result.await.map_err(|_| "storage transaction stopped before returning a result".to_owned())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        native::run(priority, operation).await
+        native::run(operation).await
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn readers_overtake_background_but_cannot_starve_it() {
-        let mut queue = Queue::default();
-        queue.push(Priority::Background, 100).unwrap();
-        for id in 0..20 {
-            queue.push(Priority::Interactive, id).unwrap();
-        }
-        for id in 0..INTERACTIVE_BURST {
-            assert_eq!(queue.pop(), Some(id));
-        }
-        assert_eq!(queue.pop(), Some(100));
-        for id in INTERACTIVE_BURST..20 {
-            assert_eq!(queue.pop(), Some(id));
-        }
-        assert_eq!(queue.pop(), None);
-    }
+/// Persistence shares transaction ordering and remains admissible during shutdown.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_persistence(operation: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    native::dispatch_cleanup(operation)
 }

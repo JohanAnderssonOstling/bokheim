@@ -1,11 +1,11 @@
-use crate::build::batch::{load_work_codes_cached, WorkEvidenceCache};
-use crate::build::import::core::author_match_keys;
 use crate::Isbn13;
+use crate::build::batch::{WorkEvidenceCache, load_work_codes_cached};
+use crate::build::import::core::author_match_keys;
 use crate::{
-    classification_similarity_keys, error, sql_placeholders, BTreeMap, BTreeSet, Classification, ClassificationScheme, ClassificationSource, Connection, EditionIdentityMatch, EditionTitleMatch, HashMap, MetadataError,
-    BULK_EVIDENCE_IDS_PER_QUERY, LCC_SCHEME,
+    BTreeMap, BTreeSet, BULK_EVIDENCE_IDS_PER_QUERY, Classification, ClassificationScheme, ClassificationSource, Connection, EditionIdentityMatch, EditionTitleMatch, HashMap, LCC_SCHEME, MetadataError, classification_similarity_keys,
+    error, sql_placeholders,
 };
-use rusqlite::{params_from_iter, OptionalExtension};
+use rusqlite::params_from_iter;
 
 struct EditionCandidate {
     edition_id: i64,
@@ -320,17 +320,6 @@ fn load_answer_classifications(output: &Connection, isbns: &BTreeSet<Isbn13>) ->
         for row in query.query_map(params_from_iter(chunk), |r| Ok((r.get::<_, Isbn13>(0)?, r.get::<_, Vec<u8>>(1)?))).map_err(error)? {
             let (isbn, json) = row.map_err(error)?;
             answers.insert(isbn, serde_json::from_slice(&json).map_err(error)?);
-        }
-        // Legacy immutable bases have no compact summary table. Read only the
-        // requested fallback answers; never materialize the whole base.
-        for isbn in chunk.iter().filter(|isbn| !answers.contains_key(isbn)).copied().collect::<Vec<_>>() {
-            let json: Option<Vec<u8>> = output.query_row("SELECT answer FROM isbn_answer WHERE isbn13=?1", [isbn], |r| r.get(0)).optional().map_err(error)?;
-            if let Some(json) = json {
-                let answer: crate::schema::StoredAnswer = serde_json::from_slice(&json).map_err(error)?;
-                if answer.result.matches.len() == 1 && crate::build::has_lcc(&answer.result) {
-                    answers.insert(isbn, answer.result.matches.into_iter().next().unwrap().classifications);
-                }
-            }
         }
     }
     Ok(answers)

@@ -111,12 +111,14 @@ impl AsyncRead for RangeReader {
                 reader.pending = Some(PendingRange { offset, length, response: (reader.fetch)(offset, length) });
             }
         }
-        if let Some(pending) = &mut reader.pending {
+        if let Some(mut pending) = reader.pending.take() {
             let bytes = match pending.response.as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    reader.pending = Some(pending);
+                    return Poll::Pending;
+                }
                 Poll::Ready(result) => result,
             };
-            let pending = reader.pending.take().unwrap();
             reader.state.remember(pending.offset, pending.length, bytes?)?;
         }
         Poll::Ready(Ok(reader.state.read_cached(output)))

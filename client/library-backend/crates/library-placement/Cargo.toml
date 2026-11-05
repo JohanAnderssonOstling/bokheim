@@ -5,12 +5,13 @@ edition = "2021"
 publish = false
 
 [dependencies]
-client-runtime = { path = "../../../client-runtime" }
+tokio = { version = "1", features = ["sync"] }
+client-protocol = { path = "../../../client-protocol" }
 library-database = { path = "../library-database" }
 library-files = { path = "../library-files" }
 library-model = { path = "../../../library-model" }
 library-replica = { path = "../library-replica" }
-library-runtime = { path = "../library-runtime" }
+library-services = { path = "../library-services" }
 sync-common = { path = "../../../../shared/sync-common" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
@@ -18,3 +19,4 @@ blake3.workspace = true
 book-model = { path = "../../../../shared/book-model" }
 book-inspection = { path = "../book-inspection" }
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

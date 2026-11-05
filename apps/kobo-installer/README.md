@@ -1,9 +1,25 @@
 # Bokheim Kobo Installer
 
-This small desktop application installs the release Kobo package onto a Kobo
-Libra 2 connected as USB storage. The verified `tar.gz` package is embedded in
+This small desktop application installs the release Kobo package onto a supported
+Kobo connected as USB storage. The verified `tar.gz` package is embedded in
 the Windows executable and Linux AppImage at build time; users do not select or
 download a second payload.
+
+The Linux USB installer is built locally for releases, using the same glibc
+2.17 release SDK and ELF compatibility checks as the desktop app:
+
+```sh
+python3 apps/kobo-installer/linux/build-release.py --output /absolute/path/to/packages
+```
+
+This builds an optimized executable, embeds the committed Kobo device package,
+and produces the AppImage and its SHA-256 sidecar. It reuses the persistent
+`linux-glibc217` Cargo cache and waits for any existing Rust compilation before
+building. Tests are not run. Use `--archive /absolute/path/to/package.tar.gz`
+to embed another locally built Kobo package. `CARGO_TARGET_DIR` and
+`BOKHEIM_BUILD_CACHE` override the cache location. See
+[`../desktop-gpui/linux/README.md`](../desktop-gpui/linux/README.md) for SDK and
+AppImage tool requirements.
 
 The installer:
 
@@ -11,20 +27,35 @@ The installer:
   on Linux, then detects mounted volumes containing Kobo's `.kobo` marker directory;
 - displays the exact mount path and requires an explicit **Install Bokheim**
   click;
-- accepts package entries only below `.adds` and `Bokheim`;
+- accepts package entries only in Bokheim's own directories and menu entry;
+- identifies the model from `.kobo/version` and checks the package's supported
+  model IDs before writing files;
 - replaces individual files through temporary and backup files; and
 - verifies that the launcher, FBInk, executable, PDFium runtime, and NickelMenu entry exist
   after extraction;
-- queues the pinned NickelMenu v0.6.0 build with Bokheim direct-launch support; and
+- preserves existing NickelMenu installations and other applications' menu entries,
+  and queues the pinned NickelMenu v0.6.0 build only when NickelMenu is missing; and
 - attempts to safely eject the Kobo when installation finishes.
 
-Tapping **Bokheim** in Kobo's bottom navigation opens Bokheim immediately.
-The button uses Bokheim's logo, with gray and black versions for its normal
-and active states. The installer embeds both icons even for older app packages.
-The installer supplies a small NickelMenu extension and replaces older Bokheim
-menu configuration. Configuration errors fall back to the regular menu.
-Firmware before 4.23.15505 keeps the original menu behavior. See the
-[extension build instructions](../desktop-gpui/kobo/nickelmenu-direct/README.md).
+With a package supporting on-device updates, open **Settings → Kobo → Check
+for updates** on the reader. Bokheim downloads the latest Kobo release over
+Wi-Fi, verifies its published size and SHA-256 digest, and stages its files.
+**Restart and install** closes the application before the launcher replaces
+the program and starts it again. The packaged version must match the release
+tag. Books, settings, databases, and optional SSH tools are excluded. This
+flow keeps the existing NickelMenu installation and Kobo firmware.
+
+A complete program-file backup is saved before replacement. If installation
+is interrupted, the firmware shell restores it before the next launch. This
+recovers installation failures; it does not roll back database migrations
+after a successfully installed release. Older launchers need one USB install
+of a package with on-device update support.
+
+Open **NickelMenu** and select **Bokheim Kobo** to launch Bokheim. The installer
+adds only Bokheim's menu entry, leaving the shared button and other applications
+such as KOReader visible. Reinstalling replaces older Bokheim menu configurations
+that renamed the button or launched Bokheim directly. Existing NickelMenu plugin
+files and other applications' configurations are preserved.
 
 On the reader, **Settings → Kobo → Uninstall Bokheim** asks for confirmation,
 then removes the program and its menu entry and returns to Kobo's built-in
@@ -32,9 +63,91 @@ reader. Books and settings are kept, as are other NickelMenu configurations
 and separately installed developer SSH tools. This requires a Kobo package
 built with uninstall support; older launchers report that a reinstall is needed.
 
-NickelMenu installs when the Kobo disconnects and restarts. Firmware must be
-4.6 or later in the 4.x series. An existing unrelated firmware update is
+When NickelMenu is missing, it installs when the Kobo disconnects and restarts.
+Firmware must be 4.6 or later in the 4.x series. An existing unrelated firmware update is
 preserved and blocks installation until that update finishes.
+
+## Sleep and battery diagnostics
+
+Pressing the hardware power button sleeps Bokheim. The on-screen power menu
+still offers shutdown, restart, and return to Kobo. Automatic sleep follows
+Kobo's **Settings → Energy saving and privacy → Automatically go to sleep after**
+choice, including **Never**. Bokheim's **Settings → Kobo → Automatic sleep**
+offers **5, 10, 15, 30, 60 minutes, and Never**. Changing it updates the same
+`[PowerOptions] AutoSleepMinutes` preference in
+`/mnt/onboard/.kobo/Kobo/Kobo eReader.conf`, so it also applies when returning
+to Kobo's built-in reader. Other Kobo preferences are preserved. Changes made
+in Kobo are read when Bokheim next launches. Bokheim uses five minutes if the
+file or setting is missing or invalid.
+**Automatic power off** offers the same choices and shares Kobo's
+`[PowerOptions] AutoOffMinutes` preference. It counts inactivity while awake
+and asleep; setting sleep to **Never** does not disable automatic power off.
+Power off defaults to **Never** if its preference is missing or invalid.
+Automatic sleep and power off wait while an audiobook is playing or buffering.
+Pausing playback starts a fresh idle period using the configured time. The power
+button and sleep cover still request sleep during listening. A failed sleep attempt retries
+after one minute; interacting with the reader cancels that retry.
+
+Pausing an audiobook closes its Bluetooth audio output. Press Play to reconnect
+and continue from the confirmed position. Device sleep releases audio decoders
+and pending source loads before switching Bluetooth and Wi-Fi off. Bluetooth's
+previous power state is restored after a confirmed wake; audio stays paused.
+Automatic Wi-Fi reconnect stops after 45 seconds if it cannot connect.
+Wi-Fi status follows supplicant events, kernel link/address notifications, and
+control-socket replacement events. A stable connected or disconnected radio has
+no periodic status timer. Connection setup, scans and DHCP keep their bounded
+checks; firmware without the required event support falls back to a 30-second
+recovery check while Wi-Fi is enabled. Radio-off and sleep have no status timer.
+Automatic library network
+work waits for a connection, and repeated failed passes back off from 30 seconds
+to a maximum of 15 minutes. Reconnecting or requesting a remote refresh wakes
+the network workers immediately.
+Account maintenance and notification connections also wait while Wi-Fi is
+offline. A stuck audio helper is killed after its two-second drain deadline.
+The battery indicator shares the power manager's samples instead of running a
+separate polling timer.
+
+Resource sampling and the text-shaping benchmark are disabled during normal
+reading. To collect resource samples for a development session, launch with
+`BOKHEIM_KOBO_RESOURCE_MONITOR=1 /bin/sh /mnt/onboard/.adds/bokheim/run-monitored.sh`.
+This enables both the shell resource log and `KOBO_RUNTIME_RESOURCE` entries
+in the application log. Set `BOKHEIM_WESTERN_SHAPING_BENCHMARK=1` separately
+when comparing text-shaping paths. Both diagnostics add work and should stay
+disabled when measuring normal battery use.
+
+## Device profiles and verification
+
+The shared `kobo-profile` catalogue expands Plato's advertised supported-device
+list into 26 hardware profiles: Touch B/C, Glo, Aura, Aura H2O, Glo HD, Aura ONE and Limited
+Edition, Aura Edition 2 and v2, Aura H2O Edition 2 and v2, Clara HD, Forma and
+32GB, Nia, Libra H2O, Elipsa, Sage, Libra 2, Clara 2E, Elipsa 2E, Libra Colour,
+Clara BW, Clara Colour, and Clara BW TPV. The numeric version-marker ID takes
+precedence over product names, which several hardware revisions share. Unknown
+models and contradictory identities are rejected.
+
+Page buttons are optional: touch navigation remains available on buttonless
+models. The profile selects screen-density scaling, the touch protocol and rotation mapping, frontlight
+driver, and available brightness, warmth, auto-rotation and Bluetooth controls.
+FBInk handles framebuffer identification and display refresh.
+Bluetooth availability follows Kobo's [compatible eReader list](https://help.kobo.com/hc/en-us/articles/4406284800023-Troubleshoot-Bluetooth-pairing-on-your-Kobo-eReader).
+
+The universal package uses ARMv7 with NEON, a private glibc 2.23 runtime built
+for Linux 2.6.32, and pinned FBInk sources covering the listed models. Firmware
+libraries remain untouched. Legacy packages without a model declaration are
+accepted only on Libra 2. Releases retain the old Libra 2 asset name as an
+identical copy of the universal package so existing updaters can migrate.
+
+Profiles describe implemented support; they are not evidence that every model
+has passed physical-device testing. In particular, an old-kernel libc ABI note
+does not establish that all Rust and application syscalls work on an old kernel.
+Old devices still need kernel and performance testing. Colour displays currently
+use the application's grayscale rendering path.
+
+For startup diagnostics, run `desktop-gpui-kobo --check-device` on the reader.
+It reads the firmware and model marker, prints the detected profile, and exits
+before opening the display or application databases. Touch protocol, lighting
+and package compatibility tests run in the shared suite. Rendering and hardware
+behavior must be checked on a physical reader.
 
 Automatic eject uses `udisksctl` on Linux, `diskutil` on macOS, and volume
 control calls on Windows. If host permissions or open files prevent eject,
@@ -49,6 +162,10 @@ the Kobo after eject. Windows and macOS use the operating system's normal
 automatic mounting.
 
 ## Local development
+
+The sibling `GPUI-Fork` checkout must include the Kobo input-profile, density
+scaling changes in `crates/gpui_kobo`. Include those fork
+changes and update the pinned fork revision when preparing a source release.
 
 Set `BOKHEIM_KOBO_ARCHIVE` to a package produced by
 `apps/desktop-gpui/scripts/package-kobo.sh` and `BOKHEIM_VERSION` to the desktop
@@ -132,15 +249,18 @@ The Kobo package itself is built on a maintainer machine, not in CI. It uses
 the pinned Bootlin ARMv7 glibc toolchain and bundles its runtime alongside
 PDFium so the reader can load PDFium without replacing firmware libraries.
 The built package is committed to the repository at
-`package/Bokheim-Kobo-Libra2-armv7.tar.gz`, and the `Kobo release` workflow
-embeds whatever is committed there.
+`package/Bokheim-Kobo-armv7.tar.gz`. Build the Linux USB installer locally with
+the command above, then upload its AppImage and checksum to the version's
+release. The `Kobo release` workflow builds the Windows USB installer from the
+committed device archive; its hosted Linux job remains available as an
+alternative to local packaging.
 
 Whenever the Kobo application changes, rebuild and commit the package before
 running the workflow:
 
 ```sh
 apps/desktop-gpui/scripts/refresh-kobo-package.sh
-git add apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+git add apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz
 git commit -m "Refresh the committed Kobo package"
 ```
 

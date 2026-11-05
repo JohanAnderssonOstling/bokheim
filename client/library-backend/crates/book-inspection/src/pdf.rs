@@ -24,7 +24,7 @@ pub struct InspectedPdf {
 }
 
 /// Extracts bounded, allow-listed bibliographic metadata from the PDF info
-/// dictionary and XMP packet. First and last pages use the shared context-aware evidence rules; arbitrary XMP extensions are never promoted.
+/// dictionary and XMP packet. Opening pages use the shared context-aware evidence rules; arbitrary XMP extensions are never promoted.
 pub fn inspect_pdf(path: &Path) -> MetadataResult<InspectedPdf> {
     inspect_pdf_reader(path, File::open(path)?)
 }
@@ -40,31 +40,15 @@ pub fn inspect_pdf_pages_reader<R: Read + Seek + Send + 'static>(source_name: &P
 }
 
 fn inspect_pdf_pages_mode<R: Read + Seek + Send + 'static>(source_name: &Path, mut reader: R) -> MetadataResult<InspectedPdf> {
-    let mut inspected = super::pdf_ranges::load_edges(&mut reader, EARLY_TEXT_PAGES).and_then(|document| inspect_pdf_document(source_name, document));
+    let mut inspected = super::pdf_ranges::metadata(&mut reader).and_then(|document| inspect_pdf_document(source_name, document));
     let original_ids = inspected.as_mut().map(|i| std::mem::take(&mut i.metadata.book.identifiers)).unwrap_or_default();
     {
         // A PDFium-readable book must not lose its page evidence just because
         // the metadata-only parser cannot handle its cross-reference variant.
         let mut inspected = inspected.unwrap_or_else(|_| InspectedPdf { metadata: fallback_metadata(source_name) });
         reader.seek(SeekFrom::Start(0))?;
-        let (count, pages) = pdf_reader_core::inspect_page_text_with_count(reader, EARLY_TEXT_PAGES, crate::evidence::MAX_SECTION_BYTES)?;
-        let evidence = pages
-            .into_iter()
-            .map(|(page, text)| {
-                if page >= count.saturating_sub(1) {
-                    {
-                        use crate::evidence::*;
-                        let book: &BookRecord = &inspected.metadata;
-                        let location: &str = &format!("pdf:page:{page}:back-cover");
-                        let text: &str = &text;
-
-                        inspect_section(book, location, text)
-                    }
-                } else {
-                    crate::evidence::inspect_section(&inspected.metadata, &format!("pdf:page:{page}"), &text)
-                }
-            })
-            .collect::<Vec<_>>();
+        let (_, pages) = pdf_reader_core::inspect_page_text_with_count(reader, EARLY_TEXT_PAGES, crate::evidence::MAX_SECTION_BYTES)?;
+        let evidence = pages.into_iter().map(|(page, text)| crate::evidence::try_inspect_section(&inspected.metadata, &format!("pdf:page:{page}"), &text)).collect::<std::io::Result<Vec<_>>>()?;
         crate::evidence::apply_evidence(&mut inspected.metadata, &evidence, "pdf");
         inspected.metadata.book.identifiers.extend(original_ids);
         Ok(inspected)

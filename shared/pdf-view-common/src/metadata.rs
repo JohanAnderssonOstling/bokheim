@@ -1,17 +1,18 @@
-//! Ingestion output tied to the exact PDF bytes, independent of a renderer.
+//! Ingestion output for a book identity and its PDF byte revision, independent
+//! of a renderer.
+#[path = "metadata/transport.rs"]
+mod transport;
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PdfReaderMetadata {
     pub version: u32,
-    pub content_hash: String,
+    #[serde(rename = "content_hash")]
+    pub book_id: String,
+    #[serde(with = "transport::pages")]
     pub pages: Vec<PdfStoredPage>,
-    /// Zero-based pages containing no content or only a blank-page notice.
-    /// None denotes metadata written before page classification was available.
-    #[serde(default)]
-    pub skippable_pages: Option<Vec<usize>>,
+    /// Legacy document-wide annotations; reader rendering discovers one page at a time.
     #[serde(default)]
     pub annotations: Vec<PdfStoredAnnotation>,
-    #[serde(default)]
-    pub dependencies: Option<PdfDependencyIndex>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -23,18 +24,16 @@ pub struct PdfStoredPage {
 }
 
 impl PdfReaderMetadata {
-    pub fn valid_for(&self, content_hash: &str) -> bool {
+    pub fn valid_for(&self, book_id: &str) -> bool {
         self.version == 1
-            && self.content_hash == content_hash
-            && content_hash.len() == 64
-            && content_hash.bytes().all(|c| c.is_ascii_hexdigit())
+            && self.book_id == book_id
+            && (book_id.len() == 64 || (book_id.len() == 66 && (book_id.starts_with("01") || book_id.starts_with("02"))))
+            && book_id.bytes().all(|c| c.is_ascii_hexdigit())
             && !self.pages.is_empty()
             && self.pages.len() <= 32767
             && self.pages.iter().all(|p| p.width.is_finite() && p.height.is_finite() && p.width > 0.0 && p.height > 0.0 && matches!(p.rotation, 0 | 90 | 180 | 270))
-            && self.skippable_pages.as_ref().is_none_or(|pages| pages.windows(2).all(|pair| pair[0] < pair[1]) && pages.iter().all(|&page| page < self.pages.len()))
             && self.annotations.len() <= 16384
             && self.annotations.iter().all(|a| a.valid(self.pages.len()))
-            && self.dependencies.as_ref().is_none_or(|d| d.valid(self.pages.len()))
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 7 * 512 * 1024)
     }
 }
@@ -74,35 +73,6 @@ impl PdfStoredAnnotation {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PdfByteRange {
-    pub offset: u64,
-    pub length: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct PdfDependencyIndex {
-    pub length: u64,
-    pub startup: Vec<PdfByteRange>,
-    pub pages: Vec<Vec<PdfByteRange>>,
-}
-
-impl PdfDependencyIndex {
-    pub fn valid(&self, pages: usize) -> bool {
-        self.length > 0
-            && self.pages.len() == pages
-            && self.startup.len() + self.pages.iter().map(Vec::len).sum::<usize>() <= 100_000
-            && self.startup.iter().chain(self.pages.iter().flatten()).all(|r| r.length > 0 && r.offset.checked_add(r.length).is_some_and(|end| end <= self.length))
-    }
-}
-
-/// Runs on the document worker before PDFium touches the requested page.
-/// Implementations share their bounded byte cache with the seekable reader.
-pub trait PdfPageSource: Send + Sync {
-    fn prepare_startup(&self) -> Result<(), String>;
-    fn prepare_page(&self, page: usize) -> Result<(), String>;
-}
-
 impl PdfReaderMetadata {
     /// Keep each synchronized snapshot below the mutation envelope limit.
     pub fn bound_optional_data(&mut self) {
@@ -117,9 +87,6 @@ impl PdfReaderMetadata {
                 true
             }
         });
-        if self.dependencies.as_ref().is_some_and(|d| serde_json::to_vec(d).map_or(true, |bytes| bytes.len() > 1024 * 1024)) {
-            self.dependencies = None;
-        }
     }
 }
 
@@ -127,19 +94,19 @@ impl PdfReaderMetadata {
 mod tests {
     use super::*;
     #[test]
-    fn old_snapshots_default_optional_fields_and_large_notes_stay_syncable() {
-        let content_hash = "a".repeat(64);
+    fn large_notes_stay_syncable() {
+        let book_id = "a".repeat(64);
         let mut metadata: PdfReaderMetadata = serde_json::from_value(serde_json::json!({
-            "version":1,"content_hash":content_hash,"pages":[{"width":600,"height":800,"rotation":0}],"outline":[]
+            "version":1,"content_hash":book_id,"pages":[{"width":600,"height":800,"rotation":0}],"annotations":[]
         }))
         .unwrap();
-        assert!(metadata.valid_for(&content_hash));
+        assert!(metadata.valid_for(&book_id));
         let note = PdfStoredAnnotation { page_index: 0, index: 0, kind: PdfStoredAnnotationKind::Note, rects: vec![[0.1, 0.1, 0.2, 0.1]], color: "#abcdef".into(), text: String::new(), note: "\n".repeat(16384) };
         metadata.annotations = vec![note; 200];
-        assert!(!metadata.valid_for(&content_hash));
+        assert!(!metadata.valid_for(&book_id));
         metadata.bound_optional_data();
         assert!(!metadata.annotations.is_empty());
-        assert!(metadata.valid_for(&content_hash));
+        assert!(metadata.valid_for(&book_id));
         assert!(serde_json::to_vec(&metadata).unwrap().len() < 4 * 1024 * 1024);
     }
 }

@@ -1,8 +1,10 @@
+use ui_text::text;
+
 use ui_components::user_facing_error;
 
 use super::SyncPage;
-use crate::android_authentication::Session;
-use gpui::Context;
+use crate::android_authentication::{Request, Session, Theme};
+use gpui::{Context, Hsla};
 
 pub(super) struct AndroidAuthentication {
     _session: Session,
@@ -12,17 +14,25 @@ impl SyncPage {
     pub(super) fn open_android_authentication(&mut self, cx: &mut Context<Self>) {
         self.android_authentication = None;
         let theme = ui_components::browser_theme(cx);
-        let colors = [theme.page_bg, theme.text, theme.text_muted, theme.accent, theme.accent_text, theme.border, theme.text_accent, theme.danger, theme.accent_wash]
-            .into_iter()
-            .map(|color| {
-                let c = color.to_rgb();
-                0xff000000 | ((c.r * 255.0).round() as u32) << 16 | ((c.g * 255.0).round() as u32) << 8 | (c.b * 255.0).round() as u32
-            })
-            .collect();
-        let (session, requests) = match Session::open(colors) {
+        let argb = |color: Hsla| {
+            let c = color.to_rgb();
+            0xff000000 | ((c.r * 255.0).round() as u32) << 16 | ((c.g * 255.0).round() as u32) << 8 | (c.b * 255.0).round() as u32
+        };
+        let theme = Theme {
+            background: argb(theme.page_bg),
+            text: argb(theme.text),
+            muted: argb(theme.text_muted),
+            accent: argb(theme.accent),
+            accent_text: argb(theme.accent_text),
+            border: argb(theme.border),
+            link: argb(theme.text_accent),
+            danger: argb(theme.danger),
+            selection: argb(theme.accent_wash),
+        };
+        let (session, requests) = match Session::open(theme) {
             Ok(value) => value,
             Err(error) => {
-                self.error = Some(user_facing_error(&error, "Could not open the sign-in form. Please try again.").into());
+                self.error = Some(user_facing_error(&error, text!(account::could_not_open_the_sign_in_form_please_try_again)).into());
                 cx.notify();
                 return;
             }
@@ -30,22 +40,11 @@ impl SyncPage {
         let id = session.0;
         let backend = self.services.backend.clone();
         let task = cx.spawn(async move |page, cx| {
-            while let Ok(request) = requests.recv().await {
-                let action = request.action.as_str();
-                if action == "closed" {
-                    break;
-                }
-                let result = match action {
-                    "login" => backend.login(request.email, request.secret).await.map(|_| ()),
-                    "register" => backend.request_public_registration(request.email, request.secret).await,
-                    "verify" => backend.verify_email(request.email, request.secret).await.map(|_| ()),
-                    "resend" => backend.resend_verification(request.email).await,
-                    "request-reset" => backend.request_password_reset(request.email).await,
-                    "reset" => backend.reset_password(request.token, request.secret).await,
-                    _ => Err("Unknown authentication action".into()),
-                };
-                let signed_in = result.is_ok() && matches!(action, "login" | "verify");
-                Session::complete(id, result.err().map(|error| ui_components::authentication_error(&error, action).to_owned()));
+            while let Ok(Request::Submit(request)) = requests.recv().await {
+                let signs_in = request.signs_in();
+                let result = request.submit(&backend).await;
+                let signed_in = result.is_ok() && signs_in;
+                Session::complete(id, result.err());
                 if signed_in {
                     let _ = page.update(cx, |page, cx| page.schedule_refresh(cx));
                 }

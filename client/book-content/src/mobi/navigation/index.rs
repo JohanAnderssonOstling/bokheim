@@ -15,7 +15,8 @@ fn invalid() -> io::Error {
 }
 
 fn word(bytes: &[u8], offset: usize) -> io::Result<usize> {
-    Ok(u32::from_be_bytes(bytes.get(offset..).and_then(|tail| tail.get(..4)).ok_or_else(invalid)?.try_into().unwrap()) as usize)
+    let bytes = bytes.get(offset..).and_then(|tail| tail.first_chunk::<4>()).ok_or_else(invalid)?;
+    Ok(u32::from_be_bytes(*bytes) as usize)
 }
 
 fn integer(bytes: &mut &[u8]) -> io::Result<usize> {
@@ -63,7 +64,7 @@ fn tags(control_count: usize, definitions: &[[u8; 4]], mut bytes: &[u8]) -> io::
                 decoded.push(integer(&mut bytes)?);
             }
         } else {
-            let length = length.unwrap();
+            let length = length.ok_or_else(invalid)?;
             let mut encoded = bytes.get(..length).ok_or_else(invalid)?;
             bytes = &bytes[length..];
             while !encoded.is_empty() {
@@ -100,7 +101,7 @@ pub(crate) async fn read(book: &mut MobiContainer) -> io::Result<Option<Vec<Entr
     if control_count > 32 || tag_length < 12 || (tag_length - 12) % 4 != 0 {
         return Err(invalid());
     }
-    let definitions = tagx.get(12..tag_length).ok_or_else(invalid)?.chunks_exact(4).map(|bytes| bytes.try_into().unwrap()).collect::<Vec<[u8; 4]>>();
+    let definitions = tagx.get(12..tag_length).ok_or_else(invalid)?.as_chunks::<4>().0.to_vec();
     if definitions.len() > 256 {
         return Err(invalid());
     }
@@ -137,7 +138,7 @@ pub(crate) async fn read(book: &mut MobiContainer) -> io::Result<Option<Vec<Entr
         if count > 8192 || entries.len() + count > 8192 || bytes.get(table..).and_then(|tail| tail.get(..4)) != Some(b"IDXT") {
             return Err(invalid());
         }
-        let offsets = bytes.get(table + 4..table + 4 + count * 2).ok_or_else(invalid)?.chunks_exact(2).map(|bytes| u16::from_be_bytes(bytes.try_into().unwrap()) as usize).chain(std::iter::once(table)).collect::<Vec<_>>();
+        let offsets = bytes.get(table + 4..table + 4 + count * 2).ok_or_else(invalid)?.as_chunks::<2>().0.iter().map(|bytes| u16::from_be_bytes(*bytes) as usize).chain(std::iter::once(table)).collect::<Vec<_>>();
         for bounds in offsets.windows(2) {
             let entry = bytes.get(bounds[0]..bounds[1]).ok_or_else(invalid)?;
             let name_length = usize::from(*entry.first().ok_or_else(invalid)?);

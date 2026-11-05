@@ -11,6 +11,7 @@ pub(super) const MAX_CACHED_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) struct BrowseResults {
     owner: Uuid,
+    pub(super) text_visibility: Option<i64>,
     pub(super) entries: VecDeque<Entry>,
     #[cfg(test)]
     pub(super) preparations: usize,
@@ -25,6 +26,7 @@ impl Default for BrowseResults {
     fn default() -> Self {
         Self {
             owner: Uuid::new_v4(),
+            text_visibility: None,
             entries: VecDeque::new(),
             #[cfg(test)]
             preparations: 0,
@@ -48,15 +50,15 @@ impl BrowseResults {
         Some(result)
     }
 
+    pub(super) fn get_revision(&mut self, revision: &str) -> Option<Arc<BrowseResult>> {
+        let key = self.entries.iter().find(|entry| entry.result.revision == revision)?.key.clone();
+        self.get(&key)
+    }
+
     pub(super) fn insert(&mut self, key: ResultKey, result: Arc<BrowseResult>) {
         #[cfg(test)]
         {
             self.preparations += 1;
-        }
-        // An oversized result remains usable for this read. Its deterministic
-        // revision allows later pages to rebuild it without retaining it.
-        if result.estimated_bytes() > MAX_CACHED_BYTES {
-            return;
         }
         self.entries.push_back(Entry { key, result });
         self.trim();
@@ -64,7 +66,8 @@ impl BrowseResults {
 
     pub(super) fn trim(&mut self) {
         // Read sizes again because preparing lazy section orders can grow an entry.
-        while self.entries.len() > MAX_RESULTS || self.entries.iter().map(|entry| entry.result.estimated_bytes()).sum::<usize>() > MAX_CACHED_BYTES {
+        // Retain one oversized snapshot so its later match pages remain usable.
+        while self.entries.len() > 1 && (self.entries.len() > MAX_RESULTS || self.entries.iter().map(|entry| entry.result.estimated_bytes()).sum::<usize>() > MAX_CACHED_BYTES) {
             self.entries.pop_front();
         }
     }

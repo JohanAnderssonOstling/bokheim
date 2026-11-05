@@ -51,32 +51,27 @@ def aspect_distance(size):
 def rank_key(candidate, merged=False):
     """Lower keys rank first; only eligible, reviewed covers can be preferred.
 
-    Balance leads: the weakest of composition, typography and readability must
-    work before decorative strengths can help. Proportions then distinguish
-    otherwise comparable designs. Artwork-context guesses are never used.
-    Explicit user choices and merged
-    work scope are preserved, without promoting an ineligible cover.
+    Correct work scope and an actual cover come before page scans or unrelated
+    product imagery. Within actual covers, the weakest of composition,
+    typography and readability leads. For equal design ratings, prefer more
+    image pixels, then cover proportions. Metadata confidence and edition
+    language are not design ratings.
     """
     review = candidate.get('design_review')
-    band = design_band(review)
+    design_band(review)  # Validate a persisted assessment before using it.
     eligible = candidate.get('eligible', False)
-    if not eligible or band == 'unreviewed':
-        return (1, not eligible, 0, 0, 0, 0, 0, aspect_distance(candidate['size']))
-    core = [review[field] for field in CORE_FIELDS]
+    kind = candidate.get('image_kind', 'cover')
+    fallback = {'page_scan': 1, 'artifact': 2, 'unavailable': 3}.get(kind, 0)
+    core = [review[field] for field in CORE_FIELDS] if review else [0, 0, 0]
+    width, height = candidate['size']
     return (
-        0,
+        not eligible,
         bool(merged and candidate.get('single_volume', False)),
+        fallback,
+        review is None,
         not candidate.get('user_preferred', False),
         -min(core),
         -sum(core),
-        0,
-        0,
+        -(width * height),
         aspect_distance(candidate['size']),
     )
-
-
-def preferred_design(candidates, merged=False, include_fallbacks=False):
-    acceptable = {'strong', 'fallback'} if include_fallbacks else {'strong'}
-    reviewed = [candidate for candidate in candidates
-                if candidate.get('eligible') and design_band(candidate.get('design_review')) in acceptable]
-    return min(reviewed, key=lambda candidate: rank_key(candidate, merged)) if reviewed else None

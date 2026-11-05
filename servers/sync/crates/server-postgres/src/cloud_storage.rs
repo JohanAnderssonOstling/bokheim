@@ -1,8 +1,7 @@
 //! Account-wide asset retention, independent of library metadata lifecycle.
 
-use crate::PostgresDatabase;
 use crate::{assets, PostgresSyncRepository, SyncError};
-use sync_common::{LibraryId, ContentHash, api::libraries::LibraryCloudStorage};
+use sync_common::{LibraryId, BookId, api::libraries::LibraryCloudStorage};
 
 fn internal(error: impl std::fmt::Display) -> SyncError { SyncError::Internal(error.to_string()) }
 
@@ -26,7 +25,7 @@ impl PostgresSyncRepository {
             sqlx::query(include_str!("sql/cloud_storage/lock_account.sql")).bind(user).execute(&mut *tx).await.map_err(internal)?;
             if !enabled { sqlx::query(include_str!("sql/cloud_storage/delete_claims.sql")).bind(id.to_string()).execute(&mut *tx).await.map_err(internal)?; }
             let hashes: Vec<Vec<u8>> = sqlx::query_scalar(include_str!("sql/cloud_storage/references.sql")).bind(id.to_string()).fetch_all(&mut *tx).await.map_err(internal)?;
-            assets::apply_lifecycle_reference_deltas(&mut tx, user, hashes.into_iter().map(|hash| ContentHash::try_from(hash.as_slice()).map(|hash| (hash, if enabled { 1 } else { -1 }))).collect::<Result<Vec<_>, _>>().map_err(internal)?).await.map_err(internal)?;
+            assets::apply_lifecycle_reference_deltas(&mut tx, user, hashes.into_iter().map(|hash| BookId::try_from(hash.as_slice()).map(|hash| (hash, if enabled { 1 } else { -1 }))).collect::<Result<Vec<_>, _>>().map_err(internal)?).await.map_err(internal)?;
             sqlx::query(include_str!("sql/cloud_storage/update.sql")).bind(id.to_string()).bind(user).bind(enabled).execute(&mut *tx).await.map_err(internal)?;
             if !enabled {
                 sqlx::query(include_str!("sql/cloud_storage/release_unreferenced.sql")).bind(user).execute(&mut *tx).await.map_err(internal)?;
@@ -34,6 +33,7 @@ impl PostgresSyncRepository {
             }
         }
         tx.commit().await.map_err(internal)?;
+        if !enabled { self.cleanup.notify_one(); }
         Ok(LibraryCloudStorage { library_id: *id, enabled })
     }
 }

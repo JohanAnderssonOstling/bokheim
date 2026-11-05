@@ -36,7 +36,7 @@ impl MetadataService {
     }
 
     pub(crate) async fn resolve_isbn_cover_at(&self, isbns: &[String], origin: &str) -> Result<Option<metadata_contract::books::CoverSource>, MetadataError> {
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).user_agent("Bokheim/0.1 (cover enrichment)").build().map_err(error)?;
+        let client = http_response::client_builder().timeout(Duration::from_secs(30)).user_agent("Bokheim/0.1 (cover enrichment)").build().map_err(error)?;
         for isbn in isbns {
             if book_model::canonical_isbn(isbn).as_deref() != Some(isbn.as_str()) {
                 return Err(MetadataError("invalid cover ISBN".into()));
@@ -88,7 +88,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = snapshot_from(dir.path(), &[], &[], &[]);
         let answers = dir.path().join("answers.sqlite");
-        crate::build_answers(&input, None, None, None, &answers).unwrap();
+        crate::build_answers_with_ratings(&input, None, None, None, None, &answers).unwrap();
         let service = MetadataService::open(&answers, &dir.path().join("demand.sqlite")).unwrap();
         service.save_cover("isbn-9780306406157", b"retained cover".to_vec()).unwrap();
         let _download = OPEN_LIBRARY.lock().await;

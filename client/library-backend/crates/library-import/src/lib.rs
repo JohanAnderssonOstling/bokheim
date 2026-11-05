@@ -3,26 +3,39 @@
 //! selected folders. Every route validates the destination, inspects the
 //! book, publishes its bytes, and commits the addition the same way.
 //!
-//! The session brackets each import (see `library-backend`) so contents
-//! notifications wait for its one completion announcement.
+//! The operation scheduler (see `library-backend`) batches contents
+//! notifications until the admitted import completes.
 
 use std::sync::Arc;
 
-use library_database::Database;
-use library_files::AssetStore;
-use library_placement::LibraryPlacement;
-use library_runtime::events::LibraryEventRouter;
+use library_placement::LibraryState;
+use library_services::events::LibraryEventRouter;
 
 mod catalog;
-mod import;
-pub mod import_status;
-pub mod import_workflow;
+mod completion;
 #[cfg(not(target_arch = "wasm32"))]
-mod dropped_paths;
+mod filesystem_import;
+mod import;
 #[cfg(not(target_arch = "wasm32"))]
 mod import_native;
+mod import_status;
+#[cfg(not(target_arch = "wasm32"))]
+mod native_move;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_move::NativeMoveResult;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod foliate;
+#[cfg(not(target_arch = "wasm32"))]
+mod reader_batch;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod reader_import;
+#[cfg(not(target_arch = "wasm32"))]
+mod reader_transfer;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod readest;
 #[cfg(target_arch = "wasm32")]
 mod selected;
+mod transfer;
 
 pub use import_status::{ImportFailure, ImportFailureKind};
 
@@ -31,15 +44,26 @@ pub use client_platform_native::filesystem::{ImportReader as DirectoryImportRead
 #[cfg(target_arch = "wasm32")]
 pub use client_platform_web::transport::import_io::{ImportReader as DirectoryImportReader, ImportReaderFuture as DirectoryImportReaderFuture, ImportSource};
 
-pub struct LibraryImport {
-    pub database: Arc<Database>,
-    pub assets: AssetStore,
-    pub cpu: Arc<dyn cpu_host::CpuHost>,
-    pub events: LibraryEventRouter,
-    pub placement: Arc<LibraryPlacement>,
+pub struct LibraryImport<'a> {
+    storage: &'a LibraryState,
+    cpu: Arc<dyn cpu_host::CpuHost>,
+    events: LibraryEventRouter,
     /// The library folder dropped files are placed into.
     #[cfg(not(target_arch = "wasm32"))]
-    pub root: String,
+    root: std::path::PathBuf,
+}
+
+impl<'a> LibraryImport<'a> {
+    /// Borrow the caller's storage handles for the duration of the import.
+    pub fn new(storage: &'a LibraryState, cpu: Arc<dyn cpu_host::CpuHost>) -> Self {
+        Self {
+            storage,
+            events: storage.events().clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            root: storage.assets().native_library_root().to_path_buf(),
+            cpu,
+        }
+    }
 }
 
 /// A selected directory tree whose files can be opened one at a time while
@@ -59,6 +83,6 @@ pub struct DirectoryImportFile {
 /// The folders created for a selected tree, by path, before any file is opened.
 #[cfg(target_arch = "wasm32")]
 pub(crate) struct PreparedDirectoryImport {
-    pub(crate) directories: Vec<(Vec<String>, sync_common::DirId)>,
+    pub(crate) directories: std::collections::HashMap<Vec<String>, sync_common::DirId>,
     pub(crate) failures: Vec<ImportFailure>,
 }

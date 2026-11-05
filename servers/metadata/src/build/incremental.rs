@@ -1,6 +1,6 @@
 //! Immutable publication with bounded updates over the same imported snapshot.
 use super::{batch::WorkEvidenceCache, *};
-use rusqlite::{params_from_iter, Row};
+use rusqlite::{Row, params_from_iter};
 use std::cmp::Ordering as KeyOrder;
 
 // Bump when the stored resolution, candidate or queue rules change. Server-only
@@ -166,9 +166,6 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
     };
     let compatible = state.as_ref().is_some_and(|(version, identity, _, _)| *version == RECIPE_VERSION && serde_json::from_str::<InputIdentity>(identity).ok().as_ref() == Some(&inputs));
     if !compatible {
-        if state.as_ref().is_some_and(|(version, identity, _, _)| *version == 2 && serde_json::from_str::<InputIdentity>(identity).ok().as_ref() == Some(&inputs)) {
-            return super::reclassify::publish_reclassification(snapshot, providers, demand, descriptions, ratings, previous, output);
-        }
         tracing::info!("incremental base is incompatible; building a fresh snapshot");
         return build_answers_with_ratings(snapshot, providers, demand, descriptions, ratings, output);
     }

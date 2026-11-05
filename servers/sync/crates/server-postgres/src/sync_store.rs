@@ -1,31 +1,48 @@
-use std::collections::HashSet;
-use sync_common::StateKey;
 use crate::sync::LibraryNameOutcome;
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::StateAddress;
+use sync_common::StateKey;
 use sync_common::api::libraries::{LibraryNameRequest, LibrarySummary};
-use sync_common::{ConflictRank, ContentHash, LibraryId, LibraryRevision, MAX_PULL_BATCH_BYTES, MAX_PULL_CHANGES, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, StateDelivery, SyncCursor, SyncGeneration, UnixMillis, VersionKey, OpaquePublication};
+use sync_common::{
+    BookId, ConflictRank, LibraryId, LibraryRevision, MAX_PULL_BATCH_BYTES, MutationRejection, MutationRejectionReason, OpaquePublication, ReplicaId, ReplicaSeq, STATE_DELIVERY_OVERHEAD_BYTES, StateDelivery, SyncCursor, SyncGeneration,
+    UnixMillis, VersionKey,
+};
 
 const FETCH_LIFECYCLE_PAGE_SQL: &str = include_str!("sql/sync/fetch_lifecycle_page.sql");
 const FETCH_FIELD_PAGE_SQL: &str = include_str!("sql/sync/fetch_field_page.sql");
 
 pub(super) async fn list_libraries(pool: &PgPool, user_id: &str) -> Result<Vec<LibrarySummary>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String, String)>(include_str!("sql/sync/list_libraries.sql")).bind(user_id).fetch_all(pool).await?;
-    rows.into_iter().map(|(id, name)| Ok(LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name })).collect()
+    let rows = sqlx::query_as::<_, (String, String, String)>(include_str!("sql/sync/list_libraries.sql")).bind(user_id).fetch_all(pool).await?;
+    rows.into_iter().map(|(id, name, storage)| Ok(LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name, storage: serde_json::from_str(&storage).map_err(decode_err)? })).collect()
 }
 
 pub(super) async fn create_library(pool: &PgPool, user_id: &str, request: &LibraryNameRequest) -> Result<Option<LibraryNameOutcome>, sqlx::Error> {
     let library_id = request.library_id.to_string();
-    let row = sqlx::query_as::<_, (String, String, bool)>(include_str!("sql/sync/create_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
-    row.map(|(id, name, changed)| Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name }, changed })).transpose()
+    let storage = serde_json::to_string(&request.storage).map_err(decode_err)?;
+    let row = sqlx::query_as::<_, (String, String, String, bool)>(include_str!("sql/sync/create_library.sql"))
+        .bind(library_id)
+        .bind(user_id)
+        .bind(&request.library_name)
+        .bind(storage)
+        .bind(request.storage.uses_bokheim_assets())
+        .fetch_optional(pool)
+        .await?;
+    row.map(|(id, name, storage, changed)| {
+        Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name, storage: serde_json::from_str(&storage).map_err(decode_err)? }, changed })
+    })
+    .transpose()
 }
 
 pub(super) async fn rename_library(pool: &PgPool, user_id: &str, request: &LibraryNameRequest) -> Result<Option<LibraryNameOutcome>, sqlx::Error> {
     let library_id = request.library_id.to_string();
-    let row = sqlx::query_as::<_, (String, String, bool)>(include_str!("sql/sync/rename_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
-    row.map(|(id, name, changed)| Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name }, changed })).transpose()
+    let row = sqlx::query_as::<_, (String, String, String, bool)>(include_str!("sql/sync/rename_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
+    row.map(|(id, name, storage, changed)| {
+        Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name, storage: serde_json::from_str(&storage).map_err(decode_err)? }, changed })
+    })
+    .transpose()
 }
 
 pub(super) async fn owns_library(pool: &PgPool, user_id: &str, library_id: &LibraryId) -> Result<bool, sqlx::Error> {
@@ -61,7 +78,7 @@ pub(super) fn storage_rejection(change: &OpaquePublication, server_now_ms: u64) 
 
 #[derive(Debug)]
 struct StoredLifecycleReference {
-    content_hash: Option<Vec<u8>>,
+    book_id: Option<Vec<u8>>,
     changed_at: i64,
     version_rank: i16,
     replica_id: String,
@@ -70,7 +87,7 @@ struct StoredLifecycleReference {
 
 fn decode_lifecycle_reference(row: PgRow) -> Result<StoredLifecycleReference, sqlx::Error> {
     Ok(StoredLifecycleReference {
-        content_hash: row.try_get("content_hash").map_err(decode_err)?,
+        book_id: row.try_get("content_hash").map_err(decode_err)?,
         changed_at: row.try_get("changed_at").map_err(decode_err)?,
         version_rank: row.try_get("version_rank").map_err(decode_err)?,
         replica_id: row.try_get("replica_id").map_err(decode_err)?,
@@ -90,7 +107,7 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
         "DELETE FROM sync_state field USING sync_state lifecycle
          WHERE lifecycle.library_id=$1 AND lifecycle.kind='book_lifecycle' AND lifecycle.entity_subkey=''
            AND lifecycle.entity_key=ANY($2) AND lifecycle.version_rank=2
-           AND field.library_id=lifecycle.library_id AND field.kind<>'book_lifecycle' AND field.content_hash=lifecycle.entity_key"
+           AND field.library_id=lifecycle.library_id AND field.kind<>'book_lifecycle' AND field.content_hash=lifecycle.entity_key",
     )
     .bind(library_id.to_string())
     .bind(lifecycles.iter().map(|c| c.state.value.address.entity_key.as_bytes().to_vec()).collect::<Vec<_>>())
@@ -107,7 +124,7 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
              FROM sync_state lifecycle
              WHERE lifecycle.library_id=$1 AND lifecycle.kind='book_lifecycle' AND lifecycle.entity_subkey=''
                AND lifecycle.entity_key=ANY($2) AND lifecycle.version_rank<>2
-               AND field.library_id=lifecycle.library_id AND field.kind<>'book_lifecycle' AND field.content_hash=lifecycle.entity_key"
+               AND field.library_id=lifecycle.library_id AND field.kind<>'book_lifecycle' AND field.content_hash=lifecycle.entity_key",
         )
         .bind(library_id.to_string())
         .bind(&purged)
@@ -129,7 +146,7 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
             continue;
         }
         let owner = change.state.value.book;
-        if owner.as_ref().is_some_and(|hash| !existing.contains(hash.as_bytes().as_slice())) {
+        if owner.as_ref().is_some_and(|hash| !existing.contains(hash.as_bytes())) {
             let failed_creation = lifecycles.iter().filter(|c| c.state.value.address.entity_key.book() == owner).find_map(|c| result.rejected.iter().find(|r| r.publisher_seq == c.publisher_seq).map(|r| r.reason.clone()));
             if let Some(reason) = failed_creation {
                 result.rejected.push(MutationRejection { publisher_seq: change.publisher_seq, reason });
@@ -147,7 +164,6 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
     result.accepted = changes.iter().filter(|c| accepted.contains(&c.publisher_seq)).map(|c| c.publisher_seq).collect();
     Ok(result)
 }
-
 
 /// Stores every synchronized kind as an opaque row in the shared table.
 async fn insert_admitted_changes(tx: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId, _replica_id: &ReplicaId, changes: &[OpaquePublication]) -> Result<InsertChangesResult, sqlx::Error> {
@@ -198,9 +214,9 @@ async fn insert_admitted_changes(tx: &mut Transaction<'_, Postgres>, user_id: &s
         }
         // A lifecycle holds its book's bytes unless it is a purge.
         let held = change.state.value.book.filter(|_| change.state.version.conflict_rank != ConflictRank::Purge);
-        if let Some(hash) = existing.as_ref().filter(|stored| stored.version_rank != i16::from(u8::from(ConflictRank::Purge))).and_then(|stored| stored.content_hash.as_ref()) {
-            lifecycle_deltas.push((ContentHash::try_from(hash.as_slice()).map_err(decode_err)?, -1));
-            if !held.is_some_and(|next| next.as_bytes().as_slice() == hash) {
+        if let Some(hash) = existing.as_ref().filter(|stored| stored.version_rank != i16::from(u8::from(ConflictRank::Purge))).and_then(|stored| stored.book_id.as_ref()) {
+            lifecycle_deltas.push((BookId::try_from(hash.as_slice()).map_err(decode_err)?, -1));
+            if !held.is_some_and(|next| next.as_bytes() == hash) {
                 sqlx::query(include_str!("sql/cloud_storage/delete_claim.sql")).bind(library_id.to_string()).bind(hash).execute(&mut **tx).await?;
             }
         }
@@ -290,16 +306,17 @@ fn decode_change(row: &PgRow) -> Result<StateDelivery, FetchChangesError> {
     let replica_id = ReplicaId::parse_str(&row.try_get::<String, _>("replica_id")?).map_err(|_| corrupt("invalid replica identity"))?;
     let replica_seq = ReplicaSeq::new(u64::try_from(row.try_get::<i64, _>("replica_seq")?).map_err(|_| corrupt("negative replica sequence"))?).map_err(|_| corrupt("invalid replica sequence"))?;
     let revision = LibraryRevision::new(u64::try_from(raw).map_err(|_| corrupt("negative library revision"))?).map_err(|_| corrupt("invalid library revision"))?;
-    let book = row.try_get::<Option<Vec<u8>>, _>("content_hash")?.map(|hash| ContentHash::try_from(hash.as_slice()).map_err(|_| corrupt("invalid book hash"))).transpose()?;
+    let book = row.try_get::<Option<Vec<u8>>, _>("content_hash")?.map(|hash| BookId::try_from(hash.as_slice()).map_err(|_| corrupt("invalid book hash"))).transpose()?;
     let conflict_rank = u8::try_from(row.try_get::<i16, _>("version_rank")?).ok().and_then(|rank| ConflictRank::try_from(rank).ok()).ok_or_else(|| corrupt("invalid conflict rank"))?;
     let version = VersionKey::new(changed_at, conflict_rank, replica_id, replica_seq);
     let value = sync_common::OpaqueStateEntry {
         address: StateAddress {
             kind: row.try_get("kind")?,
-            entity_key: StateKey::from_storage(&row.try_get::<String,_>("kind")?, &row.try_get::<Vec<u8>,_>("entity_key")?).map_err(|_| corrupt("invalid register key"))?,
+            entity_key: StateKey::from_storage(&row.try_get::<String, _>("kind")?, &row.try_get::<Vec<u8>, _>("entity_key")?).map_err(|_| corrupt("invalid register key"))?,
             entity_subkey: row.try_get("entity_subkey")?,
         },
-        bytes: row.try_get("value")?, book,
+        bytes: row.try_get("value")?,
+        book,
     };
     Ok(StateDelivery { state: sync_common::Versioned { value, version }, revision })
 }
@@ -311,14 +328,23 @@ fn decode_change(row: &PgRow) -> Result<StateDelivery, FetchChangesError> {
 fn append_page_row(changes: &mut Vec<StateDelivery>, bytes_left: &mut usize, row: &PgRow) -> Result<bool, FetchChangesError> {
     let bytes: i64 = row.try_get("row_bytes")?;
     let bytes = usize::try_from(bytes).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: row.get("server_seq"), reason: "invalid state byte length" })?;
-    if changes.len() == MAX_PULL_CHANGES || (!changes.is_empty() && bytes > *bytes_left) { return Ok(false); }
+    if !changes.is_empty() && bytes > *bytes_left {
+        return Ok(false);
+    }
     // Leave space for up to 1,000 push rejections and the outer envelope.
-    if bytes > sync_common::transport::MAX_DECODED_RESPONSE_BYTES - 512 * 1024 {
+    if bytes > MAX_PULL_BATCH_BYTES {
         return Err(FetchChangesError::CorruptStoredEvent { revision: row.get("server_seq"), reason: "stored cell exceeds the hard response limit" });
     }
     changes.push(decode_change(row)?);
     *bytes_left = bytes_left.saturating_sub(bytes);
     Ok(true)
+}
+
+// Every candidate charges at least the shared per-delivery allowance. This
+// bounds SQL work by the byte budget, with lookahead to detect another page;
+// it never cuts off rows that could fit in that budget.
+fn pull_candidate_row_limit(bytes_left: usize) -> i64 {
+    (bytes_left / STATE_DELIVERY_OVERHEAD_BYTES + 2) as i64
 }
 
 async fn fetch_page(connection: &mut PgConnection, library: &LibraryId, since: SyncCursor, head: i64, generation: SyncGeneration) -> Result<FetchChangesPage, FetchChangesError> {
@@ -328,7 +354,16 @@ async fn fetch_page(connection: &mut PgConnection, library: &LibraryId, since: S
     next_cursor.generation = Some(generation);
     let lifecycle_since = revision(since.lifecycle_revision);
     if lifecycle_since < head {
-        let rows = sqlx::query(FETCH_LIFECYCLE_PAGE_SQL).bind(library.to_string()).bind(lifecycle_since).bind(head).bind(MAX_PULL_CHANGES as i64 + 1).bind(bytes_left as i64).bind(true).fetch_all(&mut *connection).await?;
+        let rows = sqlx::query(FETCH_LIFECYCLE_PAGE_SQL)
+            .bind(library.to_string())
+            .bind(lifecycle_since)
+            .bind(head)
+            .bind(pull_candidate_row_limit(bytes_left))
+            .bind(bytes_left as i64)
+            .bind(true)
+            .bind(STATE_DELIVERY_OVERHEAD_BYTES as i64)
+            .fetch_all(&mut *connection)
+            .await?;
         for row in &rows {
             if !append_page_row(&mut changes, &mut bytes_left, row)? {
                 next_cursor.lifecycle_revision = changes.last().map(|change| change.revision);
@@ -340,9 +375,16 @@ async fn fetch_page(connection: &mut PgConnection, library: &LibraryId, since: S
     next_cursor.lifecycle_revision = protocol_revision(head)?;
     let field_since = revision(since.field_revision);
     if field_since < head {
-        let remaining = MAX_PULL_CHANGES - changes.len();
-        let query_bytes = if remaining == 0 { 0 } else { bytes_left };
-        let rows = sqlx::query(FETCH_FIELD_PAGE_SQL).bind(library.to_string()).bind(field_since).bind(head).bind(remaining as i64 + 1).bind(query_bytes as i64).bind(changes.is_empty()).fetch_all(&mut *connection).await?;
+        let rows = sqlx::query(FETCH_FIELD_PAGE_SQL)
+            .bind(library.to_string())
+            .bind(field_since)
+            .bind(head)
+            .bind(pull_candidate_row_limit(bytes_left))
+            .bind(bytes_left as i64)
+            .bind(changes.is_empty())
+            .bind(STATE_DELIVERY_OVERHEAD_BYTES as i64)
+            .fetch_all(&mut *connection)
+            .await?;
         for row in &rows {
             if !append_page_row(&mut changes, &mut bytes_left, row)? {
                 // A lifecycle-only non-final page ends at its actual last

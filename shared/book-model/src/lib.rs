@@ -1,27 +1,35 @@
 //! Bibliographic values shared by local-library metadata.
 
 mod annotations;
+pub use reading::PUBLICATION_CFI_PREFIX;
 mod audiobook;
-mod book_format;
+pub mod book_format;
 mod canonical;
+mod chapter_read;
 mod credits;
 mod identifier;
 mod language;
 mod marc;
 mod names;
 mod reading;
+pub mod record_transport;
 mod search_text;
+mod text_search;
+pub use text_search::{BookTextCheckpoint, BookTextIndex, BookTextLocation, BookTextMatch, BookTextPart, BookTextTarget};
 mod subject;
 mod titles;
 mod toc_target;
+pub mod toc_transport;
+pub use toc_target::{cbz_toc_page, cbz_toc_target};
 mod validation;
 mod year;
 
-pub use annotations::{Annotation, AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, EXTERNAL_PDF_ANNOTATION_ID_PREFIX};
+pub use annotations::{parse_annotation_color, Annotation, AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, RecurringScope, BOOKMARK_ID_PREFIX, EXTERNAL_PDF_ANNOTATION_ID_PREFIX};
 pub use audiobook::{AudiobookChapter, ChapterOrigin};
-pub use book_format::BookFormat;
+pub use book_format::{BookFormat, BookKind};
 pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid, from_content_candidate, from_text};
-pub use content_address::ContentHash;
+pub use chapter_read::ChapterReadStatus;
+pub use content_address::BookId;
 pub use credits::{agent_id_from_migration_seed, tracks_match_archive, AgentId, AudiobookTrack, AuthorId, BookDetails, BookMetadata, BookMetadataError, BookRecord, BookTocDocument, BookTocEntry, Contributor, ContributorId};
 pub use identifier::{from_metadata_value, push_isbn, Identifier, IdentifierError, Scheme, Scope};
 pub use language::{LanguageTag, LanguageTagError};
@@ -38,3 +46,6 @@ pub use year::unique_book_year;
 
 /// A non-negative Unix timestamp measured in milliseconds.
 pub type UnixMillis = u64;
+
+mod lcc;
+pub use lcc::{parse_lcc_prefix, LccPrefix};

@@ -1,9 +1,11 @@
 //! Shared review rules for filesystem roots and provider-backed directory trees.
+use ui_text::text;
+
 use gpui::SelectedDirectory;
 use library_backend::BookFormat;
 
 fn eligible(path: &[String]) -> bool {
-    !path.iter().any(|part| part.starts_with('.')) && path.last().and_then(|name| std::path::Path::new(name).extension()).and_then(|ext| ext.to_str()).and_then(BookFormat::from_import_extension).is_some()
+    !path.iter().any(|part| part.starts_with('.')) && path.last().and_then(|name| BookFormat::from_file_name(name)).is_some()
 }
 
 pub(super) fn retain_eligible_files(directory: &mut SelectedDirectory) {
@@ -32,12 +34,13 @@ pub(super) fn estimate_selected_files(directories: &[SelectedDirectory]) -> (u64
 
 pub(super) fn estimate_label((books, bytes, unavailable): (u64, u64, u64)) -> String {
     if unavailable > 0 && bytes == 0 {
-        return format!("{books} eligible books · size unavailable");
+        return format!(text!(browse::eligible_books_size_unavailable), books = books);
     }
     format!(
-        "{books} eligible books · {}{}{}",
-        if unavailable > 0 { "at least " } else { "estimated " },
+        text!(browse::eligible_books),
+        if unavailable > 0 { text!(browse::at_least) } else { text!(browse::estimated) },
         crate::services::format_storage_bytes(bytes),
-        if unavailable > 0 { format!(" · {unavailable} entries could not be checked") } else { String::new() }
+        if unavailable > 0 { format!(text!(browse::entries_could_not_be_checked), unavailable = unavailable) } else { String::new() },
+        books = books
     )
 }

@@ -1,4 +1,4 @@
--- name: count_all_books?
+-- name: count_all_books ->
 -- Counts only books with a live placement, matching what the carousels display.
 SELECT COUNT(*) FROM book
 WHERE deleted_at IS NULL

@@ -28,8 +28,7 @@ pub(crate) fn sync_error(error: server_postgres::SyncError) -> StatusCode {
         server_postgres::SyncError::LibraryOwnershipConflict => StatusCode::CONFLICT,
         server_postgres::SyncError::CursorAhead | server_postgres::SyncError::HistoryMismatch => StatusCode::GONE,
         server_postgres::SyncError::UpgradeRequired => StatusCode::UPGRADE_REQUIRED,
-        server_postgres::SyncError::InvalidLibraryName | server_postgres::SyncError::InvalidOpdsFeed => StatusCode::BAD_REQUEST,
-        server_postgres::SyncError::OpdsFeedConflict => StatusCode::CONFLICT,
+        server_postgres::SyncError::InvalidLibraryName => StatusCode::BAD_REQUEST,
         server_postgres::SyncError::AmbiguousMutationIdentity => StatusCode::BAD_REQUEST,
         server_postgres::SyncError::TooManyMutations => StatusCode::PAYLOAD_TOO_LARGE,
         server_postgres::SyncError::Internal(reason) => {

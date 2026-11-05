@@ -11,7 +11,7 @@ pub fn standard_title_placeholder(value: &str) -> bool {
     let lower = value.trim().to_ascii_lowercase();
     let label = lower.split_whitespace().collect::<Vec<_>>().join(" ");
     let label = label.replace(['-', '_'], " ");
-    let document_file = [".pdf", ".doc", ".docx", ".epub", ".mobi", ".azw", ".azw3", ".m4b", ".rtf", ".odt", ".indd", ".qxd", ".p65"]
+    let document_file = [".fb2.zip", ".fb2", ".fbz", ".cbz", ".pdf", ".doc", ".docx", ".epub", ".mobi", ".azw", ".azw3", ".m4b", ".rtf", ".odt", ".indd", ".qxd", ".p65"]
         .iter()
         .any(|extension| lower.ends_with(extension) || lower.split_once(':').is_some_and(|(name, _)| name.ends_with(extension)));
     let address = lower.trim_matches(['<', '>', '(', ')', '[', ']']);
@@ -62,7 +62,7 @@ pub(crate) fn contains_long_identifier(value: &str) -> bool {
 pub fn unusable_title(value: &str) -> bool {
     let value = value.trim();
     let lower = value.to_ascii_lowercase();
-    let stem = [".pdf", ".epub", ".mobi", ".azw3", ".m4b"].iter().find_map(|extension| lower.strip_suffix(extension)).unwrap_or(&lower);
+    let stem = [".fb2.zip", ".fb2", ".fbz", ".cbz", ".pdf", ".epub", ".mobi", ".azw3", ".m4b"].iter().find_map(|extension| lower.strip_suffix(extension)).unwrap_or(&lower);
     let number = ["urn:isbn:", "isbn-13:", "isbn-10:", "isbn"].iter().find_map(|prefix| stem.trim().strip_prefix(prefix)).unwrap_or(stem).trim_start_matches([':', ' ', '-']);
     let compact = number.replace([' ', '-'], "");
     let numeric_identifier = compact.len() >= 8 && compact.bytes().all(|c| c.is_ascii_digit() || c == b'x');

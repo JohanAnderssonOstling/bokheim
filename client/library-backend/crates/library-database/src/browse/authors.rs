@@ -34,16 +34,10 @@ pub(super) fn index_rows(authors: &BTreeMap<AuthorId, Author>, matching: &Matchi
         BrowseLocation::Author(Some(id)) | BrowseLocation::CatalogAuthor(Some(id)) => super::popularity::sum(&authors[&id].books, matching),
         _ => None,
     });
-    if options.chip_sort == library_model::BrowseChipSort::Popularity && !matching.source_priorities.is_empty() {
-        rows.sort_by_key(|row| match row.id {
-            BrowseLocation::CatalogAuthor(Some(id)) => super::popularity::source_priority(&authors[&id].books, matching),
-            _ => None,
-        });
-    }
-    if !matching.preferred.is_empty() {
-        rows.sort_by_key(|row| match row.id {
-            BrowseLocation::CatalogAuthor(Some(id)) => authors[&id].books.is_disjoint(&matching.preferred),
-            _ => true,
+    if options.chip_sort != library_model::BrowseChipSort::Popularity && !matching.preferred.is_empty() {
+        super::popularity::prefer_rows(&mut rows, &|row| match row.id {
+            BrowseLocation::CatalogAuthor(Some(id)) => !authors[&id].books.is_disjoint(&matching.preferred),
+            _ => false,
         });
     }
     rows
@@ -98,7 +92,7 @@ impl Database {
             let contents = BrowseContents { children, books };
             let (language_counts, format_counts) = self.library_facets(options)?;
             let path = author.and_then(|id| authors.get(&id).map(|found| library_model::BrowsePathSegment { id: BrowseLocation::Author(Some(id)), name: found.name.clone() })).into_iter().collect();
-            Ok(super::LibraryBrowseData { contents, sections, path, ancestors: Vec::new(), language_counts, format_counts, feed: None, page })
+            Ok(super::LibraryBrowseData { contents, sections, path, ancestors: Vec::new(), language_counts, format_counts, page })
         })
     }
 
@@ -132,7 +126,7 @@ impl Database {
 
     pub(super) fn library_browse_authors(&self) -> Result<BTreeMap<AuthorId, Author>, DatabaseError> {
         let mut authors = BTreeMap::<AuthorId, Author>::new();
-        self.connection.author_books(AUTHOR_MARC_RELATOR_CODE.0.to_vec(), |row| {
+        self.connection.author_books(AUTHOR_MARC_RELATOR_CODE.0.as_slice(), |row| {
             let id = parse_uuid_column(row.get(0)?, 0)?;
             let name: String = row.get(1)?;
             authors.entry(id).or_insert_with(|| Author { name, books: BTreeSet::new() }).books.insert(row.get(2)?);

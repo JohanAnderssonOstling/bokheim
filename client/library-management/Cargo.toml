@@ -1,0 +1,50 @@
+[package]
+name = "library-management"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["desktop"]
+desktop = ["library-backend/desktop"]
+kobo = ["library-backend/kobo", "client-platform-kobo/device"]
+
+[dependencies]
+account-client = { path = "../account-client" }
+account-contract = { path = "../../shared/account-contract" }
+client-platform-runtime = { path = "../platforms/runtime" }
+client-protocol = { path = "../client-protocol" }
+content-address = { path = "../../shared/content-address" }
+cpu-host = { path = "../library-backend/crates/cpu-host" }
+library-backend = { path = "../library-backend", default-features = false }
+library-catalog = { path = "../library-backend/crates/library-catalog" }
+library-database = { path = "../library-backend/crates/library-database" }
+library-files = { path = "../library-backend/crates/library-files" }
+library-model = { path = "../library-model" }
+library-registry = { path = "crates/registry" }
+library-services = { path = "../library-backend/crates/library-services" }
+sync-common = { path = "../../shared/sync-common" }
+async-channel = "2"
+futures-util = "0.3"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+tokio = { version = "1", features = ["macros", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+filesystem-scanner = { path = "../library-backend/crates/filesystem-scanner" }
+app-preferences = { path = "../preferences", features = ["store"] }
+library-import = { path = "../library-backend/crates/library-import" }
+library-annotation-export = { path = "../library-backend/crates/library-annotation-export" }
+client-platform-native = { path = "../platforms/native", features = ["websocket"] }
+client-platform-kobo = { path = "../platforms/kobo" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+client-platform-web = { path = "../platforms/web" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }

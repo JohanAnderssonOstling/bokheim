@@ -7,10 +7,6 @@ pub(super) fn request_id(message: &JsValue) -> Result<u32, String> {
     client_platform_runtime::protocol::request_id(id)
 }
 
-fn bytes(value: &JsValue) -> Result<Vec<u8>, String> {
-    value.dyn_ref::<js_sys::Uint8Array>().map(|bytes| bytes.to_vec()).ok_or_else(|| "Expected Uint8Array payload".into())
-}
-
 pub(super) fn byte_result(message: &JsValue) -> Result<Result<Vec<u8>, String>, String> {
     byte_payload(message).map(|result| result.map(|bytes| bytes.to_vec()))
 }
@@ -67,61 +63,9 @@ impl CpuEvent {
     }
 }
 
-pub enum SyncEvent {
-    Cancel,
-    Reply { id: u32, result: Result<Vec<u8>, String> },
+fn bytes(value: &JsValue) -> Result<Vec<u8>, String> {
+    value.dyn_ref::<js_sys::Uint8Array>().map(|bytes| bytes.to_vec()).ok_or_else(|| "Expected Uint8Array payload".into())
 }
-impl SyncEvent {
-    pub fn decode(message: &JsValue) -> Result<Self, String> {
-        if field(message, "kind").as_string().as_deref() == Some("cancel") {
-            return Ok(Self::Cancel);
-        }
-        Ok(Self::Reply { id: request_id(message)?, result: byte_result(message)? })
-    }
-}
-
-/// Commands from the coordinator to a caller-owned storage capability.
-pub enum BridgeEvent {
-    Complete(Result<Vec<u8>, String>),
-    Storage { id: u32, bytes: Vec<u8> },
-}
-impl BridgeEvent {
-    pub fn decode(message: &JsValue) -> Result<Self, String> {
-        match field(message, "kind").as_string().as_deref() {
-            Some("done" | "result") => Ok(Self::Complete(byte_result(message)?)),
-            Some("error") => Ok(Self::Complete(Err(failure(message)?))),
-            Some("storage") => Ok(Self::Storage { id: request_id(message)?, bytes: bytes(&field(message, "bytes"))? }),
-            _ => Err("Invalid worker bridge message".into()),
-        }
-    }
-}
-
-fn failure(message: &JsValue) -> Result<String, String> {
-    match byte_payload(message)? {
-        Err(error) => Ok(error),
-        Ok(_) => Err("Error reply contains a success payload".into()),
-    }
-}
-
-pub enum WorkerRequest {
-    Cpu { bytes: Vec<u8>, source: JsValue },
-    Sync { key: String, bytes: Vec<u8> },
-}
-impl WorkerRequest {
-    /// The reply port is validated separately so malformed requests can be rejected.
-    pub fn decode(message: &JsValue) -> Result<Self, String> {
-        let key = || field(message, "key").as_string().filter(|key| !key.is_empty()).ok_or_else(|| "Missing worker job key".to_owned());
-        match field(message, "transport").as_string().as_deref() {
-            Some("cpu_request") => {
-                let source = source(message)?;
-                Ok(Self::Cpu { bytes: bytes(&field(message, "bytes"))?, source })
-            }
-            Some("sync_request") => Ok(Self::Sync { key: key()?, bytes: bytes(&field(message, "bytes"))? }),
-            _ => Err("Invalid worker request".into()),
-        }
-    }
-}
-
 fn source(message: &JsValue) -> Result<JsValue, String> {
     let source = field(message, "source");
     if !source.is_undefined() && !field(&source, "port").is_instance_of::<web_sys::MessagePort>() {

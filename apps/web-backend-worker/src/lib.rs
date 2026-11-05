@@ -1,221 +1,105 @@
-#![cfg(target_family = "wasm")]
+//! Synchronous book parsers and PDFium, isolated from the UI and storage owner.
+#![cfg(target_arch = "wasm32")]
 
-use app::{
-    AppDataLocation, AppStartupState, host::AppWorkerClientMessage, host::AppWorkerStartupMessage, host::BackendWorkerHost, host::WorkerDispatchResult, host::WorkerSubscription, host::decode_worker_message, host::encode_worker_message,
-};
-use futures_channel::oneshot;
-use futures_util::future::{Either, select};
-use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
-use std::rc::Rc;
-use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{DedicatedWorkerGlobalScope, MessagePort};
+use library_backend::library::web_reader::{Reader, connect};
+use wasm_bindgen::prelude::*;
+use wasm_callback::future_to_promise_aborting;
 
-mod transport;
-
-thread_local! {
-    static STARTUP_PERMIT: Cell<Option<client_platform_runtime::executor::StartupPermit>> = const { Cell::new(None) };
-    static BACKEND: OnceCell<Result<BackendWorkerHost, app::BackendError>> = const { OnceCell::new() };
-    static PENDING_CONNECTIONS: RefCell<Vec<MessagePort>> = const { RefCell::new(Vec::new()) };
+#[wasm_bindgen(module = "/pdfium.js")]
+extern "C" {
+    #[wasm_bindgen(catch)]
+    async fn initialize_pdfium() -> Result<(), JsValue>;
 }
 
-fn worker_scope() -> DedicatedWorkerGlobalScope {
-    js_sys::global().unchecked_into()
+#[wasm_bindgen]
+pub fn execute(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+    execute_with_source(bytes, JsValue::UNDEFINED)
 }
 
-#[wasm_bindgen::prelude::wasm_bindgen(start)]
-pub fn start() -> Result<(), JsValue> {
-    console_error_panic_hook::set_once();
-    STARTUP_PERMIT.with(|permit| permit.set(Some(app::host::defer_background_work())));
-    app::host::web::network_client::install()?;
-    transport::install()?;
-    wasm_bindgen_futures::spawn_local(async {
-        finish_initialize(initialize().await);
-    });
-    Ok(())
-}
-
-async fn initialize() -> Result<(BackendWorkerHost, AppStartupState), app::BackendError> {
-    let backend = BackendWorkerHost::initialize(AppDataLocation::PlatformLocal("bokheim".to_owned())).await?;
-    let startup = backend.startup_state()?;
-    Ok((backend, startup))
-}
-
-fn finish_initialize(result: Result<(BackendWorkerHost, AppStartupState), app::BackendError>) {
-    let error = result.as_ref().err().map(ToString::to_string);
-    BACKEND.with(|slot| assert!(slot.set(result.map(|(backend, _)| backend)).is_ok(), "backend already initialized"));
-    connect_pending_ports();
-    if let Some(error) = error {
-        post_control("backend_failed", Some(&error));
-        worker_scope().close();
-    } else {
-        post_control("backend_ready", None);
-        STARTUP_PERMIT.with(|slot| {
-            if let Some(permit) = slot.take() {
-                permit.release();
+fn execute_with_source(bytes: &[u8], source: JsValue) -> Result<Vec<u8>, JsValue> {
+    let response = (|| -> Result<_, app::BackendError> {
+        let request = rmp_serde::from_slice(bytes).map_err(app::BackendError::operation)?;
+        match request {
+            app::host::cpu::CpuRequest::Book { task, .. } => {
+                let reader = Reader::new(source).map_err(app::BackendError::operation)?;
+                app::host::cpu::execute_book_with_mobi(task, Box::new(reader), |_, _| Err("subject page inspection is not supported for this format".into()))
             }
-        });
-    }
-}
-
-fn connect_pending_ports() {
-    let ports = PENDING_CONNECTIONS.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
-    for port in ports {
-        connect(port);
-    }
-}
-
-fn post_control(transport: &str, error: Option<&str>) {
-    let message = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&message, &JsValue::from_str("transport"), &JsValue::from_str(transport));
-    if let Some(error) = error {
-        let _ = js_sys::Reflect::set(&message, &JsValue::from_str("error"), &JsValue::from_str(error));
-    }
-    let _ = worker_scope().post_message(&message);
-}
-
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub fn connect(port: MessagePort) {
-    let initializing = BACKEND.with(|slot| slot.get().is_none());
-    if initializing {
-        PENDING_CONNECTIONS.with(|pending| pending.borrow_mut().push(port));
-        return;
-    }
-
-    let _ = install_request_handler(port.clone());
-    port.start();
-    let startup = BACKEND.with(|slot| match slot.get().expect("initializing connections are queued") {
-        Ok(backend) => backend.startup_state().map(|startup| AppWorkerStartupMessage::Ready { startup }).unwrap_or_else(|error| AppWorkerStartupMessage::Failed { error }),
-        Err(error) => AppWorkerStartupMessage::Failed { error: error.clone() },
-    });
-    let failed = matches!(startup, AppWorkerStartupMessage::Failed { .. });
-    post_message(&port, &startup);
-    if failed {
-        port.close();
-    }
-}
-
-fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
-    let (disconnect, disconnected) = oneshot::channel();
-    let mut disconnect = Some(disconnect);
-    let alive = Rc::new(Cell::new(true));
-    let cancellations = Rc::new(RefCell::new(HashMap::<u64, oneshot::Sender<()>>::new()));
-    let registration_port = port.clone();
-    let handler_port = port.clone();
-    let response_port = port;
-    let on_message = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-        if event.data().as_string().as_deref() == Some("disconnect") {
-            alive.set(false);
-            if let Some(disconnect) = disconnect.take() {
-                let _ = disconnect.send(());
-            }
-            for (_, cancellation) in cancellations.borrow_mut().drain() {
-                let _ = cancellation.send(());
-            }
-            handler_port.set_onmessage(None);
-            handler_port.close();
-            return;
+            request => app::host::cpu::execute(request),
         }
-        // An import request carries the picked files beside its bytes; they
-        // wait under the request's token until the import takes them.
-        let data = event.data();
-        let bytes = if data.is_instance_of::<js_sys::Uint8Array>() {
-            data
-        } else {
-            let field = |name: &str| js_sys::Reflect::get(&data, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED);
-            if let (Some(token), Ok(files)) = (field("token").as_string(), field("files").dyn_into::<js_sys::Array>()) {
-                client_platform_web::transport::import_io::hold_selected_files(token, &files);
-            }
-            field("request")
-        };
-        let request = match decode_worker_message::<AppWorkerClientMessage>(&js_sys::Uint8Array::new(&bytes).to_vec()) {
-            Ok(AppWorkerClientMessage::Request(request)) => Ok(request),
-            Ok(AppWorkerClientMessage::CancelSubscription { id }) => {
-                if let Some(cancellation) = cancellations.borrow_mut().remove(&id) {
-                    let _ = cancellation.send(());
-                }
-                return;
-            }
-            Err(error) => Err(error),
-        };
-        // Playback subscriptions own file generations even during preparation.
-        // Register cancellation before awaiting metadata or OPFS so an abandoned
-        // open cannot leave a file lease behind.
-        let mut playback_cancel = request.as_ref().ok().filter(|request| request.is_source_subscription()).map(|request| {
-            let (cancel, cancelled) = oneshot::channel();
-            cancellations.borrow_mut().insert(request.id, cancel);
-            Box::pin(cancelled)
-        });
-        let backend = BACKEND.with(|slot| slot.get().and_then(|result| result.as_ref().ok()).cloned());
-        let port = response_port.clone();
-        let alive = alive.clone();
-        let cancellations = cancellations.clone();
+    })();
+    // Application failures travel as typed results inside the byte payload.
+    // The outer transport failure is reserved for a broken worker/connection.
+    rmp_serde::to_vec_named(&response).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[wasm_bindgen(js_name = startCpuWorker)]
+pub fn start() -> js_sys::Promise {
+    future_to_promise_aborting(async {
+        initialize().await?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
+async fn initialize() -> Result<(), JsValue> {
+    client_platform_runtime::executor::initialize_storage_executor().map_err(|error| JsValue::from_str(&error.to_string()))?;
+    client_platform_web::sqlite::initialize_reference_storage().await.map_err(|error| JsValue::from_str(&error))?;
+    app::host::cpu::initialize_bisac_reference().await.map_err(|error| JsValue::from_str(&error))?;
+    let scope = client_platform_web::transport::scope::Scope::current();
+    let worker = scope.clone();
+    scope.receive(move |input| {
+        let worker = worker.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let (id, dispatch) = match (request, backend) {
-                (Ok(request), Some(backend)) => {
-                    let id = request.id;
-                    let dispatch = if let Some(cancelled) = playback_cancel.take() {
-                        match select(Box::pin(backend.dispatch(request)), cancelled).await {
-                            Either::Left((result, pending)) => {
-                                playback_cancel = Some(pending);
-                                result
-                            }
-                            Either::Right(_) => return,
-                        }
-                    } else {
-                        backend.dispatch(request).await
-                    };
-                    (id, dispatch)
+            use client_platform_web::transport::{byte_reply, error_message, object, protocol::CpuRequest};
+            let request = match CpuRequest::decode(&input) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = worker.post_message(&object(&[("transport", "endpoint_failed".into()), ("error", error.into())]));
+                    return;
                 }
-                (Ok(request), None) => (request.id, Err(app::BackendError::message("backend is not initialized"))),
-                (Err(error), _) => (0, Err(error)),
             };
-            let (result, subscription) = match dispatch {
-                Ok(WorkerDispatchResult::Response(value)) => (Ok(value), None),
-                Ok(WorkerDispatchResult::Subscription { initial, events }) => (Ok(initial), Some(events)),
-                Err(error) => (Err(error), None),
-            };
-            if !alive.get() {
-                return;
+            let CpuRequest { id, bytes, source } = request;
+            let response = async {
+                if !source.is_undefined() {
+                    connect(&source).await?;
+                }
+                if matches!(rmp_serde::from_slice::<app::host::cpu::CpuRequest>(&bytes),
+                    Ok(app::host::cpu::CpuRequest::Book {
+                        task: app::host::cpu::BookTask::Thumbnail { extension }, ..
+                    }) if extension == "pdf")
+                    || matches!(
+                        rmp_serde::from_slice::<app::host::cpu::CpuRequest>(&bytes),
+                        Ok(app::host::cpu::CpuRequest::Book {
+                            task: app::host::cpu::BookTask::Inspect { format: book_model::BookFormat::Pdf, .. }
+                                | app::host::cpu::BookTask::TextMatches { format: book_model::BookFormat::Pdf, .. }
+                                | app::host::cpu::BookTask::IndexText { format: book_model::BookFormat::Pdf },
+                            ..
+                        })
+                    )
+                {
+                    initialize_pdfium().await?;
+                }
+                // Inspection checks subject codes against the taxonomy. This
+                // worker loads the same app asset or published snapshot as the
+                // database worker, usually from the HTTP cache, on first use.
+                if let Ok(app::host::cpu::CpuRequest::Book { task: app::host::cpu::BookTask::Inspect { .. }, taxonomy }) = rmp_serde::from_slice::<app::host::cpu::CpuRequest>(&bytes) {
+                    if subject_projection::loaded_unified_taxonomy_revision_id().is_none() {
+                        match taxonomy {
+                            Some(artifact) => {
+                                let snapshot = update_client::fetch::download(&artifact).await.map_err(|error| JsValue::from_str(&error))?;
+                                subject_projection::installed::install_published_snapshot(&snapshot).map_err(|error| JsValue::from_str(&error))?;
+                            }
+                            None => app::host::cpu::initialize_bundled_taxonomy().await.map_err(|error| JsValue::from_str(&error))?,
+                        }
+                    }
+                }
+                execute_with_source(&bytes, source)
             }
-            web_sys::console::info_1(&JsValue::from_str(&format!("backend phase=response_post id={id} ok={}", result.is_ok())));
-            post_message(&port, &AppWorkerStartupMessage::Response { id, result });
-            if let Some(events) = subscription {
-                let cancelled = playback_cancel.unwrap_or_else(|| {
-                    let (cancel, cancelled) = oneshot::channel();
-                    cancellations.borrow_mut().insert(id, cancel);
-                    Box::pin(cancelled)
-                });
-                forward_subscription(events, id, port, alive, cancelled).await;
-            }
-            cancellations.borrow_mut().remove(&id);
+            .await;
+            let (result, transfer) = byte_reply(&[("id", id.into())], response.map_err(|error| error_message(&error)));
+            let _ = worker.post_message_with_transfer(&result, &transfer);
         });
     });
-    // Let JS own the callback lifetime. Clearing onmessage on disconnect can
-    // then release the captured ports and cancellation map.
-    let on_message = on_message.into_js_value();
-    registration_port.set_onmessage(Some(on_message.unchecked_ref()));
-    disconnected
-}
-
-async fn forward_subscription(mut events: WorkerSubscription, id: u64, port: MessagePort, alive: Rc<Cell<bool>>, mut cancelled: std::pin::Pin<Box<oneshot::Receiver<()>>>) {
-    loop {
-        match select(Box::pin(events.next_value()), cancelled).await {
-            Either::Left((Some(payload), pending_cancel)) => {
-                cancelled = pending_cancel;
-                if !alive.get() || !post_message(&port, &AppWorkerStartupMessage::Event { id, payload }) {
-                    break;
-                }
-            }
-            Either::Left((None, _)) | Either::Right(_) => break,
-        }
-    }
-}
-
-fn post_message(port: &MessagePort, message: &AppWorkerStartupMessage) -> bool {
-    let bytes = encode_worker_message(message).expect("backend worker message must serialize");
-    let message = js_sys::Uint8Array::from(bytes.as_slice());
-    let transferable = js_sys::Array::new();
-    transferable.push(&message.buffer());
-    port.post_message_with_transferable(message.as_ref(), transferable.as_ref()).is_ok()
+    let ready = js_sys::Object::new();
+    js_sys::Reflect::set(&ready, &"ready".into(), &true.into())?;
+    scope.post_message(&ready)
 }

@@ -1,4 +1,6 @@
-use crate::OpeningTiming;
+use ui_text::text;
+
+use crate::{OpeningTiming, lock_state};
 #[cfg(not(target_arch = "wasm32"))]
 use library_backend::library::AudioStreamControl;
 #[cfg(test)]
@@ -7,8 +9,12 @@ use std::io::{BufReader, SeekFrom};
 #[cfg(feature = "kobo")]
 use std::io::{Read, Write};
 use std::num::{NonZeroU16, NonZeroU32};
+#[cfg(feature = "kobo")]
+use std::process::ExitStatus;
 #[cfg(any(feature = "kobo", test))]
 use std::process::{Child, Command, Stdio};
+#[cfg(feature = "kobo")]
+use std::sync::Condvar;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -16,7 +22,7 @@ use std::time::Duration;
 #[cfg(any(feature = "kobo", test))]
 use std::time::Instant;
 
-use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TryRecvError, bounded, unbounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded, unbounded};
 use rodio::Decoder;
 use rodio::source::Source;
 #[cfg(not(feature = "kobo"))]
@@ -36,6 +42,8 @@ const BUFFERED_BLOCKS: usize = 32;
 const KOBO_PREBUFFER_BLOCKS: usize = 6;
 #[cfg(feature = "kobo")]
 const KOBO_PREBUFFER_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(feature = "kobo")]
+const KOBO_OUTPUT_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const EOF_CONFIRMATION_READS: usize = 8;
 const NO_GENERATION: u64 = u64::MAX;
 const REALTIME_TEMPO_EPSILON: f32 = 0.0001;
@@ -88,32 +96,32 @@ struct PositionState {
 
 impl SharedState {
     fn position_micros(&self) -> u64 {
-        self.position.lock().expect("audio position lock poisoned").micros
+        lock_state(&self.position).micros
     }
 
     fn confirmed_position_micros(&self) -> Option<u64> {
-        let position = self.position.lock().expect("audio position lock poisoned");
-        let confirmed = *self.confirmed_position.lock().expect("confirmed audio position lock poisoned");
+        let position = lock_state(&self.position);
+        let confirmed = *lock_state(&self.confirmed_position);
         (position.generation == confirmed.generation).then_some(confirmed.micros)
     }
 
     fn set_position_if_generation(&self, generation: u64, micros: u64) -> bool {
-        let mut position = self.position.lock().expect("audio position lock poisoned");
+        let mut position = lock_state(&self.position);
         if position.generation != generation {
             return false;
         }
         position.micros = micros;
-        *self.confirmed_position.lock().expect("confirmed audio position lock poisoned") = PositionState { generation, micros };
+        *lock_state(&self.confirmed_position) = PositionState { generation, micros };
         true
     }
 
     fn confirm_seek(&self, generation: u64, position: Duration) {
-        *self.confirmed_position.lock().expect("confirmed audio position lock poisoned") = PositionState { generation, micros: position.as_micros() as u64 };
+        *lock_state(&self.confirmed_position) = PositionState { generation, micros: position.as_micros() as u64 };
     }
 
     fn reject_seek_if_current(&self, generation: u64, error: String) -> bool {
-        let mut position = self.position.lock().expect("audio position lock poisoned");
-        let confirmed = *self.confirmed_position.lock().expect("confirmed audio position lock poisoned");
+        let mut position = lock_state(&self.position);
+        let confirmed = *lock_state(&self.confirmed_position);
         if self.generation.compare_exchange(generation, confirmed.generation, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return false;
         }
@@ -121,7 +129,7 @@ impl SharedState {
             *position = confirmed;
         }
         drop(position);
-        *self.error.lock().expect("audio error lock poisoned") = Some(error);
+        *lock_state(&self.error) = Some(error);
         true
     }
 
@@ -188,7 +196,7 @@ impl AudioEngine {
             .name("m4b-decode-wsola".into())
             .spawn(move || {
                 if let Err(error) = decode_worker(decoder, channels, sample_rate, request_rx, audio_tx, decoder_state, decoder_stream) {
-                    *worker_state.error.lock().expect("audio error lock poisoned") = Some(error);
+                    *lock_state(&worker_state.error) = Some(error);
                 }
                 worker_state.decoder_stopped.store(true, Ordering::Release);
             })
@@ -219,6 +227,13 @@ impl AudioEngine {
     }
 
     pub fn play(&self) {
+        #[cfg(feature = "kobo")]
+        if self.output.stop.load(Ordering::Acquire) {
+            if let Err(error) = self.begin_output_recovery() {
+                *lock_state(&self.state.error) = Some(error);
+            }
+            return;
+        }
         self.state.output_lost.store(false, Ordering::Release);
         if let Some(control) = &self.stream_control {
             control.set_paused(false);
@@ -235,7 +250,7 @@ impl AudioEngine {
 
     pub fn is_buffering(&self) -> bool {
         #[cfg(feature = "kobo")]
-        if self.recovery.lock().expect("audio recovery lock poisoned").is_some() {
+        if lock_state(&self.recovery).is_some() {
             return true;
         }
         if !self.state.buffering.load(Ordering::Acquire) {
@@ -265,19 +280,19 @@ impl AudioEngine {
     }
 
     pub fn last_confirmed_position(&self) -> Duration {
-        Duration::from_micros(self.state.confirmed_position.lock().expect("confirmed audio position lock poisoned").micros)
+        Duration::from_micros(lock_state(&self.state.confirmed_position).micros)
     }
 
     pub fn pause(&self) {
         #[cfg(feature = "kobo")]
-        self.recovery.lock().expect("audio recovery lock poisoned").take();
+        lock_state(&self.recovery).take();
         if let Some(control) = &self.stream_control {
             control.set_paused(true);
         }
         #[cfg(not(feature = "kobo"))]
         self.player.pause();
         #[cfg(feature = "kobo")]
-        self.output.playing.store(false, Ordering::Release);
+        self.output.stop();
     }
 
     pub fn is_playing(&self) -> bool {
@@ -297,15 +312,8 @@ impl AudioEngine {
 
     pub fn toggle(&mut self) -> Result<(), String> {
         #[cfg(feature = "kobo")]
-        if self.state.playback_finished() || self.output.thread.as_ref().is_some_and(|thread| thread.is_finished()) {
-            let (receiver, channels, sample_rate) = &self.retry_output;
-            let (receiver, state, channels, sample_rate, duration) = (receiver.clone(), self.state.clone(), *channels, *sample_rate, self.duration);
-            let recovery = OutputRecovery::start(move |cancelled| KoboOutput::spawn_cancellable(receiver, state, channels, sample_rate, duration, || cancelled.load(Ordering::Acquire)))?;
-            self.state.output_lost.store(false, Ordering::Release);
-            if let Some(control) = &self.stream_control {
-                control.set_paused(true);
-            }
-            *self.recovery.lock().expect("audio recovery lock poisoned") = Some(recovery);
+        if self.state.playback_finished() || self.output.stop.load(Ordering::Acquire) || self.output.thread.as_ref().is_some_and(|thread| thread.is_finished()) {
+            self.begin_output_recovery()?;
             return Ok(());
         }
         if self.state.playback_finished() {
@@ -331,6 +339,19 @@ impl AudioEngine {
     }
 
     #[cfg(feature = "kobo")]
+    fn begin_output_recovery(&self) -> Result<(), String> {
+        let (receiver, channels, sample_rate) = &self.retry_output;
+        let (receiver, state, channels, sample_rate, duration) = (receiver.clone(), self.state.clone(), *channels, *sample_rate, self.duration);
+        let recovery = OutputRecovery::start(move |cancelled| KoboOutput::spawn_cancellable(receiver, state, channels, sample_rate, duration, || cancelled.load(Ordering::Acquire)))?;
+        self.state.output_lost.store(false, Ordering::Release);
+        if let Some(control) = &self.stream_control {
+            control.set_paused(true);
+        }
+        *lock_state(&self.recovery) = Some(recovery);
+        Ok(())
+    }
+
+    #[cfg(feature = "kobo")]
     fn restart_output(&mut self, output: KoboOutput) -> Result<(), String> {
         // The failed output dropped its partially consumed chunk. Reusing the
         // remaining queue would skip that audio while reporting an unbroken clock.
@@ -349,7 +370,7 @@ impl AudioEngine {
         #[cfg(feature = "kobo")]
         {
             let result = {
-                let mut recovery = self.recovery.lock().expect("audio recovery lock poisoned");
+                let mut recovery = lock_state(&self.recovery);
                 let Some(pending) = recovery.as_ref() else {
                     return;
                 };
@@ -366,7 +387,7 @@ impl AudioEngine {
                 }
             };
             if let Err(error) = result.and_then(|output| self.restart_output(output)) {
-                *self.state.error.lock().expect("audio error lock poisoned") = Some(error);
+                *lock_state(&self.state.error) = Some(error);
             }
         }
     }
@@ -408,7 +429,7 @@ fn stream_byte_len(reader: &mut dyn ReadSeek) -> Result<u64, String> {
 }
 
 fn request_seek(state: &SharedState, request_tx: &Sender<DecoderRequest>, position: Duration) -> Result<(), String> {
-    let mut current_position = state.position.lock().expect("audio position lock poisoned");
+    let mut current_position = lock_state(&state.position);
     let previous_generation = state.generation.load(Ordering::Acquire);
     let generation = previous_generation.checked_add(1).filter(|generation| *generation != NO_GENERATION).ok_or_else(|| "audio seek generation exhausted".to_owned())?;
     let previous_position = *current_position;
@@ -422,7 +443,7 @@ fn request_seek(state: &SharedState, request_tx: &Sender<DecoderRequest>, positi
         return Ok(());
     }
 
-    let mut current = state.position.lock().expect("audio position lock poisoned");
+    let mut current = lock_state(&state.position);
     if state.generation.load(Ordering::Acquire) == generation {
         state.generation.store(previous_generation, Ordering::Release);
         if current.generation == generation {
@@ -458,7 +479,7 @@ fn collect_pending_requests(first: Option<DecoderRequest>, request_rx: &Receiver
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         #[cfg(feature = "kobo")]
-        self.recovery.lock().expect("audio recovery lock poisoned").take();
+        lock_state(&self.recovery).take();
         if let Some(control) = &self.stream_control {
             control.cancel();
         }
@@ -538,10 +559,9 @@ impl DecoderWorker {
             // A seek can invalidate I/O just before its command is enqueued. Wait
             // for that command rather than spinning the decoder on WouldBlock.
             let first = if self.stream.as_ref().is_some_and(|control| control.is_interrupted()) {
-                match self.request_rx.recv_timeout(Duration::from_millis(20)) {
+                match self.request_rx.recv() {
                     Ok(request) => Some(request),
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    Err(_) => break,
                 }
             } else {
                 None
@@ -604,18 +624,17 @@ impl DecoderWorker {
         Ok(())
     }
 
-    fn send_chunk(&mut self, mut chunk: AudioChunk) -> DecoderRequestOutcome {
+    fn send_chunk(&mut self, chunk: AudioChunk) -> DecoderRequestOutcome {
         loop {
-            match self.audio_tx.send_timeout(chunk, Duration::from_millis(10)) {
-                Ok(()) => return DecoderRequestOutcome::Continue,
-                Err(SendTimeoutError::Disconnected(_)) => return DecoderRequestOutcome::Stop,
-                Err(SendTimeoutError::Timeout(returned)) => {
-                    chunk = returned;
-                    let pending = collect_pending_requests(None, &self.request_rx);
+            // Backpressure and decoder commands share one blocking wait. In
+            // particular, a paused/full output queue needs no retry timer.
+            crossbeam_channel::select! {
+                send(self.audio_tx, chunk) -> result => return if result.is_ok() { DecoderRequestOutcome::Continue } else { DecoderRequestOutcome::Stop },
+                recv(self.request_rx) -> request => {
+                    let Ok(request) = request else { return DecoderRequestOutcome::Stop };
+                    let pending = collect_pending_requests(Some(request), &self.request_rx);
                     let outcome = self.apply_pending_requests(pending);
-                    if outcome != DecoderRequestOutcome::Continue {
-                        return outcome;
-                    }
+                    if outcome != DecoderRequestOutcome::Continue { return outcome; }
                 }
             }
         }
@@ -780,6 +799,7 @@ impl Drop for OutputRecovery {
 struct KoboOutput {
     playing: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    wake: Arc<(Mutex<()>, Condvar)>,
     volume_bits: Arc<AtomicU64>,
     child: Arc<Mutex<Child>>,
     thread: Option<JoinHandle<()>>,
@@ -795,7 +815,7 @@ impl KoboOutput {
     fn spawn_cancellable(audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration, cancelled: impl Fn() -> bool) -> Result<Self, String> {
         let channel_count = channels.get().to_string();
         let sample_rate_value = sample_rate.get();
-        let sample_rate = sample_rate_value.to_string();
+        let sample_rate_arg = sample_rate_value.to_string();
         let bluetooth_timing = OpeningTiming::new("bluetooth_output_lookup");
         let device = connected_audio_device(&cancelled)?;
         drop(bluetooth_timing);
@@ -805,18 +825,17 @@ impl KoboOutput {
         let pcm = format!("bluealsa:DEV={device},PROFILE=a2dp");
         let spawn_timing = OpeningTiming::new("aplay_spawn");
         let child = Command::new("aplay")
-            .args(["-q", "-D", &pcm, "-t", "raw", "-f", "S16_LE", "-c", &channel_count, "-r", &sample_rate])
+            .args(["-q", "-D", &pcm, "-t", "raw", "-f", "S16_LE", "-c", &channel_count, "-r", &sample_rate_arg])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Could not start Kobo Bluetooth audio (aplay): {error}"))?;
         drop(spawn_timing);
-        Self::from_child(child, audio_rx, state, channels, NonZeroU32::new(sample_rate_value).expect("sample rate is non-zero"), duration)
+        Self::from_child(child, audio_rx, state, channels, sample_rate, duration)
     }
 
     fn from_child(mut child: Child, audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration) -> Result<Self, String> {
-        let sample_rate_value = sample_rate.get();
         let mut input = child.stdin.take().ok_or_else(|| "Kobo audio player has no input pipe".to_owned())?;
         let stderr = child.stderr.take().map(|mut pipe| {
             thread::spawn(move || {
@@ -829,6 +848,8 @@ impl KoboOutput {
         let worker_child = child.clone();
         let playing = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new((Mutex::new(()), Condvar::new()));
+        let thread_wake = wake.clone();
         let volume_bits = Arc::new(AtomicU64::new(1.0f32.to_bits() as u64));
         let thread_playing = playing.clone();
         let thread_stop = stop.clone();
@@ -836,14 +857,20 @@ impl KoboOutput {
         let thread = thread::Builder::new()
             .name("kobo-bluealsa-output".into())
             .spawn(move || {
-                let mut source = WorkerSource::new(audio_rx, state.clone(), channels, NonZeroU32::new(sample_rate_value).expect("sample rate is non-zero"), duration);
+                let mut source = WorkerSource::new(audio_rx, state.clone(), channels, sample_rate, duration);
                 let mut bytes = Vec::with_capacity(4096);
                 let mut prebuffered = false;
                 let mut first_write = true;
                 while !thread_stop.load(Ordering::Acquire) {
-                    if !thread_playing.load(Ordering::Acquire) {
-                        thread::sleep(Duration::from_millis(20));
-                        continue;
+                    {
+                        let (gate, changed) = &*thread_wake;
+                        let mut guard = lock_state(gate);
+                        while !thread_playing.load(Ordering::Acquire) && !thread_stop.load(Ordering::Acquire) {
+                            guard = changed.wait(guard).unwrap_or_else(std::sync::PoisonError::into_inner);
+                        }
+                    }
+                    if thread_stop.load(Ordering::Acquire) {
+                        break;
                     }
                     if !prebuffered {
                         let _prebuffer_timing = OpeningTiming::new("prebuffer");
@@ -886,17 +913,9 @@ impl KoboOutput {
                 }
                 drop(input);
                 thread_playing.store(false, Ordering::Release);
-                // Never hold the child lock across a blocking wait: Drop must be
-                // able to kill a helper stuck in ALSA (including after stdin EOF).
-                let status = loop {
-                    match worker_child.lock().expect("audio child lock poisoned").try_wait() {
-                        Ok(Some(status)) => break Some(status),
-                        Err(_) => break None,
-                        Ok(None) => thread::sleep(Duration::from_millis(10)),
-                    }
-                };
+                let status = wait_for_output_exit(&worker_child, &thread_stop, &thread_wake, KOBO_OUTPUT_EXIT_TIMEOUT);
                 let stderr = stderr.and_then(|reader| reader.join().ok()).map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned()).unwrap_or_default();
-                if !thread_stop.load(Ordering::Acquire) && status.is_some_and(|status| !status.success()) {
+                if !thread_stop.load(Ordering::Acquire) && !state.playback_finished() && status.is_some_and(|status| !status.success()) {
                     state.output_lost.store(true, Ordering::Release);
                     if let Some(control) = &state.stream_control {
                         control.set_paused(true);
@@ -904,19 +923,41 @@ impl KoboOutput {
                     let detail = if stderr.is_empty() { "aplay exited without a diagnostic".to_owned() } else { stderr };
                     log::warn!("Kobo audio output stopped: {detail}");
                     if let Some(message) = kobo_output_message(&detail) {
-                        *state.error.lock().expect("audio error lock poisoned") = Some(message.to_owned());
+                        *lock_state(&state.error) = Some(message.to_owned());
                     }
                 }
             })
             .map_err(|error| format!("Could not start Kobo audio output thread: {error}"))?;
-        Ok(Self { playing, stop, volume_bits, child, thread: Some(thread) })
+        Ok(Self { playing, stop, wake, volume_bits, child, thread: Some(thread) })
     }
 
     fn play(&self) {
+        let (gate, changed) = &*self.wake;
+        let _guard = lock_state(gate);
         self.playing.store(true, Ordering::Release);
+        changed.notify_all();
     }
     fn toggle(&self) {
-        self.playing.fetch_xor(true, Ordering::AcqRel);
+        if self.is_playing() {
+            self.stop();
+        } else {
+            self.play();
+        }
+    }
+    fn stop(&self) {
+        {
+            let (gate, changed) = &*self.wake;
+            let _guard = lock_state(gate);
+            self.stop.store(true, Ordering::Release);
+            self.playing.store(false, Ordering::Release);
+            changed.notify_all();
+        }
+        // Closing ALSA releases the Bluetooth transport while paused. It also
+        // interrupts a blocked PCM write, so shutdown never waits on the sink.
+        let mut child = lock_state(&self.child);
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+        }
     }
     fn is_playing(&self) -> bool {
         self.playing.load(Ordering::Acquire)
@@ -927,9 +968,38 @@ impl KoboOutput {
 }
 
 #[cfg(feature = "kobo")]
+fn wait_for_output_exit(child: &Mutex<Child>, stop: &AtomicBool, wake: &(Mutex<()>, Condvar), timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        {
+            let mut child = lock_state(child);
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Err(_) => {
+                    let _ = child.kill();
+                    return child.wait().ok();
+                }
+                Ok(None) => {}
+            }
+            if stop.load(Ordering::Acquire) || Instant::now() >= deadline {
+                let _ = child.kill();
+                return child.wait().ok();
+            }
+        }
+        // Let ALSA drain briefly. Stop interrupts this wait immediately, and
+        // a stuck helper is killed and reaped after the drain deadline.
+        let (gate, changed) = wake;
+        let guard = lock_state(gate);
+        if !stop.load(Ordering::Acquire) {
+            let _wait = changed.wait_timeout(guard, deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(100)));
+        }
+    }
+}
+
+#[cfg(feature = "kobo")]
 fn kobo_output_message(detail: &str) -> Option<&'static str> {
     let detail = detail.to_ascii_lowercase();
-    if detail.contains("no such device") || detail.contains("disconnected") || detail.contains("broken pipe") { None } else { Some("Audio output stopped. Check your headphone connection, then press Play to retry.") }
+    if detail.contains("no such device") || detail.contains("disconnected") || detail.contains("broken pipe") { None } else { Some(text!(audiobook::audio_output_stopped_check_your_headphone_connection_then_press_play_to_retry)) }
 }
 
 #[cfg(feature = "kobo")]
@@ -976,7 +1046,11 @@ fn bluetooth_output(command: &mut Command, deadline: Instant, cancelled: &impl F
         return Err(error.into());
     }
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|error| format!("Could not query Bluetooth audio: {error}"))?;
-    let stdout = child.stdout.take().expect("Bluetooth command has piped stdout");
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Bluetooth audio query has no output pipe".into());
+    };
     let reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         // Drain while the child runs so a large paired-device list cannot fill
@@ -1013,16 +1087,7 @@ fn is_bluetooth_address(value: &str) -> bool {
 #[cfg(feature = "kobo")]
 impl Drop for KoboOutput {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        self.playing.store(true, Ordering::Release);
-        // Interrupt a blocked pipe write before joining the output thread.
-        // Checking/reaping under the same lock avoids targeting a reused PID.
-        {
-            let mut child = self.child.lock().expect("audio child lock poisoned");
-            if matches!(child.try_wait(), Ok(None)) {
-                let _ = child.kill();
-            }
-        }
+        self.stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -1033,6 +1098,31 @@ impl Drop for KoboOutput {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "kobo", unix))]
+    #[test]
+    fn output_exit_deadline_kills_and_reaps_a_helper_stuck_after_eof() {
+        let mut child = Command::new("/bin/sh").args(["-c", "cat >/dev/null; exec sleep 30"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        drop(child.stdin.take());
+        let child = Mutex::new(child);
+        let stop = AtomicBool::new(false);
+        let wake = (Mutex::new(()), Condvar::new());
+        let started = Instant::now();
+        let status = wait_for_output_exit(&child, &stop, &wake, Duration::from_millis(50)).unwrap();
+        assert!(!status.success());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(child.lock().unwrap().try_wait().unwrap().is_some());
+    }
+
+    #[cfg(all(feature = "kobo", unix))]
+    #[test]
+    fn output_stop_interrupts_the_helper_drain_wait() {
+        let child = Mutex::new(Command::new("/bin/sh").args(["-c", "exec sleep 30"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let stop = AtomicBool::new(true);
+        let wake = (Mutex::new(()), Condvar::new());
+        let started = Instant::now();
+        assert!(wait_for_output_exit(&child, &stop, &wake, Duration::from_secs(30)).is_some());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[cfg(all(feature = "kobo", unix))]
     #[test]
@@ -1078,7 +1168,6 @@ mod tests {
         drop(engine);
         drop(samples);
     }
-
 
     #[cfg(all(feature = "kobo", unix))]
     #[test]
@@ -1208,6 +1297,32 @@ mod tests {
         assert!(matches!(requests.recv().unwrap(), DecoderRequest::Seek { position: Duration::ZERO, generation: 1 }));
         assert!(!state.playback_finished());
         assert!(engine.is_playing());
+    }
+
+    #[cfg(all(feature = "kobo", unix))]
+    #[test]
+    fn pausing_closes_the_helper_and_resume_reseeks_to_the_confirmed_position() {
+        let state = test_state(0, 42_000_000);
+        let (_samples, receiver) = bounded(BUFFERED_BLOCKS);
+        let channels = NonZeroU16::new(1).unwrap();
+        let rate = NonZeroU32::new(22050).unwrap();
+        let duration = Duration::from_secs(100);
+        let output = || {
+            let child = Command::new("/bin/sh").args(["-c", "exec sleep 30"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+            KoboOutput::from_child(child, receiver.clone(), state.clone(), channels, rate, duration).unwrap()
+        };
+        let (request_tx, requests) = unbounded();
+        let mut engine = AudioEngine { recovery: Mutex::new(None), stream_control: None, output: output(), retry_output: (receiver.clone(), channels, rate), request_tx, worker: None, state: state.clone(), duration };
+        engine.pause();
+        assert!(engine.output.stop.load(Ordering::Acquire));
+        assert!(!engine.output.child.lock().unwrap().wait().unwrap().success());
+        assert!(!engine.is_playing());
+        assert_eq!(engine.confirmed_position(), Some(Duration::from_secs(42)));
+        assert!(!state.output_lost.load(Ordering::Acquire), "an intentional pause is not an output failure");
+        engine.restart_output(output()).unwrap();
+        assert!(matches!(requests.recv().unwrap(), DecoderRequest::Seek { position, generation: 1 } if position == Duration::from_secs(42)));
+        assert!(engine.is_playing());
+        engine.pause();
     }
 
     fn test_state(generation: u64, position_us: u64) -> Arc<SharedState> {
@@ -1362,7 +1477,6 @@ mod tests {
         assert!(!state.playback_finished());
     }
 
-
     #[test]
     fn stale_end_of_stream_cannot_overwrite_a_newer_chapter_seek() {
         let (_audio_tx, audio_rx) = bounded(1);
@@ -1374,7 +1488,6 @@ mod tests {
         assert_eq!(state.position_micros(), 25_000_000);
         assert!(!state.playback_finished());
     }
-
 
     #[test]
     fn stale_decoder_seek_failure_cannot_roll_back_a_newer_request() {
@@ -1390,7 +1503,6 @@ mod tests {
         assert_eq!(state.confirmed_position_micros(), None);
         assert!(state.error.lock().unwrap().is_none());
     }
-
 
     #[test]
     fn rapid_seek_burst_preserves_the_latest_request_without_backpressure() {
@@ -1409,7 +1521,6 @@ mod tests {
         assert_eq!(request_rx.len(), 0);
     }
 
-
     #[test]
     fn seek_generation_exhaustion_fails_without_mutating_state() {
         let (request_tx, _request_rx) = unbounded();
@@ -1419,7 +1530,6 @@ mod tests {
         assert_eq!(state.generation.load(Ordering::Acquire), NO_GENERATION - 1);
         assert_eq!(state.position_micros(), 17_000_000);
     }
-
 
     #[test]
     fn eof_on_a_zero_duration_source_finishes_at_zero() {
@@ -1432,7 +1542,6 @@ mod tests {
         assert_eq!(state.position_micros(), 0);
         assert!(state.playback_finished());
     }
-
 
     #[test]
     fn generation_change_resets_partial_position_accounting() {
@@ -1454,7 +1563,6 @@ mod tests {
         assert_eq!(state.position_micros(), 11_000_000);
     }
 
-
     #[test]
     fn stale_chunks_followed_by_disconnect_end_cleanly() {
         let (audio_tx, audio_rx) = bounded(2);
@@ -1466,7 +1574,6 @@ mod tests {
         assert_eq!(source.next(), None);
         assert_eq!(state.position_micros(), 7_000_000);
     }
-
 
     struct IntermittentDecoder {
         reads: std::vec::IntoIter<Option<f32>>,
@@ -1490,6 +1597,4 @@ mod tests {
             assert_eq!(read_decoder_block(&mut decoder, 16), [0.25, 0.5]);
         }
     }
-
-
 }

@@ -9,7 +9,7 @@ type Counts = (Vec<LibraryLanguageCount>, Vec<LibraryFormatCount>);
 
 #[derive(Default)]
 pub(crate) struct Facets {
-    library: Option<((i64, i64, Option<(u64, i64)>), Counts)>,
+    library: Option<((i64, i64), Counts)>,
     catalog: Option<((u64, i64, Option<(i64, i64, i64, String)>), Counts)>,
 }
 
@@ -27,7 +27,7 @@ impl Database {
 
     fn read_library_facets(&self) -> Result<(Vec<LibraryLanguageCount>, Vec<LibraryFormatCount>), DatabaseError> {
         let revision = Revision::read(&self.connection)?;
-        let key = (revision.visibility, revision.facets, revision.legacy);
+        let key = (revision.visibility, revision.facets);
         if let Some((_, counts)) = self.browse_facets.borrow().library.as_ref().filter(|(found, _)| *found == key) {
             return Ok(counts.clone());
         }
@@ -94,4 +94,11 @@ pub(super) fn include_selected_facets(language_counts: &mut Vec<LibraryLanguageC
     }
     language_counts.sort_by(|left, right| left.language.cmp(&right.language));
     format_counts.sort_by_key(|count| LibraryFileTypeFilter::ALL.iter().position(|format| *format == count.format));
+}
+
+// Async access owns its arguments until the synchronous database call completes.
+database_methods! {
+    fn library_language_counts() -> Vec<LibraryLanguageCount>;
+    arguments () = ();
+    execute database, arguments => database.library_language_counts();
 }

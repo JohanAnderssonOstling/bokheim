@@ -1,17 +1,17 @@
 //! Platform startup configuration; running operations go through client handles.
 
-use crate::app::{AppDataLocation, BackendContext};
+use crate::app::AppDataLocation;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::app::BackendContext;
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use sync_common::LibraryId;
 
 #[derive(Clone, Debug)]
 pub struct BackendLaunch {
     data_dir: PathBuf,
     default_library_root: PathBuf,
     discovery: Option<(String, PathBuf)>,
-    pub(crate) libraries_after_first_frame: bool,
+    private_library_storage: bool,
 }
 
 impl BackendLaunch {
@@ -21,12 +21,21 @@ impl BackendLaunch {
         // Desktop startup opens instance and update locks before the backend
         // registry, which otherwise creates this directory on first launch.
         fs::create_dir_all(&data_dir).map_err(|error| format!("failed to create app-data directory {}: {error}", data_dir.display()))?;
-        Ok(Self { data_dir, default_library_root, discovery: None, libraries_after_first_frame: false })
+        Ok(Self { data_dir, default_library_root, discovery: None, private_library_storage: false })
     }
 
     /// Location for platform-owned files such as desktop instance locks and UI sessions.
     pub fn app_data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Put future libraries in app-owned storage, including after switching
+    /// from a distribution that allowed a shared-storage default. Existing
+    /// registered libraries and their files are never moved or deleted.
+    pub fn with_private_library_storage(mut self) -> Self {
+        self.default_library_root = self.data_dir.join("libraries");
+        self.private_library_storage = true;
+        self
     }
 
     /// Use this root for discovery and future libraries, registering a fallback
@@ -37,16 +46,12 @@ impl BackendLaunch {
         self
     }
 
-    /// Build the initial UI from registry metadata, then open all libraries on
-    /// the backend worker. The host must hold `defer_library_maintenance()`
-    /// until its first frame; early requests wait for opening to finish.
-    pub fn with_libraries_after_first_frame(mut self) -> Self {
-        self.libraries_after_first_frame = true;
-        self
-    }
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_context(self) -> Result<BackendContext, String> {
         let context = BackendContext::open(self.data_dir, &self.default_library_root)?;
+        if self.private_library_storage {
+            app_preferences::library_folder::set_library_save_location(context.preferences.storage_root(), &self.default_library_root.to_string_lossy()).map_err(|error| error.to_string())?;
+        }
         if let Some((name, fallback)) = self.discovery {
             context.registry.discover(&self.default_library_root).map_err(|error| error.to_string())?;
             if context.registry.entries().map_err(|error| error.to_string())?.is_empty() && context.registry.pending_local_purges().map_err(|error| error.to_string())?.is_empty() {
@@ -58,118 +63,5 @@ impl BackendLaunch {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn first_launch_prepares_app_data_for_startup_locks_before_opening_the_backend() {
-        let root = tempfile::tempdir().unwrap();
-        let data = root.path().join("new-profile/bokheim");
-        let location = AppDataLocation::native_path(&data);
-        let launch = BackendLaunch::initialize(location.clone()).unwrap();
-        assert_eq!(launch.app_data_dir(), data);
-        assert!(data.is_dir());
-        assert!(!data.join("libraries").exists());
-
-        for name in ["windows-update-launch.lock", "desktop-instance.lock"] {
-            let lock = data.join(name);
-            let handle = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&lock).unwrap();
-            handle.try_lock().unwrap();
-            BackendLaunch::initialize(location.clone()).unwrap();
-            drop(handle);
-            fs::write(&lock, b"existing startup state").unwrap();
-            BackendLaunch::initialize(location.clone()).unwrap();
-            assert_eq!(fs::read(lock).unwrap(), b"existing startup state");
-        }
-    }
-
-    #[test]
-    fn launch_reports_app_data_directory_creation_failures() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("not-a-directory");
-        fs::write(&file, b"keep").unwrap();
-        let error = BackendLaunch::initialize(AppDataLocation::native_path(file.join("bokheim"))).unwrap_err();
-        assert!(error.contains("failed to create app-data directory"), "{error}");
-        assert_eq!(fs::read(file).unwrap(), b"keep");
-    }
-
-    #[test]
-    fn desktop_startup_preserves_documents_default_and_saved_override() {
-        let root = tempfile::tempdir().unwrap();
-        let mut launch = BackendLaunch::initialize(AppDataLocation::SharedDesktop).unwrap();
-        // Exercise desktop startup without opening the user's registry or
-        // creating libraries in their Documents directory.
-        launch.data_dir = root.path().join("app");
-        let expected = client_platform_desktop::default_library_root().unwrap();
-        let context = launch.clone().into_context().unwrap();
-        assert_eq!(context.registry.default_library_save_location().unwrap(), Some(expected.to_string_lossy().into_owned()));
-        let chosen = fs::canonicalize(root.path()).unwrap().join("Chosen");
-        context.registry.set_default_library_save_location(chosen.to_str().unwrap()).unwrap();
-        let restarted = launch.into_context().unwrap();
-        let created = restarted.registry.create("Created", None).unwrap();
-        let remote = restarted.registry.attach_remote(&LibraryId::new_v4(), "Remote").unwrap();
-        assert_eq!(Path::new(created.storage_locator()), chosen.join("Created"));
-        assert_eq!(Path::new(remote.storage_locator()), chosen.join("Remote"));
-    }
-
-    #[test]
-    fn discovery_root_places_new_and_remote_libraries_visibly_without_moving_existing_libraries() {
-        let root = tempfile::tempdir().unwrap();
-        let location = AppDataLocation::native_path(root.path().join("private"));
-        let original = BackendContext::initialize(location.clone()).unwrap();
-        let existing = original.registry.create("Existing", None).unwrap();
-        drop(original);
-        let visible = fs::canonicalize(root.path()).unwrap().join("Bokheim/Libraries");
-        let launch = BackendLaunch::initialize(location).unwrap().with_library_discovery(visible.clone(), "Kobo".into(), visible.join("default"));
-        let context = launch.clone().into_context().unwrap();
-        let created = context.registry.create("Created", None).unwrap();
-        let remote = context.registry.attach_remote(&LibraryId::new_v4(), "Remote").unwrap();
-        assert_eq!(Path::new(created.storage_locator()), visible.join("Created"));
-        assert_eq!(Path::new(remote.storage_locator()), visible.join("Remote"));
-        let restarted = launch.clone().into_context().unwrap();
-        let entries = restarted.registry.entries().unwrap();
-        assert_eq!(entries.iter().find(|entry| entry.library_id() == existing.library_id()).unwrap().storage_locator(), existing.storage_locator());
-        assert_eq!(restarted.registry.attach_remote(remote.library_id(), "Remote").unwrap().storage_locator(), remote.storage_locator());
-
-        let chosen = fs::canonicalize(root.path()).unwrap().join("User chosen");
-        context.registry.set_default_library_save_location(chosen.to_str().unwrap()).unwrap();
-        let restarted = launch.into_context().unwrap();
-        let next = restarted.registry.create("Next", None).unwrap();
-        assert_eq!(Path::new(next.storage_locator()), chosen.join("Next"));
-    }
-
-    #[test]
-    fn discovery_registers_a_fallback_once_and_preserves_it_on_restart() {
-        let root = tempfile::tempdir().unwrap();
-        let location = AppDataLocation::native_path(root.path().join("app"));
-        let libraries = root.path().join("libraries");
-        fs::create_dir_all(&libraries).unwrap();
-        let fallback = libraries.join("default");
-        let launch = BackendLaunch::initialize(location).unwrap().with_library_discovery(libraries, "Device library".into(), fallback.clone());
-        assert!(!fallback.exists(), "configuration must not mutate the library registry");
-        let first = launch.clone().into_context().unwrap();
-        let entries = first.registry.entries().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].library_name(), "Device library");
-        let restarted = launch.into_context().unwrap().registry.entries().unwrap();
-        assert_eq!(restarted.len(), 1);
-        assert_eq!(restarted[0].library_id(), entries[0].library_id());
-    }
-
-    #[test]
-    fn discovery_does_not_recreate_a_library_awaiting_local_purge() {
-        let root = tempfile::tempdir().unwrap();
-        let location = AppDataLocation::native_path(root.path().join("app"));
-        let libraries = root.path().join("libraries");
-        let fallback = libraries.join("default");
-        let launch = BackendLaunch::initialize(location).unwrap().with_library_discovery(libraries, "Device library".into(), fallback);
-        let context = launch.clone().into_context().unwrap();
-        let id = *context.registry.entries().unwrap()[0].library_id();
-        context.registry.begin_local_removal(&id).unwrap();
-        drop(context);
-
-        let restarted = launch.into_context().unwrap();
-        assert!(restarted.registry.entries().unwrap().is_empty());
-        assert_eq!(restarted.registry.pending_local_purges().unwrap(), [id]);
-    }
-}
+#[path = "../../tests/api/launch/tests.rs"]
+mod tests;

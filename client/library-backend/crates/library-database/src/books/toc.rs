@@ -1,6 +1,6 @@
 //! Stored navigation documents: reads and complete replacement.
 
-use content_address::ContentHash;
+use content_address::BookId;
 use include_sqlite_sql::include_sql;
 
 use library_model::BookTocEntry;

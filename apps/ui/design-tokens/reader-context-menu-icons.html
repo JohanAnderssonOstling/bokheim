@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Reader context menu icons</title>
+  <style>
+    @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family: Raleway; src: url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf'); }
+    @font-face { font-family: Bodoni; src: url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf'); }
+    :root { color-scheme:light; --canvas:#eae5dc; --paper:#f6f2eb; --ink:#22201d; --muted:#6b675f; --rule:#c5bdac; --accent:#466853; --wash:#d9e8de; --shadow:#29251b24; }
+    [data-theme="dark"] { color-scheme:dark; --canvas:#1c1a16; --paper:#11100d; --ink:#efe6d0; --muted:#a69c86; --rule:#4e4334; --accent:#d3b271; --wash:#3c3423; --shadow:#0006; }
+    * { box-sizing:border-box; }
+    [hidden] { display:none !important; }
+    body { margin:0; background:var(--canvas); color:var(--ink); font:14px/1.5 Raleway,system-ui,sans-serif; }
+    button { font:inherit; color:inherit; cursor:pointer; }
+    button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    button:hover { background:var(--wash); }
+    svg { flex:none; width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.3; stroke-linecap:round; stroke-linejoin:round; }
+    .sprite { position:absolute; width:0; height:0; overflow:hidden; }
+    main { max-width:1480px; margin:auto; padding:26px 32px 36px; }
+    header,.brand,.controls,.scenarios,.screen-label { display:flex; align-items:center; gap:16px; }
+    header { justify-content:space-between; padding-bottom:18px; border-bottom:1px solid var(--rule); }
+    .brand { font:30px Bodoni,serif; }
+    h1 { margin:0; border-left:1px solid var(--rule); padding-left:16px; font:14px Raleway,sans-serif; }
+    .control { background:transparent; border:1px solid var(--rule); min-height:34px; padding:6px 12px; font-size:12px; }
+    .intro { margin:24px 0; display:flex; align-items:baseline; justify-content:space-between; gap:32px; }
+    h2 { font:36px/1.2 Bodoni,serif; margin:0; }
+    .intro p { color:var(--muted); max-width:450px; font-size:12px; margin:0; }
+    .scenarios { flex-wrap:wrap; gap:6px; padding:12px 0; border-block:1px solid var(--rule); margin-bottom:22px; }
+    .scenarios>span { font-size:12px; color:var(--muted); margin-right:10px; }
+    .scenarios button[aria-pressed="true"] { background:var(--accent); color:var(--paper); border-color:var(--accent); }
+    .gallery { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:28px; align-items:start; }
+    .screen-label { justify-content:space-between; font-size:12px; margin-bottom:10px; }
+    .screen-label span { color:var(--muted); font-size:11px; }
+    .reader { height:532px; background:var(--paper); border:1px solid var(--rule); display:flex; min-width:0; overflow:hidden; }
+    .rail { width:48px; flex:none; padding:8px 0; border-right:1px solid var(--rule); display:flex; flex-direction:column; align-items:center; gap:8px; }
+    .rail span { display:grid; place-items:center; width:32px; height:32px; color:var(--muted); }
+    .rail .active { background:var(--wash); color:var(--accent); }
+    .rail .spacer { flex:1; }
+    .document { flex:1; position:relative; overflow:hidden; min-width:0; }
+    .bookbar { display:flex; justify-content:space-between; margin:0 24px; padding:14px 0; border-bottom:1px solid var(--rule); font-size:11px; color:var(--muted); }
+    .spread { display:grid; grid-template-columns:1fr 1fr; gap:32px; padding:24px 32px; height:calc(100% - 78px); overflow:hidden; }
+    .page { min-width:0; font:21px/1.55 Garamond,Georgia,serif; }
+    .running { text-align:center; text-transform:uppercase; letter-spacing:.12em; font:9px Raleway,sans-serif; color:var(--muted); margin:0 0 20px; }
+    .page h3 { text-align:center; font:27px/1.2 Bodoni,serif; margin:0 0 20px; }
+    .page p { margin:0 0 16px; }
+    .selection { background:var(--wash); box-decoration-break:clone; -webkit-box-decoration-break:clone; }
+    .page-number { position:absolute; bottom:12px; left:0; width:100%; text-align:center; color:var(--muted); font:12px Garamond,serif; }
+    .menu { position:absolute; top:178px; left:42%; z-index:2; min-width:202px; max-width:calc(100% - 20px); padding:4px; border:1px solid var(--rule); background:var(--paper); box-shadow:0 14px 34px var(--shadow); }
+    .menu-row { display:flex; align-items:center; gap:8px; width:100%; min-height:26px; border:0; padding:3px 8px; background:transparent; text-align:left; font-size:14px; line-height:20px; }
+    .menu-row svg { width:16px; height:16px; }
+    .menu-row:hover,.menu-row:focus-visible { background:var(--wash); outline-offset:-2px; }
+    .action-icon { display:contents; }
+    .caption { margin:12px 0 0; color:var(--muted); font-size:12px; }
+    .phone { position:relative; display:block; }
+    .phone .bookbar { margin:0; padding:14px 16px; }
+    .phone .page { padding:22px 24px; font-size:21px; }
+    .phone .page h3 { font-size:25px; }
+    .scrim { position:absolute; inset:48px 0 0; background:#0002; }
+    .sheet { position:absolute; bottom:0; left:0; right:0; max-height:80%; display:flex; flex-direction:column; background:var(--paper); border-top:1px solid var(--rule); box-shadow:0 14px 34px var(--shadow); }
+    .sheet-rows { overflow:auto; min-height:0; }
+    .sheet .menu-row { min-height:48px; padding:8px 16px; gap:12px; font-size:16px; }
+    .sheet .menu-row svg { width:20px; height:20px; }
+    .sheet .menu-row span { flex:1; min-width:0; }
+    .hint { display:flex; flex-wrap:wrap; gap:8px 28px; justify-content:space-between; border-top:1px solid var(--rule); padding-top:16px; margin-top:24px; color:var(--muted); font-size:12px; }
+    .hint p { margin:0; }
+    .status { min-height:18px; color:var(--accent); }
+    kbd { font:11px ui-monospace,monospace; border:1px solid var(--rule); padding:2px 4px; }
+    .specimen { display:none; font-size:17px; border-collapse:collapse; width:100%; margin-top:18px; }
+    .specimen th,.specimen td { padding:6px 8px; border:1px solid var(--rule); text-align:left; font-weight:400; }
+    [data-context="table"] .specimen { display:table; }
+    .image-example,.equation-example { display:none; margin:18px 0; border:1px solid var(--rule); padding:16px; text-align:center; }
+    .image-example svg { width:100%; height:74px; stroke:var(--muted); }
+    [data-context="image"] .image-example,[data-context="equation"] .equation-example { display:block; }
+    .equation-example { font:italic 25px Garamond,serif; }
+    @media(max-width:1150px) { .spread { grid-template-columns:1fr; padding:24px; } .spread .page:last-child { display:none; } .menu { left:32%; } .intro { align-items:start; } .intro p { max-width:330px; } }
+    @media(max-width:800px) { main { padding:18px 16px 28px; } header { flex-wrap:wrap; } .intro { display:block; } .intro p { margin-top:12px; max-width:100%; } .gallery { grid-template-columns:1fr; } .phone { max-width:400px; } .controls { gap:8px; } h2 { font-size:30px; } }
+    @media(max-width:420px) { .rail { width:36px; } .bookbar { margin:0 12px; } .menu { left:12px; top:190px; } .menu-row { font-size:13px; } }
+  </style>
+</head>
+<body>
+  <!-- Unmodified icons from the vendored Phosphor Light set. -->
+  <svg class="sprite" aria-hidden="true"><defs>
+    <symbol id="asset-pencil" viewBox="0 0 256 256"><path d="M225.9,74.78,181.21,30.09a14,14,0,0,0-19.8,0L38.1,153.41a13.94,13.94,0,0,0-4.1,9.9V208a14,14,0,0,0,14,14H92.69a13.94,13.94,0,0,0,9.9-4.1L225.9,94.58a14,14,0,0,0,0-19.8ZM48.49,160,136,72.48,155.51,92,68,179.51ZM46,208V174.48L81.51,210H48A2,2,0,0,1,46,208Zm50-.49L76.49,188,164,100.48,183.51,120ZM217.41,86.1,192,111.51,144.49,64,169.9,38.58a2,2,0,0,1,2.83,0l44.68,44.69a2,2,0,0,1,0,2.83Z"/></symbol>
+    <symbol id="asset-magnifying-glass" viewBox="0 0 256 256"><path d="M228.24,219.76l-51.38-51.38a86.15,86.15,0,1,0-8.48,8.48l51.38,51.38a6,6,0,0,0,8.48-8.48ZM38,112a74,74,0,1,1,74,74A74.09,74.09,0,0,1,38,112Z"/></symbol>
+    <symbol id="asset-translate" viewBox="0 0 256 256"><path d="M245.37,213.32l-56-112a6,6,0,0,0-10.74,0l-22.3,44.6A90,90,0,0,1,105,127.19,101.73,101.73,0,0,0,133.82,62H160a6,6,0,0,0,0-12H102V32a6,6,0,0,0-12,0V50H32a6,6,0,0,0,0,12h89.79A89.71,89.71,0,0,1,96,119.23,89.81,89.81,0,0,1,75.11,86,6,6,0,1,0,63.8,90,101.66,101.66,0,0,0,87,127.2,89.56,89.56,0,0,1,32,146a6,6,0,0,0,0,12,101.55,101.55,0,0,0,64-22.63,102.11,102.11,0,0,0,54.53,22.17l-27.89,55.78a6,6,0,0,0,10.74,5.36L147.71,190h72.58l14.34,28.68A6,6,0,0,0,240,222a5.87,5.87,0,0,0,2.68-.64A6,6,0,0,0,245.37,213.32ZM153.71,178,184,117.42,214.29,178Z"/></symbol>
+    <symbol id="asset-copy" viewBox="0 0 256 256"><path d="M216,34H88a6,6,0,0,0-6,6V82H40a6,6,0,0,0-6,6V216a6,6,0,0,0,6,6H168a6,6,0,0,0,6-6V174h42a6,6,0,0,0,6-6V40A6,6,0,0,0,216,34ZM162,210H46V94H162Zm48-48H174V88a6,6,0,0,0-6-6H94V46H210Z"/></symbol>
+    <symbol id="asset-link-simple" viewBox="0 0 256 256"><path d="M164.25,91.75a6,6,0,0,1,0,8.49l-64,64a6,6,0,0,1-8.49-8.48l64-64A6,6,0,0,1,164.25,91.75ZM214.2,41.8a54.07,54.07,0,0,0-76.38,0L107.75,71.85a6,6,0,0,0,8.49,8.49l30.07-30.06a42,42,0,0,1,59.41,59.41l-30.08,30.07a6,6,0,1,0,8.49,8.49l30.07-30.07A54,54,0,0,0,214.2,41.8ZM139.76,175.64l-30.07,30.08a42,42,0,0,1-59.41-59.41l30.06-30.07a6,6,0,0,0-8.49-8.49l-30,30.07a54,54,0,0,0,76.38,76.39l30.07-30.08a6,6,0,0,0-8.49-8.49Z"/></symbol>
+    <symbol id="asset-table" viewBox="0 0 256 256"><path d="M224,50H32a6,6,0,0,0-6,6V192a14,14,0,0,0,14,14H216a14,14,0,0,0,14-14V56A6,6,0,0,0,224,50ZM38,110H82v36H38Zm56,0H218v36H94ZM218,62V98H38V62ZM38,192V158H82v36H40A2,2,0,0,1,38,192Zm178,2H94V158H218v34A2,2,0,0,1,216,194Z"/></symbol>
+    <symbol id="asset-image" viewBox="0 0 256 256"><path d="M216,42H40A14,14,0,0,0,26,56V200a14,14,0,0,0,14,14H216a14,14,0,0,0,14-14V56A14,14,0,0,0,216,42ZM40,54H216a2,2,0,0,1,2,2V163.57L188.53,134.1a14,14,0,0,0-19.8,0l-21.42,21.42L101.9,110.1a14,14,0,0,0-19.8,0L38,154.2V56A2,2,0,0,1,40,54ZM38,200V171.17l52.58-52.58a2,2,0,0,1,2.84,0L176.83,202H40A2,2,0,0,1,38,200Zm178,2H193.8l-38-38,21.41-21.42a2,2,0,0,1,2.83,0l38,38V200A2,2,0,0,1,216,202ZM146,100a10,10,0,1,1,10,10A10,10,0,0,1,146,100Z"/></symbol>
+    <symbol id="asset-function" viewBox="0 0 256 256"><path d="M206,40a6,6,0,0,1-6,6H170.71a26,26,0,0,0-25.58,21.35L135.19,122H184a6,6,0,0,1,0,12H133l-10.33,56.8A38,38,0,0,1,85.29,222H56a6,6,0,0,1,0-12H85.29a26,26,0,0,0,25.58-21.35L120.81,134H72a6,6,0,0,1,0-12h51l10.33-56.8A38,38,0,0,1,170.71,34H200A6,6,0,0,1,206,40Z"/></symbol>
+    <symbol id="asset-caret-left" viewBox="0 0 256 256"><path d="M164.24,203.76a6,6,0,1,1-8.48,8.48l-80-80a6,6,0,0,1,0-8.48l80-80a6,6,0,0,1,8.48,8.48L88.49,128Z"/></symbol>
+    <symbol id="asset-list" viewBox="0 0 256 256"><path d="M222,128a6,6,0,0,1-6,6H40a6,6,0,0,1,0-12H216A6,6,0,0,1,222,128ZM40,70H216a6,6,0,0,0,0-12H40a6,6,0,0,0,0,12ZM216,186H40a6,6,0,0,0,0,12H216a6,6,0,0,0,0-12Z"/></symbol>
+    <symbol id="asset-bookmark" viewBox="0 0 256 256"><path d="M64 224V40a8 8 0 0 1 8-8h112a8 8 0 0 1 8 8v184l-64-40Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="12"/></symbol>
+    <symbol id="asset-gear" viewBox="0 0 256 256"><path d="M128,82a46,46,0,1,0,46,46A46.06,46.06,0,0,0,128,82Zm0,80a34,34,0,1,1,34-34A34,34,0,0,1,128,162ZM214,130.84c.06-1.89.06-3.79,0-5.68L229.33,106a6,6,0,0,0,1.11-5.29A105.34,105.34,0,0,0,219.76,74.9a6,6,0,0,0-4.53-3l-24.45-2.71q-1.93-2.07-4-4l-2.72-24.46a6,6,0,0,0-3-4.53,105.65,105.65,0,0,0-25.77-10.66A6,6,0,0,0,150,26.68l-19.2,15.37c-1.89-.06-3.79-.06-5.68,0L106,26.67a6,6,0,0,0-5.29-1.11A105.34,105.34,0,0,0,74.9,36.24a6,6,0,0,0-3,4.53L69.23,65.22q-2.07,1.94-4,4L40.76,72a6,6,0,0,0-4.53,3,105.65,105.65,0,0,0-10.66,25.77A6,6,0,0,0,26.68,106l15.37,19.2c-.06,1.89-.06,3.79,0,5.68L26.67,150.05a6,6,0,0,0-1.11,5.29A105.34,105.34,0,0,0,36.24,181.1a6,6,0,0,0,4.53,3l24.45,2.71q1.94,2.07,4,4L72,215.24a6,6,0,0,0,3,4.53,105.65,105.65,0,0,0,25.77,10.66,6,6,0,0,0,5.29-1.11L125.16,214c1.89.06,3.79.06,5.68,0l19.21,15.38a6,6,0,0,0,3.75,1.31,6.2,6.2,0,0,0,1.54-.2,105.34,105.34,0,0,0,25.76-10.68,6,6,0,0,0,3-4.53l2.71-24.45q2.07-1.93,4-4l24.46-2.72a6,6,0,0,0,4.53-3,105.49,105.49,0,0,0,10.66-25.77,6,6,0,0,0-1.11-5.29Zm-3.1,41.63-23.64,2.63a6,6,0,0,0-3.82,2,75.14,75.14,0,0,1-6.31,6.31,6,6,0,0,0-2,3.82l-2.63,23.63A94.28,94.28,0,0,1,155.14,218l-18.57-14.86a6,6,0,0,0-3.75-1.31h-.36a78.07,78.07,0,0,1-8.92,0,6,6,0,0,0-4.11,1.3L100.87,218a94.13,94.13,0,0,1-17.34-7.17L80.9,187.21a6,6,0,0,0-2-3.82,75.14,75.14,0,0,1-6.31-6.31,6,6,0,0,0-3.82-2l-23.63-2.63A94.28,94.28,0,0,1,38,155.14l14.86-18.57a6,6,0,0,0,1.3-4.11,78.07,78.07,0,0,1,0-8.92,6,6,0,0,0-1.3-4.11L38,100.87a94.13,94.13,0,0,1,7.17-17.34L68.79,80.9a6,6,0,0,0,3.82-2,75.14,75.14,0,0,1,6.31-6.31,6,6,0,0,0,2-3.82l2.63-23.63A94.28,94.28,0,0,1,100.86,38l18.57,14.86a6,6,0,0,0,4.11,1.3,78.07,78.07,0,0,1,8.92,0,6,6,0,0,0,4.11-1.3L155.13,38a94.13,94.13,0,0,1,17.34,7.17l2.63,23.64a6,6,0,0,0,2,3.82,75.14,75.14,0,0,1,6.31,6.31,6,6,0,0,0,3.82,2l23.63,2.63A94.28,94.28,0,0,1,218,100.86l-14.86,18.57a6,6,0,0,0-1.3,4.11,78.07,78.07,0,0,1,0,8.92,6,6,0,0,0,1.3,4.11L218,155.13A94.13,94.13,0,0,1,210.85,172.47Z"/></symbol>
+    <symbol id="asset-markdown-logo" viewBox="0 0 256 256"><path d="M232,50H24A14,14,0,0,0,10,64V192a14,14,0,0,0,14,14H232a14,14,0,0,0,14-14V64A14,14,0,0,0,232,50Zm2,142a2,2,0,0,1-2,2H24a2,2,0,0,1-2-2V64a2,2,0,0,1,2-2H232a2,2,0,0,1,2,2ZM126,104v48a6,6,0,0,1-12,0V118.49L92.24,140.24a6,6,0,0,1-8.48,0L62,118.49V152a6,6,0,0,1-12,0V104a6,6,0,0,1,10.24-4.24L88,127.51l27.76-27.75A6,6,0,0,1,126,104Zm78.24,19.76a6,6,0,0,1,0,8.48l-24,24a6,6,0,0,1-8.48,0l-24-24a6,6,0,1,1,8.48-8.48L170,137.51V104a6,6,0,0,1,12,0v33.51l13.76-13.75A6,6,0,0,1,204.24,123.76Z"/></symbol>
+    <symbol id="asset-file-html" viewBox="0 0 256 256"><path d="M214,120V88a6,6,0,0,0-1.76-4.24l-56-56A6,6,0,0,0,152,26H56A14,14,0,0,0,42,40v80a6,6,0,0,0,12,0V40a2,2,0,0,1,2-2h90V88a6,6,0,0,0,6,6h50v26a6,6,0,0,0,12,0ZM158,46.48,193.52,82H158ZM66,160v48a6,6,0,0,1-12,0V190H30v18a6,6,0,0,1-12,0V160a6,6,0,0,1,12,0v18H54V160a6,6,0,0,1,12,0Zm56,0a6,6,0,0,1-6,6H106v42a6,6,0,0,1-12,0V166H84a6,6,0,0,1,0-12h32A6,6,0,0,1,122,160Zm72,0v48a6,6,0,0,1-12,0V178l-13.2,17.6a6,6,0,0,1-9.6,0L146,178v30a6,6,0,0,1-12,0V160a6,6,0,0,1,10.8-3.6L164,182l19.2-25.6A6,6,0,0,1,194,160Zm56,48a6,6,0,0,1-6,6H216a6,6,0,0,1-6-6V160a6,6,0,0,1,12,0v42h22A6,6,0,0,1,250,208Z"/></symbol>
+  </defs></svg>
+  <main>
+    <header>
+      <div class="brand">Bokheim <h1>Reader context menu · Mockup</h1></div>
+      <div class="controls"><button class="control" id="theme">Dark appearance</button></div>
+    </header>
+    <section class="intro"><h2>A small cue for every action.</h2><p>Light outline icons, aligned in one column. Preview the existing reader actions on desktop and in the mobile action sheet.</p></section>
+    <nav class="scenarios" aria-label="Context menu examples">
+      <span>Context</span>
+      <button class="control" data-context="epub" aria-pressed="true">EPUB selection</button>
+      <button class="control" data-context="pdf" aria-pressed="false">PDF selection</button>
+      <button class="control" data-context="table" aria-pressed="false">Table</button>
+      <button class="control" data-context="image" aria-pressed="false">Image</button>
+      <button class="control" data-context="equation" aria-pressed="false">Equation</button>
+    </nav>
+    <div class="gallery" id="gallery" data-context="epub">
+      <section>
+        <div class="screen-label">Desktop popup <span>16 px icons · Compact rows</span></div>
+        <div class="reader">
+          <aside class="rail" aria-hidden="true"><span data-icon="caret-left"></span><span data-icon="list"></span><span class="active" data-icon="pencil"></span><span data-icon="bookmark"></span><span data-icon="magnifying-glass"></span><span class="spacer"></span><span data-icon="gear"></span></aside>
+          <div class="document" id="document">
+            <div class="bookbar"><span>Middlemarch</span><span>George Eliot</span></div>
+            <div class="spread">
+              <article class="page"><div class="running">Book II · Old and young</div><h3>Chapter XV</h3><p>But Fielding lived when the days were longer (for time, like money, is measured by our needs), when <span class="selection" id="selected-text">summer afternoons were spacious, and the clock ticked slowly in the winter evenings.</span></p><p>We belated historians must not linger after his example; and if we did so, it is probable that our chat would be thin and eager.</p>
+                <table class="specimen"><thead><tr><th>Season</th><th>Hours of light</th></tr></thead><tbody><tr><td>Summer</td><td>Sixteen</td></tr><tr><td>Winter</td><td>Eight</td></tr></tbody></table>
+                <figure class="image-example" aria-label="Illustration of hills"><svg viewBox="0 0 240 80"><circle cx="180" cy="18" r="10"/><path d="M0 70 65 15 125 70M95 70l62-42 83 42M0 72h240"/></svg></figure>
+                <div class="equation-example">E = mc²</div>
+              </article>
+              <article class="page"><div class="running">George Eliot · Middlemarch</div><p>I at least have so much to do in unravelling certain human lots, and seeing how they were woven and interwoven, that all the light I can command must be concentrated on this particular web.</p><p>At present I have to make the new settler Lydgate better known to any one interested in him than he could possibly be even to those who had seen the most of him since his arrival in Middlemarch.</p><p>He was but seven-and-twenty, an age at which many men are not quite common—at which they are hopeful of achievement.</p></article>
+            </div>
+            <div class="page-number">146 / 854</div>
+            <div class="menu" id="desktop-menu" role="menu" aria-label="Reader context actions"></div>
+          </div>
+        </div>
+        <p class="caption">The same labels and order, with a quiet icon beside each action.</p>
+      </section>
+      <section>
+        <div class="screen-label">Mobile action sheet <span>20 px icons · 48 px rows</span></div>
+        <div class="reader phone">
+          <div class="bookbar"><span>‹ &nbsp; Middlemarch</span><span>34%</span></div>
+          <article class="page"><div class="running">Book II · Old and young</div><h3>Chapter XV</h3><p>But Fielding lived when the days were longer, when <span class="selection">summer afternoons were spacious</span>, and the clock ticked slowly in the winter evenings.</p></article>
+          <div class="scrim"></div>
+          <section class="sheet" aria-label="Reader actions"><div class="sheet-rows" id="mobile-menu"></div></section>
+        </div>
+        <p class="caption">The same icons, with more space for touch.</p>
+      </section>
+    </div>
+    <footer class="hint"><p>Try a context above. Right-click the desktop page to reposition the menu. <kbd>Esc</kbd> closes it.</p><p class="status" id="status" role="status" aria-live="polite">Visual preview · Sample content</p></footer>
+  </main>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    const selectionActions = [['Annotate','pencil'],['Lookup','magnifying-glass'],['Translate','translate'],['Copy','copy'],['Copy link','link-simple']];
+    const actions = {
+      epub:selectionActions,
+      pdf:selectionActions,
+      table:[['Copy Table as Markdown','markdown-logo'],['Copy Table as Unstyled HTML','file-html'],['Copy Table as Styled HTML','file-html']],
+      image:[['Copy Image','image']],
+      equation:[['Copy as LaTeX','function']]
+    };
+    function icon(name) {
+      return `<svg aria-hidden="true" viewBox="0 0 256 256" style="fill:currentColor;stroke:none"><use href="#asset-${name}"/></svg>`;
+    }
+    function render(context) {
+      $('gallery').dataset.context = context;
+      $('desktop-menu').hidden = false;
+      $('desktop-menu').style.removeProperty('left');
+      $('desktop-menu').style.removeProperty('top');
+      $('selected-text').classList.toggle('selection', context === 'epub' || context === 'pdf');
+      document.querySelectorAll('button[data-context]').forEach(button => button.setAttribute('aria-pressed',String(button.dataset.context === context)));
+      for (const [id, desktop] of [['desktop-menu',true],['mobile-menu',false]]) {
+        $(id).replaceChildren(...actions[context].map(([label,name]) => {
+          const button = document.createElement('button');
+          button.className = 'menu-row';
+          if (desktop) button.setAttribute('role','menuitem');
+          button.innerHTML = `<span class="action-icon">${icon(name)}</span><span>${label}</span>`;
+          button.onclick = () => { $('status').textContent = `${label} · Preview only`; };
+          return button;
+        }));
+      }
+      $('status').textContent = 'Visual preview · Sample content';
+    }
+    document.querySelectorAll('[data-icon]').forEach(element => { element.innerHTML = icon(element.dataset.icon); });
+    document.querySelectorAll('button[data-context]').forEach(button => { button.onclick = () => render(button.dataset.context); });
+    $('theme').onclick = () => {
+      const dark = document.documentElement.dataset.theme !== 'dark';
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      $('theme').textContent = dark ? 'Light appearance' : 'Dark appearance';
+    };
+    $('document').oncontextmenu = event => {
+      event.preventDefault();
+      const menu = $('desktop-menu');
+      menu.hidden = false;
+      const bounds = $('document').getBoundingClientRect();
+      menu.style.left = Math.max(8,Math.min(event.clientX-bounds.left,bounds.width-menu.offsetWidth-8))+'px';
+      menu.style.top = Math.max(8,Math.min(event.clientY-bounds.top,bounds.height-menu.offsetHeight-8))+'px';
+      menu.querySelector('button').focus({preventScroll:true});
+    };
+    $('document').onpointerdown = event => { if (event.button === 0 && !$('desktop-menu').contains(event.target)) $('desktop-menu').hidden = true; };
+    document.addEventListener('keydown',event => {
+      if (event.key === 'Escape') { $('desktop-menu').hidden = true; $('status').textContent = 'Right-click the desktop page to reopen the menu.'; }
+      if (!['ArrowDown','ArrowUp','Home','End'].includes(event.key) || !event.target.matches('.menu-row')) return;
+      event.preventDefault();
+      const rows = [...event.target.parentElement.querySelectorAll('.menu-row')];
+      const index = rows.indexOf(event.target);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length-1 : (index+(event.key === 'ArrowDown' ? 1 : -1)+rows.length)%rows.length;
+      rows[next].focus({preventScroll:true});
+    });
+    render('epub');
+  </script>
+</body>
+</html>

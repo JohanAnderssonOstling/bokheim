@@ -6,10 +6,18 @@ publish = false
 autobins = false
 
 [dependencies]
+html-resources = { package = "skrift-resources", path = "../../../../../HtmlEngine/crates/html-resources" }
+html-parse = { package = "skrift-parse", path = "../../../../../HtmlEngine/crates/02-html-parse" }
+html-dom = { package = "skrift-dom", path = "../../../../../HtmlEngine/crates/html-dom" }
+html-pipeline = { package = "skrift-pipeline", path = "../../../../../HtmlEngine/crates/html-pipeline" }
+html-style = { package = "skrift-style", path = "../../../../../HtmlEngine/crates/03-html-style" }
+
 futures-lite = "2"
 scraper.workspace = true
 lightningcss.workspace = true
 book-content = { path = "../../../../client/book-content" }
+book-model = { path = "../../../../shared/book-model" }
+skrift-column-paginator.workspace = true
 html.workspace = true
 
 [[bin]]

@@ -1,0 +1,20 @@
+[package]
+name = "library-services"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+client-protocol = { path = "../../../client-protocol" }
+account-client = { path = "../../../account-client" }
+async-channel = "2"
+client-platform-runtime = { path = "../../../platforms/runtime" }
+library-model = { path = "../../../library-model", default-features = false }
+sync-common = { path = "../../../../shared/sync-common", default-features = false }
+sync-transport = { path = "../sync-transport" }
+tokio = { version = "1", features = ["sync", "macros"] }
+uuid = "1"
+web-time = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

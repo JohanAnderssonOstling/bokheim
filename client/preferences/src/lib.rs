@@ -1,5 +1,86 @@
+use ui_text::text;
+
+#[cfg(feature = "store")]
+mod store;
+#[cfg(feature = "store")]
+pub use store::PreferenceStore;
+#[cfg(feature = "store")]
+mod client;
+#[cfg(feature = "store")]
+pub use client::Client;
+#[cfg(feature = "store")]
+pub mod library_folder;
+
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
+
+/// Device-local shortcut overrides, with one combination per action.
+/// Missing actions retain their defaults; an empty list disables the shortcut.
+pub type KeyboardShortcuts = BTreeMap<String, Vec<String>>;
+
+/// A relative adjustment to every original publication weight.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaderFontWeight {
+    Light,
+    #[default]
+    Normal,
+    Heavy,
+}
+
+impl ReaderFontWeight {
+    pub const ALL: [Self; 3] = [Self::Light, Self::Normal, Self::Heavy];
+
+    pub const fn adjustment(self) -> i16 {
+        match self {
+            Self::Light => -200,
+            Self::Normal => 0,
+            Self::Heavy => 200,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Light => text!(settings::light),
+            Self::Normal => text!(settings::normal),
+            Self::Heavy => text!(settings::heavy),
+        }
+    }
+}
+
+/// Whether to preserve the publication's rules or override discretionary hyphenation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaderHyphenation {
+    #[default]
+    Book,
+    Off,
+    On,
+}
+
+impl ReaderHyphenation {
+    pub const ALL: [Self; 3] = [Self::Book, Self::Off, Self::On];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Book => text!(reader::book),
+            Self::Off => text!(common::off),
+            Self::On => text!(common::on),
+        }
+    }
+}
+
+fn normalize_keyboard_shortcuts(mut shortcuts: KeyboardShortcuts) -> KeyboardShortcuts {
+    for keys in shortcuts.values_mut() {
+        keys.truncate(1);
+    }
+    shortcuts
+}
+
+fn deserialize_keyboard_shortcuts<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<KeyboardShortcuts, D::Error> {
+    KeyboardShortcuts::deserialize(deserializer).map(normalize_keyboard_shortcuts)
+}
 
 pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 64.0;
@@ -11,6 +92,15 @@ pub const ZOOM_MIN: f64 = 0.5;
 pub const ZOOM_MAX: f64 = 3.0;
 pub const LINE_HEIGHT_MIN: f32 = 1.0;
 pub const LINE_HEIGHT_MAX: f32 = 2.4;
+pub const DEFAULT_WORD_SPACING_PERCENT: f32 = 100.0;
+pub const WORD_SPACING_MIN_PERCENT: f32 = 50.0;
+pub const WORD_SPACING_MAX_PERCENT: f32 = 200.0;
+pub const WORD_SPACING_STEP_PERCENT: f32 = 10.0;
+pub const DEFAULT_PARAGRAPH_SPACING_EM: f32 = 1.0;
+pub const DEFAULT_FIRST_LINE_INDENT_EM: f32 = 1.5;
+pub const PARAGRAPH_SPACING_MAX_EM: f32 = 3.0;
+pub const FIRST_LINE_INDENT_MAX_EM: f32 = 4.0;
+pub const PARAGRAPH_STEP_EM: f32 = 0.1;
 pub const PDF_ZOOM_MIN: f32 = 0.05;
 pub const PDF_ZOOM_MAX: f32 = 10.0;
 pub const PDF_PAGE_COUNT_MIN: u8 = 1;
@@ -40,7 +130,7 @@ pub enum ApplicationTheme {
     /// Cream surfaces, green accent.
     #[default]
     Warm,
-    /// Neutral greys and true-white cards, navy accent. Not a tinted paper —
+    /// Neutral greys and true-white cards, muted slate accent. Not a tinted paper —
     /// the absence of a tint, for people who want the application to disappear
     /// behind the covers.
     Cool,
@@ -69,15 +159,15 @@ impl ApplicationTheme {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Warm => "Warm",
-            Self::Cool => "Cool",
+            Self::Warm => text!(settings::warm),
+            Self::Cool => text!(settings::cool),
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Warm => "Cream surfaces with a muted green accent.",
-            Self::Cool => "Neutral greys and white cards with a navy accent.",
+            Self::Warm => text!(settings::cream_surfaces_with_a_muted_green_accent),
+            Self::Cool => text!(settings::neutral_greys_and_white_cards_with_a_muted_slate_accent),
         }
     }
 }
@@ -94,8 +184,8 @@ pub enum UiFontFamily {
 impl UiFontFamily {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Serif => "Serif",
-            Self::SansSerif => "Sans serif",
+            Self::Serif => text!(common::serif),
+            Self::SansSerif => text!(common::sans_serif),
         }
     }
 
@@ -109,42 +199,50 @@ impl UiFontFamily {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowsingPreferences {
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_keyboard_shortcuts")]
+    keyboard_shortcuts: KeyboardShortcuts,
     allow_metered_transfers: bool,
+    text_search: bool,
+    animations: bool,
     theme: ApplicationTheme,
-    #[serde(default)]
     appearance_override: Option<ResolvedAppearance>,
     ui_font_size_px: UiFontSize,
-    #[serde(default)]
     ui_font_family: UiFontFamily,
+    custom_ui_font_family: Option<String>,
+    custom_ui_font_enabled: bool,
     cover_text: CoverText,
     /// Draw every book with its generated cover and never load cover art.
     /// Offered on Kobo, where decoding and holding cover images is the
     /// costliest part of a library page.
-    #[serde(default)]
     generated_covers_only: bool,
-    #[serde(default)]
     catalog_grouping: CatalogGrouping,
     /// None needs an initial default; Some(empty) explicitly shows any language.
-    #[serde(default)]
     catalog_languages: Option<Vec<String>>,
-    /// Kobo keyboard layout codes in switching order; the first is current.
-    #[serde(default = "default_keyboard_layouts")]
+    /// Selected Kobo keyboard layouts.
     keyboard_layouts: Vec<String>,
 }
 
 fn default_keyboard_layouts() -> Vec<String> {
-    vec!["SV".into(), "EN".into()]
+    vec!["SV".into()]
+}
+
+const fn default_enabled() -> bool {
+    true
 }
 
 impl Default for BrowsingPreferences {
     fn default() -> Self {
         Self {
+            keyboard_shortcuts: KeyboardShortcuts::new(),
             allow_metered_transfers: false,
+            text_search: default_enabled(),
+            animations: default_enabled(),
             theme: ApplicationTheme::default(),
             appearance_override: None,
             ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT),
             ui_font_family: UiFontFamily::default(),
+            custom_ui_font_family: None,
+            custom_ui_font_enabled: false,
             cover_text: CoverText::Always,
             generated_covers_only: false,
             catalog_grouping: CatalogGrouping::default(),
@@ -155,7 +253,18 @@ impl Default for BrowsingPreferences {
 }
 
 impl BrowsingPreferences {
-    pub fn allow_metered_transfers(&self) -> bool { self.allow_metered_transfers }
+    pub fn keyboard_shortcuts(&self) -> &KeyboardShortcuts {
+        &self.keyboard_shortcuts
+    }
+    pub fn text_search(&self) -> bool {
+        self.text_search
+    }
+    pub fn animations(&self) -> bool {
+        self.animations
+    }
+    pub fn allow_metered_transfers(&self) -> bool {
+        self.allow_metered_transfers
+    }
     pub fn theme(&self) -> ApplicationTheme {
         self.theme
     }
@@ -169,6 +278,15 @@ impl BrowsingPreferences {
     }
     pub fn ui_font_family(&self) -> UiFontFamily {
         self.ui_font_family
+    }
+    pub fn custom_ui_font_family(&self) -> Option<&str> {
+        self.custom_ui_font_family.as_deref().filter(|family| !family.trim().is_empty())
+    }
+    pub fn custom_ui_font_active(&self) -> bool {
+        self.custom_ui_font_family().is_some() && self.custom_ui_font_enabled
+    }
+    pub fn ui_font_name(&self) -> &str {
+        if self.custom_ui_font_active() { self.custom_ui_font_family().unwrap() } else { self.ui_font_family.family_name() }
     }
     pub fn cover_text(&self) -> CoverText {
         self.cover_text
@@ -203,8 +321,30 @@ pub enum CatalogGrouping {
 impl CatalogGrouping {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Subject => "Subject",
-            Self::Author => "Author",
+            Self::Subject => text!(browse::subject),
+            Self::Author => text!(browse::author),
+        }
+    }
+}
+
+/// Whether paragraph indentation follows the book, is disabled, or uses a saved value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaderFirstLineIndent {
+    #[default]
+    Book,
+    Off,
+    Custom,
+}
+
+impl ReaderFirstLineIndent {
+    pub const ALL: [Self; 3] = [Self::Book, Self::Off, Self::Custom];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Book => text!(reader::book),
+            Self::Off => text!(common::off),
+            Self::Custom => text!(common::custom),
         }
     }
 }
@@ -227,15 +367,15 @@ pub enum CoverText {
 impl CoverText {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Always => "Always",
-            Self::CoverOnly => "Cover only",
+            Self::Always => text!(settings::always),
+            Self::CoverOnly => text!(settings::cover_only),
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Always => "Title and subtitle under every cover.",
-            Self::CoverOnly => "Covers carry their own title; a book with no cover art gets a generated one.",
+            Self::Always => text!(settings::title_and_subtitle_under_every_cover),
+            Self::CoverOnly => text!(settings::covers_carry_their_own_title_a_book_with_no_cover_art_gets),
         }
     }
 }
@@ -243,11 +383,15 @@ impl CoverText {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "preference", content = "value", rename_all = "snake_case")]
 pub enum BrowsingPreferencePatch {
+    KeyboardShortcuts(KeyboardShortcuts),
     AllowMeteredTransfers(bool),
+    TextSearch(bool),
+    Animations(bool),
     Theme(ApplicationTheme),
     Palette(ApplicationTheme, ResolvedAppearance),
     UiFontSizePx(u8),
     UiFontFamily(UiFontFamily),
+    CustomUiFontFamily(String),
     CoverText(CoverText),
     GeneratedCoversOnly(bool),
     CatalogGrouping(CatalogGrouping),
@@ -258,14 +402,24 @@ pub enum BrowsingPreferencePatch {
 impl BrowsingPreferencePatch {
     pub fn apply(self, preferences: &mut BrowsingPreferences) -> Result<(), PreferenceValueError> {
         match self {
+            Self::KeyboardShortcuts(value) => preferences.keyboard_shortcuts = normalize_keyboard_shortcuts(value),
             Self::AllowMeteredTransfers(value) => preferences.allow_metered_transfers = value,
+            Self::TextSearch(value) => preferences.text_search = value,
+            Self::Animations(value) => preferences.animations = value,
             Self::Theme(value) => preferences.theme = value,
             Self::Palette(theme, appearance) => {
                 preferences.theme = theme;
                 preferences.appearance_override = Some(appearance);
             }
             Self::UiFontSizePx(value) => preferences.ui_font_size_px = UiFontSize::new(value)?,
-            Self::UiFontFamily(value) => preferences.ui_font_family = value,
+            Self::UiFontFamily(value) => {
+                preferences.ui_font_family = value;
+                preferences.custom_ui_font_enabled = false;
+            }
+            Self::CustomUiFontFamily(value) => {
+                preferences.custom_ui_font_family = Some(value);
+                preferences.custom_ui_font_enabled = true;
+            }
             Self::CoverText(value) => preferences.cover_text = value,
             Self::GeneratedCoversOnly(value) => preferences.generated_covers_only = value,
             Self::CatalogGrouping(value) => preferences.catalog_grouping = value,
@@ -327,23 +481,33 @@ pub enum ReaderTextAlignment {
 pub struct ReaderPreferences {
     font_size_px: FontSize,
     max_line_width_px: LineWidth,
-    #[serde(default = "default_min_line_width_ch")]
     min_line_width_ch: LineWidthCh,
-    #[serde(default = "default_max_line_width_ch")]
     max_line_width_ch: LineWidthCh,
     zoom: Zoom,
     line_height: LineHeight,
+    /// Keep the last custom value when publisher line spacing is selected.
+    override_line_height: bool,
+    paragraph_spacing_em: ParagraphSpacing,
+    override_paragraph_spacing: bool,
+    first_line_indent_em: FirstLineIndent,
+    first_line_indent: ReaderFirstLineIndent,
+    font_weight: ReaderFontWeight,
+    word_spacing_percent: WordSpacingPercent,
     flow: ReaderFlow,
     font_family: ReaderFontFamily,
     text_alignment: ReaderTextAlignment,
-    hyphenation: bool,
+    hyphenation: ReaderHyphenation,
     max_column_count: ColumnCount,
-    #[serde(default = "default_reader_margin")]
     horizontal_margin_px: ReaderSpacing,
-    #[serde(default = "default_reader_margin")]
     vertical_margin_px: ReaderSpacing,
-    #[serde(default = "default_column_gap")]
     min_column_gap_px: ReaderSpacing,
+    /// Fixed-page spacing is independent of the HTML reader and other formats.
+    pdf_horizontal_margin_px: ReaderSpacing,
+    pdf_vertical_margin_px: ReaderSpacing,
+    pdf_page_gap_px: ReaderSpacing,
+    comic_horizontal_margin_px: ReaderSpacing,
+    comic_vertical_margin_px: ReaderSpacing,
+    comic_page_gap_px: ReaderSpacing,
     /// Which end of the PDF layout is held fixed; the rest is derived.
     pdf_zoom_mode: PdfZoomMode,
     /// How many PDF pages sit side by side under [`PdfZoomMode::FitWidth`].
@@ -354,12 +518,31 @@ pub struct ReaderPreferences {
     pdf_trim_margins: bool,
     /// How fast narration is played back. Defaulted rather than required, so a
     /// preferences file written before audiobooks still loads.
-    #[serde(default = "default_audiobook_speed")]
     audiobook_speed: AudiobookSpeed,
+}
+
+const fn default_fixed_page_spacing() -> ReaderSpacing {
+    ReaderSpacing(0.0)
 }
 
 const fn default_audiobook_speed() -> AudiobookSpeed {
     AudiobookSpeed(1.0)
+}
+
+const fn default_paragraph_spacing() -> ParagraphSpacing {
+    ParagraphSpacing(DEFAULT_PARAGRAPH_SPACING_EM)
+}
+
+const fn default_first_line_indent() -> FirstLineIndent {
+    FirstLineIndent(DEFAULT_FIRST_LINE_INDENT_EM)
+}
+
+const fn default_word_spacing_percent() -> WordSpacingPercent {
+    WordSpacingPercent(DEFAULT_WORD_SPACING_PERCENT)
+}
+
+const fn default_override_line_height() -> bool {
+    true
 }
 
 const fn default_min_line_width_ch() -> LineWidthCh {
@@ -387,11 +570,7 @@ struct UiFontSize(u8);
 
 impl UiFontSize {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(PreferenceValueError("UI font size"))
-        }
+        if (UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("UI font size")) }
     }
 
     const fn get(self) -> u8 {
@@ -413,11 +592,7 @@ macro_rules! bounded_float {
 
         impl $name {
             fn new(value: $primitive) -> Result<Self, PreferenceValueError> {
-                if value.is_finite() && ($minimum..=$maximum).contains(&value) {
-                    Ok(Self(value))
-                } else {
-                    Err(PreferenceValueError($label))
-                }
+                if value.is_finite() && ($minimum..=$maximum).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError($label)) }
             }
 
             const fn get(self) -> $primitive {
@@ -438,6 +613,9 @@ bounded_float!(LineWidth, f64, "line width", LINE_WIDTH_MIN, LINE_WIDTH_MAX);
 bounded_float!(LineWidthCh, f64, "line width in ch", LINE_WIDTH_CH_MIN, LINE_WIDTH_CH_MAX);
 bounded_float!(Zoom, f64, "zoom", ZOOM_MIN, ZOOM_MAX);
 bounded_float!(LineHeight, f32, "line height", LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
+bounded_float!(WordSpacingPercent, f32, "word spacing", WORD_SPACING_MIN_PERCENT, WORD_SPACING_MAX_PERCENT);
+bounded_float!(ParagraphSpacing, f32, "paragraph spacing", 0.0, PARAGRAPH_SPACING_MAX_EM);
+bounded_float!(FirstLineIndent, f32, "first-line indentation", 0.0, FIRST_LINE_INDENT_MAX_EM);
 bounded_float!(PdfZoom, f32, "PDF zoom", PDF_ZOOM_MIN, PDF_ZOOM_MAX);
 bounded_float!(AudiobookSpeed, f64, "audiobook speed", AUDIOBOOK_SPEED_MIN, AUDIOBOOK_SPEED_MAX);
 bounded_float!(ReaderSpacing, f32, "reader spacing", READER_SPACING_MIN, READER_SPACING_MAX);
@@ -464,11 +642,7 @@ impl ColumnCount {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
         // Only a floor: how many columns fit is a question about the width
         // available, which no contract here is in a position to answer.
-        if value >= COLUMN_COUNT_MIN {
-            Ok(Self(value))
-        } else {
-            Err(PreferenceValueError("column count"))
-        }
+        if value >= COLUMN_COUNT_MIN { Ok(Self(value)) } else { Err(PreferenceValueError("column count")) }
     }
 
     const fn get(self) -> u8 {
@@ -488,11 +662,7 @@ struct PdfPageCount(u8);
 
 impl PdfPageCount {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (PDF_PAGE_COUNT_MIN..=PDF_PAGE_COUNT_MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(PreferenceValueError("PDF page count"))
-        }
+        if (PDF_PAGE_COUNT_MIN..=PDF_PAGE_COUNT_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("PDF page count")) }
     }
 
     const fn get(self) -> u8 {
@@ -515,14 +685,27 @@ impl Default for ReaderPreferences {
             max_line_width_ch: default_max_line_width_ch(),
             zoom: Zoom(1.0),
             line_height: LineHeight(1.5),
+            override_line_height: default_override_line_height(),
+            paragraph_spacing_em: default_paragraph_spacing(),
+            override_paragraph_spacing: false,
+            first_line_indent_em: default_first_line_indent(),
+            first_line_indent: ReaderFirstLineIndent::Book,
+            font_weight: ReaderFontWeight::Normal,
+            word_spacing_percent: default_word_spacing_percent(),
             flow: ReaderFlow::Paginated,
             font_family: ReaderFontFamily::Publisher,
             text_alignment: ReaderTextAlignment::Publisher,
-            hyphenation: true,
+            hyphenation: ReaderHyphenation::Book,
             max_column_count: ColumnCount(2),
             horizontal_margin_px: default_reader_margin(),
             vertical_margin_px: default_reader_margin(),
             min_column_gap_px: default_column_gap(),
+            pdf_horizontal_margin_px: default_fixed_page_spacing(),
+            pdf_vertical_margin_px: default_fixed_page_spacing(),
+            pdf_page_gap_px: default_fixed_page_spacing(),
+            comic_horizontal_margin_px: default_fixed_page_spacing(),
+            comic_vertical_margin_px: default_fixed_page_spacing(),
+            comic_page_gap_px: default_fixed_page_spacing(),
             pdf_zoom_mode: PdfZoomMode::FitWidth,
             pdf_page_count: PdfPageCount(1),
             pdf_zoom: PdfZoom(1.0),
@@ -533,6 +716,97 @@ impl Default for ReaderPreferences {
 }
 
 impl ReaderPreferences {
+    /// Preference updates between two validated snapshots. Local UI state
+    /// stays outside this model and cannot enter a synchronized patch.
+    pub fn patches_to(&self, next: &Self) -> Vec<ReaderPreferencePatch> {
+        let mut patches = Vec::new();
+        macro_rules! changed {
+            ($field:ident, $patch:ident) => {
+                if self.$field() != next.$field() {
+                    patches.push(ReaderPreferencePatch::$patch(next.$field()));
+                }
+            };
+        }
+        changed!(font_size_px, FontSizePx);
+        changed!(max_line_width_px, MaxLineWidthPx);
+        changed!(min_line_width_ch, MinLineWidthCh);
+        changed!(max_line_width_ch, MaxLineWidthCh);
+        changed!(zoom, Zoom);
+        changed!(line_height, LineHeight);
+        changed!(override_line_height, OverrideLineHeight);
+        changed!(paragraph_spacing_em, ParagraphSpacingEm);
+        changed!(override_paragraph_spacing, OverrideParagraphSpacing);
+        changed!(first_line_indent_em, FirstLineIndentEm);
+        changed!(first_line_indent, FirstLineIndent);
+        changed!(hyphenation, Hyphenation);
+        changed!(word_spacing_percent, WordSpacingPercent);
+        changed!(font_weight, FontWeight);
+        changed!(font_family, FontFamily);
+        changed!(text_alignment, TextAlignment);
+        changed!(max_column_count, MaxColumnCount);
+        changed!(horizontal_margin_px, HorizontalMarginPx);
+        changed!(vertical_margin_px, VerticalMarginPx);
+        changed!(min_column_gap_px, MinColumnGapPx);
+        changed!(pdf_zoom_mode, PdfZoomMode);
+        changed!(pdf_page_count, PdfPageCount);
+        changed!(pdf_zoom, PdfZoom);
+        changed!(pdf_horizontal_margin_px, PdfHorizontalMarginPx);
+        changed!(pdf_vertical_margin_px, PdfVerticalMarginPx);
+        changed!(pdf_page_gap_px, PdfPageGapPx);
+        changed!(comic_horizontal_margin_px, ComicHorizontalMarginPx);
+        changed!(comic_vertical_margin_px, ComicVerticalMarginPx);
+        changed!(comic_page_gap_px, ComicPageGapPx);
+        changed!(pdf_trim_margins, PdfTrimMargins);
+        changed!(audiobook_speed, AudiobookSpeed);
+        changed!(flow, Flow);
+        patches
+    }
+
+    pub fn paragraph_spacing_em(self) -> f32 {
+        self.paragraph_spacing_em.get()
+    }
+    pub fn override_paragraph_spacing(self) -> bool {
+        self.override_paragraph_spacing
+    }
+    pub fn first_line_indent_em(self) -> f32 {
+        self.first_line_indent_em.get()
+    }
+    pub fn first_line_indent(self) -> ReaderFirstLineIndent {
+        self.first_line_indent
+    }
+
+    pub fn set_paragraph_spacing_em(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.paragraph_spacing_em = ParagraphSpacing::new(value)?;
+        Ok(())
+    }
+    pub fn set_override_paragraph_spacing(&mut self, value: bool) {
+        self.override_paragraph_spacing = value;
+    }
+    pub fn set_first_line_indent_em(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.first_line_indent_em = FirstLineIndent::new(value)?;
+        Ok(())
+    }
+    pub fn set_first_line_indent(&mut self, value: ReaderFirstLineIndent) {
+        self.first_line_indent = value;
+    }
+
+    pub fn word_spacing_percent(self) -> f32 {
+        self.word_spacing_percent.get()
+    }
+
+    pub fn set_word_spacing_percent(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.word_spacing_percent = WordSpacingPercent::new(value)?;
+        Ok(())
+    }
+
+    pub fn font_weight(&self) -> ReaderFontWeight {
+        self.font_weight
+    }
+
+    pub fn set_font_weight(&mut self, weight: ReaderFontWeight) {
+        self.font_weight = weight;
+    }
+
     pub fn font_size_px(self) -> f32 {
         self.font_size_px.get()
     }
@@ -551,6 +825,9 @@ impl ReaderPreferences {
     pub fn line_height(self) -> f32 {
         self.line_height.get()
     }
+    pub fn override_line_height(&self) -> bool {
+        self.override_line_height
+    }
     pub fn flow(self) -> ReaderFlow {
         self.flow
     }
@@ -560,7 +837,7 @@ impl ReaderPreferences {
     pub fn text_alignment(self) -> ReaderTextAlignment {
         self.text_alignment
     }
-    pub fn hyphenation(self) -> bool {
+    pub fn hyphenation(self) -> ReaderHyphenation {
         self.hyphenation
     }
     pub fn max_column_count(self) -> u8 {
@@ -574,6 +851,24 @@ impl ReaderPreferences {
     }
     pub fn min_column_gap_px(self) -> f32 {
         self.min_column_gap_px.get()
+    }
+    pub fn pdf_horizontal_margin_px(self) -> f32 {
+        self.pdf_horizontal_margin_px.get()
+    }
+    pub fn pdf_vertical_margin_px(self) -> f32 {
+        self.pdf_vertical_margin_px.get()
+    }
+    pub fn pdf_page_gap_px(self) -> f32 {
+        self.pdf_page_gap_px.get()
+    }
+    pub fn comic_horizontal_margin_px(self) -> f32 {
+        self.comic_horizontal_margin_px.get()
+    }
+    pub fn comic_vertical_margin_px(self) -> f32 {
+        self.comic_vertical_margin_px.get()
+    }
+    pub fn comic_page_gap_px(self) -> f32 {
+        self.comic_page_gap_px.get()
     }
     pub fn pdf_zoom_mode(self) -> PdfZoomMode {
         self.pdf_zoom_mode
@@ -627,6 +922,9 @@ impl ReaderPreferences {
         self.line_height = LineHeight::new(value)?;
         Ok(())
     }
+    pub fn set_override_line_height(&mut self, value: bool) {
+        self.override_line_height = value;
+    }
     pub fn set_flow(&mut self, value: ReaderFlow) {
         self.flow = value;
     }
@@ -636,7 +934,7 @@ impl ReaderPreferences {
     pub fn set_text_alignment(&mut self, value: ReaderTextAlignment) {
         self.text_alignment = value;
     }
-    pub fn set_hyphenation(&mut self, value: bool) {
+    pub fn set_hyphenation(&mut self, value: ReaderHyphenation) {
         self.hyphenation = value;
     }
     pub fn set_max_column_count(&mut self, value: u8) -> Result<(), PreferenceValueError> {
@@ -655,6 +953,30 @@ impl ReaderPreferences {
         self.min_column_gap_px = ReaderSpacing::new(value)?;
         Ok(())
     }
+    pub fn set_pdf_horizontal_margin_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.pdf_horizontal_margin_px = ReaderSpacing::new(value)?;
+        Ok(())
+    }
+    pub fn set_pdf_vertical_margin_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.pdf_vertical_margin_px = ReaderSpacing::new(value)?;
+        Ok(())
+    }
+    pub fn set_pdf_page_gap_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.pdf_page_gap_px = ReaderSpacing::new(value)?;
+        Ok(())
+    }
+    pub fn set_comic_horizontal_margin_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.comic_horizontal_margin_px = ReaderSpacing::new(value)?;
+        Ok(())
+    }
+    pub fn set_comic_vertical_margin_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.comic_vertical_margin_px = ReaderSpacing::new(value)?;
+        Ok(())
+    }
+    pub fn set_comic_page_gap_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.comic_page_gap_px = ReaderSpacing::new(value)?;
+        Ok(())
+    }
     pub fn set_pdf_zoom_mode(&mut self, value: PdfZoomMode) {
         self.pdf_zoom_mode = value;
     }
@@ -669,6 +991,7 @@ impl ReaderPreferences {
     pub fn set_pdf_trim_margins(&mut self, value: bool) {
         self.pdf_trim_margins = value;
     }
+
     pub fn set_audiobook_speed(&mut self, value: f64) -> Result<(), PreferenceValueError> {
         self.audiobook_speed = AudiobookSpeed::new(value)?;
         Ok(())
@@ -687,16 +1010,29 @@ pub enum ReaderPreferencePatch {
     Flow(ReaderFlow),
     FontFamily(ReaderFontFamily),
     TextAlignment(ReaderTextAlignment),
-    Hyphenation(bool),
+    Hyphenation(ReaderHyphenation),
     MaxColumnCount(u8),
     HorizontalMarginPx(f32),
     VerticalMarginPx(f32),
     MinColumnGapPx(f32),
+    PdfHorizontalMarginPx(f32),
+    PdfVerticalMarginPx(f32),
+    PdfPageGapPx(f32),
+    ComicHorizontalMarginPx(f32),
+    ComicVerticalMarginPx(f32),
+    ComicPageGapPx(f32),
     PdfZoomMode(PdfZoomMode),
     PdfPageCount(u8),
     PdfZoom(f32),
     PdfTrimMargins(bool),
     AudiobookSpeed(f64),
+    OverrideLineHeight(bool),
+    ParagraphSpacingEm(f32),
+    OverrideParagraphSpacing(bool),
+    FirstLineIndentEm(f32),
+    FirstLineIndent(ReaderFirstLineIndent),
+    FontWeight(ReaderFontWeight),
+    WordSpacingPercent(f32),
 }
 
 impl ReaderPreferencePatch {
@@ -708,6 +1044,25 @@ impl ReaderPreferencePatch {
             Self::MaxLineWidthCh(value) => preferences.set_max_line_width_ch(value),
             Self::Zoom(value) => preferences.set_zoom(value),
             Self::LineHeight(value) => preferences.set_line_height(value),
+            Self::OverrideLineHeight(value) => {
+                preferences.set_override_line_height(value);
+                Ok(())
+            }
+            Self::ParagraphSpacingEm(value) => preferences.set_paragraph_spacing_em(value),
+            Self::FirstLineIndentEm(value) => preferences.set_first_line_indent_em(value),
+            Self::OverrideParagraphSpacing(value) => {
+                preferences.set_override_paragraph_spacing(value);
+                Ok(())
+            }
+            Self::FirstLineIndent(value) => {
+                preferences.set_first_line_indent(value);
+                Ok(())
+            }
+            Self::WordSpacingPercent(value) => preferences.set_word_spacing_percent(value),
+            Self::FontWeight(weight) => {
+                preferences.set_font_weight(weight);
+                Ok(())
+            }
             Self::Flow(value) => {
                 preferences.set_flow(value);
                 Ok(())
@@ -728,6 +1083,12 @@ impl ReaderPreferencePatch {
             Self::HorizontalMarginPx(value) => preferences.set_horizontal_margin_px(value),
             Self::VerticalMarginPx(value) => preferences.set_vertical_margin_px(value),
             Self::MinColumnGapPx(value) => preferences.set_min_column_gap_px(value),
+            Self::PdfHorizontalMarginPx(value) => preferences.set_pdf_horizontal_margin_px(value),
+            Self::PdfVerticalMarginPx(value) => preferences.set_pdf_vertical_margin_px(value),
+            Self::PdfPageGapPx(value) => preferences.set_pdf_page_gap_px(value),
+            Self::ComicHorizontalMarginPx(value) => preferences.set_comic_horizontal_margin_px(value),
+            Self::ComicVerticalMarginPx(value) => preferences.set_comic_vertical_margin_px(value),
+            Self::ComicPageGapPx(value) => preferences.set_comic_page_gap_px(value),
             Self::PdfZoomMode(value) => {
                 preferences.set_pdf_zoom_mode(value);
                 Ok(())
@@ -745,13 +1106,168 @@ impl ReaderPreferencePatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowsingPreferencePatch, BrowsingPreferences, CoverText, ReaderPreferences, UiFontFamily, DEFAULT_READER_MARGIN_PX};
+    use super::{BrowsingPreferencePatch, BrowsingPreferences, CoverText, DEFAULT_READER_MARGIN_PX, ReaderPreferencePatch, ReaderPreferences, UiFontFamily};
+
+    #[test]
+    fn fixed_page_spacing_is_independent_and_persisted() {
+        let original = ReaderPreferences::default();
+        let patches = [
+            ReaderPreferencePatch::PdfHorizontalMarginPx(8.0),
+            ReaderPreferencePatch::PdfVerticalMarginPx(16.0),
+            ReaderPreferencePatch::PdfPageGapPx(24.0),
+            ReaderPreferencePatch::ComicHorizontalMarginPx(32.0),
+            ReaderPreferencePatch::ComicVerticalMarginPx(40.0),
+            ReaderPreferencePatch::ComicPageGapPx(48.0),
+        ];
+        let mut preferences = original;
+        for patch in patches {
+            let patch = serde_json::from_str::<ReaderPreferencePatch>(&serde_json::to_string(&patch).unwrap()).unwrap();
+            patch.apply(&mut preferences).unwrap();
+        }
+        let saved = serde_json::to_value(preferences).unwrap();
+        let restored: ReaderPreferences = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(restored, preferences);
+        assert_eq!((restored.pdf_horizontal_margin_px(), restored.pdf_vertical_margin_px(), restored.pdf_page_gap_px()), (8.0, 16.0, 24.0));
+        assert_eq!((restored.comic_horizontal_margin_px(), restored.comic_vertical_margin_px(), restored.comic_page_gap_px()), (32.0, 40.0, 48.0));
+        assert_eq!(restored.horizontal_margin_px(), original.horizontal_margin_px());
+        assert_eq!(restored.vertical_margin_px(), original.vertical_margin_px());
+        assert_eq!(restored.min_column_gap_px(), original.min_column_gap_px());
+        assert!(ReaderPreferencePatch::PdfPageGapPx(f32::NAN).apply(&mut preferences).is_err());
+        assert!(ReaderPreferencePatch::ComicVerticalMarginPx(201.0).apply(&mut preferences).is_err());
+    }
+
+    #[test]
+    fn first_line_indent_modes_preserve_custom_value() {
+        use super::ReaderFirstLineIndent;
+        let mut preferences = ReaderPreferences::default();
+        preferences.set_first_line_indent_em(2.1).unwrap();
+        for mode in ReaderFirstLineIndent::ALL {
+            let patch = ReaderPreferencePatch::FirstLineIndent(mode);
+            let patch: ReaderPreferencePatch = serde_json::from_value(serde_json::to_value(patch).unwrap()).unwrap();
+            patch.apply(&mut preferences).unwrap();
+            let restored: ReaderPreferences = serde_json::from_value(serde_json::to_value(preferences).unwrap()).unwrap();
+            assert_eq!(restored.first_line_indent(), mode);
+            assert_eq!(restored.first_line_indent_em(), 2.1);
+        }
+        let mut invalid = serde_json::to_value(preferences).unwrap();
+        invalid["first_line_indent"] = serde_json::json!("invalid");
+        assert!(serde_json::from_value::<ReaderPreferences>(invalid).is_err());
+    }
+
+    #[test]
+    fn paragraph_controls_default_to_book_and_round_trip_custom_values() {
+        let mut preferences = ReaderPreferences::default();
+        assert!(!preferences.override_paragraph_spacing());
+        assert_eq!(preferences.first_line_indent(), super::ReaderFirstLineIndent::Book);
+        assert_eq!(preferences.paragraph_spacing_em(), 1.0);
+        assert_eq!(preferences.first_line_indent_em(), 1.5);
+        for patch in
+            [ReaderPreferencePatch::ParagraphSpacingEm(0.7), ReaderPreferencePatch::FirstLineIndentEm(2.1), ReaderPreferencePatch::OverrideParagraphSpacing(true), ReaderPreferencePatch::FirstLineIndent(super::ReaderFirstLineIndent::Custom)]
+        {
+            let decoded: ReaderPreferencePatch = serde_json::from_value(serde_json::to_value(patch).unwrap()).unwrap();
+            decoded.apply(&mut preferences).unwrap();
+        }
+        let mut restored: ReaderPreferences = serde_json::from_value(serde_json::to_value(preferences).unwrap()).unwrap();
+        assert_eq!(restored, preferences);
+        ReaderPreferencePatch::OverrideParagraphSpacing(false).apply(&mut restored).unwrap();
+        ReaderPreferencePatch::FirstLineIndent(super::ReaderFirstLineIndent::Book).apply(&mut restored).unwrap();
+        assert_eq!(restored.paragraph_spacing_em(), 0.7);
+        assert_eq!(restored.first_line_indent_em(), 2.1);
+        for value in [-0.1, 10.0, f32::NAN, f32::INFINITY] {
+            assert!(ReaderPreferencePatch::ParagraphSpacingEm(value).apply(&mut restored).is_err());
+            assert!(ReaderPreferencePatch::FirstLineIndentEm(value).apply(&mut restored).is_err());
+            assert_eq!(restored.paragraph_spacing_em(), 0.7);
+            assert_eq!(restored.first_line_indent_em(), 2.1);
+        }
+        ReaderPreferencePatch::ParagraphSpacingEm(0.0).apply(&mut restored).unwrap();
+        ReaderPreferencePatch::FirstLineIndentEm(0.0).apply(&mut restored).unwrap();
+        assert_eq!(restored.paragraph_spacing_em(), 0.0);
+        assert_eq!(restored.first_line_indent_em(), 0.0);
+        let mut invalid = serde_json::to_value(restored).unwrap();
+        invalid["first_line_indent_em"] = serde_json::json!(-1.0);
+        assert!(serde_json::from_value::<ReaderPreferences>(invalid).is_err());
+    }
+
+    #[test]
+    fn hyphenation_modes_round_trip() {
+        use super::ReaderHyphenation;
+        let mut saved = serde_json::to_value(ReaderPreferences::default()).unwrap();
+        let mut preferences: ReaderPreferences = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(preferences.hyphenation(), ReaderHyphenation::Book);
+        for choice in ReaderHyphenation::ALL {
+            let patch = ReaderPreferencePatch::Hyphenation(choice);
+            let decoded: ReaderPreferencePatch = serde_json::from_value(serde_json::to_value(patch).unwrap()).unwrap();
+            decoded.apply(&mut preferences).unwrap();
+            let restored: ReaderPreferences = serde_json::from_value(serde_json::to_value(preferences).unwrap()).unwrap();
+            assert_eq!(restored.hyphenation(), choice);
+        }
+        saved["hyphenation"] = serde_json::json!("invalid");
+        assert!(serde_json::from_value::<ReaderPreferences>(saved).is_err());
+    }
+
+    #[test]
+    fn word_spacing_defaults_survive_reload_and_reject_invalid_values() {
+        let mut preferences = ReaderPreferences::default();
+        assert_eq!(preferences.word_spacing_percent(), 100.0);
+        let patch = ReaderPreferencePatch::WordSpacingPercent(120.0);
+        let decoded: ReaderPreferencePatch = serde_json::from_value(serde_json::to_value(patch).unwrap()).unwrap();
+        decoded.apply(&mut preferences).unwrap();
+        let saved = serde_json::to_value(preferences).unwrap();
+        let restored: ReaderPreferences = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(restored.word_spacing_percent(), 120.0);
+        for invalid in [0.0, 49.0, 201.0, f32::NAN, f32::INFINITY] {
+            assert!(ReaderPreferencePatch::WordSpacingPercent(invalid).apply(&mut preferences).is_err());
+            assert_eq!(preferences.word_spacing_percent(), 120.0);
+        }
+        let mut invalid_saved = saved;
+        invalid_saved["word_spacing_percent"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<ReaderPreferences>(invalid_saved).is_err());
+    }
+
+    #[test]
+    fn font_weight_choices_default_to_normal_and_survive_reload() {
+        use super::ReaderFontWeight;
+        let mut preferences = ReaderPreferences::default();
+        assert_eq!(preferences.font_weight(), ReaderFontWeight::Normal);
+        for choice in ReaderFontWeight::ALL {
+            let patch = ReaderPreferencePatch::FontWeight(choice);
+            let decoded: ReaderPreferencePatch = serde_json::from_value(serde_json::to_value(patch).unwrap()).unwrap();
+            decoded.apply(&mut preferences).unwrap();
+            let restored: ReaderPreferences = serde_json::from_value(serde_json::to_value(preferences).unwrap()).unwrap();
+            assert_eq!(restored.font_weight(), choice);
+        }
+    }
+
+    #[test]
+    fn line_height_override_preserves_saved_spacing() {
+        let mut preferences = ReaderPreferences::default();
+        assert!(preferences.override_line_height());
+        ReaderPreferencePatch::LineHeight(1.8).apply(&mut preferences).unwrap();
+        let patch: ReaderPreferencePatch = serde_json::from_str(r#"{"preference":"override_line_height","value":false}"#).unwrap();
+        patch.apply(&mut preferences).unwrap();
+        let mut restored: ReaderPreferences = serde_json::from_value(serde_json::to_value(preferences).unwrap()).unwrap();
+        assert!(!restored.override_line_height());
+        assert_eq!(restored.line_height(), 1.8);
+        ReaderPreferencePatch::OverrideLineHeight(true).apply(&mut restored).unwrap();
+        assert!(restored.override_line_height());
+        assert_eq!(restored.line_height(), 1.8);
+    }
+
+    #[test]
+    fn keyboard_shortcuts_preserve_disabled_actions() {
+        let mut preferences = BrowsingPreferences::default();
+        assert!(preferences.keyboard_shortcuts().is_empty());
+        let shortcuts = super::KeyboardShortcuts::from([("reader.search".into(), vec!["ctrl-shift-f".into(), "alt-f".into()]), ("browse.undo".into(), vec![])]);
+        BrowsingPreferencePatch::KeyboardShortcuts(shortcuts.clone()).apply(&mut preferences).unwrap();
+        let restored: BrowsingPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
+        assert_eq!(restored.keyboard_shortcuts(), &super::normalize_keyboard_shortcuts(shortcuts));
+        BrowsingPreferencePatch::KeyboardShortcuts(Default::default()).apply(&mut preferences).unwrap();
+        assert!(preferences.keyboard_shortcuts().is_empty());
+    }
 
     #[test]
     fn metered_transfer_preference_defaults_off_and_round_trips() {
-        let mut legacy = serde_json::to_value(BrowsingPreferences::default()).unwrap();
-        legacy.as_object_mut().unwrap().remove("allow_metered_transfers");
-        let mut preferences: BrowsingPreferences = serde_json::from_value(legacy).unwrap();
+        let mut preferences = BrowsingPreferences::default();
         assert!(!preferences.allow_metered_transfers());
         BrowsingPreferencePatch::AllowMeteredTransfers(true).apply(&mut preferences).unwrap();
         let restored: BrowsingPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
@@ -760,13 +1276,33 @@ mod tests {
     }
 
     #[test]
-    fn ui_font_preferences_preserve_legacy_settings_and_serialized_changes() {
+    fn custom_ui_font_round_trips_and_presets_preserve_the_saved_family() {
+        let mut preferences = BrowsingPreferences::default();
+        BrowsingPreferencePatch::CustomUiFontFamily("Noto Serif".into()).apply(&mut preferences).unwrap();
+        let restored: BrowsingPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
+        assert_eq!(restored.ui_font_name(), "Noto Serif");
+        assert_eq!(restored.custom_ui_font_family(), Some("Noto Serif"));
+        assert!(restored.custom_ui_font_active());
+        BrowsingPreferencePatch::UiFontFamily(UiFontFamily::SansSerif).apply(&mut preferences).unwrap();
+        assert_eq!(preferences.custom_ui_font_family(), Some("Noto Serif"));
+        assert!(!preferences.custom_ui_font_active());
+        assert_eq!(preferences.ui_font_name(), UiFontFamily::SansSerif.family_name());
+        let mut restored: BrowsingPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
+        assert_eq!(restored.custom_ui_font_family(), Some("Noto Serif"));
+        assert!(!restored.custom_ui_font_active());
+        assert_eq!(restored.ui_font_name(), UiFontFamily::SansSerif.family_name());
+        BrowsingPreferencePatch::CustomUiFontFamily(restored.custom_ui_font_family().unwrap().into()).apply(&mut restored).unwrap();
+        assert_eq!(restored.ui_font_name(), "Noto Serif");
+        assert!(restored.custom_ui_font_active());
+    }
+
+    #[test]
+    fn ui_font_preferences_preserve_serialized_changes() {
         let mut preferences = BrowsingPreferences::default();
         BrowsingPreferencePatch::UiFontSizePx(22).apply(&mut preferences).unwrap();
         BrowsingPreferencePatch::CoverText(CoverText::CoverOnly).apply(&mut preferences).unwrap();
-        let mut legacy = serde_json::to_value(&preferences).unwrap();
-        legacy.as_object_mut().unwrap().remove("ui_font_family");
-        let mut restored: BrowsingPreferences = serde_json::from_value(legacy).unwrap();
+        let snapshot = serde_json::to_value(&preferences).unwrap();
+        let mut restored: BrowsingPreferences = serde_json::from_value(snapshot).unwrap();
         assert_eq!(restored, preferences);
         assert_eq!(restored.ui_font_family(), UiFontFamily::Serif);
 
@@ -784,32 +1320,10 @@ mod tests {
     #[test]
     fn catalog_language_preferences_preserve_unset_any_and_saved_choices() {
         let mut preferences = BrowsingPreferences::default();
-        let mut legacy = serde_json::to_value(&preferences).unwrap();
-        legacy.as_object_mut().unwrap().remove("catalog_languages");
-        assert!(serde_json::from_value::<BrowsingPreferences>(legacy).unwrap().catalog_languages().is_none());
         for languages in [Some(vec!["en".into(), "sv".into()]), Some(vec![]), None] {
             BrowsingPreferencePatch::CatalogLanguages(languages.clone()).apply(&mut preferences).unwrap();
             let restored: BrowsingPreferences = serde_json::from_value(serde_json::to_value(&preferences).unwrap()).unwrap();
             assert_eq!(restored.catalog_languages(), languages.as_deref());
         }
-    }
-
-    #[test]
-    fn legacy_preferences_default_missing_margins_but_preserve_explicit_zero() {
-        let defaults = ReaderPreferences::default();
-        assert_eq!(defaults.horizontal_margin_px(), DEFAULT_READER_MARGIN_PX);
-        assert_eq!(defaults.vertical_margin_px(), DEFAULT_READER_MARGIN_PX);
-        let mut saved = serde_json::to_value(defaults).unwrap();
-        let fields = saved.as_object_mut().unwrap();
-        fields.remove("horizontal_margin_px");
-        fields.remove("vertical_margin_px");
-        let restored: ReaderPreferences = serde_json::from_value(saved.clone()).unwrap();
-        assert_eq!(restored.horizontal_margin_px(), DEFAULT_READER_MARGIN_PX);
-        assert_eq!(restored.vertical_margin_px(), DEFAULT_READER_MARGIN_PX);
-        saved["horizontal_margin_px"] = serde_json::json!(0.0);
-        saved["vertical_margin_px"] = serde_json::json!(0.0);
-        let restored: ReaderPreferences = serde_json::from_value(saved).unwrap();
-        assert_eq!(restored.horizontal_margin_px(), 0.0);
-        assert_eq!(restored.vertical_margin_px(), 0.0);
     }
 }

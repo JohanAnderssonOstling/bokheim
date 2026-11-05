@@ -1,5 +1,5 @@
 use crate::{
-    ActiveTheme, ElementExt, Placement, StyledExt,
+    ActiveTheme, Placement, StyledExt,
     dialog::{ANIMATION_DURATION, Dialog},
     focus_trap::FocusTrapManager,
     input::{Copy, InputState},
@@ -48,7 +48,7 @@ pub struct Root {
     pub notification: Entity<NotificationList>,
     pub(crate) tooltip_overlay: Entity<TooltipOverlay>,
     pub(crate) native_menu_overlay: Entity<FallbackMenuOverlay>,
-    sheet_size: Option<DefiniteLength>,
+    pub(crate) sheet_size: Option<DefiniteLength>,
     window_shadow_size: Pixels,
     /// Render the Linux CSD `window_border` wrapper.
     bordered: bool,
@@ -296,14 +296,7 @@ impl Root {
             sheet.focus_handle = active_sheet.focus_handle.clone();
             sheet.placement = active_sheet.placement;
 
-            let size = sheet.size;
-
-            return Some(
-                div()
-                    .relative()
-                    .child(sheet)
-                    .on_prepaint(move |_, _, cx| root.update(cx, |r, _| r.sheet_size = Some(size))),
-            );
+            return Some(div().relative().child(sheet));
         }
 
         None
@@ -646,6 +639,7 @@ impl Render for Root {
             .relative()
             .size_full()
             .font_family(cx.theme().font_family.clone())
+            .line_height_auto()
             .bg(cx.theme().tokens.background)
             .text_color(cx.theme().foreground)
             .refine_style(&self.style)

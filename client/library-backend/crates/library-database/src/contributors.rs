@@ -1,39 +1,67 @@
-//! Contributor identity lookups and writes. Import supplies name-matching
-//! rules; projection matches with `metadata_contract::matching::same_author`.
-use crate::SqlParam;
+//! Contributor identity lookups and writes, shared by import and projection.
+use crate::query_methods::query_last;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::{DatabaseError, import::ImportCommitSql, sync::SyncApplySql};
-pub(crate) use book_model::{AUTHOR_MARC_RELATOR_CODE, AgentId, Contributor, normalize_search_text};
-use content_address::ContentHash;
+use book_model::{AgentId, Contributor};
+use metadata_contract::matching::author_match_keys;
+use rusqlite::Transaction;
+use std::collections::BTreeSet;
 
 pub(crate) type Identity = (i64, AgentId);
 pub(crate) type StoredCredit = (i64, Contributor);
 
-/// The name equivalence a caller matches new credits by; storage does not
-/// normalize names itself.
-pub type ContributorNameMatcher = fn(&str, &str) -> bool;
+/// Normalized names use the persisted key index. Callers supplying a different
+/// equivalence rule retain an explicit pairwise matching option.
+#[derive(Clone, Copy)]
+pub enum ContributorNameMatcher {
+    Normalized,
+    Custom(fn(&str, &str) -> bool),
+}
 
-pub(crate) fn resolve_identity(tx: &rusqlite::Transaction<'_>, id: AgentId, name: &str, matcher: Option<ContributorNameMatcher>) -> Result<Identity, DatabaseError> {
-    let mut existing: Option<(i64, String)> = None;
-    tx.author_identity_by_stable_id(&id.to_string(), |row| {
-        existing = Some((row.get(0)?, row.get(1)?));
-        Ok(())
-    })?;
-    if existing.is_none()
-        && let Some(matches) = matcher
-    {
-        tx.provisional_author_identities(|row| {
-            if existing.is_none() && matches(name, &row.get::<_, String>(2)?) {
-                existing = Some((row.get(0)?, row.get(1)?));
+fn write_name_keys(tx: &Transaction<'_>, local: i64, keys: &BTreeSet<String>) -> rusqlite::Result<()> {
+    for key in keys {
+        tx.contributors_insert_name_key(key, local)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_identity(tx: &Transaction<'_>, id: AgentId, name: &str, matcher: Option<ContributorNameMatcher>) -> Result<Identity, DatabaseError> {
+    let mut existing: Option<(i64, String)> = query_last(|read| tx.author_identity_by_stable_id(&id.to_string(), read), |row| Ok((row.get(0)?, row.get(1)?)))?;
+    // Stable IDs take precedence even when another identity has the same name.
+    let keys = if existing.is_none() { author_match_keys(name) } else { BTreeSet::new() };
+    if existing.is_none() {
+        match matcher {
+            Some(ContributorNameMatcher::Normalized) => {
+                for key in &keys {
+                    tx.contributors_identity_by_name_key(key, |row| {
+                        let local = row.get(0)?;
+                        // Preserve the first identity in insertion order across
+                        // all matching keys, just as the former ordered scan did.
+                        if existing.as_ref().is_none_or(|(found, _)| local < *found) {
+                            existing = Some((local, row.get(1)?));
+                        }
+                        Ok(())
+                    })?;
+                }
             }
-            Ok(())
-        })?;
+            Some(ContributorNameMatcher::Custom(matches)) => {
+                tx.provisional_author_identities(|row| {
+                    if existing.is_none() && matches(name, &row.get::<_, String>(2)?) {
+                        existing = Some((row.get(0)?, row.get(1)?));
+                    }
+                    Ok(())
+                })?;
+            }
+            None => {}
+        }
     }
     match existing {
         Some((local, stable)) => Ok((local, AgentId::parse_str(&stable).map_err(|e| DatabaseError::message(format!("stored author identity is not readable: {e}")))?)),
         None => {
             tx.shared_authors_insert_author_identity(&id.to_string(), name)?;
-            Ok((tx.last_insert_rowid(), id))
+            let local = tx.last_insert_rowid();
+            write_name_keys(tx, local, &keys)?;
+            Ok((local, id))
         }
     }
 }
@@ -41,8 +69,90 @@ pub(crate) fn resolve_identity(tx: &rusqlite::Transaction<'_>, id: AgentId, name
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_methods::query_rows;
     use crate::{Database, transactions::WriteOutcome};
+    use book_model::AUTHOR_MARC_RELATOR_CODE;
+
+    #[test]
+    fn indexed_names_reuse_the_first_identity_and_keep_credited_names() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        db.write(|tx| {
+            let first = Contributor::new("García, José", AUTHOR_MARC_RELATOR_CODE).unwrap();
+            let second = Contributor::new("Jose Garcia", AUTHOR_MARC_RELATOR_CODE).unwrap();
+            let identities = resolve_credits(tx, &[first.clone(), second.clone()], None)?;
+            let variant = Contributor::new("Dr Jose Garcia", AUTHOR_MARC_RELATOR_CODE).unwrap();
+            let matched = resolve_credits(tx, &[variant], Some(ContributorNameMatcher::Normalized))?;
+            assert_eq!(matched[0].0, identities[0].0);
+            assert_eq!(matched[0].1.agent_id(), first.agent_id());
+            assert_eq!(matched[0].1.name(), "Dr Jose Garcia");
+            // An exact stable ID wins over an earlier matching name.
+            let exact = resolve_credits(tx, &[second], Some(ContributorNameMatcher::Normalized))?;
+            assert_eq!(exact[0].0, identities[1].0);
+            let stored_name: String = tx.query_row("SELECT name FROM author_identity WHERE id=?1", [identities[0].0], |row| row.get(0))?;
+            assert_eq!(stored_name, "García, José");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn indexed_names_include_new_identities_but_exclude_confirmed_ones_and_empty_keys() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        db.write(|tx| {
+            let names = ["John Smith", "Smith, John", "...", "---"];
+            let credits = names.map(|name| Contributor::new(name, AUTHOR_MARC_RELATOR_CODE).unwrap());
+            let stored = resolve_credits(tx, &credits, Some(ContributorNameMatcher::Normalized))?;
+            assert_eq!(stored[0].0, stored[1].0);
+            assert_ne!(stored[2].0, stored[3].0);
+            tx.execute("UPDATE author_identity SET is_provisional=0 WHERE id=?1", [stored[0].0])?;
+            let credit = Contributor::new("Dr John Smith", AUTHOR_MARC_RELATOR_CODE).unwrap();
+            let distinct = resolve_credits(tx, &[credit], Some(ContributorNameMatcher::Normalized))?;
+            assert_ne!(distinct[0].0, stored[0].0);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn name_keys_rollback_with_identity_creation() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        db.with_write_transaction(|tx| {
+            let credit = Contributor::new("Rollback Author", AUTHOR_MARC_RELATOR_CODE).unwrap();
+            resolve_credits(tx, &[credit], Some(ContributorNameMatcher::Normalized))?;
+            Ok(WriteOutcome::Rollback(()))
+        })
+        .unwrap();
+        let count: i64 = db.connection.query_row("SELECT count(*) FROM author_name_key", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn normalized_lookup_uses_the_key_index_without_scanning_identities() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        db.write(|tx| {
+            for index in 0..256 {
+                let credit = Contributor::new(&format!("Unrelated Author {index}"), AUTHOR_MARC_RELATOR_CODE).unwrap();
+                resolve_credits(tx, &[credit], None)?;
+            }
+            let credit = Contributor::new("García, José", AUTHOR_MARC_RELATOR_CODE).unwrap();
+            let stored = resolve_credits(tx, &[credit], None)?;
+            let mut found = false;
+            for key in author_match_keys("Jose Garcia") {
+                tx.contributors_identity_by_name_key(&key, |row| {
+                    assert_eq!(row.get::<_, i64>(0)?, stored[0].0);
+                    assert_eq!(crate::query_methods::active_query_fullscan_steps(tx), 0);
+                    found = true;
+                    Ok(())
+                })?;
+            }
+            assert!(found);
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn credit_resolution_uses_only_the_supplied_matching_rule() {
@@ -52,7 +162,7 @@ mod tests {
             let first = Contributor::new("Same Name", AUTHOR_MARC_RELATOR_CODE).unwrap();
             let other = Contributor::new("Same Name", AUTHOR_MARC_RELATOR_CODE).unwrap();
             let original = resolve_credits(tx, &[first], None)?;
-            let reused = resolve_credits(tx, &[other.clone()], Some(|left, right| left == right))?;
+            let reused = resolve_credits(tx, &[other.clone()], Some(ContributorNameMatcher::Custom(|left, right| left == right)))?;
             let independent = resolve_credits(tx, &[other], None)?;
             assert_eq!(original[0].1.agent_id(), reused[0].1.agent_id());
             assert_ne!(original[0].1.agent_id(), independent[0].1.agent_id());
@@ -60,42 +170,9 @@ mod tests {
         })
         .unwrap();
     }
-
-    #[test]
-    fn cached_credit_writes_rebind_books_roles_and_empty_lists() {
-        let db = Database::open(":memory:").unwrap();
-        db.initialize_library().unwrap();
-        let first = ContentHash::new(&"a".repeat(64));
-        let second = ContentHash::new(&"b".repeat(64));
-        let author = Contributor::new("First Author", book_model::MarcRelatorCode(*b"aut")).unwrap();
-        let editor = Contributor::new("Second Author", book_model::MarcRelatorCode(*b"edt")).unwrap();
-        db.with_write_transaction(|tx| {
-            for hash in [&first, &second] {
-                tx.fixtures_insert_book(&hash)?;
-            }
-            let credits = resolve_credits(tx, &[author, editor], None)?;
-            write_credits(tx, &first, &credits)?;
-            write_credits(tx, &second, &credits[..1])?;
-            Ok(WriteOutcome::Commit(()))
-        })
-        .unwrap();
-        db.with_write_transaction(|tx| {
-            write_credits(tx, &first, &[])?;
-            let replacement = Contributor::new("Replacement", book_model::MarcRelatorCode(*b"trl")).unwrap();
-            let credits = resolve_credits(tx, &[replacement], None)?;
-            write_credits(tx, &second, &credits)?;
-            Ok(WriteOutcome::Commit(()))
-        })
-        .unwrap();
-        let rows = query_rows(|callback| db.connection.fixtures_read_book_contributor_b_content_hash_c(callback), |row| Ok((row.get::<_, ContentHash>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?)))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(rows, vec![(second, 0, "Replacement".to_owned(), b"trl".to_vec())]);
-    }
 }
 
-pub(crate) fn resolve_credits(tx: &rusqlite::Transaction<'_>, credits: &[Contributor], matcher: Option<ContributorNameMatcher>) -> Result<Vec<StoredCredit>, DatabaseError> {
+pub(crate) fn resolve_credits(tx: &Transaction<'_>, credits: &[Contributor], matcher: Option<ContributorNameMatcher>) -> Result<Vec<StoredCredit>, DatabaseError> {
     let mut stored = Vec::new();
     for credit in credits {
         let identity = resolve_identity(tx, credit.agent_id(), credit.name(), matcher)?;
@@ -103,18 +180,6 @@ pub(crate) fn resolve_credits(tx: &rusqlite::Transaction<'_>, credits: &[Contrib
         stored.push((identity.0, credit));
     }
     Ok(stored)
-}
-
-pub(crate) fn write_credits(tx: &rusqlite::Transaction<'_>, hash: &ContentHash, credits: &[StoredCredit]) -> Result<(), DatabaseError> {
-    if !credits.is_empty() {
-        for (position, (local, credit)) in credits.iter().enumerate() {
-            tx.contributors_upsert_credit(&hash, &local, &(i64::try_from(position).unwrap_or(i64::MAX)), &(credit.name()), &(&credit.role_code().0))?;
-        }
-    }
-    tx.contributors_trim_credits(&hash, &(i64::try_from(credits.len()).unwrap_or(i64::MAX)))?;
-    let author = credits.iter().filter(|(_, credit)| credit.role_code() == AUTHOR_MARC_RELATOR_CODE).map(|(_, credit)| credit.name()).collect::<Vec<_>>().join(", ");
-    tx.contributors_set_author(&hash, &author, &(normalize_search_text(&author)))?;
-    Ok(())
 }
 
 include_sqlite_sql::include_sql!("src/sql/contributors.sql");

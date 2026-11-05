@@ -4,7 +4,7 @@
 use crate::build::tests::snapshot_from;
 use crate::schema::{self, now_ms};
 use crate::*;
-use metadata_contract::{authority_subjects::OPEN_LIBRARY_WORK_PROVIDER, AuthoritySubjectMatch, ClassificationEvidence};
+use metadata_contract::{authority_subjects::OPEN_LIBRARY_WORK_PROVIDER, AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod};
 
 /// Older answer files may already contain a union of work and sibling codes.
 /// Apply the same source priority while reading them; exact LCC remains first.
@@ -20,9 +20,8 @@ fn prefer_declared_work(connection: &Connection, matched: &mut RichWorkMetadataM
         matched.classifications.retain(|c| c.scheme != ClassificationScheme::LibraryOfCongress);
         return Ok(());
     };
-    let raw: Option<Vec<u8>> = connection
-        .query_row("SELECT codes FROM authority_title WHERE key=?1 AND source=?2 AND control_number=?3", params![format!("openlibrary-work:{work}"), OPEN_LIBRARY_WORK_PROVIDER, work], |r| r.get(0))
-        .optional().map_err(error)?;
+    let raw: Option<Vec<u8>> =
+        connection.query_row("SELECT codes FROM authority_title WHERE key=?1 AND source=?2 AND control_number=?3", params![format!("openlibrary-work:{work}"), OPEN_LIBRARY_WORK_PROVIDER, work], |r| r.get(0)).optional().map_err(error)?;
     let Some(raw) = raw else {
         // Old answers may label an inherited edition union as work evidence.
         // Without a declared work code it cannot bypass title/author consensus.
@@ -40,7 +39,7 @@ fn prefer_declared_work(connection: &Connection, matched: &mut RichWorkMetadataM
     }
     for classification in &mut declared.classifications {
         classification.source = ClassificationSource::Work;
-        classification.evidence = vec![ClassificationEvidence { method: "openlibrary_declared_work_lcc".into(), isbn13: String::new(), open_library_work_id: work.into(), open_library_edition_id: String::new() }];
+        classification.evidence = vec![ClassificationEvidence { method: ClassificationMethod::OpenLibraryDeclaredWorkLcc, isbn13: String::new(), open_library_work_id: work.into(), open_library_edition_id: String::new() }];
     }
     matched.classifications.retain(|c| c.scheme != ClassificationScheme::LibraryOfCongress);
     matched.classifications.extend(declared.classifications);
@@ -53,14 +52,14 @@ pub(crate) mod alternatives;
 pub(crate) mod audible;
 pub(crate) mod books;
 mod candidate_subjects;
-mod sibling_subjects;
 pub(crate) mod covers;
 pub(crate) mod http;
 pub(crate) mod identity;
-mod subject_identity;
 pub(crate) mod related_isbn;
 pub(crate) mod resolution;
+mod sibling_subjects;
 mod source_subjects;
+mod subject_identity;
 
 #[derive(Clone)]
 pub struct MetadataService {
@@ -191,7 +190,7 @@ mod snapshot_tests {
             &[],
         );
         let answers = dir.path().join("answers.sqlite");
-        build_answers(&source, None, None, None, &answers).unwrap();
+        build_answers_with_ratings(&source, None, None, None, None, &answers).unwrap();
         let c = Connection::open(&answers).unwrap();
         assert_eq!(c.query_row("SELECT count(*) FROM work_description", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
         let raw: Vec<u8> = c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=9780306406157", [], |r| r.get(0)).unwrap();

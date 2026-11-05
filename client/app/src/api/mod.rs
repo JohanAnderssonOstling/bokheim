@@ -1,6 +1,6 @@
-pub mod app;
+mod client;
 
-pub use app::AppClient;
+pub use client::AppClient;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod launch;

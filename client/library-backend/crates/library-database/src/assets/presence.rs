@@ -1,41 +1,46 @@
 use super::TransfersSql;
+use crate::query_methods::{first_column, query_rows};
 use crate::*;
-use library_model::BlobKind;
+use library_model::{BlobKind, TransferOrigin};
 use std::collections::HashSet;
-use sync_common::ContentHash;
+use sync_common::BookId;
 
 impl Database {
     /// Records that the server already holds these bytes.
-    pub fn record_remote_asset(&self, kind: BlobKind, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn record_remote_asset(&self, kind: BlobKind, hash: &BookId) -> Result<(), DatabaseError> {
         self.connection.record_remote_asset(kind.storage(), hash)?;
         Ok(())
     }
 
     /// Forgets server-side presence, e.g. after a local edit.
-    pub fn forget_remote_asset(&self, kind: BlobKind, hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn forget_remote_asset(&self, kind: BlobKind, hash: &BookId) -> Result<(), DatabaseError> {
         self.connection.forget_remote_asset(kind.storage(), hash)?;
         Ok(())
     }
 
+    /// Whether this library's remote storage still holds one book.
+    pub(crate) fn remote_book_available(&self, hash: &BookId) -> Result<bool, DatabaseError> {
+        let sql = { "SELECT EXISTS(SELECT 1 FROM book_transfer WHERE content_hash=?1 AND server_has_book)" };
+        Ok(self.connection.prepare_cached(sql)?.query_row([hash], |row| row.get(0))?)
+    }
+
     /// Hashes the server is known to hold for one asset kind.
-    pub fn remote_asset_hashes(&self, kind: BlobKind) -> Result<HashSet<ContentHash>, DatabaseError> {
+    pub fn remote_asset_hashes(&self, kind: BlobKind) -> Result<HashSet<BookId>, DatabaseError> {
         let mut hashes = HashSet::new();
         self.connection.remote_asset_hashes(kind.storage(), |row| {
-            hashes.insert(row.get::<_, ContentHash>(0)?);
+            hashes.insert(row.get::<_, BookId>(0)?);
             Ok(())
         })?;
         Ok(hashes)
     }
 
     /// Requested book downloads, oldest first.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn book_download_requests(&self, after_at: i64, after_hash: Option<&ContentHash>, limit: i64) -> Result<Vec<(ContentHash, i64)>, DatabaseError> {
-        let mut rows = Vec::new();
-        self.connection.book_download_requests(after_at, after_hash, limit, |row| {
-            rows.push((row.get::<_, ContentHash>(0)?, row.get(1)?));
-            Ok(())
-        })?;
-        Ok(rows)
+    pub fn book_download_requests(&self, after_at: i64, after_hash: Option<&BookId>, limit: i64) -> Result<Vec<(BookId, i64)>, DatabaseError> {
+        Ok(query_rows(|read| self.connection.book_download_requests(after_at, after_hash, limit, read), |row| Ok((row.get::<_, BookId>(0)?, row.get(1)?)))?)
+    }
+
+    pub fn book_download_origin(&self, hash: &BookId) -> Result<Option<TransferOrigin>, DatabaseError> {
+        Ok(first_column::<String>(|read| self.connection.book_download_origin(hash, read))?.as_deref().and_then(TransferOrigin::parse_storage))
     }
 }
 
@@ -47,8 +52,8 @@ mod tests {
     fn download_cursor_pages_raw_hashes_at_equal_timestamps() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let first = ContentHash::from_bytes([0; 32]);
-        let second = ContentHash::from_bytes([0xff; 32]);
+        let first = BookId::from_bytes([0; 32]);
+        let second = BookId::from_bytes([0xff; 32]);
         for hash in [second, first] {
             db.connection.fixtures_insert_book_7(&hash).unwrap();
             db.connection.fixtures_insert_book_transfer(&hash).unwrap();
@@ -61,3 +66,26 @@ mod tests {
 
 #[cfg(test)]
 use crate::sql_fixtures::FixturesSql;
+
+// Async access owns its arguments until the synchronous database call completes.
+database_methods! {
+    fn record_remote_asset(kind: BlobKind, hash: &BookId) -> ();
+    arguments (BlobKind, BookId,) = (kind, hash.clone(),);
+    execute database, arguments => database.record_remote_asset(arguments.0, &arguments.1);
+
+    fn forget_remote_asset(kind: BlobKind, hash: &BookId) -> ();
+    arguments (BlobKind, BookId,) = (kind, hash.clone(),);
+    execute database, arguments => database.forget_remote_asset(arguments.0, &arguments.1);
+
+    fn remote_asset_hashes(kind: BlobKind) -> HashSet<BookId>;
+    arguments (BlobKind,) = (kind,);
+    execute database, arguments => database.remote_asset_hashes(arguments.0);
+
+    fn book_download_requests(after_at: i64, after_hash: Option<&BookId>, limit: i64) -> Vec<(BookId, i64)>;
+    arguments (i64, Option<BookId>, i64,) = (after_at, after_hash.cloned(), limit,);
+    execute database, arguments => database.book_download_requests(arguments.0, arguments.1.as_ref(), arguments.2);
+
+    fn book_download_origin(hash: &BookId) -> Option<TransferOrigin>;
+    arguments (BookId,) = (hash.clone(),);
+    execute database, arguments => database.book_download_origin(&arguments.0);
+}

@@ -4,6 +4,10 @@
 //! [`navigation::Libraries`] owns library lifecycle and per-library
 //! pages, and global pages remain stable across library selection.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
+use ui_text::text;
+
 mod library;
 mod model;
 mod navigation;
@@ -13,12 +17,23 @@ mod session;
 mod stores;
 mod universal;
 
-pub(crate) const BOOK_IMPORT_EXTENSIONS: [&str; 6] = ["epub", "pdf", "mobi", "azw", "azw3", "m4b"];
+use book_model::BookFormat;
 
-use gpui::{App, KeyBinding, actions};
+pub(crate) const BOOK_IMPORT_EXTENSIONS: [&str; BookFormat::IMPORT_EXTENSIONS.len()] = BookFormat::IMPORT_EXTENSIONS;
+
+use gpui::{App, KeyBinding, Window, actions};
 pub use gpui_component::menu::OpenContextMenu;
 use library::CursorMove;
 use library_backend::{DirectoryImport, DirectoryImportFile, ImportSource};
+
+/// Set by the Android host before opening any settings or libraries.
+#[cfg(target_os = "android")]
+pub struct AndroidStoragePolicy {
+    pub all_files_access_available: bool,
+}
+
+#[cfg(target_os = "android")]
+impl gpui::Global for AndroidStoragePolicy {}
 
 pub(crate) fn split_panes_available(window: &gpui::Window) -> bool {
     native_windows_available() && !ui_components::WindowWidthClass::for_window(window).is_compact()
@@ -46,6 +61,14 @@ pub struct OpenInNewWindow(pub NewWindowTarget);
 pub struct OpenAuthor {
     pub author: book_model::AuthorId,
     pub name: String,
+}
+
+/// Opens a subject page — the library's or the catalog's, by the location
+/// its crumbs carry — at the end of `path`, which runs from the root down.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub struct OpenSubject {
+    pub path: Vec<library_model::BrowsePathSegment>,
 }
 
 fn directory_import(selected: gpui::SelectedDirectory) -> DirectoryImport {
@@ -77,9 +100,11 @@ pub use navigation::{GlobalRoute, LibraryRoute, Route};
 pub use root::{BrowserRoot, NowPlaying, NowPlayingBook, OpenBookRequested};
 #[cfg(feature = "kobo")]
 pub use services::SaveKoboAutoRotate;
-pub use services::{AppServices, AppStartup, UpdateAction, UpdateActionHandler, UpdateControls, UpdateView};
+#[cfg(not(target_arch = "wasm32"))]
+pub use services::bind_update_worker;
+pub use services::{AppServices, AppStartup, PublishUpdate, UpdateAction, UpdateActionHandler, UpdateControls, UpdateEvent, UpdateView};
 pub use services::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService, library_is_being_removed};
-pub use session::{BrowsePageSession, NavigationSession, ReaderSession, SaveNavigationSession, WindowSession};
+pub use session::{BrowsePageSession, NavigationSession, PaneRequest, ReaderSession, SaveNavigationSession, WindowSession};
 #[cfg(target_arch = "wasm32")]
 pub use universal::sync::SyncEvent;
 /// Switches the selected library to one of its browse views, from the menu in
@@ -88,54 +113,86 @@ pub use universal::sync::SyncEvent;
 #[action(no_json)]
 pub(crate) struct OpenLibraryView(pub(crate) LibraryRoute);
 
+pub use universal::sync::AuthenticationRequest;
 pub use universal::sync::SyncState;
 
-/// Release retained library cover images before displaying a reader. Cached
-/// pages preserve navigation and reload their artwork when rendered again.
-pub fn evict_covers(cx: &mut App) {
-    library::evict_covers(cx);
+/// Release hidden library cover images after displaying a reader. Other
+/// windows and panes keep their displayed artwork and in-flight cover loads.
+pub fn evict_covers(window: &Window) {
+    window.on_next_frame(|window, _| window.on_next_frame(|_, cx| library::evict_covers(cx)));
 }
 
-actions!(bokheim_browser, [DismissSettings, OpenTrash, ShowSettings, DecreaseUiFontSize, IncreaseUiFontSize, PreviousDestination, NextDestination, OpenLibrarySwitcher, FocusNextSetting, FocusPreviousSetting, UndoLibraryAction]);
+actions!(
+    bokheim_browser,
+    [
+        DismissSettings,
+        CloseSplitPane,
+        OpenTrash,
+        ShowSettings,
+        DecreaseUiFontSize,
+        IncreaseUiFontSize,
+        PreviousDestination,
+        NextDestination,
+        OpenLibrarySwitcher,
+        FocusNextSetting,
+        FocusPreviousSetting,
+        UndoLibraryAction,
+        CopyBooks,
+        CutBooks,
+        PasteBooks
+    ]
+);
 
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
 #[action(no_json)]
 pub(crate) struct ToggleGridSelection(pub(crate) CursorMove);
 
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub(crate) struct MoveSettingRow(pub(crate) i32);
+
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub(crate) struct AdjustSettingValue(pub(crate) i32);
+
 const GRID_SELECTION_KEY_CONTEXT: &str = "BrowseSelection && !BrowseItem && !Input && !PopupMenu && !Dialog";
+const BOOK_CLIPBOARD_KEY_CONTEXT: &str = "BrowseClipboard && !Input && !PopupMenu && !Dialog";
 
 pub fn bind_keys(cx: &mut App) {
-    // Number shortcuts follow the order drawn by the navigation rail.
+    use ui_components::{ShortcutPage::Browse, bind_shortcut};
+    bind_shortcut(cx, Browse, "browse.dismiss", text!(browse::close_settings), &["escape"], DismissSettings, "Browser");
+    bind_shortcut(cx, Browse, "browse.font_decrease", text!(common::decrease_interface_font_size), &["secondary--"], DecreaseUiFontSize, "Browser");
+    bind_shortcut(cx, Browse, "browse.font_increase", text!(common::increase_interface_font_size), &["secondary-="], IncreaseUiFontSize, "Browser");
+    bind_shortcut(cx, Browse, "browse.previous_destination", text!(browse::previous_destination), &["secondary-up"], PreviousDestination, "Browser");
+    bind_shortcut(cx, Browse, "browse.next_destination", text!(browse::next_destination), &["secondary-down"], NextDestination, "Browser");
+    // Selection contexts retain precedence over destination navigation.
+    bind_shortcut(cx, Browse, "browse.select_left", text!(browse::toggle_selection_to_the_left), &["secondary-left"], ToggleGridSelection(CursorMove::Left), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_right", text!(browse::toggle_selection_to_the_right), &["secondary-right"], ToggleGridSelection(CursorMove::Right), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_up", text!(browse::toggle_selection_above), &["secondary-up"], ToggleGridSelection(CursorMove::Up), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_down", text!(browse::toggle_selection_below), &["secondary-down"], ToggleGridSelection(CursorMove::Down), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.undo", text!(browse::undo_library_action), &["secondary-z"], UndoLibraryAction, "Browser");
     cx.bind_keys([
-        KeyBinding::new("escape", DismissSettings, Some("Browser")),
-        // Only platforms with an OS back button/gesture send this key.
+        KeyBinding::new("secondary-c", CopyBooks, Some(BOOK_CLIPBOARD_KEY_CONTEXT)),
+        KeyBinding::new("secondary-x", CutBooks, Some(BOOK_CLIPBOARD_KEY_CONTEXT)),
+        KeyBinding::new("secondary-v", PasteBooks, Some(BOOK_CLIPBOARD_KEY_CONTEXT)),
         #[cfg(not(target_os = "android"))]
         KeyBinding::new("back", DismissSettings, Some("Browser")),
-        KeyBinding::new("secondary--", DecreaseUiFontSize, Some("Browser")),
-        KeyBinding::new("secondary-=", IncreaseUiFontSize, Some("Browser")),
-        KeyBinding::new("secondary-+", IncreaseUiFontSize, Some("Browser")),
-        // Selectable grids override these destination shortcuts below.
-        KeyBinding::new("secondary-up", PreviousDestination, Some("Browser")),
-        KeyBinding::new("secondary-down", NextDestination, Some("Browser")),
-        KeyBinding::new("secondary-left", ToggleGridSelection(CursorMove::Left), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("secondary-right", ToggleGridSelection(CursorMove::Right), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("secondary-up", ToggleGridSelection(CursorMove::Up), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("secondary-down", ToggleGridSelection(CursorMove::Down), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("secondary-z", UndoLibraryAction, Some("Browser")),
-        // Settings is a form rather than a grid, so it is walked control by
-        // control. The arrows do what Tab does, for the devices whose only
-        // keyboard is a four-way pad; a text field keeps them for its cursor,
-        // and Tab still leaves the field.
+        // Tab retains control-by-control form navigation. Embedded editors
+        // keep their own keys; ordinary settings use the reader's row model.
         KeyBinding::new("tab", FocusNextSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
-        KeyBinding::new("down", FocusNextSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
+        KeyBinding::new("down", FocusNextSetting, Some("BrowserSettings && (ShortcutSettings || BrowserSettingsHeader || BrowserFontPicker)")),
         KeyBinding::new("shift-tab", FocusPreviousSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
-        KeyBinding::new("up", FocusPreviousSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
+        KeyBinding::new("up", FocusPreviousSetting, Some("BrowserSettings && (ShortcutSettings || BrowserSettingsHeader || BrowserFontPicker)")),
+        KeyBinding::new("down", MoveSettingRow(1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
+        KeyBinding::new("up", MoveSettingRow(-1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
+        KeyBinding::new("left", AdjustSettingValue(-1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
+        KeyBinding::new("right", AdjustSettingValue(1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
     ]);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GRID_SELECTION_KEY_CONTEXT;
+    use super::{BOOK_CLIPBOARD_KEY_CONTEXT, GRID_SELECTION_KEY_CONTEXT};
     use gpui::{KeyBindingContextPredicate, KeyContext};
 
     #[test]
@@ -144,6 +201,20 @@ mod tests {
         let mut contexts = vec![KeyContext::parse("Browser").unwrap()];
         assert_eq!(predicate.depth_of(&contexts), None);
         contexts.push(KeyContext::parse("BrowseSelection").unwrap());
+        assert!(predicate.depth_of(&contexts).is_some());
+        for child in ["Input", "PopupMenu", "Dialog"] {
+            contexts.push(KeyContext::parse(child).unwrap());
+            assert_eq!(predicate.depth_of(&contexts), None);
+            contexts.pop();
+        }
+    }
+
+    #[test]
+    fn book_clipboard_context_keeps_text_editing_and_other_surfaces_separate() {
+        let predicate = KeyBindingContextPredicate::parse(BOOK_CLIPBOARD_KEY_CONTEXT).unwrap();
+        let mut contexts = vec![KeyContext::parse("Browser").unwrap()];
+        assert_eq!(predicate.depth_of(&contexts), None);
+        contexts.push(KeyContext::parse("BrowseSelection BrowseClipboard").unwrap());
         assert!(predicate.depth_of(&contexts).is_some());
         for child in ["Input", "PopupMenu", "Dialog"] {
             contexts.push(KeyContext::parse(child).unwrap());

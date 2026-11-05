@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[cfg(test)]
 use book_model::AuthorId;
-use content_address::ContentHash;
+use content_address::BookId;
 use library_model::{BookCardRow, BookDetail, BookSource, CardKey, LibraryFormatCount, LibraryLanguageCount};
 #[cfg(test)]
 use library_model::{BrowseContents, BrowseLocation, BrowsePageRequest, BrowsePathSegment, LibraryBrowseQuery};
@@ -20,17 +20,20 @@ use super::authors::{Author, index_rows, page_author_rows};
 use super::books::MatchingBooks;
 use super::facets::{add_format_count, include_selected_facets};
 use super::options::{BrowseOptions, file_type_of};
+use super::rows::invalid_integer_column;
 #[cfg(test)]
 use super::sections::SectionSelection;
 #[cfg(test)]
 use super::subjects::Books;
 use crate::catalog::CatalogBook;
+#[cfg(test)]
+use crate::query_methods::uuid_blob_column;
 use crate::{Database, DatabaseError};
 use rusqlite::Connection;
 
 impl Database {
     /// The hashes of the library's visible books.
-    pub(super) fn library_book_hashes(&self) -> Result<HashSet<ContentHash>, DatabaseError> {
+    pub(super) fn library_book_hashes(&self) -> Result<HashSet<BookId>, DatabaseError> {
         let mut hashes = HashSet::new();
         self.connection.library_book_hashes(|row| {
             hashes.insert(row.get(0)?);
@@ -71,7 +74,7 @@ impl Database {
         let contents = BrowseContents { children, books };
         let (language_counts, format_counts) = facets(&options)?;
         let path = author.and_then(|id| authors.get(&id).map(|found| BrowsePathSegment { id: BrowseLocation::CatalogAuthor(Some(id)), name: found.name.clone() })).into_iter().collect();
-        Ok(LibraryBrowseData { contents, sections, path, ancestors: Vec::new(), language_counts, format_counts, feed: None, page })
+        Ok(LibraryBrowseData { contents, sections, path, ancestors: Vec::new(), language_counts, format_counts, page })
     }
 
     #[cfg(test)]
@@ -150,15 +153,14 @@ fn author_contents(author: Option<AuthorId>, authors: &BTreeMap<AuthorId, Author
 /// The catalog lists only what the library does not hold: a book in `held`
 /// matches nothing, so it leaves the cards, the counts and the sections alike.
 #[cfg(test)]
-pub(super) fn matching(candidates: &BTreeSet<i64>, held: &HashSet<ContentHash>, options: &BrowseOptions) -> Result<MatchingBooks, DatabaseError> {
+pub(super) fn matching(candidates: &BTreeSet<i64>, held: &HashSet<BookId>, options: &BrowseOptions) -> Result<MatchingBooks, DatabaseError> {
     crate::catalog::read(|db| matching_in(db, candidates, held, options))
 }
 
-pub(super) fn matching_in(db: &Connection, candidates: &BTreeSet<i64>, held: &HashSet<ContentHash>, options: &BrowseOptions) -> Result<MatchingBooks, DatabaseError> {
-    let mut result =
-        MatchingBooks { books: BTreeSet::new(), downloaded: BTreeSet::new(), text_matches: BTreeSet::new(), popularity: BTreeMap::new(), preferred: BTreeSet::new(), source_priorities: BTreeMap::new(), popularity_groups: BTreeMap::new() };
+pub(super) fn matching_in(db: &Connection, candidates: &BTreeSet<i64>, held: &HashSet<BookId>, options: &BrowseOptions) -> Result<MatchingBooks, DatabaseError> {
+    let mut result = MatchingBooks { books: BTreeSet::new(), downloaded: BTreeSet::new(), text_matches: BTreeSet::new(), popularity: BTreeMap::new(), preferred: BTreeSet::new(), popularity_groups: BTreeMap::new() };
     let ids = serde_json::to_string(candidates).map_err(DatabaseError::operation)?;
-    let held = serde_json::to_string(&held.iter().map(ToString::to_string).collect::<Vec<_>>()).map_err(DatabaseError::operation)?;
+    let held = serde_json::to_string(held).map_err(DatabaseError::operation)?;
     db.catalog_browse_matching(&ids, &held, options.file_types, &options.languages, &options.search, |row| {
         let id = row.get(0)?;
         result.books.insert(id);
@@ -169,7 +171,6 @@ pub(super) fn matching_in(db: &Connection, candidates: &BTreeSet<i64>, held: &Ha
             result.preferred.insert(id);
         }
         if options.needs_popularity() {
-            result.source_priorities.insert(id, row.get(3)?);
             if let Some(score) = row.get::<_, Option<f64>>(4)? {
                 result.popularity.insert(id, score);
                 if let Some(group) = row.get::<_, Option<String>>(5)? {
@@ -191,8 +192,7 @@ fn load_authors() -> Result<BTreeMap<AuthorId, Author>, DatabaseError> {
 pub(super) fn load_authors_in(db: &Connection) -> Result<BTreeMap<AuthorId, Author>, DatabaseError> {
     let mut authors = BTreeMap::<AuthorId, Author>::new();
     db.catalog_browse_authors(|row| {
-        let identity: Vec<u8> = row.get(0)?;
-        let id = AuthorId::from_slice(&identity).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(error)))?;
+        let id = uuid_blob_column(row, 0)?;
         authors.entry(id).or_insert(Author { name: row.get(1)?, books: BTreeSet::new() }).books.insert(row.get(2)?);
         Ok(())
     })?;
@@ -201,27 +201,25 @@ pub(super) fn load_authors_in(db: &Connection) -> Result<BTreeMap<AuthorId, Auth
 
 #[cfg(test)]
 
-fn matching_books(books: &[CatalogBook], candidates: &BTreeSet<i64>, held: &HashSet<ContentHash>, options: &BrowseOptions) -> MatchingBooks {
+fn matching_books(books: &[CatalogBook], candidates: &BTreeSet<i64>, held: &HashSet<BookId>, options: &BrowseOptions) -> MatchingBooks {
     let mut matching = BTreeSet::new();
     let mut text_matches = BTreeSet::new();
     let mut popularity = BTreeMap::new();
     let mut preferred = BTreeSet::new();
-    let mut source_priorities = BTreeMap::new();
     for &index in candidates {
         let Some(book) = usize::try_from(index).ok().and_then(|index| books.get(index)) else { continue };
         let format = options.file_types == 0 || options.file_types & book.format() as i32 != 0;
-        let language = options.languages.is_empty() || book.languages.iter().any(|language| options.languages.contains(&format!(",{language},")));
+        let language = options.languages.is_empty() || (!book.languages.is_empty() && book.languages.iter().all(|language| options.languages.contains(&format!(",{language},"))));
         // Signing out limits library browsing to downloaded books. Catalog
         // downloads are public and remain available without an account.
         if !format || !language || book.hash.is_some_and(|hash| held.contains(&hash)) {
             continue;
         }
         matching.insert(index);
-        if book.is_preferred_source() {
+        if book.source_priority() == 0 {
             preferred.insert(index);
         }
         if options.needs_popularity() {
-            source_priorities.insert(index, book.source_priority());
             if let Some(score) = popularity_score(book) {
                 popularity.insert(index, score);
             }
@@ -230,7 +228,7 @@ fn matching_books(books: &[CatalogBook], candidates: &BTreeSet<i64>, held: &Hash
             text_matches.insert(index);
         }
     }
-    MatchingBooks { books: matching, downloaded: BTreeSet::new(), text_matches, popularity, preferred, source_priorities, popularity_groups: BTreeMap::new() }
+    MatchingBooks { books: matching, downloaded: BTreeSet::new(), text_matches, popularity, preferred, popularity_groups: BTreeMap::new() }
 }
 
 #[cfg(test)]
@@ -249,7 +247,11 @@ pub(super) fn card_rows(selected: &BTreeSet<i64>, options: &BrowseOptions) -> Re
     if selected.is_empty() {
         return Ok(Vec::new());
     }
-    crate::catalog::read(|db| card_rows_in(db, selected, options))
+    crate::catalog::read(|db| {
+        let ids = ordered_books_in(db, selected, options)?;
+        let cards = load_cards_in(db, &ids)?;
+        Ok(ids.into_iter().zip(cards).collect())
+    })
 }
 
 #[cfg(test)]
@@ -275,34 +277,32 @@ pub(super) fn ordered_books_in(db: &Connection, selected: &BTreeSet<i64>, option
 
 #[cfg(test)]
 fn cards_in(db: &Connection, selected: &BTreeSet<i64>, options: &BrowseOptions) -> Result<Vec<BookCardRow>, DatabaseError> {
-    Ok(card_rows_in(db, selected, options)?.into_iter().map(|(_, card)| card).collect())
+    load_cards_in(db, &ordered_books_in(db, selected, options)?)
 }
 
-pub(super) fn card_rows_in(db: &Connection, selected: &BTreeSet<i64>, options: &BrowseOptions) -> Result<Vec<(i64, BookCardRow)>, DatabaseError> {
-    if selected.is_empty() {
+/// Hydrate an already ordered selection, preserving duplicates and positions.
+pub(super) fn load_cards_in(db: &Connection, ids: &[i64]) -> Result<Vec<BookCardRow>, DatabaseError> {
+    if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut cards = Vec::new();
-    let ids = serde_json::to_string(selected).map_err(DatabaseError::operation)?;
-    db.catalog_browse_cards(&ids, i32::from(options.book_sort == library_model::BrowseBookSort::Popularity), |row| {
-        let hash: Option<ContentHash> = row.get(2)?;
-        let key: ContentHash = row.get(1)?;
-        cards.push((
-            row.get(0)?,
-            BookCardRow {
-                source: hash.map_or(BookSource::ExternalCatalog { entry: CardKey(*key.as_bytes()), downloadable: row.get(7)? }, |content_hash| BookSource::Catalog { content_hash }),
-                title: row.get(3)?,
-                subtitle: row.get(4)?,
-                author: row.get(5)?,
-                progress: 0.0,
-                downloaded: false,
-                download_requested: false,
-                format_category: file_type_of(row.get(6)?),
-                audiobook_duration_ms: None,
-                added_at: 0,
-                source_directory: None,
-            },
-        ));
+    let mut cards = Vec::with_capacity(ids.len());
+    let ids = serde_json::to_string(ids).map_err(DatabaseError::operation)?;
+    db.catalog_browse_cards(&ids, |row| {
+        let hash: Option<BookId> = row.get(1)?;
+        let key: BookId = row.get(0)?;
+        cards.push(BookCardRow {
+            source: hash.map_or(BookSource::ExternalCatalog { entry: CardKey::from(key), downloadable: row.get(6)? }, |book_id| BookSource::Catalog { book_id }),
+            title: row.get(2)?,
+            subtitle: row.get(3)?,
+            author: row.get(4)?,
+            progress: 0.0,
+            downloaded: false,
+            download_requested: false,
+            format_category: file_type_of(row.get(5)?),
+            audiobook_duration_ms: row.get::<_, Option<i64>>(7)?.map(u64::try_from).transpose().map_err(|error| invalid_integer_column(7, error.to_string()))?,
+            added_at: 0,
+            source_directory: None,
+        });
         Ok(())
     })?;
     Ok(cards)
@@ -313,20 +313,16 @@ pub(super) fn card_rows_in(db: &Connection, selected: &BTreeSet<i64>, options: &
 fn ordered_cards(books: &[CatalogBook], selected: &BTreeSet<i64>, options: &BrowseOptions) -> Vec<BookCardRow> {
     let mut chosen = selected.iter().filter_map(|&index| usize::try_from(index).ok().and_then(|index| books.get(index))).collect::<Vec<_>>();
     chosen.sort_by(|left, right| {
-        let preferred = right.is_preferred_source().cmp(&left.is_preferred_source());
-        let popularity = if options.book_sort == library_model::BrowseBookSort::Popularity {
-            left.source_priority().cmp(&right.source_priority()).then_with(|| super::popularity::compare(popularity_score(left), popularity_score(right)))
-        } else {
-            std::cmp::Ordering::Equal
-        };
-        preferred.then(popularity).then_with(|| left.search_title.cmp(&right.search_title)).then_with(|| left.title.cmp(&right.title)).then_with(|| left.key.cmp(&right.key))
+        let order =
+            if options.book_sort == library_model::BrowseBookSort::Popularity { super::popularity::compare(popularity_score(left), popularity_score(right)) } else { (right.source_priority() == 0).cmp(&(left.source_priority() == 0)) };
+        order.then_with(|| left.search_title.cmp(&right.search_title)).then_with(|| left.title.cmp(&right.title)).then_with(|| left.key.cmp(&right.key))
     });
     chosen.into_iter().map(card).collect()
 }
 
 fn card(book: &CatalogBook) -> BookCardRow {
     BookCardRow {
-        source: book.hash.map_or(BookSource::ExternalCatalog { entry: book.key, downloadable: book.audiobook_download_url().is_some() }, |content_hash| BookSource::Catalog { content_hash }),
+        source: book.hash.map_or(BookSource::ExternalCatalog { entry: book.key, downloadable: book.audiobook_download_url().is_some() }, |book_id| BookSource::Catalog { book_id }),
         title: book.title.clone(),
         subtitle: book.subtitle.clone(),
         author: book.author.clone(),
@@ -334,7 +330,7 @@ fn card(book: &CatalogBook) -> BookCardRow {
         downloaded: false,
         download_requested: false,
         format_category: file_type_of(Some(book.format() as i64)),
-        audiobook_duration_ms: None,
+        audiobook_duration_ms: book.audiobook_duration_ms,
         added_at: 0,
         source_directory: None,
     }
@@ -342,14 +338,23 @@ fn card(book: &CatalogBook) -> BookCardRow {
 
 /// The page of a catalog book the library does not hold: its record, with
 /// nothing about reading or placement.
-pub(super) fn detail(hash: &ContentHash) -> Result<Option<BookDetail>, DatabaseError> {
-    crate::catalog::entry(CardKey(*hash.as_bytes())).map(|book| book.filter(|book| book.hash.is_some()).map(|book| book_detail(&book)))
+pub(super) fn detail(hash: &BookId) -> Result<Option<BookDetail>, DatabaseError> {
+    crate::catalog::entry(CardKey::from(hash)).map(|book| book.filter(|book| book.hash.is_some()).map(|book| book_detail(&book)))
 }
 
 impl Database {
     pub fn external_catalog_detail(&self, entry: CardKey) -> Result<BookDetail, DatabaseError> {
         let book = crate::catalog::entry(entry)?.filter(|book| book.hash.is_none()).ok_or_else(|| DatabaseError::message("the entry is not in the catalog"))?;
-        Ok(book_detail(&book))
+        self.with_catalog_subjects(book_detail(&book))
+    }
+
+    /// A catalog book's detail with the subjects the catalog's subject pages
+    /// list it under.
+    pub(super) fn with_catalog_subjects(&self, mut detail: BookDetail) -> Result<BookDetail, DatabaseError> {
+        if let Some(row) = crate::catalog::browse_row(detail.book.key())? {
+            detail.subjects = self.book_subjects(super::subjects::Books::Catalog, row)?;
+        }
+        Ok(detail)
     }
 }
 
@@ -359,6 +364,7 @@ fn book_detail(book: &CatalogBook) -> BookDetail {
         external_url: book.external_url.clone(),
         audiobook_chapter_count: None,
         description: book.record.description.clone(),
+        subjects: Vec::new(),
         year: book.record.book.year,
         source_directory_id: None,
         path: Vec::new(),
@@ -366,6 +372,7 @@ fn book_detail(book: &CatalogBook) -> BookDetail {
         credits: Vec::new(),
         current_entry: None,
         current_target: None,
+        chapter_read_status: Default::default(),
         toc: book.toc.clone(),
     }
 }
@@ -418,26 +425,76 @@ mod tests {
     use rusqlite::params;
 
     #[test]
+    fn sql_book_and_author_popularity_ignore_source_tiers_and_keep_alphabetical_ties() {
+        use library_model::{BrowseBookSort, BrowseChipSort};
+        let catalog = Connection::open_in_memory().unwrap();
+        catalog.execute_batch(include_str!("../../tests/sql/catalog_pagination.sql")).unwrap();
+        catalog.execute_batch("CREATE TABLE book_audiobook_duration(book_row_id INTEGER PRIMARY KEY,duration_ms INTEGER);").unwrap();
+        catalog.execute_batch(include_str!("../catalog/compact.sql")).unwrap();
+        catalog.execute_batch("INSERT INTO description VALUES(1,''); INSERT INTO snapshot VALUES(1,11,1); INSERT INTO catalog_browse_revision VALUES(1,19,1,11,'test');").unwrap();
+        for (id, name) in [(1, "A tier"), (2, "Z mixed"), (3, "B bilingual")] {
+            catalog.execute("INSERT INTO author VALUES(?1,?2,?3)", params![id, AuthorId::from_u128(id as u128).as_bytes().as_slice(), name]).unwrap();
+        }
+        for (id, priority, score, title, author) in
+            [(1, 0, Some(10.0), "Low preferred", 1), (2, 4, Some(90.0), "Popular", 2), (3, 6, Some(50.0), "Z tied", 3), (4, 1, Some(50.0), "A tied", 3), (5, 2, Some(0.0), "Known zero", 1), (6, 0, None, "Unknown preferred", 2)]
+        {
+            catalog.execute("INSERT INTO book(row_id,key,external,title,description_id,format) VALUES(?1,?2,0,?3,1,1)", params![id, [id as u8; 32].as_slice(), title]).unwrap();
+            catalog.execute("INSERT INTO book_author VALUES(?1,?2)", params![id, author]).unwrap();
+            catalog.execute("INSERT INTO catalog_browse_search VALUES(?1,?1,?2,'',?3,?4)", params![id, book_model::normalize_search_text(title), priority, score]).unwrap();
+        }
+        let mut actual = Vec::new();
+        catalog
+            .catalog_browse_ordered("[1,2,3,4,5,6]", 1, |row| {
+                actual.push(row.get::<_, i64>(0)?);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(actual, [2, 4, 3, 1, 5, 6]);
+        let library = Database::open(":memory:").unwrap();
+        library.initialize_library().unwrap();
+        let options = BrowseOptions::from_query(
+            &LibraryBrowseQuery {
+                location: BrowseLocation::CatalogAuthor(None),
+                search: String::new(),
+                file_types: vec![],
+                languages: vec![],
+                chip_sort: BrowseChipSort::Popularity,
+                book_sort: BrowseBookSort::Popularity,
+                hide_finished: false,
+            },
+            false,
+        );
+        let authors = library.author_query(Some(&catalog), &options).unwrap();
+        assert_eq!(authors.headings().unwrap().iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["B bilingual", "Z mixed", "A tier"]);
+        assert_eq!(authors.ordered(None).unwrap(), [2, 4, 3, 1, 5, 6]);
+    }
+
+    #[test]
     fn sql_matching_agrees_with_book_filters_and_keeps_external_entries_when_the_library_holds_their_key() {
         let mut books = (1..=4).map(|id| authored_book(id, Vec::new())).collect::<Vec<_>>();
-        books[0].hash = Some(ContentHash::from_bytes(books[0].key.0));
-        books[1].hash = Some(ContentHash::from_bytes(books[1].key.0));
+        books[0].hash = Some(BookId::from_bytes(books[0].key.0));
+        books[1].hash = Some(BookId::from_bytes(books[1].key.0));
         books[2].file_format = BookFormat::Mp3Folder;
         for (index, book) in books.iter_mut().enumerate() {
             book.languages = vec![if index % 2 == 0 { "en".into() } else { "sv".into() }];
         }
+        books[2].languages = vec!["en".into(), "sv".into()];
+        books[3].languages = vec!["en".into(), "sv".into(), "de".into()];
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(include_str!("../catalog/schema.sql")).unwrap();
         for (index, book) in books.iter().enumerate() {
-            db.execute("INSERT INTO catalog_browse_book VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)", params![index as i64, &book.key.0[..], book.hash.is_none(), book.format() as i32, book.search_title, book.search_author, book.source_priority()])
-                .unwrap();
+            db.execute(
+                "INSERT INTO catalog_browse_book(row_id,key,external,format,search_title,search_author,source_priority,popularity_score) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)",
+                params![index as i64, &book.key.0[..], book.hash.is_none(), book.format() as i32, book.search_title, book.search_author, book.source_priority()],
+            )
+            .unwrap();
             for language in &book.languages {
                 db.execute("INSERT INTO catalog_browse_language VALUES(?1,?2)", params![index as i64, language]).unwrap();
             }
         }
         let candidates = BTreeSet::from([0, 1, 2, 3]);
-        for held in [HashSet::new(), HashSet::from([books[0].hash.unwrap(), ContentHash::from_bytes(books[2].key.0)])] {
-            for languages in [vec![], vec!["en".into()], vec!["sv".into()]] {
+        for held in [HashSet::new(), HashSet::from([books[0].hash.unwrap(), BookId::from_bytes(books[2].key.0)])] {
+            for languages in [vec![], vec!["en".into()], vec!["sv".into()], vec!["en".into(), "sv".into()], vec!["en".into(), "sv".into(), "de".into()]] {
                 for file_types in [vec![], vec![LibraryFileTypeFilter::Book], vec![LibraryFileTypeFilter::Audiobook]] {
                     for search in ["", "book 2", "missing"] {
                         let query = LibraryBrowseQuery {
@@ -448,7 +505,6 @@ mod tests {
                             chip_sort: Default::default(),
                             book_sort: Default::default(),
                             hide_finished: false,
-                            include_direct_child_books: false,
                         };
                         let options = BrowseOptions::from_query(&query, false);
                         let actual = matching_in(&db, &candidates, &held, &options).unwrap();
@@ -461,16 +517,7 @@ mod tests {
             }
         }
         let options = BrowseOptions::from_query(
-            &LibraryBrowseQuery {
-                location: BrowseLocation::Catalog(0),
-                search: String::new(),
-                file_types: vec![],
-                languages: vec![],
-                chip_sort: Default::default(),
-                book_sort: Default::default(),
-                hide_finished: false,
-                include_direct_child_books: false,
-            },
+            &LibraryBrowseQuery { location: BrowseLocation::Catalog(0), search: String::new(), file_types: vec![], languages: vec![], chip_sort: Default::default(), book_sort: Default::default(), hide_finished: false },
             false,
         );
         assert!(matching_in(&db, &BTreeSet::new(), &HashSet::new(), &options).unwrap().books.is_empty());
@@ -485,6 +532,7 @@ mod tests {
             external_url: None,
             download_url: None,
             file_format: BookFormat::Epub,
+            audiobook_duration_ms: None,
             sources: Vec::new(),
             title: record.title.clone(),
             subtitle: None,
@@ -505,7 +553,8 @@ mod tests {
 
     #[test]
     fn composite_catalog_authors_use_individual_credits_and_exclude_non_authors() {
-        let mut books = vec![authored_book(1, vec![credit(1, "Alex Smith, Jamie Jones, Terry White", b"aut"), credit(2, "Alex Smith", b"aut"), credit(3, "Jamie Jones", b"aut"), credit(4, "Terry White", b"edt"), credit(5, "Untyped Credit", b"ctb")])];
+        let mut books =
+            vec![authored_book(1, vec![credit(1, "Alex Smith, Jamie Jones, Terry White", b"aut"), credit(2, "Alex Smith", b"aut"), credit(3, "Jamie Jones", b"aut"), credit(4, "Terry White", b"edt"), credit(5, "Untyped Credit", b"ctb")])];
         crate::catalog::normalize_author_lists(&mut books);
         assert_eq!(books[0].record.authors().map(|author| author.name()).collect::<Vec<_>>(), ["Alex Smith", "Jamie Jones"]);
         assert_eq!(books[0].author, "Alex Smith, Jamie Jones");
@@ -519,16 +568,8 @@ mod tests {
             assert!(candidates(Some(id), &authors).is_empty());
         }
         assert_eq!(candidates(None, &authors), BTreeSet::from([0]));
-        let query = LibraryBrowseQuery {
-            location: BrowseLocation::CatalogAuthor(None),
-            search: "Jamie".into(),
-            file_types: Vec::new(),
-            languages: Vec::new(),
-            chip_sort: Default::default(),
-            book_sort: Default::default(),
-            hide_finished: false,
-            include_direct_child_books: false,
-        };
+        let query =
+            LibraryBrowseQuery { location: BrowseLocation::CatalogAuthor(None), search: "Jamie".into(), file_types: Vec::new(), languages: Vec::new(), chip_sort: Default::default(), book_sort: Default::default(), hide_finished: false };
         let options = BrowseOptions::from_query(&query, false);
         let matching = matching_books(&books, &candidates(None, &authors), &HashSet::new(), &options);
         assert_eq!(matching.text_matches, BTreeSet::from([0]));
@@ -570,7 +611,7 @@ mod tests {
 
         let mut books = (1..=9).map(|id| authored_book(id, vec![credit(id as u128, &format!("Writer {id}"), b"aut")])).collect::<Vec<_>>();
         let sources = ["gutenberg.org", "loyalbooks.com", "unglue.it", "litteraturbanken.se", "publicdomainlibrary.org", "gutenberg.org", "loyalbooks.com", "gutenberg.org", "standardebooks.org"];
-        for (book, (source, score)) in books.iter_mut().zip(sources.into_iter().zip([Some(10000.0), Some(1.1), Some(1.0), Some(0.0), None, Some(0.0), Some(1.1), None, None])) {
+        for (book, (source, score)) in books.iter_mut().zip(sources.into_iter().zip([Some(100.0), Some(55.0), Some(1.0), Some(0.0), None, Some(0.0), Some(55.0), None, None])) {
             book.sources = vec![source.into()];
             book.popularity = score.map(|source_score| CatalogPopularity { source_score: Some(source_score), source: Some(source.into()), ..Default::default() });
             book.languages = vec!["en".into()];
@@ -578,8 +619,8 @@ mod tests {
         // One LoyalBooks page offers two formats to the same author.
         books[6].record.contributors = books[1].record.contributors.clone();
         books[6].file_format = BookFormat::Mp3Folder;
-        // A replacement also retains its older provenance. Its best source
-        // still places it above lower-tier books with known popularity.
+        // Older source credits must not lift an unscored replacement above
+        // books with known normalized popularity.
         books[8].sources.push("gutenberg.org".into());
         let query = LibraryBrowseQuery {
             location: BrowseLocation::CatalogAuthor(None),
@@ -589,20 +630,20 @@ mod tests {
             chip_sort: BrowseChipSort::Popularity,
             book_sort: BrowseBookSort::Popularity,
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let authors = catalog_authors(&books);
         let options = BrowseOptions::from_query(&query, false);
         let matching = matching_books(&books, &candidates(None, &authors), &HashSet::new(), &options);
-        assert_eq!(ordered_cards(&books, &matching.books, &options).iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Book 5", "Book 9", "Book 4", "Book 3", "Book 2", "Book 7", "Book 1", "Book 6", "Book 8"]);
+        assert_eq!(ordered_cards(&books, &matching.books, &options).iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Book 1", "Book 2", "Book 7", "Book 3", "Book 4", "Book 6", "Book 5", "Book 8", "Book 9"]);
         let rows = index_rows(&authors, &matching, &options, |id| BrowseLocation::CatalogAuthor(Some(id)));
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Writer 5", "Writer 9", "Writer 4", "Writer 3", "Writer 2", "Writer 1", "Writer 6", "Writer 8"]);
-        assert_eq!(sum(&BTreeSet::from([1, 6]), &matching), Some(2.2));
+        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Writer 2", "Writer 1", "Writer 3", "Writer 4", "Writer 6", "Writer 5", "Writer 8", "Writer 9"]);
+        assert_eq!(sum(&BTreeSet::from([1, 6]), &matching), Some(110.0));
+        assert_eq!(sum(&BTreeSet::from([0, 1, 6]), &matching), Some(210.0));
 
         // Filtering to audio counts only the audio edition.
         let audio_options = BrowseOptions::from_query(&LibraryBrowseQuery { file_types: vec![library_model::LibraryFileTypeFilter::Audiobook], ..query }, false);
         let audio = matching_books(&books, &candidates(None, &authors), &HashSet::new(), &audio_options);
-        assert_eq!(sum(&BTreeSet::from([1, 6]), &audio), Some(1.1));
+        assert_eq!(sum(&BTreeSet::from([1, 6]), &audio), Some(55.0));
         assert_eq!(audio.books, BTreeSet::from([6]));
     }
 
@@ -636,7 +677,6 @@ mod tests {
             chip_sort: BrowseChipSort::Popularity,
             book_sort: BrowseBookSort::Popularity,
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let candidates = candidates(None, &authors);
         let options = BrowseOptions::from_query(&query, false);
@@ -655,7 +695,7 @@ mod tests {
         assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["A writer", "Z writer", "Zero", "Unknown"]);
 
         // Held books contribute no score to totals.
-        let hash = ContentHash::from_bytes([2; 32]);
+        let hash = BookId::from_bytes([2; 32]);
         books[1].hash = Some(hash);
         let matching = matching_books(&books, &candidates, &HashSet::from([hash]), &options);
         assert!(!matching.popularity.contains_key(&1));
@@ -686,7 +726,6 @@ mod tests {
             chip_sort: BrowseChipSort::Popularity,
             book_sort: BrowseBookSort::Popularity,
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let options = BrowseOptions::from_query(&query, false);
         let matching = matching_books(&books, &BTreeSet::from([0, 1, 2]), &HashSet::new(), &options);
@@ -695,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn preferred_source_precedes_every_sort_and_author_sections_respect_filters() {
+    fn source_preference_does_not_override_popularity_and_filters_still_apply() {
         use crate::catalog::{CatalogPopularity, CombinedPopularity};
         use library_model::{BrowseBookSort, BrowseChipSort};
 
@@ -731,12 +770,11 @@ mod tests {
             chip_sort: BrowseChipSort::DefaultOrder,
             book_sort: BrowseBookSort::DefaultOrder,
             hide_finished: false,
-            include_direct_child_books: false,
         };
         for (book_sort, chip_sort, expected) in [
             (BrowseBookSort::DefaultOrder, BrowseChipSort::DefaultOrder, ["Book 2", "Book 4", "Book 1", "Book 3"]),
             (BrowseBookSort::Alphabetical, BrowseChipSort::Alphabetical, ["Book 2", "Book 4", "Book 1", "Book 3"]),
-            (BrowseBookSort::Popularity, BrowseChipSort::Popularity, ["Book 4", "Book 2", "Book 1", "Book 3"]),
+            (BrowseBookSort::Popularity, BrowseChipSort::Popularity, ["Book 1", "Book 4", "Book 2", "Book 3"]),
         ] {
             query.book_sort = book_sort;
             query.chip_sort = chip_sort;
@@ -745,7 +783,8 @@ mod tests {
             assert_eq!(matching.preferred, BTreeSet::from([1, 3]));
             assert_eq!(ordered_cards(&books, &matching.books, &options).iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), expected);
             let rows = index_rows(&authors, &matching, &options, |id| BrowseLocation::CatalogAuthor(Some(id)));
-            assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Z preferred", "A other", "M unknown"]);
+            let expected = if chip_sort == BrowseChipSort::Popularity { ["A other", "Z preferred", "M unknown"] } else { ["Z preferred", "A other", "M unknown"] };
+            assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), expected);
         }
         assert!(books[1].popularity.is_none());
 
@@ -753,9 +792,9 @@ mod tests {
         let options = BrowseOptions::from_query(&query, false);
         let matching = matching_books(&books, &candidates, &HashSet::new(), &options);
         assert_eq!(matching.preferred, BTreeSet::from([1]));
-        assert_eq!(ordered_cards(&books, &matching.books, &options).iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Book 2", "Book 1", "Book 3"]);
+        assert_eq!(ordered_cards(&books, &matching.books, &options).iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Book 1", "Book 2", "Book 3"]);
 
-        let hash = ContentHash::from_bytes([2; 32]);
+        let hash = BookId::from_bytes([2; 32]);
         books[1].hash = Some(hash);
         let matching = matching_books(&books, &candidates, &HashSet::from([hash]), &options);
         assert!(matching.preferred.is_empty());
@@ -765,7 +804,7 @@ mod tests {
 
     #[test]
     fn catalog_format_filters_separate_hosted_books_source_epubs_and_audio() {
-        let hash = ContentHash::new(&"2".repeat(64));
+        let hash = BookId::new(&"2".repeat(64));
         let mut books = vec![
             authored_book(1, vec![credit(1, "Mixed writer", b"aut")]),
             authored_book(2, vec![credit(2, "Book writer", b"aut")]),
@@ -786,16 +825,7 @@ mod tests {
         assert!(matches!(card(&books[3]).source, BookSource::ExternalCatalog { downloadable: false, .. }));
         let authors = catalog_authors(&books);
         let candidates = candidates(None, &authors);
-        let mut query = LibraryBrowseQuery {
-            location: BrowseLocation::CatalogAuthor(None),
-            search: String::new(),
-            file_types: vec![],
-            languages: vec![],
-            chip_sort: Default::default(),
-            book_sort: Default::default(),
-            hide_finished: false,
-            include_direct_child_books: false,
-        };
+        let mut query = LibraryBrowseQuery { location: BrowseLocation::CatalogAuthor(None), search: String::new(), file_types: vec![], languages: vec![], chip_sort: Default::default(), book_sort: Default::default(), hide_finished: false };
         for downloaded_only in [false, true] {
             for (filters, expected) in [
                 (vec![], BTreeSet::from([0, 1, 2, 3])),
@@ -833,7 +863,7 @@ mod tests {
     #[test]
     fn catalog_format_facets_count_each_category_and_keep_selected_empty_filters() {
         let mut books = vec![authored_book(1, vec![]), authored_book(2, vec![]), authored_book(3, vec![])];
-        books[0].hash = Some(ContentHash::new(&"3".repeat(64)));
+        books[0].hash = Some(BookId::new(&"3".repeat(64)));
         books[2].download_url = Some("https://archive.org/download/recording/audio.zip".into());
         books[2].file_format = BookFormat::Mp3Folder;
         let query = LibraryBrowseQuery {
@@ -844,7 +874,6 @@ mod tests {
             chip_sort: Default::default(),
             book_sort: Default::default(),
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let options = BrowseOptions::from_query(&query, false);
         let counts = book_facets(&books, &options).1;
@@ -855,13 +884,14 @@ mod tests {
 
     #[test]
     fn signed_out_catalog_browsing_keeps_public_books_and_respects_filters() {
-        let hash = ContentHash::new(&"1".repeat(64));
+        let hash = BookId::new(&"1".repeat(64));
         let mut books = [CatalogBook {
             hash: Some(hash),
-            key: CardKey(*hash.as_bytes()),
+            key: CardKey::from(hash),
             external_url: None,
             download_url: None,
             file_format: BookFormat::Epub,
+            audiobook_duration_ms: None,
             sources: Vec::new(),
             title: "Public book".into(),
             subtitle: None,
@@ -882,7 +912,6 @@ mod tests {
             chip_sort: Default::default(),
             book_sort: Default::default(),
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let candidates = BTreeSet::from([0]);
         let held = HashSet::new();
@@ -904,9 +933,16 @@ mod tests {
         query.languages = vec!["en".into()];
         let external = card(&books[0]);
         assert!(matches!(external.source, BookSource::ExternalCatalog { .. }));
-        assert!(external.content_hash().is_none());
+        assert!(external.book_id().is_none());
         assert_eq!(matching_books(&books, &candidates, &HashSet::from([hash]), &BrowseOptions::from_query(&query, true)).books, candidates);
         query.file_types = vec![LibraryFileTypeFilter::Pdf];
         assert!(matching_books(&books, &candidates, &held, &BrowseOptions::from_query(&query, true)).books.is_empty());
     }
+}
+
+// Async access owns its arguments until the synchronous database call completes.
+database_methods! {
+    fn external_catalog_detail(entry: CardKey) -> BookDetail;
+    arguments (CardKey,) = (entry,);
+    execute database, arguments => database.external_catalog_detail(arguments.0);
 }

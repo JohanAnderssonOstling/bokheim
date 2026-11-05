@@ -9,12 +9,11 @@ WHERE book.deleted_at IS NULL
              WHERE presence.book_row_id=book.row_id);
 
 
--- name: concept_routes?
--- param: concept_ids: &str
--- Every route each concept appears at, for books outside the library.
-SELECT route.concept_id,route.route_id
-FROM json_each(:concept_ids) selected
-JOIN curated.unified_concept_route route ON route.concept_id=selected.value;
+-- name: catalog_subject_assignments?
+-- Resolve the catalog's concept assignments into the same book/route pairs.
+SELECT assignment.book_row_id,route.route_id
+FROM catalog_browse_concept assignment
+JOIN curated.unified_concept_route route ON route.concept_id=assignment.concept_id;
 
 -- name: taxonomy_route_parent ->
 -- param: route_id: &SqlParam<'_>

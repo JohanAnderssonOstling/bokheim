@@ -1,8 +1,9 @@
 //! Native parser bridge borrowing the application’s I/O runtime.
 
 use super::{RemoteFileError, REQUEST_TIMEOUT};
+use crate::fetch_dispatch;
 use crate::range_reader::{validate_prefix, RangeFetcher, RangeReader};
-use crate::{BoxedBookReader, FetchFuture};
+use crate::{BoxedBookReader, BundleFetch, FetchFuture};
 use std::{
     io::{self, Read, Seek, SeekFrom},
     time::Duration,
@@ -41,6 +42,16 @@ where
     F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, RemoteFileError>> + Send + 'static,
 {
     open(length, prefix, Box::new(fetch), REQUEST_TIMEOUT)
+}
+
+/// Construct on the I/O runtime, then invoke only from a parser thread.
+pub fn native_bundle_fetch<F>(fetch: F) -> io::Result<BundleFetch>
+where
+    F: Fn(Vec<(u64, usize)>) -> FetchFuture<'static, Result<Vec<u8>, RemoteFileError>> + Send + Sync + 'static,
+{
+    let handle = Handle::try_current().map_err(io::Error::other)?;
+    let fetch = fetch_dispatch::native(fetch)?;
+    Ok(Box::new(move |ranges| handle.block_on(fetch(ranges))))
 }
 
 fn open(length: u64, prefix: Vec<u8>, mut fetch: AsyncFetch, timeout: Duration) -> io::Result<BoxedBookReader> {

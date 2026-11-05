@@ -10,25 +10,26 @@ use axum::{
 };
 use book_model::{BookDetails, BookFormat, BookRecord, Contributor, Identifier, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
 use image::{DynamicImage, ImageFormat, RgbImage};
-use library_database::{Database, ImportCommit};
+use library_database::{executor::BackendExecutor, DatabaseClient, ImportCommit};
 use library_files::asset_store::AssetStore;
 use library_model::{BlobKind, PublishedStagedBook};
-use library_runtime::{events::LibraryEventRouter, scheduler::SyncScheduler};
+use library_services::events::LibraryEventRouter;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet},
     io::Cursor,
     sync::{Arc, Mutex},
 };
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 
-use super::{google_matches, isbn_key, isbns};
+use super::{isbn_key, isbns};
 use crate::{CoverClient, LibraryEnrichment, MetadataClient};
 
 struct Provider {
     origin: String,
     requests: Mutex<Vec<String>>,
-    google_status: Mutex<VecDeque<StatusCode>>,
-    google_image: Vec<u8>,
+    isbn_status: StatusCode,
+    isbn_image: Vec<u8>,
+    search_docs: Mutex<Vec<serde_json::Value>>,
     fallback_image: Vec<u8>,
 }
 
@@ -53,29 +54,16 @@ async fn serve(State(provider): State<Arc<Provider>>, request: Request) -> Respo
             let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
             let request: metadata_contract::books::BookEnrichmentRequest = serde_json::from_slice(&bytes).unwrap();
             assert!(!request.books[0].needs_cover, "the metadata server must not fetch artwork");
-            assert!(!std::str::from_utf8(&bytes).unwrap().contains("test-key"));
             axum::Json(serde_json::json!({"policy":"books_v5","results":[{"key":request.books[0].key,"status":"no_match","record":null,"cover":null}]})).into_response()
         }
-        "/google/volumes" => {
-            let status = {
-                let mut statuses = provider.google_status.lock().unwrap();
-                if statuses.len() > 1 {
-                    statuses.pop_front().unwrap()
-                } else {
-                    *statuses.front().unwrap()
-                }
-            };
-            if !status.is_success() {
-                return status.into_response();
+        "/ol/b/isbn/9780306406157-L.jpg" => {
+            if !provider.isbn_status.is_success() {
+                return provider.isbn_status.into_response();
             }
-            axum::Json(serde_json::json!({"items":[{"id":"matched","volumeInfo":{"title":"Utilitarianism","authors":["John Stuart Mill"],
-                "industryIdentifiers":[{"type":"ISBN_13","identifier":"9780306406157"}],
-                "imageLinks":{"medium":format!("{}/images/google.png", provider.origin)}}}]}))
-            .into_response()
+            ([("content-type", "image/png")], provider.isbn_image.clone()).into_response()
         }
-        "/images/google.png" => ([("content-type", "image/png")], provider.google_image.clone()).into_response(),
-        "/ol/b/isbn/9780306406157-L.jpg" => ([("content-type", "image/png")], provider.fallback_image.clone()).into_response(),
-        "/ol/search.json" => axum::Json(serde_json::json!({"docs":[]})).into_response(),
+        "/ol/search.json" => axum::Json(serde_json::json!({"docs":*provider.search_docs.lock().unwrap()})).into_response(),
+        "/ol/b/id/42-L.jpg" => ([("content-type", "image/png")], provider.fallback_image.clone()).into_response(),
         _ => Response::builder().status(404).body(Body::empty()).unwrap(),
     }
 }
@@ -86,16 +74,16 @@ async fn provider(status: StatusCode, width: u32) -> (CoverClient, Arc<Provider>
     let provider = Arc::new(Provider {
         origin: origin.clone(),
         requests: Default::default(),
-        google_status: Mutex::new(VecDeque::from([status])),
-        google_image: artwork(width, width * 3 / 2, [240, 100, 0]),
+        isbn_status: status,
+        isbn_image: artwork(width, width * 3 / 2, [240, 100, 0]),
+        search_docs: Mutex::new(vec![serde_json::json!({"title":"Utilitarianism","author_name":["John Stuart Mill"],"cover_i":42})]),
         fallback_image: artwork(300, 450, [0, 100, 240]),
     });
     let app = Router::new().fallback(any(serve)).with_state(provider.clone());
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let mut client = CoverClient::new(Some("test-key".into()));
-    client.google_origin = format!("{origin}/google/").parse().unwrap();
+    let mut client = CoverClient::default();
     client.openlibrary_origin = format!("{origin}/ol/").parse().unwrap();
     client.openlibrary_covers = client.openlibrary_origin.clone();
     client.interval_ms = 0;
@@ -103,113 +91,107 @@ async fn provider(status: StatusCode, width: u32) -> (CoverClient, Arc<Provider>
 }
 
 #[tokio::test]
-async fn google_artwork_is_downloaded_directly_before_openlibrary() {
+async fn openlibrary_isbn_artwork_is_downloaded_directly() {
     let (client, provider, task) = provider(StatusCode::OK, 600).await;
-    assert_eq!(client.book_cover(&record()).await.unwrap().unwrap(), provider.google_image);
-    let paths = provider.requests.lock().unwrap().clone();
-    assert!(paths[0].starts_with("/google/volumes?"));
-    assert!(paths[0].contains("key=test-key"));
-    let search = url::Url::parse(&format!("{}{}", provider.origin, paths[0])).unwrap();
-    assert_eq!(search.query_pairs().find(|(key, _)| key == "q").unwrap().1, "Utilitarianism John Stuart Mill");
-    assert_eq!(paths[1], "/images/google.png");
-    assert_eq!(paths.len(), 2);
+    assert_eq!(client.book_cover(&record()).await.unwrap().unwrap(), provider.isbn_image);
+    assert_eq!(*provider.requests.lock().unwrap(), ["/ol/b/isbn/9780306406157-L.jpg?default=false"]);
     task.abort();
 }
 
 #[tokio::test]
-async fn temporary_google_failures_retry_the_same_title_author_query() {
-    let (client, provider, task) = provider(StatusCode::OK, 600).await;
-    *provider.google_status.lock().unwrap() = VecDeque::from([StatusCode::SERVICE_UNAVAILABLE, StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK]);
-    assert_eq!(client.book_cover(&record()).await.unwrap().unwrap(), provider.google_image);
-    let paths = provider.requests.lock().unwrap().clone();
-    assert_eq!(paths.len(), 4);
-    assert_eq!(paths[0], paths[1]);
-    assert_eq!(paths[1], paths[2]);
-    assert_eq!(paths[3], "/images/google.png");
-    assert!(client.google_retry.lock().await.is_none());
-    task.abort();
-}
-
-#[tokio::test]
-async fn persistent_google_service_failure_has_bounded_retries_then_falls_back() {
-    let (client, provider, task) = provider(StatusCode::SERVICE_UNAVAILABLE, 600).await;
+async fn missing_isbn_artwork_falls_back_to_title_and_author_search() {
+    let (client, provider, task) = provider(StatusCode::NOT_FOUND, 600).await;
     assert_eq!(client.book_cover(&record()).await.unwrap().unwrap(), provider.fallback_image);
     let paths = provider.requests.lock().unwrap().clone();
-    assert_eq!(paths.iter().filter(|path| path.starts_with("/google/volumes?")).count(), 4);
-    assert_eq!(paths.last().unwrap(), "/ol/b/isbn/9780306406157-L.jpg?default=false");
-    assert!(client.google_retry.lock().await.is_none());
+    assert_eq!(paths.len(), 3);
+    assert_eq!(paths[0], "/ol/b/isbn/9780306406157-L.jpg?default=false");
+    let search = url::Url::parse(&format!("{}{}", provider.origin, paths[1])).unwrap();
+    assert_eq!(search.path(), "/ol/search.json");
+    let params = search.query_pairs().collect::<BTreeMap<_, _>>();
+    assert_eq!(params.get("title").unwrap(), "Utilitarianism");
+    assert_eq!(params.get("author").unwrap(), "John Stuart Mill");
+    assert_eq!(paths[2], "/ol/b/id/42-L.jpg?default=false");
     task.abort();
 }
 
 #[tokio::test]
-async fn missing_author_skips_google_title_search_and_keeps_openlibrary_fallback() {
+async fn missing_author_keeps_isbn_lookup() {
     let (client, provider, task) = provider(StatusCode::OK, 600).await;
     let mut book = record();
     book.contributors.clear();
-    assert_eq!(client.book_cover(&book).await.unwrap().unwrap(), provider.fallback_image);
-    let paths = provider.requests.lock().unwrap().clone();
-    assert_eq!(paths, ["/ol/b/isbn/9780306406157-L.jpg?default=false"]);
+    assert_eq!(client.book_cover(&book).await.unwrap().unwrap(), provider.isbn_image);
+    assert_eq!(*provider.requests.lock().unwrap(), ["/ol/b/isbn/9780306406157-L.jpg?default=false"]);
     task.abort();
 }
 
 #[tokio::test]
-async fn google_quota_failure_falls_back_directly_and_waits_before_retrying_google() {
-    let (client, provider, task) = provider(StatusCode::TOO_MANY_REQUESTS, 600).await;
-    for _ in 0..2 {
-        assert_eq!(client.book_cover(&record()).await.unwrap().unwrap(), provider.fallback_image);
-    }
-    let paths = provider.requests.lock().unwrap().clone();
-    assert_eq!(paths.iter().filter(|path| path.starts_with("/google/")).count(), 1);
-    assert_eq!(paths.iter().filter(|path| path.starts_with("/ol/b/isbn/")).count(), 2);
-    assert!(paths.iter().all(|path| !path.contains("v3/covers")));
-    task.abort();
-}
-
-#[tokio::test]
-async fn undersized_google_artwork_does_not_block_openlibrary() {
+async fn undersized_isbn_artwork_falls_back_to_search() {
     let (client, provider, task) = provider(StatusCode::OK, 50).await;
     assert_eq!(client.book_cover(&record()).await.unwrap().unwrap(), provider.fallback_image);
+    assert_eq!(provider.requests.lock().unwrap().len(), 3);
+    task.abort();
+}
+
+#[tokio::test]
+async fn title_search_rejects_unrelated_authors_and_works() {
+    let (client, provider, task) = provider(StatusCode::NOT_FOUND, 600).await;
+    *provider.search_docs.lock().unwrap() = vec![
+        serde_json::json!({"title":"Utilitarianism","author_name":["Other Author"],"cover_i":42}),
+        serde_json::json!({"title":"Different Work","author_name":["John Stuart Mill"],"cover_i":42}),
+        serde_json::json!({"title":"Utilitarianism: On Liberty and Other Essays","author_name":["John Stuart Mill"],"cover_i":42}),
+    ];
+    assert!(client.book_cover(&record()).await.unwrap().is_none());
+    let paths = provider.requests.lock().unwrap().clone();
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().all(|path| !path.starts_with("/ol/b/id/")));
     task.abort();
 }
 
 #[test]
-fn cover_matching_rejects_other_authors_collections_languages_and_print_references() {
-    let record = record();
-    let authors = vec!["John Stuart Mill".into()];
-    for value in [
-        serde_json::json!({"title":"Utilitarianism","authors":["Other Author"]}),
-        serde_json::json!({"title":"Utilitarianism","subtitle":"On Liberty and Other Essays","authors":authors}),
-        serde_json::json!({"title":"Different Work","authors":authors}),
-    ] {
-        let info = serde_json::from_value(value).unwrap();
-        assert!(!google_matches(&record, &[], &authors, &info));
-    }
-    let mut reference = record.clone();
-    reference.book.identifiers[0].scope = Scope::Edition;
-    assert!(isbns(&reference).is_empty());
-    let info = serde_json::from_value(serde_json::json!({"title":"Utilitarianism","authors":authors})).unwrap();
-    assert!(google_matches(&record, &[], &authors, &info));
-    let mut english = record;
-    english.book.languages.push(book_model::LanguageTag::parse("en").unwrap());
-    let info = serde_json::from_value(serde_json::json!({"title":"Utilitarianism","authors":authors,"language":"fr"})).unwrap();
-    assert!(!google_matches(&english, &[], &authors, &info));
+fn isbn_lookup_normalizes_identifiers_and_respects_scope() {
     assert_eq!(isbn_key("0-306-40615-2"), isbn_key("9780306406157"));
-    let info = serde_json::from_value(serde_json::json!({"industryIdentifiers":[{"type":"ISBN_10","identifier":"0306406152"}]})).unwrap();
-    assert!(google_matches(&english, &["9780306406157".into()], &[], &info));
+    let mut book = record();
+    assert_eq!(isbns(&book), ["9780306406157"]);
+    book.book.identifiers[0].scope = Scope::Edition;
+    assert!(isbns(&book).is_empty());
+    book.book.identifiers.push(Identifier::new("B000FC1FIU", Scheme::Asin, Scope::Edition).unwrap());
+    assert_eq!(isbns(&book), ["9780306406157"]);
+}
+
+#[tokio::test]
+async fn title_search_prioritizes_strict_coauthor_matches_and_preserves_provider_order() {
+    let (client, provider, task) = provider(StatusCode::NOT_FOUND, 600).await;
+    let mut book = record();
+    book.contributors = vec![Contributor::new("John Stuart Mill and Harriet Taylor", AUTHOR_MARC_RELATOR_CODE).unwrap()];
+    for (strict_id, expected) in [(40, vec![40, 41, 42]), (42, vec![42])] {
+        *provider.search_docs.lock().unwrap() = vec![
+            serde_json::json!({"title":"Utilitarianism","author_name":["J. S. Mill"],"cover_i":42}),
+            serde_json::json!({"title":"Utilitarianism","author_name":["Mill, John Stuart"],"cover_i":strict_id}),
+            serde_json::json!({"title":"Utilitarianism","author_name":["Other Author and Harriét Taylor"],"cover_i":41}),
+        ];
+        provider.requests.lock().unwrap().clear();
+        assert_eq!(client.book_cover(&book).await.unwrap().unwrap(), provider.fallback_image);
+        let paths = provider.requests.lock().unwrap();
+        let covers = paths.iter().filter(|path| path.starts_with("/ol/b/id/")).cloned().collect::<Vec<_>>();
+        assert_eq!(covers, expected.iter().map(|id| format!("/ol/b/id/{id}-L.jpg?default=false")).collect::<Vec<_>>());
+    }
+    task.abort();
 }
 
 #[tokio::test]
 async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_cover() {
     let (covers, provider, task) = provider(StatusCode::OK, 600).await;
     let temporary = tempfile::tempdir().unwrap();
-    let db = Arc::new(Database::open(":memory:").unwrap());
-    db.initialize_library().unwrap();
-    let hash = ContentHash::new(&"a".repeat(64));
+    let db = DatabaseClient::open(":memory:", &BackendExecutor::new().unwrap()).await.unwrap();
+    db.initialize_library().await.unwrap();
+    let hash = BookId::new(&"a".repeat(64));
     db.commit_import(ImportCommit {
+        source_identity: None,
+        byte_checksum: None,
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
         format: BookFormat::Epub,
-        content_hash: hash,
+        book_id: hash,
         size_bytes: 10,
         inspection_version: 1,
         inspection: Some(book_inspection::InspectedBook { metadata: record(), pdf: None, audiobook: None, toc: Vec::new() }),
@@ -217,23 +199,165 @@ async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_
         request_thumbnail: false,
         restore_paths: Vec::new(),
     })
+    .await
     .unwrap();
-    db.complete_thumbnail_work(&hash, false).unwrap();
-    let (sync, _) = SyncScheduler::new();
-    let (assets_wake, _) = SyncScheduler::new();
-    let (files, _) = SyncScheduler::new();
-    let (enrichment, _) = SyncScheduler::new();
-    let (events, _) = LibraryEventRouter::new(sync, assets_wake, files, enrichment);
+    db.complete_thumbnail_work(&hash, false).await.unwrap();
+
+    let (events, _) = LibraryEventRouter::new();
     let assets = AssetStore::open(temporary.path().to_str().unwrap()).unwrap();
-    let lane = LibraryEnrichment { database: db.clone(), assets: assets.clone(), client: MetadataClient::new(&format!("{}/metadata/", provider.origin)).unwrap(), covers, cpu: Arc::new(client_platform_native::cpu_host::NativeHost), events };
+    let lane = LibraryEnrichment {
+        state: Arc::new(tokio::sync::RwLock::new(library_placement::LibraryState::new(db.clone(), assets.clone(), events.clone()))),
+        database: db.clone(),
+        client: MetadataClient::new(&format!("{}/metadata/", provider.origin)).unwrap(),
+        covers,
+        cpu: Arc::new(cpu_host::NativeHost),
+        events,
+    };
     assert_eq!(lane.enrich_books(&HashSet::from([hash])).await.unwrap(), 2);
     let original = assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap();
     assert!(!original.is_empty());
-    assert!(db.enrichment_candidates(&[hash], 0).unwrap().is_empty());
+    assert!(db.enrichment_candidates(&[hash], 0).await.unwrap().is_empty());
     assert!(provider.requests.lock().unwrap().iter().all(|path| !path.contains("v3/covers")));
-    let state = db.thumbnail_work_state(&hash).unwrap();
+    let state = db.thumbnail_work_state(&hash).await.unwrap();
     let other = cpu_host::cover(&*lane.cpu, provider.fallback_image.clone()).await.unwrap();
     assert_eq!(lane.apply_enriched_cover(hash, &state, Some(&other)).await.unwrap(), None);
     assert_eq!(assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), original);
     task.abort();
+}
+
+#[tokio::test]
+async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_failed_and_duplicate_answers() {
+    use axum::{routing::post, Json};
+    use book_inspection::{AudiobookMetadata, InspectedBook};
+    use book_model::ChapterOrigin;
+    use metadata_contract::books::{BookEnrichment, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, MAX_BOOKS_PER_REQUEST};
+
+    type Requests = Arc<Mutex<Vec<BookEnrichmentRequest>>>;
+    async fn answer(State((requests, fail_first)): State<(Requests, bool)>, Json(request): Json<BookEnrichmentRequest>) -> Response {
+        let batch = {
+            let mut requests = requests.lock().unwrap();
+            let batch = requests.len();
+            requests.push(request.clone());
+            batch
+        };
+        if fail_first && batch == 0 {
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        let mut results: Vec<_> = request
+            .books
+            .into_iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, facts)| {
+                if batch == 0 && index == 2 {
+                    return None;
+                }
+                let status = if batch == 0 && index == 1 { BookEnrichmentStatus::Failed } else { BookEnrichmentStatus::Found };
+                let mut record = facts.record;
+                record.book.year = Some(2000 + record.title.strip_prefix("Story ").unwrap().parse::<i32>().unwrap());
+                Some(BookEnrichment { key: facts.key, status, record: (status == BookEnrichmentStatus::Found).then_some(record), toc: None, cover: None, popularity: None, failure: None, detail: String::new() })
+            })
+            .collect();
+        // A consumed early answer must not move the later duplicate ahead of
+        // the original answer for that key.
+        let first = results.pop().unwrap();
+        results.insert(0, first);
+        let mut duplicate = results[1].clone();
+        duplicate.record.as_mut().unwrap().book.year = Some(9999);
+        results.push(BookEnrichment { key: "unrequested".into(), status: BookEnrichmentStatus::Found, record: None, toc: None, cover: None, popularity: None, failure: None, detail: String::new() });
+        results.push(duplicate);
+        Json(BookEnrichmentResponse { policy: "batch fixture".into(), results }).into_response()
+    }
+
+    for fail_first in [false, true] {
+        let requests: Requests = Arc::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}/", listener.local_addr().unwrap());
+        let app = Router::new().route("/v3/books", post(answer)).with_state((requests.clone(), fail_first));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let database = DatabaseClient::open(":memory:", &BackendExecutor::new().unwrap()).await.unwrap();
+        database.initialize_library().await.unwrap();
+        let mut hashes = Vec::new();
+        for index in 0..MAX_BOOKS_PER_REQUEST + 2 {
+            let hash = BookId::from_bytes([index as u8 + 1; 32]);
+            let audio = index == 0;
+            let format = if audio { BookFormat::M4b } else { BookFormat::Epub };
+            let name = format!("Writer - Story {index}.{}", format.canonical_extension());
+            let mut metadata = record();
+            metadata.title = format!("Story {index}");
+            metadata.description = "the file's description".into();
+            let audiobook = audio.then(|| AudiobookMetadata {
+                title: metadata.title.clone(),
+                authors: metadata.contributors.clone(),
+                description: metadata.description.clone(),
+                duration_ms: 1000,
+                chapters: vec![],
+                tracks: vec![],
+                chapter_origin: ChapterOrigin::FullAudiobookFallback,
+                recording: Default::default(),
+            });
+            database
+                .commit_import(ImportCommit {
+                    source_identity: None,
+                    byte_checksum: None,
+                    parent_id: ROOT_DIR_ID,
+                    file_name: name.clone(),
+                    format,
+                    book_id: hash,
+                    size_bytes: 10,
+                    inspection_version: 1,
+                    inspection: Some(InspectedBook { metadata, pdf: None, audiobook, toc: vec![] }),
+                    published: PublishedStagedBook { name: name.clone(), relative_path: format!("/{name}"), published: false, fingerprint: None },
+                    request_thumbnail: true,
+                    restore_paths: vec![],
+                })
+                .await
+                .unwrap();
+            hashes.push(hash);
+        }
+        let original = database.enrichment_candidates(&hashes, 0).await.unwrap();
+        let (events, _) = LibraryEventRouter::new();
+        let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        let lane = LibraryEnrichment {
+            state: Arc::new(tokio::sync::RwLock::new(library_placement::LibraryState::new(database.clone(), assets.clone(), events.clone()))),
+            database: database.clone(),
+
+            client: MetadataClient::new(&origin).unwrap(),
+            covers: CoverClient::default(),
+            cpu: Arc::new(cpu_host::NativeHost),
+            events,
+        };
+        let changed = lane.enrich_books(&hashes.iter().copied().collect()).await.unwrap();
+        assert_eq!(changed, if fail_first { 2 } else { hashes.len() - 2 });
+        server.abort();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.iter().map(|request| request.books.len()).collect::<Vec<_>>(), [MAX_BOOKS_PER_REQUEST, 2]);
+        for (index, facts) in requests.iter().flat_map(|request| &request.books).enumerate() {
+            let expected = &original[index];
+            assert_eq!(facts.key, (index % MAX_BOOKS_PER_REQUEST).to_string());
+            assert_eq!(serde_json::to_value(&facts.record).unwrap(), serde_json::to_value(&expected.record).unwrap());
+            assert_eq!(facts.audiobook, expected.audiobook);
+            assert!(!facts.needs_cover);
+            assert_eq!(serde_json::to_value(&facts.recording).unwrap(), serde_json::to_value(&expected.recording).unwrap());
+            assert_eq!(serde_json::to_value(&facts.readings).unwrap(), serde_json::to_value(book_inspection::title_readings(&expected.record, &expected.filenames)).unwrap());
+            let failed = if fail_first { index < MAX_BOOKS_PER_REQUEST } else { index == 1 || index == 2 };
+            let title = database.browse_book_detail(&expected.book_id).await.unwrap().book.title;
+            assert_eq!(title, format!("Story {index}"), "the file's title is immutable");
+            let resolved = database.enrichment_cover_record(&expected.book_id).await.unwrap();
+            if failed {
+                assert!(resolved.is_none());
+            } else {
+                assert_eq!(resolved.unwrap().book.year, Some(2000 + index as i32));
+            }
+        }
+        let retry = database.enrichment_candidates(&hashes, i64::MAX).await.unwrap();
+        let expected = if fail_first { hashes[..MAX_BOOKS_PER_REQUEST].to_vec() } else { vec![hashes[1], hashes[2]] };
+        assert_eq!(retry.iter().map(|candidate| candidate.book_id).collect::<Vec<_>>(), expected);
+        for candidate in retry {
+            let expected = original.iter().find(|original| original.book_id == candidate.book_id).unwrap();
+            assert_eq!(candidate.request_key, expected.request_key);
+        }
+        assert!(database.enrichment_next_retry().await.unwrap().is_some());
+    }
 }

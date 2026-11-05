@@ -20,14 +20,14 @@ impl Connection {
         socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
         let (send, messages) = async_channel::unbounded();
         let closed = send.clone();
-        let message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+        let message = Closure::<dyn FnMut(web_sys::MessageEvent)>::own_aborting(move |event: web_sys::MessageEvent| {
             if let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let _ = send.try_send(js_sys::Uint8Array::new(&buffer).to_vec());
             } else {
                 send.close();
             }
         });
-        let closed = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        let closed = Closure::<dyn FnMut(web_sys::Event)>::own_aborting(move |_| {
             closed.close();
         });
         socket.set_onmessage(Some(message.as_ref().unchecked_ref()));

@@ -58,16 +58,7 @@ impl Database {
                         }
                     }
                 }
-                let mut current = route;
-                while current != 0 {
-                    let Some(node) = nodes.get(&current) else {
-                        metadata.path.clear();
-                        break;
-                    };
-                    metadata.path.push(BrowsePathSegment { id: source.location(current), name: node.label.clone() });
-                    current = node.parent;
-                }
-                metadata.path.reverse();
+                metadata.path = crate::browse::subjects::subject_path(source, route, &nodes);
                 if let Some((_, above)) = metadata.path.split_last() {
                     let unsearched = BrowseOptions { search: String::new(), ..options.clone() };
                     let root_matching = self.result_matching(catalog, nodes.get(&0).map_or(&empty, |node| &node.members), &unsearched)?;
@@ -77,6 +68,14 @@ impl Database {
                     }
                 }
                 (matching, direct)
+            }
+            BrowseLocation::Notebook(sort) => {
+                let direct = self.notebook_book_ids(options, sort)?.into_iter().map(Item::from).collect();
+                return Ok(Selection { sections, metadata, books: SelectedBooks::Ordered { direct, section_orders: Orders::new() } });
+            }
+            BrowseLocation::TextSearch(sort) => {
+                let direct = self.text_search_ids(options, sort)?.into_iter().map(|(book, offsets)| Item { book, directory: None, text_offsets: Some(offsets) }).collect();
+                return Ok(Selection { sections, metadata, books: SelectedBooks::Ordered { direct, section_orders: Orders::new() } });
             }
             BrowseLocation::Books => {
                 let _stage = Stage::new("library book selection and ordering");
@@ -99,10 +98,10 @@ impl Database {
         let mut metadata = LibraryBrowseData::default();
         let mut sections = Vec::new();
         let mut section_orders = Orders::new();
-        let mut direct = match shelf {
-            Some(shelf) => prepared.shelves.iter().find(|found| found.shelf == shelf).map(|found| found.books.clone()).unwrap_or_default(),
+        let direct = match shelf {
+            Some(shelf) => prepared.shelves.into_iter().find(|found| found.shelf == shelf).map(|found| found.books).unwrap_or_default(),
             None if options.search.is_empty() => {
-                for found in prepared.shelves.iter().filter(|found| !found.books.is_empty()) {
+                for found in prepared.shelves.into_iter().filter(|found| !found.books.is_empty()) {
                     let parent = BrowseRow {
                         id: BrowseLocation::Home(Some(found.shelf)),
                         name: found.shelf.label().to_owned(),
@@ -111,19 +110,19 @@ impl Database {
                         downloaded_book_count: found.books.iter().filter(|id| prepared.matching.downloaded.contains(id)).count(),
                     };
                     metadata.contents.children.push(parent.clone());
-                    sections.push(SectionSelection { parent: parent.clone(), children: Vec::new(), books: found.books.iter().copied().collect() });
                     section_orders.insert(parent.id, Arc::new(found.books.iter().copied().map(Item::from).collect()));
+                    sections.push(SectionSelection { parent, children: Vec::new(), books: found.books.into_iter().collect() });
                 }
                 Vec::new()
             }
             None => {
                 let mut seen = HashSet::new();
-                prepared.shelves.iter().flat_map(|found| found.books.iter().copied()).filter(|id| seen.insert(*id)).collect()
+                let direct = prepared.shelves.into_iter().flat_map(|found| found.books).filter(|id| seen.insert(*id)).collect::<Vec<_>>();
+                // Individual shelves already have their book order. Only a
+                // merged search needs ordering across shelf boundaries.
+                if options.book_sort != BrowseBookSort::DefaultOrder { self.ordered_books(&direct.iter().copied().collect(), options)? } else { direct }
             }
         };
-        if options.book_sort != BrowseBookSort::DefaultOrder {
-            direct = self.ordered_books(&direct.iter().copied().collect(), options)?;
-        }
         metadata.path = shelf.map(|shelf| BrowsePathSegment { id: BrowseLocation::Home(Some(shelf)), name: shelf.label().to_owned() }).into_iter().collect();
         (metadata.language_counts, metadata.format_counts) = self.library_facets(options)?;
         Ok(Selection { sections, metadata, books: SelectedBooks::Ordered { direct: direct.into_iter().map(Item::from).collect(), section_orders } })
@@ -141,7 +140,7 @@ impl Database {
         let mut placements = HashMap::<DirId, Vec<Item>>::new();
         self.connection.folder_placements(&serde_json::to_string(&directories).map_err(DatabaseError::operation)?, |row| {
             let directory = parse_uuid_column(row.get(1)?, 1)?;
-            placements.entry(directory).or_default().push(Item { book: row.get(0)?, directory: Some(directory) });
+            placements.entry(directory).or_default().push(Item { book: row.get(0)?, directory: Some(directory), text_offsets: None });
             Ok(())
         })?;
         let with_books = placements.keys().copied().collect::<HashSet<_>>();
@@ -155,7 +154,7 @@ impl Database {
             items.sort_unstable_by_key(|item| (positions[&item.book], item.directory));
         }
         let scope = scope.iter().map(|id| id.parse::<DirId>().map_err(DatabaseError::operation)).collect::<Result<HashSet<_>, _>>()?;
-        let mut direct = placements.iter().filter(|(directory, _)| scope.contains(directory)).flat_map(|(_, items)| items.iter().copied()).collect::<Vec<_>>();
+        let mut direct = placements.iter().filter(|(directory, _)| scope.contains(directory)).flat_map(|(_, items)| items.iter().cloned()).collect::<Vec<_>>();
         direct.sort_unstable_by_key(|item| (positions[&item.book], item.directory));
         let mut sections = Vec::new();
         let mut wrappers = Vec::new();

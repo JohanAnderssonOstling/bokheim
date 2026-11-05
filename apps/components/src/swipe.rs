@@ -80,9 +80,13 @@ impl SwipePreview {
 
     pub fn offset(&mut self, window: &mut Window, cx: &App) -> Point<Pixels> {
         self.redraw_pending = false;
+        if cx.reduce_motion() {
+            self.clear();
+            return Point::default();
+        }
         let Some(started_at) = self.returning_at else { return self.offset };
         let progress = (started_at.elapsed().as_secs_f32() / self.return_duration.as_secs_f32()).clamp(0.0, 1.0);
-        if progress >= 1.0 || cx.reduce_motion() {
+        if progress >= 1.0 {
             self.clear();
             return Point::default();
         }

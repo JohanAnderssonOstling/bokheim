@@ -12,9 +12,12 @@ native-rodio = ["dep:rodio", "rodio/playback"]
 path = "src/lib.rs"
 
 [dependencies]
+base64 = "0.22"
+ui-text = { path = "../ui-text" }
 library-backend = { path = "../../client/library-backend" }
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"
+futures-util = "0.3"
 library-model = { path = "../../client/library-model" }
 ui-components = { path = "../components" }
 gpui.workspace = true

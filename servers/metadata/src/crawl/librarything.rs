@@ -34,7 +34,7 @@ impl LibraryThingClient {
         if key.trim().is_empty() {
             return Err(MetadataError("LibraryThing key is empty".into()));
         }
-        let client = reqwest::Client::builder().user_agent("BokheimMetadata/1.0").redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(15)).build().map_err(error)?;
+        let client = http_response::client_builder().user_agent("BokheimMetadata/1.0").redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(15)).build().map_err(error)?;
         Ok(Self { client, key: Arc::new(key.trim().into()), endpoint: ENDPOINT.into(), cache: Arc::new(Mutex::new(crate::crawl::open_provider(provider_file)?)), requests: Arc::new(tokio::sync::Mutex::new(())) })
     }
     pub(crate) async fn lookup_isbn(&self, id: Isbn13) -> Result<(), MetadataError> {
@@ -77,7 +77,7 @@ impl LibraryThingClient {
             bytes.extend_from_slice(&chunk);
         }
         let found = parse(&bytes)?;
-        use metadata_contract::{Classification, ClassificationEvidence, ClassificationScheme, ClassificationSource};
+        use metadata_contract::{Classification, ClassificationEvidence, ClassificationMethod, ClassificationScheme, ClassificationSource};
         let codes = found
             .codes
             .into_iter()
@@ -88,7 +88,12 @@ impl LibraryThingClient {
                 scheme,
                 notation,
                 source: ClassificationSource::Work,
-                evidence: vec![ClassificationEvidence { method: format!("librarything_isbn:{}", found.work_id), isbn13: isbn.clone(), open_library_work_id: String::new(), open_library_edition_id: String::new() }],
+                evidence: vec![ClassificationEvidence {
+                    method: ClassificationMethod::LibraryThingIsbn { work_id: found.work_id.to_string() },
+                    isbn13: isbn.clone(),
+                    open_library_work_id: String::new(),
+                    open_library_edition_id: String::new(),
+                }],
             })
             .collect::<Vec<_>>();
         crate::crawl::save_result(&*self.cache.lock().map_err(error)?, "librarything", id, if found.work_id.is_empty() { "no_match" } else { "matched" }, &codes, &[])
@@ -192,7 +197,7 @@ mod network_tests {
         let (status, raw): (String, Vec<u8>) = c.query_row("SELECT status,classifications FROM provider_result WHERE provider='librarything'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(status, "matched");
         let codes: Vec<metadata_contract::Classification> = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(codes[0].evidence[0].method, "librarything_isbn:7");
+        assert_eq!(codes[0].evidence[0].method, metadata_contract::ClassificationMethod::LibraryThingIsbn { work_id: "7".into() });
         assert_eq!(codes[0].notation, "QA76");
         drop(c);
         task.abort();

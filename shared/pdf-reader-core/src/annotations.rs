@@ -61,8 +61,7 @@ pub(super) fn inspect(page: &PdfPage<'_>, page_index: usize, budget: &mut usize)
             };
             let color = a.fill_color().or_else(|_| a.stroke_color()).map(|c| format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())).unwrap_or_else(|_| "#f6c945".into());
             let note = bounded(a.contents().unwrap_or_default());
-            // Includes worst-case JSON escaping; bound accumulation during ingestion,
-            // before the final synchronized snapshot is serialized.
+            // Includes worst-case JSON escaping; bound annotation data per rendered page.
             let cost = 256 + (text.len() + note.len()) * 6 + rects.len() * 128;
             if cost > *budget {
                 return None;

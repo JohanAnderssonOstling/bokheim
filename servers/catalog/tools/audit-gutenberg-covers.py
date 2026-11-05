@@ -484,11 +484,6 @@ def openlibrary_lookup(row):
     return openlibrary_cover_candidates(row, answer, evidence['edition_lookups']), evidence
 
 
-def openlibrary_cover(row):
-    candidates, evidence = openlibrary_lookup(row)
-    return next((doc for doc, _ in candidates), None), evidence
-
-
 def google_matches(row, info, strict=True):
     own = row['record']
     title = own['title'] + (': ' + own['subtitle'] if own.get('subtitle') else '')

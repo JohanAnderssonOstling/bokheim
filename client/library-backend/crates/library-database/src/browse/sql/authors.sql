@@ -1,5 +1,5 @@
 -- name: author_books?
--- param: author_role: Vec<u8>
+-- param: author_role: &[u8]
 -- Every author credit as (author, display name, book) rows. An author files
 -- under the smallest spelling credited to them; a book credited twice to one
 -- identity — two spellings that resolved together — is still one book.

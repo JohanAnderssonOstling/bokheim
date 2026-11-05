@@ -4,8 +4,10 @@
 //! Only the status dots and the upload reservation carry a semantic colour, and
 //! only while something is actually waiting; everything else is quiet.
 
+use ui_text::text;
+
 use gpui::prelude::*;
-use gpui::{AnyElement, Div, FontWeight, Hsla, SharedString, div, px, relative};
+use gpui::{AnyElement, Div, FontWeight, Hsla, Pixels, SharedString, Window, div, px, relative};
 
 use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_SM, TEXT_XS};
 
@@ -23,9 +25,10 @@ const BREAKDOWN_BYTES_WIDTH_REM: f32 = 4.5;
 /// The height a breakdown line keeps, so the list reads at one rhythm.
 const BREAKDOWN_ROW_HEIGHT_REM: f32 = 1.5;
 /// The library table's fixed columns. The name takes what is left.
+const LIBRARY_NAME_COLUMN_MIN_WIDTH_REM: f32 = 8.0;
 const LIBRARY_SIZE_COLUMN_WIDTH_REM: f32 = 6.5;
 const LIBRARY_STATUS_COLUMN_WIDTH_REM: f32 = 9.0;
-const LIBRARY_CLOUD_COLUMN_WIDTH_REM: f32 = 3.0;
+const LIBRARY_CLOUD_COLUMN_WIDTH_REM: f32 = 5.0;
 /// The column gap in the library table.
 const LIBRARY_COLUMN_GAP: f32 = 12.0;
 /// Keeps the empty line the height a library row's name has.
@@ -60,7 +63,7 @@ pub fn account_identity(initial: impl Into<SharedString>, email: impl Into<Share
                 .child(initial.into()),
         )
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(email.into()))
-        .child(div().flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).children(actions))
+        .child(div().flex_none().max_w_full().flex().flex_row().flex_wrap().items_center().gap(px(SPACE_MD)).children(actions))
 }
 
 /// The quota as one line: what is used against the quota, and what is left
@@ -98,6 +101,19 @@ pub fn storage_breakdown(rows: impl IntoIterator<Item = Div>) -> Div {
     div().w_full().flex().flex_col().gap(px(SPACE_XXS)).children(rows)
 }
 
+/// A ranked book is identified by title, with its cloud bytes alongside it.
+pub fn storage_book_row(title: impl Into<SharedString>, bytes: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div()
+        .w_full()
+        .min_h(gpui::rems(BREAKDOWN_ROW_HEIGHT_REM))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_SM))
+        .text_size(gpui::rems(TEXT_XS))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.text).child(title.into()))
+        .child(div().w(gpui::rems(BREAKDOWN_BYTES_WIDTH_REM)).flex_none().flex().justify_end().text_color(theme.text_muted).child(bytes.into()))
+}
+
 /// One line of [`storage_breakdown`]: the segment's colour, its name, its share
 /// of the quota, and its size.
 pub fn storage_breakdown_row(color: Hsla, name: impl Into<SharedString>, share: impl Into<SharedString>, bytes: impl Into<SharedString>, theme: BrowserTheme) -> Div {
@@ -129,19 +145,26 @@ pub fn library_usage_empty(text: impl Into<SharedString>, theme: BrowserTheme) -
     div().w_full().py(px(SPACE_SM)).min_h(gpui::rems(LIBRARY_NAME_HEIGHT_REM)).flex().items_center().border_t_1().border_color(theme.rule).text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(text.into())
 }
 
+/// Width needed by the table's columns, gaps and overflow menu.
+/// Use the available section width so split panes and larger fonts also stack.
+pub fn library_table_min_width(window: &Window) -> Pixels {
+    let columns = LIBRARY_NAME_COLUMN_MIN_WIDTH_REM + LIBRARY_SIZE_COLUMN_WIDTH_REM + LIBRARY_STATUS_COLUMN_WIDTH_REM + LIBRARY_CLOUD_COLUMN_WIDTH_REM + crate::topbar_action_height_rem();
+    window.rem_size() * columns + px(LIBRARY_COLUMN_GAP * 4.0)
+}
+
 /// The library table's column headings.
 ///
 /// Every library states the same things, and a reader comparing two of them is
 /// reading down a column, so the columns are named once rather than labelled in
-/// every row. A compact window has no room for the columns and draws no heading.
+/// every row. A narrow section has no room for the columns and draws no heading.
 pub fn library_table_header(theme: BrowserTheme) -> Div {
-    let heading = |label: &'static str| div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).font_features(crate::small_caps()).child(label);
+    let heading = |label: &'static str| div().whitespace_nowrap().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).font_features(crate::small_caps()).child(label);
     library_table_line(theme)
         .py(px(SPACE_XS))
-        .child(heading("Library").flex_1().min_w_0())
-        .child(heading("On this device").w(gpui::rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none())
-        .child(heading("Status").w(gpui::rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none())
-        .child(heading("Cloud").w(gpui::rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)).flex_none())
+        .child(heading(text!(common::library)).flex_1().min_w(gpui::rems(LIBRARY_NAME_COLUMN_MIN_WIDTH_REM)))
+        .child(heading(text!(account::on_this_device)).w(gpui::rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none().text_center())
+        .child(heading(text!(account::status)).w(gpui::rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none().text_center())
+        .child(heading(text!(account::cloud_books)).w(gpui::rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)).flex_none().text_center())
 }
 
 /// One library: its name and folder, what it occupies here, where it stands
@@ -151,8 +174,7 @@ pub fn library_table_header(theme: BrowserTheme) -> Div {
 /// details button, which hid the one control on the row and made every library
 /// a two-step read.
 ///
-/// A compact window keeps the status and cloud columns and moves the size
-/// under the name, where it does not need a column of its own.
+/// A narrow section stacks the name, path, size, status and cloud control.
 pub fn library_table_row(name: impl Into<SharedString>, path: Option<AnyElement>, size: impl Into<SharedString>, status: (impl Into<SharedString>, Hsla), cloud: impl IntoElement, compact: bool, theme: BrowserTheme) -> Div {
     let size = div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(size.into());
     let title = div()
@@ -163,7 +185,7 @@ pub fn library_table_row(name: impl Into<SharedString>, path: Option<AnyElement>
         .items_start()
         .gap(px(SPACE_XS))
         .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(name.into()))
-        .children(path.map(|path| div().max_w_full().min_w_0().child(path)));
+        .children(path.map(|path| div().w_full().min_w_0().flex().child(path)));
     let (status, status_color) = status;
     let status = div()
         .min_w_0()
@@ -176,14 +198,14 @@ pub fn library_table_row(name: impl Into<SharedString>, path: Option<AnyElement>
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(status.into()));
     let cloud = div().flex_none().flex().items_center().child(cloud);
     if compact {
-        return library_table_line(theme).py(px(12.0)).child(title.child(size)).child(status.flex_none()).child(cloud);
+        return library_table_line(theme).flex_col().items_start().gap(px(SPACE_SM)).py(px(12.0)).child(title.w_full().flex_none().child(size)).child(status.w_full().flex_none()).child(cloud.w_full());
     }
     library_table_line(theme)
         .py(px(12.0))
-        .child(title)
-        .child(size.w(gpui::rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none())
-        .child(status.w(gpui::rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none())
-        .child(cloud.w(gpui::rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)))
+        .child(title.min_w(gpui::rems(LIBRARY_NAME_COLUMN_MIN_WIDTH_REM)))
+        .child(size.w(gpui::rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none().text_center())
+        .child(status.w(gpui::rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none().justify_center())
+        .child(cloud.w(gpui::rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)).justify_center())
 }
 
 /// A table line, ruled above like every row in Settings.

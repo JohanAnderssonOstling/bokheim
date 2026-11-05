@@ -6,9 +6,11 @@ pub mod books;
 pub mod catalog;
 pub mod popularity;
 pub use popularity::{unique_work_popularity, WorkPopularity};
+mod classification_method;
 pub mod matching;
 pub mod subject_consensus;
 pub mod year_consensus;
+pub use classification_method::{ClassificationMethod, ClassificationProvider};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -88,8 +90,6 @@ pub struct SiblingSubjectSupport {
     pub support_fraction: f64,
     pub evidence: Vec<ClassificationEvidence>,
 }
-
-pub const SIBLING_SUBJECT_CONSENSUS_METHOD: &str = "verified_sibling_subject_consensus:";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -215,7 +215,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         authors: authors.into_values().collect(),
         // Ambiguous ISBNs can point at unrelated works. Only expose a
         // description when all available Open Library evidence agrees.
-        description: (descriptions.len() == 1).then(|| descriptions.into_iter().next().expect("one description exists")),
+        description: if descriptions.len() == 1 { descriptions.into_iter().next() } else { None },
         subjects: subjects.into_iter().collect(),
         popularity,
     }
@@ -296,7 +296,7 @@ pub struct Classification {
 /// Provenance for classification evidence.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ClassificationEvidence {
-    pub method: String,
+    pub method: ClassificationMethod,
     pub isbn13: String,
     pub open_library_work_id: String,
     pub open_library_edition_id: String,
@@ -330,38 +330,10 @@ pub fn classification_consensus_notation(scheme: ClassificationScheme, notation:
             valid.then_some(value)
         }
         ClassificationScheme::LibraryOfCongress => {
-            let value = notation.trim();
-            let bytes = value.as_bytes();
-            let mut cursor = 0;
-            while cursor < bytes.len() && cursor < 3 && bytes[cursor].is_ascii_alphabetic() {
-                cursor += 1;
-            }
-            if cursor == 0 || bytes.get(cursor).is_some_and(u8::is_ascii_alphabetic) {
-                return None;
-            }
-            let letters = value[..cursor].to_ascii_uppercase();
-            while bytes.get(cursor).is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'\'') {
-                cursor += 1;
-            }
-            let number_start = cursor;
-            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
-                cursor += 1;
-            }
-            if cursor == number_start {
-                return None;
-            }
-            if bytes.get(cursor) == Some(&b'.') {
-                let decimal_start = cursor + 1;
-                let mut decimal_end = decimal_start;
-                while bytes.get(decimal_end).is_some_and(u8::is_ascii_digit) {
-                    decimal_end += 1;
-                }
-                if decimal_end > decimal_start {
-                    cursor = decimal_end;
-                }
-            }
-            Some(format!("{letters}{}", &value[number_start..cursor]))
+            let parsed = book_model::parse_lcc_prefix(notation)?;
+            Some(format!("{}{}", parsed.letters, parsed.number))
         }
+
         ClassificationScheme::Bisac => {
             let value = notation.trim().to_ascii_uppercase();
             (value.len() == 9 && value.as_bytes()[..3].iter().all(u8::is_ascii_alphabetic) && value.as_bytes()[3..].iter().all(u8::is_ascii_digit)).then_some(value)

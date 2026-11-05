@@ -46,6 +46,9 @@ public final class SpeechService extends Service {
     private boolean foreground;
     private long id;
     private String lastState;
+    private String author = "", chapter = "";
+    private byte[] coverBytes;
+    private android.graphics.Bitmap cover;
     private final Runnable deferredStop = this::stopSelf;
     private final BroadcastReceiver noisy = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -81,10 +84,19 @@ public final class SpeechService extends Service {
         });
     }
 
+    static void stopForAppClose(Context context) {
+        pending.clear();
+        if (instance != null && instance.id != 0) {
+            controlSender.test(instance.id, "stop");
+            instance.finishSession();
+        }
+        context.stopService(new Intent(context, SpeechService.class));
+    }
+
     @Override public void onCreate() {
         super.onCreate();
         instance = this;
-        NotificationChannel channel = new NotificationChannel(CHANNEL, "Read aloud", NotificationManager.IMPORTANCE_LOW);
+        NotificationChannel channel = new NotificationChannel(CHANNEL, UiText.READER_READ_ALOUD, NotificationManager.IMPORTANCE_LOW);
         channel.setSound(null, null);
         channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         getSystemService(NotificationManager.class).createNotificationChannel(channel);
@@ -139,9 +151,12 @@ public final class SpeechService extends Service {
         if (id != 0 && id != next) controlSender.test(id, "stop");
         id = next;
         lastState = null;
+        author = chapter = "";
+        coverBytes = null;
+        cover = null;
         session.setActive(true);
         // Promote before requesting focus (required when targeting Android 15+).
-        promote(notification("Read aloud", false));
+        promote(notification(UiText.READER_READ_ALOUD, false));
         updateState();
     }
 
@@ -180,8 +195,8 @@ public final class SpeechService extends Service {
     }
 
     private String title() {
-        try { return new JSONObject(stateProvider.apply(id)).optString("title", "Read aloud"); }
-        catch (Exception ignored) { return "Read aloud"; }
+        try { return new JSONObject(stateProvider.apply(id)).optString("title", UiText.READER_READ_ALOUD); }
+        catch (Exception ignored) { return UiText.READER_READ_ALOUD; }
     }
 
     void updateState() {
@@ -191,7 +206,7 @@ public final class SpeechService extends Service {
             if (encoded == null || encoded.isEmpty()) { finishSession(); return; }
             JSONObject state = new JSONObject(encoded);
             boolean paused = state.getBoolean("paused");
-            String title = state.optString("title", "Read aloud");
+            String title = state.optString("title", UiText.READER_READ_ALOUD);
             if (!paused && !hasFocus) {
                 promote(notification(title, false));
                 if (!requestFocus()) return;
@@ -203,13 +218,23 @@ public final class SpeechService extends Service {
             } else if (!wakeLock.isHeld()) wakeLock.acquire();
             if (encoded.equals(lastState)) return;
             lastState = encoded;
+            author = state.optString("author");
+            chapter = state.optString("chapter");
+            byte[] bytes = MediaArtwork.bytes(state);
+            if (!java.util.Arrays.equals(bytes, coverBytes)) {
+                coverBytes = bytes;
+                cover = MediaArtwork.bitmap(bytes);
+            }
             session.setMetadata(new MediaMetadata.Builder().putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, "Bokheim · Read aloud").build());
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, MediaArtwork.credit(author, chapter))
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, author)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION, chapter)
+                .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, cover).build());
             int playback = paused ? PlaybackState.STATE_PAUSED : state.optBoolean("preparing") ? PlaybackState.STATE_BUFFERING : PlaybackState.STATE_PLAYING;
             session.setPlaybackState(new PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
                 | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_STOP | PlaybackState.ACTION_REWIND | PlaybackState.ACTION_FAST_FORWARD
                 | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_SKIP_TO_NEXT)
-                .addCustomAction(new PlaybackState.CustomAction.Builder("stop", "Stop narration", android.R.drawable.ic_menu_close_clear_cancel).build())
                 .setState(playback, PlaybackState.PLAYBACK_POSITION_UNKNOWN, (float) state.optDouble("rate", 1.0)).build());
             getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, notification(title, paused));
         } catch (Exception error) {
@@ -230,12 +255,11 @@ public final class SpeechService extends Service {
 
     private Notification notification(String title, boolean paused) {
         return new Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle(title).setContentText("Bokheim · Read aloud").setContentIntent(openReader())
+            .setContentTitle(title).setContentText(author).setSubText(chapter).setLargeIcon(cover).setContentIntent(openReader())
             .setVisibility(Notification.VISIBILITY_PUBLIC).setOnlyAlertOnce(true).setOngoing(!paused)
-            .addAction(action(android.R.drawable.ic_media_rew, "Previous passage", "back", 1043))
-            .addAction(action(paused ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause, paused ? "Play" : "Pause", paused ? "resume" : "pause", 1044))
-            .addAction(action(android.R.drawable.ic_media_ff, "Next passage", "forward", 1045))
-            .addAction(action(android.R.drawable.ic_menu_close_clear_cancel, "Stop narration", "stop", 1046))
+            .addAction(action(android.R.drawable.ic_media_rew, UiText.COMMON_PREVIOUS_PASSAGE, "back", 1043))
+            .addAction(action(paused ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause, paused ? UiText.COMMON_PLAY : UiText.COMMON_PAUSE, paused ? "resume" : "pause", 1044))
+            .addAction(action(android.R.drawable.ic_media_ff, UiText.COMMON_NEXT_PASSAGE, "forward", 1045))
             .setStyle(new Notification.MediaStyle().setMediaSession(session.getSessionToken()).setShowActionsInCompactView(0, 1, 2)).build();
     }
 
@@ -244,6 +268,10 @@ public final class SpeechService extends Service {
         audio.abandonAudioFocusRequest(focus);
         hasFocus = false;
         session.setActive(false);
+        session.setMetadata(null);
+        session.setPlaybackState(new PlaybackState.Builder().setState(PlaybackState.STATE_STOPPED, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 0).build());
+        coverBytes = null;
+        cover = null;
         stopForeground(true);
         foreground = false;
         getSystemService(NotificationManager.class).cancel(NOTIFICATION_ID);

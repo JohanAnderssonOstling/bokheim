@@ -12,7 +12,7 @@ packaged-pdfium = []
 [dependencies]
 pdf-range-reader = { path = "../pdf-range-reader" }
 blake3 = "1"
-image = { version = "0.25", default-features = false }
+image = { workspace = true }
 pdf-view-common = { path = "../pdf-view-common" }
 book-model = { path = "../book-model", default-features = false }
 pdfium-render = { workspace = true, features = ["pdfium_latest", "thread_safe"] }

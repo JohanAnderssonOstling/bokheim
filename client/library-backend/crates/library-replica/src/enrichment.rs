@@ -1,101 +1,84 @@
-use book_model::{BookRecord, BookTocEntry};
+use book_model::BookTocEntry;
 use metadata_contract::WorkPopularity;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
-/// A definitive enrichment answer. Failures are device-local retry work.
-#[derive(Debug, Clone, PartialEq)]
-pub enum EnrichmentResult {
-    Found { record: BookRecord, toc: Option<Vec<BookTocEntry>>, cover_id: Option<String>, popularity: Option<WorkPopularity> },
-    NoMatch,
-}
-
-// Retain the two original positional variants so saved additions remain readable.
-// The appended variant carries popularity without changing their binary layout.
-#[derive(Serialize, Deserialize)]
+/// A definitive lookup outcome; its metadata is already applied to the book.
+/// Failures are device-local retry work.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Encoded<R, T, C, P> {
-    Found { record: R, toc: T, cover_id: C },
-    NoMatch,
-    FoundWithPopularity { record: R, toc: T, cover_id: C, popularity: P },
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "EnrichmentResult", rename_all = "snake_case")]
-enum HumanEnrichment {
+pub enum EnrichmentResult {
     Found {
-        record: BookRecord,
+        #[serde(with = "book_model::toc_transport::optional")]
         toc: Option<Vec<BookTocEntry>>,
         cover_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         popularity: Option<WorkPopularity>,
     },
     NoMatch,
 }
 
-impl Serialize for EnrichmentResult {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            return HumanEnrichment::serialize(self, serializer);
-        }
-        let encoded = match self {
-            Self::Found { record, toc, cover_id, popularity: None } => Encoded::Found { record, toc, cover_id },
-            Self::Found { record, toc, cover_id, popularity: Some(popularity) } => Encoded::FoundWithPopularity { record, toc, cover_id, popularity },
-            Self::NoMatch => Encoded::NoMatch,
-        };
-        encoded.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for EnrichmentResult {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if deserializer.is_human_readable() {
-            return HumanEnrichment::deserialize(deserializer);
-        }
-        Ok(match Encoded::deserialize(deserializer)? {
-            Encoded::Found { record, toc, cover_id } => Self::Found { record, toc, cover_id, popularity: None },
-            Encoded::FoundWithPopularity { record, toc, cover_id, popularity } => Self::Found { record, toc, cover_id, popularity: Some(popularity) },
-            Encoded::NoMatch => Self::NoMatch,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use book_model::BookRecord;
 
-    // The schema used before popularity was added, independent of the adapter.
-    #[derive(Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum LegacyEnrichment {
-        Found { record: BookRecord, toc: Option<Vec<BookTocEntry>>, cover_id: Option<String> },
-        NoMatch,
+    fn draft() -> crate::BookAddition {
+        let mut record = BookRecord { metadata: Default::default(), description: "File description".into() };
+        record.title = "File title".into();
+        record.subtitle = Some("File subtitle".into());
+        record.book.year = Some(1999);
+        crate::BookAddition { facts: crate::BookFacts { added_at: 1, format: book_model::BookFormat::Epub }, record, navigation: None, pdf: None, recording: None, enrichment: None }
+    }
+
+    fn provider() -> BookRecord {
+        use book_model::{AUTHOR_MARC_RELATOR_CODE, BookSubject, Contributor, ContributorId};
+        let mut record = BookRecord { metadata: Default::default(), description: "Provider description".into() };
+        record.title = "Provider title".into();
+        record.subtitle = Some("Provider subtitle".into());
+        record.book.year = Some(2005);
+        record.book.publishers = vec!["Provider publisher".into()];
+        record.book.subjects = vec![BookSubject::new(None, "Provider subject", "provider", None, None).unwrap()];
+        record.contributors = vec![Contributor::with_id(ContributorId::from_u128(1), "Provider author", AUTHOR_MARC_RELATOR_CODE).unwrap()];
+        record
+    }
+
+    fn assert_effective_record(addition: &crate::BookAddition, description: &str, year: i32) {
+        assert_eq!(addition.record.title, "File title");
+        assert_eq!(addition.record.subtitle.as_deref(), Some("File subtitle"));
+        assert_eq!(addition.record.description, description);
+        assert_eq!(addition.record.book.year, Some(year));
+        assert_eq!(addition.record.book.publishers, ["Provider publisher"]);
+        assert_eq!(addition.record.book.subjects[0].name(), "Provider subject");
+        assert_eq!(addition.record.contributors[0].name(), "Provider author");
     }
 
     #[test]
-    fn original_saved_answers_decode_and_keep_their_binary_layout() {
-        let record = BookRecord { metadata: Default::default(), description: String::new() };
-        let original = LegacyEnrichment::Found { record: record.clone(), toc: None, cover_id: None };
-        let bytes = sync_common::wire::encode(&original).unwrap();
-        let result: EnrichmentResult = sync_common::wire::decode(&bytes, 4096).unwrap();
-        assert_eq!(result, EnrichmentResult::Found { record, toc: None, cover_id: None, popularity: None });
-        assert_eq!(sync_common::wire::encode(&result).unwrap(), bytes);
-        let transport = sync_common::transport::encode(&original).unwrap();
-        assert_eq!(sync_common::transport::decode::<EnrichmentResult>(&transport, 4096).unwrap(), result);
-        assert_eq!(sync_common::wire::encode(&EnrichmentResult::NoMatch).unwrap(), sync_common::wire::encode(&LegacyEnrichment::NoMatch).unwrap());
+    fn enrichment_updates_one_record_and_preserves_file_precedence() {
+        for has_file_values in [false, true] {
+            let mut addition = draft();
+            if !has_file_values {
+                addition.record.description = " \n".into();
+                addition.record.book.year = None;
+            }
+            addition.apply_enrichment(provider(), EnrichmentResult::Found { toc: None, cover_id: Some("cover".into()), popularity: None });
+            assert_effective_record(&addition, if has_file_values { "File description" } else { "Provider description" }, if has_file_values { 1999 } else { 2005 });
+            let json = serde_json::to_value(&addition).unwrap();
+            assert!(json["enrichment"]["found"].get("record").is_none());
+            assert_eq!(serde_json::from_value::<crate::BookAddition>(json).unwrap(), addition);
+            let persisted = sync_common::wire::encode(&addition).unwrap();
+            assert_eq!(sync_common::wire::decode::<crate::BookAddition>(&persisted, 100_000).unwrap(), addition);
+            let transport = sync_common::transport::encode(&addition).unwrap();
+            assert_eq!(sync_common::transport::decode::<crate::BookAddition>(&transport, 100_000).unwrap(), addition);
+            assert_eq!(sync_common::transport::representation::<_, crate::BookAddition>(&addition).unwrap(), addition);
+        }
     }
 
     #[test]
-    fn popularity_survives_storage_and_sync_encodings() {
-        let result = EnrichmentResult::Found {
-            record: BookRecord { metadata: Default::default(), description: String::new() },
-            toc: None,
-            cover_id: None,
-            popularity: Some(WorkPopularity { open_library_work_id: "OL10W".into(), rating_count: 12, snapshot_date: "2026-09-01".into() }),
-        };
-        let bytes = sync_common::wire::encode(&result).unwrap();
-        assert_eq!(sync_common::wire::decode::<EnrichmentResult>(&bytes, 4096).unwrap(), result);
-        let bytes = sync_common::transport::encode(&result).unwrap();
-        assert_eq!(sync_common::transport::decode::<EnrichmentResult>(&bytes, 4096).unwrap(), result);
-        assert!(matches!(sync_common::transport::decode::<LegacyEnrichment>(&bytes, 4096).unwrap(), LegacyEnrichment::Found { .. }));
+    fn unanswered_drafts_and_no_match_keep_their_original_record() {
+        let mut addition = draft();
+        for result in [None, Some(EnrichmentResult::NoMatch)] {
+            addition.enrichment = result;
+            let bytes = sync_common::wire::encode(&addition).unwrap();
+            assert_eq!(sync_common::wire::decode::<crate::BookAddition>(&bytes, 100_000).unwrap(), addition);
+        }
     }
 }

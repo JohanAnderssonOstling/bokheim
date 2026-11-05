@@ -5,32 +5,38 @@
 //! library list is reported upward so the root can update the shared
 //! [`Libraries`] rather than this page reaching into the navigation UI tree.
 
+use ui_text::text;
+
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use ui_components::user_facing_error;
-use std::collections::HashSet;
 mod account;
 #[cfg(target_os = "android")]
 mod android_authentication;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod authentication;
+mod authentication_request;
+mod deletion;
+#[cfg(feature = "kobo")]
+mod kobo_authentication;
 mod view;
 #[cfg(target_arch = "wasm32")]
 mod web_authentication;
 
 use account_contract::StorageUsageResponse;
-use app::{AccountStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
-#[cfg(not(target_arch = "wasm32"))]
-use gpui::Task;
+use app::{AccountStatus, ServerBookStorageUsage, ServerLibraryStorageUsage};
 use gpui::prelude::*;
-use gpui::{Context, Div, Entity, IntoElement, Render, SharedString, Subscription, Window, div, px};
+use gpui::{Context, Div, Entity, IntoElement, Render, SharedString, Subscription, Task, Window, div, px};
 use gpui_component::IconName;
 use gpui_component::alert::Alert;
-use gpui_component::button::ButtonVariants;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-use gpui_component::input::{Input, InputState, OtpInput};
+use gpui_component::input::{Input, OtpInput};
 use gpui_component::{Sizable, Size};
-use library_backend::{LibrarySyncState, LibrarySyncStatus};
+use library_backend::{LibrarySyncState, LibrarySyncStatus, LibraryUpdate};
+use library_management::management::LocalLibraryStorageUsage;
 use ui_components as components;
 
+pub use self::authentication_request::AuthenticationRequest;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use crate::model::AccountFlow;
 use crate::navigation::Libraries;
@@ -45,21 +51,85 @@ pub(crate) use self::view::LibrariesView;
 pub struct SyncState {
     pub(crate) account_status: AccountStatus,
     pub(crate) storage_usage: Option<StorageUsageResponse>,
+    pub(crate) pending_cloud_bytes: Option<u64>,
     pub(crate) sync_statuses: Vec<LibrarySyncStatus>,
     pub(crate) local_storage_usage: Vec<LocalLibraryStorageUsage>,
     pub(crate) server_storage_usage: Option<Vec<ServerLibraryStorageUsage>>,
+    pub(crate) server_book_storage_usage: Option<Vec<ServerBookStorageUsage>>,
+    _account_updates: Task<()>,
 }
 
 impl SyncState {
-    pub fn new(services: &AppServices) -> Self {
-        Self { account_status: services.startup.account_status.clone(), storage_usage: None, sync_statuses: Vec::new(), local_storage_usage: Vec::new(), server_storage_usage: None }
+    pub(crate) fn cloud_storage_blocker(&self, bytes: Option<u64>) -> Option<&'static str> {
+        if !self.account_status.signed_in() {
+            return Some(text!(account::sign_in_to_use_cloud_storage));
+        }
+        let Some(bytes) = bytes else {
+            return Some(text!(account::checking_the_library_size_before_adding_it_to_cloud_storage));
+        };
+        let Some(usage) = self.storage_usage else {
+            return Some(text!(account::checking_available_cloud_storage));
+        };
+        let Some(pending) = self.pending_cloud_bytes else {
+            return Some(text!(account::checking_books_waiting_for_cloud_storage));
+        };
+        if bytes > usage.available_bytes().saturating_sub(pending) {
+            return Some(text!(account::not_enough_cloud_storage_free_space_or_keep_this_library_local_only));
+        }
+        None
+    }
+
+    pub(crate) fn library_cloud_storage_blocker(&self, library_id: sync_common::LibraryId) -> Option<&'static str> {
+        let bytes = self.local_storage_usage.iter().find(|usage| usage.library_id == library_id).and_then(|usage| usage.cloud_bytes);
+        self.cloud_storage_blocker(bytes)
+    }
+
+    pub fn new(services: &AppServices, cx: &mut Context<Self>) -> Self {
+        let account = services.backend.account.clone();
+        let updates = cx.spawn(async move |state, cx| {
+            let mut updates = account.subscribe_status();
+            let initial = updates.current();
+            cx.defer_update(state.clone(), move |state, cx| state.apply_account_status(initial, cx));
+            while let Ok(status) = updates.changed().await {
+                cx.defer_update(state.clone(), move |state, cx| state.apply_account_status(status, cx));
+            }
+        });
+        Self {
+            account_status: services.startup.account_status.clone(),
+            storage_usage: None,
+            pending_cloud_bytes: None,
+            sync_statuses: Vec::new(),
+            local_storage_usage: Vec::new(),
+            server_storage_usage: None,
+            server_book_storage_usage: None,
+            _account_updates: updates,
+        }
+    }
+
+    fn apply_account_status(&mut self, status: AccountStatus, cx: &mut Context<Self>) {
+        if self.account_status == status {
+            return;
+        }
+        self.account_status = status;
+        self.storage_usage = None;
+        self.pending_cloud_bytes = None;
+        self.sync_statuses.clear();
+        self.server_storage_usage = None;
+        self.server_book_storage_usage = None;
+        cx.notify();
     }
 
     pub fn apply_account_snapshot(&mut self, snapshot: &app::AccountSnapshot, cx: &mut Context<Self>) {
-        self.account_status = snapshot.account.clone();
+        // Account identity comes directly from its service. An older remote
+        // snapshot must not restore a logged-out or replaced account in the UI.
+        if self.account_status != snapshot.account {
+            return;
+        }
         self.storage_usage = snapshot.storage_usage;
+        self.pending_cloud_bytes = snapshot.pending_cloud_bytes;
         self.sync_statuses = snapshot.sync_statuses.clone();
         self.server_storage_usage = snapshot.server_storage_usage.clone();
+        self.server_book_storage_usage = snapshot.server_book_storage_usage.clone();
         cx.notify();
     }
 
@@ -83,15 +153,17 @@ impl SyncState {
 #[cfg(target_arch = "wasm32")]
 pub enum SyncEvent {
     AccountRefreshDue,
+    LibrarySyncChanged { storage_changed: bool },
     AccountRefreshRequested,
-    AccountSnapshot { generation: u64, result: Result<app::AccountSnapshot, String> },
+    AccountSnapshot { generation: u64, result: Result<app::AccountSnapshot, app::BackendError> },
     LocalStorageUsageRequested,
-    LocalStorageUsage { generation: u64, result: Result<Vec<app::LocalLibraryStorageUsage>, String> },
+    LocalStorageUsage { generation: u64, result: Result<Vec<LocalLibraryStorageUsage>, app::BackendError> },
     LogoutRequested,
-    AccountOperation { generation: u64, result: Result<app::AccountSnapshot, String>, success: &'static str, reveal_password_reset_on_error: bool },
+    DeleteAccountRequested { email: String, password: String },
+    AccountOperation { generation: u64, result: Result<app::AccountSnapshot, app::BackendError>, success: &'static str, reveal_password_reset_on_error: bool },
     AssetStorageRequested { library_id: sync_common::LibraryId, enabled: bool },
-    AssetStorageChanged { library_id: sync_common::LibraryId, enabled: bool, result: Result<(), String> },
-    Authenticate { action: String, email: String, secret: String, token: String, reply: async_channel::Sender<Result<(), String>> },
+    AssetStorageChanged { library_id: sync_common::LibraryId, enabled: bool, result: Result<(), app::BackendError> },
+    Authenticate { request: AuthenticationRequest, reply: async_channel::Sender<Result<(), &'static str>> },
     WebAuthenticated,
 }
 
@@ -100,6 +172,14 @@ enum AccountActivity {
     Idle,
     Refreshing,
     AccountRequest,
+    DeletingAccount,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum StorageBreakdownTab {
+    #[default]
+    Libraries,
+    Books,
 }
 
 pub(crate) struct SyncPage {
@@ -110,7 +190,9 @@ pub(crate) struct SyncPage {
     state: Entity<SyncState>,
     active_library: Entity<Libraries>,
     identity: Entity<view::AccountIdentityView>,
+    deletion: Option<deletion::DeleteAccountForm>,
     asset_storage_pending: HashSet<sync_common::LibraryId>,
+    storage_tab: StorageBreakdownTab,
     /// Where a new library is created. It belongs to the library list rather
     /// than to a storage group of its own: it is the setting that decides where
     /// the next row in that list will live. `None` until the backend answers,
@@ -124,10 +206,8 @@ pub(crate) struct SyncPage {
     /// them is pressed.
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     access_open: bool,
-    /// Whether the password field on the current flow is showing its text. One
-    /// flag, because only one flow is on screen and each carries one password.
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    password_revealed: bool,
+    #[cfg(feature = "kobo")]
+    access_overlay: kobo_authentication::AccountOverlay,
     activity: AccountActivity,
     /// Password recovery is offered only after an actual sign-in request has
     /// failed, rather than as a permanent third authentication mode.
@@ -142,6 +222,7 @@ pub(crate) struct SyncPage {
     /// on entry, explicit refresh, and when the library set changes.
     local_usage_due: bool,
     local_usage_libraries: HashSet<sync_common::LibraryId>,
+    sync_update_tasks: HashMap<sync_common::LibraryId, Task<()>>,
     #[cfg(not(target_arch = "wasm32"))]
     local_usage_generation: u64,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -152,12 +233,6 @@ pub(crate) struct SyncPage {
     android_authentication: Option<android_authentication::AndroidAuthentication>,
     _active_library_subscription: Subscription,
     _state_subscription: Subscription,
-}
-
-/// Native compatibility wrapper while other callback paths are migrated.
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) async fn after_browser_callback(cx: &gpui::AsyncApp) {
-    cx.wait_for_update_slot().await;
 }
 
 impl SyncPage {
@@ -172,37 +247,54 @@ impl SyncPage {
         let identity = cx.new(|_| view::AccountIdentityView::new(page_entity, account_status.clone()));
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         let authentication = AuthenticationInputs::new(window, cx);
+        let backend = services.backend.clone();
+        let subscription_backend = backend.clone();
         let active_library_subscription = cx.observe(&active_library, move |page, _, cx| {
             let library_ids = page.active_library.read(cx).entries().iter().map(|entry| *entry.library_id()).collect();
             if page.local_usage_libraries != library_ids {
                 page.local_usage_libraries = library_ids;
                 page.local_usage_due = true;
+                page.observe_library_sync(&subscription_backend, cx);
             }
             page.schedule_refresh(cx);
             cx.notify();
         });
         let state_subscription = cx.observe(&state, |page, state, cx| {
             let account_status = state.read(cx).account_status.clone();
-            page.identity.update(cx, |identity, cx| identity.set_account_status(account_status, cx));
+            if page.deletion.as_ref().is_some_and(|form| account_status.email() != Some(form.email.as_str())) {
+                page.deletion = None;
+            }
+            if page.identity.update(cx, |identity, cx| identity.set_account_status(account_status, cx)) {
+                page.schedule_refresh(cx);
+            }
             cx.notify();
         });
-        let page = Self {
+        let mut page = Self {
             #[cfg(not(target_arch = "wasm32"))]
             services,
             #[cfg(target_arch = "wasm32")]
-            events: services.sync_events.clone().expect("web sync event inbox"),
+            events: services.sync_events.clone().unwrap_or_else(|| {
+                log::error!("Web sync event inbox is unavailable");
+                // A closed sender lets the existing command error path report
+                // unavailable sync without queuing requests that cannot finish.
+                let (sender, receiver) = async_channel::unbounded();
+                drop(receiver);
+                sender
+            }),
             state,
             active_library,
             identity,
+            deletion: None,
             asset_storage_pending: HashSet::new(),
+            storage_tab: StorageBreakdownTab::default(),
             #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
             default_library_location: None,
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             flow: AccountFlow::SignIn,
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             access_open: false,
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-            password_revealed: false,
+            #[cfg(feature = "kobo")]
+            access_overlay: kobo_authentication::AccountOverlay::new(cx),
             activity: AccountActivity::Idle,
             login_failed: false,
             message: None,
@@ -213,6 +305,7 @@ impl SyncPage {
             refresh_pending: false,
             local_usage_due: true,
             local_usage_libraries,
+            sync_update_tasks: HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             local_usage_generation: 0,
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -224,18 +317,20 @@ impl SyncPage {
             _active_library_subscription: active_library_subscription,
             _state_subscription: state_subscription,
         };
+        page.observe_library_sync(&backend, cx);
         // Start snapshots from a normal window turn, never from an async
         // worker callback or a render borrow.
         cx.on_next_frame(window, |page, _, cx| page.refresh(cx));
         #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
         {
-            let backend = page.services.backend.clone();
+            let preferences = page.services.preferences.clone();
+            let fallback = page.services.startup.default_library_root.clone();
             cx.spawn(async move |page, cx| {
-                let result = backend.default_library_save_location().await;
+                let result = preferences.default_library_save_location(&fallback).await.map_err(app::BackendError::operation);
                 let _ = page.update(cx, |page, cx| {
                     match result {
                         Ok(path) => page.default_library_location = path,
-                        Err(error) => page.error = Some(user_facing_error(&error, "Could not load the library location. Please try again.").into()),
+                        Err(error) => page.error = Some(user_facing_error(&error, text!(account::could_not_load_the_library_location_please_try_again)).into()),
                     }
                     cx.notify();
                 });
@@ -244,12 +339,63 @@ impl SyncPage {
         }
         page
     }
+
+    /// Settings includes every library, even those without an open book view.
+    fn observe_library_sync(&mut self, backend: &Rc<app::AppClient>, cx: &mut Context<Self>) {
+        self.sync_update_tasks.retain(|id, _| self.local_usage_libraries.contains(id));
+        for id in &self.local_usage_libraries {
+            if self.sync_update_tasks.contains_key(id) {
+                continue;
+            }
+            let library = match backend.management.library(*id) {
+                Ok(library) => library,
+                Err(error) => {
+                    log::warn!("Could not observe library sync status: {error}");
+                    continue;
+                }
+            };
+            #[cfg(target_arch = "wasm32")]
+            let events = self.events.clone();
+            let task = cx.spawn(async move |page, cx| {
+                let (updates, _) = match library.updates().await {
+                    Ok(updates) => updates,
+                    Err(error) => {
+                        log::warn!("Could not observe library sync status: {error}");
+                        return;
+                    }
+                };
+                while let Ok(update) = updates.recv().await {
+                    let storage_changed = matches!(update, LibraryUpdate::Contents);
+                    if !storage_changed && !matches!(update, LibraryUpdate::SyncStatusChanged | LibraryUpdate::BookFileActivity(_)) {
+                        continue;
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if events.try_send(SyncEvent::LibrarySyncChanged { storage_changed }).is_err() {
+                            break;
+                        }
+                        let _ = (&page, &cx);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    cx.defer_update(page.clone(), move |page, cx| {
+                        page.local_usage_due |= storage_changed;
+                        page.schedule_refresh(cx);
+                    });
+                }
+            });
+            self.sync_update_tasks.insert(*id, task);
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
 impl SyncPage {
     pub(crate) fn apply_event(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
         match event {
+            SyncEvent::LibrarySyncChanged { storage_changed } => {
+                self.local_usage_due |= storage_changed;
+                self.schedule_refresh(cx);
+            }
             SyncEvent::AccountRefreshDue => {
                 self.refresh_scheduled = false;
                 self.refresh_with_feedback(false, cx);
@@ -264,17 +410,25 @@ impl SyncPage {
                     self.apply_snapshot(snapshot, Some(success), cx);
                 }
                 Err(error) => {
-                    self.login_failed = reveal_password_reset_on_error;
+                    self.login_failed = reveal_password_reset_on_error && matches!(error.failure(), Some(app::Failure::Unauthorized | app::Failure::Rejected));
                     self.apply_error(error, cx);
                 }
             },
             SyncEvent::AssetStorageChanged { library_id, enabled, result } => {
                 self.asset_storage_pending.remove(&library_id);
                 match result {
-                    Ok(()) => self.schedule_refresh(cx),
-                    Err(error) => self.error = Some(user_facing_error(&error, "Could not change cloud storage for this library. Please try again.").into()),
+                    Ok(()) => {
+                        if !enabled {
+                            self.message = Some(text!(account::cloud_book_storage_is_off).into());
+                        }
+                        self.schedule_refresh(cx);
+                    }
+                    Err(error) => {
+                        self.message = None;
+                        let recovery = user_facing_error(&error, text!(account::could_not_change_cloud_storage_check_your_connection_and_free_space_then));
+                        self.error = Some(if enabled { recovery.to_owned() } else { format!(text!(account::cloud_book_storage_has_been_kept_retry_to_finish_saving_books_locally), recovery = recovery) }.into());
+                    }
                 }
-                let _ = enabled;
                 cx.notify();
             }
             SyncEvent::WebAuthenticated => self.schedule_refresh(cx),
@@ -282,6 +436,7 @@ impl SyncPage {
             | SyncEvent::LocalStorageUsageRequested
             | SyncEvent::LocalStorageUsage { .. }
             | SyncEvent::LogoutRequested
+            | SyncEvent::DeleteAccountRequested { .. }
             | SyncEvent::AssetStorageRequested { .. }
             | SyncEvent::Authenticate { .. } => {
                 unreachable!("sync commands are handled by ApplicationRoot")

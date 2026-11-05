@@ -1,5 +1,5 @@
 //! Extract a sole opaque image from image-only content with right-angle placement.
-//! Inline images, nested forms, text, paths, graphics settings and transparency use PDFium.
+//! JPEG2000, inline images, nested forms, text, paths, graphics settings and transparency use PDFium.
 //! Unknown drawing operations always fall back to rendering.
 use super::*;
 use lopdf::{Dictionary, Document, Object, Stream};
@@ -125,6 +125,10 @@ pub(super) fn extract(reader: &mut (impl Read + Seek)) -> Option<RgbImage> {
         if filters.len() > 8 {
             return None;
         }
+        // Leave JPEG2000 to PDFium without cloning or decoding the stream here.
+        if filters.iter().any(|filter| *filter == b"JPXDecode") {
+            return None;
+        }
         let decode_parms = match stream.dict.get(b"DecodeParms") {
             Ok(value) => Some(resolve(document, value)?),
             Err(_) => None,
@@ -148,7 +152,7 @@ pub(super) fn extract(reader: &mut (impl Read + Seek)) -> Option<RgbImage> {
                 Object::Null => Dictionary::new(),
                 value => value.as_dict().ok()?.clone(),
             };
-            if matches!(*filter, b"DCTDecode" | b"JPXDecode") {
+            if *filter == b"DCTDecode" {
                 if index + 1 != filters.len() || bytes.len() > MAX_COVER_IMAGE_BYTES {
                     return None;
                 }
@@ -166,99 +170,64 @@ pub(super) fn extract(reader: &mut (impl Read + Seek)) -> Option<RgbImage> {
         }
         (bytes, codec, codec_parameters)
     };
-    let jpx = codec == b"JPXDecode";
-    let space;
-    let mut samples;
-    let bits = if jpx { 8 } else { dict.get(b"BitsPerComponent").and_then(Object::as_i64).ok()? };
-    if jpx {
-        let image = hayro_jpeg2000::Image::new(&encoded, &Default::default()).ok()?;
-        if image.has_alpha() || (image.width(), image.height()) != (width, height) {
-            return None;
-        }
-        let embedded = match image.color_space() {
-            hayro_jpeg2000::ColorSpace::Gray => color::Space::Device(1),
-            hayro_jpeg2000::ColorSpace::RGB => color::Space::Device(3),
-            hayro_jpeg2000::ColorSpace::CMYK => color::Space::Device(4),
-            hayro_jpeg2000::ColorSpace::Icc { profile, num_channels } => color::Space::icc(profile, usize::from(*num_channels))?,
-            hayro_jpeg2000::ColorSpace::Unknown { .. } => return None,
-        };
-        let mut context = hayro_jpeg2000::DecoderContext::default();
-        let decoded = image.decode(&mut context).ok()?;
-        let data = decoded.data_u8();
-        let pixels = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
-        if data.len() != pixels.checked_mul(embedded.channels() + usize::from(image.has_alpha()))? {
-            return None;
-        }
-        // A PDF ColorSpace overrides the colour space embedded in JP2.
-        space = match dict.get(b"ColorSpace") {
-            Ok(value) => color::resolve_space(document, resources, value)?,
-            Err(_) => embedded,
-        };
-        samples = data;
-    } else {
-        space = color::resolve_space(document, resources, dict.get(b"ColorSpace").ok()?)?;
-        let channels = space.channels();
-        if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
-            return None;
-        }
-        samples = match codec.as_slice() {
-            b"DCTDecode" if bits == 8 => {
-                let limit = usize::try_from(u64::from(width) * u64::from(height)).ok()?.checked_mul(channels)?;
-                let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(&encoded));
-                decoder.set_max_decoding_buffer_size(limit);
-                decoder.read_info().ok()?;
-                let info = decoder.info()?;
-                if (u32::from(info.width), u32::from(info.height), info.pixel_format.pixel_bytes()) != (width, height, channels) {
-                    return None;
-                }
-                if let Ok(transform) = codec_parameters.get(b"ColorTransform") {
-                    let transform = match (transform.as_i64().ok()?, channels) {
-                        (0, 3) => jpeg_decoder::ColorTransform::RGB,
-                        (0, 4) => jpeg_decoder::ColorTransform::CMYK,
-                        (1, 3) => jpeg_decoder::ColorTransform::YCbCr,
-                        (1, 4) => jpeg_decoder::ColorTransform::YCCK,
-                        _ => return None,
-                    };
-                    decoder.set_color_transform(transform);
-                }
-                let mut samples = decoder.decode().ok()?;
-                // Undo jpeg-decoder's CMYK polarity normalization before PDF /Decode.
-                if channels == 4 {
-                    for sample in &mut samples {
-                        *sample = 255 - *sample;
-                    }
-                }
-                samples
-            }
-            b"" => unpack(&encoded, width, height, channels, bits)?,
-            _ => return None,
-        };
-    }
+    let bits = dict.get(b"BitsPerComponent").and_then(Object::as_i64).ok()?;
+    let space = color::resolve_space(document, resources, dict.get(b"ColorSpace").ok()?)?;
     let channels = space.channels();
+    if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
+        return None;
+    }
+    let mut samples = match codec.as_slice() {
+        b"DCTDecode" if bits == 8 => {
+            let limit = usize::try_from(u64::from(width) * u64::from(height)).ok()?.checked_mul(channels)?;
+            let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(encoded.as_slice()));
+            decoder.set_max_decoding_buffer_size(limit);
+            decoder.read_info().ok()?;
+            let info = decoder.info()?;
+            if (u32::from(info.width), u32::from(info.height), info.pixel_format.pixel_bytes()) != (width, height, channels) {
+                return None;
+            }
+            if let Ok(transform) = codec_parameters.get(b"ColorTransform") {
+                let transform = match (transform.as_i64().ok()?, channels) {
+                    (0, 3) => jpeg_decoder::ColorTransform::RGB,
+                    (0, 4) => jpeg_decoder::ColorTransform::CMYK,
+                    (1, 3) => jpeg_decoder::ColorTransform::YCbCr,
+                    (1, 4) => jpeg_decoder::ColorTransform::YCCK,
+                    _ => return None,
+                };
+                decoder.set_color_transform(transform);
+            }
+            let mut samples = decoder.decode().ok()?;
+            // Undo jpeg-decoder's CMYK polarity normalization before PDF /Decode.
+            if channels == 4 {
+                for sample in &mut samples {
+                    *sample = 255 - *sample;
+                }
+            }
+            samples
+        }
+        b"" => unpack(&encoded, width, height, channels, bits)?,
+        _ => return None,
+    };
     let pixels = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
     if samples.len() != pixels.checked_mul(channels)? {
         return None;
     }
-    // ISO 32000: /Decode is ignored for JPXDecode, whose samples are normalized
-    // by the JPEG2000 decoder. All other codecs produce PDF sample values.
-    if !jpx {
-        let mapping = match dict.get(b"Decode") {
-            Ok(value) => Some(numbers(resolve(document, value)?.as_array().ok()?)?),
-            Err(_) => None,
-        };
-        let indexed = matches!(space, color::Space::Indexed(_));
-        if (indexed && bits > 8) || mapping.as_ref().is_some_and(|values| values.len() != channels * 2) {
-            return None;
-        }
-        if indexed || mapping.is_some() {
-            let default_max = if indexed { ((1_u32 << bits) - 1) as f64 } else { 1. };
-            let scale = if indexed { 1. } else { 255. };
-            for pixel in samples.chunks_exact_mut(channels) {
-                for (i, sample) in pixel.iter_mut().enumerate() {
-                    let (min, max) = mapping.as_deref().map_or((0., default_max), |values| (values[2 * i], values[2 * i + 1]));
-                    let value = min + f64::from(*sample) / 255. * (max - min);
-                    *sample = (value * scale).round().clamp(0., 255.) as u8;
-                }
+    let mapping = match dict.get(b"Decode") {
+        Ok(value) => Some(numbers(resolve(document, value)?.as_array().ok()?)?),
+        Err(_) => None,
+    };
+    let indexed = matches!(space, color::Space::Indexed(_));
+    if (indexed && bits > 8) || mapping.as_ref().is_some_and(|values| values.len() != channels * 2) {
+        return None;
+    }
+    if indexed || mapping.is_some() {
+        let default_max = if indexed { ((1_u32 << bits) - 1) as f64 } else { 1. };
+        let scale = if indexed { 1. } else { 255. };
+        for pixel in samples.chunks_exact_mut(channels) {
+            for (i, sample) in pixel.iter_mut().enumerate() {
+                let (min, max) = mapping.as_deref().map_or((0., default_max), |values| (values[2 * i], values[2 * i + 1]));
+                let value = min + f64::from(*sample) / 255. * (max - min);
+                *sample = (value * scale).round().clamp(0., 255.) as u8;
             }
         }
     }
@@ -643,22 +612,22 @@ mod tests {
         }
     }
     #[test]
-    fn jpeg2000_preserves_pixels_and_ignores_pdf_decode_ranges() {
+    fn jpeg2000_covers_require_rendering() {
         let mut document = fixture(DRAW, 0);
         let stream = image_mut(&mut document);
         stream.dict.set("Filter", Object::Name(b"JPXDecode".to_vec()));
         stream.dict.set("Decode", vec![1.into(), 0.into(), 1.into(), 0.into(), 1.into(), 0.into()]);
         stream.set_content(include_bytes!("../tests/fixtures/six-colours.jp2").to_vec());
-        assert_eq!(run(document).unwrap(), run(fixture(DRAW, 0)).unwrap());
+        assert!(run(document).is_none());
     }
     #[test]
-    fn indirect_image_filter_names_are_resolved() {
+    fn indirect_jpeg2000_filters_require_rendering() {
         let mut document = fixture(DRAW, 0);
         let filter = document.add_object(Object::Name(b"JPXDecode".to_vec()));
         let stream = image_mut(&mut document);
         stream.dict.set("Filter", filter);
         stream.set_content(include_bytes!("../tests/fixtures/six-colours.jp2").to_vec());
-        assert_eq!(run(document).unwrap(), run(fixture(DRAW, 0)).unwrap());
+        assert!(run(document).is_none());
     }
 
     #[test]

@@ -1,22 +1,29 @@
-use app::host::startup_profile::StartupProfile;
-use app::host::defer_library_maintenance;
+use ui_text::text;
+
 use app::{AppDataLocation, host::BackendLaunch};
+use gpui::Platform;
 use gpui_android::{AndroidApp, AndroidPlatform, AndroidPlatformOptions};
 use jni::EnvUnowned;
-use jni::objects::{JClass, JObject, JString};
+use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::refs::Reference;
 use jni::sys::{jboolean, jint, jlong, jstring};
+use std::borrow::Cow;
+use std::ffi::CString;
 use std::fs::File;
+use std::io::{self, Read};
 use std::os::fd::FromRawFd as _;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Once;
 use std::sync::mpsc::TrySendError;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 
-use crate::{IncomingBook, IncomingBookResult, UiLaunchOptions, open_ui};
+use crate::{IncomingBook, IncomingBookResult, ReaderActivation, UiLaunchOptions, open_ui};
 
 static INCOMING_FILE_SENDER: OnceLock<async_channel::Sender<IncomingBookResult>> = OnceLock::new();
+static READER_LINKS: LazyLock<(async_channel::Sender<ReaderActivation>, async_channel::Receiver<ReaderActivation>)> = LazyLock::new(async_channel::unbounded);
+// Queue entries and storage snapshots remain valid if a callback unwinds.
+// Recover these locks so a later JNI callback cannot panic on poisoning.
 static EARLY_INCOMING_FILES: Mutex<Vec<IncomingBookResult>> = Mutex::new(Vec::new());
 static NATIVE_BACK: OnceLock<async_channel::Sender<()>> = OnceLock::new();
 static STAGING_QUEUE: OnceLock<std::sync::mpsc::SyncSender<StagingRequest>> = OnceLock::new();
@@ -29,10 +36,10 @@ struct StorageAccess {
 
 static STORAGE_ACCESS: Mutex<(Option<async_channel::Sender<StorageAccess>>, Option<StorageAccess>)> = Mutex::new((None, None));
 
-pub(crate) fn watch_storage_access(backend: app::AppClient, private_root: std::path::PathBuf, cx: &mut gpui::App) {
+pub(crate) fn watch_storage_access(preferences: app_preferences::Client, private_root: std::path::PathBuf, cx: &mut gpui::App) {
     let (sender, receiver) = async_channel::unbounded();
     {
-        let mut state = STORAGE_ACCESS.lock().unwrap();
+        let mut state = STORAGE_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(access) = state.1.clone() {
             sender.try_send(access).ok();
         }
@@ -42,16 +49,16 @@ pub(crate) fn watch_storage_access(backend: app::AppClient, private_root: std::p
         let private_root = private_root.to_string_lossy().into_owned();
         while let Ok(access) = receiver.recv().await {
             let outcome = async {
-                let current = backend.default_library_save_location().await?;
+                let current = preferences.default_library_save_location(&private_root).await?;
                 // Only switch our automatic destinations. Never replace a
                 // user's custom save location or move existing libraries.
                 if current.as_deref().is_none_or(|current| same_storage_root(current, &private_root) || same_storage_root(current, &access.documents_root)) {
                     let root = if access.granted { access.documents_root } else { private_root.clone() };
                     if !current.as_deref().is_some_and(|current| same_storage_root(current, &root)) {
-                        backend.set_default_library_save_location(root).await?;
+                        preferences.set_default_library_save_location(root).await?;
                     }
                 }
-                Ok::<_, String>(())
+                Ok::<_, io::Error>(())
             }
             .await;
             if let Err(error) = outcome {
@@ -74,17 +81,25 @@ struct StagingRequest {
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     gpui_android::init_logging();
+    if let Err(error) = run_android(app.clone()) {
+        log::error!("Could not start Bokheim: {error}");
+        finish_activity(&app);
+    }
+}
+
+fn run_android(app: AndroidApp) -> Result<(), String> {
+    let data_dir = app.internal_data_path().ok_or("Android did not provide a private application data directory")?;
     let (back_sender, back_receiver) = async_channel::unbounded();
     NATIVE_BACK.set(back_sender).ok();
     let (incoming_sender, incoming_files) = async_channel::bounded(8);
     INCOMING_FILE_SENDER.set(incoming_sender.clone()).ok();
-    for file in std::mem::take(&mut *EARLY_INCOMING_FILES.lock().unwrap()) {
+    for file in std::mem::take(&mut *EARLY_INCOMING_FILES.lock().unwrap_or_else(PoisonError::into_inner)) {
         incoming_sender.try_send(file).ok();
     }
     // Retain the application context and class, never an Activity: media
     // commands remain valid after the activity is destroyed or recreated.
     let audio_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    let (audio_class, audio_context, profiling, defer_background, defer_maintenance, load_system_fonts, cache_gpu_pipelines, force_opengl) = audio_vm
+    let (audio_class, audio_context, load_system_fonts, cache_gpu_pipelines, force_opengl) = audio_vm
         .attach_current_thread(|env| {
             let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
             let activity = unsafe { env.as_cast_raw::<jni::refs::Global<JObject>>(&raw_activity)? };
@@ -96,36 +111,30 @@ fn android_main(app: AndroidApp) {
             if env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()? {
                 gpui::profiler::input_frame::enable();
             }
-            let key = JString::from_str(env, "bokheim.startup_profile")?;
-            let profiling = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
-            let key = JString::from_str(env, "bokheim.startup_defer_background")?;
-            let defer_background = profiling && env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
-            let key = JString::from_str(env, "bokheim.startup_defer_maintenance")?;
-            let defer_maintenance = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(true)])?.z()?;
             let key = JString::from_str(env, "bokheim.android_system_fonts")?;
-            let load_system_fonts = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
+            let load_system_fonts = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(true)])?.z()?;
             let key = JString::from_str(env, "bokheim.gpu_pipeline_cache")?;
             let cache_gpu_pipelines = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(true)])?.z()?;
             let key = JString::from_str(env, "bokheim.force_opengl")?;
             let force_opengl = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
-            Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, profiling, defer_background, defer_maintenance, load_system_fonts, cache_gpu_pipelines, force_opengl))
+            Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, load_system_fonts, cache_gpu_pipelines, force_opengl))
         })
-        .expect("could not initialize Android audiobook bridge");
-    if profiling {
-        StartupProfile::enable();
-        gpui::profiler::startup::StartupProfile::enable();
-    }
-    let mut profile = StartupProfile::new("android_launch");
+        .map_err(|error| {
+            log::error!("could_not_initialize_android_audiobook_bridge: {error}");
+            text!(startup::could_not_initialize_android_audiobook_bridge).to_owned()
+        })?;
     let taxonomy = audio_vm
         .attach_current_thread(|env| {
             let path = env.call_static_method(&audio_class, jni::jni_str!("taxonomyFile"), jni::jni_sig!("(Landroid/content/Context;)Ljava/lang/String;"), &[jni::objects::JValue::Object(audio_context.as_ref())])?.l()?;
             env.cast_local::<JString>(path)?.try_to_string(env)
         })
-        .expect("could not extract bundled taxonomy");
-    subject_projection::bundled::set_path(Path::new(&taxonomy)).expect("could not configure bundled taxonomy");
-    profile.mark("taxonomy_prepare");
+        .map_err(|error| format!("could not extract bundled taxonomy: {error}"))?;
+    subject_projection::bundled::set_path(Path::new(&taxonomy)).map_err(|error| format!("could not configure bundled taxonomy: {error}"))?;
     let speech_vm = audio_vm.clone();
-    let (speech_class, speech_context) = audio_vm.attach_current_thread(|env| Ok::<_, jni::errors::Error>((env.new_global_ref(&audio_class)?, env.new_global_ref(&audio_context)?))).expect("could not retain Android speech context");
+    let (speech_class, speech_context) = audio_vm.attach_current_thread(|env| Ok::<_, jni::errors::Error>((env.new_global_ref(&audio_class)?, env.new_global_ref(&audio_context)?))).map_err(|error| {
+        log::error!("could_not_retain_android_speech_context: {error}");
+        text!(startup::could_not_retain_android_speech_context).to_owned()
+    })?;
     let speech_refs = Arc::new((speech_class, speech_context));
     let model_refs = speech_refs.clone();
     let model_vm = speech_vm.clone();
@@ -146,6 +155,24 @@ fn android_main(app: AndroidApp) {
             .map(Into::into)
             .map_err(|error| error.to_string())
     });
+    let device_vm = speech_vm.clone();
+    let device_refs = speech_refs.clone();
+    reader_speech::device::initialize(move |command| {
+        device_vm
+            .attach_current_thread(|env| {
+                let command = JString::from_str(env, command)?;
+                let response = env
+                    .call_static_method(
+                        &device_refs.0,
+                        jni::jni_str!("localSpeechCommand"),
+                        jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;"),
+                        &[jni::objects::JValue::Object(device_refs.1.as_ref()), jni::objects::JValue::Object(command.as_ref())],
+                    )?
+                    .l()?;
+                env.cast_local::<JString>(response)?.try_to_string(env)
+            })
+            .map_err(|error| error.to_string())
+    });
     reader_speech::android::initialize(move |command| {
         speech_vm
             .attach_current_thread(|env| {
@@ -160,7 +187,7 @@ fn android_main(app: AndroidApp) {
             })
             .map_err(|error| error.to_string())
     });
-    audiobook_player::android::initialize(app.internal_data_path().unwrap().join("audio-playback"), move |command| {
+    audiobook_player::android::initialize(data_dir.join("audio-playback"), move |command| {
         audio_vm
             .attach_current_thread(|env| {
                 let command = JString::from_str(env, command)?;
@@ -182,7 +209,7 @@ fn android_main(app: AndroidApp) {
             let class = env.get_object_class(activity.as_ref())?;
             env.new_global_ref(class)
         })
-        .expect("could not initialize Android account bridge");
+        .map_err(|error| format!("could not initialize Android account bridge: {error}"))?;
     browser_ui::android_authentication::initialize(move |command| {
         auth_vm
             .attach_current_thread(|env| {
@@ -192,7 +219,6 @@ fn android_main(app: AndroidApp) {
             })
             .map_err(|error| error.to_string())
     });
-    profile.mark("media_and_auth_bridges");
     let browser_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
     let browser_class = browser_vm
         .attach_current_thread(|env| {
@@ -202,11 +228,10 @@ fn android_main(app: AndroidApp) {
             let class = env.get_object_class(activity.as_ref())?;
             env.call_static_method(&class, jni::jni_str!("startNetworkCostMonitor"), jni::jni_sig!("(Landroid/content/Context;)V"), &[jni::objects::JValue::Object(context.as_ref())])?;
             rustls_platform_verifier::android::init_with_env(env, context)?;
-            env.call_static_method(&class, jni::jni_str!("useTransferPolicy"), jni::jni_sig!("()V"), &[])?;
             env.new_global_ref(class)
         })
-        .expect("could not initialize Android book browser bridge");
-    crate::book_browser::initialize(
+        .map_err(|error| format!("could not initialize Android book browser bridge: {error}"))?;
+    embedded_browser_ui::android::initialize(
         move |command| {
             browser_vm
                 .attach_current_thread(|env| {
@@ -216,12 +241,10 @@ fn android_main(app: AndroidApp) {
                 })
                 .map_err(|error| error.to_string())
         },
-        app::host::android_browser::receive,
+        embedded_browser::android::receive,
     );
-    app::host::android_browser::initialize(crate::book_browser::command);
-    profile.mark("browser_and_network");
+    embedded_browser::android::initialize(embedded_browser_ui::android::command);
     gpui_platform::android_init(app.clone());
-    profile.mark("platform_init");
     static PANIC_LOGGING: Once = Once::new();
     PANIC_LOGGING.call_once(|| {
         let previous = std::panic::take_hook();
@@ -232,121 +255,162 @@ fn android_main(app: AndroidApp) {
     });
     log::info!("Bokheim Android entry point started");
 
-    let data_dir = app.internal_data_path().expect("Android did not provide a private application data directory");
-    app::host::configure_opds_browser(data_dir.join("opds-webview"));
+    embedded_browser::configure(data_dir.join("browser"));
     let update_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    let (update_class, update_context) = update_vm
+    let (update_class, update_context, play_store, self_updates_enabled) = update_vm
         .attach_current_thread(|env| {
             let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
             let activity = unsafe { env.as_cast_raw::<jni::refs::Global<JObject>>(&raw_activity)? };
             let class = env.get_object_class(activity.as_ref())?;
             let class = env.new_global_ref(class)?;
+            let play_store = env.call_static_method(&class, jni::jni_str!("isPlayStoreBuild"), jni::jni_sig!("()Z"), &[])?.z()?;
+            let self_updates_enabled = env.call_static_method(&class, jni::jni_str!("isSelfUpdateEnabled"), jni::jni_sig!("()Z"), &[])?.z()?;
             let context = env.call_method(activity.as_ref(), jni::jni_str!("getApplicationContext"), jni::jni_sig!("()Landroid/content/Context;"), &[])?.l()?;
-            Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?))
+            Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, play_store, self_updates_enabled))
         })
-        .expect("could not initialize Android update bridge");
-    let update_trial = crate::android_updates::initialize(&data_dir, move |command| {
-        update_vm
-            .attach_current_thread(|env| {
-                let command = JString::from_str(env, command)?;
-                let result = env.call_static_method(
-                    &update_class,
-                    jni::jni_str!("updateCommand"),
-                    jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;"),
-                    &[jni::objects::JValue::Object(update_context.as_ref()), jni::objects::JValue::Object(command.as_ref())],
-                );
-                if env.exception_check() {
-                    env.exception_describe();
-                    env.exception_clear();
-                }
-                let value = result?.l()?;
-                env.cast_local::<JString>(value)?.try_to_string(env)
-            })
-            .map_err(|e| e.to_string())
-    })
-    .expect("failed to recover Android update");
-    profile.mark("update_recovery");
-    let mut startup_permit = (update_trial || defer_background).then(app::host::defer_background_work);
-    // Keep scan/sync/import I/O from competing with opening the remaining
-    // libraries and rendering the first frame. Foreground commands stay live.
-    let maintenance_permit = defer_maintenance.then(defer_library_maintenance);
+        .map_err(|error| {
+            log::error!("could_not_initialize_android_update_bridge: {error}");
+            text!(startup::could_not_initialize_android_update_bridge).to_owned()
+        })?;
+    let update_trial = if !self_updates_enabled {
+        // No update host means no feed requests, APK staging or update controls.
+        false
+    } else {
+        crate::android_updates::initialize(&data_dir, move |command| {
+            update_vm
+                .attach_current_thread(|env| {
+                    let command = JString::from_str(env, command)?;
+                    let result = env.call_static_method(
+                        &update_class,
+                        jni::jni_str!("updateCommand"),
+                        jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;"),
+                        &[jni::objects::JValue::Object(update_context.as_ref()), jni::objects::JValue::Object(command.as_ref())],
+                    );
+                    if env.exception_check() {
+                        env.exception_describe();
+                        env.exception_clear();
+                    }
+                    let value = result?.l()?;
+                    env.cast_local::<JString>(value)?.try_to_string(env)
+                })
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|error| format!("failed to recover Android update: {error}"))?
+    };
+    let startup_permit = update_trial.then(app::host::defer_background_work);
     let incoming_directory = data_dir.join("incoming");
-    std::fs::create_dir_all(&incoming_directory).expect("failed to create Android incoming book directory");
-    cleanup_abandoned_incoming_files(&incoming_directory);
+    std::fs::create_dir_all(&incoming_directory).map_err(|error| format!("failed to create Android incoming book directory: {error}"))?;
     let (staging_sender, staging_receiver) = std::sync::mpsc::sync_channel::<StagingRequest>(2);
     STAGING_QUEUE.set(staging_sender).ok();
     std::thread::Builder::new()
         .name("incoming-book".to_owned())
         .spawn(move || {
+            cleanup_abandoned_incoming_files(&incoming_directory);
             for request in staging_receiver {
                 let path = incoming_directory.join(format!("{}.part", uuid::Uuid::new_v4()));
                 match crate::stage_incoming_book(request.file, &path) {
                     Ok(()) => deliver_incoming_file(Ok(IncomingBook { name: request.name, path })),
                     Err(error) => {
                         let _ = std::fs::remove_file(path);
-                        deliver_incoming_file(Err(format!("{}: {error}", request.name)));
+                        deliver_incoming_file(Err(app::BackendError::from(error).context(request.name)));
                     }
                 }
             }
         })
-        .expect("failed to start incoming book worker");
+        .map_err(|error| format!("failed to start incoming book worker: {error}"))?;
     log::info!("initializing backend in {}", data_dir.display());
-    let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).expect("failed to initialize Android app-data directory");
-    profile.mark("staging_and_launch_config");
+    let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).map_err(|error| {
+        log::error!("failed_to_initialize_android_app_data_directory: {error}");
+        text!(startup::failed_to_initialize_android_app_data_directory).to_owned()
+    })?;
+    let backend_context = if play_store { backend_context.with_private_library_storage() } else { backend_context };
     log::info!("backend context initialized");
 
     log::info!("constructing GPUI application");
-    let platform =
-        AndroidPlatform::new_with_options(false, AndroidPlatformOptions { load_system_fonts, system_font_fallback: "Raleway".into(), cache_gpu_pipelines, graphics_backends: force_opengl.then_some(gpui_android::wgpu::Backends::GL) });
+    // Start the UI with bundled fonts. Device font I/O and registration run
+    // in the background after the application window has been installed.
+    let platform = AndroidPlatform::new_with_options(
+        false,
+        AndroidPlatformOptions { load_system_fonts: false, system_font_fallback: "Noto Sans".into(), cache_gpu_pipelines, graphics_backends: force_opengl.then_some(gpui_android::wgpu::Backends::GL) },
+    );
+    let font_text_system = load_system_fonts.then(|| platform.text_system());
     let application = gpui::Application::with_platform(Rc::new(platform)).with_assets(ui_components::Assets);
-    profile.mark("application_construct");
     log::info!("running GPUI application");
+    let font_assets = app.asset_manager();
     application.run(move |cx| {
-        profile.mark("event_loop_ready");
+        ui_components::configure_bundled_font_source(
+            move |name| {
+                let path = CString::new(format!("fonts/{name}")).map_err(|error| error.to_string())?;
+                let mut asset = font_assets.open(&path).ok_or_else(|| format!("bundled font asset is missing: {name}"))?;
+                let mut bytes = Vec::with_capacity(asset.length());
+                asset.read_to_end(&mut bytes).map_err(|error| format!("read bundled font {name}: {error}"))?;
+                Ok(Cow::Owned(bytes))
+            },
+            cx,
+        );
+        cx.set_global(ui_components::SystemFontFamilies(if load_system_fonts { Vec::new() } else { vec!["NV Garamond".into(), "Raleway".into(), "Bodoni Moda".into()] }));
+        let pending_fonts = font_text_system.map(|text_system| {
+            let (ready, receiver) = async_channel::bounded::<()>(1);
+            cx.set_global(reader_ui::SystemFontsLoading(receiver));
+            (text_system, ready)
+        });
+        cx.set_global(browser_ui::AndroidStoragePolicy { all_files_access_available: !play_store });
         log::info!("opening shared Bokheim UI");
         let opened = open_ui(backend_context, UiLaunchOptions::MOBILE, Some(incoming_files), cx);
+        if let Some(root) = opened.clone() {
+            crate::forward_reader_links(READER_LINKS.1.clone(), root, cx);
+        }
+        if opened.is_none() {
+            log::error!("failed to open the Android application UI");
+            finish_activity(&app);
+            cx.quit();
+            return;
+        }
+        if let Some((text_system, ready)) = pending_fonts {
+            let fonts = cx.background_executor().spawn(async move {
+                crate::android_fonts::load(text_system.as_ref());
+                text_system.all_font_names()
+            });
+            cx.spawn(async move |cx| {
+                let families = fonts.await;
+                let _ = cx.update(|cx| {
+                    cx.set_global(ui_components::SystemFontFamilies(families));
+                    cx.refresh_windows();
+                });
+                // No messages are sent: closing wakes every waiting reader.
+                drop(ready);
+            })
+            .detach();
+        }
         if let Some(root) = opened.clone() {
             let back_app = app.clone();
             cx.spawn(async move |cx| {
                 while back_receiver.recv().await.is_ok() {
                     // This is navigation, not a synthetic keyboard event.
                     if matches!(root.update_in(cx, |root, window, cx| root.native_back(window, cx)), Ok(false)) {
-                        finish_from_back(&back_app);
+                        finish_activity(&back_app);
                     }
                 }
             })
             .detach();
         }
-        profile.mark("ui_open");
         if opened.is_some() {
-            crate::android_updates::healthy().expect("failed to commit Android update startup");
-            if !defer_background {
-                if let Some(permit) = startup_permit.take() {
-                    permit.release();
-                }
+            if let Err(error) = crate::android_updates::healthy() {
+                log::error!("failed to commit Android update startup: {error}");
+                finish_activity(&app);
+                cx.quit();
+                return;
+            }
+            if let Some(permit) = startup_permit {
+                permit.release();
             }
         }
         log::info!("shared Bokheim UI opened");
-        if opened.is_some() {
-            profile.mark("update_healthy");
-            let window = cx.windows()[0];
-            let _ = window.update(cx, |_, window, _| {
-                window.on_next_frame(move |_, _| {
-                    profile.mark("frame_callback");
-                    if let Some(permit) = maintenance_permit {
-                        log::info!("Android library maintenance released after first frame callback");
-                        drop(permit);
-                    }
-                    if let Some(permit) = startup_permit {
-                        permit.release();
-                    }
-                })
-            });
-        }
     });
+    Ok(())
 }
 
-fn finish_from_back(app: &AndroidApp) {
+fn finish_activity(app: &AndroidApp) {
     let activity_app = app.clone();
     app.run_on_java_main_thread(Box::new(move || {
         let vm = unsafe { jni::JavaVM::from_raw(activity_app.vm_as_ptr().cast()) };
@@ -357,7 +421,7 @@ fn finish_from_back(app: &AndroidApp) {
             Ok::<_, jni::errors::Error>(())
         });
         if let Err(error) = result {
-            log::error!("Could not finish Android activity after Back: {error}");
+            log::error!("Could not finish Android activity: {error}");
         }
     }));
 }
@@ -370,11 +434,6 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeBackPressed(_e
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeTransfersAllowed(_env: EnvUnowned<'_>, _class: JClass<'_>) -> jboolean {
-    app::host::transfers::allowed().into()
-}
-
-#[unsafe(no_mangle)]
 extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeNetworkCostChanged(_env: EnvUnowned<'_>, _class: JClass<'_>, cost: jint) {
     use app::host::transfers::{NetworkCost, POLICY};
     POLICY.set_network_cost(match cost {
@@ -383,6 +442,8 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeNetworkCostCha
         _ => NetworkCost::Unknown,
     });
 }
+
+// Keep the Java callback ABI available in builds without provider support.
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_se_bokheim_reader_gpui_UpdateMetadata_nativeJson<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: jni::objects::JClass<'caller>) -> jni::sys::jstring {
@@ -427,7 +488,7 @@ fn deliver_incoming_file(file: IncomingBookResult) {
             }
         }
     } else {
-        EARLY_INCOMING_FILES.lock().unwrap().push(file);
+        EARLY_INCOMING_FILES.lock().unwrap_or_else(PoisonError::into_inner).push(file);
     }
 }
 
@@ -440,6 +501,17 @@ fn cleanup_abandoned_incoming_files(directory: &Path) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeOpenReaderLink<'caller>(mut unowned_env: EnvUnowned<'caller>, _activity: JObject<'caller>, url: JString<'caller>) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            let url = url.try_to_string(env)?;
+            let _ = READER_LINKS.0.try_send(vec![url].into());
+            Ok(())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>();
 }
 
 #[unsafe(no_mangle)]
@@ -461,9 +533,9 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeOpenBook<'call
                     let request = match error {
                         TrySendError::Full(request) | TrySendError::Disconnected(request) => request,
                     };
-                    deliver_incoming_file(Err(format!("could not queue {}: incoming book queue is full or stopped", request.name)));
+                    deliver_incoming_file(Err(app::BackendError::message(format!(text!(startup::could_not_queue_incoming_book_queue_is_full_or_stopped), request.name))));
                 }
-                None => deliver_incoming_file(Err("incoming book worker is not initialized".to_owned())),
+                None => deliver_incoming_file(Err(app::BackendError::message(text!(startup::incoming_book_worker_is_not_initialized)))),
             }
             Ok(())
         })
@@ -524,7 +596,7 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeStorageAccessC
     unowned_env
         .with_env(|env| -> jni::errors::Result<()> {
             let access = StorageAccess { granted, documents_root: documents_root.try_to_string(env)? };
-            let mut state = STORAGE_ACCESS.lock().unwrap();
+            let mut state = STORAGE_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
             state.1 = Some(access.clone());
             if let Some(sender) = &state.0 {
                 sender.try_send(access).ok();
@@ -606,6 +678,36 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeReaderChromeRe
 }
 
 #[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_DeviceSpeech_nativeBegin(_env: EnvUnowned<'_>, _class: JClass<'_>, id: jlong, rate: jint, encoding: jint, channels: jint) -> jboolean {
+    id > 0 && rate > 0 && reader_speech::device::started(id as u64, rate as u32, encoding, channels)
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_DeviceSpeech_nativeAudio<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>, id: jlong, bytes: JByteArray<'caller>) -> jboolean {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<_> {
+            if id <= 0 || bytes.len(env)? > 32 * 1024 * 1024 {
+                return Ok(false);
+            }
+            Ok(reader_speech::device::audio(id as u64, &env.convert_byte_array(&bytes)?))
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_DeviceSpeech_nativeComplete<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>, id: jlong, error: JString<'caller>) {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<()> {
+            let error = if error.is_null() { None } else { Some(error.try_to_string(env)?) };
+            if id > 0 {
+                reader_speech::device::complete(id as u64, error);
+            }
+            Ok(())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>();
+}
+
+#[unsafe(no_mangle)]
 extern "system" fn Java_se_bokheim_reader_gpui_SpeechService_nativeState<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>, id: jlong) -> jstring {
     unowned_env
         .with_env(|env| -> jni::errors::Result<_> {
@@ -644,18 +746,29 @@ extern "system" fn Java_se_bokheim_reader_gpui_AudiobookService_nativeInterruptA
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_se_bokheim_reader_gpui_AudiobookService_nativeReadAudio<'caller>(
-    mut unowned_env: EnvUnowned<'caller>, _class: jni::objects::JClass<'caller>, id: jni::sys::jlong, offset: jni::sys::jlong, length: jni::sys::jint,
-) -> jni::sys::jbyteArray {
+    mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>, id: jlong, offset: jlong, buffer: JByteArray<'caller>, buffer_offset: jint, length: jint,
+) -> jint {
     unowned_env
-        .with_env(|env| -> jni::errors::Result<jni::sys::jbyteArray> {
-            if id <= 0 || offset < 0 || length < 0 {
-                return Ok(std::ptr::null_mut());
+        .with_env(|env| -> jni::errors::Result<jint> {
+            if id <= 0 || offset < 0 || buffer.is_null() || buffer_offset < 0 || !(0..=256 * 1024).contains(&length) {
+                return Ok(-1);
+            }
+            let buffer_length = buffer.len(env)?;
+            if buffer_offset as usize > buffer_length || length as usize > buffer_length - buffer_offset as usize {
+                return Ok(-1);
             }
             match audiobook_player::android::read_source(id as u64, offset as u64, length as usize) {
-                Ok(bytes) => Ok(env.byte_array_from_slice(&bytes)?.into_raw()),
+                Ok(bytes) => {
+                    // SAFETY: u8 and JNI's i8 have identical layout and accept every bit pattern.
+                    // This borrowed view avoids allocating a signed-byte copy of the audio data.
+                    let signed_bytes = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i8>(), bytes.len()) };
+                    // Copy only after the potentially blocking read; never pin Java memory across I/O.
+                    buffer.set_region(env, buffer_offset, signed_bytes)?;
+                    Ok(bytes.len() as jint)
+                }
                 Err(error) => {
                     log::warn!("Could not read Android audiobook: {error}");
-                    Ok(std::ptr::null_mut())
+                    Ok(-1)
                 }
             }
         })
@@ -676,7 +789,7 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeAuthentication
 extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeBookBrowserEvent<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: jni::objects::JClass<'caller>, id: jlong, message: JString<'caller>) {
     unowned_env
         .with_env(|env| -> jni::errors::Result<()> {
-            crate::book_browser::receive(id as u64, &message.try_to_string(env)?);
+            embedded_browser_ui::android::receive(id as u64, &message.try_to_string(env)?);
             Ok(())
         })
         .resolve::<jni::errors::LogErrorAndDefault>();

@@ -23,7 +23,7 @@ SELECT p.relative_path
 FROM local_file_projection p
 JOIN pending USING(content_hash)
 UNION ALL
-SELECT relative_path FROM local_file_work;
+SELECT relative_path FROM local_file_work WHERE operation='remove' AND source_root IS NULL;
 
 -- name: scanner_pending_placements?
 -- Live placements of books with queued work; Rust adds each one's path.
@@ -40,13 +40,24 @@ WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL;
 
 -- Scanner inventory and apply operations.
 
+-- name: scanner_directory_projection_retained ->
+-- param: dir_id: &str
+-- param: parent_id: &str
+-- param: relative_path: &str
+SELECT EXISTS(
+    SELECT 1 FROM dir d
+    JOIN local_directory_projection p ON p.dir_id=d.id
+    WHERE d.id=:dir_id AND d.parent_id=:parent_id AND d.deleted_at IS NULL
+      AND trim(p.relative_path,'/')=trim(:relative_path,'/')
+);
+
 -- name: scanner_set_sequence!
 -- param: value: &str
 INSERT INTO sync_metadata(singleton,scan_seq) VALUES(1,:value) ON CONFLICT(singleton) DO UPDATE SET scan_seq=excluded.scan_seq;
 
 -- name: scanner_known_books?
 SELECT bd.local_hash,b.content_hash,bd.dir_id,bd.file_name,i.inspection_version,
-       b.format,b.duration_ms,b.toc_json,b.tracks_json
+       b.format,b.duration_ms,CAST(b.toc_json AS BLOB),CAST(b.tracks_json AS BLOB)
 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
 LEFT JOIN book_local_state i ON i.content_hash=b.content_hash AND i.inspection_format=b.format
 WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL AND bd.local_hash!='';

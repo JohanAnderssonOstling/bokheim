@@ -1,13 +1,13 @@
-use crate::http::{decode_response, post_empty, request, with_body};
-use crate::session::{AuthError, Session};
 use crate::Url;
-use account_contract::{AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest};
-use reqwest::Method;
+use crate::http::{decode_response, post_empty, request, send, with_body};
+use crate::session::{AuthError, Session};
+use account_contract::{AuthResponse, DeleteAccountRequest, EmailRequest, EmailVerificationRequest, LoginRequest, PASSWORD_MAX_BYTES, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest};
+use reqwest::{Method, StatusCode};
 use serde::Serialize;
 
 async fn post_auth(server_url: &Url, endpoint: &str, body: &impl Serialize) -> Result<Session, AuthError> {
     let response: AuthResponse = decode_response(with_body(request(server_url, Method::POST, endpoint)?, body)?).await?;
-    Session::try_new_with_tokens(server_url.clone(), response.user_id, response.email, response.token, Some(response.expires_at), Some(response.refresh_token), Some(response.refresh_expires_at))
+    Session::try_new(server_url.clone(), response.user_id, response.email, response.token, response.expires_at, response.refresh_token, response.refresh_expires_at)
 }
 
 pub async fn login(server_url: &Url, email: &str, password: &str) -> Result<Session, AuthError> {
@@ -15,6 +15,7 @@ pub async fn login(server_url: &Url, email: &str, password: &str) -> Result<Sess
 }
 
 pub async fn request_public_registration(server_url: &Url, email: &str, password: &str) -> Result<(), AuthError> {
+    validate_password_length(password)?;
     post_empty(server_url, "api/auth/register", &PublicRegistrationRequest { email: email.to_owned(), password: password.to_owned() }).await
 }
 
@@ -22,8 +23,9 @@ pub async fn resend_verification(server_url: &Url, email: &str) -> Result<(), Au
     post_empty(server_url, "api/auth/resend-verification", &EmailRequest { email: email.to_owned() }).await
 }
 
-pub async fn verify_email(server_url: &Url, email: &str, pin: &str) -> Result<Session, AuthError> {
-    post_auth(server_url, "api/auth/verify-email", &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned() }).await
+pub async fn verify_email(server_url: &Url, email: &str, pin: &str, password: &str) -> Result<Session, AuthError> {
+    validate_password_length(password)?;
+    post_auth(server_url, "api/auth/verify-email", &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned(), password: password.to_owned() }).await
 }
 
 pub async fn request_password_reset(server_url: &Url, email: &str) -> Result<(), AuthError> {
@@ -31,18 +33,36 @@ pub async fn request_password_reset(server_url: &Url, email: &str) -> Result<(),
 }
 
 pub async fn reset_password(server_url: &Url, token: &str, new_password: &str) -> Result<(), AuthError> {
+    validate_password_length(new_password)?;
     post_empty(server_url, "api/auth/reset-password", &ResetPasswordRequest { token: token.to_owned(), new_password: new_password.to_owned() }).await
 }
 
+fn validate_password_length(password: &str) -> Result<(), AuthError> {
+    if password.len() > PASSWORD_MAX_BYTES {
+        return Err(AuthError::PasswordTooLong);
+    }
+    Ok(())
+}
+
 pub async fn logout(session: &Session) -> Result<(), AuthError> {
-    let refresh_token = session.refresh_token().ok_or_else(|| AuthError::InvalidData("session has no refresh token; sign in again".to_owned()))?;
+    let refresh_token = session.refresh_token();
     post_empty(session.server_url(), "api/auth/logout", &RefreshRequest { refresh_token: refresh_token.to_owned() }).await
 }
 
+/// Deletes the account only after checking its current password again.
+pub async fn delete_account(session: &Session, password: &str) -> Result<(), AuthError> {
+    let body = DeleteAccountRequest { email: session.email().to_owned(), password: password.to_owned(), confirmation: "DELETE".to_owned() };
+    let response = send(request(session.server_url(), Method::POST, "api/auth/delete-account")?.json(&body)).await?;
+    if response.status() != StatusCode::NO_CONTENT {
+        return Err(AuthError::InvalidData("account deletion was not confirmed by the server".into()));
+    }
+    Ok(())
+}
+
 pub async fn refresh_session(session: &Session) -> Result<Session, AuthError> {
-    let refresh_token = session.refresh_token().ok_or_else(|| AuthError::InvalidData("session has no refresh token; sign in again".to_owned()))?;
+    let refresh_token = session.refresh_token();
     if session.refresh_expires_within(0) {
-        return Err(AuthError::InvalidData("refresh token has expired; sign in again".to_owned()));
+        return Err(AuthError::SignInRequired("refresh token has expired"));
     }
     let refreshed = post_auth(session.server_url(), "api/auth/refresh", &RefreshRequest { refresh_token: refresh_token.to_owned() }).await?;
     if refreshed.user_id() != session.user_id() {
@@ -54,17 +74,41 @@ pub async fn refresh_session(session: &Session) -> Result<Session, AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Bytes;
-    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use axum::response::{IntoResponse, Response};
     use axum::routing::{get, post};
-    use axum::Router;
-    use flate2::{write::GzEncoder, Compression};
+    use flate2::{Compression, write::GzEncoder};
     use std::io::Write;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use sync_common::transport as wire;
 
+    #[tokio::test]
+    async fn deletion_requires_server_confirmation_and_preserves_authentication_errors() {
+        let app = Router::new().route(
+            "/api/auth/delete-account",
+            post(|headers: HeaderMap, axum::Json(body): axum::Json<DeleteAccountRequest>| async move {
+                assert_eq!(body.email, "reader@example.com");
+                assert_eq!(body.confirmation, "DELETE");
+                assert!(!headers.contains_key(header::AUTHORIZATION), "fresh password authorizes deletion");
+                match body.password.as_str() {
+                    "correct-password" => StatusCode::NO_CONTENT,
+                    "wrong-password" => StatusCode::UNAUTHORIZED,
+                    _ => StatusCode::OK,
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session = Session::try_new(origin, "user-1".into(), "reader@example.com".into(), "a".repeat(43), i64::MAX - 1, "r".repeat(43), i64::MAX).unwrap();
+        delete_account(&session, "correct-password").await.unwrap();
+        assert!(delete_account(&session, "wrong-password").await.unwrap_err().is_unauthorized());
+        assert!(matches!(delete_account(&session, "unexpected-response").await, Err(AuthError::InvalidData(_))));
+        server.abort();
+    }
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn gzip_response(body: &[u8], content_type: &'static str) -> Response {
@@ -93,8 +137,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let make_session =
-            |refresh_token: char| Session::try_new_with_tokens(origin.clone(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into(), Some(1_900_000_000), Some(refresh_token.to_string().repeat(43)), Some(1_910_000_000)).unwrap();
+        let make_session = |refresh_token: char| Session::try_new(origin.clone(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into(), 1_900_000_000, refresh_token.to_string().repeat(43), 1_910_000_000).unwrap();
 
         logout(&make_session('b')).await.unwrap();
         let error = logout(&make_session('c')).await.unwrap_err();
@@ -109,7 +152,7 @@ mod tests {
         let observed = Arc::clone(&received_old_refresh);
         let library_id = sync_common::LibraryId::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
         let expected_snapshot = account_contract::AccountSnapshotResponse {
-            libraries: vec![sync_common::api::libraries::LibrarySummary { library_id, library_name: "Classics".to_owned() }],
+            libraries: vec![sync_common::api::libraries::LibrarySummary { library_id, library_name: "Classics".to_owned(), storage: Default::default() }],
             deleted_library_ids: Vec::new(),
             storage: account_contract::StorageUsageResponse { used_bytes: 40, reserved_bytes: 2, quota_bytes: 100 },
             library_storage: vec![account_contract::LibraryStorageUsage { library_id: library_id.to_string(), used_bytes: 40 }],
@@ -148,15 +191,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let session =
-            Session::try_new_with_tokens(Url::parse(&format!("http://{address}")).unwrap(), "user-1".to_owned(), "reader@example.com".to_owned(), TEST_TOKEN.to_owned(), Some(1_800_000_000), Some("b".repeat(43)), Some(1_910_000_000))
-                .unwrap();
+        let session = Session::try_new(Url::parse(&format!("http://{address}")).unwrap(), "user-1".to_owned(), "reader@example.com".to_owned(), TEST_TOKEN.to_owned(), 1_800_000_000, "b".repeat(43), 1_910_000_000).unwrap();
 
         let refreshed = refresh_session(&session).await.unwrap();
 
         assert!(received_old_refresh.load(Ordering::SeqCst));
         assert_eq!(refreshed.token(), "c".repeat(43));
-        assert_eq!(refreshed.refresh_token(), Some("d".repeat(43).as_str()));
+        assert_eq!(refreshed.refresh_token(), "d".repeat(43).as_str());
         assert_eq!(refreshed.user_id(), session.user_id());
         assert_eq!(refreshed.email(), session.email());
         assert_eq!(crate::account::account_snapshot(&refreshed).await.unwrap(), expected_snapshot);

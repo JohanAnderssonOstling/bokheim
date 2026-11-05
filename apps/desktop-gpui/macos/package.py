@@ -6,10 +6,12 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 
 ROOT = Path(os.environ.get("BOKHEIM_PACKAGE_SOURCE_ROOT", Path(__file__).resolve().parents[3])).resolve()
@@ -34,7 +36,7 @@ def pdfium(app):
 
 
 def browser_helper(app):
-    return app / "Contents/MacOS/bokheim-opds-webview"
+    return app / "Contents/MacOS/bokheim-browser"
 
 
 def verify_arches(path, expected):
@@ -53,7 +55,8 @@ def sign_and_verify(app):
 
 def architecture(args, version, source):
     target = ARCHES[args.arch]
-    binary = ROOT / "target" / target / "release/bokheim"
+    cache = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'scripts/ci/build_cache.py'))
+    binary = cache['target_directory'](target, root=ROOT) / target / 'release/bokheim'
     prepared = ROOT / ".pdfium" / target
     if not binary.is_file() or not (prepared / "libpdfium.dylib").is_file():
         raise ValueError(f"Build the optimized {target} desktop app first")
@@ -66,7 +69,9 @@ def architecture(args, version, source):
         shutil.copy2(binary, executable(app))
         shutil.copy2(binary.parent / "taxonomy.sqlite3", resources / "taxonomy.sqlite3")
         (executable(app).parent / "taxonomy.sqlite3").symlink_to("../Resources/taxonomy.sqlite3")
-        shutil.copy2(binary.with_name("bokheim-opds-webview"), browser_helper(app))
+        shutil.copytree(binary.parent / "fonts", resources / "fonts")
+        (executable(app).parent / "fonts").symlink_to("../Resources/fonts", target_is_directory=True)
+        shutil.copy2(binary.with_name("bokheim-browser"), browser_helper(app))
         pdfium(app).parent.mkdir()
         shutil.copy2(prepared / "libpdfium.dylib", pdfium(app))
         speech = binary.parent / "tts"
@@ -92,12 +97,19 @@ def architecture(args, version, source):
                 else:
                     run("sips", "-z", pixels, pixels, original, "--out", destination)
         run("iconutil", "-c", "icns", iconset, "-o", resources / "Bokheim.icns")
+        formats = json.loads((ROOT / "shared/book-model/formats.json").read_text())
+        documents = [dict(CFBundleTypeName=format["variant"], CFBundleTypeRole="Viewer",
+                          LSHandlerRank="Alternate",
+                          CFBundleTypeExtensions=[ext for file in format["files"] for ext in file["extensions"]],
+                          CFBundleTypeMIMETypes=[mime["value"] for file in format["files"] for mime in file["mime_types"]])
+                     for format in formats if format["browser_download"]]
         info = dict(CFBundleIdentifier="se.bokheim.Bokheim", CFBundleName="Bokheim",
                     CFBundleDisplayName="Bokheim", CFBundleExecutable="Bokheim",
                     CFBundlePackageType="APPL", CFBundleIconFile="Bokheim.icns",
                     CFBundleShortVersionString=version, CFBundleVersion=version,
                     LSMinimumSystemVersion="13.0", NSHighResolutionCapable=True,
-                    NSPrincipalClass="NSApplication")
+                    NSPrincipalClass="NSApplication", CFBundleDocumentTypes=documents,
+                    CFBundleURLTypes=[dict(CFBundleURLName="se.bokheim.reader", CFBundleURLSchemes=["bokheim"], CFBundleTypeRole="Viewer")])
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
         for path in (executable(app), browser_helper(app), pdfium(app)):
             verify_arches(path, [args.arch])
@@ -129,7 +141,7 @@ def universal(args, version, source):
         staging.mkdir()
         app = staging / "Bokheim.app"
         shutil.copytree(apps["arm64"], app, symlinks=True)
-        for location in ("Contents/MacOS/Bokheim", "Contents/MacOS/bokheim-opds-webview", "Contents/Frameworks/libpdfium.dylib"):
+        for location in ("Contents/MacOS/Bokheim", "Contents/MacOS/bokheim-browser", "Contents/Frameworks/libpdfium.dylib"):
             run("lipo", "-create", apps["arm64"] / location, apps["x86_64"] / location,
                 "-output", app / location)
             verify_arches(app / location, ARCHES)
@@ -141,8 +153,18 @@ def universal(args, version, source):
             "Privacy & Security > Open Anyway and confirm Open.\n"
             "This download is not notarized by Apple.\n")
         image = args.output / "Bokheim-macOS-universal.dmg"
-        run("hdiutil", "create", "-volname", "Bokheim", "-srcfolder", staging,
-            "-format", "UDZO", image)
+        command = ["hdiutil", "create", "-volname", "Bokheim", "-srcfolder", str(staging),
+                   "-format", "UDZO", str(image)]
+        for attempt in range(3):
+            result = subprocess.run(command, capture_output=True, text=True)
+            print(result.stdout, end="")
+            print(result.stderr, end="", file=sys.stderr)
+            if result.returncode == 0:
+                break
+            if "Resource busy" not in result.stderr or attempt == 2:
+                result.check_returncode()
+            image.unlink(missing_ok=True)
+            time.sleep(2 * (attempt + 1))
         run("hdiutil", "verify", image)
         sha = digest(image)
         image.with_suffix(".dmg.sha256").write_text(f"{sha}  {image.name}\n")

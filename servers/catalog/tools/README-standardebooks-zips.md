@@ -80,11 +80,13 @@ normalized title/author matches identify other catalog EPUB editions separately.
 
 Published snapshots also store the resolved, most specific subject assignments
 in `book_concept`, alongside their taxonomy/matcher revision in
-`subject_projection`. Original subject metadata remains in `book_subject`.
+`subject_projection`. Original subject metadata and external codes remain in
+server curation; format-9 client snapshots carry only the numeric assignments.
 An assigned ancestor is omitted only when another assignment descends from it;
-assignments on separate branches remain. Clients use these stored rows when the
-revision matches, and rebuild them once when the taxonomy changes. Library book
-projections apply the same rule when writing assignments. Parent counts include
+assignments on separate branches remain. Clients retain those identities across
+taxonomy revisions. To classify books under newly added subjects, rebuild the
+catalog from server curation using the new taxonomy and publish both together.
+Library book projections apply the same ancestor rule when writing assignments. Parent counts include
 descendants through the existing subject tree; browsing does not prune rows.
 
 Reviewed replacements can retain all original classification evidence while

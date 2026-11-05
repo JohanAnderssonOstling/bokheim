@@ -2,21 +2,16 @@
 //!
 //! HTTP and WebSocket traffic uses the separate `protobuf-wire` crate.
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::fmt;
 
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 const MAGIC: &[u8; 4] = b"BKHM";
-const VERSION: u8 = 17;
+const VERSION: u8 = 18;
 const HEADER_BYTES: usize = MAGIC.len() + 1;
-
-/// The magic+version header bytes prefixing every persisted value.
-pub const fn header_bytes() -> [u8; HEADER_BYTES] {
-    [MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], VERSION]
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum WireError {
@@ -87,7 +82,6 @@ mod tests {
     fn example(count: usize) -> Example {
         Example { name: "Bokheim".to_owned(), values: (0..count as u64).collect() }
     }
-
 
     #[test]
     fn version_size_and_trailing_data_are_rejected() {

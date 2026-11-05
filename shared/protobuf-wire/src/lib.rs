@@ -3,27 +3,26 @@
 //! Persisted BLOBs use the separate `wire` storage crate. Synchronization
 //! values serialize their domain types through this same codec.
 
+use prost::Message;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
 
-mod value_serializer;
 mod canonical;
-mod deserializer;
-mod serializer;
-mod size_serializer;
-mod serialization;
-#[cfg(test)]
-mod legacy_serializer;
+pub mod compact;
 #[cfg(test)]
 mod compatibility_tests;
+mod deserializer;
+#[cfg(test)]
+mod legacy_serializer;
+mod serialization;
+mod serializer;
+mod size_serializer;
+mod value_serializer;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=29";
-pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+protobuf";
+include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-
-const VERSION: u32 = 29;
 
 /// The protobuf protocol version written into every envelope.
 pub const fn version() -> u32 {
@@ -72,9 +71,13 @@ impl fmt::Display for WireError {
 impl std::error::Error for WireError {}
 
 pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, WireError> {
-    use prost::Message;
-
     let value = serializer::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
+    encode_envelope(value)
+}
+
+// Share framing and allocation across all serialized domain types.
+#[inline(never)]
+fn encode_envelope(value: protobuf::Value) -> Result<Vec<u8>, WireError> {
     let envelope = protobuf::Envelope { version: VERSION, value: Some(value) };
     let mut body = Vec::with_capacity(envelope.encoded_len());
     envelope.encode(&mut body).map_err(|error| WireError::Encode(error.to_string()))?;
@@ -95,26 +98,24 @@ pub fn representation<S: Serialize + ?Sized, D: DeserializeOwned>(value: &S) -> 
 }
 
 pub fn decode<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
-    decode_versions(body, decoded_limit, &[VERSION], false)
+    decode_value(body, decoded_limit, false)
 }
 
 /// For contracts whose byte fields use `serde_bytes`. Keeps protobuf bytes
 /// compact through deserialization instead of allocating one Value per byte.
 /// The wire representation and strict version checks are unchanged.
 pub fn decode_byte_fields<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
-    decode_versions(body, decoded_limit, &[VERSION], true)
+    decode_value(body, decoded_limit, true)
 }
 
-/// Reads opaque domain values retained by the sync relay. Protocol 29 changes
-/// cursors, not domain payloads, so version 28 values remain readable. HTTP and
-/// WebSocket envelopes must still use the strict current-version `decode`.
-pub fn decode_state<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
-    decode_versions(body, decoded_limit, &[28, VERSION], false)
+fn decode_value<T: DeserializeOwned>(body: &[u8], decoded_limit: usize, byte_fields: bool) -> Result<T, WireError> {
+    let value = decode_envelope(body, decoded_limit)?;
+    T::deserialize(deserializer::Deserializer { value, byte_fields }).map_err(|error| WireError::Decode(error.to_string()))
 }
 
-fn decode_versions<T: DeserializeOwned>(body: &[u8], decoded_limit: usize, versions: &[u32], byte_fields: bool) -> Result<T, WireError> {
-    use prost::Message;
-
+// Keep parsing and validation out of every type-specific deserializer.
+#[inline(never)]
+fn decode_envelope(body: &[u8], decoded_limit: usize) -> Result<protobuf::Value, WireError> {
     if body.len() > decoded_limit {
         return Err(WireError::TooLarge { limit: decoded_limit });
     }
@@ -122,12 +123,12 @@ fn decode_versions<T: DeserializeOwned>(body: &[u8], decoded_limit: usize, versi
     if !canonical::matches(&envelope, body) {
         return Err(WireError::Decode("non-canonical or trailing protobuf data".to_owned()));
     }
-    if !versions.contains(&envelope.version) {
+    if envelope.version != VERSION {
         return Err(WireError::UnsupportedVersion(envelope.version));
     }
     let value = envelope.value.ok_or(WireError::InvalidHeader)?;
     deserializer::validate(&value)?;
-    T::deserialize(deserializer::Deserializer { value, byte_fields }).map_err(|error| WireError::Decode(error.to_string()))
+    Ok(value)
 }
 
 fn protobuf_value(value: serde_value::Value) -> Result<protobuf::Value, WireError> {
@@ -185,7 +186,9 @@ fn domain_value(value: protobuf::Value, byte_fields: bool) -> Result<serde_value
         Kind::OptionValue(value) => Value::Option(value.value.map(|value| domain_value(*value, byte_fields).map(Box::new)).transpose()?),
         Kind::NewtypeValue(value) => Value::Newtype(Box::new(domain_value(*value, byte_fields)?)),
         Kind::Sequence(value) => Value::Seq(value.values.into_iter().map(|value| domain_value(value, byte_fields)).collect::<Result<_, _>>()?),
-        Kind::Map(value) => Value::Map(value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or(WireError::InvalidHeader)?, byte_fields)?, domain_value(entry.value.ok_or(WireError::InvalidHeader)?, byte_fields)?))).collect::<Result<_, WireError>>()?),
+        Kind::Map(value) => Value::Map(
+            value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or(WireError::InvalidHeader)?, byte_fields)?, domain_value(entry.value.ok_or(WireError::InvalidHeader)?, byte_fields)?))).collect::<Result<_, WireError>>()?,
+        ),
         // The established encoder also represents empty sequences as bytes.
         // Keep those deserializable as lists (e.g. no rejections or mutations).
         Kind::BytesValue(value) if byte_fields && !value.is_empty() => Value::Bytes(value),
@@ -232,7 +235,7 @@ mod tests {
 
     #[test]
     fn version_and_decoded_size_are_bounded() {
-        assert_eq!(version(), 29);
+        assert_eq!(version(), 31);
         let mut unsupported = encode(&example(1)).unwrap();
         unsupported[1] = (VERSION + 1) as u8;
         assert!(matches!(decode::<Example>(&unsupported, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
@@ -244,9 +247,8 @@ mod tests {
         let mut historical = encode(&example(1)).unwrap();
         historical[1] = 28;
         assert!(matches!(decode::<Example>(&historical, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(28))));
-        assert_eq!(decode_state::<Example>(&historical, MAX_DECODED_REQUEST_BYTES).unwrap(), example(1));
         historical[1] = (VERSION + 1) as u8;
-        assert!(matches!(decode_state::<Example>(&historical, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
+        assert!(matches!(decode::<Example>(&historical, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
     }
 
     #[test]

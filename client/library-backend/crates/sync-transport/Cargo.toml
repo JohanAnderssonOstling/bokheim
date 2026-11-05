@@ -5,6 +5,8 @@ edition = "2021"
 publish = false
 
 [dependencies]
+content-address = { path = "../../../../shared/content-address" }
+http-response = { path = "../../../../shared/http-response" }
 log = "0.4"
 web-time = "1"
 uuid = { version = "1", features = ["v4", "js"] }
@@ -13,12 +15,13 @@ serde = { version = "1", features = ["derive"] }
 futures-util = "0.3"
 httpdate = "1"
 url = "2"
+thiserror = "2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-reqwest = { workspace = true, default-features = false, features = ["stream"] }
+reqwest = { workspace = true, features = ["stream"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "stream", "gzip"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "stream", "gzip"] }
 
 [dev-dependencies]
 axum = "0.7"

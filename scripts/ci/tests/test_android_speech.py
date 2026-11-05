@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-SPEECH = Path(__file__).resolve().parents[3] / 'shared/reader-speech'
+SPEECH = Path(__file__).resolve().parents[3] / 'apps/reader/crates/speech'
 sys.path.insert(0, str(SPEECH))
 spec = importlib.util.spec_from_file_location('android_speech', SPEECH / 'prepare_android.py')
 speech = importlib.util.module_from_spec(spec)
@@ -43,7 +43,7 @@ class AndroidSpeechTests(unittest.TestCase):
             (george / 'model.onnx').write_bytes(b'stale-george')
             with patch.object(speech, 'SHA256', digest), patch.object(speech, 'prepare', side_effect=voice) as prepare:
                 libraries = speech.prepare_android(root, offline=True)
-            prepare.assert_called_once_with(root / 'assets/tts/alba', offline=True)
+            prepare.assert_called_once_with(root / 'assets/tts/alba', offline=True, archive=None)
             self.assertEqual({path.name for path in libraries.glob('*.so')}, set(speech.REQUIRED))
             self.assertFalse((root / 'jniLibs/x86_64').exists())
             self.assertEqual((root / 'assets/tts/alba/voice.sha256').read_text().strip(), speech.VOICE_SHA256)

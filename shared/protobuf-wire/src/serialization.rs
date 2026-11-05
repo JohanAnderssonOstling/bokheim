@@ -143,7 +143,9 @@ impl<B: Backend> ser::Serializer for Serializer<B> {
         B::text(variant)
     }
     fn serialize_newtype_struct<T: Serialize + ?Sized>(self, name: &'static str, value: &T) -> Result<B::Output, SerializerError> {
-        if name == "ContentHash" {
+        // The domain adapter owns representation policy. Encoding, counting
+        // and opaque representations all implement the same Serde extension.
+        if serde_transport::uses_binary_representation(name) {
             value.serialize(Self::new(true))
         } else {
             B::newtype(value.serialize(self)?)

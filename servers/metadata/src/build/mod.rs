@@ -7,22 +7,22 @@ use crate::*;
 
 pub(crate) mod authority_ingestion;
 pub(crate) mod batch;
+mod edition_index;
 pub(crate) mod enrichment;
 pub(crate) mod identity;
 pub(crate) mod import;
 pub(crate) mod incremental;
-mod reclassify;
-mod edition_index;
 pub(crate) mod loc_dump;
 pub(crate) mod openlibrary;
 mod popularity;
 mod providers;
+mod reclassify;
 mod work_classification;
 mod work_lookup;
-pub use work_lookup::index_work_classifications;
+pub use edition_index::{extend_edition_index, EditionIndexReport};
 pub use incremental::build_answers_incremental;
 pub use reclassify::reclassify_answers;
-pub use edition_index::{extend_edition_index, EditionIndexReport};
+pub use work_lookup::index_work_classifications;
 pub(crate) mod service;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -49,11 +49,6 @@ pub struct BuildReport {
     pub edition_index_seconds: f64,
     pub authority_index_seconds: f64,
     pub queue_seconds: f64,
-}
-
-/// OUT must be a new file. Publish it only after all tables and the manifest are complete.
-pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, output: &Path) -> Result<BuildReport, MetadataError> {
-    build_answers_with_ratings(snapshot, providers, demand, descriptions, None, output)
 }
 
 pub fn build_answers_with_ratings(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, ratings: Option<&Path>, output: &Path) -> Result<BuildReport, MetadataError> {
@@ -240,7 +235,7 @@ fn put_authority(out: &Connection, m: metadata_contract::AuthoritySubjectMatch, 
 fn build_authorities(source: &Connection, out: &Connection) -> Result<(), MetadataError> {
     work_lookup::build_work_lookup(source, out)?;
     use metadata_contract::matching::NormalizedTitle;
-    use metadata_contract::{AuthoritySubjectMatch, ClassificationEvidence};
+    use metadata_contract::{AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod, ClassificationProvider};
     if has_table(source, "lc_title")? {
         #[derive(Deserialize)]
         struct Record {
@@ -259,7 +254,7 @@ fn build_authorities(source: &Connection, out: &Connection) -> Result<(), Metada
                 .map_err(error)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(error)?;
-            let classifications = authority_codes(&codes, format!("library_of_congress_title_author:{id}"));
+            let classifications = authority_codes(&codes, ClassificationMethod::TitleAuthor { provider: ClassificationProvider::LibraryOfCongress, record_id: id.clone() });
             if classifications.is_empty() {
                 continue;
             }
@@ -284,7 +279,7 @@ fn build_authorities(source: &Connection, out: &Connection) -> Result<(), Metada
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)?;
-        let classifications = authority_codes(&codes, format!("wikidata_title_author:Q{}", -id));
+        let classifications = authority_codes(&codes, ClassificationMethod::TitleAuthor { provider: ClassificationProvider::Wikidata, record_id: format!("Q{}", -id) });
         if classifications.is_empty() {
             continue;
         }
@@ -292,7 +287,7 @@ fn build_authorities(source: &Connection, out: &Connection) -> Result<(), Metada
         let keys = NormalizedTitle::new(&full).lookup_keys();
         put_authority(out, AuthoritySubjectMatch { main_title: title, title: full, authors, provider_id: "wikidata".into(), record_ids: vec![format!("Q{}", -id)], classifications }, keys)?;
     }
-    fn authority_codes(codes: &[String], method: String) -> Vec<Classification> {
+    fn authority_codes(codes: &[String], method: ClassificationMethod) -> Vec<Classification> {
         codes
             .iter()
             .filter_map(|n| metadata_contract::classification_consensus_notation(ClassificationScheme::LibraryOfCongress, n))
@@ -330,7 +325,7 @@ mod wanted_tests {
             &[],
         );
         let out = dir.path().join("answers.sqlite");
-        build_answers(&source, None, None, None, &out).unwrap();
+        build_answers_with_ratings(&source, None, None, None, None, &out).unwrap();
         assert_eq!(Connection::open(out).unwrap().query_row("SELECT work_id FROM wanted WHERE isbn13=9780131103627", [], |r| r.get::<_, i64>(0)).unwrap(), 20);
     }
 }

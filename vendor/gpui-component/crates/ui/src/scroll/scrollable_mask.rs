@@ -1,13 +1,17 @@
 use gpui::{
     App, Axis, BorderStyle, Bounds, ContentMask, Edges, Element, ElementId, GlobalElementId,
-    Hitbox, Hsla, InteractiveElement as _, IntoElement, IsZero as _, LayoutId, PaintQuad,
-    ParentElement as _, Point, Position, ScrollHandle, ScrollWheelEvent,
-    StatefulInteractiveElement as _, Style, StyleRefinement, Styled as _, Window, div, px,
+    Hitbox, Hsla, IntoElement, IsZero as _, LayoutId, PaintQuad,
+    Point, Position, ScrollHandle, ScrollWheelEvent,
+    Style, Window, px,
     relative,
 };
 use gpui::{Corners, Pixels};
 
-use crate::{AxisExt, StyledExt as _};
+use crate::AxisExt;
+#[cfg(test)]
+use crate::StyledExt as _;
+#[cfg(test)]
+use gpui::{InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, StyleRefinement, Styled as _, div};
 
 /// A horizontal scroll viewport that only consumes horizontal wheel deltas.
 ///
@@ -15,7 +19,8 @@ use crate::{AxisExt, StyledExt as _};
 /// scrolling when there is no vertical overflow. This wrapper keeps the visual
 /// clipping and scroll offset, while delegating wheel input to [`ScrollableMask`]
 /// so vertical wheel events can continue bubbling to the parent scroller.
-pub(crate) fn horizontal_scroll_area(
+#[cfg(test)]
+fn horizontal_scroll_area(
     id: impl Into<ElementId>,
     scroll_handle: &ScrollHandle,
     style: &StyleRefinement,

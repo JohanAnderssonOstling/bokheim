@@ -10,14 +10,15 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
-COMMITTED="$REPO_ROOT/apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz"
+COMMITTED="$REPO_ROOT/apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz"
 
 cd "$REPO_ROOT"
 
-KOBO_CPU_PROFILE=${KOBO_CPU_PROFILE:-libra2}
+KOBO_CPU_PROFILE=generic
 export KOBO_CPU_PROFILE
 ARCHIVE=$("$SCRIPT_DIR/package-kobo.sh")
 test -s "$ARCHIVE"
+python3 "$SCRIPT_DIR/verify-kobo-package.py" "$ARCHIVE" --multi-device
 
 # A package missing the launcher or holding a host-architecture binary bricks
 # nothing, but it wastes a release and a device round trip to discover, and
@@ -52,5 +53,5 @@ cp "$ARCHIVE" "$COMMITTED"
 
 printf 'Updated %s\n' "$COMMITTED"
 printf 'Commit it so the installer workflow embeds this build:\n'
-printf '  git add %s\n' "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz"
+printf '  git add %s\n' "apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz"
 printf '  git commit -m "Refresh the committed Kobo package"\n'

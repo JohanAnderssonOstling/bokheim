@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bokheim · Export annotations</title>
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Bold.ttf');font-weight:700}
+@font-face{font-family:Jost;src:url('../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf')}
+:root{color-scheme:light;--paper:#f6f2eb;--raised:#fcfaf6;--ink:#22201d;--muted:#6b675f;--accent:#466853;--on-accent:#fff;--border:#8c7f64;--rule:#c5bdac;--wash:#46685310;--scrim:#25231f55}
+[data-dark]{color-scheme:dark;--paper:#171511;--raised:#211e18;--ink:#efe6d0;--muted:#afa48d;--accent:#d3b271;--on-accent:#171511;--border:#786640;--rule:#4e4334;--wash:#d3b27112;--scrim:#0008}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.4 Garamond,Georgia,serif}button,input,select{font:inherit;color:inherit}button{cursor:pointer;background:transparent;border:1px solid var(--border);border-radius:4px;padding:6px 13px}button:hover{background:var(--wash)}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}input[type=text],select{background:var(--raised);border:1px solid var(--border);border-radius:3px;padding:7px 10px;min-width:0;width:100%}input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px;flex:none;margin:3px 0 0}h1,h2,h3,p{margin:0}h1{font-size:30px;font-weight:400}h2{font-size:26px;font-weight:400}h3,legend{font-size:18px;font-weight:700}small,.muted{color:var(--muted)}small{display:block;font-size:14px}.preview-bar{height:44px;padding:7px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--rule);font:12px Jost,sans-serif;gap:12px}.preview-bar span{color:var(--muted)}.preview-actions{display:flex;gap:8px}.preview-actions button{font:inherit;padding:4px 9px}.app{display:grid;grid-template-columns:210px minmax(0,1fr);min-height:calc(100dvh - 44px)}aside{padding:26px 18px;border-right:1px solid var(--rule);display:flex;flex-direction:column;gap:12px}.brand{font-size:31px;margin:0 10px 23px}.nav{padding:9px 12px;border:0;text-align:left}.nav.active{background:var(--wash);color:var(--accent)}.library-switch{margin-top:auto;position:relative}.library-switch>button{width:100%;display:flex;justify-content:space-between;text-align:left}.switcher{position:absolute;bottom:48px;left:0;width:260px;background:var(--paper);border:1px solid var(--rule);border-radius:5px;box-shadow:0 6px 25px #0002;padding:9px;z-index:3}.switch-row{display:flex;justify-content:space-between;align-items:center;padding:5px 3px}.switch-row>span{padding-left:7px}.more{border:0;font:22px/1 Jost,sans-serif;padding:5px 10px}.menu{position:absolute;right:0;top:40px;background:var(--paper);border:1px solid var(--rule);border-radius:4px;box-shadow:0 6px 22px #0002;z-index:4;min-width:210px;padding:5px}.menu button{display:block;border:0;width:100%;text-align:left;padding:8px 12px}.menu button:last-child{border-top:1px solid var(--rule);border-radius:0}.switcher .menu{top:auto;bottom:45px;right:-155px}main{padding:43px 50px;max-width:1100px;width:100%}.settings-nav{display:flex;gap:24px;margin:24px 0 42px;border-bottom:1px solid var(--rule);padding-bottom:12px;color:var(--muted)}.settings-nav span:last-child{color:var(--accent)}.section-title{font-size:19px;font-variant-caps:all-small-caps;letter-spacing:.04em;margin-bottom:8px}.setting-row{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--rule);padding:18px 0;gap:24px}.setting-row>div{min-width:0}.library-row{position:relative}.storage{display:flex;gap:26px;align-items:center;color:var(--muted);white-space:nowrap}.settings-foot{margin-top:22px;font-size:14px;color:var(--muted)}dialog{margin:auto;width:min(650px,calc(100vw - 28px));max-height:calc(100dvh - 36px);padding:0;color:var(--ink);background:var(--paper);border:1px solid var(--rule);border-radius:7px;box-shadow:0 12px 60px #0003;overflow:hidden}dialog::backdrop{background:var(--scrim)}.dialog-layout{display:flex;flex-direction:column;max-height:calc(100dvh - 38px)}.dialog-heading{padding:22px 26px 16px;border-bottom:1px solid var(--rule);display:flex;justify-content:space-between;gap:12px}.dialog-heading p{font-size:15px;color:var(--muted);margin-top:4px}.close{border:0;padding:0 6px;align-self:flex-start;font:26px/1.2 Garamond,serif}.dialog-body{overflow:auto;padding:19px 26px 23px}.section{margin-bottom:20px}fieldset{border:0;padding:0;margin:0}legend{padding:0;margin-bottom:8px}.format{display:flex;gap:12px;align-items:flex-start;padding:7px 0;cursor:pointer}.format-copy{flex:1}.format-name{display:flex;justify-content:space-between;gap:16px}.count{font-size:14px;color:var(--muted);white-space:nowrap}.destination-label{display:block;font-weight:700;font-size:18px;margin-bottom:8px}.path-row{display:flex;gap:8px}.path-row input{font-size:15px}.path-row button{flex:none}.footer{border-top:1px solid var(--rule);padding:15px 26px;display:flex;align-items:center;justify-content:flex-end;gap:15px;flex:none}.buttons{display:flex;gap:9px}.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);padding-left:19px;padding-right:19px}.primary:hover{background:var(--accent);filter:brightness(.95)}.result-body{padding:30px 0 12px}.result-body h3{font-weight:400;font-size:23px;margin-bottom:10px}.result-body p{font-size:15px;color:var(--muted)}.result-list{margin:22px 0 0;padding:0;list-style:none;font-size:15px}.result-list li{display:flex;justify-content:space-between;border-top:1px solid var(--rule);padding:11px 0}.result-path{margin-top:18px;font-size:14px;overflow-wrap:anywhere;color:var(--muted)}.picker{width:450px}.picker .dialog-body{display:grid;gap:9px}.picker button{text-align:left}.picker small{margin-top:3px}#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:10px 18px;border-radius:5px;font:13px Jost,sans-serif;z-index:10}
+@media(max-width:700px){aside{display:none}.app{grid-template-columns:1fr}main{padding:28px 20px}.storage span:first-child{display:none}.preview-bar{height:auto;min-height:44px;padding:8px 12px;flex-wrap:wrap}.preview-actions{gap:5px}.dialog-heading{padding:19px 18px 14px}.dialog-body{padding:16px 18px 20px}.footer{padding:14px 18px}.settings-nav{gap:15px;font-size:15px}h2{font-size:24px}.format-name{gap:8px}}
+@media(max-width:700px){main{min-width:0}.settings-nav{flex-wrap:wrap}.setting-row{gap:12px}.setting-row>button{max-width:100%;overflow:hidden;text-overflow:ellipsis}.setting-row:not(.library-row){flex-wrap:wrap}.setting-row>div:first-child{overflow-wrap:anywhere}}
+</style>
+</head>
+<body>
+<div class="preview-bar"><span>Interactive mockup · Files are not written</span><div class="preview-actions"><button id="show-settings">Settings entry</button><button id="show-switcher">Library switcher entry</button><button id="theme">Dark appearance</button></div></div>
+<div class="app">
+<aside><div class="brand">Bokheim</div><button class="nav">Browse</button><button class="nav">Notebook</button><button class="nav active">Settings</button><div class="library-switch"><button id="switch-library" aria-expanded="false">My library <span>⌃</span></button><div class="switcher" id="switcher" hidden><small style="padding:5px 10px">Libraries</small><div class="switch-row"><span>✓ &nbsp; My library</span><button class="more" id="switch-more" aria-label="More options for My library" aria-expanded="false">⋯</button></div><div class="switch-row"><span>Research</span><button class="more" aria-label="More options for Research" disabled>⋯</button></div><div class="menu" id="switch-menu" hidden><button class="export-entry">Export annotations…</button><button class="placeholder-action">Rename…</button><button class="placeholder-action">Remove…</button></div></div></div></aside>
+<main><h1>Settings</h1><div class="settings-nav"><span>Account</span><span>Appearance</span><span>Reading</span><span>Libraries</span></div><h3 class="section-title">Libraries</h3><div class="setting-row"><div>Default location for new libraries</div><button>/home/johan/Documents/Bokheim</button></div><div class="setting-row library-row"><div><div>My library</div><small>~/Documents/Bokheim/My library</small></div><div class="storage"><span>2.4 GB</span><span>Up to date</span><button class="more" id="settings-more" aria-label="More options for My library" aria-expanded="false">⋯</button></div><div class="menu" id="settings-menu" hidden><button class="export-entry">Export annotations…</button><button class="placeholder-action">Rename…</button><button class="placeholder-action">Remove…</button></div></div><div class="setting-row"><div>Research<small>~/Documents/Bokheim/Research</small></div><div class="storage"><span>865 MB</span><span>Up to date</span><button class="more" aria-label="More options for Research" disabled>⋯</button></div></div><p class="settings-foot">Your libraries and their storage on this device.</p></main>
+</div>
+<dialog id="export-dialog" aria-labelledby="export-title" aria-describedby="export-description"><div class="dialog-layout"><header class="dialog-heading"><div><h2 id="export-title">Export annotations</h2><p id="export-description">My library · 137 annotations in 8 books</p></div><button class="close" id="close" aria-label="Close export dialog">×</button></header><div class="dialog-body">
+<div id="options"><fieldset class="section"><legend>Export formats</legend><label class="format"><input type="checkbox" id="markdown" checked><span class="format-copy"><span class="format-name"><span>Markdown</span><span class="count">8 books</span></span></span></label><label class="format"><input type="checkbox" id="foliate"><span class="format-copy"><span class="format-name"><span>Foliate JSON</span><span class="count">5 EPUBs</span></span></span></label><label class="format"><input type="checkbox" id="readest"><span class="format-copy"><span class="format-name"><span>Readest JSON</span><span class="count">5 EPUBs</span></span></span></label><label class="format"><input type="checkbox" id="pdf"><span class="format-copy"><span class="format-name"><span>Write into existing PDFs</span><span class="count">3 PDFs</span></span></span></label></fieldset>
+<section class="section" id="destination-section"><label class="destination-label" for="export-folder">Export folder</label><div class="path-row"><input type="text" id="export-folder" value="/home/johan/Documents/Bokheim annotations/My library" spellcheck="false"><button id="browse">Browse…</button></div></section>
+</div>
+<section id="result-view" hidden class="result-body" aria-live="polite"><h3>Annotations exported</h3><p>Your annotations are saved on this device.</p><ul class="result-list" id="results" hidden></ul><p class="result-path" id="result-path" hidden></p></section>
+</div><footer class="footer"><div class="buttons"><button id="cancel">Close</button><button class="primary" id="export">Export</button><button id="open-folder" hidden>Open export folder</button><button class="primary" id="done" hidden>Done</button></div></footer></div></dialog>
+<dialog id="folder-picker" class="picker" aria-labelledby="picker-title"><header class="dialog-heading"><h2 id="picker-title">Choose export folder</h2><button class="close" id="close-picker" aria-label="Close folder picker">×</button></header><div class="dialog-body"><small>Sample locations for this mockup. You can also edit the path directly.</small><button data-folder="/home/johan/Documents/Bokheim annotations/My library">Documents<small>~/Documents/Bokheim annotations/My library</small></button><button data-folder="/home/johan/Desktop/Annotation exports/My library">Desktop<small>~/Desktop/Annotation exports/My library</small></button></div></dialog>
+<div id="toast" role="status" hidden></div>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const books = [
+ {title:'Middlemarch',folder:'Fiction/Classics',format:'epub',count:31},
+ {title:'A Room of One’s Own',folder:'Essays',format:'epub',count:16},
+ {title:'Pride and Prejudice',folder:'Fiction/Classics',format:'epub',count:24},
+ {title:'Walden',folder:'Essays',format:'epub',count:19},
+ {title:'The Waves',folder:'Fiction',format:'epub',count:12},
+ {title:'Ways of Seeing',folder:'Art',format:'pdf',count:17},
+ {title:'A Pattern Language',folder:'Architecture',format:'pdf',count:11},
+ {title:'The Elements of Typographic Style',folder:'Design',format:'pdf',count:7}
+];
+let planned = [], lastTrigger = null;
+const join = (...parts) => parts.filter(Boolean).join('/').replace(/\/{2,}/g,'/');
+const destination = () => $('export-folder').value.trim();
+// The production dialog always exports with AnnotationExportConflict::Replace.
+function plan(){
+ const items=[];
+ for(const book of books){
+  if($('pdf').checked && book.format==='pdf') items.push({book,kind:'PDF',path:join('/home/johan/Documents/Bokheim/My library',book.folder,book.title+'.pdf'),fixed:true});
+  if($('markdown').checked) items.push({book,kind:'Markdown',path:join(destination(),book.folder,book.title+'.md')});
+  if($('foliate').checked && book.format==='epub') items.push({book,kind:'Foliate JSON',path:join(destination(),book.folder,book.title+'.foliate.json')});
+  if($('readest').checked && book.format==='epub') items.push({book,kind:'Readest JSON',path:join(destination(),book.folder,book.title+'.readest.json')});
+ }
+ return items.sort((a,b)=>Number(b.fixed||false)-Number(a.fixed||false));
+}
+function render(){
+ planned=plan();
+ const hasNew=$('markdown').checked||$('foliate').checked||$('readest').checked;
+ $('destination-section').hidden=!hasNew;
+ $('export').disabled=!planned.length||(hasNew&&!destination().startsWith('/'));
+
+}
+function closeMenus(){for(const id of ['settings-menu','switch-menu','switcher']) $(id).hidden=true;for(const id of ['settings-more','switch-more','switch-library']) $(id).setAttribute('aria-expanded','false')}
+function showExport(trigger){lastTrigger=trigger||document.activeElement;closeMenus();reset();$('export-dialog').showModal()}
+function reset(){ $('options').hidden=false;$('result-view').hidden=true;$('results').hidden=true;$('result-path').hidden=true;$('cancel').hidden=false;$('export').hidden=false;$('open-folder').hidden=true;$('done').hidden=true;render() }
+function closeExport(){ $('export-dialog').close();lastTrigger?.focus() }
+function finish(){
+ $('options').hidden=true;$('result-view').hidden=false;$('results').hidden=false;$('results').replaceChildren();
+ const created=planned.filter(item=>!item.fixed).length, updated=planned.length-created;
+ for(const [label,value] of [['New files created',created],['PDFs updated',updated]]){const li=document.createElement('li'),count=document.createElement('span');li.textContent=label;count.textContent=value;li.append(count);$('results').append(li)}
+ $('result-path').hidden=!created;$('result-path').textContent=destination();$('cancel').hidden=true;$('export').hidden=true;$('done').hidden=false;$('open-folder').hidden=!created;$('done').focus();
+}
+$('export').addEventListener('click',()=>{planned=plan();if(planned.length)finish()});
+for(const id of ['markdown','foliate','readest','pdf']) $(id).addEventListener('change',render);
+$('export-folder').addEventListener('input',render);
+for(const id of ['cancel','close','done']) $(id).addEventListener('click',closeExport);
+$('export-dialog').addEventListener('cancel',event=>{event.preventDefault();closeExport()});
+$('settings-more').addEventListener('click',()=>{const open=$('settings-menu').hidden;closeMenus();$('settings-menu').hidden=!open;$('settings-more').setAttribute('aria-expanded',String(open))});
+$('switch-library').addEventListener('click',()=>{const open=$('switcher').hidden;closeMenus();$('switcher').hidden=!open;$('switch-library').setAttribute('aria-expanded',String(open))});
+$('switch-more').addEventListener('click',()=>{const open=$('switch-menu').hidden;$('switch-menu').hidden=!open;$('switch-more').setAttribute('aria-expanded',String(open))});
+document.querySelectorAll('.export-entry').forEach(button=>button.addEventListener('click',()=>showExport(button.closest('#settings-menu')?$('settings-more'):$('switch-library'))));
+$('show-settings').addEventListener('click',()=>{if($('export-dialog').open)$('export-dialog').close();reset();closeMenus();$('settings-menu').hidden=false;$('settings-more').setAttribute('aria-expanded','true');$('settings-menu').querySelector('button').focus()});
+$('show-switcher').addEventListener('click',()=>{if($('export-dialog').open)$('export-dialog').close();reset();closeMenus();$('switcher').hidden=false;$('switch-menu').hidden=false;$('switch-library').setAttribute('aria-expanded','true');$('switch-more').setAttribute('aria-expanded','true');$('switch-menu').querySelector('button').focus()});
+$('theme').addEventListener('click',()=>{const dark=document.documentElement.toggleAttribute('data-dark');$('theme').textContent=dark?'Light appearance':'Dark appearance'});
+$('browse').addEventListener('click',()=>$('folder-picker').showModal());$('close-picker').addEventListener('click',()=>$('folder-picker').close());
+document.querySelectorAll('[data-folder]').forEach(button=>button.addEventListener('click',()=>{$('export-folder').value=button.dataset.folder;$('folder-picker').close();render()}));
+function toast(message){$('toast').textContent=message;$('toast').hidden=false;setTimeout(()=>$('toast').hidden=true,3000)}
+$('open-folder').addEventListener('click',()=>toast('Mockup: would open '+destination()));document.querySelectorAll('.placeholder-action').forEach(button=>button.addEventListener('click',()=>{closeMenus();toast('This preview focuses on annotation export.')}));
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('export-dialog').open)closeMenus()});
+render();showExport($('settings-more'));
+</script>
+</body>
+</html>

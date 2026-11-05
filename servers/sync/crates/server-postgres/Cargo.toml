@@ -8,14 +8,18 @@ publish = false
 workspace = true
 
 [dependencies]
+content-address = { path = "../../../../shared/content-address" }
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 tracing = "0.1"
+serde_json = "1"
 server-asset-store = { path = "../server-asset-store" }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres", "macros", "uuid", "migrate"] }
 sync-common = { path = "../../../../shared/sync-common" }
 thiserror = "1"
-tokio = { version = "1", features = ["io-util"] }
+tokio = { version = "1", features = ["io-util", "rt", "sync", "time", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+blake3 = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

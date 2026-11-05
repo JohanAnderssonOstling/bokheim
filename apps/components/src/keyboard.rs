@@ -1,6 +1,8 @@
 //! Native keyboard labels shared by controls and their bindings.
 
-use gpui::{Keystroke, Modifiers, SharedString};
+use ui_text::text;
+
+use gpui::{Keystroke, SharedString};
 use gpui_component::kbd::Kbd;
 
 /// Format the same GPUI shortcut syntax used by `KeyBinding::new`.
@@ -10,35 +12,29 @@ pub fn shortcut_tooltip(label: impl Into<SharedString>, shortcut: &str) -> Share
 }
 
 /// List alternative bindings for the same action inside one pair of parentheses.
+/// Invalid shortcut hints are omitted so they cannot prevent a control rendering.
 pub fn shortcut_tooltip_with_alternatives(label: impl Into<SharedString>, shortcuts: &[&str]) -> SharedString {
     let label = label.into();
-    if shortcuts.is_empty() {
+    let keys = shortcuts
+        .iter()
+        .filter_map(|shortcut| match Keystroke::parse(shortcut) {
+            Ok(keystroke) => Some(Kbd::format(&keystroke)),
+            Err(error) => {
+                log::warn!("Invalid tooltip shortcut: {error}");
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if keys.is_empty() {
         return label;
     }
-    let keys = shortcuts.iter().map(|shortcut| Kbd::format(&Keystroke::parse(shortcut).expect("valid tooltip keyboard shortcut"))).collect::<Vec<_>>().join(" / ");
-    format!("{label} ({keys})").into()
-}
-
-/// Match exactly Command on macOS or Control on other platforms.
-pub fn primary_modifier_only(modifiers: Modifiers) -> bool {
-    modifiers.secondary() && modifiers.number_of_modifiers() == 1
+    format!(text!(common::shortcut_with_keys), keys = keys, label = label).into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn primary_modifier_matches_native_bindings_without_extra_modifiers() {
-        let primary = Keystroke::parse("secondary-f").unwrap().modifiers;
-        assert!(primary_modifier_only(primary));
-        assert!(!primary_modifier_only(Modifiers::default()));
-        assert_eq!(primary_modifier_only(Keystroke::parse("cmd-f").unwrap().modifiers), cfg!(target_os = "macos"));
-        assert_eq!(primary_modifier_only(Keystroke::parse("ctrl-f").unwrap().modifiers), !cfg!(target_os = "macos"));
-        for modifiers in [Modifiers { shift: true, ..primary }, Modifiers { alt: true, ..primary }, Modifiers { function: true, ..primary }, Modifiers { control: true, platform: true, ..primary }] {
-            assert!(!primary_modifier_only(modifiers));
-        }
-    }
 
     #[test]
     fn tooltips_use_native_modifiers_and_key_names() {
@@ -59,5 +55,13 @@ mod tests {
         let expected = if cfg!(target_os = "macos") { "Previous match (⇧⏎ / ↑)" } else { "Previous match (Shift+Enter / Up)" };
         assert_eq!(shortcut_tooltip_with_alternatives("Previous match", &["shift-enter", "up"]).as_ref(), expected);
         assert_eq!(shortcut_tooltip_with_alternatives("Cancel", &[]).as_ref(), "Cancel");
+    }
+
+    #[test]
+    fn invalid_shortcut_hints_do_not_prevent_tooltips_rendering() {
+        assert!(Keystroke::parse("invalid-shortcut").is_err());
+        assert_eq!(shortcut_tooltip("Search", "invalid-shortcut").as_ref(), "Search");
+        let expected = shortcut_tooltip("Search", "secondary-f");
+        assert_eq!(shortcut_tooltip_with_alternatives("Search", &["invalid-shortcut", "secondary-f"]).as_ref(), expected.as_ref());
     }
 }

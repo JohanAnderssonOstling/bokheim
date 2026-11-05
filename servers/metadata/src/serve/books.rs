@@ -10,10 +10,8 @@ use crate::serve::{alternatives, related_isbn};
 use crate::{MetadataError, MetadataService};
 use book_model::{AgentId, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
 use metadata_contract::audible::{LookupRequest, LookupResponse, LookupStatus as AudibleStatus};
-use metadata_contract::books::{BookEnrichment, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, BookFacts, TitleReading, MAX_BOOKS_PER_REQUEST};
-use metadata_contract::{
-    EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, MAX_ISBNS_PER_REQUEST,
-};
+use metadata_contract::books::{BookEnrichment, BookEnrichmentFailure, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, BookFacts, TitleReading, MAX_BOOKS_PER_REQUEST};
+use metadata_contract::{ClassificationMethod, EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, MAX_ISBNS_PER_REQUEST};
 use std::collections::{BTreeSet, HashMap};
 
 /// Bump whenever a lookup or merge rule below changes; clients ask again.
@@ -24,10 +22,8 @@ pub const POLICY: &str = "books_v27";
 const MAX_DIRECT_CLASSIFICATIONS_WITHOUT_CONSENSUS: usize = 12;
 // Subject sources an edition consensus may replace.
 const REPLACEABLE_SUBJECT_SOURCES: [&str; 3] = ["dc:subject", "openlibrary:metadata:sibling-edition", "openlibrary:metadata:work"];
-const BORROWED_CLASSIFICATION_SOURCES: &[&str] = &[
-    "metadata:work", "metadata:shared-edition-classification", "metadata:year-only-edition-consensus",
-    "metadata:edition-subject-consensus", "openlibrary:metadata:sibling-edition", "openlibrary:metadata:work",
-];
+const BORROWED_CLASSIFICATION_SOURCES: &[&str] =
+    &["metadata:work", "metadata:shared-edition-classification", "metadata:year-only-edition-consensus", "metadata:edition-subject-consensus", "openlibrary:metadata:sibling-edition", "openlibrary:metadata:work"];
 
 /// ISBN lookups for one book, keyed by requested and canonical ISBN.
 type Lookups = HashMap<String, RichIsbnMetadataResult>;
@@ -42,6 +38,23 @@ struct AudibleEnrichment {
     recording: AudibleRecording,
 }
 
+struct EnrichmentError {
+    stage: BookEnrichmentFailure,
+    error: MetadataError,
+}
+
+impl From<MetadataError> for EnrichmentError {
+    fn from(error: MetadataError) -> Self {
+        Self { stage: BookEnrichmentFailure::Lookup, error }
+    }
+}
+
+impl EnrichmentError {
+    fn cover(error: MetadataError) -> Self {
+        Self { stage: BookEnrichmentFailure::Cover, error }
+    }
+}
+
 impl MetadataService {
     pub(crate) async fn enrich_books(&self, request: BookEnrichmentRequest) -> Result<BookEnrichmentResponse, MetadataError> {
         if request.books.is_empty() || request.books.len() > MAX_BOOKS_PER_REQUEST {
@@ -53,14 +66,14 @@ impl MetadataService {
             let key = facts.key.clone();
             match self.enrich_book(facts).await {
                 Ok(result) => result,
-                Err(error) => BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail: error.to_string() },
+                Err(error) => BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: Some(error.stage), detail: error.error.to_string() },
             }
         }))
         .await;
         Ok(BookEnrichmentResponse { policy: POLICY.to_owned(), results })
     }
 
-    async fn enrich_book(&self, facts: BookFacts) -> Result<BookEnrichment, MetadataError> {
+    async fn enrich_book(&self, facts: BookFacts) -> Result<BookEnrichment, EnrichmentError> {
         let mut record = facts.record.clone();
         record.description.clear();
         record.book.infer_embedded_subject_isbns().map_err(|error| MetadataError(error.to_string()))?;
@@ -77,8 +90,7 @@ impl MetadataService {
             let previous_count = record.book.subjects.len();
             record.book.subjects.retain(|subject| {
                 subject.source() != subject_projection::EDITION_SUBTREE_CONSENSUS_SOURCE
-                    && !(subject.authority().is_some_and(|authority| matches!(authority.to_ascii_lowercase().as_str(), "lcc" | "bisac" | "ddc" | "unified"))
-                        && BORROWED_CLASSIFICATION_SOURCES.contains(&subject.source()))
+                    && !(subject.authority().is_some_and(|authority| matches!(authority.to_ascii_lowercase().as_str(), "lcc" | "bisac" | "ddc" | "unified")) && BORROWED_CLASSIFICATION_SOURCES.contains(&subject.source()))
             });
             found |= record.book.subjects.len() != previous_count;
             found |= self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await?;
@@ -110,18 +122,18 @@ impl MetadataService {
                     let enrichment = apply_audible(&mut record, &response)?;
                     toc = enrichment.toc;
                     if facts.needs_cover {
-                        cover = self.resolve_audible_cover(&enrichment.recording.asin, &enrichment.recording.region).await?;
+                        cover = self.resolve_audible_cover(&enrichment.recording.asin, &enrichment.recording.region).await.map_err(EnrichmentError::cover)?;
                     }
                     found = true;
                 }
-                AudibleStatus::Unavailable => return Err(MetadataError(format!("audiobook lookup unavailable: {}", response.detail))),
+                AudibleStatus::Unavailable => return Err(MetadataError(format!("audiobook lookup unavailable: {}", response.detail)).into()),
                 AudibleStatus::NoMatch | AudibleStatus::Ambiguous => {}
             }
         }
         if facts.needs_cover && cover.is_none() {
             let isbns = canonical_isbns(&record);
             if !isbns.is_empty() {
-                cover = self.resolve_isbn_cover(&isbns).await?;
+                cover = self.resolve_isbn_cover(&isbns).await.map_err(EnrichmentError::cover)?;
             }
         }
 
@@ -130,7 +142,7 @@ impl MetadataService {
         let popularity = metadata_contract::unique_work_popularity(isbns.iter().filter_map(|isbn| lookups.get(isbn)).flat_map(|result| &result.matches));
         found |= cover.is_some() || popularity.is_some();
         let status = if found { BookEnrichmentStatus::Found } else { BookEnrichmentStatus::NoMatch };
-        Ok(BookEnrichment { key: facts.key, status, record: found.then_some(record), toc, cover, popularity, detail: String::new() })
+        Ok(BookEnrichment { key: facts.key, status, record: found.then_some(record), toc, cover, popularity, failure: None, detail: String::new() })
     }
 
     /// Looks up every ISBN not already in `lookups`. An ISBN the lookup
@@ -190,8 +202,8 @@ impl MetadataService {
                     let mut codes = related_isbn::classifications(&[isbn.to_owned()], |_| records.clone());
                     for code in &mut codes {
                         for evidence in &mut code.evidence {
-                            if evidence.method == "local_bibliographic_print_isbn_verified_title_author" {
-                                evidence.method = "local_bibliographic_isbn_reference".into();
+                            if evidence.method == ClassificationMethod::LocalPrintIsbnVerifiedTitleAuthor {
+                                evidence.method = ClassificationMethod::LocalIsbnReference;
                             }
                         }
                     }
@@ -239,17 +251,18 @@ impl MetadataService {
         let results = response.into_iter().map(|result| (result.query_id.clone(), result)).collect::<HashMap<_, _>>();
 
         let supported = |query: &EditionIdentityQuery, result: &EditionIdentityResult| {
-            result.sibling_subjects.as_ref().is_some_and(|consensus| !consensus.subjects.is_empty()) || !alternatives::classifications(query, &resource_isbns, result)
-                .iter()
-                .flat_map(|classification| match classification.scheme {
-                    metadata_contract::ClassificationScheme::LibraryOfCongress => subject_projection::unified_subject_paths(subject_projection::LCC_SYSTEM_ID, &classification.notation),
-                    metadata_contract::ClassificationScheme::Bisac => subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &classification.notation),
-                    _ => Vec::new(),
-                })
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-                .is_empty()
+            result.sibling_subjects.as_ref().is_some_and(|consensus| !consensus.subjects.is_empty())
+                || !alternatives::classifications(query, &resource_isbns, result)
+                    .iter()
+                    .flat_map(|classification| match classification.scheme {
+                        metadata_contract::ClassificationScheme::LibraryOfCongress => subject_projection::unified_subject_paths(subject_projection::LCC_SYSTEM_ID, &classification.notation),
+                        metadata_contract::ClassificationScheme::Bisac => subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &classification.notation),
+                        _ => Vec::new(),
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .is_empty()
         };
         let mut result = results.get(&base.query_id);
         let mut query = base.clone();
@@ -311,8 +324,12 @@ fn gutenberg_identifier(record: &BookRecord) -> bool {
 fn identity_query(record: &BookRecord) -> EditionIdentityQuery {
     let title = record.subtitle.as_deref().filter(|subtitle| !subtitle.trim().is_empty()).map_or_else(|| record.title.clone(), |subtitle| format!("{}: {subtitle}", record.title));
     EditionIdentityQuery {
-        query_id: "0".to_owned(), title, authors: record.authors().map(|author| author.name().to_owned()).collect(),
-        author_surname: None, publishers: record.book.publishers.clone(), book_year: if gutenberg_identifier(record) { None } else { record.book.year },
+        query_id: "0".to_owned(),
+        title,
+        authors: record.authors().map(|author| author.name().to_owned()).collect(),
+        author_surname: None,
+        publishers: record.book.publishers.clone(),
+        book_year: if gutenberg_identifier(record) { None } else { record.book.year },
     }
 }
 
@@ -455,6 +472,7 @@ fn subject_key(subject: &BookSubject) -> (String, String) {
 mod tests {
     use super::*;
     use crate::build::tests::snapshot_from;
+    use subject_projection::{project_subject_codes, project_subject_concepts, unified_concept_id, unified_subject_paths, BISAC_SYSTEM_ID, LCC_SYSTEM_ID};
 
     #[test]
     fn ebook_release_year_does_not_rank_print_editions_or_rewrite_the_year() {
@@ -475,7 +493,11 @@ mod tests {
         request.record.book.subjects.push(BookSubject::new(None, "Science fiction", "dc:subject", None, None).unwrap());
         let result = enrich(&service, request).await;
         assert_eq!(result.status, BookEnrichmentStatus::Found);
-        assert!(result.record.unwrap().book.subjects.iter().any(|subject| subject.code() == Some("FIC028000")));
+        let record = result.record.unwrap();
+        let expected = unified_subject_paths(BISAC_SYSTEM_ID, "FIC028000").iter().filter_map(|path| unified_concept_id(path)).collect::<BTreeSet<_>>();
+        let actual = project_subject_concepts(&project_subject_codes(&record.book.subjects)).into_iter().map(|(_, concept)| concept).collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert!(expected.is_subset(&actual), "expected classifications {expected:?}, got {actual:?}");
     }
 
     #[test]
@@ -516,7 +538,10 @@ mod tests {
         assert_eq!(result.status, BookEnrichmentStatus::Found, "{}", result.detail);
         let record = result.record.unwrap();
         assert!(record.book.subjects.contains(&broad));
-        assert!(record.book.subjects.iter().any(|subject| subject.code().is_some_and(|code| code.starts_with("E757"))));
+        let expected = unified_subject_paths(LCC_SYSTEM_ID, "E757 .A37 1985").iter().filter_map(|path| unified_concept_id(path)).collect::<BTreeSet<_>>();
+        let actual = project_subject_concepts(&project_subject_codes(&record.book.subjects)).into_iter().map(|(_, concept)| concept).collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert!(expected.is_subset(&actual), "expected classifications {expected:?}, got {actual:?}");
     }
 
     fn facts(title: &str, isbn: Option<&str>) -> BookFacts {
@@ -593,7 +618,7 @@ mod tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, crate::app(reopened)).await.unwrap();
         });
-        let http = reqwest::Client::new();
+        let http = http_response::client();
         let response = http.get(format!("{origin}/v3/covers/{}", cover.id)).send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.bytes().await.unwrap().as_ref(), b"resolved artwork");
@@ -609,7 +634,10 @@ mod tests {
 
         assert_eq!(result.status, BookEnrichmentStatus::Found, "{}", result.detail);
         let record = result.record.unwrap();
-        assert!(record.book.subjects.iter().any(|subject| subject.authority() == Some("lcc")), "{:?}", record.book.subjects);
+        let expected = unified_subject_paths(LCC_SYSTEM_ID, "E757 .A37 1985").iter().filter_map(|path| unified_concept_id(path)).collect::<BTreeSet<_>>();
+        let actual = project_subject_concepts(&project_subject_codes(&record.book.subjects)).into_iter().map(|(_, concept)| concept).collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert!(expected.is_subset(&actual), "expected classifications {expected:?}, got {actual:?}");
         let expected = author_id("open_library:OL20A");
         assert_eq!(record.contributors[0].agent_id(), expected, "an authority-resolved author gets the same id on every device");
         assert_eq!(record.description, "Open Library summary.", "the server reports its own description, never the file's");
@@ -657,7 +685,10 @@ mod tests {
 
         assert_eq!(result.status, BookEnrichmentStatus::Found, "{}", result.detail);
         let record = result.record.unwrap();
-        assert!(record.book.subjects.iter().any(|subject| subject.authority() == Some("lcc")), "{:?}", record.book.subjects);
+        let expected = unified_subject_paths(LCC_SYSTEM_ID, "E757 .A37 1985").iter().filter_map(|path| unified_concept_id(path)).collect::<BTreeSet<_>>();
+        let actual = project_subject_concepts(&project_subject_codes(&record.book.subjects)).into_iter().map(|(_, concept)| concept).collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert!(expected.is_subset(&actual), "expected classifications {expected:?}, got {actual:?}");
         assert_eq!(result.popularity.unwrap().rating_count, 2);
     }
 

@@ -8,16 +8,6 @@ pub(crate) fn taxonomy(connection: &Connection) -> Result<Option<String>, Databa
     if installed { crate::taxonomy_update::revision(connection).map(Some) } else { Ok(None) }
 }
 
-#[cfg(test)]
-pub(crate) fn remove(connection: &Connection) -> Result<(), DatabaseError> {
-    let triggers = connection.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND name GLOB 'browse_*'")?.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-    for trigger in triggers {
-        connection.execute_batch(&format!("DROP TRIGGER {trigger}"))?;
-    }
-    connection.execute_batch("DROP TABLE browse_revision")?;
-    Ok(())
-}
-
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Revision {
     pub visibility: i64,
@@ -28,18 +18,12 @@ pub(crate) struct Revision {
     pub reading: i64,
     pub folders: i64,
     pub facets: i64,
-    // Older, uninitialized databases retain conservative invalidation.
-    pub legacy: Option<(u64, i64)>,
 }
 
 impl Revision {
     pub(crate) fn read(connection: &Connection) -> Result<Self, DatabaseError> {
-        let installed: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='browse_revision' AND type='table')", [], |row| row.get(0))?;
-        if !installed {
-            return Ok(Self { legacy: Some((connection.total_changes(), connection.pragma_query_value(None, "data_version", |row| row.get(0))?)), ..Default::default() });
-        }
         Ok(connection.query_row("SELECT visibility,subjects,authors,metadata,availability,reading,folders,facets FROM browse_revision WHERE singleton=1", [], |row| {
-            Ok(Self { visibility: row.get(0)?, subjects: row.get(1)?, authors: row.get(2)?, metadata: row.get(3)?, availability: row.get(4)?, reading: row.get(5)?, folders: row.get(6)?, facets: row.get(7)?, legacy: None })
+            Ok(Self { visibility: row.get(0)?, subjects: row.get(1)?, authors: row.get(2)?, metadata: row.get(3)?, availability: row.get(4)?, reading: row.get(5)?, folders: row.get(6)?, facets: row.get(7)? })
         })?)
     }
 }
@@ -92,30 +76,4 @@ pub(crate) fn install(connection: &Connection) -> Result<(), DatabaseError> {
         ))?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Database;
-
-    #[test]
-    fn version_40_migration_installs_transactional_counters_once() {
-        let db = Database::open(":memory:").unwrap();
-        let replica = db.initialize_library().unwrap();
-        remove(&db.connection).unwrap();
-        db.connection.pragma_update(None, "user_version", 40).unwrap();
-        assert!(Revision::read(&db.connection).unwrap().legacy.is_some());
-        assert_eq!(db.initialize_library().unwrap(), replica);
-        let before = Revision::read(&db.connection).unwrap();
-        assert!(before.legacy.is_none());
-        let transaction = db.connection.unchecked_transaction().unwrap();
-        transaction.execute("UPDATE dir SET name='temporary'", []).unwrap();
-        assert!(Revision::read(&transaction).unwrap().folders > before.folders);
-        transaction.rollback().unwrap();
-        assert!(Revision::read(&db.connection).unwrap() == before);
-        assert_eq!(db.initialize_library().unwrap(), replica);
-        assert!(Revision::read(&db.connection).unwrap() == before);
-        db.check_migrated().unwrap();
-    }
 }

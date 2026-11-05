@@ -10,16 +10,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::blocking_worker::BlockingWorker;
 
-const SESSION_VERSION: u32 = 1;
+const SESSION_VERSION: u32 = 2;
 
 fn default_kobo_auto_rotate() -> bool {
     true
 }
 
 /// Geometry for the one application window.
-///
-/// This used to describe a separate reader window. Keeping the same serialized
-/// shape lets existing desktop sessions migrate without losing their layout.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeometry {
     pub x: f32,
@@ -41,12 +38,10 @@ impl WindowGeometry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiSession {
     version: u32,
-    #[serde(default = "default_kobo_auto_rotate")]
     pub kobo_auto_rotate: bool,
     pub reader_preferences: ReaderPreferences,
-    #[serde(default)]
     pub navigation: NavigationSession,
-    #[serde(default, alias = "reader_window")]
+    #[serde(default)]
     pub window: Option<WindowGeometry>,
 }
 
@@ -209,15 +204,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sessions_keep_reader_preferences_and_default_navigation() {
+    fn sessions_keep_reader_preferences_and_navigation() {
         let directory = tempfile::tempdir().unwrap();
         let path = session_path(directory.path());
         let mut original = UiSession::default();
         original.reader_preferences.toc_width = 417.0;
         original.window = Some(WindowGeometry { x: 10.0, y: 20.0, width: 900.0, height: 700.0 });
-        let mut legacy = serde_json::to_value(&original).unwrap();
-        legacy.as_object_mut().unwrap().remove("navigation");
-        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let snapshot = serde_json::to_value(&original).unwrap();
+        fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
         let loaded = UiSession::load(&path);
         assert_eq!(loaded.reader_preferences, original.reader_preferences);
         assert_eq!(loaded.window, original.window);
@@ -226,9 +220,10 @@ mod tests {
 
     #[gpui::test]
     async fn navigation_and_reader_are_saved_without_shutdown_and_closing_reader_stays_closed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let path = session_path(directory.path());
-        let scheduler = cx.new(|cx| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new(cx.background_executor(), 1)));
+        let scheduler = cx.new(|_| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new()));
         scheduler.update(cx, |owner, cx| {
             owner.session.navigation = saved_navigation();
             owner.save_now(cx);
@@ -252,9 +247,10 @@ mod tests {
 
     #[gpui::test]
     async fn delayed_saves_coalesce_and_include_immediate_navigation_changes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let path = session_path(directory.path());
-        let owner = cx.new(|cx| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new(cx.background_executor(), 1)));
+        let owner = cx.new(|_| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new()));
         let worker = owner.read_with(cx, |owner, _| owner.blocking_worker.clone());
         owner.update(cx, |owner, cx| {
             owner.session.reader_preferences.toc_width = 300.0;

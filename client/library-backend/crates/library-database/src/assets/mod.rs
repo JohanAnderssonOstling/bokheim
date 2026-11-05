@@ -9,8 +9,9 @@ pub(crate) mod uploads;
 
 pub use planning::BookUploadSnapshot;
 pub use transfer::{AssetTransferState, PlacementTransferEntry, TransferSnapshot};
+pub use uploads::BookStorageMetadata;
 
-use content_address::ContentHash;
+use content_address::{BookId, ContentHash};
 use include_sqlite_sql::include_sql;
 
 include_sql!("src/assets/sql/schema/tables.sql");

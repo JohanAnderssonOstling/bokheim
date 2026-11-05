@@ -1,28 +1,17 @@
 //! Decode database rows without masking malformed values.
 
+pub(crate) use crate::query_methods::parse_uuid_column;
+pub use crate::query_methods::{invalid_integer_column, invalid_text_column};
 pub(crate) use library_model::BookCardRow;
-use std::io::{Error, ErrorKind};
-pub(crate) use sync_common::ContentHash;
-
-pub fn invalid_text_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
-}
-
-pub fn invalid_integer_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Integer, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
-}
-
-pub(crate) fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<uuid::Uuid> {
-    uuid::Uuid::parse_str(&value).map_err(|error| invalid_text_column(column, error.to_string()))
-}
+pub(crate) use sync_common::BookId;
 
 pub(crate) fn read_book_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookCardRow> {
-    let raw_content_hash: ContentHash = row.get("content_hash")?;
+    let book_id: BookId = row.get("content_hash")?;
     let title: Option<String> = row.get("title")?;
     let duration_column = row.as_ref().column_index("audiobook_duration_ms")?;
     let duration_ms: Option<i64> = row.get(duration_column)?;
     Ok(BookCardRow {
-        source: library_model::BookSource::Library { content_hash: raw_content_hash },
+        source: library_model::BookSource::Library { book_id },
         title: super::text::display_title(title.as_deref()).to_owned(),
         subtitle: row.get("subtitle")?,
         author: row.get::<_, Option<String>>("author")?.unwrap_or_default(),

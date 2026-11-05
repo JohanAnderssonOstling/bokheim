@@ -1,7 +1,8 @@
 use super::bisac_database::with_reference;
-use super::{canonical_subject_system, has_usable_lcc_classification, normalize_path, normalize_term, split_path, BISAC_SYSTEM_ID, UNIFIED_SYSTEM_ID};
+use super::{BISAC_SYSTEM_ID, UNIFIED_SYSTEM_ID, canonical_subject_system, has_usable_lcc_classification, normalize_path, normalize_term, split_path};
 use book_model::BookSubject;
 use rusqlite::{Connection, OptionalExtension, Row};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 struct SubjectNode {
@@ -18,57 +19,85 @@ impl SubjectNode {
     }
 }
 
-struct Reference<'a>(&'a Connection);
+struct Reference<'a> {
+    database: Option<&'a Connection>,
+    failed: Cell<bool>,
+}
 
 fn read_node(row: &Row<'_>) -> rusqlite::Result<SubjectNode> {
     let path: String = row.get(0)?;
+    Ok(node(path, row.get(1)?))
+}
+
+fn node(path: String, code: Option<String>) -> SubjectNode {
     // The compiler joins CSV components with this exact separator. Recovering
     // the parent and last label avoids storing both again for every node.
     let (parent_path, name) = match path.rsplit_once(" / ") {
         Some((parent, name)) => (Some(parent.to_owned()), name.to_owned()),
         None => (None, path.clone()),
     };
-    Ok(SubjectNode { path, parent_path, name, code: row.get(1)?, normalized_components: Vec::new() })
+    SubjectNode { path, parent_path, name, code, normalized_components: Vec::new() }
 }
 
-impl Reference<'_> {
+impl<'a> Reference<'a> {
+    fn new(database: Option<&'a Connection>) -> Self {
+        Self { database, failed: Cell::new(false) }
+    }
+
+    fn query<T>(&self, read: impl FnOnce(&Connection) -> Result<T, String>) -> Option<T> {
+        let db = self.database.filter(|_| !self.failed.get())?;
+        match read(db) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.failed.set(true);
+                eprintln!("BISAC reference query failed: {error}");
+                None
+            }
+        }
+    }
+
     fn node_by_path(&self, path: &str) -> Option<SubjectNode> {
-        self.0.prepare_cached("SELECT path,code FROM bisac_node WHERE normalized_path=?1 ORDER BY id DESC LIMIT 1").and_then(|mut query| query.query_row([normalize_path(path)], read_node).optional()).expect("BISAC path query must succeed")
+        let path = normalize_path(path);
+        self.query(|db| db.prepare_cached("SELECT path,code FROM bisac_node WHERE normalized_path=?1 ORDER BY id DESC LIMIT 1").and_then(|mut query| query.query_row([&path], read_node).optional()).map_err(|error| error.to_string()))
+            .flatten()
     }
 
     fn node_by_code(&self, code: &str) -> Option<SubjectNode> {
-        self.0.prepare_cached("SELECT path,code FROM bisac_node WHERE code=?1 ORDER BY id DESC LIMIT 1").and_then(|mut query| query.query_row([code.trim().to_ascii_uppercase()], read_node).optional()).expect("BISAC code query must succeed")
+        let code = code.trim().to_ascii_uppercase();
+        self.query(|db| db.prepare_cached("SELECT path,code FROM bisac_node WHERE code=?1 ORDER BY id DESC LIMIT 1").and_then(|mut query| query.query_row([&code], read_node).optional()).map_err(|error| error.to_string()))
+            .flatten()
     }
 
     fn candidates(&self, components: &HashMap<String, BTreeSet<usize>>, minimum_components: usize) -> Vec<SubjectNode> {
         if components.is_empty() {
             return Vec::new();
         }
-        let keys = serde_json::to_string(&components.keys().collect::<Vec<_>>()).expect("BISAC components must serialize");
-        let mut query = self
-            .0
-            .prepare_cached(
-                "SELECT n.path,n.code
-            FROM bisac_node n
-            WHERE n.id IN (SELECT n.id FROM json_each(?1) selected JOIN bisac_node n ON n.tail_component=selected.value)
-              AND n.component_count>=?2 ORDER BY n.id",
-            )
-            .expect("BISAC candidate query must prepare");
-        query
-            .query_map(rusqlite::params![keys, i64::try_from(minimum_components).unwrap_or(i64::MAX)], |row| {
-                let mut node = read_node(row)?;
-                node.normalized_components = node.path.split(" / ").map(normalize_term).collect();
-                Ok(node)
-            })
-            .expect("BISAC candidate query must succeed")
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .expect("BISAC candidates must be readable")
+        self.query(|db| {
+            let keys = serde_json::to_string(&components.keys().collect::<Vec<_>>()).map_err(|error| error.to_string())?;
+            let mut query = db
+                .prepare_cached(
+                    "SELECT n.path,n.code
+                 FROM bisac_node n
+                 WHERE n.id IN (SELECT n.id FROM json_each(?1) selected JOIN bisac_node n ON n.tail_component=selected.value)
+                   AND n.component_count>=?2 ORDER BY n.id",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = query
+                .query_map(rusqlite::params![keys, i64::try_from(minimum_components).unwrap_or(i64::MAX)], |row| {
+                    let mut node = read_node(row)?;
+                    node.normalized_components = node.path.split(" / ").map(normalize_term).collect();
+                    Ok(node)
+                })
+                .map_err(|error| error.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())
+        })
+        .unwrap_or_default()
     }
 }
 
 pub fn bisac_code_for_path(path: &str) -> Option<String> {
     with_reference(|db| {
-        let reference = Reference(db);
+        let reference = Reference::new(db);
         reference.node_by_path(path).and_then(|node| node.code).or_else(|| reference.node_by_path(&format!("{path} / General")).and_then(|node| node.code))
     })
 }
@@ -100,7 +129,7 @@ pub fn match_bisac_subjects(subjects: &[BookSubject]) -> Vec<SubjectAssignment> 
 pub fn match_bisac_subjects_with_minimum_adjacent(subjects: &[BookSubject], minimum_components: usize) -> Vec<SubjectAssignment> {
     let preferred_lcc = has_usable_lcc_classification(subjects);
     with_reference(|db| {
-        let system = Reference(db);
+        let system = Reference::new(db);
         let mut matches = BTreeMap::<String, BTreeSet<usize>>::new();
         let mut component_evidence = HashMap::<String, BTreeSet<usize>>::new();
         for (position, subject) in subjects.iter().enumerate() {
@@ -190,7 +219,7 @@ mod compact_reference_tests {
     #[test]
     fn duplicate_normalized_paths_and_codes_keep_path_order() {
         let db = database();
-        let reference = Reference(&db);
+        let reference = Reference::new(Some(&db));
         assert_eq!(reference.node_by_path("TOPIC > GENERAL").unwrap().path, "topic / General");
         assert_eq!(reference.node_by_code(" aaa000000 ").unwrap().path, "topic / General");
     }
@@ -198,7 +227,7 @@ mod compact_reference_tests {
     #[test]
     fn candidate_components_preserve_unicode_and_literal_separators() {
         let db = database();
-        let reference = Reference(&db);
+        let reference = Reference::new(Some(&db));
         let evidence = HashMap::from([("unicode".to_owned(), BTreeSet::from([0])), ("éducation".to_owned(), BTreeSet::from([1])), ("graphic novels".to_owned(), BTreeSet::from([2])), ("horror--zombies".to_owned(), BTreeSet::from([3]))]);
         let candidates = reference.candidates(&evidence, 2);
         let unicode = candidates.iter().find(|node| node.path == "Unicode / Éducation").unwrap();

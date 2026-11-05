@@ -5,12 +5,14 @@
 //! request number to stop early, and the UI checks it again before displaying
 //! the completed result set.
 
+use ui_text::text;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{ListAlignment, ListState, px};
-use html_view_core::{BookSearchMatch, BookSearchTarget, SearchOptions, SearchScope};
+use skrift_column_paginator::{BookSearchMatch, BookSearchTarget, SearchOptions, SearchScope};
 
 use crate::epub::SearchState;
 use crate::epub::toc::TocState;
@@ -33,7 +35,7 @@ impl Default for SearchState {
             cancellation: Arc::new(AtomicU64::new(0)),
             options: SearchOptions { match_case: false, whole_word: false, match_diacritics: false, scope },
             match_position: None,
-            results: Vec::new(),
+            results: Default::default(),
             rows: Vec::new(),
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
         }
@@ -92,8 +94,8 @@ impl SearchState {
     /// match's CFI and rebuilding every heading on each sidebar repaint.
     pub(in crate::epub) fn rebuild_rows(&mut self, toc: &TocState) {
         self.rows.clear();
-        for (chapter, document, indices) in search_groups(toc, &self.results) {
-            let title = chapter.and_then(|ordinal| toc.title_for_ordinal(ordinal)).unwrap_or_else(|| format!("Section {}", document + 1));
+        for (chapter, document, indices) in search_groups(toc, self.results.iter()) {
+            let title = chapter.and_then(|ordinal| toc.title_for_ordinal(ordinal)).unwrap_or_else(|| format!(text!(reader::section), document + 1));
             self.rows.push(SearchRow::Heading(title));
             self.rows.extend(indices.into_iter().map(SearchRow::Match));
         }
@@ -112,14 +114,17 @@ impl SearchState {
 }
 
 /// Preserve reading order even when some spine documents lack TOC entries.
-pub(in crate::epub) fn search_groups(toc: &TocState, results: &[BookSearchMatch]) -> Vec<(Option<usize>, usize, Vec<usize>)> {
+pub(in crate::epub) fn search_groups<'a>(
+    toc: &TocState,
+    results: impl IntoIterator<Item = &'a BookSearchMatch>,
+) -> Vec<(Option<usize>, usize, Vec<usize>)> {
     let chapters = toc.chapter_ordinals();
     let mut groups: Vec<(Option<usize>, usize, Vec<usize>)> = Vec::new();
     let mut group_indices = HashMap::new();
-    for (index, result) in results.iter().enumerate() {
+    for (index, result) in results.into_iter().enumerate() {
         let ordinal = match &result.target {
             BookSearchTarget::SourceCfi(cfi) => toc.ordinal_for_cfi(cfi),
-            BookSearchTarget::LocalOccurrence(_) => toc.ordinal_for_cfi(&format!("epubcfi(/6/{}!/0)", (result.doc + 1) * 2)),
+            BookSearchTarget::LocalOccurrence(_) => toc.ordinal_for_document(result.doc),
         };
         let chapter = ordinal.and_then(|ordinal| chapters.iter().rev().find(|&&chapter| chapter <= ordinal).copied());
         let key = (chapter, if chapter.is_some() { 0 } else { result.doc });

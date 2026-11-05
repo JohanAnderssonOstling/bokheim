@@ -1,3 +1,4 @@
+use server_asset_store::CatalogStorage;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
@@ -9,6 +10,7 @@ const ASSETS_DIRECTORY: &str = "BOKHEIM_ASSETS_DIR";
 pub struct StoragePaths {
     books: PathBuf,
     thumbnails: PathBuf,
+    catalog: Option<CatalogStorage>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -37,13 +39,52 @@ impl StoragePaths {
         (self.books, self.thumbnails)
     }
 
+    pub fn catalog(&self) -> Option<&CatalogStorage> {
+        self.catalog.as_ref()
+    }
+
     fn from_values(mut value: impl FnMut(&str) -> Option<OsString>) -> Result<Self, StorageConfigError> {
+        let catalog = match (value("BOKHEIM_CATALOG_BOOKS_DIR"), value("BOKHEIM_CATALOG_PINS_DIR")) {
+            (None, None) => None,
+            (Some(books), Some(pins)) => {
+                let books = PathBuf::from(books);
+                let pins = PathBuf::from(pins);
+                validate_production_path("BOKHEIM_CATALOG_BOOKS_DIR", &books)?;
+                validate_production_path("BOKHEIM_CATALOG_PINS_DIR", &pins)?;
+                Some(CatalogStorage { books, pins })
+            }
+            _ => return Err(StorageConfigError::new("BOKHEIM_CATALOG_BOOKS_DIR and BOKHEIM_CATALOG_PINS_DIR must be configured together")),
+        };
         let Some(root) = value(ASSETS_DIRECTORY) else {
-            return Ok(Self { books: PathBuf::from("./books"), thumbnails: PathBuf::from("./thumbnails") });
+            return Ok(Self { books: PathBuf::from("./books"), thumbnails: PathBuf::from("./thumbnails"), catalog });
         };
         let root = PathBuf::from(root);
         validate_production_path(ASSETS_DIRECTORY, &root)?;
-        Ok(Self { books: root.join("books"), thumbnails: root.join("thumbnails") })
+        Ok(Self { books: root.join("books"), thumbnails: root.join("thumbnails"), catalog })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_requires_both_absolute_paths() {
+        assert!(StoragePaths::from_values(|_| None).unwrap().catalog().is_none());
+        assert!(StoragePaths::from_values(|name| (name == "BOKHEIM_CATALOG_BOOKS_DIR").then(|| "/catalog/books".into())).is_err());
+        assert!(StoragePaths::from_values(|name| match name {
+            "BOKHEIM_CATALOG_BOOKS_DIR" => Some("relative/books".into()),
+            "BOKHEIM_CATALOG_PINS_DIR" => Some("/private/pins".into()),
+            _ => None,
+        })
+        .is_err());
+        let paths = StoragePaths::from_values(|name| match name {
+            "BOKHEIM_CATALOG_BOOKS_DIR" => Some("/catalog/books".into()),
+            "BOKHEIM_CATALOG_PINS_DIR" => Some("/private/pins".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(paths.catalog().unwrap().pins, PathBuf::from("/private/pins"));
     }
 }
 

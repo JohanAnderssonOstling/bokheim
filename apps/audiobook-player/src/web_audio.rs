@@ -54,7 +54,7 @@ impl AudioEngine {
             &serde_json::json!({"title": book.title, "artist": book.author.clone().unwrap_or_default(), "tracks": source.metadata.tracks, "localTrackUrls": source.local_tracks, "bookDuration": book.duration.as_secs_f64()}).to_string(),
         )
         .map_err(|e| format!("{e:?}"))?;
-        let save = Closure::new(move |position: f64, progress: f64| {
+        let save = Closure::own_aborting(move |position: f64, progress: f64| {
             if let Some(position) = crate::browser_position_update(position, progress) {
                 let _ = updates.try_send(position);
             }

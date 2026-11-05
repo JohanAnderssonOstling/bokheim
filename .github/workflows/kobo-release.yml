@@ -3,6 +3,10 @@ name: Kobo release
 on:
   workflow_dispatch:
     inputs:
+      source_commit:
+        description: Optional full application source commit for this packaging workflow
+        type: string
+        required: false
       publish:
         description: Upload the installers to the shared draft release for this version
         required: true
@@ -30,6 +34,7 @@ env:
   RUST_VERSION: stable
   LINUXDEPLOY_VERSION: 1-alpha-20251107-1
   APPIMAGETOOL_VERSION: 1.9.1
+  SOURCE_COMMIT: ${{ inputs.source_commit || github.sha }}
 
 jobs:
   shared-tests:
@@ -37,15 +42,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
       - name: Require shared tests for this source commit
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_ONLY: ${{ inputs.build_only || false }}
         run: |
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Expected a full application source commit"; exit 1; }
           if [[ "$BUILD_ONLY" == true ]]; then
             echo "Build-only release requested; shared tests are skipped."
           else
-            python3 scripts/ci/require-shared-tests.py "${{ github.repository }}" "$GITHUB_SHA"
+            python3 scripts/ci/require-shared-tests.py "${{ github.repository }}" "$SOURCE_COMMIT"
           fi
 
   version:
@@ -61,6 +69,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: bokheim
+          ref: ${{ env.SOURCE_COMMIT }}
 
       - name: Read and check release version
         id: version
@@ -85,22 +94,22 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: bokheim
+          ref: ${{ env.SOURCE_COMMIT }}
 
       - name: Check the committed Kobo package
         working-directory: bokheim
         shell: bash
         run: |
           # The Kobo package is cross-compiled on a maintainer machine and
-          # committed to the repository: its ARMv7 musl toolchain comes from a
-          # single host that is too often unreachable to sit in the release
-          # path. The installers embed the committed package rather than
-          # rebuilding or downloading it, so a checkout is all CI needs.
-          package=apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          # committed to the repository with its private glibc runtime.
+          # The installers embed the verified package, so release CI does not
+          # need to rebuild the ARM toolchain or download a second payload.
+          package=apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz
           if [ ! -s "$package" ]; then
             echo "::error::$package is missing. Rebuild it with apps/desktop-gpui/scripts/package-kobo.sh and commit the result."
             exit 1
           fi
-          tar -tzf "$package" >/dev/null
+          python3 apps/desktop-gpui/scripts/verify-kobo-package.py "$package" --multi-device
           ls -l "$package"
 
       - name: Install Rust
@@ -110,14 +119,13 @@ jobs:
           rustup default $env:RUST_VERSION
 
       - name: Restore installer dependencies and build cache
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            bokheim/apps/kobo-installer/target
-          key: kobo-installer-windows-v3-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
+          prefix-key: bokheim-kobo-windows-v2
+          shared-key: kobo-installer-windows
+          workspaces: bokheim/apps/kobo-installer -> target
+          cache-on-failure: true
+          cache-workspace-crates: true
 
       - name: Test installer workflows
         if: inputs.build_only != true
@@ -129,7 +137,7 @@ jobs:
         working-directory: bokheim
         shell: pwsh
         run: |
-          $archive = (Resolve-Path "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz").Path
+          $archive = (Resolve-Path "apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz").Path
           $env:BOKHEIM_KOBO_ARCHIVE = $archive
           $env:BOKHEIM_VERSION = "${{ needs.version.outputs.version }}"
           $env:RUSTFLAGS = "-C target-feature=+crt-static"
@@ -142,7 +150,7 @@ jobs:
         shell: pwsh
         run: |
           $installer = "release/Bokheim-Kobo-Installer-Windows-x86_64.exe"
-          $archive = "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz"
+          $archive = "apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz"
           if (!(Test-Path $installer) -or (Get-Item $installer).Length -le (Get-Item $archive).Length) {
             throw "The installer is missing its embedded Kobo package"
           }
@@ -153,6 +161,7 @@ jobs:
           $name = Split-Path $installer -Leaf
           $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           "$hash  $name" | Out-File -FilePath "$installer.sha256" -Encoding ascii
+          $env:SOURCE_COMMIT | Set-Content -Encoding ascii "release/kobo-windows-source-commit.txt"
 
       - name: Retain Windows installer artifact
         uses: actions/upload-artifact@v7
@@ -165,30 +174,35 @@ jobs:
   build-linux-installer:
     name: Linux USB installer AppImage
     needs: [version, shared-tests]
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
 
     steps:
       - name: Check out Bokheim
         uses: actions/checkout@v6
         with:
           path: bokheim
+          ref: ${{ env.SOURCE_COMMIT }}
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
 
       - name: Check the committed Kobo package
         working-directory: bokheim
         shell: bash
         run: |
           # The Kobo package is cross-compiled on a maintainer machine and
-          # committed to the repository: its ARMv7 musl toolchain comes from a
-          # single host that is too often unreachable to sit in the release
-          # path. The installers embed the committed package rather than
-          # rebuilding or downloading it, so a checkout is all CI needs.
-          package=apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          # committed to the repository with its private glibc runtime.
+          # The installers embed the verified package, so release CI does not
+          # need to rebuild the ARM toolchain or download a second payload.
+          package=apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz
           if [ ! -s "$package" ]; then
             echo "::error::$package is missing. Rebuild it with apps/desktop-gpui/scripts/package-kobo.sh and commit the result."
             exit 1
           fi
-          tar -tzf "$package" >/dev/null
+          python3 apps/desktop-gpui/scripts/verify-kobo-package.py "$package" --multi-device
           ls -l "$package"
 
       - name: Install build and AppImage dependencies
@@ -210,6 +224,7 @@ jobs:
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
             pkg-config
+          sudo apt-get -o Acquire::Retries=3 install -y cpio zstd
 
       - name: Install Rust
         run: |
@@ -217,14 +232,13 @@ jobs:
           rustup default "$RUST_VERSION"
 
       - name: Restore installer dependencies and build cache
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            bokheim/apps/kobo-installer/target
-          key: kobo-installer-linux-v3-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
+          prefix-key: bokheim-kobo-linux-glibc217-v2-${{ hashFiles('bokheim/scripts/linux/toolchain.json', 'bokheim/scripts/linux/toolchain.py', 'bokheim/scripts/linux/compiler.py') }}
+          shared-key: kobo-installer-linux
+          workspaces: bokheim/apps/kobo-installer -> target
+          cache-on-failure: true
+          cache-workspace-crates: true
 
       - name: Download pinned AppImage tools
         run: |
@@ -244,9 +258,9 @@ jobs:
       - name: Build Linux installer
         working-directory: bokheim
         env:
-          BOKHEIM_KOBO_ARCHIVE: ${{ github.workspace }}/bokheim/apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          BOKHEIM_KOBO_ARCHIVE: ${{ github.workspace }}/bokheim/apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz
           BOKHEIM_VERSION: ${{ needs.version.outputs.version }}
-        run: cargo build --release --manifest-path apps/kobo-installer/Cargo.toml
+        run: python3 scripts/linux/toolchain.py -- cargo build --release --manifest-path apps/kobo-installer/Cargo.toml
 
       - name: Build installer AppImage
         working-directory: bokheim
@@ -254,7 +268,15 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           LINUXDEPLOY: ${{ runner.temp }}/linuxdeploy-x86_64.AppImage
           APPIMAGETOOL: ${{ runner.temp }}/appimagetool-x86_64.AppImage
-        run: apps/kobo-installer/linux/build-appimage.sh
+        run: |
+          # libbsd/libmd belong to the distribution's excluded libXdmcp.
+          # Do not let linuxdeploy copy the build host's transitive libraries.
+          cat > "$RUNNER_TEMP/linuxdeploy-compat" <<'SH'
+          #!/bin/sh
+          exec "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" --exclude-library 'libbsd*' --exclude-library 'libmd*' "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/linuxdeploy-compat"
+          LINUXDEPLOY="$RUNNER_TEMP/linuxdeploy-compat" apps/kobo-installer/linux/build-appimage.sh
 
       - name: Verify Linux installer AppImage
         working-directory: bokheim
@@ -263,12 +285,24 @@ jobs:
           release/Bokheim-Kobo-Installer-Linux-x86_64.AppImage --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/bokheim-kobo-installer
           test -f squashfs-root/se.bokheim.KoboInstaller.desktop
+          bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh squashfs-root 2.17
+          bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh release/Bokheim-Kobo-Installer-Linux-x86_64.AppImage 2.17
           (cd release && sha256sum --check Bokheim-Kobo-Installer-Linux-x86_64.AppImage.sha256)
           ldd squashfs-root/usr/bin/bokheim-kobo-installer > "$RUNNER_TEMP/kobo-installer-ldd.txt"
           if grep -F 'not found' "$RUNNER_TEMP/kobo-installer-ldd.txt"; then
             cat "$RUNNER_TEMP/kobo-installer-ldd.txt"
             exit 1
           fi
+
+      - name: Package verified ARM updates
+        working-directory: bokheim
+        run: |
+          cp apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz release/
+          # Existing Libra 2 updaters still request the historical asset name.
+          cp release/Bokheim-Kobo-armv7.tar.gz release/Bokheim-Kobo-Libra2-armv7.tar.gz
+          (cd release && sha256sum Bokheim-Kobo-armv7.tar.gz > Bokheim-Kobo-armv7.tar.gz.sha256)
+          (cd release && sha256sum Bokheim-Kobo-Libra2-armv7.tar.gz > Bokheim-Kobo-Libra2-armv7.tar.gz.sha256)
+          printf '%s\n' "$SOURCE_COMMIT" > release/kobo-source-commit.txt
 
       - name: Retain Linux installer artifact
         uses: actions/upload-artifact@v7
@@ -289,6 +323,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
       - name: Require shared tests for the exact source commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -310,11 +346,15 @@ jobs:
           if ! gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
               --repo "$GH_REPO" \
-              --target "$GITHUB_SHA" --draft --generate-notes --title "Bokheim ${VERSION}" || \
+              --target "$SOURCE_COMMIT" --draft --generate-notes --title "Bokheim ${VERSION}" || \
               gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null
           fi
           # Refuse to overwrite assets after a release has become public.
           test "$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft --jq .isDraft)" = true
           printf '%s\n' "$(git rev-parse HEAD)" > release/kobo-source-commit.txt
+          cp apps/kobo-installer/package/Bokheim-Kobo-armv7.tar.gz release/
+          (cd release && sha256sum Bokheim-Kobo-armv7.tar.gz > Bokheim-Kobo-armv7.tar.gz.sha256)
+          cp release/Bokheim-Kobo-armv7.tar.gz release/Bokheim-Kobo-Libra2-armv7.tar.gz
+          (cd release && sha256sum Bokheim-Kobo-Libra2-armv7.tar.gz > Bokheim-Kobo-Libra2-armv7.tar.gz.sha256)
           gh release upload "$RELEASE_TAG" release/* \
             --repo "$GH_REPO" --clobber

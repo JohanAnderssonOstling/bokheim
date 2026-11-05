@@ -1,14 +1,14 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::io::Cursor;
 use library_placement as asset_workflow;
+use std::io::Cursor;
 use std::sync::Arc;
 
-use client_platform_runtime::executor::BoxedBackendFuture;
+use client_platform_runtime::executor::{BackendExecutor, BoxedBackendFuture};
 use cpu_host::{BackendError, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, ThumbnailBytes};
-use library_database::{Database, ScanSnapshot};
+use library_database::{DatabaseClient, ScanSnapshot};
 use library_files::{asset_store::ImportOptions, AssetStore};
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 
 struct InspectHost;
 
@@ -16,10 +16,10 @@ impl CpuHost for InspectHost {
     fn book(&self, task: BookTask, mut reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
         Box::pin(async move {
             use std::io::{Read as _, Seek as _};
-            let BookTask::Inspect { content_hash, .. } = &task else { panic!("unexpected task") };
+            let BookTask::Inspect { book_id, .. } = &task else { panic!("unexpected task") };
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).unwrap();
-            assert_eq!(*content_hash, Some(ContentHash::from(blake3::hash(&bytes))));
+            assert_eq!(*book_id, Some(BookId::from(blake3::hash(&bytes))));
             reader.rewind().unwrap();
             cpu_host::execute_book_with_mobi(task, reader, |_, _| Err("subject page inspection is not supported for this format".into()))
         })
@@ -82,20 +82,20 @@ async fn copied_imports_and_scanned_files_have_identical_ingestion_results() {
     for (name, bytes) in fixtures.into_iter().chain(std::iter::once(("book.pdf", pdf.as_slice()))) {
         for direct in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let db = Database::open(root.path().join("library.db")).unwrap();
-            db.initialize_library().unwrap();
+            let db = DatabaseClient::open(root.path().join("library.db"), &BackendExecutor::new().unwrap()).await.unwrap();
+            db.initialize_library().await.unwrap();
             let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
             let host: Arc<dyn CpuHost> = Arc::new(InspectHost);
-            let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, name.into(), Box::new(Cursor::new(bytes.to_vec())), ImportOptions { direct }).await.unwrap();
+            let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, name, Box::new(Cursor::new(bytes.to_vec())), ImportOptions { direct }).await.unwrap();
             assert_eq!(std::fs::read(copied.path()).unwrap(), bytes, "copy must leave ingestion to the shared function");
             let ingested = filesystem_scanner::ingestion::ingest_file(copied.path().to_owned(), name.clone(), &*host).await.unwrap();
-            let expected_hash = ingested.content_hash;
+            let expected_hash = ingested.book_id;
             let expected_size = ingested.size_bytes;
             let expected_metadata = inspection_facts(&ingested.inspection);
             let staged = copied.into_staged(expected_hash, expected_size);
             let published = asset_workflow::publish_import(&store, &db, ROOT_DIR_ID, &name, staged, false).await.unwrap();
             let published_bytes = std::fs::read(root.path().join(published.relative_path.trim_start_matches('/'))).unwrap();
-            assert_eq!(expected_hash, ContentHash::from(blake3::hash(&published_bytes)));
+            assert_eq!(expected_hash, BookId::from(blake3::hash(&published_bytes)));
             assert_eq!(expected_size, published_bytes.len() as u64);
             let snapshot = empty_snapshot();
             let scan = filesystem_scanner::filesystem_scan::discover(root.path(), &snapshot);
@@ -103,7 +103,7 @@ async fn copied_imports_and_scanned_files_have_identical_ingestion_results() {
             assert!(inspected.readable);
             assert_eq!(inspected.books.len(), 1);
             let scanned = &inspected.books[0];
-            assert_eq!(scanned.content_hash, expected_hash);
+            assert_eq!(scanned.book_id, expected_hash);
             assert_eq!(scanned.size_bytes, expected_size);
             assert_eq!(inspection_facts(&scanned.inspection), expected_metadata);
             assert_eq!(std::fs::read(root.path().join(published.relative_path.trim_start_matches('/'))).unwrap(), published_bytes);
@@ -115,10 +115,10 @@ async fn copied_imports_and_scanned_files_have_identical_ingestion_results() {
 async fn failed_ingestion_cleans_up_copied_files() {
     for direct in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let db = Database::open(root.path().join("library.db")).unwrap();
-        db.initialize_library().unwrap();
+        let db = DatabaseClient::open(root.path().join("library.db"), &BackendExecutor::new().unwrap()).await.unwrap();
+        db.initialize_library().await.unwrap();
         let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
-        let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, "invalid.epub".into(), Box::new(Cursor::new(b"invalid epub")), ImportOptions { direct }).await.unwrap();
+        let (name, copied) = asset_workflow::stage_import(&store, &db, ROOT_DIR_ID, "invalid.epub", Box::new(Cursor::new(b"invalid epub")), ImportOptions { direct }).await.unwrap();
         let path = copied.path().to_owned();
         assert!(filesystem_scanner::ingestion::ingest_file(path.clone(), name, &InspectHost).await.is_err());
         drop(copied);

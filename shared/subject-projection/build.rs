@@ -5,6 +5,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use subject_taxonomy::{runtime_index as runtime, taxonomy_reader};
 
+#[path = "src/matcher_storage.rs"]
+mod matcher_storage;
+
 const CLIENT_TAXONOMY_DEPTH: u8 = 2;
 
 fn main() {
@@ -36,8 +39,13 @@ fn main() {
         std::fs::remove_file(&bisac_path).expect("replace generated BISAC reference");
     }
     subject_taxonomy::bisac_reference::compile(&bisac_path, &bisac_csv, &bisac_revision).expect("compile BISAC reference");
-    let bisac_image = std::fs::read(&bisac_path).expect("read compiled BISAC reference");
-    let bisac_digest = blake3::hash(&bisac_image).to_hex().to_string();
+    let bisac_digest = blake3::hash(&std::fs::read(&bisac_path).expect("read compiled BISAC reference")).to_hex().to_string();
+    // Finish the cache metadata before packaging. Native and web can install
+    // this exact image without SQLite backups or a post-install write.
+    let bisac = Connection::open(&bisac_path).expect("open BISAC reference metadata");
+    bisac.execute("UPDATE reference_meta SET revision=?1", [&bisac_digest]).expect("record BISAC artifact identity");
+    drop(bisac);
+    let bisac_image = std::fs::read(&bisac_path).expect("read prepared BISAC reference");
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
     encoder.write_all(&bisac_image).expect("compress BISAC reference");
     let compressed = encoder.finish().expect("finish BISAC reference compression");
@@ -56,15 +64,15 @@ fn main() {
     let client_connection = Connection::open(&client_database_path).unwrap_or_else(|error| panic!("failed to open {}: {error}", client_database_path.display()));
     // Route IDs identify occurrences, so a concept can retain several parents.
     client_connection.execute_batch(include_str!("src/route_storage.sql")).expect("compile curated navigation routes");
-    // Route and lookup index construction can leave partially filled pages.
-    // Compact the final database before packaging it as a standalone resource.
-    client_connection.execute_batch("VACUUM;").expect("compact bundled taxonomy database");
     let concepts = taxonomy_reader::read_unified_taxonomy_connection(&client_connection, "build-time taxonomy").expect("read bundled taxonomy");
-    let matcher = runtime::build_runtime(concepts).expect("compile bundled taxonomy matcher");
-    let encoded = bincode::serde::encode_to_vec(&matcher, bincode::config::standard()).expect("encode taxonomy matcher");
-    std::fs::write(output_dir.join("unified-taxonomy-matcher.bin"), encoded).expect("write taxonomy matcher");
+    let subclasses = taxonomy_reader::read_lcc_subclasses(&client_connection).expect("read taxonomy subclass names");
+    let matcher = runtime::build_runtime_with_subclasses(concepts, subclasses).expect("compile bundled taxonomy matcher");
+    client_connection.execute_batch("BEGIN;").expect("begin matcher preparation");
+    matcher_storage::prepare(&client_connection, &matcher).expect("prepare SQLite matching indexes");
+    client_connection.execute_batch("COMMIT; VACUUM;").expect("compact bundled taxonomy database");
     std::fs::write(output_dir.join("unified-taxonomy-revision-id.txt"), &matcher.revision_id).expect("write taxonomy revision");
     std::fs::write(output_dir.join("taxonomy-release.rs"), format!("{published_release_id}u64")).expect("write taxonomy release");
+    std::fs::write(output_dir.join("taxonomy-format.rs"), format!("{format_version}u32")).expect("write taxonomy format");
     let image = std::fs::read(&client_database_path).expect("read prepared taxonomy");
     let digest = blake3::hash(&image).to_hex().to_string();
     std::fs::write(output_dir.join("taxonomy.digest"), &digest).expect("write taxonomy digest");
@@ -122,6 +130,16 @@ fn build_client_database(authority_path: &PathBuf, client_path: &PathBuf) {
         )
         .expect("create client taxonomy schema");
     client.execute_batch(include_str!("src/range_storage.sql")).expect("create client range schema");
+    // Keep the full taxonomy's classification vocabulary when pruning deep
+    // navigation concepts; matching must not depend on a separate CSV.
+    let authority = Connection::open_with_flags(authority_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open taxonomy class names");
+    let subclasses = taxonomy_reader::read_lcc_subclasses(&authority).expect("read authoritative class names");
+    client.execute_batch("CREATE TABLE lcc_subclass(letters TEXT PRIMARY KEY NOT NULL) STRICT, WITHOUT ROWID;").expect("create taxonomy class names");
+    let transaction = client.unchecked_transaction().expect("begin taxonomy class names");
+    for letters in subclasses {
+        transaction.execute("INSERT INTO lcc_subclass VALUES(?1)", [letters]).expect("store taxonomy class name");
+    }
+    transaction.commit().expect("commit taxonomy class names");
     client.execute("ATTACH DATABASE ?1 AS authority", [authority_path.to_string_lossy().as_ref()]).expect("attach authoritative taxonomy");
     client
         .execute_batch(&format!(

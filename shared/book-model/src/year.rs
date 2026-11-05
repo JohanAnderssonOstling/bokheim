@@ -15,5 +15,5 @@ pub fn unique_book_year<'a>(values: impl Iterator<Item = &'a str>) -> Option<i32
             }
         }
     }
-    (years.len() == 1).then(|| *years.first().expect("one book year exists"))
+    if years.len() == 1 { years.first().copied() } else { None }
 }

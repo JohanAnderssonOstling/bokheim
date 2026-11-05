@@ -40,7 +40,7 @@ pub fn serve(port: web_sys::MessagePort, response: BytesFuture) {
         },
     );
     wasm_bindgen_futures::spawn_local(async move {
-        if let Some(result) = client_platform_runtime::pending::until_cancelled(response, cancelled.recv()).await {
+        if let Some(result) = client_platform_runtime::task_scope::until_cancelled(response, cancelled.recv()).await {
             let (message, transfer) = byte_reply(&[], result);
             let _ = owner.raw.post_message_with_transferable(&message, &transfer);
         }

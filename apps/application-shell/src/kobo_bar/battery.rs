@@ -1,51 +1,68 @@
-use app::{AppClient, BatteryStatus};
+use ui_text::text;
+
 use gpui::{Context, Entity, Render, Window, prelude::*, px};
 use gpui_component::{IconName, popover::Popover};
-use std::time::Duration;
+use kobo_device::battery::{BatteryReading, BatteryStatus};
 
 pub(super) struct BatteryPanel {
-    backend: AppClient,
     status: Option<BatteryStatus>,
     error: Option<String>,
     busy: bool,
 }
 impl BatteryPanel {
-    pub(super) fn new(backend: AppClient, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(cx: &mut Context<Self>) -> Self {
+        let mut readings = kobo_device::battery::subscribe();
         cx.spawn(async move |panel, cx| {
             loop {
-                if panel.update(cx, |panel, cx| panel.refresh(cx)).is_err() {
+                let reading = readings.borrow_and_update().clone();
+                if let Some(reading) = reading {
+                    if panel.update(cx, |panel, cx| panel.apply_reading(reading, cx)).is_err() {
+                        break;
+                    }
+                }
+                if readings.changed().await.is_err() {
                     break;
                 }
-                cx.background_executor().timer(Duration::from_secs(60)).await;
             }
         })
         .detach();
-        Self { backend, status: None, error: None, busy: false }
+        Self { status: None, error: None, busy: false }
+    }
+
+    fn apply_reading(&mut self, reading: BatteryReading, cx: &mut Context<Self>) {
+        let previous = (self.status.clone(), self.error.clone());
+        match reading {
+            Ok(status) => {
+                self.status = Some(status);
+                self.error = None;
+            }
+            Err(error) => {
+                self.status = None;
+                log::warn!("Device control failed: {error}");
+                self.error = Some(text!(device::could_not_read_the_battery_level_try_reopening_this_panel).into());
+            }
+        }
+        if previous != (self.status.clone(), self.error.clone()) {
+            cx.notify();
+        }
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
         self.busy = true;
-        let backend = self.backend.clone();
         cx.spawn(async move |panel, cx| {
-            let result = backend.kobo_battery().await;
+            let result = kobo_device::control::battery().await;
             let _ = panel.update(cx, |panel, cx| {
-                let previous = (panel.status.clone(), panel.error.clone());
                 panel.busy = false;
                 match result {
-                    Ok(status) => {
-                        panel.status = Some(status);
-                        panel.error = None;
-                    }
+                    Ok(_) => {}
                     Err(error) => {
                         panel.status = None;
                         log::warn!("Device control failed: {error}");
-                        panel.error = Some("Could not read the battery level. Try reopening this panel.".into());
+                        panel.error = Some(text!(device::could_not_read_the_battery_level_try_reopening_this_panel).into());
+                        cx.notify();
                     }
-                }
-                if previous != (panel.status.clone(), panel.error.clone()) {
-                    cx.notify();
                 }
             });
         })
@@ -62,14 +79,14 @@ impl Render for BatteryPanel {
             .gap(px(8.0))
             .bg(theme.page_bg)
             .text_color(theme.text)
-            .child("Battery")
-            .child(self.status.as_ref().map(|status| format!("{}% · {}", status.percent, status.status)).unwrap_or_else(|| self.error.clone().unwrap_or_else(|| "Loading…".into())))
+            .child(text!(device::battery))
+            .child(self.status.as_ref().map(|status| format!("{}% · {}", status.percent, status.status)).unwrap_or_else(|| self.error.clone().unwrap_or_else(|| text!(common::loading).into())))
     }
 }
 pub(super) fn popover(panel: &Entity<BatteryPanel>, top: gpui::Pixels, cx: &gpui::App) -> Popover {
     let state = panel.read(cx);
     let icon = match &state.status {
-        Some(status) if status.status == "Charging" => IconName::BatteryCharging,
+        Some(status) if status.status == text!(device::charging) => IconName::BatteryCharging,
         Some(status) if status.percent <= 20 => IconName::BatteryLow,
         Some(status) if status.percent <= 70 => IconName::BatteryMedium,
         Some(_) => IconName::BatteryFull,
@@ -81,7 +98,7 @@ pub(super) fn popover(panel: &Entity<BatteryPanel>, top: gpui::Pixels, cx: &gpui
         .anchor(gpui::Anchor::TopRight)
         .top(top)
         .p_0()
-        .trigger(super::device_button("kobo-battery-button", format!("Battery: {label}"), icon))
+        .trigger(super::device_button("kobo-battery-button", format!(text!(device::battery_state), label = label), icon))
         .on_open_change(move |open, _, cx| {
             if *open {
                 refresh.update(cx, |panel, cx| panel.refresh(cx));

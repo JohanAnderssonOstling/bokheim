@@ -1,10 +1,10 @@
-use crate::{AuthError, Session, Url};
+use crate::{AccountStatus, AuthError, Session, Url};
 use std::fmt;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -17,6 +17,10 @@ pub trait SessionPersistence: Clone + fmt::Debug + Send + Sync + 'static {
     /// Dispatch must happen before acquiring a session state lock.
     fn run<T: Send + 'static>(&self, operation: impl FnOnce() -> T + Send + 'static) -> io::Result<T> {
         Ok(operation())
+    }
+
+    fn run_async<T: Send + 'static>(&self, operation: impl FnOnce() -> T + Send + 'static) -> SessionFuture<'_, io::Result<T>> {
+        Box::pin(async move { self.run(operation) })
     }
 
     fn load_account_session(&self) -> io::Result<Option<Session>>;
@@ -39,6 +43,7 @@ pub enum AccountSessionError {
     Persistence(io::Error),
     Poisoned,
     Changed,
+    DeletionIdentityMismatch,
 }
 
 impl fmt::Display for AccountSessionError {
@@ -48,11 +53,20 @@ impl fmt::Display for AccountSessionError {
             Self::Persistence(error) => error.fmt(formatter),
             Self::Poisoned => formatter.write_str("account session lock is poisoned"),
             Self::Changed => formatter.write_str("account changed while the request was in progress"),
+            Self::DeletionIdentityMismatch => formatter.write_str("the signed-in account is not the one being deleted"),
         }
     }
 }
 
-impl std::error::Error for AccountSessionError {}
+impl std::error::Error for AccountSessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Authentication(error) => Some(error),
+            Self::Persistence(error) => Some(error),
+            Self::Poisoned | Self::Changed | Self::DeletionIdentityMismatch => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AccountSession<P: SessionPersistence> {
@@ -61,6 +75,7 @@ pub struct AccountSession<P: SessionPersistence> {
     state: Arc<RwLock<SessionState>>,
     refresh: Arc<Mutex<()>>,
     changes: watch::Sender<u64>,
+    status: watch::Sender<AccountStatus>,
 }
 
 impl<P: SessionPersistence> AccountSession<P> {
@@ -70,11 +85,22 @@ impl<P: SessionPersistence> AccountSession<P> {
             persistence.clear_account_session().map_err(AccountSessionError::Persistence)?;
             session = None;
         }
-        Ok(Self { persistence, server, state: Arc::new(RwLock::new(SessionState { session, generation: 0 })), refresh: Arc::new(Mutex::new(())), changes: watch::channel(0).0 })
+        let status = watch::channel(AccountStatus::from_session(session.as_ref())).0;
+        Ok(Self { persistence, server, state: Arc::new(RwLock::new(SessionState { session, generation: 0 })), refresh: Arc::new(Mutex::new(())), changes: watch::channel(0).0, status })
+    }
+
+    pub fn server_url(&self) -> &Url {
+        &self.server
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
+    }
+
+    /// Observe persisted login, logout, and identity changes. Token renewal for
+    /// the same identity leaves this subscription unchanged.
+    pub fn subscribe_status(&self) -> watch::Receiver<AccountStatus> {
+        self.status.subscribe()
     }
 
     /// Read the latest usable session without performing persistence or refresh work.
@@ -107,6 +133,11 @@ impl<P: SessionPersistence> AccountSession<P> {
         })
     }
 
+    pub async fn session(&self) -> Result<Option<Session>, AccountSessionError> {
+        let account = self.clone();
+        self.persistence.run_async(move || account.current()).await.map_err(AccountSessionError::Persistence)?
+    }
+
     fn remove_expired(&self, state: &mut SessionState) -> Result<(), AccountSessionError> {
         if state.session.as_ref().is_some_and(Self::is_expired) {
             self.replace(state, None)?;
@@ -115,7 +146,7 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     pub fn require(&self) -> Result<Session, AccountSessionError> {
-        self.current()?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("not signed in".to_owned())))
+        self.current()?.ok_or(AccountSessionError::Authentication(AuthError::SignInRequired("not signed in")))
     }
 
     pub fn set(&self, session: Session) -> Result<(), AccountSessionError> {
@@ -130,6 +161,18 @@ impl<P: SessionPersistence> AccountSession<P> {
         })
     }
 
+    /// A completed deletion must not clear a different account signed in
+    /// while the server request was in flight.
+    pub fn clear_user(&self, user_id: &str) -> Result<(), AccountSessionError> {
+        let user_id = user_id.to_owned();
+        self.with_storage(move |this, state| {
+            if state.session.as_ref().is_some_and(|session| session.user_id() == user_id) {
+                this.replace(state, None)?;
+            }
+            Ok(())
+        })
+    }
+
     fn with_storage<T: Send + 'static>(&self, operation: impl FnOnce(&Self, &mut SessionState) -> Result<T, AccountSessionError> + Send + 'static) -> Result<T, AccountSessionError> {
         let this = self.clone();
         self.persistence
@@ -140,9 +183,25 @@ impl<P: SessionPersistence> AccountSession<P> {
             .map_err(AccountSessionError::Persistence)?
     }
 
+    async fn with_storage_async<T: Send + 'static>(&self, operation: impl FnOnce(&Self, &mut SessionState) -> Result<T, AccountSessionError> + Send + 'static) -> Result<T, AccountSessionError> {
+        let this = self.clone();
+        self.persistence
+            .run_async(move || {
+                let mut state = this.state.write().map_err(|_| AccountSessionError::Poisoned)?;
+                operation(&this, &mut state)
+            })
+            .await
+            .map_err(AccountSessionError::Persistence)?
+    }
+
     /// Called on the storage owner: persistence completes before publishing
     /// credentials, without holding this lock while waiting on another worker.
     fn replace(&self, state: &mut SessionState, session: Option<Session>) -> Result<(), AccountSessionError> {
+        let identity_changed = match (&state.session, &session) {
+            (Some(previous), Some(next)) => previous.server_url() != next.server_url() || previous.user_id() != next.user_id(),
+            (None, None) => false,
+            _ => true,
+        };
         if let Some(session) = &session {
             if !Self::is_usable(session, &self.server) {
                 return Err(AccountSessionError::Authentication(AuthError::InvalidData("cannot adopt an expired session or a session from another server".to_owned())));
@@ -153,6 +212,11 @@ impl<P: SessionPersistence> AccountSession<P> {
         }
         state.session = session;
         state.generation += 1;
+        let status = AccountStatus::from_session(state.session.as_ref());
+        let status_changed = identity_changed || *self.status.borrow() != status;
+        if status_changed {
+            self.status.send_replace(status);
+        }
         self.changes.send_replace(state.generation);
         Ok(())
     }
@@ -175,28 +239,24 @@ impl<P: SessionPersistence> AccountSession<P> {
         Fut: Future<Output = Result<Session, AuthError>>,
     {
         let _guard = self.refresh.lock().await;
-        let Some((session, generation)) = self.with_storage(|this, state| {
-            this.remove_expired(state)?;
-            Ok(state.session.clone().map(|session| (session, state.generation)))
-        })?
+        let Some((session, generation)) = self
+            .with_storage_async(|this, state| {
+                this.remove_expired(state)?;
+                Ok(state.session.clone().map(|session| (session, state.generation)))
+            })
+            .await?
         else {
             return Ok(None);
         };
         if rejected_token.is_some_and(|token| token != session.token()) || (rejected_token.is_none() && !session.expires_within(REFRESH_WINDOW_SECONDS)) {
             return Ok(Some(session));
         }
-        if session.refresh_token().is_none() {
-            if rejected_token.is_some() || session.expires_within(EXPIRY_SAFETY_WINDOW_SECONDS) {
-                return self.finish_refresh(generation, Ok(None));
-            }
-            return Ok(Some(session));
-        }
         let result = refresh(session).await.map(Some);
-        self.finish_refresh(generation, result)
+        self.finish_refresh(generation, result).await
     }
 
-    fn finish_refresh(&self, generation: u64, result: Result<Option<Session>, AuthError>) -> Result<Option<Session>, AccountSessionError> {
-        self.with_storage(move |this, state| {
+    async fn finish_refresh(&self, generation: u64, result: Result<Option<Session>, AuthError>) -> Result<Option<Session>, AccountSessionError> {
+        self.with_storage_async(move |this, state| {
             this.remove_expired(state)?;
             // Neither a delayed success nor a rejection may modify a newer login/logout.
             if state.generation != generation {
@@ -205,7 +265,7 @@ impl<P: SessionPersistence> AccountSession<P> {
             match result {
                 Ok(session) => this.replace(state, session)?,
                 Err(error) => {
-                    if error.is_unauthorized() || matches!(error, AuthError::InvalidData(_) | AuthError::Wire(_)) {
+                    if error.is_unauthorized() || matches!(error, AuthError::InvalidData(_) | AuthError::SignInRequired(_) | AuthError::Wire(_)) {
                         this.replace(state, None)?;
                     }
                     return Err(AccountSessionError::Authentication(error));
@@ -213,18 +273,14 @@ impl<P: SessionPersistence> AccountSession<P> {
             }
             Ok(state.session.clone())
         })
+        .await
     }
 
-    pub async fn request<T>(&self, mut request: impl for<'a> FnMut(&'a Session) -> SessionFuture<'a, Result<T, AuthError>>) -> Result<T, AccountSessionError> {
-        let session = self.refresh_if_needed().await?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("not signed in".to_owned())))?;
-        match request(&session).await {
-            Ok(value) => Ok(value),
-            Err(error) if error.is_unauthorized() => {
-                let refreshed = self.refresh_after_unauthorized(session.token()).await?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("authentication expired; sign in again".to_owned())))?;
-                request(&refreshed).await.map_err(AccountSessionError::Authentication)
-            }
-            Err(error) => Err(AccountSessionError::Authentication(error)),
-        }
+    pub async fn request<T, Fut>(&self, request: impl FnMut(Session) -> Fut) -> Result<T, AccountSessionError>
+    where
+        Fut: Future<Output = Result<T, AuthError>>,
+    {
+        crate::account_request(self, request).await
     }
 
     fn is_usable(session: &Session, server: &Url) -> bool {
@@ -232,11 +288,7 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     fn is_expired(session: &Session) -> bool {
-        if session.refresh_token().is_some() {
-            session.refresh_expires_within(EXPIRY_SAFETY_WINDOW_SECONDS)
-        } else {
-            session.expires_within(EXPIRY_SAFETY_WINDOW_SECONDS)
-        }
+        session.refresh_expires_within(EXPIRY_SAFETY_WINDOW_SECONDS)
     }
 }
 
@@ -263,7 +315,21 @@ mod tests {
 
     fn session(token: char) -> Session {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-        Session::try_new_with_tokens("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), token.to_string().repeat(43), Some(now + 120), Some("r".repeat(43)), Some(now + 3600)).unwrap()
+        Session::try_new("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), token.to_string().repeat(43), now + 120, "r".repeat(43), now + 3600).unwrap()
+    }
+
+    #[test]
+    fn completed_deletion_clears_only_the_deleted_users_credentials() {
+        let persistence = MemoryPersistence::default();
+        let account = AccountSession::load(persistence.clone(), "https://example.com".parse().unwrap()).unwrap();
+        account.set(session('a')).unwrap();
+        account.clear_user("previous-user").unwrap();
+        assert!(account.current().unwrap().is_some(), "a newer account must stay signed in");
+        assert!(persistence.load_account_session().unwrap().is_some());
+        account.clear_user("user").unwrap();
+        assert!(account.credentials_session().is_none());
+        assert!(persistence.load_account_session().unwrap().is_none());
+        account.clear_user("user").unwrap();
     }
 
     #[tokio::test]
@@ -271,7 +337,7 @@ mod tests {
         let persistence = MemoryPersistence::default();
         let account = AccountSession::load(persistence, "https://example.com".parse().unwrap()).unwrap();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-        let initial = Session::try_new_with_tokens("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), "a".repeat(43), Some(now + 3600), Some("r".repeat(43)), Some(now + 7200)).unwrap();
+        let initial = Session::try_new("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), "a".repeat(43), now + 3600, "r".repeat(43), now + 7200).unwrap();
         let rejected_token = initial.token().to_owned();
         account.set(initial).unwrap();
         account.refresh_using(None, |_| async { panic!("a fresh session needs no scheduled refresh") }).await.unwrap();
@@ -294,11 +360,7 @@ mod tests {
                 let refresh = account.refresh_using(None, |_| async move {
                     started_tx.send(()).unwrap();
                     resume_rx.await.unwrap();
-                    if rejected {
-                        Err(AuthError::InvalidData("refresh rejected".into()))
-                    } else {
-                        Ok(session('b'))
-                    }
+                    if rejected { Err(AuthError::InvalidData("refresh rejected".into())) } else { Ok(session('b')) }
                 });
                 let supersede = async {
                     started_rx.await.unwrap();

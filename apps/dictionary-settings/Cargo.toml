@@ -1,0 +1,14 @@
+[package]
+name = "dictionary-settings"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ui-text = { path = "../ui-text" }
+dictionary = { path = "../../client/dictionaries/core", features = ["client"] }
+dictionary-catalog = { path = "../../client/dictionaries/catalog" }
+ui-components = { path = "../components" }
+gpui.workspace = true
+gpui-component.workspace = true
+sys-locale = { version = "0.3", features = ["js"] }
+

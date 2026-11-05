@@ -1,9 +1,11 @@
 //! Shared PostgreSQL connection and initial schema setup.
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 use std::time::Duration;
 use sync_common::SyncGeneration;
+use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DatabasePoolConfig {
@@ -47,11 +49,17 @@ fn parse_bounded_u64(raw: Option<String>, default: u64, minimum: u64, maximum: u
 #[derive(Clone)]
 pub struct PostgresDatabase {
     pool: PgPool,
+    cleanup: Arc<Notify>,
 }
 
 impl PostgresDatabase {
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, cleanup: Arc::new(Notify::new()) }
+    }
+
+    /// Shared by the account, sync and asset services within this server.
+    pub fn asset_cleanup_signal(&self) -> Arc<Notify> {
+        self.cleanup.clone()
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -74,7 +82,7 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
         .map(PostgresDatabase::from_pool)
 }
 
-const SCHEMA_VERSION: i32 = 11;
+const SCHEMA_VERSION: i32 = 17;
 
 /// Applies the initial schema to an empty database. Files are
 /// applied in filename order -- `01_core.sql` before the domain files that
@@ -84,54 +92,6 @@ pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
     for file in SCHEMA_FILES {
         sqlx::raw_sql(file).execute(database.pool()).await?;
     }
-    Ok(())
-}
-
-/// Adopt the deployed pre-release baseline and upgrade it to the current schema
-/// in one transaction, preserving data.
-/// Startup remains read-only; only the explicit deployment command upgrades it.
-pub async fn upgrade_existing(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
-    let mut transaction = database.pool().begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('bokheim-schema-upgrade'))").execute(&mut *transaction).await?;
-    let versioned: bool = sqlx::query_scalar("SELECT to_regclass('bokheim_schema_version') IS NOT NULL").fetch_one(&mut *transaction).await?;
-    if !versioned {
-        sqlx::raw_sql(include_str!("../schema/migrations/adopt_release_baseline.sql")).execute(&mut *transaction).await?;
-    }
-    let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(&mut *transaction).await?;
-    if !(1..=SCHEMA_VERSION).contains(&version) {
-        return Err(sqlx::Error::Protocol(format!("unsupported sync schema version {version}; expected {SCHEMA_VERSION}")));
-    }
-    if version == 1 {
-        sqlx::raw_sql(include_str!("../schema/migrations/book_owner.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 2 {
-        sqlx::raw_sql(include_str!("../schema/migrations/shrink_identity.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 3 {
-        sqlx::raw_sql(include_str!("../schema/migrations/merge_sync_state.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 4 {
-        sqlx::raw_sql(include_str!("../schema/migrations/unify_content_hash.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 5 {
-        sqlx::raw_sql(include_str!("../schema/migrations/raw_content_hash.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 6 {
-        sqlx::raw_sql(include_str!("../schema/migrations/raw_state_keys.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 7 {
-        sqlx::raw_sql(include_str!("../schema/migrations/immutable_book_records.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 8 {
-        sqlx::raw_sql(include_str!("../schema/migrations/completed_book_additions.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 9 {
-        sqlx::raw_sql(include_str!("../schema/migrations/opds_feeds.sql")).execute(&mut *transaction).await?;
-    }
-    if version <= 10 {
-        sqlx::raw_sql(include_str!("../schema/migrations/sync_history.sql")).execute(&mut *transaction).await?;
-    }
-    transaction.commit().await?;
     Ok(())
 }
 

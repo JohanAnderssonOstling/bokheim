@@ -5,13 +5,20 @@ edition = "2024"
 
 [features]
 default = []
-kobo = ["mobile", "dep:gpui_kobo"]
+kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-profile"]
 mobile = []
 
 [dependencies]
+html-pipeline = { package = "skrift-pipeline", path = "../../../HtmlEngine/crates/html-pipeline" }
+html-style-model = { package = "skrift-style-model", path = "../../../HtmlEngine/crates/html-style-model" }
+ui-text = { path = "../ui-text" }
+book-model = { path = "../../shared/book-model", default-features = false }
+kobo-profile = { path = "../../client/platforms/kobo/crates/profile", optional = true }
 log = "0.4"
 web-time = "1"
 library-model = { path = "../../client/library-model", default-features = false }
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure" }
+path-label = { path = "../../client/ui/path-label" }
 app-preferences = { path = "../../client/preferences" }
 gpui.workspace = true
 html.workspace = true
@@ -24,13 +31,17 @@ unicode-normalization.workspace = true
 # Configure GPUI's shared decoder dependencies explicitly instead of enabling
 # its broad image-formats feature. Keep the same UI formats on every platform,
 # including raster images embedded inside SVGs.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 resvg = { version = "0.46", default-features = false, features = ["raster-images"] }
 
 [dev-dependencies]
+html-engine-model = { package = "skrift-engine-model", path = "../../../HtmlEngine/crates/html-engine-model" }
 gpui = { workspace = true, features = ["test-support"] }
+gpui_wgpu.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["Window", "MediaQueryList"] }
 
 [package.metadata.cargo-machete]

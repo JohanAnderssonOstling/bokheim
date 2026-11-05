@@ -26,6 +26,13 @@ impl RangeCache {
     pub(crate) fn contains(&self, offset: u64) -> bool {
         self.entries.iter().any(|(start, bytes)| offset >= *start && offset - start < bytes.len() as u64)
     }
+    pub(crate) fn touch(&mut self, offset: u64) {
+        if let Some(index) = self.entries.iter().position(|(start, bytes)| offset >= *start && offset - start < bytes.len() as u64) {
+            if let Some(entry) = self.entries.remove(index) {
+                self.entries.push_front(entry);
+            }
+        }
+    }
     pub(crate) fn insert(&mut self, offset: u64, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
@@ -63,10 +70,11 @@ impl RangeCache {
     pub(crate) fn read(&mut self, offset: u64, output: &mut [u8]) -> usize {
         let Some(index) = self.entries.iter().position(|(start, bytes)| offset >= *start && offset - start < bytes.len() as u64) else { return 0 };
         if index != 0 {
-            let entry = self.entries.remove(index).unwrap();
-            self.entries.push_front(entry);
+            if let Some(entry) = self.entries.remove(index) {
+                self.entries.push_front(entry);
+            }
         }
-        let (start, bytes) = self.entries.front().unwrap();
+        let Some((start, bytes)) = self.entries.front() else { return 0 };
         let within = (offset - start) as usize;
         let count = output.len().min(bytes.len() - within);
         output[..count].copy_from_slice(&bytes[within..within + count]);

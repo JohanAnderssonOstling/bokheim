@@ -9,6 +9,9 @@
 //! Use --probe-whitespace instead of a book path to exercise native shaping
 //! of spaces, tabs, line breaks, nonbreaking spaces, and mixed scripts.
 
+use html_engine_model::shaping_contracts;
+use html_style_model::open_type;
+use html_engine_model::shaping;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,10 +20,15 @@ use std::time::{Duration, Instant};
 use book_access::AsyncBookSource;
 use book_content::{Book, BookFormat};
 use gpui::{App, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px, size};
-use html::text::{FontSlant, GlyphShaper, OpenTypeFeature, TextRunShapeRequest, TextStyleSpan};
+#[cfg(test)]
+use html_style_model::OpenTypeFeature;
+use html_style_model::OpenTypeFeatureKind;
+use html::text::FontSlant;
+use html_pipeline::engine::GlyphId;
+use html_engine_model::GlyphResourceStore;
 use html_gpui::backend::GpuiTextCache;
-use html_view_core::{RendererCommand, RendererInitialConfig, RendererPreparation};
 use html_view_gpui::HtmlView;
+use skrift_column_paginator::{RendererCommand, RendererInitialConfig, RendererPreparation};
 
 #[path = "../crates/html/src/book.rs"]
 mod book;
@@ -81,7 +89,7 @@ async fn prepare(path: PathBuf, repetition: usize, middle: bool, runtime: tokio:
         0,
         Some(&nav_state),
         None,
-        RendererInitialConfig { font_size: 19.0, column_width: 600.0, max_column_count: Some(1), ..Default::default() },
+        RendererInitialConfig { publication_cfi_bases: book.publication_cfi_bases.clone(), font_size: 19.0, column_width: 600.0, max_column_count: Some(1), ..Default::default() },
     )?;
     let sample = Sample { started, open_ms, text_ms, style_ms: milliseconds(stage), create_ms: 0.0, plan_ms: 0.0, chapters, text_bytes, chapter, chapter_bytes, repetition, middle };
     Ok((book, preparation, sample))
@@ -91,7 +99,7 @@ fn observe_frame(document: Entity<HtmlView>, sample: Sample, done: async_channel
     window.on_next_frame(move |window, cx| {
         // A frame callback can precede the first paint. Wait until the actual
         // HtmlView has composed a display list before reporting completion.
-        if document.read(cx).paint_cache_stats().base_misses == 0 {
+        if document.read(cx).paint_stats().compositions == 0 {
             observe_frame(document, sample, done, window);
             return;
         }
@@ -107,7 +115,7 @@ fn observe_frame(document: Entity<HtmlView>, sample: Sample, done: async_channel
                 "parse_style_ms": sample.style_ms, "renderer_create_ms": sample.create_ms,
                 "viewport_plan_ms": sample.plan_ms,
                 "frame_observed_ms": milliseconds(sample.started),
-                "glyph_misses": shapes.glyph_misses, "line_misses": shapes.line_misses,
+                "glyph_shapes": shapes.glyph_shapes, "line_shapes": shapes.line_shapes,
                 "font_setup_hits": shapes.font_setup_hits, "font_setup_misses": shapes.font_setup_misses, "retained_font_setups": shapes.retained_font_setups,
                 "registered_glyphs": shapes.registered_glyphs, "backend_glyph_records": shapes.backend_glyph_records,
                 "trailing_whitespace_probes": shapes.trailing_whitespace_probes,
@@ -182,28 +190,32 @@ fn profile_whitespace() {
         ui_components::register_fonts(cx).expect("reader fonts");
         cx.open_window(Default::default(), |window, cx| {
             let mut shaper = GpuiTextCache::new(window.text_system().clone());
+            let mut resources = GlyphResourceStore::default();
             let no_features = [];
-            let disabled_features = [OpenTypeFeature::new(*b"liga", 0), OpenTypeFeature::new(*b"kern", 0)];
-            let overridden_features = [OpenTypeFeature::new(*b"liga", 0), OpenTypeFeature::new(*b"liga", 1)];
+            let disabled_features = [open_type::open_type_feature_new(OpenTypeFeatureKind::StandardLigatures, 0), open_type::open_type_feature_new(OpenTypeFeatureKind::Kerning, 0)];
+            let overridden_features = [open_type::open_type_feature_new(OpenTypeFeatureKind::StandardLigatures, 0), open_type::open_type_feature_new(OpenTypeFeatureKind::StandardLigatures, 1)];
             for (font_size, weight, slant, features) in [
                 (19.0, 400, FontSlant::Normal, no_features.as_slice()),
                 (26.0, 700, FontSlant::Italic, disabled_features.as_slice()),
-                (13.0, 400, FontSlant::Oblique, overridden_features.as_slice()),
+                (13.0, 400, shaping_contracts::font_slant_oblique(14.0), overridden_features.as_slice()),
                 (0.0, 400, FontSlant::Normal, no_features.as_slice()),
             ] {
+                let mut feature_settings = features.to_vec();
+                let resolved_features = shaping::font_features(&mut feature_settings, features, false);
                 for family in ["serif", "sans-serif", "monospace"] {
                     for text in [" ", "   ", "word ", "word  ", "office ", "a\u{301} ", "אבג ", "سلام ", "word\u{a0}", "word\u{2003}", "word\u{2009}", "word\u{3000}", "word\t", "word\n", "word\u{2028}"] {
                         let before = shaper.shape_cache_stats();
-                        let style = TextStyleSpan::new(0..text.len(), font_size, weight, slant, 0x000000ff, Some(family)).unwrap().with_font_features(features.to_vec());
-                        let request = TextRunShapeRequest::new(text, style).unwrap();
-                        let mut glyphs = vec![0; text.chars().count()];
-                        let shaped = shaper.shape_glyph_run(request, &mut glyphs).expect("native whitespace shaping").expect("native run");
+                        let mut style = shaping::style(font_size, weight, slant, 0x000000ff, Some(family));
+                        style.font_features = &resolved_features;
+                        let request = shaping::run(text, style, None);
+                        let mut glyphs = vec![GlyphId(0); text.chars().count()];
+                        let shaped = resources.shape_run(&mut shaper, request, &mut glyphs).expect("native whitespace shaping").expect("native run");
                         let after = shaper.shape_cache_stats();
                         let metrics = glyphs
                             .iter()
                             .map(|glyph| {
-                                let metric = shaper.glyph_resources().get(*glyph).expect("registered metric");
-                                (metric.ch(), metric.advance(), metric.ascent(), metric.descent(), metric.baseline_offset())
+                                let metric = resources.get(*glyph).expect("registered metric");
+                                (metric.ch(), metric.advance(), metric.ascent(), metric.descent())
                             })
                             .collect::<Vec<_>>();
                         println!(
@@ -211,8 +223,8 @@ fn profile_whitespace() {
                             serde_json::json!({
                                 "family": family, "text": text, "width": shaped.advances().iter().sum::<f32>(),
                                 "font_size": font_size, "weight": weight, "slant": format!("{slant:?}"),
-                                "features": features.iter().map(|feature| (feature.tag(), feature.value())).collect::<Vec<_>>(),
-                                "advances": shaped.advances(), "cluster_boundaries": shaped.cluster_boundaries(), "caret_stops": shaped.caret_stops(), "metrics": metrics,
+                                "features": features.iter().map(|feature| (open_type::open_type_feature_tag_bytes(*feature), open_type::open_type_feature_value(*feature))).collect::<Vec<_>>(),
+                                "advances": shaped.advances(), "cluster_boundaries": shaped.cluster_boundaries(), "caret_stops": shaped.caret_stops().map(|stops| stops.to_dense()), "metrics": metrics,
                                 "last_advance": shaped.advances().last(),
                                 "probes": after.trailing_whitespace_probes - before.trailing_whitespace_probes,
                                 "probe_ms": (after.trailing_whitespace_probe_time - before.trailing_whitespace_probe_time).as_secs_f64() * 1000.0,

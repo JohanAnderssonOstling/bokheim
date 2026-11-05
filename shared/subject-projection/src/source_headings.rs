@@ -1,5 +1,5 @@
 //! Scoped, reviewed raw headings select pinned routes in the curated taxonomy.
-use super::{bisac_code_for_path, canonical_subject_system, compact_whitespace, match_bisac_subjects, unified_concept_id, unified_subject_paths, BookSubject, BISAC_SYSTEM_ID, UNIFIED_SYSTEM_ID};
+use super::{BISAC_SYSTEM_ID, BookSubject, UNIFIED_SYSTEM_ID, bisac_code_for_path, canonical_subject_system, compact_whitespace, match_bisac_subjects, unified_concept_id, unified_subject_paths};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;

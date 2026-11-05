@@ -1,54 +1,43 @@
-//! Local media retains a storage lease; remote media uses expiring direct URLs.
+//! Local media retains a storage lease. Remote media uses a playback grant.
 
+use crate::asset_store::AssetStore;
+use crate::library::DirectPlayback;
 pub use crate::library::{PlaybackLocation, PlaybackSource};
+use crate::{BackendError, BookId};
+use book_access::RemoteFileError;
+use book_model::{BookFormat, tracks_match_archive};
+use client_platform_web::web_storage::FileReader;
+use library_database::DatabaseClient;
 use library_model::PlaybackMetadata;
-use crate::BackendError;
-use crate::{ContentHash, LibrarySession};
+use std::future::Future;
+
 pub type PlaybackLease = client_platform_web::audiobook::PlaybackLease;
-pub type BrowserAudiobook = client_platform_web::audiobook::BrowserAudiobook<PlaybackMetadata, crate::library::DirectPlayback>;
+pub type BrowserAudiobook = client_platform_web::audiobook::BrowserAudiobook<PlaybackMetadata, DirectPlayback>;
 
-pub(crate) async fn prepare(library: &LibrarySession, hash: ContentHash) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
-    let file = library.assets.playback_reader(&hash).await.map_err(BackendError::operation)?;
-    prepare_with_file(library, hash, file).await
-}
-
-/// Browser-host command used when a local audiobook is absent.  The format
-/// check and storage probe remain inside the owning library module.
-pub async fn open_remote_audio(library: &LibrarySession, hash: ContentHash) -> Result<Option<PlaybackSource>, BackendError> {
-    let format = library.db.book_format(&hash).map_err(BackendError::operation)?;
-    if !matches!(format, Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder)) || library.assets.playback_reader(&hash).await.map_err(BackendError::operation)?.is_some() {
+/// The browser fast path authorizes remote playback only after one local probe.
+pub(crate) async fn open_remote_audio(db: &DatabaseClient, assets: &AssetStore, book: BookId, remote: impl Future<Output = Result<DirectPlayback, RemoteFileError>>) -> Result<Option<PlaybackSource>, BackendError> {
+    let format = db.book_format(&book).await?;
+    if !matches!(format, Some(BookFormat::M4b | BookFormat::Mp3Folder)) || assets.playback_reader(&book).await.map_err(BackendError::operation)?.is_some() {
         return Ok(None);
     }
-    let (source, _lease) = prepare(library, hash).await?;
+    let metadata = db.audiobook_playback_metadata(&book).await?;
+    let (source, _lease) = prepare(metadata, None, remote).await?;
     Ok(Some(source))
 }
 
-pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: ContentHash, file: Option<client_platform_web::web_storage::FileReader>) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
-    let format = library.db.book_format(&hash).map_err(BackendError::operation)?;
-    if !matches!(format, Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder)) {
+/// Remote authorization is polled only when no local file was supplied.
+pub(crate) async fn prepare(metadata: Option<PlaybackMetadata>, file: Option<FileReader>, remote: impl Future<Output = Result<DirectPlayback, RemoteFileError>>) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
+    let metadata = metadata.ok_or("audiobook addition has no valid playback facts")?;
+    let format = metadata.format;
+    if !matches!(format, BookFormat::M4b | BookFormat::Mp3Folder) {
         return Err("book is not an audiobook".into());
     }
-    let metadata = library.db.audiobook_playback_metadata(&hash).map_err(BackendError::operation)?;
-    let remote = if file.is_none() && (format == Some(book_model::BookFormat::Mp3Folder) || metadata.is_none()) { Some(library.describe_remote_file(hash).await.map_err(BackendError::operation)?.0) } else { None };
-    let current_hash = if format == Some(book_model::BookFormat::Mp3Folder) {
-        match (&file, &remote) {
-            (Some(file), _) => file.content_hash().map_err(BackendError::message)?,
-            (_, Some(remote)) => Some(remote.hash),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    // Browser playback currently runs without artwork. In particular, opening
-    // a remote book must not wait on optional thumbnail extraction or storage,
-    // so the cover stays empty.
-    let metadata = metadata
-        .filter(|metadata| format != Some(book_model::BookFormat::Mp3Folder) || current_hash.is_some_and(|content_hash| book_model::tracks_match_archive(&metadata.tracks, content_hash)))
-        .ok_or("audiobook addition has no valid playback facts")?;
+    // Playback uses persisted facts without waiting for optional artwork.
     let (location, local_lease) = match file {
-        Some(file) if format == Some(book_model::BookFormat::Mp3Folder) => {
-            if metadata.tracks.is_empty() {
-                return Err("downloaded MP3 folder has no track index".into());
+        Some(file) if format == BookFormat::Mp3Folder => {
+            let current_hash = file.book_id().await.map_err(BackendError::message)?;
+            if !current_hash.is_some_and(|book_id| tracks_match_archive(&metadata.tracks, book_id)) {
+                return Err("audiobook addition has no valid playback facts".into());
             }
             let (urls, lease) = client_platform_web::transport::resources::local_track_media_lease(file, &metadata.tracks).await.map_err(BackendError::operation)?;
             (PlaybackLocation::LocalTracks(urls), Some(lease))
@@ -58,8 +47,8 @@ pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: ContentHas
             (PlaybackLocation::LocalUrl(url), Some(lease))
         }
         None => {
-            let source = library.direct_audio_source(hash).await?;
-            if format == Some(book_model::BookFormat::Mp3Folder) && !book_model::tracks_match_archive(&metadata.tracks, source.content_hash) {
+            let source = remote.await.map_err(BackendError::operation)?;
+            if format == BookFormat::Mp3Folder && !tracks_match_archive(&metadata.tracks, source.book_id) {
                 return Err("audiobook track index does not match the playback archive".into());
             }
             (PlaybackLocation::Direct(source), None)

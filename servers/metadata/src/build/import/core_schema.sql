@@ -40,7 +40,8 @@ CREATE TABLE snapshot(
                 edition_id INTEGER PRIMARY KEY,
                 title TEXT NOT NULL,
                 normalized_title TEXT NOT NULL,
-                book_year INTEGER
+                book_year INTEGER,
+                description TEXT
              ) STRICT;
              CREATE INDEX edition_bibliography_by_title ON edition_bibliography(normalized_title,edition_id);
              CREATE TABLE work_bibliography(
@@ -110,7 +111,12 @@ CREATE TABLE snapshot(
              ) WITHOUT ROWID;
              CREATE TABLE author(
                 author_id INTEGER PRIMARY KEY,
-                name TEXT
+                name TEXT,
+                aliases TEXT,
+                birth_year INTEGER,
+                death_year INTEGER,
+                image TEXT,
+                description TEXT
              ) STRICT;
              CREATE TABLE author_identifier(
                 author_id INTEGER NOT NULL,

@@ -1,6 +1,7 @@
 //! The PDF reader surface.
 
 pub(crate) mod marks;
+mod recurring;
 pub(crate) mod render;
 pub(crate) mod search;
 pub(crate) mod state;

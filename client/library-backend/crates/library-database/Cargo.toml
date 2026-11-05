@@ -10,12 +10,13 @@ autotests = false
 scanner = []
 
 [dependencies]
+description-storage = { path = "../../../../shared/description-storage" }
 blake3 = "1"
 content-address = { path = "../../../../shared/content-address", features = ["sqlite"] }
-client-runtime = { path = "../../../client-runtime" }
+client-protocol = { path = "../../../client-protocol" }
 book-model = { path = "../../../../shared/book-model" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
-device-sqlite = { path = "../../../device-sqlite" }
+device-sqlite = { path = "../../../platforms/sqlite" }
 library-model = { path = "../../../library-model", default-features = false }
 library-replica = { path = "../library-replica", default-features = false }
 sync-common = { path = "../../../../shared/sync-common", default-features = false, features = ["sqlite"] }
@@ -23,14 +24,15 @@ subject-projection = { path = "../../../../shared/subject-projection" }
 metadata-contract = { path = "../../../../shared/metadata-contract" }
 book-inspection = { path = "../book-inspection" }
 pdf-view-common = { path = "../../../../shared/pdf-view-common" }
-rusqlite = { version = "0.40.0", features = ["backup", "bundled", "functions", "hooks"] }
-include-sqlite-sql = "0.2.1"
+rusqlite = { version = "0.40.0", features = ["backup", "bundled", "functions", "limits"] }
+include-sqlite-sql = { version = "0.2.2", path = "../../../../vendor/include-sqlite-sql" }
 log = "0.4"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 web-time = "1"
 url = "2"
+tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 client-platform-web = { path = "../../../platforms/web" }
@@ -38,11 +40,8 @@ client-platform-web = { path = "../../../platforms/web" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 client-platform-native = { path = "../../../platforms/native" }
 
-
-
-[[test]]
-name = "versioned_state"
-path = "tests/versioned_state.rs"
+[dev-dependencies]
+rusqlite = { version = "0.40.0", features = ["hooks"] }
 
 [[test]]
 name = "catalog_pagination"

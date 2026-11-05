@@ -21,8 +21,6 @@ pub(super) struct MatchingBooks {
     /// Filtered catalog books from the preferred acquisition source. Empty
     /// for personal-library browsing, where source preference does not apply.
     pub preferred: BTreeSet<i64>,
-    /// Catalog acquisition source order; empty for personal-library browsing.
-    pub source_priorities: BTreeMap<i64, u8>,
     /// Formats sharing one source popularity observation count once in totals.
     pub popularity_groups: BTreeMap<i64, String>,
 }
@@ -53,7 +51,7 @@ impl Database {
             }
             Ok(())
         })?;
-        Ok(MatchingBooks { books: matching, downloaded, text_matches, popularity, preferred: BTreeSet::new(), source_priorities: BTreeMap::new(), popularity_groups: BTreeMap::new() })
+        Ok(MatchingBooks { books: matching, downloaded, text_matches, popularity, preferred: BTreeSet::new(), popularity_groups: BTreeMap::new() })
     }
 
     /// `books` in the page's book order.

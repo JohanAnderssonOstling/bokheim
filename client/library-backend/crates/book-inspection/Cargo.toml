@@ -16,7 +16,7 @@ lopdf = { version = "0.44", default-features = false }
 book-model = { path = "../../../../shared/book-model" }
 roxmltree = "0.20"
 regex = "1"
-quick-xml = "0.31"
+quick-xml = "0.41"
 subject-projection = { path = "../../../../shared/subject-projection" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,7 +35,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tempfile = "3"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 
 [dev-dependencies]
 mobi = { workspace = true }

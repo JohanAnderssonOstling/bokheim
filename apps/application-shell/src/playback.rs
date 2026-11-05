@@ -1,4 +1,4 @@
-//! One playback owner and one ordered restoration writer per application.
+//! Playback owners with separate ordered restoration writers.
 
 use app::AppClient;
 use browser_ui::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService};
@@ -69,6 +69,10 @@ impl RestoreStore {
     fn save(&self, expected: Option<uuid::Uuid>, record: Option<ActiveAudiobook>) -> Result<bool, String> {
         if let Some(record) = &record {
             record.validate()?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.path.is_none() {
+            return Ok(true);
         }
         if self.load()?.as_ref().map(|record| record.session_id) != expected {
             return Ok(false);
@@ -142,7 +146,8 @@ struct OpenOrder {
 }
 impl OpenOrder {
     fn reserve(&mut self) -> u64 {
-        self.next = self.next.checked_add(1).expect("playback request sequence exhausted");
+        // Exhaustion rejects subsequent opens through the existing order check.
+        self.next = self.next.saturating_add(1);
         self.next
     }
     fn accept(&mut self, request: u64) -> bool {
@@ -175,21 +180,67 @@ pub(super) struct PlaybackController {
     observation: Option<Subscription>,
 }
 
+#[derive(Default)]
+struct PlaybackControllers(Vec<WeakEntity<PlaybackController>>);
+impl Global for PlaybackControllers {}
+
+#[cfg(feature = "kobo")]
+pub(super) fn kobo_idle_sleep_allowed(cx: &App) -> bool {
+    cx.try_global::<PlaybackControllers>().is_none_or(|registry| !registry.0.iter().filter_map(WeakEntity::upgrade).any(|controller| controller.read(cx).current.as_ref().is_some_and(|active| active.session.read(cx).prevents_idle_sleep())))
+}
+
+#[cfg(feature = "kobo")]
+pub(super) fn prepare_kobo_sleep(cx: &mut App) {
+    let controllers = cx.try_global::<PlaybackControllers>().map(|registry| registry.0.clone()).unwrap_or_default();
+    for controller in controllers.into_iter().filter_map(|controller| controller.upgrade()) {
+        controller.update(cx, |controller, cx| {
+            controller.opens.cancel_pending();
+            controller.opening = None;
+            controller.generation = controller.generation.wrapping_add(1);
+            if let Some(active) = &controller.current {
+                active.session.update(cx, |session, cx| session.prepare_sleep(cx));
+            }
+        });
+    }
+}
+
 struct PlaybackLibraryRemoval {
-    controller: WeakEntity<PlaybackController>,
+    controllers: Vec<WeakEntity<PlaybackController>>,
 }
 
 impl LibraryRemovalService for PlaybackLibraryRemoval {
     fn prepare_removal(&self, library: LibraryId, cx: &mut App) -> LibraryRemovalPreparation {
-        self.controller.update(cx, |controller, cx| controller.prepare_removal(library, cx)).unwrap_or_else(|_| Box::pin(async { Err("Playback controller is unavailable".into()) }))
+        let preparations = self.controllers.iter().filter_map(|controller| controller.upgrade()).map(|controller| controller.update(cx, |controller, cx| controller.prepare_removal(library, cx))).collect::<Vec<_>>();
+        Box::pin(async move {
+            for preparation in preparations {
+                preparation.await?;
+            }
+            Ok(())
+        })
     }
 }
 
 impl PlaybackController {
     pub fn shared(backend: AppClient, restore_path: Option<PathBuf>, cx: &mut App) -> Entity<Self> {
         let controller = Self::shared_with(cx, |cx| Self::new(backend, RestoreStore::new(restore_path), cx));
-        cx.set_global(LibraryRemovalHook(Rc::new(PlaybackLibraryRemoval { controller: controller.downgrade() })));
+        Self::register(&controller, cx);
         controller
+    }
+
+    pub fn independent(backend: AppClient, restore_path: Option<PathBuf>, cx: &mut App) -> Entity<Self> {
+        let controller = cx.new(|cx| Self::new(backend, RestoreStore::new(restore_path), cx));
+        Self::register(&controller, cx);
+        controller
+    }
+
+    fn register(controller: &Entity<Self>, cx: &mut App) {
+        let mut controllers = cx.try_global::<PlaybackControllers>().map(|registry| registry.0.clone()).unwrap_or_default();
+        controllers.retain(|existing| existing.upgrade().is_some());
+        if !controllers.iter().any(|existing| existing.entity_id() == controller.entity_id()) {
+            controllers.push(controller.downgrade());
+        }
+        cx.set_global(PlaybackControllers(controllers.clone()));
+        cx.set_global(LibraryRemovalHook(Rc::new(PlaybackLibraryRemoval { controllers })));
     }
 
     fn shared_with(cx: &mut App, create: impl FnOnce(&mut Context<Self>) -> Self) -> Entity<Self> {
@@ -219,7 +270,7 @@ impl PlaybackController {
             };
             let mut stored_id = restored.as_ref().map(|record| record.session_id);
             if let Some(record) = restored {
-                let missing = backend.libraries().await.ok().is_some_and(|libraries| !libraries.iter().any(|entry| entry.library_id() == record.locator.library_id()));
+                let missing = backend.management.libraries().await.ok().is_some_and(|libraries| !libraries.iter().any(|entry| entry.library_id() == record.locator.library_id()));
                 if missing {
                     if matches!(restore_store.save(stored_id, None), Ok(true)) {
                         stored_id = None;
@@ -251,8 +302,9 @@ impl PlaybackController {
                         write_error = None;
                     }
                     Ok(false) => {
-                        write_error = Some("Audiobook restore record changed outside this playback controller".to_owned());
-                        log::warn!("{}", write_error.as_ref().unwrap());
+                        let error = "Audiobook restore record changed outside this playback controller".to_owned();
+                        log::warn!("{error}");
+                        write_error = Some(error);
                     }
                     Err(error) => {
                         log::warn!("could not save active audiobook: {error}");
@@ -269,7 +321,13 @@ impl PlaybackController {
         cx.spawn(async move |_, _| writer.await).detach();
         cx.spawn(async move |this, cx| {
             if let Ok(record) = restored_rx.recv().await {
-                let library = restore_backend.library(*record.locator.library_id());
+                let library = match restore_backend.management.library(*record.locator.library_id()) {
+                    Ok(library) => library,
+                    Err(error) => {
+                        log::warn!("could not restore audiobook: {error}");
+                        return;
+                    }
+                };
                 let _ = this.update(cx, |controller, cx| {
                     if controller.user_changed {
                         return;
@@ -315,7 +373,7 @@ impl PlaybackController {
         self.user_changed = true;
         self.opens.cancel_pending();
         self.opening = None;
-        self.generation = self.generation.checked_add(1).expect("playback generation exhausted");
+        self.generation = self.generation.wrapping_add(1);
         // No intermediate observation may overwrite the final service snapshot
         // while shutdown is waiting for the position producer to finish.
         self.observation = None;
@@ -365,7 +423,7 @@ impl PlaybackController {
         if !self.opens.accept(request) {
             return false;
         }
-        self.generation = self.generation.checked_add(1).expect("playback generation exhausted");
+        self.generation = self.generation.wrapping_add(1);
         self.user_changed = true;
         self.opening = None;
         active.session.update(cx, |session, cx| {
@@ -382,7 +440,7 @@ impl PlaybackController {
             return;
         }
         self.stop_current(cx);
-        let metadata = library_model::PlaybackMetadata { format: book_model::BookFormat::M4b, title, author: String::new(), narrator: None, duration_ms: 0, chapters: vec![], tracks: vec![], cover: vec![] };
+        let metadata = library_model::PlaybackMetadata { format: book_model::BookFormat::M4b, title, author: String::new(), narrator: None, duration_ms: 0, chapters: vec![], tracks: vec![] };
         let record = ActiveAudiobook::new(locator, 0, 1.0, metadata);
         self.install(record, session, false, cx);
         self.save_current(true, cx);
@@ -414,7 +472,7 @@ impl PlaybackController {
             || !active.persisted
             || playing != active.playing
             || record.speed != active.record.speed
-            || record.metadata.cover != active.record.metadata.cover
+            || record.cover != active.record.cover
             || record.position_ms.abs_diff(active.record.position_ms) > 5_000
             || (changed && active.last_save.elapsed() >= Duration::from_secs(5));
         if !save {
@@ -435,6 +493,18 @@ impl PlaybackController {
         }
         self.opens.cancel_pending();
         self.stop_current(cx);
+    }
+
+    pub fn close_pane(&mut self, cx: &mut Context<Self>) -> LibraryRemovalPreparation {
+        self.close(cx);
+        let positions = self.pending_positions.iter().map(|(_, flush)| flush.clone()).collect::<Vec<_>>();
+        let saves = self.flush_saves();
+        Box::pin(async move {
+            for position in positions {
+                position.await?;
+            }
+            saves.await
+        })
     }
 
     fn flush_saves(&self) -> LibraryRemovalPreparation {
@@ -491,13 +561,16 @@ impl PlaybackController {
     }
 
     fn finish_active_removal(&mut self, positions: LibraryRemovalPreparation, cx: &mut Context<Self>) -> LibraryRemovalPreparation {
-        let library = *self.current.as_ref().expect("active removal requires a session").record.locator.library_id();
+        let Some(active) = &self.current else {
+            return Box::pin(async { Err("Playback session ended while preparing library removal; try again".into()) });
+        };
+        let library = *active.record.locator.library_id();
         let positions = self.track_position_flush(library, positions, cx);
         self.opens.cancel_pending();
         self.opening = None;
         self.user_changed = true;
         self.observation = None;
-        self.generation = self.generation.checked_add(1).expect("playback generation exhausted");
+        self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         // Retain the stopped session until both saves succeed. In particular,
         // never queue a tombstone before the final position producer has flushed.
@@ -528,7 +601,7 @@ impl PlaybackController {
                 this.update(cx, |controller, cx| {
                     controller.check_removal_generation(generation)?;
                     controller.current = None;
-                    controller.generation = controller.generation.checked_add(1).expect("playback generation exhausted");
+                    controller.generation = controller.generation.wrapping_add(1);
                     cx.notify();
                     Ok::<_, String>(())
                 })
@@ -581,7 +654,7 @@ impl PlaybackController {
 
     fn stop_current(&mut self, cx: &mut Context<Self>) {
         self.opening = None;
-        self.generation = self.generation.checked_add(1).expect("playback generation exhausted");
+        self.generation = self.generation.wrapping_add(1);
         self.user_changed = true;
         self.save_current(true, cx);
         if let Some(active) = self.current.take() {
@@ -595,5 +668,21 @@ impl PlaybackController {
         self.observation = None;
         let _ = self.saves.try_send(Save::Replace(None));
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::OpenOrder;
+
+    #[test]
+    fn exhausting_request_ids_never_reaccepts_an_old_open() {
+        let mut order = OpenOrder { next: u64::MAX - 1, ..OpenOrder::default() };
+        let last = order.reserve();
+        assert_eq!(last, u64::MAX);
+        assert!(order.accept(last));
+        let exhausted = order.reserve();
+        assert!(!order.accept(exhausted));
+        assert!(!order.accept(1));
     }
 }

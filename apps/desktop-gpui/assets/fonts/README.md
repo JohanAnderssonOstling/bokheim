@@ -21,11 +21,50 @@ host system.
   licensed under the SIL Open Font License 1.1. See `LICENSE-RALEWAY.txt`.
   The interface and reader use this sans-serif family on every platform.
 
-The shared `ui-components` font registration installs NV Garamond, Raleway and
-Bodoni Moda once per application, before either the browser or reader uses them.
-The sans-serif UI choice uses Raleway for both body text and prominent headings.
+The shared `ui-components` font registration installs the selected interface
+family before it is used. The serif UI also loads Bodoni Moda for display
+headings. Other families load when requested by book styling, generated covers,
+or an opened typeface picker. The sans-serif UI uses Raleway for both body text
+and prominent headings. Android also installs Noto Sans for native generic-font
+requests before its system-font discovery completes.
 
 Libertinus is no longer bundled by the application. Historical comparison
 assets and their license are in `apps/ui/design-tokens/assets/fonts/libertinus-comparison`.
 
 The files are redistributed without modification.
+
+Droid Sans Fallback Regular is the compact bundled CJK fallback (3,451,900
+bytes), from the Android Open Source Project's `android13-qpr2-s10-release`
+`data/fonts/DroidSansFallback.ttf` (Git blob
+`1099b177c881c96bf298989dcdca5fda7841133d`). It is redistributed without
+modification under Apache License 2.0; see `LICENSE-DROID.txt`.
+Source: https://android.googlesource.com/platform/frameworks/base/+/android13-qpr2-s10-release/data/fonts/
+SHA-256: `21b96a0377f067833a93af3082eb28d4ffab7a8cd46bfd513286f1d64b7b0949`.
+
+It provides 33,275 Unicode mappings, covering common Chinese, Japanese kana,
+Korean Hangul and Bopomofo. It lacks CJK Extensions A/B and separate regional
+Han glyph forms. Only regular weight is included; bold and oblique depend on
+platform synthesis. An installed regional font can be chosen in the reader.
+Desktop builds package font files in `fonts/` beside the executable; Android
+reads them directly from APK assets. Only the selected interface family and
+its display face are registered at desktop startup. Other bundled Latin families load
+on first use, including a book request or an opened font picker.
+
+Native readers register the CJK face when text containing CJK characters first
+reaches the shaper, before resolving its fonts. This also covers later chapters
+and books without language metadata. Web preloads the remote CJK face when a
+book opens because its font fetch is asynchronous. Structured
+BCP 47 book language metadata enables separate Latin and CJK font controls. The
+CJK choices are Book (the default) and Custom. Book
+preserves the publisher's CJK family even when a different Latin font is chosen,
+and uses the bundled face for missing glyphs. The Custom picker checks the
+actual face's glyph coverage and excludes Latin-only fonts. Without
+CJK metadata those controls stay hidden and the usual book font choices apply.
+Chapter text is never scanned to guess a language.
+CJK typeface overrides and installed font names are device-local preferences,
+separate from Latin book settings.
+
+On Kobo, copy custom TTF, OTF, TTC or OTC files into `/mnt/onboard/fonts`
+(`fonts/` on the USB drive), then restart Bokheim. Subdirectories are included.
+These fonts appear under Custom in both interface and reader typeface settings.
+They are registered before saved font preferences are applied on startup.

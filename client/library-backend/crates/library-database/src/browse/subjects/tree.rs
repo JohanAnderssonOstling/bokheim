@@ -19,7 +19,6 @@ struct CachedTree {
 struct TreeRevision {
     visibility: i64,
     subjects: i64,
-    legacy: Option<(u64, i64)>,
     taxonomy_revision: Option<String>,
     taxonomy_local_changes: Option<u64>,
     taxonomy_data_version: i64,
@@ -46,7 +45,6 @@ impl Database {
         let revision = TreeRevision {
             visibility: library.visibility,
             subjects: library.subjects,
-            legacy: library.legacy,
             taxonomy_revision: crate::browse::revision::taxonomy(&self.connection)?,
             taxonomy_local_changes: (!self.connection.is_readonly("curated")?).then(|| self.connection.total_changes()),
             taxonomy_data_version: self.connection.pragma_query_value(Some("curated"), "data_version", |row| row.get(0))?,
@@ -90,15 +88,14 @@ impl Database {
     }
 
     fn load_catalog_subject_tree(&self, catalog: &Connection) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
-        let mut statement = catalog.prepare("SELECT book_row_id,concept_id FROM catalog_browse_concept")?;
-        let concepts = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
-        let selected = concepts.iter().map(|(_, concept)| *concept).collect::<BTreeSet<_>>();
-        let mut routes = BTreeMap::<i64, Vec<i64>>::new();
-        self.connection.concept_routes(&serde_json::to_string(&selected).map_err(DatabaseError::operation)?, |row| {
-            routes.entry(row.get(0)?).or_default().push(row.get(1)?);
+        // An inactive catalog uses a temporary empty connection; active
+        // catalogs already have the same taxonomy attached as the library.
+        crate::attach_taxonomy(catalog)?;
+        let mut assignments = Vec::new();
+        catalog.catalog_subject_assignments(|row| {
+            assignments.push((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
             Ok(())
         })?;
-        let assignments = concepts.into_iter().flat_map(|(book, concept)| routes.get(&concept).into_iter().flatten().map(move |route| (book, *route))).collect();
         self.subject_tree(assignments)
     }
 
@@ -112,63 +109,72 @@ impl Database {
                     let (parent, label) = self.connection.taxonomy_route_parent(&current, |row| Ok((row.get(0)?, row.get(1)?)))?;
                     nodes.insert(current, SubjectNode { parent, label, ..Default::default() });
                 }
-                let node = nodes.get_mut(&current).expect("loaded route");
+                let node = subject_node_mut(&mut nodes, current)?;
                 node.members.insert(book);
                 if current == assigned_route {
                     node.direct.insert(book);
                 }
                 current = node.parent;
             }
-            nodes.get_mut(&0).expect("subject root").members.insert(book);
+            subject_node_mut(&mut nodes, 0)?.members.insert(book);
         }
         let edges = nodes.iter().filter(|(route, _)| **route != 0).map(|(&route, node)| (route, node.parent)).collect::<Vec<_>>();
         for (route, parent) in edges {
-            nodes.get_mut(&parent).expect("loaded ancestor").children.insert(route);
+            subject_node_mut(&mut nodes, parent)?.children.insert(route);
         }
-        let branches = nodes[&0].children.clone();
+        let branches = subject_node(&nodes, 0)?.children.clone();
         for branch in branches {
-            if !compact_node(branch, &mut nodes) {
-                let members = nodes[&branch].members.clone();
-                let root = nodes.get_mut(&0).expect("subject root");
+            if !compact_node(branch, &mut nodes)? {
+                let members = remove_subject_node(&mut nodes, branch)?.members;
+                let root = subject_node_mut(&mut nodes, 0)?;
                 root.direct.extend(members);
                 root.children.remove(&branch);
             }
         }
-        // Compacted-away nodes are no longer valid browse locations.
-        let visible = subtree_routes(&nodes, 0);
-        nodes.retain(|route, _| visible.contains(route));
         Ok(nodes)
     }
 }
 
+fn subject_node(nodes: &BTreeMap<i64, SubjectNode>, route: i64) -> Result<&SubjectNode, DatabaseError> {
+    nodes.get(&route).ok_or_else(|| DatabaseError::message(format!("subject tree is missing route {route}")))
+}
+
+fn subject_node_mut(nodes: &mut BTreeMap<i64, SubjectNode>, route: i64) -> Result<&mut SubjectNode, DatabaseError> {
+    nodes.get_mut(&route).ok_or_else(|| DatabaseError::message(format!("subject tree is missing route {route}")))
+}
+
+fn remove_subject_node(nodes: &mut BTreeMap<i64, SubjectNode>, route: i64) -> Result<SubjectNode, DatabaseError> {
+    nodes.remove(&route).ok_or_else(|| DatabaseError::message(format!("subject tree is missing route {route}")))
+}
+
 /// Collapse small leaves, then absorb a sole child of an empty wrapper while
-/// keeping the wrapper's label. Membership is independent of page filters.
-pub(in crate::browse) fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> bool {
-    let children = nodes[&route].children.clone();
+/// keeping the wrapper's label. Remove each discarded child as its contents
+/// move to the parent. Membership is independent of page filters.
+pub(in crate::browse) fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> Result<bool, DatabaseError> {
+    let children = subject_node(nodes, route)?.children.clone();
     for child in children {
-        if !compact_node(child, nodes) {
-            let members = nodes[&child].members.clone();
-            let node = nodes.get_mut(&route).expect("subject route");
+        if !compact_node(child, nodes)? {
+            let members = remove_subject_node(nodes, child)?.members;
+            let node = subject_node_mut(nodes, route)?;
             node.direct.extend(members);
             node.children.remove(&child);
         }
     }
-    let node = &nodes[&route];
+    let node = subject_node(nodes, route)?;
     if node.children.is_empty() && node.members.len() <= 2 {
-        return false;
+        return Ok(false);
     }
     if node.direct.is_empty() && node.children.len() == 1 {
-        let child = *node.children.first().expect("sole child");
-        let direct = nodes[&child].direct.clone();
-        let grandchildren = nodes[&child].children.clone();
+        let child = *node.children.first().ok_or_else(|| DatabaseError::message("subject wrapper has no child"))?;
+        let SubjectNode { direct, children: grandchildren, .. } = remove_subject_node(nodes, child)?;
         for grandchild in &grandchildren {
-            nodes.get_mut(grandchild).expect("subject grandchild").parent = route;
+            subject_node_mut(nodes, *grandchild)?.parent = route;
         }
-        let node = nodes.get_mut(&route).expect("subject route");
+        let node = subject_node_mut(nodes, route)?;
         node.direct = direct;
         node.children = grandchildren;
     }
-    true
+    Ok(true)
 }
 
 pub(in crate::browse) fn subtree_routes(nodes: &BTreeMap<i64, SubjectNode>, root: i64) -> BTreeSet<i64> {
@@ -190,6 +196,13 @@ mod tests {
     use crate::transactions::WriteOutcome;
 
     #[test]
+    fn compaction_reports_missing_children_instead_of_panicking() {
+        let mut nodes = BTreeMap::from([(1, SubjectNode { children: BTreeSet::from([2]), ..Default::default() })]);
+        assert!(compact_node(1, &mut nodes).is_err());
+        assert!(compact_node(99, &mut nodes).is_err());
+    }
+
+    #[test]
     fn leaf_assignments_count_upwards_once_without_combining_separate_branches() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
@@ -209,6 +222,8 @@ mod tests {
         db.initialize_library().unwrap();
         db.connection.fixtures_detach_curated_concept_2().unwrap();
         let catalog = Connection::open_in_memory().unwrap();
+        crate::attach_taxonomy(&catalog).unwrap();
+        catalog.fixtures_detach_curated_concept_2().unwrap();
         catalog.execute_batch(include_str!("../../catalog/schema.sql")).unwrap();
         catalog.execute("INSERT INTO catalog_browse_revision VALUES(1,13,1,8,'test')", []).unwrap();
         for id in 1..=3 {
@@ -233,7 +248,6 @@ mod tests {
             chip_sort: Default::default(),
             book_sort: Default::default(),
             hide_finished: false,
-            include_direct_child_books: false,
         };
         db.browse(&query, false).unwrap();
         assert!(Arc::ptr_eq(&library, &db.subject_tree_for(Books::Library).unwrap()));
@@ -322,7 +336,6 @@ mod tests {
             chip_sort: library_model::BrowseChipSort::Alphabetical,
             book_sort: library_model::BrowseBookSort::Alphabetical,
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let writes = db.connection.total_changes();
         let root = db.browse_contents(&query(0), false).unwrap();
@@ -387,7 +400,6 @@ mod tests {
             chip_sort: library_model::BrowseChipSort::Alphabetical,
             book_sort: library_model::BrowseBookSort::Alphabetical,
             hide_finished: false,
-            include_direct_child_books: false,
         };
         let contents = db.browse_contents(&query, false).unwrap();
         assert_eq!(contents.children.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(), ["Optics", "Quantum"]);
@@ -423,7 +435,6 @@ mod tests {
             chip_sort: Default::default(),
             book_sort: Default::default(),
             hide_finished: false,
-            include_direct_child_books: false,
         };
         db.connection.pragma_update(None, "query_only", true).unwrap();
         let root = db.browse(&query, false).unwrap();

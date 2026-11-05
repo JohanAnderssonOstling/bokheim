@@ -1,25 +1,50 @@
 //! Ranking values projected from server evidence for the compact desktop catalog.
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
+
+/// Shared SQLite projection for publisher snapshots and client catalogs.
+/// Observed source scores become tied-rank percentiles within their cataloged
+/// source observations. Bilinguator receives an assigned score of 50.
+/// Raw crawl evidence remains in server curation.
+pub const SOURCE_PERCENTILES_SQL: &str = include_str!("catalog_percentiles.sql");
 
 pub struct CatalogEvidence {
     pub popularity: Option<CatalogPopularity>,
     pub sources: Vec<String>,
     pub external_audio: bool,
+    pub audiobook_duration_ms: Option<u64>,
 }
 
 /// Raw crawling and merge records stay on the server. Only ranking and source
-/// attribution cross into the published catalog, with audio format resolved.
+/// attribution and audiobook duration cross into the published catalog, with audio format resolved.
 pub fn source_evidence(source: &str, metadata: &Value) -> Result<CatalogEvidence, String> {
     let mut sources = Vec::new();
     let popularity = if source == "bokheim:combined-volumes" {
         let mut selected: Option<CatalogPopularity> = None;
-        for entry in metadata["components"].as_array().into_iter().flatten().flat_map(|component| component["source_entries"].as_array().into_iter().flatten()) {
-            let Some(original_source) = entry["source"].as_str() else { continue };
-            if !sources.iter().any(|name| name == original_source) {
-                sources.push(original_source.to_owned());
+        let mut gutenberg_scores = Vec::new();
+        for component in metadata["components"].as_array().into_iter().flatten() {
+            let mut gutenberg: Option<CatalogPopularity> = None;
+            for entry in component["source_entries"].as_array().into_iter().flatten() {
+                let Some(original_source) = entry["source"].as_str() else { continue };
+                if !sources.iter().any(|name| name == original_source) {
+                    sources.push(original_source.to_owned());
+                }
+                let Some(value) = observation(original_source, &entry["metadata"])? else { continue };
+                let candidate = if original_source == "gutenberg.org" { &mut gutenberg } else { &mut selected };
+                if candidate.as_ref().is_none_or(|previous| stronger(&value, previous)) {
+                    *candidate = Some(value);
+                }
             }
-            let Some(value) = observation(original_source, &entry["metadata"])? else { continue };
+            if let Some(value) = gutenberg {
+                gutenberg_scores.push(value.score());
+            }
+        }
+        if !gutenberg_scores.is_empty() {
+            // Each component contributes one raw download count, before the
+            // publisher calculates source percentiles. An incomplete set of
+            // observations cannot supply the complete edition's average.
+            let score = gutenberg_scores.iter().try_fold(0.0, |total, score| Some(total + (*score)?)).map(|total| total / gutenberg_scores.len() as f64);
+            let value = CatalogPopularity { source: Some("gutenberg.org".into()), source_score: score, ..Default::default() };
             if selected.as_ref().is_none_or(|previous| stronger(&value, previous)) {
                 selected = Some(value);
             }
@@ -28,7 +53,12 @@ pub fn source_evidence(source: &str, metadata: &Value) -> Result<CatalogEvidence
     } else {
         observation(source, metadata)?
     };
-    Ok(CatalogEvidence { popularity, sources, external_audio: metadata["audiobook_download_url"].as_str().is_some() || metadata["audiobook_delivery"] == "external_download" })
+    Ok(CatalogEvidence {
+        popularity,
+        sources,
+        external_audio: metadata["audiobook_download_url"].as_str().is_some() || metadata["audiobook_delivery"] == "external_download",
+        audiobook_duration_ms: metadata["audiobook_duration_ms"].as_u64().filter(|duration| *duration > 0 && *duration <= i64::MAX as u64),
+    })
 }
 
 /// Source observations used by catalog browsing. Litteraturbanken retains its
@@ -93,6 +123,7 @@ pub fn observation(source: &str, metadata: &Value) -> Result<Option<CatalogPopul
             }
         }
         "gutenberg.org" => value.source_score = metadata["downloads"].as_u64().map(|count| count as f64),
+        "bilinguator.com" => value.source_score = Some(50.0),
         "standardebooks.org" => {
             // This is an observed listing position, not an exposed download
             // count. Reciprocal rank sorts lower ordinals first while keeping
@@ -138,6 +169,62 @@ pub fn stronger(value: &CatalogPopularity, previous: &CatalogPopularity) -> bool
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn bilingual_books_receive_an_assigned_neutral_score() {
+        let value = source_evidence("bilinguator.com", &json!({})).unwrap().popularity.unwrap();
+        assert_eq!(value.source.as_deref(), Some("bilinguator.com"));
+        assert_eq!(value.score(), Some(50.0));
+        assert!(value.popularity.is_none());
+    }
+
+    #[test]
+    fn combined_gutenberg_uses_mean_raw_downloads_and_keeps_fractional_values() {
+        let metadata = json!({"components": [
+            {"source_entries": [{"source":"gutenberg.org","metadata":{"downloads":5}}]},
+            {"source_entries": [{"source":"gutenberg.org","metadata":{"downloads":10}}]}
+        ]});
+        let evidence = source_evidence("bokheim:combined-volumes", &metadata).unwrap();
+        assert_eq!(evidence.sources, ["gutenberg.org"]);
+        let popularity = evidence.popularity.unwrap();
+        assert_eq!(popularity.source.as_deref(), Some("gutenberg.org"));
+        assert_eq!(popularity.score(), Some(7.5));
+        assert!(popularity.popularity.is_none());
+    }
+
+    #[test]
+    fn combined_gutenberg_requires_every_component_count_and_includes_zero() {
+        let mut metadata = json!({"components": [
+            {"source_entries": [{"source":"gutenberg.org","metadata":{"downloads":0}}]},
+            {"source_entries": [{"source":"gutenberg.org","metadata":{"downloads":10}}]}
+        ]});
+        assert_eq!(source_evidence("bokheim:combined-volumes", &metadata).unwrap().popularity.unwrap().score(), Some(5.0));
+        for missing in [json!(null), json!(-1), json!("10")] {
+            metadata["components"][1]["source_entries"][0]["metadata"]["downloads"] = missing;
+            assert_eq!(source_evidence("bokheim:combined-volumes", &metadata).unwrap().popularity.unwrap().score(), None);
+        }
+    }
+
+    #[test]
+    fn combined_gutenberg_mean_preserves_other_source_preferences() {
+        let metadata = json!({"components": [
+            {"source_entries": [{"source":"gutenberg.org","metadata":{"downloads":1000}},
+                                {"source":"loyalbooks.com","metadata":{"rating_count":10}}]},
+            {"source_entries": [{"source":"gutenberg.org","metadata":{"downloads":2000}}]}
+        ]});
+        let evidence = source_evidence("bokheim:combined-volumes", &metadata).unwrap();
+        assert_eq!(evidence.sources, ["gutenberg.org", "loyalbooks.com"]);
+        assert_eq!(evidence.popularity.unwrap().source.as_deref(), Some("loyalbooks.com"));
+    }
+
+    #[test]
+    fn source_audio_duration_preserves_known_values_and_rejects_invalid_values() {
+        let evidence = source_evidence("loyalbooks.com", &json!({"audiobook_duration_ms":27_789_000})).unwrap();
+        assert_eq!(evidence.audiobook_duration_ms, Some(27_789_000));
+        for value in [json!(null), json!(0), json!(-1), json!(u64::MAX), json!("7 hours")] {
+            assert_eq!(source_evidence("loyalbooks.com", &json!({"audiobook_duration_ms":value})).unwrap().audiobook_duration_ms, None);
+        }
+    }
 
     #[test]
     fn standardebooks_ordinal_rank_orders_within_its_source_without_inventing_counts() {

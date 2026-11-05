@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "target": "x86_64-unknown-linux-gnu",
+  "glibc": "2.17",
+  "onnxruntime": {
+    "repository": "https://github.com/microsoft/onnxruntime.git",
+    "tag": "v1.28.2",
+    "commit": "33ca9628233dc8f002435e868d4c2e9f82766ca1"
+  },
+  "models": {
+    "alba/en_GB-alba-medium.onnx": "c904d007a8047ab13628b021351b983d0a2627c0d7a81c64a6fe9ad661adb1cf",
+    "george/model.onnx": "b40f62b166ac8164b0627ef48a0b358eda0985e272fb03ef5252e7206305da11"
+  },
+  "operator_tools": {
+    "onnx": "1.20.1",
+    "onnxruntime": "1.28.0"
+  }
+}

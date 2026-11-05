@@ -65,7 +65,8 @@ struct TreeItemState {
 pub struct TreeItem {
     pub id: SharedString,
     pub label: SharedString,
-    pub children: Vec<TreeItem>,
+    /// Shared structure makes item clones independent of subtree size.
+    pub children: Rc<Vec<TreeItem>>,
     state: Rc<RefCell<TreeItemState>>,
 }
 
@@ -136,7 +137,7 @@ impl TreeItem {
         Self {
             id: id.into(),
             label: label.into(),
-            children: Vec::new(),
+            children: Rc::default(),
             state: Rc::new(RefCell::new(TreeItemState {
                 expanded: false,
                 disabled: false,
@@ -146,13 +147,13 @@ impl TreeItem {
 
     /// Add a child item to this tree item.
     pub fn child(mut self, child: TreeItem) -> Self {
-        self.children.push(child);
+        Rc::make_mut(&mut self.children).push(child);
         self
     }
 
     /// Add multiple child items to this tree item.
     pub fn children(mut self, children: impl IntoIterator<Item = TreeItem>) -> Self {
-        self.children.extend(children);
+        Rc::make_mut(&mut self.children).extend(children);
         self
     }
 
@@ -190,7 +191,7 @@ impl TreeItem {
             return Some(vec![]);
         }
 
-        for child in &self.children {
+        for child in self.children.iter() {
             if let Some(mut path) = child.find_ancestors(target_id) {
                 path.push(self.clone());
                 return Some(path);
@@ -366,7 +367,7 @@ impl TreeState {
             depth,
         });
         if item.is_expanded() {
-            for child in &item.children {
+            for child in item.children.iter() {
                 self.add_entry(child.clone(), depth + 1);
             }
         }
@@ -696,6 +697,42 @@ mod tests {
 
     use super::{TreeEvent, TreeState};
     use gpui::{AppContext as _, Render, Subscription};
+
+    #[test]
+    fn cloned_items_share_subtrees_and_child_builders_preserve_structure() {
+        use super::TreeItem;
+
+        let original = TreeItem::new("root", "Root")
+            .child(TreeItem::new("branch", "Branch").child(TreeItem::new("leaf", "Leaf")));
+        let cloned = original.clone();
+        assert!(Rc::ptr_eq(&original.children, &cloned.children));
+        let extended = cloned.child(TreeItem::new("sibling", "Sibling"));
+        assert_eq!(original.children.len(), 1);
+        assert_eq!(extended.children.len(), 2);
+        assert!(Rc::ptr_eq(
+            &original.children[0].children,
+            &extended.children[0].children,
+        ));
+    }
+
+    #[gpui::test]
+    fn flattened_entries_share_their_original_child_structure(cx: &mut gpui::TestAppContext) {
+        use super::TreeItem;
+
+        let root = TreeItem::new("root", "Root").expanded(true).child(
+            TreeItem::new("branch", "Branch")
+                .expanded(true)
+                .child(TreeItem::new("leaf", "Leaf")),
+        );
+        let state = cx.new(|cx| TreeState::new(cx).items(vec![root]));
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.entries.len(), 3);
+            assert!(Rc::ptr_eq(
+                &state.entries[0].item.children[0].children,
+                &state.entries[1].item.children,
+            ));
+        });
+    }
 
     struct TestCollector {
         _state: gpui::Entity<TreeState>,

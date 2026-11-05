@@ -57,10 +57,12 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Building sync-server for ${cargo_target}..."
-cargo build --release --target "${cargo_target}" --manifest-path "${repository_root}/servers/sync/Cargo.toml" -p sync-server
+cargo build --release --target "${cargo_target}" --target-dir "${repository_root}/servers/sync/target" --manifest-path "${repository_root}/servers/sync/Cargo.toml" -p sync-server
+cargo build --release --target "${cargo_target}" --target-dir "${repository_root}/servers/sync/target" --manifest-path "${repository_root}/client/library-backend/crates/library-cloud-upgrade/Cargo.toml" -p library-cloud-upgrade
 
 sync_binary=${repository_root}/servers/sync/target/${cargo_target}/release/sync-server
-for required in "${sync_binary}"; do
+upgrade_binary=${repository_root}/servers/sync/target/${cargo_target}/release/library-cloud-upgrade
+for required in "${sync_binary}" "${upgrade_binary}"; do
     if [[ ! -x ${required} ]]; then
         echo "missing executable release artifact: ${required}" >&2
         exit 1
@@ -74,7 +76,9 @@ for required in "${repository_root}/servers/sync/deploy/bokheim-sync.service"; d
 done
 
 install -m 0755 "${sync_binary}" "${stage}/sync-server"
+install -m 0755 "${upgrade_binary}" "${stage}/library-cloud-upgrade"
 install -m 0644 "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${stage}/bokheim-sync.service"
+install -m 0644 "${repository_root}/shared/protobuf-wire/protocol.json" "${stage}/protocol.json"
 echo "Checking SSH access to ${remote}..."
 remote_stage=$(ssh "${ssh_options[@]}" "${remote}" "mktemp -d '${remote_prefix}.XXXXXX'")
 scp "${ssh_options[@]}" "${stage}"/* "${remote}:${remote_stage}/"

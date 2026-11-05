@@ -2,12 +2,11 @@
 use super::{author, reidentify};
 use book_model::{AgentId, BookRecord};
 use metadata_contract::matching::author_match_keys;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeSet, HashMap};
 
 pub(super) fn initialize(db: &Connection) -> Result<(), String> {
     with_savepoint(db, || {
-        let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='catalog_author_credit' AND type='table')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
         db.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS catalog_author_credit(
@@ -28,9 +27,6 @@ pub(super) fn initialize(db: &Connection) -> Result<(), String> {
                 let name = event.split_whitespace().next().unwrap().to_lowercase();
                 db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS catalog_author_{table}_{name} AFTER {event} ON {table} BEGIN INSERT OR IGNORE INTO catalog_author_dirty VALUES('{table}',{reference}.{key}); END;"))
                     .map_err(|e| e.to_string())?;
-            }
-            if !exists {
-                db.execute(&format!("INSERT OR IGNORE INTO catalog_author_dirty SELECT '{table}',{key} FROM {table}"), []).map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -169,7 +165,7 @@ mod tests {
     use super::*;
     use crate::curation::{self, record, set_enriched_record, set_record};
     use crate::links::{self, Entry};
-    use book_model::{BookDetails, BookFormat, Contributor, AUTHOR_MARC_RELATOR_CODE, NARRATOR_MARC_RELATOR_CODE};
+    use book_model::{AUTHOR_MARC_RELATOR_CODE, BookDetails, BookFormat, Contributor, NARRATOR_MARC_RELATOR_CODE};
 
     fn book(name: &str, id: AgentId) -> BookRecord {
         BookRecord { metadata: BookDetails { title: "Test book".into(), contributors: vec![Contributor::with_id(id, name, AUTHOR_MARC_RELATOR_CODE).unwrap()], ..Default::default() }, description: "Original description".into() }
@@ -254,29 +250,5 @@ mod tests {
         AuthorIds::load(&db).unwrap().assign(&mut next).unwrap();
         assert_eq!(next.authors().next().unwrap().agent_id(), AgentId::from_u128(4));
         assert_eq!(db.query_row("SELECT count(*) FROM catalog_author_credit", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-    }
-
-    #[test]
-    fn migration_indexes_existing_records_and_reopening_does_not_rescan_them() {
-        let dir = tempfile::tempdir().unwrap();
-        {
-            let db = curation::open(dir.path()).unwrap();
-            set_record(&db, "hosted", &book("Jane Austen", AgentId::from_u128(1))).unwrap();
-            linked(&db, book("Jules Verne", AgentId::from_u128(2)));
-            for (table, _) in TABLES {
-                for event in ["insert", "update", "delete"] {
-                    db.execute_batch(&format!("DROP TRIGGER catalog_author_{table}_{event}")).unwrap();
-                }
-            }
-            db.execute_batch("DROP TABLE catalog_author_credit; DROP TABLE catalog_author_dirty").unwrap();
-        }
-        {
-            let db = curation::open(dir.path()).unwrap();
-            let mut next = book("Verne, Jules", AgentId::from_u128(3));
-            AuthorIds::load(&db).unwrap().assign(&mut next).unwrap();
-            assert_eq!(next.authors().next().unwrap().agent_id(), AgentId::from_u128(2));
-        }
-        let db = curation::open(dir.path()).unwrap();
-        assert_eq!(db.query_row("SELECT count(*) FROM catalog_author_dirty", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 }

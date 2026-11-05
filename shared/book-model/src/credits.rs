@@ -7,7 +7,7 @@
 
 use crate::{BookSubject, Identifier, LanguageTag, MarcRelatorCode};
 use crate::{IdentifierError, LanguageTagError, SubjectError};
-use content_address::ContentHash;
+use content_address::BookId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -163,9 +163,8 @@ impl<'de> Deserialize<'de> for BookRecord {
     }
 }
 
-/// One entry in a book's own hierarchical navigation document. It is
-/// shared by library ingestion and library inspection; UI contracts only
-/// project it at their process boundary.
+/// One entry in a book's own hierarchical navigation document, shared by
+/// content parsing, library storage, readers, bookmarks, and annotation exports.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookTocEntry {
     pub title: String,
@@ -184,9 +183,10 @@ pub struct AudiobookTrack {
     pub end_ms: u64,
     pub offset: u64,
     pub length: u64,
-    /// ZIP revision whose stored byte offsets this track index describes.
+    /// Book identity whose ZIP offsets this track index describes. Provider
+    /// readers also pin the file revision so replacements cannot reuse offsets.
     #[serde(default)]
-    pub archive_hash: Option<ContentHash>,
+    pub archive_hash: Option<BookId>,
 }
 
 impl AudiobookTrack {
@@ -200,7 +200,7 @@ impl AudiobookTrack {
     }
 }
 
-pub fn tracks_match_archive(tracks: &[AudiobookTrack], hash: ContentHash) -> bool {
+pub fn tracks_match_archive(tracks: &[AudiobookTrack], hash: BookId) -> bool {
     !tracks.is_empty() && tracks.iter().all(|track| track.valid() && track.archive_hash == Some(hash))
 }
 
@@ -208,6 +208,7 @@ pub fn tracks_match_archive(tracks: &[AudiobookTrack], hash: ContentHash) -> boo
 /// `None` clears a prior duration or track index; empty entries clear the TOC.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookTocDocument {
+    #[serde(with = "crate::toc_transport")]
     pub entries: Vec<BookTocEntry>,
     pub duration_ms: Option<u64>,
     #[serde(default)]

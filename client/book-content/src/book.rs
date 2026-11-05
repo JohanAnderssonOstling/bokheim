@@ -1,28 +1,33 @@
 //! Parsed containers and renderer-independent reading preparation.
 
 use crate::epub::{EpubProvider, EpubSession};
+use crate::fb2::{Fb2Container, Fb2Resources};
 use crate::mobi::{MobiContainer, MobiResources};
+use crate::profile::{PreparationProfile, measure};
 use crate::resource_path::local_resource_uri;
 use crate::resources::PreparedResources;
 use crate::source::{ReaderFactory, Source};
-use crate::{BookReader, DeclaredMetadata, DocumentInspection, TocEntry};
+use crate::{BookReader, BookToc, BookTocEntry, DeclaredMetadata, DocumentInspection};
 use futures_lite::future::block_on;
 use std::future::Future;
 use std::io::{self, Read, Seek};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BookFormat {
     Epub,
     Mobi,
+    Fb2,
 }
 
 enum Container {
     Epub(EpubSession),
     Mobi(MobiContainer),
+    Fb2(Fb2Container),
 }
 
-/// Opening parses the container directory and headers. Text preparation is a
+/// Opening parses container headers or bounded FB2 XML. Text preparation is a
 /// separate, consuming step, so scans and covers never decode MOBI text.
 pub struct Book {
     container: Container,
@@ -41,6 +46,7 @@ impl Book {
         let container = match format {
             BookFormat::Epub => Container::Epub(EpubSession::open(source).await?),
             BookFormat::Mobi => Container::Mobi(MobiContainer::open(source).await?),
+            BookFormat::Fb2 => Container::Fb2(Fb2Container::open(source).await?),
         };
         Ok(Self { container })
     }
@@ -49,21 +55,45 @@ impl Book {
         block_on(Self::open_source(format, Source::from_reader(reader)))
     }
 
+    pub fn publication_identifier(&self) -> Option<String> {
+        match &self.container {
+            Container::Epub(epub) => epub.package.publication_identifier(),
+            _ => None,
+        }
+    }
+
+    /// Resolve annotation chapters from package data, reading TOC anchors only
+    /// in documents containing these CFIs rather than preparing the whole book.
+    pub fn toc_for_cfis(&mut self, toc: &[BookTocEntry], cfis: &[&str]) -> io::Result<BookToc> {
+        let Container::Epub(epub) = &mut self.container else {
+            return Err(io::Error::other("annotation TOC lookup requires an EPUB"));
+        };
+        let documents = epub.package.document_uris()?;
+        let bases = epub.package.cfi_bases(&documents);
+        Ok(BookToc::from_documents(&documents, bases, toc, Some(cfis), |uri| {
+            let xml = epub.package.resource_media_type(uri) == Some("application/xhtml+xml") || uri.to_ascii_lowercase().ends_with(".xhtml");
+            let bytes = block_on(epub.read_bytes_bounded_async(uri, crate::resources::MAX_BINARY_RESOURCE_BYTES)).ok()?;
+            Some((bytes, xml))
+        }))
+    }
+
     pub fn metadata(&mut self) -> io::Result<DeclaredMetadata> {
         match &mut self.container {
             Container::Epub(epub) => epub.metadata(),
             Container::Mobi(mobi) => Ok(mobi.metadata()),
+            Container::Fb2(fb2) => Ok(fb2.metadata()),
         }
     }
 
-    pub fn toc(&mut self) -> io::Result<Option<Vec<TocEntry>>> {
+    pub fn toc(&mut self) -> io::Result<Option<Vec<BookTocEntry>>> {
         block_on(self.toc_async())
     }
 
-    pub async fn toc_async(&mut self) -> io::Result<Option<Vec<TocEntry>>> {
+    pub async fn toc_async(&mut self) -> io::Result<Option<Vec<BookTocEntry>>> {
         match &mut self.container {
             Container::Epub(epub) => epub.toc().await,
             Container::Mobi(mobi) => mobi.toc().await,
+            Container::Fb2(fb2) => fb2.toc().map(Some),
         }
     }
 
@@ -72,6 +102,7 @@ impl Book {
         match &mut self.container {
             Container::Epub(epub) => Ok(epub.declared_cover_image_path()?.into_iter().collect()),
             Container::Mobi(mobi) => Ok(mobi.preferred_covers()),
+            Container::Fb2(fb2) => Ok(fb2.covers()),
         }
     }
 
@@ -81,6 +112,7 @@ impl Book {
         match &mut self.container {
             Container::Epub(epub) => epub.image_paths_in_reading_order(),
             Container::Mobi(mobi) => Ok(mobi.image_resources()),
+            Container::Fb2(fb2) => Ok(fb2.images()),
         }
     }
 
@@ -89,6 +121,7 @@ impl Book {
         match &mut self.container {
             Container::Epub(epub) => epub.read_bytes_bounded_async(&uri, limit).await,
             Container::Mobi(mobi) => mobi.read_resource(&uri, limit).await,
+            Container::Fb2(fb2) => fb2.read_resource(&uri, limit),
         }
     }
 
@@ -107,26 +140,68 @@ impl Book {
                     Ok(DocumentInspection::from_epub(epub, documents, toc))
                 }
                 Container::Mobi(mobi) => Ok(DocumentInspection::from_prepared(mobi.prepare_text().await?)),
+                Container::Fb2(fb2) => Ok(DocumentInspection::from_prepared(fb2.prepare_text()?)),
             }
         })
     }
 
     pub async fn prepare_reading(self) -> io::Result<ReadingBook> {
+        self.prepare_reading_inner::<false>(&mut PreparationProfile::default()).await
+    }
+
+    /// Runs the same preparation with per-stage and per-resource measurements.
+    /// EPUB resources include wall time, active polling, and suspended time.
+    /// The ordinary `prepare_reading` path does not sample clocks.
+    pub async fn prepare_reading_profiled(self) -> io::Result<(ReadingBook, PreparationProfile)> {
+        let mut profile = PreparationProfile::default();
+        let (reading, total) = measure::<true, _>(self.prepare_reading_inner::<true>(&mut profile)).await;
+        profile.total = total;
+        reading.map(|reading| (reading, profile))
+    }
+
+    async fn prepare_reading_inner<const PROFILE: bool>(self, profile: &mut PreparationProfile) -> io::Result<ReadingBook> {
         let (epub, toc) = match self.container {
             Container::Mobi(mobi) => return mobi.prepare_reading().await,
+            Container::Fb2(fb2) => return fb2.prepare_reading(),
             Container::Epub(mut epub) => {
-                let toc = epub.toc().await?.unwrap_or_default();
-                (Arc::new(epub.into_provider().await?), toc)
+                let (toc, timing) = measure::<PROFILE, _>(epub.toc()).await;
+                if PROFILE {
+                    profile.record("toc", timing);
+                }
+                let toc = toc?.unwrap_or_default();
+                let (epub, timing) = measure::<PROFILE, _>(epub.into_provider()).await;
+                if PROFILE {
+                    profile.record("source_promotion", timing);
+                }
+                (Arc::new(epub?), toc)
             }
         };
-        let documents = epub.package.document_uris()?;
+        let started = PROFILE.then(Instant::now);
+        let mut documents = epub.package.document_uris()?;
         if documents.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "EPUB contains no readable documents"));
         }
-        let weights = epub.package.document_progress_weights(&documents)?;
-        let bytes = epub.prepare_text_resources_async(&documents).await?;
-        let types = epub.package.resource_media_types();
-        Ok(PreparedText { resources: PreparedResources::new(bytes, Some(types), documents), document_weights: weights, toc }.into_reading(ResourceSource::Epub(epub)))
+        profile.record_sync("spine_and_weights", started);
+        let (bytes, timing) = measure::<PROFILE, _>(epub.prepare_text_resources_async::<PROFILE>(&documents, profile)).await;
+        if PROFILE {
+            profile.record("text_resources", timing);
+        }
+        let bytes = bytes?;
+        documents.retain(|uri| bytes.get(uri).is_some_and(|bytes| !bytes.is_empty()));
+        if documents.is_empty() {
+            documents = epub.package.fallback_documents().into_iter().filter(|uri| bytes.get(uri).is_some_and(|bytes| !bytes.is_empty())).collect();
+        }
+        if documents.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "EPUB contains no readable documents"));
+        }
+        let weights = documents.iter().map(|uri| bytes[uri].len().max(1) as u64).collect();
+        let started = PROFILE.then(Instant::now);
+        let types = epub.package.resource_media_types(&bytes);
+        profile.record_sync("media_types", started);
+        let started = PROFILE.then(Instant::now);
+        let reading = PreparedText { resources: PreparedResources::new(bytes, Some(types), documents), document_weights: weights, toc }.into_reading(ResourceSource::Epub(epub));
+        profile.record_sync("finish", started);
+        Ok(reading)
     }
 }
 
@@ -134,7 +209,7 @@ impl Book {
 pub(crate) struct PreparedText {
     pub(crate) resources: PreparedResources,
     pub(crate) document_weights: Vec<u64>,
-    pub(crate) toc: Vec<TocEntry>,
+    pub(crate) toc: Vec<BookTocEntry>,
 }
 
 impl PreparedText {
@@ -148,6 +223,7 @@ impl PreparedText {
 pub(crate) enum ResourceSource {
     Epub(Arc<EpubProvider>),
     Mobi(Arc<MobiResources>),
+    Fb2(Arc<Fb2Resources>),
 }
 
 /// Immutable documents and CSS for synchronous consumers, with asynchronous
@@ -156,15 +232,25 @@ pub struct ReadingBook {
     pub resources: PreparedResources,
     pub document_weights: Vec<u64>,
     source: ResourceSource,
-    pub toc: Vec<TocEntry>,
+    pub toc: Vec<BookTocEntry>,
 }
 
 impl ReadingBook {
+    /// Original OPF paths aligned with the final prepared document list. The
+    /// renderer uses these for EPUB CFIs and synthetic addresses otherwise.
+    pub fn publication_cfi_bases(&self) -> Option<Vec<Option<String>>> {
+        match &self.source {
+            ResourceSource::Epub(epub) => epub.package.cfi_bases(self.document_uris()),
+            ResourceSource::Mobi(_) | ResourceSource::Fb2(_) => None,
+        }
+    }
+
     /// Language codes declared by the container; an empty list means unspecified.
     pub fn languages(&self) -> Vec<String> {
         match &self.source {
             ResourceSource::Epub(epub) => epub.languages(),
             ResourceSource::Mobi(mobi) => mobi.languages(),
+            ResourceSource::Fb2(fb2) => fb2.languages(),
         }
     }
 
@@ -183,6 +269,7 @@ impl ReadingBook {
                     match source {
                         ResourceSource::Epub(epub) => epub.read_bytes_async(&uri).await,
                         ResourceSource::Mobi(mobi) => mobi.read_bytes(&uri).await,
+                        ResourceSource::Fb2(fb2) => fb2.read_bytes(&uri, crate::resources::MAX_BINARY_RESOURCE_BYTES),
                     }
                 }
                 Err(error) => Err(error),
@@ -197,16 +284,71 @@ mod language_tests {
     use std::io::{Cursor, Write};
 
     #[test]
+    fn epub_cfi_bases_keep_original_xml_positions_after_document_filtering() {
+        let package = r#"<package><metadata/><manifest>
+            <item id="a" href="a.xhtml" media-type="application/xhtml+xml"/>
+            <item id="empty" href="empty.xhtml" media-type="application/xhtml+xml"/>
+            <item id="binary" href="image.bin" media-type="application/octet-stream"/>
+            <item id="b" href="b.xhtml" media-type="application/xhtml+xml"/>
+            </manifest><extra/><spine id="sp!ine">
+            <itemref idref="a"/><itemref idref="binary"/>
+            <itemref idref="missing"/><itemref idref="a"/>
+            <itemref idref="empty"/><itemref idref="b" id="b]ref" linear="no"/>
+            </spine></package>"#;
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, text) in [
+            ("META-INF/container.xml", "<container><rootfiles><rootfile full-path='book.opf'/></rootfiles></container>"),
+            ("book.opf", package),
+            ("a.xhtml", "<html><body>First</body></html>"),
+            ("b.xhtml", "<html><body>Last</body></html>"),
+            ("empty.xhtml", ""),
+            ("image.bin", "unrenderable resource"),
+        ] {
+            archive.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            archive.write_all(text.as_bytes()).unwrap();
+        }
+        let reading = block_on(Book::open_reader(BookFormat::Epub, archive.finish().unwrap()).unwrap().prepare_reading()).unwrap();
+        assert_eq!(reading.document_uris(), ["a.xhtml", "b.xhtml"]);
+        assert_eq!(reading.publication_cfi_bases(), Some(vec![Some("/8[sp!ine]/2".into()), Some("/8[sp!ine]/12[b^]ref]".into())]));
+    }
+
+    #[test]
+    fn profiled_preparation_preserves_documents_css_and_auxiliary_html() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let package = "<package><manifest><item id='a' href='a.xhtml' media-type='application/xhtml+xml'/><item id='b' href='b.xhtml' media-type='application/xhtml+xml'/><item id='css' href='style.css' media-type='text/css'/></manifest><spine><itemref idref='a'/></spine></package>";
+        let resources = [("a.xhtml", "<html><body>Main chapter</body></html>"), ("b.xhtml", "<html><body>Auxiliary notes</body></html>"), ("style.css", "body { color: black; }")];
+        for (name, text) in [("META-INF/container.xml", "<container><rootfiles><rootfile full-path='book.opf'/></rootfiles></container>"), ("book.opf", package)].into_iter().chain(resources) {
+            archive.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            archive.write_all(text.as_bytes()).unwrap();
+        }
+        let bytes = archive.finish().unwrap().into_inner();
+        let plain = block_on(Book::open_reader(BookFormat::Epub, Cursor::new(bytes.clone())).unwrap().prepare_reading()).unwrap();
+        let (profiled, profile) = block_on(Book::open_reader(BookFormat::Epub, Cursor::new(bytes)).unwrap().prepare_reading_profiled()).unwrap();
+        assert_eq!(plain.document_uris(), profiled.document_uris());
+        assert_eq!(plain.document_weights, profiled.document_weights);
+        assert_eq!(profile.resources.len(), resources.len());
+        assert!(profile.total.active <= profile.total.elapsed);
+        for (uri, expected) in resources {
+            assert_eq!(plain.resources.read_bytes(uri).unwrap(), profiled.resources.read_bytes(uri).unwrap());
+            assert_eq!(profiled.resources.read_bytes(uri).unwrap(), expected.as_bytes());
+            assert_eq!(plain.resources.media_type(uri).unwrap(), profiled.resources.media_type(uri).unwrap());
+            let resource = profile.resources.iter().find(|resource| resource.uri == uri).unwrap();
+            assert_eq!(resource.timing.output_bytes, expected.len());
+            assert!(resource.timing.decode.active <= resource.timing.decode.elapsed);
+        }
+    }
+
+    #[test]
     fn reading_languages_come_from_epub_package_metadata() {
         for languages in [vec![], vec!["en-GB"], vec!["sv"], vec!["fr", "en-US"]] {
             let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
             let metadata = languages.iter().map(|language| format!("<dc:language>{language}</dc:language>")).collect::<String>();
-            let package = format!("<package xmlns:dc='http://purl.org/dc/elements/1.1/'><metadata>{metadata}</metadata><manifest><item id='chapter' href='chapter.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='chapter'/></spine></package>");
-            for (name, text) in [
-                ("META-INF/container.xml", "<container><rootfiles><rootfile full-path='content.opf'/></rootfiles></container>"),
-                ("content.opf", package.as_str()),
-                ("chapter.xhtml", "<html><body><p>A chapter.</p></body></html>"),
-            ] {
+            let package = format!(
+                "<package xmlns:dc='http://purl.org/dc/elements/1.1/'><metadata>{metadata}</metadata><manifest><item id='chapter' href='chapter.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='chapter'/></spine></package>"
+            );
+            for (name, text) in
+                [("META-INF/container.xml", "<container><rootfiles><rootfile full-path='content.opf'/></rootfiles></container>"), ("content.opf", package.as_str()), ("chapter.xhtml", "<html><body><p>A chapter.</p></body></html>")]
+            {
                 archive.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
                 archive.write_all(text.as_bytes()).unwrap();
             }

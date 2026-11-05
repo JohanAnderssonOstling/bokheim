@@ -66,8 +66,9 @@ pub(crate) fn prepare_library_removal(library: LibraryId, cx: &mut App) -> Libra
     }
 }
 
-pub(crate) async fn prepared_removal<T>(preparation: LibraryRemovalPreparation, remove: impl Future<Output = Result<T, String>>) -> Result<T, String> {
-    preparation.await?;
+pub(crate) async fn prepared_removal<T>(preparation: LibraryRemovalPreparation, remove: impl Future<Output = Result<T, app::BackendError>>) -> Result<T, app::BackendError> {
+    // Preparation fails only for application state, such as playback saves.
+    preparation.await.map_err(app::BackendError::message)?;
     remove.await
 }
 

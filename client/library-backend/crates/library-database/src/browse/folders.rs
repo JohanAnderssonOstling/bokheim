@@ -20,7 +20,7 @@ impl Database {
                     let parents: &[BrowseRow] = &contents.children;
                     let counts: &FolderCounts = &tree.counts;
                     let options: &super::BrowseOptions = &options;
-                    let ids = json(&parents.iter().filter_map(|row| if let BrowseLocation::Folder(id) = row.id { Some(id) } else { None }).map(|id| id.to_string()).collect::<Vec<_>>())?;
+                    let ids = json(&parents.iter().filter_map(|row| row.id.folder()).collect::<Vec<_>>())?;
                     let mut with_books = HashSet::new();
                     self.connection.folder_placements(&ids, |row| {
                         with_books.insert(row.get::<_, String>(1)?);
@@ -52,7 +52,7 @@ impl Database {
             let (language_counts, format_counts) = self.library_facets(&options)?;
             let path = self.browse_directory_path(&directory_id)?;
             let ancestors = self.folder_ancestors(&path, &options)?;
-            Ok(super::LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, feed: None, page: None })
+            Ok(super::LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, page: None })
         })
     }
 
@@ -131,23 +131,25 @@ impl Database {
         })?;
         // Search results come from anywhere below, so each says where it lives.
         if !options.search.is_empty() {
-            let mut paths = crate::placements::FolderPaths::new(&self.connection);
+            let mut paths = crate::placements::FolderPaths::for_directories(&self.connection, parents.iter().map(String::as_str))?;
             for (folder, parent) in folders.iter_mut().zip(parents) {
-                folder.path = paths.folder(&parent)?.filter(|path| !path.is_empty());
+                folder.path = paths.folder(&parent)?.filter(|path| !path.is_empty()).map(str::to_owned);
             }
         }
         {
             let folders: &mut Vec<BrowseRow> = &mut folders;
-            for folder in folders.iter_mut() {
+            let show_empty = options.file_types == 0 && options.languages.is_empty() && !options.hide_finished;
+            folders.retain_mut(|folder| {
                 let count = match folder.id {
                     BrowseLocation::Folder(id) => counts.get(&id.to_string()).copied().unwrap_or_default(),
                     _ => FolderCount::default(),
                 };
                 folder.book_count = if options.downloaded_only { count.downloaded } else { count.total };
                 folder.downloaded_book_count = count.downloaded;
-            }
-            let unfiltered = options.search.is_empty() && options.file_types == 0 && options.languages.is_empty() && !options.downloaded_only && !options.hide_finished;
-            folders.retain(|folder| unfiltered || folder.book_count > 0);
+                // Empty directories stay navigable in local-only libraries and name searches.
+                // Folders containing only remote books still obey the download filter.
+                folder.book_count > 0 || show_empty && count.total == 0
+            });
             super::popularity::sort_rows(folders, options.chip_sort, |row| row.id.folder().and_then(|id| counts.get(&id.to_string()).and_then(|count| count.popularity)));
         };
         Ok(folders)
@@ -174,8 +176,9 @@ impl Database {
             })?;
             level.end = folders.len();
         }
+        let selected = json(&folders)?;
         let mut counts = FolderCounts::new();
-        self.connection.folder_direct_counts(&json(&folders)?, options.file_types, &options.languages, i32::from(options.hide_finished), f64::from(library_model::FINISHED_PROGRESS_THRESHOLD), |row| {
+        self.connection.folder_direct_counts(&selected, options.file_types, &options.languages, i32::from(options.hide_finished), f64::from(library_model::FINISHED_PROGRESS_THRESHOLD), |row| {
             counts.insert(row.get(0)?, FolderCount { total: count_column(row, 1)?, downloaded: count_column(row, 2)?, popularity: None });
             Ok(())
         })?;
@@ -189,7 +192,7 @@ impl Database {
         }
         if options.chip_sort == BrowseChipSort::Popularity {
             let mut members = HashMap::<String, BTreeSet<i64>>::new();
-            self.connection.folder_placements(&json(&folders)?, |row| {
+            self.connection.folder_placements(&selected, |row| {
                 if options.downloaded_only && !row.get::<_, bool>(2)? {
                     return Ok(());
                 }
@@ -201,7 +204,8 @@ impl Database {
             for folder in folders.iter().rev() {
                 let mut ids = members.remove(folder).unwrap_or_default();
                 for child in children.get(folder).into_iter().flatten() {
-                    if let Some(below) = members.get(child) {
+                    // Its score is already saved; only this parent still needs its members.
+                    if let Some(below) = members.remove(child) {
                         ids.extend(below);
                     }
                 }
@@ -243,4 +247,11 @@ fn count_column(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<usiz
 
 fn json(ids: &[impl serde::Serialize]) -> Result<String, DatabaseError> {
     serde_json::to_string(ids).map_err(DatabaseError::operation)
+}
+
+// Async access owns its arguments until the synchronous database call completes.
+database_methods! {
+    fn browse_directory_path(directory_id: &DirId) -> Vec<library_model::BrowsePathSegment>;
+    arguments (DirId,) = (directory_id.clone(),);
+    execute database, arguments => database.browse_directory_path(&arguments.0);
 }

@@ -5,6 +5,11 @@ use super::*;
 use crate::source::Source;
 use crate::toc::root_href;
 use futures_lite::future::block_on;
+use quick_xml::{
+    XmlVersion,
+    escape::{resolve_xml_entity, unescape_with},
+    events::Event,
+};
 use std::collections::HashSet;
 #[cfg(test)]
 use std::io::{Read, Seek};
@@ -14,6 +19,7 @@ use std::sync::Arc;
 pub(crate) struct EpubSession {
     pub(super) archive: ArchiveReader,
     pub(crate) package: Arc<EpubPackage>,
+    toc_cache: Option<Option<Vec<BookTocEntry>>>,
 }
 impl EpubSession {
     #[cfg(test)]
@@ -27,7 +33,7 @@ impl EpubSession {
         if package.document_uris()?.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "EPUB book contains no readable documents"));
         }
-        Ok(Self { archive, package })
+        Ok(Self { archive, package, toc_cache: None })
     }
 
     pub(crate) async fn into_provider(self) -> io::Result<EpubProvider> {
@@ -122,7 +128,16 @@ impl EpubSession {
         self.archive.read_prefix(uri, max_bytes).await
     }
 
-    pub(crate) async fn toc(&mut self) -> io::Result<Option<Vec<TocEntry>>> {
+    pub(crate) async fn toc(&mut self) -> io::Result<Option<Vec<BookTocEntry>>> {
+        if let Some(toc) = &self.toc_cache {
+            return Ok(toc.clone());
+        }
+        let toc = self.read_toc().await?;
+        self.toc_cache = Some(toc.clone());
+        Ok(toc)
+    }
+
+    async fn read_toc(&mut self) -> io::Result<Option<Vec<BookTocEntry>>> {
         let manifest = self.package.get_or_parse_manifest().clone();
 
         if let Some(ref nav_href) = manifest.nav_href {
@@ -278,7 +293,6 @@ fn identifier_scheme_from_type(identifier_type: &MetadataIdentifierType) -> Opti
 
 pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
     let mut reader = quick_xml::Reader::from_str(opf_xml);
-    reader.trim_text(true);
     let mut buf = Vec::new();
     let mut metadata = DeclaredMetadata::default();
     let mut current = None;
@@ -291,14 +305,102 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
     let mut current_subject_source: Option<String> = None;
     let mut current_subject_authority: Option<String> = None;
     let mut current_date_event: Option<String> = None;
-    let mut current_role: Option<CreatorRole> = None;
+    let mut current_role = CreatorRole::author();
     let mut current_file_as: Option<String> = None;
     let mut parsed_identifiers = Vec::<(Option<String>, MetadataIdentifier)>::new();
     let mut identifier_type_refinements = Vec::<(String, MetadataIdentifierType)>::new();
 
+    let mut text_buf = String::new();
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) => {
+        let event = reader.read_event_into(&mut buf).unwrap_or(Event::Eof);
+        match &event {
+            Event::Text(text) if current.is_some() => {
+                text_buf.push_str(&text.decode().unwrap_or_default());
+                buf.clear();
+                continue;
+            }
+            Event::GeneralRef(reference) if current.is_some() => {
+                text_buf.push('&');
+                text_buf.push_str(&reference.decode().unwrap_or_default());
+                text_buf.push(';');
+                buf.clear();
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(field) = current {
+            // Trim before decoding so escaped whitespace at the edges survives.
+            let raw = std::mem::take(&mut text_buf);
+            let text = unescape_with(raw.trim_matches([' ', '\t', '\r', '\n']), resolve_xml_entity).unwrap_or_default().into_owned();
+            if !text.is_empty() {
+                match field {
+                    MetaField::Title => {
+                        if metadata.title.is_empty() {
+                            metadata.title = text;
+                        } else {
+                            metadata.alternate_titles.push(MetadataTitle { id: current_value_id.clone(), value: text, title_type: None, sort_as: None });
+                        }
+                    }
+                    MetaField::Identifier => {
+                        let value = text.trim();
+                        if !value.is_empty() {
+                            let scheme = if matches!(current_scheme, IdentifierScheme::Unspecified) { infer_identifier_scheme(value) } else { current_scheme.clone() };
+                            parsed_identifiers.push((current_identifier_id.clone(), MetadataIdentifier { value: value.to_owned(), scheme, identifier_types: Vec::new() }));
+                        }
+                    }
+                    MetaField::IdentifierType => {
+                        if let Some(target) = current_identifier_type_target.clone() {
+                            let value = text.trim();
+                            if !value.is_empty() {
+                                identifier_type_refinements.push((target, MetadataIdentifierType { value: value.to_owned(), scheme: current_identifier_type_scheme.clone() }));
+                            }
+                        }
+                    }
+                    MetaField::Creator => {
+                        metadata.creators.push(MetadataCredit { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone() });
+                    }
+                    MetaField::Contributor => {
+                        metadata.contributors.push(MetadataCredit { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone() });
+                    }
+                    MetaField::Description if metadata.description.is_empty() => {
+                        metadata.description = text;
+                    }
+                    MetaField::Publisher => {
+                        metadata.publishers.push(text);
+                    }
+                    MetaField::Language => {
+                        metadata.languages.push(text);
+                    }
+                    MetaField::Date => {
+                        metadata.dates.push(MetadataDate { source: "epub:package:date".to_owned(), id: current_value_id.clone(), value: text, event: current_date_event.clone() });
+                    }
+                    MetaField::Subject => {
+                        let code = current_subject_authority.as_deref().filter(|authority| authority.eq_ignore_ascii_case("bisac")).filter(|_| looks_like_bisac_code(&text)).map(|_| text.trim().to_ascii_uppercase());
+                        metadata.subjects.push(MetadataSubject {
+                            id: current_value_id.clone(),
+                            value: text,
+                            source: current_subject_source.clone().unwrap_or_else(|| "dc:subject".to_owned()),
+                            authority: current_subject_authority.clone(),
+                            code,
+                        });
+                    }
+                    MetaField::Rights => metadata.rights.push(text),
+                    MetaField::Source => metadata.sources.push(text),
+                    MetaField::Type => metadata.types.push(text),
+                    MetaField::Format => metadata.formats.push(text),
+                    MetaField::Relation => metadata.relations.push(text),
+                    MetaField::Coverage => metadata.coverage.push(text),
+                    MetaField::Property => {
+                        if let Some(property) = current_property.clone() {
+                            metadata.properties.push(MetadataProperty { value: text, ..property });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match event {
+            Event::Start(e) => {
                 let name = e.name();
                 if name.as_ref().ends_with(b"title") {
                     current = Some(MetaField::Title);
@@ -326,12 +428,12 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
                 } else if name.as_ref().ends_with(b"creator") {
                     current = Some(MetaField::Creator);
                     // Extract role attribute (opf:role), default to Author if not present
-                    current_role = Some(read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::author));
+                    current_role = read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::author);
                     current_value_id = read_xml_attr(e.attributes(), b"id");
                     // Extract file-as attribute (opf:file-as)
                     current_file_as = read_xml_attr(e.attributes(), b"file-as");
                 } else if name.as_ref().ends_with(b"contributor") {
-                    current_role = Some(read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::contributor));
+                    current_role = read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::contributor);
                     current_value_id = read_xml_attr(e.attributes(), b"id");
                     current = Some(MetaField::Contributor);
                     current_file_as = read_xml_attr(e.attributes(), b"file-as");
@@ -364,7 +466,7 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
                     current = Some(MetaField::Coverage);
                 }
             }
-            Ok(quick_xml::events::Event::Empty(e)) => {
+            Event::Empty(e) => {
                 let name = e.name();
                 if name.as_ref().ends_with(b"meta") && read_xml_attr(e.attributes(), b"property").as_deref().is_some_and(|property| property.rsplit(':').next() == Some("identifier-type")) {
                     if let (Some(target), Some(value)) = (read_xml_attr(e.attributes(), b"refines").and_then(|target| target.strip_prefix('#').map(str::to_owned)), read_xml_attr(e.attributes(), b"content")) {
@@ -390,7 +492,7 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
                     }
                 }
             }
-            Ok(quick_xml::events::Event::End(e)) => {
+            Event::End(e) => {
                 let name = e.name();
                 if name.as_ref().ends_with(b"title")
                     || name.as_ref().ends_with(b"identifier")
@@ -414,7 +516,7 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
                     current_identifier_id = None;
                     current_identifier_type_target = None;
                     current_identifier_type_scheme = None;
-                    current_role = None;
+                    current_role = CreatorRole::author();
                     current_file_as = None;
                     current_property = None;
                     current_value_id = None;
@@ -423,82 +525,7 @@ pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
                     current_date_event = None;
                 }
             }
-            Ok(quick_xml::events::Event::Text(t)) => {
-                if let Some(field) = current {
-                    let text = t.unescape().unwrap_or_default().into_owned();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    match field {
-                        MetaField::Title => {
-                            if metadata.title.is_empty() {
-                                metadata.title = text;
-                            } else {
-                                metadata.alternate_titles.push(MetadataTitle { id: current_value_id.clone(), value: text, title_type: None, sort_as: None });
-                            }
-                        }
-                        MetaField::Identifier => {
-                            let value = text.trim();
-                            if !value.is_empty() {
-                                let scheme = if matches!(current_scheme, IdentifierScheme::Unspecified) { infer_identifier_scheme(value) } else { current_scheme.clone() };
-                                parsed_identifiers.push((current_identifier_id.clone(), MetadataIdentifier { value: value.to_owned(), scheme, identifier_types: Vec::new() }));
-                            }
-                        }
-                        MetaField::IdentifierType => {
-                            if let Some(target) = current_identifier_type_target.clone() {
-                                let value = text.trim();
-                                if !value.is_empty() {
-                                    identifier_type_refinements.push((target, MetadataIdentifierType { value: value.to_owned(), scheme: current_identifier_type_scheme.clone() }));
-                                }
-                            }
-                        }
-                        MetaField::Creator => {
-                            // unwrap is safe here because we always set current_role for creators
-                            metadata.creators.push(MetadataCredit { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone().unwrap() });
-                        }
-                        MetaField::Contributor => {
-                            // unwrap is safe here because we only set current=Contributor if role exists
-                            metadata.contributors.push(MetadataCredit { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone().unwrap() });
-                        }
-                        MetaField::Description if metadata.description.is_empty() => {
-                            metadata.description = text;
-                        }
-                        MetaField::Publisher => {
-                            metadata.publishers.push(text);
-                        }
-                        MetaField::Language => {
-                            metadata.languages.push(text);
-                        }
-                        MetaField::Date => {
-                            metadata.dates.push(MetadataDate { source: "epub:package:date".to_owned(), id: current_value_id.clone(), value: text, event: current_date_event.clone() });
-                        }
-                        MetaField::Subject => {
-                            let code = current_subject_authority.as_deref().filter(|authority| authority.eq_ignore_ascii_case("bisac")).filter(|_| looks_like_bisac_code(&text)).map(|_| text.trim().to_ascii_uppercase());
-                            metadata.subjects.push(MetadataSubject {
-                                id: current_value_id.clone(),
-                                value: text,
-                                source: current_subject_source.clone().unwrap_or_else(|| "dc:subject".to_owned()),
-                                authority: current_subject_authority.clone(),
-                                code,
-                            });
-                        }
-                        MetaField::Rights => metadata.rights.push(text),
-                        MetaField::Source => metadata.sources.push(text),
-                        MetaField::Type => metadata.types.push(text),
-                        MetaField::Format => metadata.formats.push(text),
-                        MetaField::Relation => metadata.relations.push(text),
-                        MetaField::Coverage => metadata.coverage.push(text),
-                        MetaField::Property => {
-                            if let Some(property) = current_property.clone() {
-                                metadata.properties.push(MetadataProperty { value: text, ..property });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
+            Event::Eof => break,
             _ => {}
         }
         buf.clear();
@@ -646,13 +673,13 @@ enum MetaField {
 
 fn parse_opf_cover_id(opf_xml: &str) -> Option<String> {
     let mut reader = quick_xml::Reader::from_str(opf_xml);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut in_metadata = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) | Ok(quick_xml::events::Event::Empty(e)) => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let name = e.name();
                 if name.as_ref().ends_with(b"metadata") {
                     in_metadata = true;
@@ -671,13 +698,13 @@ fn parse_opf_cover_id(opf_xml: &str) -> Option<String> {
                     }
                 }
             }
-            Ok(quick_xml::events::Event::End(e)) => {
+            Ok(Event::End(e)) => {
                 let name = e.name();
                 if name.as_ref().ends_with(b"metadata") {
                     break;
                 }
             }
-            Ok(quick_xml::events::Event::Eof) => break,
+            Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
         }
@@ -689,13 +716,13 @@ fn parse_opf_cover_id(opf_xml: &str) -> Option<String> {
 
 fn parse_opf_guide_cover_href(opf_xml: &str) -> Option<String> {
     let mut reader = quick_xml::Reader::from_str(opf_xml);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut in_guide = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) | Ok(quick_xml::events::Event::Empty(e)) => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let name = e.name();
                 if name.as_ref().ends_with(b"guide") {
                     in_guide = true;
@@ -714,10 +741,10 @@ fn parse_opf_guide_cover_href(opf_xml: &str) -> Option<String> {
                     }
                 }
             }
-            Ok(quick_xml::events::Event::End(e)) if e.name().as_ref().ends_with(b"guide") => {
+            Ok(Event::End(e)) if e.name().as_ref().ends_with(b"guide") => {
                 break;
             }
-            Ok(quick_xml::events::Event::Eof) => break,
+            Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
         }
@@ -733,13 +760,13 @@ fn parse_first_image_href_from_html(html: &str) -> Option<String> {
 
 fn parse_image_hrefs_from_html(html: &str) -> Vec<String> {
     let mut reader = quick_xml::Reader::from_str(html);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut images = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) | Ok(quick_xml::events::Event::Empty(e)) => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let tag = e.name();
                 if tag.as_ref().ends_with(b"img") {
                     if let Some(src) = read_xml_attr(e.attributes(), b"src") {
@@ -751,7 +778,7 @@ fn parse_image_hrefs_from_html(html: &str) -> Vec<String> {
                     images.push(href);
                 }
             }
-            Ok(quick_xml::events::Event::Eof) => break,
+            Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
         }
@@ -813,9 +840,8 @@ mod tests {
 /// Keep element text intact across XML text events so a valid substring in a
 /// larger value cannot masquerade as a complete ISBN.
 fn metadata_block_values(xml: &str, block: &str) -> Vec<String> {
-    use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(xml);
-    reader.expand_empty_elements(true);
+    reader.config_mut().expand_empty_elements = true;
     let mut inside = false;
     let mut stack: Vec<String> = Vec::new();
     let mut values = Vec::new();
@@ -830,13 +856,20 @@ fn metadata_block_values(xml: &str, block: &str) -> Vec<String> {
                 }
                 stack.push(String::new());
                 for attribute in e.attributes().flatten() {
-                    if let Ok(value) = attribute.unescape_value() {
+                    if let Ok(value) = attribute.normalized_value_with(XmlVersion::Implicit1_0, 1, resolve_xml_entity) {
                         values.push(value.into_owned());
                     }
                 }
             }
             Ok(Event::Text(e)) if inside => {
-                if let Ok(text) = e.unescape() {
+                if let Ok(text) = e.decode() {
+                    for value in &mut stack {
+                        value.push_str(&text);
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(e)) if inside => {
+                if let Ok(text) = crate::xml::reference_text(&e) {
                     for value in &mut stack {
                         value.push_str(&text);
                     }
@@ -901,28 +934,31 @@ mod mislabeled_isbn_tests {
 }
 
 impl EpubPackage {
-    fn parse_nav_toc(nav_xml: &str) -> Option<Vec<TocEntry>> {
+    fn parse_nav_toc(nav_xml: &str) -> Option<Vec<BookTocEntry>> {
         let html = scraper::Html::parse_document(nav_xml);
-        let nav = scraper::Selector::parse("nav").unwrap();
-        let toc = html.select(&nav).find(|element| element.value().attr("epub:type").or_else(|| element.value().attr("type")).is_some_and(|kind| kind.split_whitespace().any(|kind| kind == "toc")))?;
+        let toc = html
+            .root_element()
+            .descendants()
+            .filter_map(scraper::ElementRef::wrap)
+            .filter(|element| element.value().name() == "nav")
+            .find(|element| element.value().attr("epub:type").or_else(|| element.value().attr("type")).is_some_and(|kind| kind.split_whitespace().any(|kind| kind == "toc")))?;
         let entries = crate::toc::html_entries(toc, |element| element.value().attr("href").map(str::to_owned));
         (!entries.is_empty()).then_some(entries)
     }
 
-    fn parse_ncx_toc(ncx_xml: &str) -> Option<Vec<TocEntry>> {
+    fn parse_ncx_toc(ncx_xml: &str) -> Option<Vec<BookTocEntry>> {
         let mut reader = quick_xml::Reader::from_str(ncx_xml);
-        reader.trim_text(true);
         let mut buf = Vec::new();
-        let mut stack: Vec<TocEntry> = Vec::new();
-        let mut root: Vec<TocEntry> = Vec::new();
+        let mut stack: Vec<BookTocEntry> = Vec::new();
+        let mut root: Vec<BookTocEntry> = Vec::new();
         let mut in_text = false;
         let mut text_buf = String::new();
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(quick_xml::events::Event::Start(e)) => {
+                Ok(Event::Start(e)) => {
                     if e.name().as_ref().ends_with(b"navPoint") {
-                        stack.push(TocEntry::default());
+                        stack.push(BookTocEntry::default());
                     } else if e.name().as_ref().ends_with(b"text") {
                         in_text = true;
                         text_buf.clear();
@@ -931,24 +967,27 @@ impl EpubPackage {
                             if attr.key.as_ref().ends_with(b"src")
                                 && let Some(entry) = stack.last_mut()
                             {
-                                entry.link = String::from_utf8_lossy(&attr.value).into_owned();
+                                entry.target = String::from_utf8_lossy(&attr.value).into_owned();
                             }
                         }
                     }
                 }
-                Ok(quick_xml::events::Event::Empty(e)) if e.name().as_ref().ends_with(b"content") => {
+                Ok(Event::Empty(e)) if e.name().as_ref().ends_with(b"content") => {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref().ends_with(b"src")
                             && let Some(entry) = stack.last_mut()
                         {
-                            entry.link = String::from_utf8_lossy(&attr.value).into_owned();
+                            entry.target = String::from_utf8_lossy(&attr.value).into_owned();
                         }
                     }
                 }
-                Ok(quick_xml::events::Event::Text(e)) if in_text => {
-                    text_buf.push_str(&e.unescape().unwrap_or_default());
+                Ok(Event::Text(e)) if in_text => {
+                    text_buf.push_str(&e.decode().unwrap_or_default());
                 }
-                Ok(quick_xml::events::Event::End(e)) => {
+                Ok(Event::GeneralRef(e)) if in_text => {
+                    text_buf.push_str(&crate::xml::reference_text(&e).unwrap_or_default());
+                }
+                Ok(Event::End(e)) => {
                     if e.name().as_ref().ends_with(b"text") && in_text {
                         in_text = false;
                         if let Some(entry) = stack.last_mut() {
@@ -964,7 +1003,7 @@ impl EpubPackage {
                         }
                     }
                 }
-                Ok(quick_xml::events::Event::Eof) => break,
+                Ok(Event::Eof) => break,
                 Err(_) => break,
                 _ => {}
             }
@@ -975,9 +1014,9 @@ impl EpubPackage {
     }
 }
 
-fn resolve_toc_links(base_path: &str, entries: &mut [TocEntry]) {
+fn resolve_toc_links(base_path: &str, entries: &mut [BookTocEntry]) {
     for entry in entries {
-        entry.link = root_href(resolve_toc_href(base_path, entry.link.as_str()));
+        entry.target = root_href(resolve_toc_href(base_path, entry.target.as_str()));
         resolve_toc_links(base_path, &mut entry.children);
     }
 }

@@ -3,13 +3,19 @@
 use crate::SqlParam;
 use crate::native::observations::forget_file;
 use crate::projection::{place_book, project_dirty};
-use crate::query_methods::query_rows;
+#[cfg(feature = "scanner")]
+use crate::query_methods::optional_blob_column;
+use crate::query_methods::{first_column, optional_text_column, query_last, query_rows, text_column, try_for_each_row};
 pub(crate) use crate::shared_sql::SharedSql;
 use crate::sync::apply::registers::record_local;
+#[cfg(feature = "scanner")]
+use crate::sync::parse_uuid_column;
 use crate::transactions::WriteOutcome::{Commit, Rollback};
-use rusqlite::Transaction;
+use pdf_view_common::PdfReaderMetadata;
+use rusqlite::{Connection, Row, Transaction};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 // ---- placements ----
 // Directory and physical book-placement persistence: moves, copies, and the
 // Trash lifecycle (trash/restore/purge) for both books and folders.
@@ -22,14 +28,23 @@ pub(crate) use library_model::{Dir, LibraryFolderDestination, LibraryTrashView, 
 pub(crate) use library_replica::{DirectoryLifecycleState, LibraryStateEntry};
 pub(crate) use rusqlite::OptionalExtension;
 pub(crate) use std::collections::HashSet;
-pub(crate) use sync_common::{ContentHash, DirId, FileName};
+pub(crate) use sync_common::{BookId, DirId, FileName};
+
+/// A physical import folder awaiting registration, with parents before children.
+#[derive(Clone, Debug)]
+pub struct CreatedDirectory {
+    pub id: DirId,
+    pub parent_id: DirId,
+    pub name: String,
+    pub relative_path: String,
+}
 
 pub(crate) fn unix_millis() -> Result<i64, DatabaseError> {
     web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).map_err(DatabaseError::operation)
 }
 
-pub(crate) fn parse_dir_id(raw: String) -> Result<DirId, DatabaseError> {
-    DirId::parse_str(&raw).map_err(DatabaseError::operation)
+pub(crate) fn parse_dir_id(raw: &str) -> Result<DirId, DatabaseError> {
+    DirId::parse_str(raw).map_err(DatabaseError::operation)
 }
 
 /// Read command preconditions from canonical registers, never placeholder defaults.
@@ -44,7 +59,7 @@ pub(crate) fn canonical_directory(connection: &rusqlite::Connection, id: &DirId)
     let mut state = CanonicalDirectory::default();
 
     for row in query_rows(|callback| connection.directory_read_sync_state_version_body(&(id.to_string()), callback), |row| row.get::<_, Vec<u8>>(0))? {
-        match sync_common::wire::decode::<LibraryStateEntry>(&row?, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
+        match sync_common::wire::decode::<LibraryStateEntry>(&row, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
             LibraryStateEntry::DirectoryName { name, .. } => state.name = Some(name),
             LibraryStateEntry::DirectoryParent { parent_id, .. } => state.parent = Some(parent_id),
             LibraryStateEntry::DirectoryLifecycle { value, .. } => state.lifecycle = Some(value),
@@ -54,25 +69,20 @@ pub(crate) fn canonical_directory(connection: &rusqlite::Connection, id: &DirId)
     Ok(state)
 }
 
-pub(crate) fn book_is_trashed(connection: &rusqlite::Connection, content_hash: &ContentHash) -> Result<bool, DatabaseError> {
-    let mut trashed = false;
-    connection.placements_book_is_trashed(content_hash, |row| {
-        trashed = row.get(0)?;
-        Ok(())
-    })?;
-    Ok(trashed)
+pub(crate) fn book_is_trashed(connection: &rusqlite::Connection, book_id: &BookId) -> Result<bool, DatabaseError> {
+    Ok(connection.placements_book_is_trashed(book_id, |row| row.get(0))?)
 }
 
-pub(crate) fn restore_placement_candidates(connection: &rusqlite::Connection, content_hash: &ContentHash) -> Result<Vec<(String, String)>, DatabaseError> {
+pub(crate) fn restore_placement_candidates(connection: &rusqlite::Connection, book_id: &BookId) -> Result<Vec<(String, String)>, DatabaseError> {
     let mut placements = Vec::new();
-    connection.restore_book_record_with_parent_select_2(content_hash, |row| {
+    connection.restore_book_record_with_parent_select_2(book_id, |row| {
         placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
         Ok(())
     })?;
     if placements.is_empty() {
         // A restore with no remaining membership explicitly creates a root
         // placement. Planning is read-only; commit revalidates these candidates.
-        connection.restore_book_fallback_name(content_hash, |row| {
+        connection.restore_book_fallback_name(book_id, |row| {
             placements.push((sync_common::ROOT_DIR_ID.to_string(), row.get::<_, String>(0)?));
             Ok(())
         })?;
@@ -108,25 +118,23 @@ pub(crate) fn dir_path_components(connection: &rusqlite::Connection, dir_id: &st
     // Reuse an existing transaction, or hold a read snapshot for the whole walk.
     let snapshot = connection.is_autocommit().then(|| connection.unchecked_transaction()).transpose()?;
 
+    let root = sync_common::ROOT_DIR_ID.to_string();
     let mut current = dir_id.to_owned();
     let mut seen = HashSet::new();
     let mut components = Vec::new();
-    let root = sync_common::ROOT_DIR_ID.to_string();
     loop {
-        // A loop never reaches the root, which is the same as not being live.
         if !seen.insert(current.clone()) {
             components.clear();
             break;
         }
-        let row = connection.directory_live_parent_and_name(&(&current), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()?;
-        let Some((parent, name)) = row else {
+        let Some((parent, name)) = connection.directory_live_parent_and_name(&(&current), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()? else {
             components.clear();
             break;
         };
         if current == root {
             break;
         }
-        components.push(DirPathComponent { id: parse_dir_id(current)?, name });
+        components.push(DirPathComponent { id: parse_dir_id(&current)?, name });
         current = parent;
     }
     components.reverse();
@@ -136,30 +144,128 @@ pub(crate) fn dir_path_components(connection: &rusqlite::Connection, dir_id: &st
     Ok(components)
 }
 
-/// Folder and placement paths for many rows in one operation. Rows share few
-/// folders, so each folder's ancestry is walked once and remembered.
+/// Folder and placement paths resolved together for one operation.
 pub(crate) struct FolderPaths<'c> {
-    pub(crate) connection: &'c rusqlite::Connection,
-    pub(crate) folders: HashMap<String, Option<String>>,
+    pub(crate) connection: &'c Connection,
+    pub(crate) folders: HashMap<DirId, Option<String>>,
+    complete: bool,
 }
 
 impl<'c> FolderPaths<'c> {
-    pub(crate) fn new(connection: &'c rusqlite::Connection) -> Self {
-        Self { connection, folders: HashMap::new() }
+    pub(crate) fn new(connection: &'c Connection) -> Self {
+        Self { connection, folders: HashMap::new(), complete: false }
     }
 
-    /// "" for the root, "a/b" below it, or None when the folder is not live.
-    pub(crate) fn folder(&mut self, dir_id: &str) -> Result<Option<String>, DatabaseError> {
-        if !self.folders.contains_key(dir_id) {
-            let folder = directory_relative_path(self.connection, &parse_dir_id(dir_id.to_owned())?)?;
-            self.folders.insert(dir_id.to_owned(), folder);
+    /// Resolve selected folders together; keep a single folder iterative.
+    pub(crate) fn for_directories<'d>(connection: &'c Connection, directories: impl IntoIterator<Item = &'d str>) -> Result<Self, DatabaseError> {
+        let distinct = directories.into_iter().collect::<HashSet<_>>();
+        let ids = distinct.into_iter().map(parse_dir_id).collect::<Result<HashSet<_>, _>>()?;
+        if ids.len() <= 1 {
+            return Ok(Self::new(connection));
         }
-        Ok(self.folders[dir_id].clone())
+        let json = serde_json::to_string(&ids).map_err(DatabaseError::operation)?;
+        Self::batch(connection, &json, "[]")
     }
 
-    /// "/a/b/book.epub", or None when the folder is not live.
-    pub(crate) fn placement(&mut self, dir_id: &str, file_name: &str) -> Result<Option<RelativeBookPath>, DatabaseError> {
-        self.folder(dir_id)?.map(|folder| stored_book_path(&format!("{folder}/{file_name}"))).transpose()
+    /// Resolve the placement folders for a bounded page without buffering placements.
+    pub(crate) fn for_books(connection: &'c Connection, books: &str) -> Result<Self, DatabaseError> {
+        Self::batch(connection, "[]", books)
+    }
+
+    fn read_nodes(query: impl FnOnce(&mut dyn FnMut(&Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>) -> Result<HashMap<DirId, Option<(DirId, String)>>, DatabaseError> {
+        let mut nodes = HashMap::new();
+        try_for_each_row(query, |row| {
+            let id = parse_dir_id(text_column(row, 0)?)?;
+            let node = match optional_text_column(row, 1)? {
+                Some(parent) => Some((parse_dir_id(parent)?, row.get::<_, String>(2)?)),
+                None => None,
+            };
+            nodes.insert(id, node);
+            Ok(())
+        })?;
+        Ok(nodes)
+    }
+
+    fn batch(connection: &'c Connection, directories: &str, books: &str) -> Result<Self, DatabaseError> {
+        let root = sync_common::ROOT_DIR_ID;
+        let root_text = root.to_string();
+        let snapshot = connection.is_autocommit().then(|| connection.unchecked_transaction()).transpose()?;
+        // Read the selected folders and their parents together. Only ancestors
+        // missing from this batch need a recursive walk.
+        let mut nodes = Self::read_nodes(|read| connection.directory_path_seeds(directories, books, &root_text, read))?;
+        let missing = nodes.values().filter_map(|node| node.as_ref().map(|(parent, _)| *parent)).filter(|parent| !nodes.contains_key(parent)).collect::<HashSet<_>>();
+        if !missing.is_empty() {
+            let json = serde_json::to_string(&missing).map_err(DatabaseError::operation)?;
+            nodes.extend(Self::read_nodes(|read| connection.directory_path_ancestors(&json, &root_text, read))?);
+        }
+        if let Some(snapshot) = snapshot {
+            snapshot.commit()?;
+        }
+        let mut folders = HashMap::new();
+        folders.insert(root, nodes.remove(&root).flatten().map(|_| String::new()));
+        let starts = nodes.keys().copied().collect::<Vec<_>>();
+        for id in starts {
+            if folders.contains_key(&id) {
+                continue;
+            }
+            let mut current = id;
+            let mut chain = Vec::new();
+            let mut path = loop {
+                if let Some(path) = folders.get(&current) {
+                    break path.clone();
+                }
+                // Consuming the node also terminates cycles without another set.
+                let Some((parent, name)) = nodes.remove(&current).flatten() else {
+                    folders.insert(current, None);
+                    break None;
+                };
+                chain.push((current, name));
+                current = parent;
+            };
+            let mut at_root = current == root;
+            for (id, name) in chain.into_iter().rev() {
+                path = path.map(|mut path| {
+                    if !at_root {
+                        path.push('/');
+                    }
+                    path.push_str(&name);
+                    path
+                });
+                at_root = false;
+                folders.insert(id, path.clone());
+            }
+        }
+        // Direct root lookups remain valid before its row has been created.
+        folders.insert(root, Some(String::new()));
+        Ok(Self { connection, folders, complete: false })
+    }
+
+    /// Resolve the complete live tree in one recursive query for inventories.
+    pub(crate) fn all(connection: &'c Connection) -> Result<Self, DatabaseError> {
+        let root = sync_common::ROOT_DIR_ID;
+        let mut folders = HashMap::new();
+        try_for_each_row(
+            |read| connection.directory_all_live_paths(&root.to_string(), read),
+            |row| {
+                folders.insert(parse_dir_id(text_column(row, 0)?)?, Some(row.get::<_, String>(1)?));
+                Ok(())
+            },
+        )?;
+        folders.insert(root, Some(String::new()));
+        Ok(Self { connection, folders, complete: true })
+    }
+
+    pub(crate) fn folder(&mut self, id: &str) -> Result<Option<&str>, DatabaseError> {
+        let id = parse_dir_id(id)?;
+        if !self.folders.contains_key(&id) {
+            let path = if self.complete { None } else { directory_relative_path(self.connection, &id)? };
+            self.folders.insert(id, path);
+        }
+        Ok(self.folders[&id].as_deref())
+    }
+
+    pub(crate) fn placement(&mut self, id: &str, name: &str) -> Result<Option<RelativeBookPath>, DatabaseError> {
+        self.folder(id)?.map(|folder| stored_placement_path(folder, name)).transpose()
     }
 }
 
@@ -168,18 +274,39 @@ pub(crate) fn stored_book_path(value: &str) -> Result<RelativeBookPath, Database
     RelativeBookPath::parse(value).map_err(|error| DatabaseError::message(format!("stored book path {value:?} is not readable: {error}")))
 }
 
+pub(crate) fn validate_stored_book_path(value: &str) -> Result<(), DatabaseError> {
+    RelativeBookPath::validate(value).map_err(|error| DatabaseError::message(format!("stored book path {value:?} is not readable: {error}")))
+}
+
+pub(crate) fn validate_stored_placement(folder: &str, file_name: &str) -> Result<(), DatabaseError> {
+    RelativeBookPath::validate_in_folder(folder, file_name).map_err(|error| {
+        let path = format!("{folder}/{file_name}");
+        DatabaseError::message(format!("stored book path {path:?} is not readable: {error}"))
+    })
+}
+
+/// An empty folder denotes the library root.
+pub(crate) fn stored_placement_path(folder: &str, file_name: &str) -> Result<RelativeBookPath, DatabaseError> {
+    stored_book_path(&format!("{folder}/{file_name}"))
+}
+
+pub(crate) fn stored_book_path_column(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<RelativeBookPath> {
+    stored_book_path(&row.get::<_, String>(column)?).map_err(|error| crate::sync::invalid_text_column(column, error.to_string()))
+}
+
 /// Folders reached from `roots` one level per query, roots included.
 /// Child queries take a JSON list of parents and return their children.
 /// Each folder is visited once, so an ancestry loop cannot walk forever.
-pub(crate) fn walk_down(connection: &rusqlite::Connection, roots: Vec<String>, _trashed_only: bool) -> Result<Vec<String>, DatabaseError> {
+pub(crate) fn walk_down(connection: &rusqlite::Connection, roots: Vec<String>, trashed_only: bool) -> Result<Vec<String>, DatabaseError> {
     let mut seen: HashSet<String> = HashSet::new();
-    let mut level: Vec<String> = roots.into_iter().filter(|root| seen.insert(root.clone())).collect();
-    let mut folders = level.clone();
-    while !level.is_empty() {
-        let parents = serde_json::to_string(&level).map_err(DatabaseError::operation)?;
-        let children = query_rows(|callback| connection.directory_read_dir_parent_id_name_2(&parents, callback), |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        level = children.into_iter().filter(|child| seen.insert(child.clone())).collect();
-        folders.extend(level.iter().cloned());
+    let mut folders: Vec<String> = roots.into_iter().filter(|root| seen.insert(root.clone())).collect();
+    let mut level_start = 0;
+    while level_start < folders.len() {
+        let level_end = folders.len();
+        let parents = serde_json::to_string(&folders[level_start..level_end]).map_err(DatabaseError::operation)?;
+        let children = query_rows(|callback| if trashed_only { connection.directory_trashed_children(&parents, callback) } else { connection.directory_children(&parents, callback) }, |row| row.get::<_, String>(0))?;
+        folders.extend(children.into_iter().filter(|child| seen.insert(child.clone())));
+        level_start = level_end;
     }
     Ok(folders)
 }
@@ -187,7 +314,7 @@ pub(crate) fn walk_down(connection: &rusqlite::Connection, roots: Vec<String>, _
 /// Folders with queued physical work, and every folder below them: a book in
 /// any of them may be about to move on disk.
 pub(crate) fn pending_work_directories(connection: &rusqlite::Connection) -> Result<Vec<String>, DatabaseError> {
-    let roots = query_rows(|callback| connection.directory_work_roots(callback), |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let roots = query_rows(|callback| connection.directory_work_roots(callback), |row| row.get::<_, String>(0))?;
     walk_down(connection, roots, false)
 }
 
@@ -195,24 +322,15 @@ pub(crate) fn pending_work_directories(connection: &rusqlite::Connection) -> Res
 /// parent so folders hidden from the display tree still come along.
 pub(crate) fn trashed_subtree(connection: &rusqlite::Connection, roots: Vec<String>) -> Result<Vec<String>, DatabaseError> {
     let roots = serde_json::to_string(&roots).map_err(DatabaseError::operation)?;
-    let roots = query_rows(|callback| connection.directory_trashed_roots(&roots, callback), |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let roots = query_rows(|callback| connection.directory_trashed_roots(&roots, callback), |row| row.get::<_, String>(0))?;
     walk_down(connection, roots, true)
 }
 
 /// Materialized paths first, then the book's live placements.
-pub(crate) fn book_paths_in(connection: &rusqlite::Connection, hash: &ContentHash) -> Result<Vec<RelativeBookPath>, DatabaseError> {
-    let mut projected = Vec::new();
-    connection.book_projection_paths(hash, |row| {
-        projected.push(row.get::<_, String>(0)?);
-        Ok(())
-    })?;
-    let mut paths = projected.iter().map(|path| stored_book_path(path)).collect::<Result<Vec<_>, _>>()?;
-    let mut placements = Vec::new();
-    connection.shared_live_book_placements(hash, |row| {
-        placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
-        Ok(())
-    })?;
-    let mut resolver = FolderPaths::new(connection);
+pub(crate) fn book_paths_in(connection: &rusqlite::Connection, hash: &BookId) -> Result<Vec<RelativeBookPath>, DatabaseError> {
+    let mut paths = query_rows(|read| connection.book_projection_paths(hash, read), |row| stored_book_path_column(row, 0))?;
+    let placements = query_rows(|read| connection.shared_live_book_placements(hash, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut resolver = FolderPaths::for_directories(connection, placements.iter().map(|(id, _)| id.as_str()))?;
     for (dir_id, file_name) in placements {
         paths.extend(resolver.placement(&dir_id, &file_name)?);
     }
@@ -222,6 +340,15 @@ pub(crate) fn book_paths_in(connection: &rusqlite::Connection, hash: &ContentHas
 /// A placement path's live folder and file name, walking folder names down
 /// from the root. None when a folder on the way is missing or deleted.
 pub(crate) fn resolve_placement_path(connection: &rusqlite::Connection, relative_path: &str) -> Result<Option<(String, String)>, DatabaseError> {
+    let snapshot = connection.is_autocommit().then(|| connection.unchecked_transaction()).transpose()?;
+    let result = resolve_placement_path_in(connection, relative_path)?;
+    if let Some(snapshot) = snapshot {
+        snapshot.commit()?;
+    }
+    Ok(result)
+}
+
+fn resolve_placement_path_in(connection: &rusqlite::Connection, relative_path: &str) -> Result<Option<(String, String)>, DatabaseError> {
     let root = sync_common::ROOT_DIR_ID.to_string();
 
     if connection.directory_live_parent_and_name(&(&root), |_| Ok(())).optional()?.is_none() {
@@ -243,17 +370,22 @@ pub(crate) fn resolve_placement_path(connection: &rusqlite::Connection, relative
 
 /// The live book at a placement path, with the folder and file name the path
 /// resolved to.
-pub(crate) fn book_at_path(connection: &rusqlite::Connection, relative_path: &str) -> Result<Option<(ContentHash, DirId, String)>, DatabaseError> {
+pub(crate) fn book_at_path(connection: &rusqlite::Connection, relative_path: &str) -> Result<Option<(BookId, DirId, String)>, DatabaseError> {
+    // Include the final book lookup in the same snapshot as its folder walk.
+    let snapshot = connection.is_autocommit().then(|| connection.unchecked_transaction()).transpose()?;
+    let result = book_at_path_in(connection, relative_path)?;
+    if let Some(snapshot) = snapshot {
+        snapshot.commit()?;
+    }
+    Ok(result)
+}
+
+fn book_at_path_in(connection: &rusqlite::Connection, relative_path: &str) -> Result<Option<(BookId, DirId, String)>, DatabaseError> {
     let Some((dir_id, file_name)) = resolve_placement_path(connection, relative_path)? else {
         return Ok(None);
     };
-    let mut hash = None;
-    connection.book_at_placement(&dir_id, &file_name, |row| {
-        hash = Some(row.get::<_, ContentHash>(0)?);
-        Ok(())
-    })?;
-    let Some(hash) = hash else { return Ok(None) };
-    Ok(Some((hash, parse_dir_id(dir_id)?, file_name)))
+    let Some(hash) = first_column::<BookId>(|read| connection.book_at_placement(&dir_id, &file_name, read))? else { return Ok(None) };
+    Ok(Some((hash, parse_dir_id(&dir_id)?, file_name)))
 }
 
 /// Whether `directory` is `folder` or one of its ancestors, following current
@@ -276,12 +408,7 @@ pub(crate) fn is_ancestor_or_self(connection: &rusqlite::Connection, directory: 
 }
 
 pub(crate) fn directory_exists_in(connection: &rusqlite::Connection, directory_id: &str) -> Result<bool, DatabaseError> {
-    let mut exists = false;
-    connection.placements_live_directory_exists(directory_id, |row| {
-        exists = row.get(0)?;
-        Ok(())
-    })?;
-    Ok(exists)
+    Ok(connection.placements_live_directory_exists(directory_id, |row| row.get(0))?)
 }
 
 pub(crate) fn validate_library_directory_name(name: &str) -> Result<(), DatabaseError> {
@@ -294,41 +421,22 @@ pub(crate) fn validate_library_directory_name(name: &str) -> Result<(), Database
 /// Live database names reserved in a destination. Physical collisions are
 /// checked separately by the file store.
 pub(crate) fn occupied_file_names_in(connection: &rusqlite::Connection, destination: &str) -> Result<Vec<String>, DatabaseError> {
-    let mut names = Vec::new();
-    connection.shared_occupied_file_names(destination, |row| {
-        names.push(row.get::<_, String>(0)?);
-        Ok(())
-    })?;
-    Ok(names)
+    Ok(query_rows(|read| connection.shared_occupied_file_names(destination, read), |row| row.get::<_, String>(0))?)
 }
 
 /// The filename of a live placement, or `None` when it is absent.
-pub(crate) fn live_file_name(connection: &rusqlite::Connection, directory: &DirId, hash: &ContentHash) -> Result<Option<String>, DatabaseError> {
-    let mut name = None;
-    connection.placements_live_file_name(&directory.to_string(), hash, |row| {
-        name = Some(row.get(0)?);
-        Ok(())
-    })?;
-    Ok(name)
+pub(crate) fn live_file_name(connection: &rusqlite::Connection, directory: &DirId, hash: &BookId) -> Result<Option<String>, DatabaseError> {
+    Ok(first_column::<String>(|read| connection.placements_live_file_name(&directory.to_string(), hash, read))?)
 }
 
 pub(crate) fn choose_move_folder_name(connection: &rusqlite::Connection, parent: &str, excluded: &str, requested: &str) -> Result<String, DatabaseError> {
     for number in 1..=8 {
         let candidate = if number == 1 { library_replica::project_folder_name(requested) } else { library_replica::numbered_folder_name(requested, number) };
-        let mut occupied = false;
-        connection.placements_folder_name_occupied(parent, &library_replica::portable_name_key(&candidate), excluded, |row| {
-            occupied = row.get(0)?;
-            Ok(())
-        })?;
-        if !occupied {
+        if !connection.placements_folder_name_occupied(parent, &library_replica::portable_name_key(&candidate), excluded, |row| row.get::<_, bool>(0))? {
             return Ok(candidate);
         }
     }
-    let mut names = Vec::new();
-    connection.placements_sibling_folder_names(parent, excluded, |row| {
-        names.push(row.get::<_, String>(0)?);
-        Ok(())
-    })?;
+    let names = query_rows(|read| connection.placements_sibling_folder_names(parent, excluded, read), |row| row.get::<_, String>(0))?;
     Ok(library_replica::unique_folder_name(requested, names.iter().map(String::as_str)))
 }
 
@@ -376,24 +484,62 @@ pub(crate) fn queue_directory_work(transaction: &rusqlite::Transaction<'_>, dir:
 
 /// Publishes a book's queued local file operation. A no-op on wasm, which has
 /// no separate physical file store to reconcile.
-pub(crate) fn queue_file_work(transaction: &rusqlite::Transaction<'_>, operation: &str, hash: &ContentHash, path: &RelativeBookPath) -> Result<(), DatabaseError> {
+pub(crate) fn queue_materialization(transaction: &rusqlite::Connection, hash: &BookId, directory: &DirId) -> Result<(), DatabaseError> {
     #[cfg(target_arch = "wasm32")]
-    let _ = (transaction, operation, hash, path);
+    let _ = (transaction, hash, directory);
     #[cfg(not(target_arch = "wasm32"))]
-    transaction.shared_placements_queue_file_work(operation, hash, path.as_str())?;
+    transaction.shared_queue_materialization(hash, &directory.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn queue_file_removal(transaction: &rusqlite::Connection, hash: &BookId, path: &RelativeBookPath) -> Result<(), DatabaseError> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = (transaction, hash, path);
+    #[cfg(not(target_arch = "wasm32"))]
+    transaction.shared_placements_queue_file_work(hash, path.as_str())?;
     Ok(())
 }
 
 /// The library-relative path of `name` in `dir`: "/book.epub" at the root,
 /// "/a/b/book.epub" below it. Fails when the folder is not live.
 pub(crate) fn placement_path(connection: &rusqlite::Connection, dir: &DirId, name: &str) -> Result<RelativeBookPath, DatabaseError> {
-    FolderPaths::new(connection).placement(&dir.to_string(), name)?.ok_or_else(|| DatabaseError::message("placement directory has no path"))
+    let folder = directory_relative_path(connection, dir)?.ok_or_else(|| DatabaseError::message("placement directory has no path"))?;
+    stored_placement_path(&folder, name)
 }
 
 /// Preserves upload provenance across a metadata-only copy/move. No upload work.
-pub(crate) fn copy_book_baseline(transaction: &rusqlite::Transaction<'_>, source: &DirId, destination: &DirId, hash: &ContentHash) -> Result<(), DatabaseError> {
+pub(crate) fn copy_book_baseline(transaction: &rusqlite::Transaction<'_>, source: &DirId, destination: &DirId, hash: &BookId) -> Result<(), DatabaseError> {
     transaction.placements_copy_book_baseline(&source.to_string(), &destination.to_string(), hash)?;
     Ok(())
+}
+
+pub(crate) fn can_recover_import_directory(connection: &rusqlite::Connection, id: DirId) -> Result<bool, DatabaseError> {
+    let exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM dir WHERE id=?1)", [id.to_string()], |row| row.get(0))?;
+    if exists {
+        return Ok(false);
+    }
+    let state = canonical_directory(connection, &id)?;
+    Ok(state.name.is_none() && state.parent.is_none() && state.lifecycle.is_none())
+}
+
+pub(crate) fn register_created_directories(transaction: &Transaction<'_>, directories: &[CreatedDirectory]) -> Result<Vec<Dir>, DatabaseError> {
+    use crate::native::NativeFileWorkSql;
+    let mut result = Vec::new();
+    for CreatedDirectory { id, parent_id, name, relative_path: path } in directories {
+        if !directory_exists_in(transaction, &parent_id.to_string())? {
+            return Err(DatabaseError::message("parent directory does not exist"));
+        }
+        let parent = directory_relative_path(transaction, parent_id)?.ok_or_else(|| DatabaseError::message("parent directory has no path"))?;
+        let expected = if parent.is_empty() { name.to_owned() } else { format!("{parent}/{name}") };
+        if path != &expected || choose_move_folder_name(transaction, &parent_id.to_string(), &id.to_string(), name)? != *name {
+            return Err(DatabaseError::message("folder destination changed during creation"));
+        }
+        upsert_dir(transaction, id, parent_id, name)?;
+        transaction.native_set_directory_projection(&id.to_string(), &format!("/{}", path.trim_start_matches('/')))?;
+        transaction.directory_clear_work(&(id.to_string()))?;
+        result.push(Dir::new(*id, name.to_owned(), 0, 0));
+    }
+    Ok(result)
 }
 
 impl Database {
@@ -409,32 +555,21 @@ impl Database {
     /// Whether a placement still addresses these bytes through live
     /// directories. A move, rename, or deletion that landed mid-transfer
     /// makes the finished bytes belong to a stale path.
-    pub fn book_placement_expects_hash(&self, placement: &BookPlacement, content_hash: &ContentHash) -> Result<bool, DatabaseError> {
+    pub fn book_placement_expects_hash(&self, placement: &BookPlacement, book_id: &BookId) -> Result<bool, DatabaseError> {
         let Some((stored_hash, dir_id, file_name)) = book_at_path(&self.connection, placement.rel_path.as_str())? else {
             return Ok(false);
         };
-        if stored_hash != placement.content_hash || stored_hash != *content_hash {
+        if stored_hash != placement.book_id || stored_hash != *book_id {
             return Ok(false);
         }
-        let mut exists = false;
-        self.connection
-            .placement_expects_hash(&dir_id.to_string(), content_hash, &file_name, |row| {
-                exists = row.get(0)?;
-                Ok(())
-            })
-            .map_err(DatabaseError::operation)?;
-        Ok(exists)
+        self.connection.placement_expects_hash(&dir_id.to_string(), book_id, &file_name, |row| row.get(0)).map_err(DatabaseError::operation)
     }
 
     /// The live folder in `parent_id` that a folder named `name` would
     /// collide with, if any.
     pub fn child_directory(&self, parent_id: &DirId, name: &str) -> Result<Option<DirId>, DatabaseError> {
-        let mut child = None;
-        self.connection.placements_child_directory(&parent_id.to_string(), name, |row| {
-            child = Some(row.get::<_, String>(0)?);
-            Ok(())
-        })?;
-        child.map(parse_dir_id).transpose()
+        let child = first_column::<String>(|read| self.connection.placements_child_directory(&parent_id.to_string(), name, read))?;
+        child.as_deref().map(parse_dir_id).transpose()
     }
 
     /// Whether the folder already holds a live book under this file name,
@@ -496,94 +631,43 @@ impl Database {
     /// Register a folder already created on disk, including its projection.
     /// A crash before this commit is recovered by filesystem discovery.
     pub fn register_created_directory(&self, id: &DirId, parent_id: &DirId, name: &str, path: &str) -> Result<Dir, DatabaseError> {
-        use crate::native::NativeFileWorkSql;
-        self.write(|transaction| {
-            if !directory_exists_in(transaction, &parent_id.to_string())? {
-                return Err(DatabaseError::message("parent directory does not exist"));
-            }
-            let parent = directory_relative_path(transaction, parent_id)?.ok_or_else(|| DatabaseError::message("parent directory has no path"))?;
-            let expected = if parent.is_empty() { name.to_owned() } else { format!("{parent}/{name}") };
-            if path != expected || choose_move_folder_name(transaction, &parent_id.to_string(), &id.to_string(), name)? != name {
-                return Err(DatabaseError::message("folder destination changed during creation"));
-            }
-            upsert_dir(transaction, id, parent_id, name)?;
-            transaction.native_set_directory_projection(&id.to_string(), path)?;
-            // The caller has already materialized this exact projected directory.
-            transaction.directory_clear_work(&(id.to_string()))?;
-            Ok(Dir::new(*id, name.to_owned(), 0, 0))
-        })
+        self.register_created_directories(&[CreatedDirectory { id: *id, parent_id: *parent_id, name: name.to_owned(), relative_path: path.to_owned() }])?.pop().ok_or_else(|| DatabaseError::message("created directory was not registered"))
+    }
+
+    /// Register an already-durable tree, parents before children, in one commit.
+    pub fn register_created_directories(&self, directories: &[CreatedDirectory]) -> Result<Vec<Dir>, DatabaseError> {
+        if directories.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.write(|transaction| register_created_directories(transaction, directories))
+    }
+
+    /// Unregistered filesystem markers can recover an interrupted Copy batch.
+    /// Never adopt an identity already known here, including hidden or purged folders.
+    pub fn can_recover_import_directory(&self, id: DirId) -> Result<bool, DatabaseError> {
+        can_recover_import_directory(&self.connection, id)
     }
 
     pub fn folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, DatabaseError> {
-        // Children by parent; the tree is walked from the root, so folders under
-        // a deleted one are left out along with it.
-        let mut children: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        self.connection.placements_live_folders(|row| {
-            children.entry(row.get(1)?).or_default().push((row.get(0)?, row.get(2)?));
-            Ok(())
-        })?;
         let root = sync_common::ROOT_DIR_ID;
+        let root_id = root.to_string();
         let mut destinations = vec![LibraryFolderDestination { id: root, parent_id: None, label: "Library".to_owned(), path: "Library".to_owned() }];
-        let mut pending = vec![(root.to_string(), String::new())];
-        let mut seen = HashSet::from([root.to_string()]);
-        while let Some((parent, parent_path)) = pending.pop() {
-            for (id, name) in children.remove(&parent).unwrap_or_default() {
-                if !seen.insert(id.clone()) {
-                    continue;
+        try_for_each_row(
+            |read| self.connection.directory_folder_destinations(&root_id, read),
+            |row| {
+                let id = text_column(row, 0)?;
+                if id != root_id {
+                    destinations.push(LibraryFolderDestination { id: parse_dir_id(id)?, parent_id: Some(parse_dir_id(text_column(row, 2)?)?), label: row.get(3)?, path: row.get(1)? });
                 }
-                let path = if parent_path.is_empty() { name.clone() } else { format!("{parent_path} / {name}") };
-                destinations.push(LibraryFolderDestination { id: parse_dir_id(id.clone())?, parent_id: Some(parse_dir_id(parent.clone())?), label: name, path: path.clone() });
-                pending.push((id, path));
-            }
-        }
+                Ok(())
+            },
+        )?;
         destinations[1..].sort_by(|left, right| library_replica::portable_name_key(&left.path).cmp(&library_replica::portable_name_key(&right.path)).then_with(|| left.id.cmp(&right.id)));
         Ok(destinations)
     }
 
     pub fn move_directory(&self, directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> Result<String, DatabaseError> {
-        if let Some(name) = requested_name {
-            validate_library_directory_name(name)?;
-        }
-        self.write(|transaction| {
-            if *directory_id == sync_common::ROOT_DIR_ID {
-                return Err(DatabaseError::message("the library root cannot be renamed or moved"));
-            }
-            let mut existing: Option<(String, String)> = None;
-            transaction.live_directory_location(&directory_id.to_string(), |row| {
-                existing = Some((row.get(0)?, row.get(1)?));
-                Ok(())
-            })?;
-            let (current_parent, current_name) = existing.ok_or_else(|| DatabaseError::message("folder does not exist or is in Trash"))?;
-            let current_parent = parse_dir_id(current_parent)?;
-            let parent_id = requested_parent.copied().unwrap_or(current_parent);
-            if !directory_exists_in(transaction, &parent_id.to_string())? {
-                return Err(DatabaseError::message("destination folder does not exist"));
-            }
-            let requested = requested_name.unwrap_or(&current_name);
-            let chosen = choose_move_folder_name(transaction, &parent_id.to_string(), &directory_id.to_string(), requested)?;
-            let (canonical_parent, canonical_name): (String, String) = transaction.directory_canonical_location(&(directory_id.to_string()), |row| Ok((row.get(0)?, row.get(1)?)))?;
-            let parent_changed = requested_parent.is_some() && canonical_parent != parent_id.to_string();
-            let name_changed = (requested_name.is_some() || chosen != current_name) && canonical_name != chosen;
-            if parent_changed || name_changed || parent_id != current_parent || chosen != current_name {
-                let closes_cycle = is_ancestor_or_self(transaction, &directory_id.to_string(), &parent_id.to_string())?;
-                if closes_cycle {
-                    return Err(DatabaseError::message("directory move would create a cycle"));
-                }
-                // A rename must not adopt a repaired parent; a move must not adopt
-                // a numbered display name unless it needs a new name at its destination.
-                if parent_changed {
-                    record_local(transaction, LibraryStateEntry::DirectoryParent { dir_id: *directory_id, parent_id })?;
-                }
-                if name_changed {
-                    record_local(transaction, LibraryStateEntry::DirectoryName { dir_id: *directory_id, name: chosen.clone() })?;
-                }
-                queue_directory_work(transaction, directory_id)?;
-            }
-            project_dirty(transaction)?;
-            // Moving can remove a collision suffix while retaining the name intent.
-            let projected_name = transaction.directory_projected_name(&(directory_id.to_string()), |row| row.get::<_, String>(0))?;
-            Ok(projected_name)
-        })
+        self.write(|transaction| move_directory_in(transaction, directory_id, requested_parent, requested_name))
     }
 
     /// Duplicates a folder and everything under it beneath `destination_parent_id`,
@@ -593,241 +677,117 @@ impl Database {
     /// Books are content-addressed, so a copied book is a second placement of
     /// the same asset rather than a second copy of its bytes.
     pub fn copy_directory(&self, directory_id: &DirId, destination_parent_id: &DirId) -> Result<DirId, DatabaseError> {
-        self.write(|transaction| {
-            if *directory_id == sync_common::ROOT_DIR_ID {
-                return Err(DatabaseError::message("the library root cannot be copied"));
-            }
-            let mut name: Option<String> = None;
-            transaction.copy_directory_record_select(&directory_id.to_string(), |row| {
-                name = row.get(0)?;
-                Ok(())
-            })?;
-            let name = name.ok_or_else(|| DatabaseError::message("folder does not exist or is in Trash"))?;
-            if !directory_exists_in(transaction, &destination_parent_id.to_string())? {
-                return Err(DatabaseError::message("destination folder does not exist"));
-            }
-            // The subtree is read as the copy is written, so a destination inside
-            // it would be copying a folder into itself; the same query that
-            // rejects a cycle-forming move answers this.
-            if is_ancestor_or_self(transaction, &directory_id.to_string(), &destination_parent_id.to_string())? {
-                return Err(DatabaseError::message("a folder cannot be copied into itself"));
-            }
-            let mut occupied = Vec::new();
-            transaction.copy_directory_record_select_2(&destination_parent_id.to_string(), |row| {
-                occupied.push(row.get::<_, String>(0)?);
-                Ok(())
-            })?;
-            let chosen = library_replica::unique_folder_name(&name, occupied.iter().map(String::as_str));
-
-            let copy_id = DirId::new_v4();
-            let mut pending = vec![(*directory_id, copy_id, chosen, *destination_parent_id)];
-            let mut visited = HashSet::new();
-            while let Some((source_id, copy_id, copy_name, copy_parent)) = pending.pop() {
-                if !visited.insert(source_id) {
-                    continue;
-                }
-                upsert_dir(transaction, &copy_id, &copy_parent, &copy_name)?;
-                queue_directory_work(transaction, &copy_id)?;
-                let mut placements = Vec::new();
-                transaction.copy_directory_record_select_3(&source_id.to_string(), |row| {
-                    placements.push((row.get::<_, ContentHash>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?));
-                    Ok(())
-                })?;
-                for (hash, file_name, downloaded) in placements {
-                    // Names are already unique within the source folder and the
-                    // copy is empty, so each placement keeps the name it had.
-                    place_book(transaction, &copy_id, &hash, &file_name)?;
-                    project_dirty(transaction)?;
-                    #[cfg(target_arch = "wasm32")]
-                    if downloaded {
-                        transaction.shared_set_book_hash_downloaded(&hash, 1)?;
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let _ = downloaded;
-                    copy_book_baseline(transaction, &source_id, &copy_id, &hash)?;
-                    #[cfg(not(target_arch = "wasm32"))]
-                    queue_file_work(transaction, "materialize", &hash, &placement_path(transaction, &copy_id, &file_name)?)?;
-                }
-                let mut children = Vec::new();
-                transaction.copy_directory_record_select_4(&source_id.to_string(), |row| {
-                    children.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
-                    Ok(())
-                })?;
-                for (child_id, child_name) in children {
-                    pending.push((parse_dir_id(child_id)?, DirId::new_v4(), child_name, copy_id));
-                }
-            }
-            Ok(copy_id)
-        })
+        self.write(|transaction| copy_directory_in(transaction, directory_id, destination_parent_id, &mut DirId::new_v4))
     }
 
     /// Puts a book back in a folder it was removed from, reviving the book
     /// itself if that removal was what sent it to Trash. The tombstoned
     /// placement is reused where it still exists, so the book returns under
     /// the file name it had rather than a fresh unique one.
-    pub fn restore_book_placement(&self, content_hash: &ContentHash, directory_id: &DirId) -> Result<(), DatabaseError> {
-        self.write(|transaction| {
-            if !directory_exists_in(transaction, &directory_id.to_string())? {
-                return Err(DatabaseError::message("folder does not exist or is in Trash"));
-            }
-            let mut previous: Option<String> = None;
-            transaction.restore_book_placement_record_select(&directory_id.to_string(), content_hash, |row| {
-                previous = row.get(0)?;
-                Ok(())
-            })?;
-            let mut title: Option<String> = None;
-            transaction.restore_book_placement_record_select_2(content_hash, |row| {
-                title = row.get(0)?;
-                Ok(())
-            })?;
-            let adding = previous.is_none();
-            let requested = previous.or(title).ok_or_else(|| DatabaseError::message("book does not exist"))?;
-            let mut occupied = Vec::new();
-            transaction.restore_book_placement_record_select_3(&directory_id.to_string(), content_hash, |row| {
-                occupied.push(row.get::<_, String>(0)?);
-                Ok(())
-            })?;
-            let chosen = library_replica::unique_file_name(&requested, occupied.iter().map(String::as_str));
-            record_book_lifecycle(transaction, content_hash, library_replica::BookLifecycleState::Present)?;
-            project_dirty(transaction)?;
-            place_book(transaction, directory_id, content_hash, &chosen)?;
-            project_dirty(transaction)?;
-            #[cfg(not(target_arch = "wasm32"))]
-            if adding {
-                queue_file_work(transaction, "materialize", content_hash, &placement_path(transaction, directory_id, &chosen)?)?;
-            }
-            if adding {
-                {
-                    let transaction: &rusqlite::Transaction<'_> = transaction;
-                    let hash: &ContentHash = content_hash;
-                    transaction.shared_request_book_download(hash, TransferOrigin::UserInitiated.storage(), unix_millis()?)?;
-                };
-            }
-            Ok(())
-        })
+    pub fn restore_book_placement(&self, book_id: &BookId, directory_id: &DirId) -> Result<(), DatabaseError> {
+        self.write(|transaction| restore_book_placement_in(transaction, book_id, directory_id, false))
     }
 
     /// Copies from an explicit folder, or any live placement for a flat listing.
     /// Returns whether a new destination placement was created, for undo.
-    pub fn copy_book_to_directory(&self, content_hash: &ContentHash, source_id: Option<&DirId>, destination_id: &DirId) -> Result<bool, DatabaseError> {
-        self.write(|transaction| {
-            if !directory_exists_in(transaction, &destination_id.to_string())? {
-                return Err(DatabaseError::message("destination folder does not exist"));
-            }
-            if live_file_name(transaction, destination_id, content_hash)?.is_some() {
-                return Ok(false);
-            }
-            let source_id = match source_id {
-                Some(source) => *source,
-                None => {
-                    let mut source = None;
-                    transaction.placements_copy_source(content_hash, |row| {
-                        source = Some(row.get::<_, String>(0)?);
-                        Ok(())
-                    })?;
-                    parse_dir_id(source.ok_or_else(|| DatabaseError::message("book has no live folder placement"))?)?
-                }
-            };
-            transfer_book_placement_in(transaction, content_hash, &source_id, destination_id, false)?;
-            Ok(true)
+    pub fn copy_book_to_directory(&self, book_id: &BookId, source_id: Option<&DirId>, destination_id: &DirId) -> Result<bool, DatabaseError> {
+        self.write(|transaction| copy_book_to_directory_in(transaction, book_id, source_id, destination_id))
+    }
+
+    /// Atomically move a placement and report whether its destination was new.
+    pub fn move_book_placement(&self, book: &BookId, source: &DirId, destination: &DirId) -> Result<bool, DatabaseError> {
+        self.write(|tx| {
+            let created = live_file_name(tx, destination, book)?.is_none();
+            transfer_book_placement_in(tx, book, source, destination, true)?;
+            Ok(created)
         })
     }
 
-    pub fn transfer_book_placement(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId, remove_source: bool) -> Result<String, DatabaseError> {
-        self.write(|transaction| transfer_book_placement_in(transaction, content_hash, source_id, destination_id, remove_source))
-    }
-
-    pub fn remove_book_placement(&self, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, DatabaseError> {
-        self.write(|transaction| remove_book_placement_in(transaction, content_hash, source_id))
+    pub fn remove_book_placement(&self, book_id: &BookId, source_id: &DirId) -> Result<bool, DatabaseError> {
+        self.write(|transaction| remove_book_placement_in(transaction, book_id, source_id))
     }
 
     pub fn library_trash(&self) -> Result<LibraryTrashView, DatabaseError> {
-        let mut books = Vec::new();
-        self.connection.library_trash_select(|row| {
-            books.push(TrashedBook {
-                content_hash: row.get::<_, ContentHash>(0)?,
-                title: row.get(1)?,
-                author: row.get(2)?,
-                format: row.get::<_, Option<i64>>(3)?.and_then(BookFormat::from_code).map(|format| format.canonical_extension().to_owned()).unwrap_or_default(),
-                deleted_at: row.get(4)?,
-            });
-            Ok(())
-        })?;
-        let mut raw = Vec::new();
-        self.connection.library_trash_select_2(|row| {
-            raw.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?));
-            Ok(())
-        })?;
+        let books = query_rows(
+            |read| self.connection.library_trash_select(read),
+            |row| {
+                Ok(TrashedBook {
+                    book_id: row.get::<_, BookId>(0)?,
+                    title: row.get(1)?,
+                    author: row.get(2)?,
+                    format: row.get::<_, Option<i64>>(3)?.and_then(BookFormat::from_code).map(|format| format.canonical_extension().to_owned()).unwrap_or_default(),
+                    deleted_at: row.get(4)?,
+                })
+            },
+        )?;
+        let raw = query_rows(|read| self.connection.library_trash_select_2(read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?)))?;
         let mut folders = Vec::new();
         for (id, name, deleted_at, parent_name) in raw {
-            folders.push(TrashedFolder { id: parse_dir_id(id)?, name, parent_name, deleted_at });
+            folders.push(TrashedFolder { id: parse_dir_id(&id)?, name, parent_name, deleted_at });
         }
         Ok(LibraryTrashView { books, folders })
     }
 
-    pub fn trash_book(&self, content_hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn trash_book(&self, book_id: &BookId) -> Result<(), DatabaseError> {
         self.write(|transaction| {
-            let live: bool = transaction.directory_live_book_exists(&(&content_hash), |row| row.get(0))?;
+            let live: bool = transaction.directory_live_book_exists(&(&book_id), |row| row.get(0))?;
             if !live {
                 return Err(DatabaseError::message("book does not exist or is already in Trash"));
             }
-            record_book_lifecycle(transaction, content_hash, library_replica::BookLifecycleState::Deleted { origin_folder_id: None })?;
+            record_book_lifecycle(transaction, book_id, library_replica::BookLifecycleState::Deleted { origin_folder_id: None })?;
             Ok(())
         })
     }
 
     /// Restore a trashed book using only the database's directory liveness.
-    pub fn restore_book(&self, content_hash: &ContentHash) -> Result<(), DatabaseError> {
+    pub fn restore_book(&self, book_id: &BookId) -> Result<(), DatabaseError> {
         let choices = self
-            .restore_book_plan(content_hash)?
+            .restore_book_plan(book_id)?
             .into_iter()
             .map(|candidate| {
                 let target = candidate.ancestry.iter().find(|ancestor| ancestor.live).map(|ancestor| ancestor.id).unwrap_or(sync_common::ROOT_DIR_ID);
                 (candidate.original, target)
             })
             .collect::<Vec<_>>();
-        self.restore_book_commit(content_hash, &choices)
+        self.restore_book_commit(book_id, &choices)
     }
 
-    pub(crate) fn restore_book_plan(&self, content_hash: &ContentHash) -> Result<Vec<RestorePlacement>, DatabaseError> {
-        if !book_is_trashed(&self.connection, content_hash)? {
+    pub(crate) fn restore_book_plan(&self, book_id: &BookId) -> Result<Vec<RestorePlacement>, DatabaseError> {
+        if !book_is_trashed(&self.connection, book_id)? {
             return Err(DatabaseError::message("book is not in Trash"));
         }
-        let recoverable = restore_placement_candidates(&self.connection, content_hash)?;
+        let recoverable = restore_placement_candidates(&self.connection, book_id)?;
         if recoverable.is_empty() {
             return Err(DatabaseError::message("book has no recoverable placement"));
         }
         let mut plan = Vec::with_capacity(recoverable.len());
         for (original, name) in recoverable {
             let mut ancestry = Vec::new();
-            let mut target = parse_dir_id(original.clone())?;
+            let original = parse_dir_id(&original)?;
+            let mut target = original;
             let mut visited = HashSet::new();
             while target != sync_common::ROOT_DIR_ID {
                 if !visited.insert(target) {
                     break;
                 }
-                let mut directory: Option<(String, bool)> = None;
-                self.connection.restore_book_record_with_parent_select_4(&target.to_string(), |row| {
-                    directory = Some((row.get(0)?, row.get(1)?));
-                    Ok(())
-                })?;
+                let directory: Option<(String, bool)> = query_last(|read| self.connection.restore_book_record_with_parent_select_4(&target.to_string(), read), |row| Ok((row.get(0)?, row.get(1)?)))?;
                 let Some((parent, live)) = directory else {
                     break;
                 };
                 ancestry.push(RestoreAncestor { id: target, live });
-                target = parse_dir_id(parent)?;
+                target = parse_dir_id(&parent)?;
             }
-            plan.push(RestorePlacement { original: parse_dir_id(original)?, file_name: name, ancestry });
+            plan.push(RestorePlacement { original, file_name: name, ancestry });
         }
         Ok(plan)
     }
 
-    pub(crate) fn restore_book_commit(&self, content_hash: &ContentHash, choices: &[(DirId, DirId)]) -> Result<(), DatabaseError> {
+    pub(crate) fn restore_book_commit(&self, book_id: &BookId, choices: &[(DirId, DirId)]) -> Result<(), DatabaseError> {
         self.write(|transaction| {
-            if !book_is_trashed(transaction, content_hash)? {
+            if !book_is_trashed(transaction, book_id)? {
                 return Err(DatabaseError::message("book is not in Trash"));
             }
-            let recoverable: HashMap<DirId, String> = restore_placement_candidates(transaction, content_hash)?.into_iter().map(|(original, name)| parse_dir_id(original).map(|original| (original, name))).collect::<Result<_, _>>()?;
+            let recoverable: HashMap<DirId, String> = restore_placement_candidates(transaction, book_id)?.into_iter().map(|(original, name)| parse_dir_id(&original).map(|original| (original, name))).collect::<Result<_, _>>()?;
             if recoverable.is_empty() {
                 return Err(DatabaseError::message("book has no recoverable placement"));
             }
@@ -840,32 +800,26 @@ impl Database {
             let targets = choices.iter().map(|(_, target)| *target).collect::<HashSet<_>>();
             for (original, _) in choices {
                 if !targets.contains(original) {
-                    remove_placement(transaction, original, content_hash, None)?;
+                    remove_placement(transaction, original, book_id, None)?;
                 }
             }
-            record_book_lifecycle(transaction, content_hash, library_replica::BookLifecycleState::Present)?;
+            record_book_lifecycle(transaction, book_id, library_replica::BookLifecycleState::Present)?;
             project_dirty(transaction)?;
             for (original, target) in choices {
                 if *target != sync_common::ROOT_DIR_ID
                     && !{
-                        let connection: &rusqlite::Connection = transaction;
-                        let dir_id: &DirId = target;
-                        let mut directory: Option<(String, bool)> = None;
-                        connection.restore_book_record_with_parent_select_4(&dir_id.to_string(), |row| {
-                            directory = Some((row.get(0)?, row.get(1)?));
-                            Ok(())
-                        })?;
+                        let directory: Option<(String, bool)> = query_last(|read| transaction.restore_book_record_with_parent_select_4(&target.to_string(), read), |row| Ok((row.get(0)?, row.get(1)?)))?;
                         directory.is_some_and(|(_, live)| live)
                     }
                 {
                     return Err(DatabaseError::message("restore target changed; retry the restore"));
                 }
                 let name = &recoverable[original];
-                let existing = live_file_name(transaction, target, content_hash)?;
+                let existing = live_file_name(transaction, target, book_id)?;
                 if existing.is_none() {
                     let occupied = occupied_file_names_in(transaction, &target.to_string())?;
                     let chosen = library_replica::unique_file_name(name, occupied.iter().map(String::as_str));
-                    place_book(transaction, target, content_hash, &chosen)?;
+                    place_book(transaction, target, book_id, &chosen)?;
                     project_dirty(transaction)?;
                 }
             }
@@ -875,8 +829,8 @@ impl Database {
 
     /// Permanently removes a book in Trash. Sync intent and retryable file
     /// cleanup survive independently of the deleted database row.
-    pub fn purge_book(&self, content_hash: &ContentHash) -> Result<(), DatabaseError> {
-        self.write(|transaction| purge_book_in(transaction, content_hash))
+    pub fn purge_book(&self, book_id: &BookId) -> Result<(), DatabaseError> {
+        self.write(|transaction| purge_book_in(transaction, book_id))
     }
 
     pub fn trash_directory(&self, directory_id: &DirId) -> Result<(), DatabaseError> {
@@ -894,30 +848,23 @@ impl Database {
             };
             let requested_parent = requested_parent.copied().unwrap_or(stored_parent);
             let parent = if directory_exists_in(transaction, &requested_parent.to_string())? { requested_parent } else { sync_common::ROOT_DIR_ID };
-            let mut occupied = Vec::new();
-            transaction.placements_sibling_folder_names(&parent.to_string(), &directory_id.to_string(), |row| {
-                occupied.push(row.get::<_, String>(0)?);
-                Ok(())
-            })?;
+            let occupied = query_rows(|read| transaction.placements_sibling_folder_names(&parent.to_string(), &directory_id.to_string(), read), |row| row.get::<_, String>(0))?;
             let chosen = library_replica::unique_folder_name(&name, occupied.iter().map(String::as_str));
             upsert_dir(transaction, directory_id, &parent, &chosen)?;
-            let placements =
-                query_rows(|callback| transaction.directory_placements_trashed_from(&(directory_id.to_string()), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, ContentHash>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+            let placements = query_rows(|callback| transaction.directory_placements_trashed_from(&(directory_id.to_string()), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, BookId>(1)?)))?;
             for (directory, hash) in placements {
-                record_local(transaction, LibraryStateEntry::Placement { dir_id: parse_dir_id(directory)?, content_hash: hash, present: true, origin_folder_id: None })?;
+                record_local(transaction, LibraryStateEntry::Placement { dir_id: parse_dir_id(&directory)?, book_id: hash, present: true, origin_folder_id: None })?;
             }
-            let books = query_rows(|callback| transaction.directory_books_trashed_from(&(directory_id.to_string()), callback), |row| row.get::<_, ContentHash>(0))?.collect::<Result<Vec<_>, _>>()?;
+            let books = query_rows(|callback| transaction.directory_books_trashed_from(&(directory_id.to_string()), callback), |row| row.get::<_, BookId>(0))?;
             for hash in &books {
                 record_book_lifecycle(transaction, hash, library_replica::BookLifecycleState::Present)?;
             }
             // Restore the complete tree and book projections in the database.
             project_dirty(transaction)?;
             for hash in books {
-                let paths = query_rows(|callback| transaction.directory_unobserved_placements(&(&hash), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
-                for (dir, name) in paths {
-                    if directory_relative_path(transaction, &parse_dir_id(dir.clone())?)?.is_some() {
-                        queue_file_work(transaction, "materialize", &hash, &placement_path(transaction, &parse_dir_id(dir)?, &name)?)?;
-                    }
+                let paths = query_rows(|callback| transaction.directory_unobserved_placements(&(&hash), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+                for (dir, _) in paths {
+                    queue_materialization(transaction, &hash, &parse_dir_id(&dir)?)?;
                 }
             }
             directory_relative_path(transaction, directory_id)?.ok_or_else(|| DatabaseError::message("restored directory has no path"))?;
@@ -940,7 +887,7 @@ impl Database {
                 return Err(DatabaseError::message("folder is not in Trash"));
             }
             for id in directories {
-                record_local(transaction, LibraryStateEntry::DirectoryLifecycle { dir_id: parse_dir_id(id)?, value: DirectoryLifecycleState::Purged })?;
+                record_local(transaction, LibraryStateEntry::DirectoryLifecycle { dir_id: parse_dir_id(&id)?, value: DirectoryLifecycleState::Purged })?;
             }
             Ok(())
         })
@@ -951,20 +898,12 @@ impl Database {
     /// collections are processed explicitly.
     pub fn empty_trash(&self) -> Result<(), DatabaseError> {
         self.write(|transaction| {
-            let mut roots = Vec::new();
-            transaction.empty_trash_roots(|row| {
-                roots.push(row.get::<_, String>(0)?);
-                Ok(())
-            })?;
+            let roots = query_rows(|read| transaction.empty_trash_roots(read), |row| row.get::<_, String>(0))?;
             let directories = trashed_subtree(transaction, roots)?;
             for id in directories {
-                record_local(transaction, LibraryStateEntry::DirectoryLifecycle { dir_id: parse_dir_id(id)?, value: DirectoryLifecycleState::Purged })?;
+                record_local(transaction, LibraryStateEntry::DirectoryLifecycle { dir_id: parse_dir_id(&id)?, value: DirectoryLifecycleState::Purged })?;
             }
-            let mut books = Vec::new();
-            transaction.empty_trash_records_select(|row| {
-                books.push(row.get::<_, ContentHash>(0)?);
-                Ok(())
-            })?;
+            let books = query_rows(|read| transaction.empty_trash_records_select(read), |row| row.get::<_, BookId>(0))?;
             for hash in books {
                 purge_book_in(transaction, &hash)?;
             }
@@ -973,7 +912,146 @@ impl Database {
     }
 }
 
-fn transfer_book_placement_in(transaction: &Transaction<'_>, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId, remove_source: bool) -> Result<String, DatabaseError> {
+pub(crate) fn restore_book_placement_in(transaction: &Transaction<'_>, book_id: &BookId, directory_id: &DirId, materialize_retained: bool) -> Result<(), DatabaseError> {
+    if !directory_exists_in(transaction, &directory_id.to_string())? {
+        return Err(DatabaseError::message("folder does not exist or is in Trash"));
+    }
+    let previous = first_column::<Option<String>>(|read| transaction.restore_book_placement_record_select(&directory_id.to_string(), book_id, read))?.flatten();
+    let title = first_column::<Option<String>>(|read| transaction.restore_book_placement_record_select_2(book_id, read))?.flatten();
+    let adding = previous.is_none();
+    let requested = previous.or(title).ok_or_else(|| DatabaseError::message("book does not exist"))?;
+    let occupied = query_rows(|read| transaction.restore_book_placement_record_select_3(&directory_id.to_string(), book_id, read), |row| row.get::<_, String>(0))?;
+    let chosen = library_replica::unique_file_name(&requested, occupied.iter().map(String::as_str));
+    record_book_lifecycle(transaction, book_id, library_replica::BookLifecycleState::Present)?;
+    project_dirty(transaction)?;
+    place_book(transaction, directory_id, book_id, &chosen)?;
+    project_dirty(transaction)?;
+    #[cfg(target_arch = "wasm32")]
+    let _ = materialize_retained;
+    #[cfg(not(target_arch = "wasm32"))]
+    if adding || materialize_retained {
+        queue_materialization(transaction, book_id, directory_id)?;
+    }
+    if adding {
+        {
+            let transaction: &rusqlite::Transaction<'_> = transaction;
+            let hash: &BookId = book_id;
+            transaction.shared_request_book_download(hash, TransferOrigin::UserInitiated.storage(), unix_millis()?)?;
+        };
+    }
+    Ok(())
+}
+
+pub(crate) fn move_directory_in(transaction: &Transaction<'_>, directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> Result<String, DatabaseError> {
+    if let Some(name) = requested_name {
+        validate_library_directory_name(name)?;
+    }
+    if *directory_id == sync_common::ROOT_DIR_ID {
+        return Err(DatabaseError::message("the library root cannot be renamed or moved"));
+    }
+    let existing: Option<(String, String)> = query_last(|read| transaction.live_directory_location(&directory_id.to_string(), read), |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let (current_parent, current_name) = existing.ok_or_else(|| DatabaseError::message("folder does not exist or is in Trash"))?;
+    let current_parent = parse_dir_id(&current_parent)?;
+    let parent_id = requested_parent.copied().unwrap_or(current_parent);
+    if !directory_exists_in(transaction, &parent_id.to_string())? {
+        return Err(DatabaseError::message("destination folder does not exist"));
+    }
+    let requested = requested_name.unwrap_or(&current_name);
+    let chosen = choose_move_folder_name(transaction, &parent_id.to_string(), &directory_id.to_string(), requested)?;
+    let (canonical_parent, canonical_name): (String, String) = transaction.directory_canonical_location(&(directory_id.to_string()), |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let parent_changed = requested_parent.is_some() && canonical_parent != parent_id.to_string();
+    let name_changed = (requested_name.is_some() || chosen != current_name) && canonical_name != chosen;
+    if parent_changed || name_changed || parent_id != current_parent || chosen != current_name {
+        let closes_cycle = is_ancestor_or_self(transaction, &directory_id.to_string(), &parent_id.to_string())?;
+        if closes_cycle {
+            return Err(DatabaseError::message("directory move would create a cycle"));
+        }
+        // A rename must not adopt a repaired parent; a move must not adopt
+        // a numbered display name unless it needs a new name at its destination.
+        if parent_changed {
+            record_local(transaction, LibraryStateEntry::DirectoryParent { dir_id: *directory_id, parent_id })?;
+        }
+        if name_changed {
+            record_local(transaction, LibraryStateEntry::DirectoryName { dir_id: *directory_id, name: chosen.clone() })?;
+        }
+        queue_directory_work(transaction, directory_id)?;
+    }
+    project_dirty(transaction)?;
+    // Moving can remove a collision suffix while retaining the name intent.
+    let projected_name = transaction.directory_projected_name(&(directory_id.to_string()), |row| row.get::<_, String>(0))?;
+    Ok(projected_name)
+}
+
+pub(crate) fn copy_directory_in(transaction: &Transaction<'_>, directory_id: &DirId, destination_parent_id: &DirId, next_id: &mut impl FnMut() -> DirId) -> Result<DirId, DatabaseError> {
+    if *directory_id == sync_common::ROOT_DIR_ID {
+        return Err(DatabaseError::message("the library root cannot be copied"));
+    }
+    let name = first_column::<Option<String>>(|read| transaction.copy_directory_record_select(&directory_id.to_string(), read))?.flatten();
+    let name = name.ok_or_else(|| DatabaseError::message("folder does not exist or is in Trash"))?;
+    if !directory_exists_in(transaction, &destination_parent_id.to_string())? {
+        return Err(DatabaseError::message("destination folder does not exist"));
+    }
+    // The subtree is read as the copy is written, so a destination inside
+    // it would be copying a folder into itself; the same query that
+    // rejects a cycle-forming move answers this.
+    if is_ancestor_or_self(transaction, &directory_id.to_string(), &destination_parent_id.to_string())? {
+        return Err(DatabaseError::message("a folder cannot be copied into itself"));
+    }
+    let occupied = query_rows(|read| transaction.copy_directory_record_select_2(&destination_parent_id.to_string(), read), |row| row.get::<_, String>(0))?;
+    let chosen = library_replica::unique_folder_name(&name, occupied.iter().map(String::as_str));
+
+    let copy_id = next_id();
+    let mut pending = vec![(*directory_id, copy_id, chosen, *destination_parent_id)];
+    let mut visited = HashSet::new();
+    while let Some((source_id, copy_id, copy_name, copy_parent)) = pending.pop() {
+        if !visited.insert(source_id) {
+            continue;
+        }
+        upsert_dir(transaction, &copy_id, &copy_parent, &copy_name)?;
+        queue_directory_work(transaction, &copy_id)?;
+        let placements = query_rows(|read| transaction.copy_directory_record_select_3(&source_id.to_string(), read), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))?;
+        for (hash, file_name, downloaded) in placements {
+            // Names are already unique within the source folder and the
+            // copy is empty, so each placement keeps the name it had.
+            place_book(transaction, &copy_id, &hash, &file_name)?;
+            project_dirty(transaction)?;
+            #[cfg(target_arch = "wasm32")]
+            if downloaded {
+                transaction.shared_set_book_hash_downloaded(&hash, 1)?;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = downloaded;
+            copy_book_baseline(transaction, &source_id, &copy_id, &hash)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            queue_materialization(transaction, &hash, &copy_id)?;
+        }
+        let children = query_rows(|read| transaction.copy_directory_record_select_4(&source_id.to_string(), read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        for (child_id, child_name) in children {
+            pending.push((parse_dir_id(&child_id)?, next_id(), child_name, copy_id));
+        }
+    }
+    Ok(copy_id)
+}
+
+pub(crate) fn copy_book_to_directory_in(transaction: &Transaction<'_>, book_id: &BookId, source_id: Option<&DirId>, destination_id: &DirId) -> Result<bool, DatabaseError> {
+    if !directory_exists_in(transaction, &destination_id.to_string())? {
+        return Err(DatabaseError::message("destination folder does not exist"));
+    }
+    if live_file_name(transaction, destination_id, book_id)?.is_some() {
+        return Ok(false);
+    }
+    let source_id = match source_id {
+        Some(source) => *source,
+        None => {
+            let source = first_column::<String>(|read| transaction.placements_copy_source(book_id, read))?;
+            parse_dir_id(source.as_deref().ok_or_else(|| DatabaseError::message("book has no live folder placement"))?)?
+        }
+    };
+    transfer_book_placement_in(transaction, book_id, &source_id, destination_id, false)?;
+    Ok(true)
+}
+
+pub(crate) fn transfer_book_placement_in(transaction: &Transaction<'_>, book_id: &BookId, source_id: &DirId, destination_id: &DirId, remove_source: bool) -> Result<String, DatabaseError> {
     if source_id == destination_id {
         return Err(DatabaseError::message("source and destination folders are the same"));
     }
@@ -981,19 +1059,15 @@ fn transfer_book_placement_in(transaction: &Transaction<'_>, content_hash: &Cont
     // a hash-addressed browser store has no separate physical placement.
     #[cfg(not(target_arch = "wasm32"))]
     let old_path = {
-        let name = live_file_name(transaction, source_id, content_hash)?.ok_or_else(|| DatabaseError::message("book is not present in the source folder"))?;
+        let name = live_file_name(transaction, source_id, book_id)?.ok_or_else(|| DatabaseError::message("book is not present in the source folder"))?;
         placement_path(transaction, source_id, &name)?
     };
-    let mut source: Option<(String, bool)> = None;
-    transaction.transfer_book_placement_record_select(&source_id.to_string(), content_hash, |row| {
-        source = Some((row.get(0)?, row.get(1)?));
-        Ok(())
-    })?;
+    let source: Option<(String, bool)> = query_last(|read| transaction.transfer_book_placement_record_select(&source_id.to_string(), book_id, read), |row| Ok((row.get(0)?, row.get(1)?)))?;
     let (source_name, downloaded): (String, bool) = source.ok_or_else(|| DatabaseError::message("book is not present in the source folder"))?;
     if !directory_exists_in(transaction, &destination_id.to_string())? {
         return Err(DatabaseError::message("destination folder does not exist"));
     }
-    let existing = live_file_name(transaction, destination_id, content_hash)?;
+    let existing = live_file_name(transaction, destination_id, book_id)?;
     let destination_name = if let Some(existing) = existing {
         existing
     } else {
@@ -1024,49 +1098,45 @@ fn transfer_book_placement_in(transaction: &Transaction<'_>, content_hash: &Cont
                 }
             }
         };
-        place_book(transaction, destination_id, content_hash, &chosen)?;
+        place_book(transaction, destination_id, book_id, &chosen)?;
         project_dirty(transaction)?;
         #[cfg(target_arch = "wasm32")]
         if downloaded {
-            transaction.shared_set_book_hash_downloaded(&content_hash, 1)?;
+            transaction.shared_set_book_hash_downloaded(&book_id, 1)?;
         }
         #[cfg(not(target_arch = "wasm32"))]
         let _ = downloaded;
-        copy_book_baseline(transaction, source_id, destination_id, content_hash)?;
+        copy_book_baseline(transaction, source_id, destination_id, book_id)?;
         chosen
     };
     #[cfg(not(target_arch = "wasm32"))]
     {
         // Publish the destination before retiring the source. Only this
         // book's paths need work; no whole-library projection is needed.
-        queue_file_work(transaction, "materialize", content_hash, &placement_path(transaction, destination_id, &destination_name)?)?;
+        queue_materialization(transaction, book_id, destination_id)?;
         if remove_source && source_id != destination_id {
-            queue_file_work(transaction, "remove", content_hash, &old_path)?;
+            queue_file_removal(transaction, book_id, &old_path)?;
         }
     }
     if remove_source {
-        remove_placement(transaction, source_id, content_hash, None)?;
+        remove_placement(transaction, source_id, book_id, None)?;
     }
     Ok(destination_name)
 }
 
-pub(crate) fn purge_book_in(transaction: &rusqlite::Transaction<'_>, content_hash: &ContentHash) -> Result<(), DatabaseError> {
-    let mut book_row_id: Option<i64> = None;
-    transaction.purge_book_record_select(content_hash, |row| {
-        book_row_id = row.get(0)?;
-        Ok(())
-    })?;
+pub(crate) fn purge_book_in(transaction: &rusqlite::Transaction<'_>, book_id: &BookId) -> Result<(), DatabaseError> {
+    let book_row_id = first_column::<Option<i64>>(|read| transaction.purge_book_record_select(book_id, read))?.flatten();
     let book_row_id = book_row_id.ok_or_else(|| DatabaseError::message("book is not in Trash"))?;
 
     // Publish placement tombstones before removing their disposable local
     // rows. Other replicas use these before the Purged lifecycle arrives.
-    let directories = query_rows(|callback| transaction.directory_live_book_folders(&book_row_id, callback), |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let directories = query_rows(|callback| transaction.directory_live_book_folders(&book_row_id, callback), |row| row.get::<_, String>(0))?;
     for directory in directories {
-        remove_placement(transaction, &parse_dir_id(directory)?, content_hash, None)?;
+        remove_placement(transaction, &parse_dir_id(&directory)?, book_id, None)?;
     }
     // Publish the delete intent directly. Projection performs the same physical
     // row deletion for local commands and received lifecycle winners.
-    record_book_lifecycle(transaction, content_hash, library_replica::BookLifecycleState::Purged)?;
+    record_book_lifecycle(transaction, book_id, library_replica::BookLifecycleState::Purged)?;
     Ok(())
 }
 
@@ -1099,7 +1169,7 @@ pub struct ScanSnapshot {
 /// fingerprint is empty (for example, a freshly downloaded book).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanPlacement {
-    pub content_hash: ContentHash,
+    pub book_id: BookId,
     pub directory: DirId,
     pub name: String,
     pub path: String,
@@ -1110,19 +1180,70 @@ pub struct ScanPlacement {
 
 #[cfg(feature = "scanner")]
 pub(crate) fn scan_placements(connection: &rusqlite::Connection) -> Result<Vec<ScanPlacement>, DatabaseError> {
-    let mut rows = Vec::new();
-    connection.scanner_placements(|row| {
-        rows.push((row.get::<_, ContentHash>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get(3)?, row.get(4)?, row.get(5)?));
-        Ok(())
-    })?;
+    let mut folders = FolderPaths::all(connection)?;
+    scan_placements_with_folders(connection, &mut folders)
+}
+
+#[cfg(feature = "scanner")]
+fn scan_placements_with_folders(connection: &rusqlite::Connection, folders: &mut FolderPaths<'_>) -> Result<Vec<ScanPlacement>, DatabaseError> {
     // A placement in a folder that is not live has no path on disk to scan.
-    let mut folders = FolderPaths::new(connection);
     let mut placements = Vec::new();
-    for (content_hash, directory, name, fingerprint, downloaded, projected_path) in rows {
-        let Some(folder) = folders.folder(&directory)? else { continue };
-        placements.push(ScanPlacement { content_hash, directory: parse_dir_id(directory)?, path: if folder.is_empty() { name.clone() } else { format!("{folder}/{name}") }, name, fingerprint, downloaded, projected_path });
-    }
+    try_for_each_row(
+        |read| connection.scanner_placements(read),
+        |row| {
+            let book_id = row.get::<_, BookId>(0)?;
+            let directory = text_column(row, 1)?;
+            let name = text_column(row, 2)?;
+            let fingerprint = text_column(row, 3)?;
+            let downloaded = row.get(4)?;
+            let projected_path = optional_text_column(row, 5)?;
+            let Some(folder) = folders.folder(directory)? else { return Ok(()) };
+            placements.push(ScanPlacement {
+                book_id,
+                directory: parse_dir_id(directory)?,
+                path: if folder.is_empty() { name.to_owned() } else { format!("{folder}/{name}") },
+                name: name.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+                downloaded,
+                projected_path: projected_path.map(str::to_owned),
+            });
+            Ok(())
+        },
+    )?;
     Ok(placements)
+}
+
+#[cfg(feature = "scanner")]
+fn scan_placements_match(connection: &rusqlite::Connection, placements: &[ScanPlacement]) -> Result<bool, DatabaseError> {
+    let mut folders = FolderPaths::all(connection)?;
+    let mut expected = placements.iter();
+    let mut matches = true;
+    // Compare borrowed columns with the existing snapshot instead of building
+    // another placement inventory and allocating every path just to discard it.
+    try_for_each_row(
+        |read| connection.scanner_placements(read),
+        |row| {
+            let book_id = row.get::<_, BookId>(0)?;
+            let directory = text_column(row, 1)?;
+            let name = text_column(row, 2)?;
+            let fingerprint = text_column(row, 3)?;
+            let downloaded = row.get::<_, bool>(4)?;
+            let projected_path = optional_text_column(row, 5)?;
+            let Some(folder) = folders.folder(directory)? else { return Ok(()) };
+            let directory = parse_dir_id(directory)?;
+            matches &= expected.next().is_some_and(|old| {
+                old.book_id == book_id
+                    && old.directory == directory
+                    && old.name == name
+                    && old.fingerprint == fingerprint
+                    && old.downloaded == downloaded
+                    && old.projected_path.as_deref() == projected_path
+                    && if folder.is_empty() { old.path == name } else { old.path.strip_prefix(folder).and_then(|tail| tail.strip_prefix('/')) == Some(name) }
+            });
+            Ok(())
+        },
+    )?;
+    Ok(matches && expected.next().is_none())
 }
 
 #[cfg(feature = "scanner")]
@@ -1145,7 +1266,7 @@ pub struct ScanKnownDirectory {
 
 #[derive(Clone, Debug)]
 pub struct ScanKnownBook {
-    pub content_hash: ContentHash,
+    pub book_id: BookId,
     pub directory: DirId,
     pub name: String,
     pub fingerprint: u64,
@@ -1153,6 +1274,7 @@ pub struct ScanKnownBook {
     /// Complete playback facts for these verified bytes, including facts
     /// received through sync. This does not claim a local inspection occurred.
     pub cached_audiobook_format: Option<BookFormat>,
+    pub cached_pdf: Option<Arc<book_inspection::CachedPdfReader>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1186,11 +1308,12 @@ pub struct InspectedFilesystemScan {
 
 #[derive(Clone, Debug)]
 pub struct ScannedBook {
+    pub source_identity: Option<book_inspection::PdfSourceIdentity>,
     pub directory: DirId,
     pub name: String,
     pub path: String,
     pub fingerprint: u64,
-    pub content_hash: ContentHash,
+    pub book_id: BookId,
     pub size_bytes: u64,
     pub extension: String,
     /// The book's own metadata (title, authors, TOC, ...), extracted the
@@ -1211,36 +1334,20 @@ impl Database {
         self.with_write_transaction(|transaction| {
             let connection = &*transaction;
             let work_revision = connection.scanner_file_work_revision(|row| row.get(0))?;
-            let mut sequence = None;
-            connection.shared_scanner_sequence(|row| {
-                sequence = Some(row.get::<_, String>(0)?);
-                Ok(())
-            })?;
+            let sequence = first_column::<String>(|read| connection.shared_scanner_sequence(read))?;
             let current = sequence.map(|value| value.parse::<i64>().map_err(DatabaseError::operation)).transpose()?.unwrap_or(0);
             let scan_id = current.checked_add(1).ok_or_else(|| DatabaseError::message("scan sequence overflow"))?;
             connection.scanner_set_sequence(&scan_id.to_string())?;
-            let mut folders = FolderPaths::new(connection);
+            let mut folders = FolderPaths::all(connection)?;
             let mut excluded_paths = Vec::new();
-            let mut pending_directories = Vec::new();
             let pending = serde_json::to_string(&pending_work_directories(connection)?).map_err(DatabaseError::operation)?;
-            connection.scanner_pending_directories(&pending, |row| {
-                pending_directories.push((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?));
-                Ok(())
-            })?;
+            let pending_directories = query_rows(|read| connection.scanner_pending_directories(&pending, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?;
             for (id, remembered) in pending_directories {
                 let live = folders.folder(&id)?;
-                excluded_paths.extend(live.into_iter().chain(remembered).map(|path| path.trim_matches('/').to_owned()));
+                excluded_paths.extend(live.into_iter().chain(remembered.as_deref()).map(|path| path.trim_matches('/').to_owned()));
             }
-            let mut pending_file_paths = Vec::new();
-            connection.scanner_pending_files(|row| {
-                pending_file_paths.push(row.get::<_, String>(0)?);
-                Ok(())
-            })?;
-            let mut pending_placements = Vec::new();
-            connection.scanner_pending_placements(|row| {
-                pending_placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
-                Ok(())
-            })?;
+            let mut pending_file_paths = query_rows(|read| connection.scanner_pending_files(read), |row| row.get::<_, String>(0))?;
+            let pending_placements = query_rows(|read| connection.scanner_pending_placements(read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
             for (dir_id, file_name) in pending_placements {
                 pending_file_paths.extend(folders.placement(&dir_id, &file_name)?.map(|path| path.to_string()));
             }
@@ -1248,33 +1355,30 @@ impl Database {
             let mut books = Vec::new();
             connection.scanner_known_books(|row| {
                 let Ok(fingerprint) = row.get::<_, String>(0)?.parse::<u64>() else { return Ok(()) };
-                let content_hash = row.get::<_, ContentHash>(1)?;
+                let book_id = row.get::<_, BookId>(1)?;
                 let inspection_version = row.get::<_, Option<i64>>(4)?;
                 let format = BookFormat::from_code(row.get(5)?);
                 let cached_audiobook_format = if inspection_version.is_none() && matches!(format, Some(BookFormat::M4b | BookFormat::Mp3Folder)) {
-                    crate::books::audiobook::reusable_playback_format(content_hash, format, row.get(6)?, row.get::<_, Option<String>>(7)?.as_deref(), row.get::<_, Option<String>>(8)?.as_deref())
+                    crate::books::audiobook::reusable_playback_format(book_id, format, row.get(6)?, optional_blob_column(row, 7)?, optional_blob_column(row, 8)?)
                 } else {
                     None
                 };
-                books.push((fingerprint, content_hash, row.get::<_, String>(2)?, row.get::<_, String>(3)?, inspection_version, cached_audiobook_format));
+                books.push(ScanKnownBook { book_id, directory: parse_uuid_column(row.get(2)?, 2)?, name: row.get(3)?, fingerprint, inspection_version, cached_audiobook_format, cached_pdf: None });
                 Ok(())
             })?;
-            let books = books
-                .into_iter()
-                .map(|(fingerprint, content_hash, directory, name, inspection_version, cached_audiobook_format)| {
-                    Ok(ScanKnownBook { content_hash, directory: DirId::parse_str(&directory).map_err(DatabaseError::operation)?, name, fingerprint, inspection_version, cached_audiobook_format })
-                })
-                .collect::<Result<Vec<_>, DatabaseError>>()?;
-            let mut directories = Vec::new();
-            connection.scanner_known_directories(|row| {
-                directories.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?));
-                Ok(())
-            })?;
+            for book in &mut books {
+                if BookFormat::from_file_name(&book.name) == Some(BookFormat::Pdf) && book.inspection_version != Some(book_inspection::inspection_version(BookFormat::Pdf)) && book.inspection_version.is_none_or(|version| version >= 0) {
+                    if let Some(checksum) = self.local_content_hash(book.book_id, book.directory)? {
+                        book.cached_pdf = self.cached_pdf_reader(BookId::from(checksum))?.map(Arc::new);
+                    }
+                }
+            }
+            let directories = query_rows(|read| connection.scanner_known_directories(read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?)))?;
             let directories = directories
                 .into_iter()
                 .map(|(id, parent_id, name, live)| {
                     Ok(ScanKnownDirectory {
-                        path: if live { folders.folder(&id)? } else { None },
+                        path: if live { folders.folder(&id)?.map(str::to_owned) } else { None },
                         id: DirId::parse_str(&id).map_err(DatabaseError::operation)?,
                         parent_id: DirId::parse_str(&parent_id).map_err(DatabaseError::operation)?,
                         name,
@@ -1282,13 +1386,10 @@ impl Database {
                     })
                 })
                 .collect::<Result<Vec<_>, DatabaseError>>()?;
-            let mut tombstoned_files = Vec::new();
-            connection.scanner_tombstoned_files(|row| {
-                tombstoned_files.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
-                Ok(())
-            })?;
-            let tombstoned_files = tombstoned_files.into_iter().map(|(directory, name)| DirId::parse_str(&directory).map(|directory| (directory, name)).map_err(DatabaseError::operation)).collect::<Result<Vec<_>, DatabaseError>>()?;
-            let placements = scan_placements(connection)?;
+            let tombstoned_files = query_rows(|read| connection.scanner_tombstoned_files(read), |row| Ok((parse_uuid_column(row.get(0)?, 0)?, row.get::<_, String>(1)?)))?;
+            // The inventory above already resolved live folders. Reuse those
+            // paths instead of walking their ancestry again per folder.
+            let placements = scan_placements_with_folders(connection, &mut folders)?;
             ({
                 use crate::assets::ActivitySql;
 
@@ -1303,67 +1404,82 @@ impl Database {
     /// so our writes are accepted but concurrent edits still invalidate it.
     #[cfg(feature = "scanner")]
     pub fn apply_filesystem_scan_batch(
-        &self, snapshot: &mut ScanSnapshot, discovery: &FilesystemScan, inspected: &InspectedFilesystemScan, complete: bool, matcher: Option<crate::ContributorNameMatcher>,
+        &self, snapshot: &mut ScanSnapshot, discovery: &FilesystemScan, inspected: InspectedFilesystemScan, complete: bool, matcher: Option<crate::ContributorNameMatcher>,
     ) -> Result<ScanApplyResult, DatabaseError> {
         // Normalize metadata and serialize inspection data before acquiring
         // the writer. Snapshot validation and identity resolution remain in
         // the transaction so changes during preparation still invalidate it.
+        let reconcile_missing = complete && discovery.readable && inspected.readable;
         let prepared_books = inspected
             .books
-            .iter()
+            .into_iter()
             .map(|book| {
-                let format = BookFormat::from_extension(&book.extension).ok_or_else(|| DatabaseError::message(format!("unsupported scanned extension: {}", book.extension)))?;
-                let prepared = crate::import::prepare_inspection(&book.inspection, &book.content_hash, format)?;
-                let catalog_record = crate::catalog::import_record(book.content_hash, format)?;
-                Ok((format, prepared, catalog_record))
+                let format = BookFormat::from_file_name(&format!("book.{}", book.extension)).ok_or_else(|| DatabaseError::message(format!("unsupported scanned extension: {}", book.extension)))?;
+                let prepared = crate::import::prepare_inspection(book.inspection, &book.book_id, format)?;
+                let checksum = book.book_id.content_hash().ok_or_else(|| DatabaseError::message("scanned bytes require a content checksum"))?;
+                let identity = self.resolve_scanned_content(checksum, book.source_identity)?;
+                let prepared = prepared.with_identity(identity);
+                let catalog_record = crate::catalog::import_record(book.book_id, format)?;
+                let import = crate::import::ImportCommit {
+                    source_identity: book.source_identity,
+                    byte_checksum: Some(checksum),
+                    parent_id: book.directory,
+                    file_name: book.name.clone(),
+                    format,
+                    book_id: identity,
+                    size_bytes: book.size_bytes,
+                    inspection_version: book.inspection_version,
+                    inspection: None,
+                    published: library_model::PublishedStagedBook { name: book.name, relative_path: book.path, published: true, fingerprint: Some(book.fingerprint.to_string()) },
+                    request_thumbnail: true,
+                    restore_paths: Vec::new(),
+                };
+                Ok((import, prepared, catalog_record, checksum))
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
         let mut next_guard = None;
         let result = self.with_write_transaction(|transaction| {
             let current_revision: i64 = transaction.scanner_file_work_revision(|row| row.get(0))?;
-            let mut current_sequence = String::new();
-            transaction.shared_scanner_sequence(|row| {
-                current_sequence = row.get(0)?;
-                Ok(())
-            })?;
-            if current_revision != snapshot.work_revision || current_sequence != snapshot.scan_id.to_string() || scan_placements(transaction)? != snapshot.placements {
+            let current_sequence = first_column::<String>(|read| transaction.shared_scanner_sequence(read))?.unwrap_or_default();
+            if current_revision != snapshot.work_revision || current_sequence != snapshot.scan_id.to_string() || !scan_placements_match(transaction, &snapshot.placements)? {
                 return Ok(Rollback(ScanApplyResult::Stale));
             }
             for directory in &discovery.directories {
-                // Folder paths are derived from dir, so upserting dir is all a
-                // new path needs.
-                upsert_dir(transaction, &directory.id, &directory.parent_id, &directory.name)?;
+                // A retained physical path can be a local collision alias after
+                // relocation. Observing it again must not rewrite synced intent.
+                let retained: bool = transaction.scanner_directory_projection_retained(&directory.id.to_string(), &directory.parent_id.to_string(), &directory.path, |row| row.get(0))?;
+                if !retained {
+                    upsert_dir(transaction, &directory.id, &directory.parent_id, &directory.name)?;
+                }
             }
-            for (book, (format, prepared, catalog_record)) in inspected.books.iter().zip(prepared_books) {
+            let mut refreshed = HashSet::new();
+            for (import, prepared, catalog_record, checksum) in prepared_books {
                 // Scanned books commit through the same identity-resolution and
                 // placement logic explicit import uses, so a scan-discovered book
                 // gets its title, authors, and subjects just like an imported one.
-                let import = crate::import::ImportCommit {
-                    parent_id: book.directory,
-                    file_name: book.name.clone(),
-                    format,
-                    content_hash: book.content_hash,
-                    size_bytes: book.size_bytes,
-                    inspection_version: book.inspection_version,
-                    inspection: None,
-                    published: library_model::PublishedStagedBook { name: book.name.clone(), relative_path: book.path.clone(), published: true, fingerprint: Some(book.fingerprint.to_string()) },
-                    request_thumbnail: true,
-                    restore_paths: Vec::new(),
-                };
+                let book_id = import.book_id;
+                if reconcile_missing {
+                    refreshed.insert((import.parent_id, book_id));
+                }
                 // Only scanning may replace the old identity at a path already
                 // observed on disk. Ordinary imports retain their collision check.
-                for old in snapshot.placements.iter().filter(|old| old.directory == book.directory && old.name == book.name && old.content_hash != book.content_hash) {
+                for old in snapshot.placements.iter().filter(|old| old.directory == import.parent_id && old.name == import.file_name && old.book_id != book_id) {
                     if scan_path_excluded(snapshot, &old.path) {
                         return Ok(Rollback(ScanApplyResult::Stale));
                     }
-                    remove_placement(transaction, &old.directory, &old.content_hash, None)?;
-                    transaction.directory_clear_placement_hash(&(old.directory.to_string()), &(&old.content_hash))?;
+                    remove_placement(transaction, &old.directory, &old.book_id, None)?;
+                    transaction.directory_clear_placement_hash(&(old.directory.to_string()), &(&old.book_id))?;
                     project_dirty(transaction)?;
-                    forget_file(transaction, &old.directory.to_string(), &old.content_hash)?;
+                    forget_file(transaction, &old.directory.to_string(), &old.book_id)?;
                 }
+                let directory = import.parent_id;
                 crate::import::commit_one(transaction, import, Some(prepared), matcher)?;
+                crate::content_identity::observe_content(transaction, book_id, directory, checksum)?;
+                if crate::content_identity::expected_hash(transaction, book_id)?.is_none() {
+                    transaction.execute("UPDATE book_transfer SET upload_checksum=?2 WHERE content_hash=?1 AND upload_id IS NOT NULL", rusqlite::params![book_id, checksum])?;
+                }
                 if let Some(record) = catalog_record {
-                    crate::enrichment::facts::record_catalog_answer(transaction, &book.content_hash, record)?;
+                    crate::enrichment::facts::record_catalog_answer(transaction, &book_id, record)?;
                 }
             }
             if complete {
@@ -1372,26 +1488,25 @@ impl Database {
                     if let Some(old) = known.get(&(file.directory, file.name.as_str())).filter(|old| old.fingerprint == file.fingerprint.to_string())
                         && (!old.downloaded || old.projected_path.as_deref().map(|path| path.trim_matches('/')) != Some(file.path.trim_matches('/')))
                     {
-                        crate::native::observations::record_file(transaction, &file.directory.to_string(), &old.content_hash, &file.path, Some(&old.fingerprint), crate::native::observations::Revision::Retained)?;
+                        crate::native::observations::record_file(transaction, &file.directory.to_string(), &old.book_id, &file.path, Some(&old.fingerprint), crate::native::observations::Revision::Retained)?;
                     }
                 }
-                if discovery.readable && inspected.readable {
+                if reconcile_missing {
                     let observed = discovery.files.iter().map(|file| (file.directory, file.name.as_str())).collect::<HashSet<_>>();
                     let observed_paths = discovery.files.iter().map(|file| file.path.trim_matches('/')).collect::<HashSet<_>>();
-                    let refreshed = inspected.books.iter().map(|book| (book.directory, book.content_hash)).collect::<HashSet<_>>();
                     for old in &snapshot.placements {
                         if !old.downloaded && old.projected_path.is_none() && old.fingerprint.is_empty() {
                             continue;
                         }
                         if observed.contains(&(old.directory, old.name.as_str()))
-                            || refreshed.contains(&(old.directory, old.content_hash))
+                            || refreshed.contains(&(old.directory, old.book_id))
                             || scan_path_excluded(snapshot, &old.path)
                             || old.projected_path.as_deref().is_some_and(|path| scan_path_excluded(snapshot, path) || observed_paths.contains(path.trim_matches('/')))
                         {
                             continue;
                         }
                         // Absence is local availability, not a synchronized deletion.
-                        forget_file(transaction, &old.directory.to_string(), &old.content_hash)?;
+                        forget_file(transaction, &old.directory.to_string(), &old.book_id)?;
                     }
                 }
             }
@@ -1450,34 +1565,29 @@ pub struct LocalBookInfo {
 }
 
 impl Database {
-    pub fn pdf_metadata(&self, hash: &ContentHash) -> Result<Option<pdf_view_common::PdfReaderMetadata>, DatabaseError> {
-        let connection = &self.connection;
-        let mut bytes = None;
-        connection.stored_pdf_metadata(hash, |row| {
-            bytes = Some(row.get::<_, Vec<u8>>(0)?);
-            Ok(())
-        })?;
-        Ok(bytes.and_then(|bytes| serde_json::from_slice::<pdf_view_common::PdfReaderMetadata>(&bytes).ok()).filter(|metadata| metadata.valid_for(&hash.to_hex())))
+    pub fn pdf_metadata(&self, hash: &BookId) -> Result<Option<PdfReaderMetadata>, DatabaseError> {
+        let bytes = first_column::<Vec<u8>>(|read| self.connection.stored_pdf_metadata(hash, read))?;
+        Ok(bytes.and_then(|bytes| crate::stored_document::decode::<PdfReaderMetadata>(&bytes).ok()).filter(|metadata| metadata.valid_for(&hash.to_hex())))
     }
 
-    pub fn local_book_info(&self, hash: &ContentHash) -> Result<LocalBookInfo, DatabaseError> {
+    pub fn local_book_info(&self, hash: &BookId) -> Result<LocalBookInfo, DatabaseError> {
         let connection = &self.connection;
-        let mut format = None;
-        connection.shared_book_format(hash, |row| {
-            format = Some(row.get::<_, Option<i64>>(0)?);
-            Ok(())
-        })?;
+        let format = first_column::<Option<i64>>(|read| connection.shared_book_format(hash, read))?;
         let format = format.flatten().and_then(BookFormat::from_code).ok_or_else(|| DatabaseError::message("book format missing"))?;
-        let mut placements = Vec::new();
-        connection.readable_placements(hash, |row| {
-            placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?));
-            Ok(())
-        })?;
+        let placements = query_rows(|read| connection.readable_placements(hash, read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))?;
         // Prefer a placement with local bytes, so the reader opens bytes that
         // are present instead of failing on an arbitrarily chosen empty one.
         let mut folders = FolderPaths::new(connection);
         let mut candidates = Vec::new();
         for (dir_id, file_name, downloaded) in placements {
+            #[cfg(not(target_arch = "wasm32"))]
+            if downloaded {
+                let projected = connection.query_row("SELECT relative_path FROM local_file_projection WHERE content_hash=?1 AND dir_id=?2", (hash, &dir_id), |row| row.get::<_, String>(0)).optional()?;
+                if let Some(path) = projected {
+                    candidates.push((true, stored_book_path(&path)?));
+                    continue;
+                }
+            }
             if let Some(path) = folders.placement(&dir_id, &file_name)? {
                 candidates.push((downloaded, path));
             }
@@ -1488,25 +1598,44 @@ impl Database {
 
     /// Every remembered native path for a book, including a source
     /// retained while a move is pending.
-    pub fn book_paths(&self, hash: &ContentHash) -> Result<Vec<RelativeBookPath>, DatabaseError> {
+    pub fn book_paths(&self, hash: &BookId) -> Result<Vec<RelativeBookPath>, DatabaseError> {
         book_paths_in(&self.connection, hash)
+    }
+
+    /// Directory identities whose physical markers belong to this library,
+    /// including retained and trashed folders.
+    pub fn registered_library_directory_ids(&self) -> Result<HashSet<DirId>, DatabaseError> {
+        Ok(self.connection.prepare_cached("SELECT id FROM dir")?.query_map([], |row| row.get::<_, String>(0))?.map(|row| parse_dir_id(&row?)).collect::<Result<_, _>>()?)
+    }
+
+    /// Registered physical files, including retained and trashed placements.
+    /// A root move must never infer ownership from a directory listing.
+    pub fn registered_library_files(&self) -> Result<Vec<(BookId, RelativeBookPath)>, DatabaseError> {
+        let connection = &self.connection;
+        let snapshot = connection.is_autocommit().then(|| connection.unchecked_transaction()).transpose()?;
+        let mut files = query_rows(|read| connection.registered_file_projection_paths(read), |row| Ok((row.get::<_, BookId>(0)?, stored_book_path_column(row, 1)?)))?;
+        let mut folders = FolderPaths::all(connection)?;
+        try_for_each_row(
+            |read| connection.registered_file_placements(read),
+            |row| {
+                if let Some(path) = folders.placement(text_column(row, 1)?, text_column(row, 2)?)? {
+                    files.push((row.get(0)?, path));
+                }
+                Ok(())
+            },
+        )?;
+        if let Some(snapshot) = snapshot {
+            snapshot.commit()?;
+        }
+        Ok(files)
     }
 
     /// Paths that contribute to local book storage usage.
     pub fn local_book_paths(&self) -> Result<Vec<RelativeBookPath>, DatabaseError> {
         let connection = &self.connection;
-        let mut projected = Vec::new();
-        connection.local_book_projection_paths(|row| {
-            projected.push(row.get::<_, String>(0)?);
-            Ok(())
-        })?;
-        let mut paths = projected.iter().map(|path| stored_book_path(path)).collect::<Result<Vec<_>, _>>()?;
-        let mut placements = Vec::new();
-        connection.local_book_placements(|row| {
-            placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
-            Ok(())
-        })?;
-        let mut resolver = FolderPaths::new(connection);
+        let mut paths = query_rows(|read| connection.local_book_projection_paths(read), |row| stored_book_path_column(row, 0))?;
+        let placements = query_rows(|read| connection.local_book_placements(read), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut resolver = FolderPaths::for_directories(connection, placements.iter().map(|(id, _)| id.as_str()))?;
         for (dir_id, file_name) in placements {
             paths.extend(resolver.placement(&dir_id, &file_name)?);
         }
@@ -1516,60 +1645,60 @@ impl Database {
     }
 
     /// Load cached PDF metadata for the selected placement without checking the file.
-    pub fn local_pdf_metadata(&self, hash: &ContentHash, relative_path: &str) -> Result<Option<pdf_view_common::PdfReaderMetadata>, DatabaseError> {
-        let matches = book_at_path(&self.connection, relative_path)?.is_some_and(|(current, _, _)| current == *hash);
-        if !matches {
+    pub fn local_pdf_metadata(&self, hash: &BookId, relative_path: &str) -> Result<Option<pdf_view_common::PdfReaderMetadata>, DatabaseError> {
+        let Some((current, directory, _)) = book_at_path(&self.connection, relative_path)? else { return Ok(None) };
+        if current != *hash {
             return Ok(None);
+        }
+        if let Some(local) = self.local_content_hash(*hash, directory)? {
+            if let Some(canonical) = self.canonical_content_hash(*hash)? {
+                if local != canonical {
+                    return Ok(None);
+                }
+            } else {
+                // Before the first upload, an edited file may have outgrown
+                // its immutable import metadata. Let the reader inspect it.
+                let revisions: i64 = self.connection.query_row("SELECT count(*) FROM local_content_alias WHERE book_id=?1", [hash], |row| row.get(0))?;
+                if revisions > 1 {
+                    return Ok(None);
+                }
+            }
         }
         self.pdf_metadata(hash)
     }
 
     /// Live file names already occupied in a destination folder. Physical
     /// name collisions are checked separately by the file store.
-    pub fn shared_occupied_file_names(&self, destination: &sync_common::DirId) -> Result<Vec<String>, DatabaseError> {
-        let mut names = Vec::new();
-        self.connection.shared_occupied_file_names(&destination.to_string(), |row| {
-            names.push(row.get::<_, String>(0)?);
-            Ok(())
-        })?;
-        Ok(names)
+    pub fn shared_occupied_file_names(&self, destination: &DirId) -> Result<Vec<String>, DatabaseError> {
+        occupied_file_names_in(&self.connection, &destination.to_string())
     }
 }
 
 include_sql!("src/placements/sql/book_paths.sql");
 
-fn record_book_lifecycle(connection: &rusqlite::Connection, hash: &ContentHash, value: library_replica::BookLifecycleState) -> Result<(), DatabaseError> {
-    record_local(connection, LibraryStateEntry::BookLifecycle { content_hash: *hash, value })
+fn record_book_lifecycle(connection: &rusqlite::Connection, hash: &BookId, value: library_replica::BookLifecycleState) -> Result<(), DatabaseError> {
+    record_local(connection, LibraryStateEntry::BookLifecycle { book_id: *hash, value })
 }
 
-fn remove_placement(connection: &rusqlite::Connection, directory: &DirId, hash: &ContentHash, origin_folder_id: Option<String>) -> Result<(), DatabaseError> {
+fn remove_placement(connection: &rusqlite::Connection, directory: &DirId, hash: &BookId, origin_folder_id: Option<String>) -> Result<(), DatabaseError> {
     connection.directory_clear_placement_download(&(directory.to_string()), &(&hash))?;
-    record_local(connection, LibraryStateEntry::Placement { dir_id: *directory, content_hash: *hash, present: false, origin_folder_id })
+    record_local(connection, LibraryStateEntry::Placement { dir_id: *directory, book_id: *hash, present: false, origin_folder_id })
 }
 
 include_sqlite_sql::include_sql!("src/placements/sql/directory_operations.sql");
 
 /// Transaction-scoped source removal shared with cross-library moves.
-pub(crate) fn remove_book_placement_in(transaction: &rusqlite::Transaction<'_>, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, DatabaseError> {
-    let mut exists = false;
-    transaction.remove_book_placement_record_select(&source_id.to_string(), content_hash, |row| {
-        exists = row.get(0)?;
-        Ok(())
-    })?;
-    if !exists {
+pub(crate) fn remove_book_placement_in(transaction: &rusqlite::Transaction<'_>, book_id: &BookId, source_id: &DirId) -> Result<bool, DatabaseError> {
+    if !transaction.remove_book_placement_record_select(&source_id.to_string(), book_id, |row| row.get::<_, bool>(0))? {
         return Err(DatabaseError::message("book is not present in this folder"));
     }
-    let mut orphaned = false;
-    transaction.remove_book_placement_record_select_2(content_hash, &source_id.to_string(), |row| {
-        orphaned = row.get(0)?;
-        Ok(())
-    })?;
+    let orphaned = transaction.remove_book_placement_record_select_2(book_id, &source_id.to_string(), |row| row.get(0))?;
     if orphaned {
         // Removing the last copy trashes the book, retaining its placement
         // so restore does not have to reconstruct membership from clocks.
-        record_book_lifecycle(transaction, content_hash, library_replica::BookLifecycleState::Deleted { origin_folder_id: Some(source_id.to_string()) })?;
+        record_book_lifecycle(transaction, book_id, library_replica::BookLifecycleState::Deleted { origin_folder_id: Some(source_id.to_string()) })?;
     } else {
-        remove_placement(transaction, source_id, content_hash, None)?;
+        remove_placement(transaction, source_id, book_id, None)?;
     }
     Ok(orphaned)
 }
@@ -1582,28 +1711,179 @@ pub(crate) fn trash_directory_in(transaction: &rusqlite::Transaction<'_>, direct
     if !directory_exists_in(transaction, &directory_id.to_string())? {
         return Err(DatabaseError::message("folder does not exist or is already in Trash"));
     }
-    let subtree = serde_json::to_string(
-        &({
-            let connection: &rusqlite::Connection = transaction;
-            let dir_id: &DirId = directory_id;
-            walk_down(connection, vec![dir_id.to_string()], false)?
-        }),
-    )
-    .map_err(DatabaseError::operation)?;
-    let mut hashes = Vec::new();
-    transaction.trash_subtree_only_books(&subtree, |row| {
-        hashes.push(row.get::<_, ContentHash>(0)?);
-        Ok(())
-    })?;
+    let subtree = serde_json::to_string(&walk_down(transaction, vec![directory_id.to_string()], false)?).map_err(DatabaseError::operation)?;
+    let hashes = query_rows(|read| transaction.trash_subtree_only_books(&subtree, read), |row| row.get::<_, BookId>(0))?;
     for hash in hashes {
         record_book_lifecycle(transaction, &hash, library_replica::BookLifecycleState::Deleted { origin_folder_id: Some(directory_id.to_string()) })?;
     }
     // Only books still present elsewhere need independent placement removals.
     project_dirty(transaction)?;
-    let removed = query_rows(|callback| transaction.directory_live_subtree_placements(&(&subtree), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, ContentHash>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+    let removed = query_rows(|callback| transaction.directory_live_subtree_placements(&(&subtree), callback), |row| Ok((row.get::<_, String>(0)?, row.get::<_, BookId>(1)?)))?;
     for (directory, hash) in removed {
-        remove_placement(transaction, &parse_dir_id(directory)?, &hash, Some(directory_id.to_string()))?;
+        remove_placement(transaction, &parse_dir_id(&directory)?, &hash, Some(directory_id.to_string()))?;
     }
     record_local(transaction, LibraryStateEntry::DirectoryLifecycle { dir_id: *directory_id, value: DirectoryLifecycleState::Deleted })?;
     Ok(())
+}
+
+// Async access owns its arguments until the synchronous database call completes.
+database_methods! {
+    fn dir_path_components(directory_id: &DirId) -> Vec<DirPathComponent>;
+    arguments (DirId,) = (directory_id.clone(),);
+    execute database, arguments => database.dir_path_components(&arguments.0);
+
+    fn is_live_destination(directory: &DirId) -> bool;
+    arguments (DirId,) = (directory.clone(),);
+    execute database, arguments => database.is_live_destination(&arguments.0);
+
+    fn book_placement_expects_hash(placement: &BookPlacement, book_id: &BookId) -> bool;
+    arguments (BookPlacement, BookId,) = (placement.clone(), book_id.clone(),);
+    execute database, arguments => database.book_placement_expects_hash(&arguments.0, &arguments.1);
+
+    fn child_directory(parent_id: &DirId, name: &str) -> Option<DirId>;
+    arguments (DirId, String,) = (parent_id.clone(), name.to_owned(),);
+    execute database, arguments => database.child_directory(&arguments.0, &arguments.1);
+
+    fn has_book_named(dir_id: &DirId, file_name: &str) -> bool;
+    arguments (DirId, String,) = (dir_id.clone(), file_name.to_owned(),);
+    execute database, arguments => database.has_book_named(&arguments.0, &arguments.1);
+
+    fn create_directory(parent_id: &DirId, name: &FileName) -> Dir;
+    arguments (DirId, FileName,) = (parent_id.clone(), name.clone(),);
+    execute database, arguments => database.create_directory(&arguments.0, &arguments.1);
+
+    fn create_directory_with_id(dir_id: &DirId, parent_id: &DirId, name: &FileName) -> Dir;
+    arguments (DirId, DirId, FileName,) = (dir_id.clone(), parent_id.clone(), name.clone(),);
+    execute database, arguments => database.create_directory_with_id(&arguments.0, &arguments.1, &arguments.2);
+
+    fn directory_creation_path(parent_id: &DirId, name: &str) -> (String, String);
+    arguments (DirId, String,) = (parent_id.clone(), name.to_owned(),);
+    execute database, arguments => database.directory_creation_path(&arguments.0, &arguments.1);
+
+    fn register_created_directory(id: &DirId, parent_id: &DirId, name: &str, path: &str) -> Dir;
+    arguments (DirId, DirId, String, String,) = (id.clone(), parent_id.clone(), name.to_owned(), path.to_owned(),);
+    execute database, arguments => database.register_created_directory(&arguments.0, &arguments.1, &arguments.2, &arguments.3);
+
+    fn register_created_directories(directories: &[CreatedDirectory]) -> Vec<Dir>;
+    arguments (Vec<CreatedDirectory>,) = (directories.to_vec(),);
+    execute database, arguments => database.register_created_directories(&arguments.0);
+
+    fn can_recover_import_directory(id: DirId) -> bool;
+    arguments (DirId,) = (id,);
+    execute database, arguments => database.can_recover_import_directory(arguments.0);
+
+    fn folder_destinations() -> Vec<LibraryFolderDestination>;
+    arguments () = ();
+    execute database, arguments => database.folder_destinations();
+
+    fn move_directory(directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> String;
+    arguments (DirId, Option<DirId>, Option<String>,) = (directory_id.clone(), requested_parent.cloned(), requested_name.map(str::to_owned),);
+    execute database, arguments => database.move_directory(&arguments.0, arguments.1.as_ref(), arguments.2.as_deref());
+
+    fn copy_directory(directory_id: &DirId, destination_parent_id: &DirId) -> DirId;
+    arguments (DirId, DirId,) = (directory_id.clone(), destination_parent_id.clone(),);
+    execute database, arguments => database.copy_directory(&arguments.0, &arguments.1);
+
+    fn restore_book_placement(book_id: &BookId, directory_id: &DirId) -> ();
+    arguments (BookId, DirId,) = (book_id.clone(), directory_id.clone(),);
+    execute database, arguments => database.restore_book_placement(&arguments.0, &arguments.1);
+
+    fn copy_book_to_directory(book_id: &BookId, source_id: Option<&DirId>, destination_id: &DirId) -> bool;
+    arguments (BookId, Option<DirId>, DirId,) = (book_id.clone(), source_id.cloned(), destination_id.clone(),);
+    execute database, arguments => database.copy_book_to_directory(&arguments.0, arguments.1.as_ref(), &arguments.2);
+
+    fn move_book_placement(book: &BookId, source: &DirId, destination: &DirId) -> bool;
+    arguments (BookId, DirId, DirId,) = (book.clone(), source.clone(), destination.clone(),);
+    execute database, arguments => database.move_book_placement(&arguments.0, &arguments.1, &arguments.2);
+
+    fn remove_book_placement(book_id: &BookId, source_id: &DirId) -> bool;
+    arguments (BookId, DirId,) = (book_id.clone(), source_id.clone(),);
+    execute database, arguments => database.remove_book_placement(&arguments.0, &arguments.1);
+
+    fn library_trash() -> LibraryTrashView;
+    arguments () = ();
+    execute database, arguments => database.library_trash();
+
+    fn trash_book(book_id: &BookId) -> ();
+    arguments (BookId,) = (book_id.clone(),);
+    execute database, arguments => database.trash_book(&arguments.0);
+
+    fn restore_book(book_id: &BookId) -> ();
+    arguments (BookId,) = (book_id.clone(),);
+    execute database, arguments => database.restore_book(&arguments.0);
+
+    fn purge_book(book_id: &BookId) -> ();
+    arguments (BookId,) = (book_id.clone(),);
+    execute database, arguments => database.purge_book(&arguments.0);
+
+    fn trash_directory(directory_id: &DirId) -> ();
+    arguments (DirId,) = (directory_id.clone(),);
+    execute database, arguments => database.trash_directory(&arguments.0);
+
+    fn restore_directory(directory_id: &DirId, requested_parent: Option<&DirId>) -> String;
+    arguments (DirId, Option<DirId>,) = (directory_id.clone(), requested_parent.cloned(),);
+    execute database, arguments => database.restore_directory(&arguments.0, arguments.1.as_ref());
+
+    fn purge_directory(directory_id: &DirId) -> ();
+    arguments (DirId,) = (directory_id.clone(),);
+    execute database, arguments => database.purge_directory(&arguments.0);
+
+    fn empty_trash() -> ();
+    arguments () = ();
+    execute database, arguments => database.empty_trash();
+
+    #[cfg(feature = "scanner")]
+    fn scan_snapshot() -> ScanSnapshot;
+    arguments () = ();
+    execute database, arguments => database.scan_snapshot();
+
+    fn pdf_metadata(hash: &BookId) -> Option<PdfReaderMetadata>;
+    arguments (BookId,) = (hash.clone(),);
+    execute database, arguments => database.pdf_metadata(&arguments.0);
+
+    fn local_book_info(hash: &BookId) -> LocalBookInfo;
+    arguments (BookId,) = (hash.clone(),);
+    execute database, arguments => database.local_book_info(&arguments.0);
+
+    fn book_paths(hash: &BookId) -> Vec<RelativeBookPath>;
+    arguments (BookId,) = (hash.clone(),);
+    execute database, arguments => database.book_paths(&arguments.0);
+
+    fn registered_library_directory_ids() -> HashSet<DirId>;
+    arguments () = ();
+    execute database, arguments => database.registered_library_directory_ids();
+
+    fn registered_library_files() -> Vec<(BookId, RelativeBookPath)>;
+    arguments () = ();
+    execute database, arguments => database.registered_library_files();
+
+    fn local_book_paths() -> Vec<RelativeBookPath>;
+    arguments () = ();
+    execute database, arguments => database.local_book_paths();
+
+    fn local_pdf_metadata(hash: &BookId, relative_path: &str) -> Option<pdf_view_common::PdfReaderMetadata>;
+    arguments (BookId, String,) = (hash.clone(), relative_path.to_owned(),);
+    execute database, arguments => database.local_pdf_metadata(&arguments.0, &arguments.1);
+
+    fn shared_occupied_file_names(destination: &DirId) -> Vec<String>;
+    arguments (DirId,) = (destination.clone(),);
+    execute database, arguments => database.shared_occupied_file_names(&arguments.0);
+}
+
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+impl crate::DatabaseClient {
+    pub async fn apply_filesystem_scan_batch(
+        &self, snapshot: &mut ScanSnapshot, discovery: &FilesystemScan, inspected: InspectedFilesystemScan, complete: bool, matcher: Option<crate::ContributorNameMatcher>,
+    ) -> Result<ScanApplyResult, DatabaseError> {
+        let mut next = snapshot.clone();
+        let discovery = discovery.clone();
+        let (next, result) = self
+            .run(move |database| {
+                let result = database.apply_filesystem_scan_batch(&mut next, &discovery, inspected, complete, matcher)?;
+                Ok((next, result))
+            })
+            .await?;
+        *snapshot = next;
+        Ok(result)
+    }
 }

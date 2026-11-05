@@ -1,10 +1,10 @@
-pub(super) use pdf_range_reader::{document_root, load_edges, metadata};
+pub(super) use pdf_range_reader::{document_root, metadata};
 
 #[cfg(test)]
 mod tests {
     use lopdf::dictionary;
     use lopdf::{Dictionary, Document, Object, Stream};
-    use pdf_range_reader::{load, load_edges};
+    use pdf_range_reader::metadata;
     use std::io::{Cursor, Result};
     use std::io::{Read, Seek, SeekFrom};
     use std::path::Path;
@@ -13,7 +13,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     #[test]
-    fn edge_inspection_reads_final_copyright_without_middle_page_streams() {
+    fn metadata_inspection_skips_page_streams_and_closing_copyright() {
         use lopdf::content::{Content, Operation};
         let mut document = Document::with_version("1.7");
         let pages = document.new_object_id();
@@ -21,8 +21,17 @@ mod tests {
         let mut kids = Vec::new();
         let mut streams = Vec::new();
         for index in 0..50 {
-            let text = if index == 49 { "Copyright Ada Author. Library of Congress Cataloging-in-Book Data. Science History. ISBN 978-0-393-24327-7 (pdf). Classification: LCC Q125 .A12 2023" } else { "Ordinary chapter" };
-            let content = Content { operations: vec![Operation::new("BT", vec![]), Operation::new("Tf", vec!["F1".into(), 12.into()]), Operation::new("Tj", vec![Object::string_literal(text)]), Operation::new("ET", vec![])] };
+            let lines: &[&str] =
+                if index == 49 { &["Copyright Ada Author.", "Library of Congress Cataloging-in-Book Data.", "Science History.", "ISBN 978-0-393-24327-7 (pdf).", "Classification: LCC Q125 .A12 2023"] } else { &["Ordinary chapter"] };
+            // Keep every asserted value inside the visible page. One long
+            // line at (0, 0) placed the classification beyond the media box.
+            let mut operations = vec![Operation::new("BT", vec![]), Operation::new("Tf", vec!["F1".into(), 12.into()]), Operation::new("Td", vec![40.into(), 740.into()])];
+            for line in lines {
+                operations.push(Operation::new("Tj", vec![Object::string_literal(*line)]));
+                operations.push(Operation::new("Td", vec![0.into(), (-18).into()]));
+            }
+            operations.push(Operation::new("ET", vec![]));
+            let content = Content { operations };
             let stream = document.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
             streams.push(stream);
             let page = document
@@ -36,14 +45,13 @@ mod tests {
         document.trailer.set("Info", info);
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).unwrap();
-        let loaded = load_edges(Cursor::new(bytes.clone()), 8).unwrap();
+        let loaded = metadata(Cursor::new(bytes.clone())).unwrap();
         assert!(!loaded.objects.contains_key(&streams[25]));
-        assert!(loaded.objects.contains_key(&streams[49]));
+        assert!(!loaded.objects.contains_key(&streams[49]));
         let inspected = crate::inspect_pdf_reader(Path::new("book.pdf"), Cursor::new(bytes)).unwrap();
         {
-            assert!(inspected.metadata.book.subjects.iter().any(|s| s.code() == Some("Q125 .A12 2023")));
-            assert_eq!(inspected.metadata.book.identifiers[0].canonical_value().as_deref(), Some("9780393243277"));
-            assert!(inspected.metadata.book.subjects[0].source().contains("pdf:page:50"));
+            assert!(inspected.metadata.book.subjects.is_empty());
+            assert!(inspected.metadata.book.identifiers.is_empty());
         }
     }
     struct Counted<R> {
@@ -62,6 +70,44 @@ mod tests {
             self.inner.seek(position)
         }
     }
+
+    #[test]
+    fn pdf_inspection_keeps_metadata_without_reading_an_unrelated_large_stream_for_hashing() {
+        use book_model::BookFormat;
+        use content_address::BookId;
+        let mut document = Document::with_version("1.7");
+        let pages = document.new_object_id();
+        // A large unreferenced stream represents data that metadata extraction
+        // has no reason to request from a range reader.
+        document.add_object(Stream::new(dictionary! { "Type" => "EmbeddedFile" }, vec![b'x'; 16 * 1024 * 1024]));
+        let text = document.add_object(Stream::new(Dictionary::new(), b"BT /F1 12 Tf (ISBN 978-0-8213-3827-8) Tj ET".to_vec()));
+        let font = document.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => text,
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+            "MediaBox" => vec![0.into(),0.into(),600.into(),800.into()]
+        });
+        document.objects.insert(pages, dictionary! { "Type" => "Pages", "Count" => 1, "Kids" => vec![page.into()] }.into());
+        let root = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        let info = document.add_object(dictionary! { "Title" => Object::string_literal("Remote PDF") });
+        document.trailer.set("Root", root);
+        document.trailer.set("Info", info);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        let byte_hash = BookId::from(blake3::hash(&bytes));
+        let identity = BookId::for_local_content(&[9; 16], blake3::hash(b"separate book").into());
+        let read = Arc::new(AtomicUsize::new(0));
+        let reader = Counted { inner: Cursor::new(bytes), read: read.clone() };
+        let inspected = crate::inspect_book_reader_with_hash(Path::new("Book.pdf"), BookFormat::Pdf, reader, Some(identity)).unwrap();
+        let pdf = inspected.pdf.unwrap();
+        assert!(pdf.valid_for(&identity.to_hex()));
+        assert!(!pdf.valid_for(&byte_hash.to_hex()));
+        assert_eq!(pdf.pages.len(), 1);
+        assert_eq!(inspected.metadata.title, "Remote PDF");
+        assert!(inspected.metadata.book.identifiers.iter().any(|id| id.canonical_value().as_deref() == Some("9780821338278")));
+        assert!(read.load(Ordering::Relaxed) < 1024 * 1024, "PDF inspection requested {} bytes", read.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn indirect_page_children_and_invalid_optional_info_remain_readable() {
         for invalid_info in [false, true] {
@@ -85,13 +131,13 @@ mod tests {
             }
             let inspected = crate::inspect_pdf_reader(Path::new("readable.pdf"), Cursor::new(bytes.clone())).unwrap();
             assert_eq!(inspected.metadata.title, "readable");
-            let loaded = load(Cursor::new(bytes), 20).unwrap();
-            assert_eq!(loaded.get_pages().len(), 1);
+            let loaded = metadata(Cursor::new(bytes)).unwrap();
+            assert!(loaded.get_pages().is_empty());
         }
     }
 
     #[test]
-    fn incremental_metadata_uses_latest_revision_and_inherits_the_page_tree() {
+    fn incremental_metadata_uses_latest_revision_without_loading_the_page_tree() {
         let mut document = Document::with_version("1.7");
         let pages = document.new_object_id();
         let page = document.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(),0.into(),600.into(),800.into()] });
@@ -108,8 +154,8 @@ mod tests {
         let trailer = format!("xref\n10 1\n{object:010} 00000 n\ntrailer\n<< /Size 11 /Info 10 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n");
         bytes.extend_from_slice(update.as_bytes());
         bytes.extend_from_slice(trailer.as_bytes());
-        let loaded = load(Cursor::new(bytes), 20).unwrap();
-        assert_eq!(loaded.get_pages().len(), 1);
+        let loaded = metadata(Cursor::new(bytes)).unwrap();
+        assert!(loaded.get_pages().is_empty());
         assert_eq!(loaded.get_object((10, 0)).unwrap().as_dict().unwrap().get(b"Title").unwrap().as_str().unwrap(), b"Latest title");
     }
 
@@ -135,11 +181,13 @@ mod tests {
             }
             let read = Arc::new(AtomicUsize::new(0));
             let reader = Counted { inner: Cursor::new(bytes), read: read.clone() };
-            let loaded = load(reader, 20).unwrap();
+            let loaded = metadata(reader).unwrap();
             assert_eq!(loaded.get_object(info).unwrap().as_dict().unwrap().get(b"Title").unwrap().as_str().unwrap(), b"Large illustrated book");
-            assert!(loaded.extract_text(&[1]).unwrap().contains("978-0-8213-3827-8"));
+            // A compressed object block can contain page dictionaries beside Info.
+            // Metadata inspection must still leave the page-content stream unread.
+            assert!(loaded.get_object(text).is_err());
             assert!(read.load(Ordering::Relaxed) < 1024 * 1024, "read {} bytes (modern={modern})", read.load(Ordering::Relaxed));
-            assert!(loaded.get_object(image).unwrap().as_stream().unwrap().content.is_empty());
+            assert!(loaded.get_object(image).is_err());
         }
     }
 }

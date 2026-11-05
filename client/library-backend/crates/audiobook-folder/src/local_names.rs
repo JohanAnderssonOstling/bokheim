@@ -165,13 +165,6 @@ pub fn extract_download<R: Read + Seek>(reader: R, destination: &Path, titles: &
     extract_with_local_names(reader, destination, titles, cfg!(windows))
 }
 
-/// Windows downloads may use chapter titles for filenames that cannot be
-/// materialized as written. The original names and entry order stay in a local
-/// sidecar, so rebuilding the transport archive keeps the same content hash.
-pub fn extract_for_windows<R: Read + Seek>(reader: R, destination: &Path, titles: &[(String, String)]) -> io::Result<Vec<String>> {
-    extract_with_local_names(reader, destination, titles, true)
-}
-
 fn extract_with_local_names<R: Read + Seek>(mut reader: R, destination: &Path, titles: &[(String, String)], repair_names: bool) -> io::Result<Vec<String>> {
     let mut mapping = PathMapping { version: 1, entries: Vec::new(), formats: audiobook_archive::entry_formats(&mut reader)? };
     let mut used = HashSet::new();
@@ -259,7 +252,7 @@ mod tests {
         let bytes = archive();
         let destination = tempfile::tempdir().unwrap();
         let titles = vec![("NUL.mp3".into(), "Introduction".into()), ("Disc?/track?.mp3".into(), "Introduction".into()), ("001 - Introduction.mp3".into(), "End: Why?".into())];
-        extract_for_windows(Cursor::new(&bytes), destination.path(), &titles).unwrap();
+        extract_with_local_names(Cursor::new(&bytes), destination.path(), &titles, true).unwrap();
         let mapping = load(destination.path()).unwrap().unwrap();
         assert_eq!(mapping.entries[0].local, "001 - Introduction.mp3");
         assert_eq!(mapping.entries[1].local, "002 - Introduction.mp3");
@@ -284,7 +277,7 @@ mod tests {
     fn missing_titles_have_portable_numbered_fallbacks() {
         let bytes = archive();
         let destination = tempfile::tempdir().unwrap();
-        extract_for_windows(Cursor::new(&bytes), destination.path(), &[]).unwrap();
+        extract_with_local_names(Cursor::new(&bytes), destination.path(), &[], true).unwrap();
         let mapping = load(destination.path()).unwrap().unwrap();
         assert_eq!(mapping.entries[0].local, "001 - Track.mp3");
         assert_eq!(mapping.entries[1].local, "002 - Track.mp3");
@@ -320,7 +313,7 @@ mod tests {
         }
         let bytes = zip.finish().unwrap().into_inner();
         let destination = tempfile::tempdir().unwrap();
-        extract_for_windows(Cursor::new(&bytes), destination.path(), &[]).unwrap();
+        extract_with_local_names(Cursor::new(&bytes), destination.path(), &[], true).unwrap();
         assert_eq!(crate::discover(destination.path()).unwrap().iter().map(|track| track.name.as_str()).collect::<Vec<_>>(), ["02.mp3", "01.mp3"]);
         assert_eq!(crate::folder_hash(destination.path()).unwrap(), blake3::hash(&bytes));
     }
@@ -377,7 +370,7 @@ mod tests {
         zip.write_all(b"audio").unwrap();
         let bytes = zip.finish().unwrap().into_inner();
         let destination = tempfile::tempdir().unwrap();
-        extract_for_windows(Cursor::new(&bytes), destination.path(), &[]).unwrap();
+        extract_with_local_names(Cursor::new(&bytes), destination.path(), &[], true).unwrap();
         assert!(!destination.path().join(PATH_MAPPING_FILE).exists());
         assert_eq!(fs::read(destination.path().join("Disc 1/01.mp3")).unwrap(), b"audio");
         assert_eq!(crate::folder_hash(destination.path()).unwrap(), blake3::hash(&bytes));

@@ -1,26 +1,21 @@
 //! The native browser's start document, shared by desktop and Android.
-use gpui_component::Colorize;
 use crate::BrowserTheme;
+use gpui_component::Colorize;
+use ui_text::text;
 
 /// Each shortcut shows its icon and title. Its URL is only a link target.
 pub fn browser_start_page<'a>(pages: impl IntoIterator<Item = (&'a str, &'a str, Option<&'a str>)>, theme: BrowserTheme) -> String {
     let mut shortcuts = String::new();
     for (url, title, icon) in pages.into_iter().take(8) {
         let letter = title.chars().find(|c| c.is_alphanumeric()).unwrap_or('?').to_uppercase().to_string();
-        let image = icon.map(|url| format!(
-            r#"<img src="{}" alt="" referrerpolicy="no-referrer" onload="this.previousElementSibling.hidden=true" onerror="this.hidden=true">"#, escape(url)
-        )).unwrap_or_default();
-        shortcuts.push_str(&format!(
-            r#"<a class="shortcut" href="{}"><span class="icon"><span>{}</span>{}</span><span class="title">{}</span></a>"#,
-            escape(url), escape(&letter), image, escape(title),
-        ));
+        let image = icon.map(|url| format!(r#"<img src="{}" alt="" referrerpolicy="no-referrer" onload="this.previousElementSibling.hidden=true" onerror="this.hidden=true">"#, escape(url))).unwrap_or_default();
+        shortcuts.push_str(&format!(r#"<a class="shortcut" href="{}"><span class="icon"><span>{}</span>{}</span><span class="title">{}</span></a>"#, escape(url), escape(&letter), image, escape(title),));
     }
-    let section = if shortcuts.is_empty() { String::new() } else {
-        format!("<main><h1>Most visited</h1><nav aria-label=\"Most visited\">{shortcuts}</nav></main>")
-    };
-    format!(r#"<!doctype html>
+    let section = if shortcuts.is_empty() { String::new() } else { format!("<main><h1>{heading}</h1><nav aria-label=\"{heading}\">{shortcuts}</nav></main>", heading = text!(common::most_visited)) };
+    format!(
+        r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Start page</title><style>
+<title>{page_title}</title><style>
 :root {{ background: {background}; color: {text}; font: 16px '{font}', sans-serif; }}
 * {{ box-sizing: border-box; }}
 body {{ margin: 0; }}
@@ -39,14 +34,19 @@ img {{ position: absolute; width: 100%; height: 100%; padding: 6px; object-fit: 
     overflow: hidden; overflow-wrap: anywhere; font-size: 14px; line-height: 1.4; }}
 @media (max-width: 520px) {{ main {{ margin-top: 32px; }} nav {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
 </style></head><body>{section}</body></html>"#,
-        background = theme.page_bg.to_hex(), text = theme.text.to_hex(), font = theme.ui_font_family.family_name(),
-        hover = theme.hover.to_hex(), accent = theme.accent.to_hex(), raised = theme.raised_bg.to_hex(), muted = theme.text_muted.to_hex(),
+        page_title = text!(browser::start_page),
+        background = theme.page_bg.to_hex(),
+        text = theme.text.to_hex(),
+        font = theme.ui_font_family.family_name(),
+        hover = theme.hover.to_hex(),
+        accent = theme.accent.to_hex(),
+        raised = theme.raised_bg.to_hex(),
+        muted = theme.text_muted.to_hex(),
     )
 }
 
 fn escape(value: &str) -> String {
-    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-        .replace('"', "&quot;").replace('\'', "&#39;")
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
 #[cfg(test)]

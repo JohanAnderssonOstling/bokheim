@@ -159,14 +159,11 @@ remains open. Subsequent WAL transactions can run alongside service readers.
 The report separates `reclassified_rows` and `reclassified_editions` from full
 metadata resolution in `resolved_rows`.
 
-The command supports legacy full databases without incremental state. The caller
-must supply the core used to build that database; the dump date and answer schema
-are checked, and any cached ISBN identity mismatch aborts the transaction. Once
-input identities exist, they must match exactly. Legacy provider/demand baselines
-start empty and current evidence is actually applied before saving their state.
-The known recipe 2-to-3 migration also uses this SQL maintenance path when running
-`build --previous`, on a copied database so its dated publication contract remains
-unchanged. Direct `reclassify` avoids that copy.
+Reclassification requires current recipe bookkeeping and the exact recorded
+immutable inputs. Incremental builds use a fresh full build when their previous
+inputs or recipe are incompatible.
+
+
 
 With identical inputs, OUT reuses the previous immutable file without resolving
 ISBNs or copying it. Changed builds publish a small cumulative update database
@@ -458,20 +455,11 @@ artwork is fetched from Audible. Confirmed bytes persist in `demand.sqlite` and
 `books_v5`. Successful client answers are immutable; popularity is captured
 when new book additions are enriched.
 Library clients send `needs_cover: false` for every book and look up/download
-missing artwork directly on the device: Google Books first, Open Library next,
+missing artwork directly on the device: Open Library by ISBN or title/author,
 and Audible by ASIN when recording artwork is needed. Bibliographic, recording
-and popularity enrichment still use `/v3/books`. Google Books artwork lookup
-uses plain title-and-author searches and verifies the returned editions. Open
-Library can still use ISBNs as well as title/author matching. Existing embedded
-or downloaded art is retained. Temporary Google service errors receive up to
-four attempts with increasing delays, within the lookup deadline.
-Native launchers can supply `BOKHEIM_GOOGLE_BOOKS_API_KEY` at runtime; native and
-browser builds can bundle it through the same build-time environment variable.
-The key is not sent to this server or stored in synchronized book metadata.
-Google quota failures permit Open Library fallback and defer another Google
-request for ten minutes. Direct browser image downloads remain subject to the
-provider's CORS headers; the tested Google Books image endpoint supplies no
-allow-origin header, so the browser falls back to Open Library.
+and popularity enrichment still use `/v3/books`. Existing embedded or downloaded
+art is retained. Direct browser image downloads remain subject to the provider's
+CORS headers.
 Older clients and catalog tools can still request server-side covers. Omitted
 `needs_cover` flags default to true for compatibility.
 Cached ISBN artwork is checked before external-download pacing; concurrent
@@ -515,10 +503,6 @@ snapshot without resolving the whole catalog again.
 `~/.config/bokheim/metadata-crawl.env`, containing only the LT key-file setting.
 Its `StateDirectory` owns provider.sqlite; the server's separate state directory
 owns demand.sqlite. Re-run the provisioner to install both release templates.
-
-For the one-time cache migration, use `tools/migrate-provider-caches.py` against
-copies of the former LC/LT databases. It copies completed results and LT quota
-state into a new provider database; the runtime has no cache-upgrade code.
 
 ## Verification
 

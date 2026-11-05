@@ -1,4 +1,5 @@
 //! Gutenberg acquisitions use the EPUB3 advertised by the selected book page.
+use crate::IngestError;
 use crate::{curation, get, manifest::SourceMetadata, store_book};
 use book_model::{from_text, unique_book_year, BookDetails, BookRecord, BookSubject, Identifier, Scheme, Scope};
 use reqwest::{blocking::Client, Url};
@@ -279,13 +280,13 @@ pub fn backfill_subjects(db: &Connection, path: &Path) -> Result<(), String> {
 
 /// Other sources keep their acquisition URLs. Gutenberg links always resolve
 /// through the book page, including when an OPDS feed offers an older EPUB.
-pub fn resolve_acquisition(http: &Client, url: &Url) -> Result<Acquisition, String> {
+pub fn resolve_acquisition(http: &Client, url: &Url) -> Result<Acquisition, IngestError> {
     if !is_gutenberg(url) {
         return Ok(Acquisition { epub: url.clone(), metadata: SourceMetadata::default() });
     }
-    let page = book_page(url).ok_or_else(|| format!("cannot identify the Gutenberg book page for {url}"))?;
-    let raw = String::from_utf8(get(http, &page)?).map_err(|error| format!("{page}: {error}"))?;
-    Ok(Acquisition { epub: page_epub3(&page, &raw)?, metadata: page_metadata(&raw)? })
+    let page = book_page(url).ok_or_else(|| IngestError::Source(format!("cannot identify the Gutenberg book page for {url}")))?;
+    let raw = String::from_utf8(get(http, &page)?).map_err(|error| IngestError::Source(format!("{page}: {error}")))?;
+    Ok(Acquisition { epub: page_epub3(&page, &raw).map_err(IngestError::Source)?, metadata: page_metadata(&raw).map_err(IngestError::Source)? })
 }
 
 pub fn add(dir: &Path, db: &Connection, http: &Client, value: &str) -> Result<(), String> {
@@ -502,7 +503,7 @@ mod tests {
         let mut entry = json!({"page_url":"https://www.gutenberg.org/ebooks/1497", "page_file":"page.html", "file":"book.epub", "file_url":"https://www.gutenberg.org/ebooks/1497.epub.images", "downloads":28375, "listing_url":"https://www.gutenberg.org/ebooks/bookshelf/691?sort_order=downloads", "observed_at":"2026-10-12T12:00:00Z"});
         let path = dir.path().join("manifest.json");
         fs::write(&path, json!([entry.clone()]).to_string()).unwrap();
-        let http = Client::new();
+        let http = http_response::blocking_client_builder().build().unwrap();
         assert!(import(dir.path(), &db, &http, &path).is_err());
         assert_eq!(db.query_row("SELECT count(*) FROM source_entry", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         entry["file_url"] = json!("https://www.gutenberg.org/ebooks/1497.epub3.images");
@@ -586,7 +587,7 @@ mod tests {
         record.book.subjects.push(BookSubject::new(None, "Curated subject", "manual:subject", None, None).unwrap());
         curation::set_record(&db, &hash, &record).unwrap();
         let metadata = page_metadata(BIBREC).unwrap();
-        let http = Client::new();
+        let http = http_response::blocking_client_builder().build().unwrap();
         for _ in 0..2 {
             assert_eq!(store_book(dir.path(), &db, &http, bytes, "book.epub", Vec::new(), None, Some(&metadata)).unwrap(), hash);
         }

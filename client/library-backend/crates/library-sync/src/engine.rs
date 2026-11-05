@@ -4,38 +4,47 @@ use library_replica::StatePublication;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Display;
-use std::future::Future;
-use std::pin::Pin;
-use sync_common::{ContentHash, LibraryId, MutationIssue, OpaquePublication, PullStateResponse, PushBatcher, PushMutationsResponse, ReplicaId, ReplicaSeq, SyncCursor};
+use sync_common::{BookId, LibraryId, MutationIssue, OpaquePublication, PullStateResponse, PushBatcher, PushMutationsResponse, ReplicaId, ReplicaSeq, SyncCursor};
+use sync_transport::SyncCredentials;
 
 pub type StoreError = Box<dyn Error + Send + Sync>;
 
-/// Local: stores borrow the library's single connection on its own thread.
-pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>> + 'a>>;
+/// Stores use the async database client; native futures can run on any executor.
+pub type StoreFuture<'a, T> = client_platform_runtime::executor::BoxedBackendFuture<'a, Result<T, StoreError>>;
+
+/// Everything needed before the first exchange, prepared by the storage owner.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum PreparedSync<T> {
+    RecoveryPending,
+    Ready { cursor: SyncCursor, outbox: T, mutations: Vec<StatePublication> },
+}
 
 /// Persistence required by state synchronization. Implementations own their
 /// transaction semantics; the engine owns protocol and recovery policy.
 pub trait SyncStore {
     type Outbox;
+    /// Check recovery before freezing the outbox; include its first bounded page.
+    fn prepare_sync(&self) -> StoreFuture<'_, PreparedSync<Self::Outbox>>;
     /// Prepare once. Pages are unique by state identity and globally ordered
     /// with book lifecycles first; newer edits stay outside this scan.
     fn prepare_outbox(&self) -> StoreFuture<'_, Self::Outbox>;
-    fn cursor_recovery_pending(&self) -> StoreFuture<'_, bool>;
     fn begin_cursor_recovery(&self) -> StoreFuture<'_, ()>;
     fn complete_cursor_recovery(&self) -> StoreFuture<'_, usize>;
-    fn pull_cursor(&self) -> StoreFuture<'_, SyncCursor>;
     fn pending_mutations<'a>(&'a self, scan: &'a mut Self::Outbox) -> StoreFuture<'a, Vec<StatePublication>>;
     fn record_mutation_issues(&self, issues: &[MutationIssue]) -> StoreFuture<'_, ()>;
     fn acknowledge_mutations(&self, mutation_ids: &[ReplicaSeq]) -> StoreFuture<'_, ()>;
     /// Persists validated push acknowledgments and a pull page. Implementations
     /// may share a commit, but must retain acknowledgments if applying pull fails.
-    fn apply_exchange_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> StoreFuture<'_, ()>;
+    fn apply_exchange_response(&self, ids: Vec<ReplicaSeq>, page: PullStateResponse) -> StoreFuture<'_, ()>;
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, thiserror::Error)]
 pub enum SyncError {
+    #[error("synchronization authentication is required")]
     AuthenticationRequired,
+    #[error("the synchronization cursor was rejected after recovery")]
     CursorRejected,
+    #[error("{0}")]
     Failed(String),
 }
 
@@ -44,18 +53,6 @@ impl SyncError {
         Self::Failed(error.to_string())
     }
 }
-
-impl Display for SyncError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
-            Self::CursorRejected => formatter.write_str("the synchronization cursor was rejected after recovery"),
-            Self::Failed(message) => message.fmt(formatter),
-        }
-    }
-}
-
-impl Error for SyncError {}
 
 impl From<sync_transport::SyncRequestError> for SyncError {
     fn from(error: sync_transport::SyncRequestError) -> Self {
@@ -79,7 +76,7 @@ struct Acknowledgements {
 
 struct SubmittedBatch {
     ids: Vec<ReplicaSeq>,
-    creations: Vec<(ReplicaSeq, ContentHash)>,
+    creations: Vec<(ReplicaSeq, BookId)>,
 }
 
 impl SubmittedBatch {
@@ -105,7 +102,7 @@ struct Outgoing<T> {
     scan: Option<T>,
     page: std::vec::IntoIter<StatePublication>,
     batches: PushBatcher,
-    deferred: HashSet<ContentHash>,
+    deferred: HashSet<BookId>,
 }
 
 impl<T> Outgoing<T> {
@@ -119,7 +116,7 @@ pub struct SyncEngine<'a, S: SyncStore> {
     http_client: &'a reqwest::Client,
     library_id: LibraryId,
     replica_id: ReplicaId,
-    credentials: Option<sync_transport::SyncCredentials>,
+    credentials: Option<SyncCredentials>,
 }
 
 pub struct SyncEngineConfig<'a, S: SyncStore> {
@@ -127,7 +124,7 @@ pub struct SyncEngineConfig<'a, S: SyncStore> {
     pub http_client: &'a reqwest::Client,
     pub library_id: LibraryId,
     pub replica_id: ReplicaId,
-    pub credentials: Option<sync_transport::SyncCredentials>,
+    pub credentials: Option<SyncCredentials>,
 }
 
 impl<'a, S: SyncStore> SyncEngine<'a, S> {
@@ -142,10 +139,12 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         let mut result = SyncOutcome::default();
         loop {
             let requested = self.next_push_batch(&mut remaining, &mut result).await?;
-            if requested.is_empty() { break; }
+            if requested.is_empty() {
+                break;
+            }
             let submitted = SubmittedBatch::new(&requested);
             let credentials = self.current_credentials()?;
-            let response = sync_transport::exchange_changes(self.http_client, &credentials, self.library_id, self.replica_id, requested, SyncCursor::default()).await?;
+            let response = sync_transport::exchange_changes(self.http_client, credentials, self.library_id, self.replica_id, requested, SyncCursor::default()).await?;
             let acknowledgements = self.prepare_acknowledgements(&submitted, &response.push).await?;
             self.acknowledge_completed(&acknowledgements.completed).await?;
             result.mutation_issues.extend(acknowledgements.issues);
@@ -155,12 +154,18 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
     }
 
     pub async fn synchronize(&self) -> Result<SyncOutcome, SyncError> {
-        if self.store.cursor_recovery_pending().await.map_err(SyncError::failed)? {
-            self.resume_cursor_recovery().await?;
-        }
         for attempt in 0..2 {
-            let cursor = self.store.pull_cursor().await.map_err(SyncError::failed)?;
-            match self.exchange_events_with_server(cursor).await {
+            let mut prepared = self.store.prepare_sync().await.map_err(SyncError::failed)?;
+            if matches!(prepared, PreparedSync::RecoveryPending) {
+                self.resume_cursor_recovery().await?;
+                prepared = self.store.prepare_sync().await.map_err(SyncError::failed)?;
+            }
+            let PreparedSync::Ready { cursor, outbox, mutations } = prepared else {
+                return Err(SyncError::failed("cursor recovery did not clear its pending marker"));
+            };
+            let mut remaining = Outgoing::new(if mutations.is_empty() { None } else { Some(outbox) });
+            remaining.page = mutations.into_iter();
+            match self.exchange_prepared(cursor, remaining).await {
                 Ok(result) => return Ok(result),
                 Err(SyncError::CursorRejected) if attempt == 0 => {
                     self.begin_cursor_recovery().await?;
@@ -181,20 +186,19 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         let mut result = SyncOutcome::default();
         let mut remaining = Outgoing::new(None);
         let credentials = self.current_credentials()?;
-        self.exchange_until_idle(&credentials, SyncCursor::default(), &mut remaining, &mut result).await?;
+        self.exchange_until_idle(credentials, SyncCursor::default(), &mut remaining, &mut result).await?;
         let inserted = self.store.complete_cursor_recovery().await.map_err(SyncError::failed)?;
         log::warn!("Recovered a rejected synchronization cursor and queued {inserted} canonical cells for republishing");
         Ok(())
     }
 
-    pub async fn exchange_events_with_server(&self, starting_cursor: SyncCursor) -> Result<SyncOutcome, SyncError> {
-        let mut trace = sync_transport::PerformanceTrace::new("sync_exchange", "load_and_batch_outbox");
+    async fn exchange_prepared(&self, starting_cursor: SyncCursor, mut remaining: Outgoing<S::Outbox>) -> Result<SyncOutcome, SyncError> {
+        let mut trace = sync_transport::PerformanceTrace::new("sync_exchange", "prepare_request");
         log::debug!(target: "sync_performance", "trace_id={} library_id={} initial_cursor={:?} from_zero={}", trace.id(), self.library_id, starting_cursor, starting_cursor == SyncCursor::default());
-        let mut remaining = self.prepare_outbox().await?;
         let mut result = SyncOutcome::default();
         let credentials = self.current_credentials()?;
         trace.phase("pages");
-        self.exchange_until_idle(&credentials, starting_cursor, &mut remaining, &mut result).await?;
+        self.exchange_until_idle(credentials, starting_cursor, &mut remaining, &mut result).await?;
         trace.finish(true);
         Ok(result)
     }
@@ -239,7 +243,7 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         Ok(())
     }
 
-    async fn exchange_until_idle(&self, credentials: &sync_transport::SyncCredentials, mut cursor: SyncCursor, remaining: &mut Outgoing<S::Outbox>, result: &mut SyncOutcome) -> Result<(), SyncError> {
+    async fn exchange_until_idle(&self, credentials: &SyncCredentials, mut cursor: SyncCursor, remaining: &mut Outgoing<S::Outbox>, result: &mut SyncOutcome) -> Result<(), SyncError> {
         let mut page_number = 0_u64;
         let mut requested = self.next_push_batch(remaining, result).await?;
         loop {
@@ -262,7 +266,7 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
             }
             cursor = response.pull.next_cursor;
             trace.phase("apply_local_transaction");
-            self.store.apply_exchange_response(&acknowledgements.completed, &response.pull).await.map_err(SyncError::failed)?;
+            self.store.apply_exchange_response(acknowledgements.completed, response.pull).await.map_err(SyncError::failed)?;
             submitted.defer_rejected_fields(remaining, &response.push);
             trace.finish(true);
             requested = self.next_push_batch(remaining, result).await?;
@@ -272,8 +276,8 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         }
     }
 
-    fn current_credentials(&self) -> Result<sync_transport::SyncCredentials, SyncError> {
-        self.credentials.clone().ok_or(SyncError::AuthenticationRequired)
+    fn current_credentials(&self) -> Result<&SyncCredentials, SyncError> {
+        self.credentials.as_ref().ok_or(SyncError::AuthenticationRequired)
     }
 
     async fn record_issues(&self, issues: &[MutationIssue]) -> Result<(), SyncError> {

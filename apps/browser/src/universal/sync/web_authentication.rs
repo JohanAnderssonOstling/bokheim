@@ -1,5 +1,7 @@
 //! The browser owns the visible authentication form so autofill and keyboard
 //! focus operate on real fields. Credentials go straight to the existing client.
+use ui_text::text;
+
 use super::SyncPage;
 use gpui::Context;
 use wasm_bindgen::prelude::*;
@@ -7,7 +9,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(module = "/web/authentication.js")]
 extern "C" {
     #[wasm_bindgen(js_name = openAuthentication, catch)]
-    fn open_authentication(theme: &str, minimum: u32, submit: &js_sys::Function) -> Result<JsValue, JsValue>;
+    fn open_authentication(theme: &str, minimum: u32, submit: &js_sys::Function, resend_cooldown_seconds: u32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = closeAuthentication)]
     fn close_authentication(panel: &JsValue);
     #[wasm_bindgen(js_name = registerAuthenticationFont, catch)]
@@ -16,7 +18,7 @@ extern "C" {
 
 pub(super) struct WebAuthentication {
     panel: JsValue,
-    _submit: Closure<dyn FnMut(String, String, String, String) -> js_sys::Promise>,
+    _submit: Closure<dyn FnMut(String) -> js_sys::Promise>,
 }
 impl Drop for WebAuthentication {
     fn drop(&mut self) {
@@ -27,12 +29,14 @@ impl Drop for WebAuthentication {
 impl SyncPage {
     pub(super) fn open_web_authentication(&mut self, cx: &mut Context<Self>) {
         let events = self.events.clone();
-        let submit = Closure::new(move |action: String, email: String, secret: String, token: String| {
+        // The form sends one JSON request; never log it, it carries credentials.
+        let submit = Closure::own_aborting(move |request: String| {
             let events = events.clone();
             wasm_bindgen_futures::future_to_promise(async move {
+                let request = serde_json::from_str::<super::AuthenticationRequest>(&request).map_err(|_| JsValue::from_str(text!(account::could_not_read_the_sign_in_form_reload_the_page_and_try)))?;
                 let (reply, result) = async_channel::bounded(1);
-                events.try_send(super::SyncEvent::Authenticate { action, email, secret, token, reply }).map_err(|_| JsValue::from_str("The application window is closed"))?;
-                result.recv().await.map_err(|_| JsValue::from_str("The application window is closed"))?.map_err(|error| JsValue::from_str(&error))?;
+                events.try_send(super::SyncEvent::Authenticate { request, reply }).map_err(|_| JsValue::from_str("The application window is closed"))?;
+                result.recv().await.map_err(|_| JsValue::from_str("The application window is closed"))?.map_err(JsValue::from_str)?;
                 Ok(JsValue::UNDEFINED)
             })
         });
@@ -56,12 +60,12 @@ impl SyncPage {
         // Dispose an earlier panel before opening another modal; never leave
         // duplicate credential forms for password managers to discover.
         self.web_authentication = None;
-        match open_authentication(&theme.to_string(), account_contract::PASSWORD_MIN_CHARACTERS as u32, submit.as_ref().unchecked_ref()) {
+        match open_authentication(&theme.to_string(), account_contract::PASSWORD_MIN_CHARACTERS as u32, submit.as_ref().unchecked_ref(), account_contract::EMAIL_RESEND_COOLDOWN_SECONDS) {
             Ok(panel) => {
                 self.web_authentication = Some(WebAuthentication { panel, _submit: submit });
             }
             Err(_) => {
-                self.error = Some("Could not open the sign-in form".into());
+                self.error = Some(text!(account::could_not_open_the_sign_in_form).into());
                 cx.notify();
             }
         }

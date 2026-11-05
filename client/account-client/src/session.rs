@@ -9,18 +9,26 @@ use web_time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug)]
 pub enum AuthError {
     Http(reqwest::Error),
+    /// The native HTTP I/O runtime could not be initialized.
+    Runtime(std::io::Error),
     Wire(WireError),
     Url(ParseError),
     InvalidData(String),
+    PasswordTooLong,
+    /// No usable session: none is stored, or it can no longer be refreshed.
+    SignInRequired(&'static str),
 }
 
 impl fmt::Display for AuthError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Http(error) => error.fmt(formatter),
+            Self::Runtime(error) => write!(formatter, "could not initialize HTTP runtime: {error}"),
             Self::Wire(error) => error.fmt(formatter),
             Self::Url(error) => error.fmt(formatter),
             Self::InvalidData(message) => write!(formatter, "invalid authentication data: {message}"),
+            Self::PasswordTooLong => formatter.write_str("password exceeds the maximum length"),
+            Self::SignInRequired(reason) => write!(formatter, "sign-in required: {reason}"),
         }
     }
 }
@@ -29,9 +37,10 @@ impl std::error::Error for AuthError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Http(error) => Some(error),
+            Self::Runtime(error) => Some(error),
             Self::Wire(error) => Some(error),
             Self::Url(error) => Some(error),
-            Self::InvalidData(_) => None,
+            Self::InvalidData(_) | Self::PasswordTooLong | Self::SignInRequired(_) => None,
         }
     }
 }
@@ -39,6 +48,10 @@ impl std::error::Error for AuthError {
 impl AuthError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::Http(error) if error.status() == Some(StatusCode::NOT_FOUND))
+    }
+
+    pub fn is_upgrade_required(&self) -> bool {
+        matches!(self, Self::Http(error) if error.status() == Some(StatusCode::UPGRADE_REQUIRED))
     }
 
     pub fn is_unauthorized(&self) -> bool {
@@ -77,9 +90,9 @@ pub struct Session {
     user_id: String,
     email: String,
     token: String,
-    expires_at: Option<i64>,
-    refresh_token: Option<String>,
-    refresh_expires_at: Option<i64>,
+    expires_at: i64,
+    refresh_token: String,
+    refresh_expires_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -88,12 +101,9 @@ struct StoredSession {
     user_id: String,
     email: String,
     token: String,
-    #[serde(deserialize_with = "Option::deserialize")]
-    expires_at: Option<i64>,
-    #[serde(deserialize_with = "Option::deserialize")]
-    refresh_token: Option<String>,
-    #[serde(deserialize_with = "Option::deserialize")]
-    refresh_expires_at: Option<i64>,
+    expires_at: i64,
+    refresh_token: String,
+    refresh_expires_at: i64,
 }
 
 impl fmt::Debug for Session {
@@ -105,7 +115,7 @@ impl fmt::Debug for Session {
             .field("email", &self.email)
             .field("token", &"[redacted]")
             .field("expires_at", &self.expires_at)
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[redacted]"))
+            .field("refresh_token", &"[redacted]")
             .field("refresh_expires_at", &self.refresh_expires_at)
             .finish()
     }
@@ -114,7 +124,7 @@ impl fmt::Debug for Session {
 impl<'de> Deserialize<'de> for Session {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let stored = StoredSession::deserialize(deserializer)?;
-        Self::try_new_with_tokens(stored.server_url, stored.user_id, stored.email, stored.token, stored.expires_at, stored.refresh_token, stored.refresh_expires_at).map_err(serde::de::Error::custom)
+        Self::try_new(stored.server_url, stored.user_id, stored.email, stored.token, stored.expires_at, stored.refresh_token, stored.refresh_expires_at).map_err(serde::de::Error::custom)
     }
 }
 
@@ -143,32 +153,22 @@ fn validate_token(value: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
-fn expiry_within(expires_at: Option<i64>, seconds: i64) -> bool {
+fn expiry_within(expires_at: i64, seconds: i64) -> bool {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs() as i64).unwrap_or(i64::MAX);
-    expires_at.is_some_and(|expires_at| expires_at <= now.saturating_add(seconds.max(0)))
+    expires_at <= now.saturating_add(seconds.max(0))
 }
 
 impl Session {
-    pub fn try_new(server_url: Url, user_id: String, email: String, token: String) -> Result<Self, AuthError> {
-        Self::try_new_with_tokens(server_url, user_id, email, token, None, None, None)
-    }
-
-    pub fn try_new_with_tokens(server_url: Url, user_id: String, email: String, token: String, expires_at: Option<i64>, refresh_token: Option<String>, refresh_expires_at: Option<i64>) -> Result<Self, AuthError> {
+    pub fn try_new(server_url: Url, user_id: String, email: String, token: String, expires_at: i64, refresh_token: String, refresh_expires_at: i64) -> Result<Self, AuthError> {
         validate_identity(&user_id, "user id")?;
         validate_email(&email)?;
         validate_token(&token)?;
-        if expires_at.is_some_and(|expires_at| expires_at <= 0) {
+        if expires_at <= 0 {
             return Err(AuthError::InvalidData("session expiry must be a positive Unix timestamp".to_string()));
         }
-        match (&refresh_token, refresh_expires_at) {
-            (Some(refresh_token), Some(refresh_expires_at)) => {
-                validate_token(refresh_token)?;
-                if refresh_expires_at <= 0 {
-                    return Err(AuthError::InvalidData("refresh expiry must be a positive Unix timestamp".to_string()));
-                }
-            }
-            (None, None) => {}
-            _ => return Err(AuthError::InvalidData("refresh token and expiry must be stored together".to_string())),
+        validate_token(&refresh_token)?;
+        if refresh_expires_at <= 0 {
+            return Err(AuthError::InvalidData("refresh expiry must be a positive Unix timestamp".to_string()));
         }
         Ok(Self { server_url, user_id, email, token, expires_at, refresh_token, refresh_expires_at })
     }
@@ -181,6 +181,11 @@ impl Session {
         &self.user_id
     }
 
+    /// Stable account key used by persisted library ownership and sync state.
+    pub fn identity(&self) -> String {
+        format!("{}|{}", self.server_url, self.user_id)
+    }
+
     pub fn email(&self) -> &str {
         &self.email
     }
@@ -189,15 +194,15 @@ impl Session {
         &self.token
     }
 
-    pub fn expires_at(&self) -> Option<i64> {
+    pub fn expires_at(&self) -> i64 {
         self.expires_at
     }
 
-    pub fn refresh_token(&self) -> Option<&str> {
-        self.refresh_token.as_deref()
+    pub fn refresh_token(&self) -> &str {
+        &self.refresh_token
     }
 
-    pub fn refresh_expires_at(&self) -> Option<i64> {
+    pub fn refresh_expires_at(&self) -> i64 {
         self.refresh_expires_at
     }
 
@@ -218,7 +223,7 @@ mod tests {
 
     #[test]
     fn debug_redacts_token_and_expiry_is_validated() {
-        let session = Session::try_new(Url::parse("https://example.com").unwrap(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into()).unwrap();
+        let session = Session::try_new(Url::parse("https://example.com").unwrap(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into(), i64::MAX - 1, "r".repeat(43), i64::MAX).unwrap();
         assert!(!format!("{session:?}").contains(TEST_TOKEN));
         let restored: Session = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
         assert_eq!(restored.server_url(), session.server_url());

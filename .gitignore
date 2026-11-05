@@ -117,6 +117,7 @@ venv/
 
 # Local books, large test assets, and external reference checkouts
 *.epub
+!/client/book-content/tests/fixtures/annotation-toc.epub
 !/client/library-backend/crates/book-inspection/tests/fixtures/*.epub
 /TestData/
 /client/app/tests/test_folder/
@@ -136,3 +137,13 @@ venv/
 # Verified PDFium dependency cache and prepared platform inputs
 /.pdfium-cache/
 /.pdfium/
+/.linux-toolchain/
+
+# Generated output from in-memory annotation databases.
+:memory:.annotation-export-baselines/
+
+# Generated JVM heap dumps.
+*.hprof
+
+# Nested native speech compiler cache.
+/vendor/sherpa-onnx-sys/.tmp/

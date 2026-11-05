@@ -3,12 +3,12 @@ use std::rc::Rc;
 use gpui::{
     App, ClickEvent, ElementId, Empty, Hsla, InteractiveElement, IntoElement, ParentElement as _,
     RenderOnce, Role, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
-    div, prelude::FluentBuilder as _, px, rems, transparent_white,
+    div, prelude::FluentBuilder as _, px, transparent_white,
 };
 
 use crate::{
     ActiveTheme as _, Colorize, Icon, IconName, Sizable, Size, StyledExt, h_flex,
-    text::{Text, TextViewStyle},
+    text::Text,
 };
 
 /// The variant of the [`Alert`].
@@ -226,10 +226,7 @@ impl RenderOnce for Alert {
                                     )
                                 })
                             })
-                            .child(
-                                self.message
-                                    .style(TextViewStyle::default().paragraph_gap(rems(0.2))),
-                            ),
+                            .child(self.message),
                     ),
             )
             .when_some(self.on_close, |this, on_close| {

@@ -1,6 +1,11 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
+use ui_text::text;
+
 #[cfg(not(target_arch = "wasm32"))]
 use library_backend::library::AudioStreamControl;
 use std::cell::Cell;
+use std::rc::Rc;
 mod dock;
 mod session;
 pub use dock::{AudiobookDock, DockAction};
@@ -8,9 +13,12 @@ pub use session::{ActiveAudiobook, PlaybackSession};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use gpui::{App, Bounds, ClickEvent, Context, DispatchPhase, Entity, Image, ImageFormat, IntoElement, MouseButton, MouseMoveEvent, Pixels, Render, SharedString, Styled, Window, canvas, div, prelude::*, px};
+use gpui::{App, Bounds, ClickEvent, Context, DispatchPhase, Entity, Image, ImageFormat, IntoElement, MouseButton, MouseMoveEvent, Pixels, Render, SharedString, Styled, Window, canvas, div, prelude::*, px, rems};
+use gpui_component::{Placement, WindowExt as _};
 use web_time::Instant;
 
 // Stage boundaries also appear on early returns, making failed opens visible
@@ -37,14 +45,19 @@ mod audio_engine;
 #[path = "android_audio.rs"]
 pub mod android;
 
+// The service bridge and source-reader tests need no Android runtime.
+#[cfg(all(test, not(target_arch = "wasm32"), not(target_os = "android")))]
+#[path = "android_audio.rs"]
+mod android_audio_tests;
+
 #[cfg(target_os = "android")]
 use android::AudioEngine;
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 use audio_engine::AudioEngine;
 #[cfg(target_arch = "wasm32")]
 mod web_audio;
-use book_model::AudiobookChapter;
-use gpui_component::menu::PopupMenu;
+use book_model::{AudiobookChapter, BookTocEntry, ChapterReadStatus, audiobook_toc_target};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::{ElementExt, Icon, IconName};
 use library_backend::LibraryClient;
 use library_backend::ResolvedBook;
@@ -53,7 +66,52 @@ use library_model::BookLocator;
 use web_audio::AudioEngine;
 
 const POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(5);
-type PlaybackPosition = (Duration, f32);
+#[derive(Debug, PartialEq)]
+enum PlaybackPosition {
+    Position { position: Duration, progress: f32 },
+    ResetReadStatus { target: Option<String> },
+}
+
+impl PlaybackPosition {
+    fn new(position: Duration, progress: f32) -> Self {
+        Self::Position { position, progress }
+    }
+}
+
+/// Recover small playback-state records after a worker unwinds. Source readers
+/// use fallible locks instead: a poisoned reader must not be reused.
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_state<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(error) => {
+            log::error!("Recovering poisoned audiobook state");
+            let guard = error.into_inner();
+            state.clear_poison();
+            guard
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod lock_tests {
+    use super::lock_state;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Mutex;
+
+    #[test]
+    fn playback_state_remains_available_after_a_worker_unwinds() {
+        let state = Mutex::new(42);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = state.lock().unwrap();
+            panic!("worker failed while holding playback state");
+        }));
+        assert!(state.is_poisoned());
+        *lock_state(&state) += 1;
+        assert!(!state.is_poisoned());
+        assert_eq!(*lock_state(&state), 43);
+    }
+}
 /// How far the transport's two skip controls move. Back is shorter than
 /// forward: it is used to hear something again.
 const SKIP_BACK_SECONDS: f64 = -15.0;
@@ -71,9 +129,8 @@ fn browser_position_update(seconds: f64, fraction: f64) -> Option<PlaybackPositi
         return None;
     }
     let position = Duration::try_from_secs_f64(seconds).ok()?;
-    Some((position, (fraction.clamp(0.0, 1.0) * 100.0) as f32))
+    Some(PlaybackPosition::new(position, (fraction.clamp(0.0, 1.0) * 100.0) as f32))
 }
-
 
 #[cfg(not(target_arch = "wasm32"))]
 trait ReadSeek: Read + Seek + Send + Sync {}
@@ -130,17 +187,23 @@ pub enum SleepPlan {
 
 impl SleepPlan {
     pub fn deadline(self) -> Option<Instant> {
-        match self { Self::Until(deadline) => Some(deadline), Self::EndOfChapter(_) => None }
+        match self {
+            Self::Until(deadline) => Some(deadline),
+            Self::EndOfChapter(_) => None,
+        }
     }
 
     pub fn chapter(self) -> Option<usize> {
-        match self { Self::EndOfChapter(chapter) => Some(chapter), Self::Until(_) => None }
+        match self {
+            Self::EndOfChapter(chapter) => Some(chapter),
+            Self::Until(_) => None,
+        }
     }
 
     pub fn label(self, now: Instant) -> SharedString {
         match self {
-            Self::Until(deadline) => format!("{} min", deadline.saturating_duration_since(now).as_secs().div_ceil(60)).into(),
-            Self::EndOfChapter(_) => "Chapter".into(),
+            Self::Until(deadline) => format!(text!(audiobook::min), deadline.saturating_duration_since(now).as_secs().div_ceil(60)).into(),
+            Self::EndOfChapter(_) => text!(audiobook::chapter).into(),
         }
     }
 }
@@ -170,9 +233,9 @@ impl SleepChoice {
 
     fn label(self) -> SharedString {
         match self {
-            SleepChoice::Minutes(minutes) => format!("{minutes} minutes").into(),
-            SleepChoice::EndOfChapter => "End of chapter".into(),
-            SleepChoice::Off => "Off".into(),
+            SleepChoice::Minutes(minutes) => format!(text!(audiobook::minutes), minutes = minutes).into(),
+            SleepChoice::EndOfChapter => text!(audiobook::end_of_chapter).into(),
+            SleepChoice::Off => text!(common::off).into(),
         }
     }
 
@@ -187,7 +250,7 @@ impl SleepChoice {
 
 /// What a running sleep timer is waiting for, heading its menu.
 fn sleep_status(remaining: &str) -> String {
-    if remaining == "Chapter" { "Until end of chapter".to_owned() } else { format!("{remaining} remaining") }
+    if remaining == text!(audiobook::chapter) { text!(audiobook::until_end_of_chapter).to_owned() } else { format!(text!(audiobook::remaining), remaining = remaining) }
 }
 
 /// A playback menu's contents, shared by the wide dropdown and the compact
@@ -197,6 +260,7 @@ pub struct PlaybackMenu<T> {
     title: &'static str,
     status: Option<String>,
     choices: Vec<PlaybackChoice<T>>,
+    presets: bool,
 }
 
 struct PlaybackChoice<T> {
@@ -204,11 +268,16 @@ struct PlaybackChoice<T> {
     label: SharedString,
     checked: bool,
     value: T,
+    trailing: Option<SharedString>,
+    short_label: Option<SharedString>,
 }
 
 pub fn speed_menu(current_rate: f64) -> PlaybackMenu<f64> {
-    let choices = PLAYBACK_SPEEDS.into_iter().map(|rate| PlaybackChoice { id: format!("speed-{rate}").into(), label: format_playback_rate(rate).into(), checked: same_rate(rate, current_rate), value: rate }).collect();
-    PlaybackMenu { id: "playback-speed", title: "Playback speed", status: None, choices }
+    let choices = PLAYBACK_SPEEDS
+        .into_iter()
+        .map(|rate| PlaybackChoice { id: format!("speed-{rate}").into(), label: format_playback_rate(rate).into(), checked: same_rate(rate, current_rate), value: rate, trailing: None, short_label: None })
+        .collect();
+    PlaybackMenu { id: "playback-speed", title: text!(common::playback_speed), status: None, choices, presets: true }
 }
 
 pub fn sleep_menu(remaining: Option<&str>) -> PlaybackMenu<SleepChoice> {
@@ -217,47 +286,163 @@ pub fn sleep_menu(remaining: Option<&str>) -> PlaybackMenu<SleepChoice> {
 
 /// Reader narration can end at a PDF page instead of an audio chapter.
 pub fn sleep_menu_for_section(remaining: Option<&str>, section: &str) -> PlaybackMenu<SleepChoice> {
-    let choices = SleepChoice::offered(remaining.is_some()).map(|choice| PlaybackChoice {
-        id: choice.id(),
-        label: if matches!(choice, SleepChoice::EndOfChapter) { format!("End of {section}").into() } else { choice.label() },
-        checked: false,
-        value: choice,
-    }).collect();
-    let status = remaining.map(|remaining| if remaining == "Chapter" { format!("Until end of {section}") } else { sleep_status(remaining) });
-    PlaybackMenu { id: "sleep", title: "Sleep timer", status, choices }
-}
-
-fn chapters_menu(chapters: &[AudiobookChapter], active: usize) -> PlaybackMenu<usize> {
-    let choices = chapters.iter().enumerate().map(|(index, chapter)| PlaybackChoice { id: format!("chapter-{index}").into(), label: chapter_display_title(&chapter.title).into(), checked: index == active, value: index }).collect();
-    PlaybackMenu { id: "chapters", title: "Chapters", status: None, choices }
+    let choices = SleepChoice::offered(remaining.is_some())
+        .map(|choice| {
+            let short_label = match choice {
+                SleepChoice::Minutes(minutes) => format!("{minutes}m"),
+                SleepChoice::EndOfChapter => text!(audiobook::end).into(),
+                SleepChoice::Off => text!(common::off).into(),
+            };
+            PlaybackChoice {
+                id: choice.id(),
+                label: if matches!(choice, SleepChoice::EndOfChapter) { format!(text!(audiobook::end_of), section = section).into() } else { choice.label() },
+                checked: false,
+                value: choice,
+                trailing: None,
+                short_label: Some(short_label.into()),
+            }
+        })
+        .collect();
+    let status = remaining.map(|remaining| if remaining == text!(audiobook::chapter) { format!(text!(audiobook::until_end_of), section = section) } else { sleep_status(remaining) });
+    PlaybackMenu { id: "sleep", title: text!(common::sleep_timer), status, choices, presets: true }
 }
 
 impl<T: Copy + 'static> PlaybackMenu<T> {
+    pub fn new(id: &'static str, title: &'static str, choices: impl IntoIterator<Item = (T, SharedString, bool)>) -> Self {
+        let choices = choices.into_iter().enumerate().map(|(index, (value, label, checked))| PlaybackChoice { id: format!("{id}-{index}").into(), label, checked, value, trailing: None, short_label: None }).collect();
+        Self { id, title, status: None, choices, presets: false }
+    }
+
+    pub fn title(mut self, title: &'static str) -> Self {
+        self.title = title;
+        self
+    }
+
+    /// A single horizontal row of equal square presets. Larger text can scroll
+    /// the row horizontally instead of shrinking or wrapping the controls.
+    fn preset_row<H: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(&self, choose: impl Fn(usize, T) -> H, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
+        let buttons = self.choices.iter().enumerate().map(|(index, choice)| {
+            let label = choice.short_label.clone().unwrap_or_else(|| choice.label.clone());
+            let button = ui_components::playback_secondary_button(ui_components::base_button(choice.id.clone()).ghost())
+                .text_color(theme.text)
+                .bg(theme.page_bg)
+                .border_1()
+                .border_color(if choice.checked { theme.accent } else { theme.rule })
+                .tooltip(choice.label.clone())
+                .debug_selector({
+                    let id = choice.id.to_string();
+                    move || id.clone()
+                })
+                .child(div().text_size(rems(ui_components::TEXT_XS)).whitespace_nowrap().child(label));
+            ui_components::selectable_button(button, choice.checked, theme).on_click(choose(index, choice.value))
+        });
+        div()
+            .id(SharedString::from(format!("{}-presets", self.id)))
+            .w_full()
+            .flex_none()
+            .p(px(ui_components::SPACE_MD))
+            .overflow_x_scroll()
+            .child(ui_components::row(0.0).w_full().min_w(rems(self.choices.len() as f32 * (ui_components::PLAYBACK_SECONDARY_SIZE_REM + 0.25) + 0.25)).justify_evenly().children(buttons))
+            .into_any_element()
+    }
+
+    /// The window owns focus, dismissal and layering, so sheets opened from a
+    /// short dock cover the reader and consume native Back before navigation.
+    pub fn open_sheet(self, window: &mut Window, cx: &mut App, choose: impl Fn(T, &mut App) + 'static) {
+        let choose = Rc::new(choose);
+        window.open_sheet_at(Placement::Bottom, cx, move |sheet, window, cx| {
+            let theme = ui_components::browser_theme(cx);
+            let safe_area = window.insets().effective();
+            let rem = f32::from(window.rem_size());
+            let usable_height = (window.viewport_size().height - safe_area.top).max(px(0.0));
+            let row_height = (ui_components::TEXT_MD * rem * 1.5 + ui_components::SPACE_SM * 2.0).max(48.0);
+            let header_height = (ui_components::TEXT_MD * rem * 1.5).max(24.0) + 16.0;
+            let status_height = if !self.presets && self.status.is_some() { ui_components::TEXT_XS * rem * 1.5 + 10.0 } else { 0.0 };
+            let choices_height = if self.presets { ui_components::PLAYBACK_SECONDARY_SIZE_REM * rem + ui_components::SPACE_MD * 2.0 } else { row_height * self.choices.len() as f32 };
+            let height = (header_height + choices_height + status_height + f32::from(safe_area.bottom) + 1.0).min(f32::from(usable_height) * 0.8);
+            let content = if self.presets {
+                self.preset_row(
+                    |_, value| {
+                        let choose = choose.clone();
+                        move |_, window, cx| {
+                            cx.stop_propagation();
+                            window.close_sheet(cx);
+                            choose(value, cx);
+                        }
+                    },
+                    theme,
+                )
+            } else {
+                let rows = self.choices.iter().map(|choice| {
+                    let choose = choose.clone();
+                    let value = choice.value;
+                    let label = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_components::SPACE_SM))
+                        .child(div().flex_1().min_w_0().child(choice.label.clone()))
+                        .when_some(choice.trailing.clone(), |row, amount| row.child(ui_components::bottom_sheet_row_caption(amount, choice.checked, theme).flex_none()));
+                    ui_components::bottom_sheet_row(choice.id.clone(), label, choice.checked, theme)
+                        .debug_selector({
+                            let id = choice.id.to_string();
+                            move || id.clone()
+                        })
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            window.close_sheet(cx);
+                            choose(value, cx);
+                        })
+                });
+                ui_components::column(0.0).children(self.status.as_ref().map(|status| ui_components::bottom_sheet_section(status.clone(), theme))).children(rows).into_any_element()
+            };
+            sheet
+                .title(div().text_size(rems(ui_components::TEXT_MD)).child(self.title))
+                .size(px(height))
+                .resizable(false)
+                .p_0()
+                .pl(safe_area.left)
+                .pr(safe_area.right)
+                .bg(theme.page_bg)
+                .border_color(theme.border)
+                .child(div().w_full().flex().flex_col().border_t_1().border_color(theme.rule).child(content).child(div().h(safe_area.bottom).flex_none()))
+        });
+    }
+
     pub fn dropdown(self, mut menu: PopupMenu, choose: impl Fn(T, &mut App) + Clone + 'static) -> PopupMenu {
+        if self.presets {
+            let selected = Rc::new(Cell::new(self.choices.iter().position(|choice| choice.checked).unwrap_or(0)));
+            let render_selected = selected.clone();
+            let choices = Rc::new(self);
+            let activate = choices.clone();
+            // The child records the clicked preset. The enclosing menu item
+            // applies it and uses the popup's normal selection dismissal.
+            return menu.min_w(px(320.0)).item(
+                PopupMenuItem::element(move |_, cx| {
+                    let selected = render_selected.clone();
+                    choices.preset_row(
+                        move |index, _| {
+                            let selected = selected.clone();
+                            move |_, _, _| selected.set(index)
+                        },
+                        ui_components::browser_theme(cx),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    if let Some(choice) = activate.choices.get(selected.get()) {
+                        choose(choice.value, cx);
+                    }
+                }),
+            );
+        }
         if let Some(status) = self.status {
             menu = menu.item(ui_components::menu_section(status));
         }
         for choice in self.choices {
             let choose = choose.clone();
-            menu = menu.item(ui_components::menu_item(choice.label, move |_, _, cx| choose(choice.value, cx)).checked(choice.checked));
+            let label = choice.trailing.map(|amount| format!(text!(audiobook::timer_with_duration), choice.label, amount = amount).into()).unwrap_or(choice.label);
+            menu = menu.item(ui_components::menu_item(label, move |_, _, cx| choose(choice.value, cx)).checked(choice.checked));
         }
         menu
-    }
-
-    /// Choosing also closes the sheet, which is the dock's state, so the dock
-    /// supplies each row's handler.
-    fn sheet<H: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(self, choose: impl Fn(T) -> H, dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
-        let id = self.id;
-        let rows = self.choices.into_iter().map(|choice| {
-            let choose = choose(choice.value);
-            ui_components::bottom_sheet_row(choice.id, choice.label, choice.checked, theme).on_click(move |event, window, cx| {
-                cx.stop_propagation();
-                choose(event, window, cx);
-            })
-        });
-        let rows = ui_components::column(0.0).id(SharedString::from(format!("{id}-rows"))).flex_1().min_h_0().overflow_y_scroll().children(self.status.map(|status| ui_components::bottom_sheet_section(status, theme))).children(rows);
-        let sheet = ui_components::bottom_sheet_surface(theme).id(SharedString::from(format!("{id}-sheet"))).child(ui_components::bottom_sheet_header(self.title, theme)).child(rows);
-        ui_components::bottom_sheet_overlay().child(ui_components::modal_scrim(SharedString::from(format!("{id}-scrim")), theme).on_click(dismiss)).child(sheet).into_any_element()
     }
 }
 
@@ -334,7 +519,6 @@ fn sleep_gain(remaining: Duration) -> f32 {
     (remaining.as_secs_f32() / 30.0).clamp(0.0, 1.0)
 }
 
-
 /// Whether two speeds are the same offered step. Playback rates are a short
 /// list of round numbers, so exact comparison is what is meant.
 fn same_rate(left: f64, right: f64) -> bool {
@@ -364,11 +548,7 @@ fn format_duration_short(duration: Duration) -> String {
 fn format_minutes_short(total_minutes: u64) -> String {
     let hours = total_minutes / 60;
     let minutes = total_minutes % 60;
-    if hours > 0 { format!("{hours} h {minutes} m") } else { format!("{minutes} m") }
-}
-
-fn format_time_left(duration: Duration) -> String {
-    format!("{} left", format_minutes_short(duration.as_secs().div_ceil(60)))
+    if hours > 0 { format!(text!(common::hours_h_minutes_m), hours = hours, minutes = minutes) } else { format!(text!(common::minutes_m), minutes = minutes) }
 }
 
 fn chapter_display_title(title: &str) -> String {
@@ -389,4 +569,133 @@ fn is_timestamp(value: &str) -> bool {
         return false;
     }
     parts[parts.len() - 2].parse::<u64>().is_ok_and(|minutes| minutes < 60) && parts[parts.len() - 1].parse::<u64>().is_ok_and(|seconds| seconds < 60)
+}
+
+#[cfg(test)]
+mod playback_sheet_tests {
+    use super::*;
+    use gpui::{DismissEvent, FocusHandle, Focusable as _, TestAppContext, size};
+    use gpui_component::Root;
+
+    struct SheetHost {
+        focus: FocusHandle,
+    }
+
+    struct MenuHost {
+        menu: Entity<PopupMenu>,
+    }
+
+    impl Render for MenuHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.menu.clone()
+        }
+    }
+
+    impl Render for SheetHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().track_focus(&self.focus).children(Root::render_sheet_layer(window, cx).map(|sheet| gpui::deferred(sheet).with_priority(2)))
+        }
+    }
+
+    #[gpui::test]
+    fn playback_preset_popup_selection_applies_and_dismisses(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let chosen = Rc::new(Cell::new(1.25));
+        let selected = chosen.clone();
+        let (host, cx) = cx.add_window_view(move |window, cx| {
+            let menu = PopupMenu::build(window, cx, move |menu, _, _| speed_menu(1.25).dropdown(menu, move |rate, _| selected.set(rate)));
+            menu.read(cx).focus_handle(cx).focus(window, cx);
+            MenuHost { menu }
+        });
+        let menu = host.read_with(cx, |host, _| host.menu.clone());
+        cx.simulate_resize(size(px(390.0), px(844.0)));
+        let dismissed = Rc::new(Cell::new(false));
+        let observed = dismissed.clone();
+        let _subscription = cx.update(|_, cx| cx.subscribe(&menu, move |_, _: &DismissEvent, _| observed.set(true)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let preset = cx.debug_bounds("speed-1.5").expect("popup speed presets must render");
+        cx.simulate_click(preset.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(chosen.get(), 1.5);
+        assert!(dismissed.get(), "clicking a preset must use the menu's selection dismissal");
+    }
+
+    #[gpui::test]
+    fn playback_sheet_selection_and_dismissal_restore_reader_focus(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|cx| {
+                let focus = cx.focus_handle();
+                focus.focus(window, cx);
+                SheetHost { focus }
+            });
+            Root::new(host, window, cx).bordered(false)
+        });
+        cx.simulate_resize(size(px(390.0), px(844.0)));
+        cx.run_until_parked();
+        let previous = cx.update(|window, cx| window.focused(cx).unwrap());
+        let chosen = Rc::new(Cell::new(1.25));
+        let selected = chosen.clone();
+        cx.update(|window, cx| speed_menu(1.25).title("Reading speed").open_sheet(window, cx, move |rate, _| selected.set(rate)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let row = cx.debug_bounds("speed-1.5").expect("speed choices must render in the sheet");
+        let viewport = cx.update(|window, _| window.viewport_size());
+        assert_eq!(row.size.width, row.size.height, "presets should be square");
+        assert!(row.size.width < viewport.width / 4.0, "presets should share one horizontal row");
+        let next = cx.debug_bounds("speed-1.75").expect("adjacent speed must render");
+        assert_eq!(row.top(), next.top());
+        assert!(next.left() >= row.right());
+        cx.simulate_click(row.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(chosen.get(), 1.5);
+        cx.update(|window, cx| {
+            assert!(!window.has_active_sheet(cx));
+            assert!(previous.is_focused(window));
+        });
+
+        for native_back in [false, true] {
+            let selected = chosen.clone();
+            cx.update(|window, cx| {
+                PlaybackMenu::new("tts-pauses", "Pauses", [(2.0, "Long pauses".into(), false)]).open_sheet(window, cx, move |rate, _| selected.set(rate));
+            });
+            cx.run_until_parked();
+            if native_back {
+                cx.update(|window, cx| assert!(Root::dismiss_active_overlay(window, cx)));
+            } else {
+                cx.simulate_keystrokes("escape");
+            }
+            cx.run_until_parked();
+            assert_eq!(chosen.get(), 1.5, "dismissing must not apply a choice");
+            cx.update(|window, cx| {
+                assert!(!window.has_active_sheet(cx));
+                assert!(previous.is_focused(window));
+            });
+        }
+
+        let selected = chosen.clone();
+        cx.update(|window, cx| {
+            PlaybackMenu::new("tts-voice", "Narration voice", [(1.5, "Alba".into(), true), (2.0, "George".into(), false)]).open_sheet(window, cx, move |voice, _| selected.set(voice));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let row = cx.debug_bounds("tts-voice-1").expect("shared choice rows must render in the sheet");
+        cx.simulate_click(row.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(chosen.get(), 2.0);
+        cx.update(|window, cx| {
+            assert!(!window.has_active_sheet(cx));
+            assert!(previous.is_focused(window));
+        });
+    }
 }

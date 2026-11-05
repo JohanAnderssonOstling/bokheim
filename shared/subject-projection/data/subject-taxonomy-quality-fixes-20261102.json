@@ -1,0 +1,1385 @@
+{
+  "description": "Reviewed taxonomy quality fixes: restore source-audience routing, consolidate equivalent subjects with legacy-ID redirects, restore intended uncoded language families, improve labels and religious-tradition discovery.",
+  "source_sha256": "ddf6bb92fce9df4ce24b67ccf7ce331a0c1881b3e5969ff4fcef77b2bc7fbebf",
+  "identity_merges": {
+    "4815": 4804,
+    "4821": 4806,
+    "4822": 4807,
+    "4823": 4808,
+    "2859": 2873
+  },
+  "code_remaps": [
+    {
+      "system": "bisac",
+      "code": "JUV032000",
+      "old_concept_id": 4628,
+      "new_concept_id": 60179
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032010",
+      "old_concept_id": 4628,
+      "new_concept_id": 60180
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032020",
+      "old_concept_id": 4628,
+      "new_concept_id": 60181
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032030",
+      "old_concept_id": 4628,
+      "new_concept_id": 60182
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032040",
+      "old_concept_id": 4628,
+      "new_concept_id": 60183
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032060",
+      "old_concept_id": 4628,
+      "new_concept_id": 60184
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032070",
+      "old_concept_id": 4628,
+      "new_concept_id": 60185
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032080",
+      "old_concept_id": 4628,
+      "new_concept_id": 60186
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032090",
+      "old_concept_id": 4628,
+      "new_concept_id": 60187
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032100",
+      "old_concept_id": 4628,
+      "new_concept_id": 60188
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032110",
+      "old_concept_id": 4628,
+      "new_concept_id": 60189
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032120",
+      "old_concept_id": 4628,
+      "new_concept_id": 60190
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032140",
+      "old_concept_id": 4628,
+      "new_concept_id": 60191
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032150",
+      "old_concept_id": 4628,
+      "new_concept_id": 60192
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032160",
+      "old_concept_id": 4628,
+      "new_concept_id": 60193
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032170",
+      "old_concept_id": 4628,
+      "new_concept_id": 60194
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032180",
+      "old_concept_id": 4628,
+      "new_concept_id": 60195
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032190",
+      "old_concept_id": 4628,
+      "new_concept_id": 60196
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032200",
+      "old_concept_id": 4628,
+      "new_concept_id": 60197
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032210",
+      "old_concept_id": 4628,
+      "new_concept_id": 60198
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032220",
+      "old_concept_id": 4628,
+      "new_concept_id": 60199
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032230",
+      "old_concept_id": 4628,
+      "new_concept_id": 60200
+    },
+    {
+      "system": "bisac",
+      "code": "JUV032240",
+      "old_concept_id": 4628,
+      "new_concept_id": 60201
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054000",
+      "old_concept_id": 4628,
+      "new_concept_id": 60202
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054010",
+      "old_concept_id": 4628,
+      "new_concept_id": 60203
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054020",
+      "old_concept_id": 4628,
+      "new_concept_id": 60204
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054030",
+      "old_concept_id": 4628,
+      "new_concept_id": 60205
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054040",
+      "old_concept_id": 4628,
+      "new_concept_id": 60206
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054050",
+      "old_concept_id": 4628,
+      "new_concept_id": 60207
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054060",
+      "old_concept_id": 4628,
+      "new_concept_id": 60208
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054070",
+      "old_concept_id": 4628,
+      "new_concept_id": 60209
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054080",
+      "old_concept_id": 4628,
+      "new_concept_id": 60210
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054100",
+      "old_concept_id": 4628,
+      "new_concept_id": 60211
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054110",
+      "old_concept_id": 4628,
+      "new_concept_id": 60212
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054120",
+      "old_concept_id": 4628,
+      "new_concept_id": 60213
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054130",
+      "old_concept_id": 4628,
+      "new_concept_id": 60214
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054140",
+      "old_concept_id": 4628,
+      "new_concept_id": 60215
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054150",
+      "old_concept_id": 4628,
+      "new_concept_id": 60216
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054160",
+      "old_concept_id": 4628,
+      "new_concept_id": 60217
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054170",
+      "old_concept_id": 4628,
+      "new_concept_id": 60218
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054180",
+      "old_concept_id": 4628,
+      "new_concept_id": 60219
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054190",
+      "old_concept_id": 4628,
+      "new_concept_id": 60220
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054200",
+      "old_concept_id": 4628,
+      "new_concept_id": 60221
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054210",
+      "old_concept_id": 4628,
+      "new_concept_id": 60222
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054220",
+      "old_concept_id": 4628,
+      "new_concept_id": 60223
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054230",
+      "old_concept_id": 4628,
+      "new_concept_id": 60224
+    },
+    {
+      "system": "bisac",
+      "code": "JNF054240",
+      "old_concept_id": 4628,
+      "new_concept_id": 60225
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059000",
+      "old_concept_id": 4628,
+      "new_concept_id": 60226
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059010",
+      "old_concept_id": 4628,
+      "new_concept_id": 60227
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059020",
+      "old_concept_id": 4628,
+      "new_concept_id": 60228
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059030",
+      "old_concept_id": 4628,
+      "new_concept_id": 60229
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059040",
+      "old_concept_id": 4628,
+      "new_concept_id": 60230
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059050",
+      "old_concept_id": 4628,
+      "new_concept_id": 60231
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059060",
+      "old_concept_id": 4628,
+      "new_concept_id": 60232
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059070",
+      "old_concept_id": 4628,
+      "new_concept_id": 60233
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059080",
+      "old_concept_id": 4628,
+      "new_concept_id": 60234
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059090",
+      "old_concept_id": 4628,
+      "new_concept_id": 60235
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059100",
+      "old_concept_id": 4628,
+      "new_concept_id": 60236
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059110",
+      "old_concept_id": 4628,
+      "new_concept_id": 60237
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059120",
+      "old_concept_id": 4628,
+      "new_concept_id": 60238
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059130",
+      "old_concept_id": 4628,
+      "new_concept_id": 60239
+    },
+    {
+      "system": "bisac",
+      "code": "YAF059140",
+      "old_concept_id": 4628,
+      "new_concept_id": 60240
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053000",
+      "old_concept_id": 4628,
+      "new_concept_id": 60241
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053010",
+      "old_concept_id": 4628,
+      "new_concept_id": 60242
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053020",
+      "old_concept_id": 4628,
+      "new_concept_id": 60243
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053030",
+      "old_concept_id": 4628,
+      "new_concept_id": 60244
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053040",
+      "old_concept_id": 4628,
+      "new_concept_id": 60245
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053050",
+      "old_concept_id": 4628,
+      "new_concept_id": 60246
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053060",
+      "old_concept_id": 4628,
+      "new_concept_id": 60247
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053070",
+      "old_concept_id": 4628,
+      "new_concept_id": 60248
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053080",
+      "old_concept_id": 4628,
+      "new_concept_id": 60249
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053090",
+      "old_concept_id": 4628,
+      "new_concept_id": 60250
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053100",
+      "old_concept_id": 4628,
+      "new_concept_id": 60251
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053110",
+      "old_concept_id": 4628,
+      "new_concept_id": 60252
+    },
+    {
+      "system": "bisac",
+      "code": "YAN053120",
+      "old_concept_id": 4628,
+      "new_concept_id": 60253
+    },
+    {
+      "system": "bisac",
+      "code": "JNF051140",
+      "old_concept_id": 5030,
+      "new_concept_id": 60254
+    },
+    {
+      "system": "bisac",
+      "code": "YAN050120",
+      "old_concept_id": 5030,
+      "new_concept_id": 60255
+    },
+    {
+      "system": "bisac",
+      "code": "JNF049080",
+      "old_concept_id": 4582,
+      "new_concept_id": 60256
+    },
+    {
+      "system": "bisac",
+      "code": "YAN047040",
+      "old_concept_id": 4582,
+      "new_concept_id": 60257
+    },
+    {
+      "system": "bisac",
+      "code": "SCI013010",
+      "old_concept_id": 4815,
+      "new_concept_id": 4804
+    },
+    {
+      "system": "bisac",
+      "code": "SCI013030",
+      "old_concept_id": 4821,
+      "new_concept_id": 4806
+    },
+    {
+      "system": "bisac",
+      "code": "SCI013040",
+      "old_concept_id": 4822,
+      "new_concept_id": 4807
+    },
+    {
+      "system": "bisac",
+      "code": "SCI013050",
+      "old_concept_id": 4823,
+      "new_concept_id": 4808
+    },
+    {
+      "system": "bisac",
+      "code": "MED085030",
+      "old_concept_id": 2859,
+      "new_concept_id": 2873
+    }
+  ],
+  "new_concepts": [
+    {
+      "concept_id": 60179,
+      "label": "Sports & Recreation",
+      "parent_concept_id": 1093
+    },
+    {
+      "concept_id": 60180,
+      "label": "Baseball & Softball",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60181,
+      "label": "Basketball",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60182,
+      "label": "Football",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60183,
+      "label": "Games",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60184,
+      "label": "Water Sports",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60185,
+      "label": "Martial Arts",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60186,
+      "label": "Winter Sports",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60187,
+      "label": "Equestrian",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60188,
+      "label": "Extreme Sports",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60189,
+      "label": "Hockey",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60190,
+      "label": "Ice Skating",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60191,
+      "label": "Skateboarding",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60192,
+      "label": "Soccer",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60193,
+      "label": "Wrestling",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60194,
+      "label": "Camping & Outdoor Activities",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60195,
+      "label": "Cycling",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60196,
+      "label": "Golf",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60197,
+      "label": "Gymnastics",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60198,
+      "label": "Track & Field",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60199,
+      "label": "Cheerleading",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60200,
+      "label": "Motor Sports",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60201,
+      "label": "Olympics & Paralympics",
+      "parent_concept_id": 60179
+    },
+    {
+      "concept_id": 60202,
+      "label": "Sports & Recreation",
+      "parent_concept_id": 1387
+    },
+    {
+      "concept_id": 60203,
+      "label": "Baseball & Softball",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60204,
+      "label": "Basketball",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60205,
+      "label": "Camping & Outdoor Activities",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60206,
+      "label": "Cycling",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60207,
+      "label": "Football",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60208,
+      "label": "Gymnastics",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60209,
+      "label": "Hockey",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60210,
+      "label": "Martial Arts",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60211,
+      "label": "Motor Sports",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60212,
+      "label": "Olympics & Paralympics",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60213,
+      "label": "Racket Sports",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60214,
+      "label": "Soccer",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60215,
+      "label": "Track & Field",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60216,
+      "label": "Water Sports",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60217,
+      "label": "Winter Sports",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60218,
+      "label": "Equestrian",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60219,
+      "label": "Extreme Sports",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60220,
+      "label": "Ice Skating",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60221,
+      "label": "Roller & In-Line Skating",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60222,
+      "label": "Skateboarding",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60223,
+      "label": "Wrestling",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60224,
+      "label": "Golf",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60225,
+      "label": "Cheerleading",
+      "parent_concept_id": 60202
+    },
+    {
+      "concept_id": 60226,
+      "label": "Sports & Recreation",
+      "parent_concept_id": 1734
+    },
+    {
+      "concept_id": 60227,
+      "label": "Baseball & Softball",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60228,
+      "label": "Basketball",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60229,
+      "label": "Camping & Outdoor Activities",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60230,
+      "label": "Equestrian",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60231,
+      "label": "Extreme Sports",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60232,
+      "label": "Football",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60233,
+      "label": "Gymnastics",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60234,
+      "label": "Hockey",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60235,
+      "label": "Martial Arts",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60236,
+      "label": "Skateboarding",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60237,
+      "label": "Soccer",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60238,
+      "label": "Track & Field",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60239,
+      "label": "Water Sports",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60240,
+      "label": "Winter Sports",
+      "parent_concept_id": 60226
+    },
+    {
+      "concept_id": 60241,
+      "label": "Sports & Recreation",
+      "parent_concept_id": 1950
+    },
+    {
+      "concept_id": 60242,
+      "label": "Baseball & Softball",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60243,
+      "label": "Basketball",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60244,
+      "label": "Camping & Outdoor Activities",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60245,
+      "label": "Extreme Sports",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60246,
+      "label": "Football",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60247,
+      "label": "Hockey",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60248,
+      "label": "Martial Arts",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60249,
+      "label": "Motor Sports",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60250,
+      "label": "Olympics & Paralympics",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60251,
+      "label": "Soccer",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60252,
+      "label": "Track & Field",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60253,
+      "label": "Winter Sports",
+      "parent_concept_id": 60241
+    },
+    {
+      "concept_id": 60254,
+      "label": "Physics",
+      "parent_concept_id": 1664
+    },
+    {
+      "concept_id": 60255,
+      "label": "Physics",
+      "parent_concept_id": 2123
+    },
+    {
+      "concept_id": 60256,
+      "label": "Christianity",
+      "parent_concept_id": 1638
+    },
+    {
+      "concept_id": 60257,
+      "label": "Christianity",
+      "parent_concept_id": 2109
+    }
+  ],
+  "parent_changes": [
+    {
+      "concept_id": 1443,
+      "old_parent_id": 54965,
+      "new_parent_id": 1440,
+      "reason": "Restore the audience and document scope carried by its juvenile nonfiction code."
+    },
+    {
+      "concept_id": 1450,
+      "old_parent_id": 54965,
+      "new_parent_id": 1440,
+      "reason": "Restore the audience and document scope carried by its juvenile nonfiction code."
+    },
+    {
+      "concept_id": 1642,
+      "old_parent_id": 3251,
+      "new_parent_id": 1638,
+      "reason": "Restore the audience and document scope carried by its juvenile nonfiction code."
+    },
+    {
+      "concept_id": 60092,
+      "old_parent_id": 54951,
+      "new_parent_id": 60024,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60093,
+      "old_parent_id": 54951,
+      "new_parent_id": 60024,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60094,
+      "old_parent_id": 54951,
+      "new_parent_id": 60024,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60095,
+      "old_parent_id": 54951,
+      "new_parent_id": 60024,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60096,
+      "old_parent_id": 54951,
+      "new_parent_id": 60024,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60097,
+      "old_parent_id": 54951,
+      "new_parent_id": 60025,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60098,
+      "old_parent_id": 54951,
+      "new_parent_id": 60025,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60099,
+      "old_parent_id": 54951,
+      "new_parent_id": 60025,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60100,
+      "old_parent_id": 54951,
+      "new_parent_id": 60025,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60101,
+      "old_parent_id": 54951,
+      "new_parent_id": 60025,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60102,
+      "old_parent_id": 54951,
+      "new_parent_id": 60025,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60103,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60104,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60105,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60106,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60107,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60108,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60109,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60110,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60111,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60112,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60113,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60114,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60115,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60116,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60131,
+      "old_parent_id": 54951,
+      "new_parent_id": 60025,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60132,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60133,
+      "old_parent_id": 54951,
+      "new_parent_id": 60022,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60136,
+      "old_parent_id": 54951,
+      "new_parent_id": 60027,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60137,
+      "old_parent_id": 54951,
+      "new_parent_id": 60027,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60159,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60160,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60161,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60162,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60163,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60164,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60165,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60166,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60167,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60168,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60169,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60170,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60171,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60172,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60173,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60174,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60175,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 60176,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 9258,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 6225,
+      "old_parent_id": 54951,
+      "new_parent_id": 60141,
+      "reason": "Restore the language-family grouping recorded in literature-cleanup-20261014.json."
+    },
+    {
+      "concept_id": 291,
+      "old_parent_id": 55180,
+      "new_parent_id": 5563,
+      "reason": "Correct the placement of the TA plasma-engineering subject; leave Plasma Physics and all selectors unchanged."
+    }
+  ],
+  "added_parent_routes": [
+    {
+      "concept_id": 4605,
+      "parent_concept_id": 55011
+    },
+    {
+      "concept_id": 4550,
+      "parent_concept_id": 55011
+    },
+    {
+      "concept_id": 4625,
+      "parent_concept_id": 55011
+    },
+    {
+      "concept_id": 4627,
+      "parent_concept_id": 55011
+    }
+  ],
+  "renames": [
+    {
+      "concept_id": 4804,
+      "before": "Analytical chemistry",
+      "after": "Analytical Chemistry"
+    },
+    {
+      "concept_id": 4806,
+      "before": "Inorganic chemistry",
+      "after": "Inorganic Chemistry"
+    },
+    {
+      "concept_id": 4807,
+      "before": "Organic chemistry",
+      "after": "Organic Chemistry"
+    },
+    {
+      "concept_id": 4808,
+      "before": "Physical & Theoretical Chem.",
+      "after": "Physical & Theoretical Chemistry"
+    },
+    {
+      "concept_id": 5572,
+      "before": "AI, Data & Emerging Computing",
+      "after": "Emerging & Specialized Computing"
+    }
+  ],
+  "reference_additions": 17,
+  "before": {
+    "subjects": 15753,
+    "roots": 24,
+    "edges": 16019,
+    "mean_shortest_depth": 3.9961277217038025,
+    "mean_longest_depth": 4.064876531454326,
+    "maximum_depth": 7,
+    "subjects_with_shortest_depth_at_least_5": 5129,
+    "subjects_with_shortest_depth_at_least_6": 1670,
+    "shortest_depth_histogram": {
+      "0": 24,
+      "1": 217,
+      "2": 1253,
+      "3": 3678,
+      "4": 5452,
+      "5": 3459,
+      "6": 1599,
+      "7": 71
+    },
+    "longest_depth_histogram": {
+      "0": 24,
+      "1": 209,
+      "2": 1173,
+      "3": 3466,
+      "4": 5344,
+      "5": 3611,
+      "6": 1832,
+      "7": 94
+    },
+    "root_to_subject_routes": 16874,
+    "mean_route_depth": 4.066729880289202,
+    "route_depth_histogram": {
+      "0": 24,
+      "1": 218,
+      "2": 1264,
+      "3": 3739,
+      "4": 5689,
+      "5": 3855,
+      "6": 1967,
+      "7": 118
+    },
+    "single_child_subjects": 334
+  },
+  "after": {
+    "subjects": 15827,
+    "roots": 24,
+    "edges": 16097,
+    "mean_shortest_depth": 3.9934921336955833,
+    "mean_longest_depth": 4.063183168004044,
+    "maximum_depth": 7,
+    "subjects_with_shortest_depth_at_least_5": 5130,
+    "subjects_with_shortest_depth_at_least_6": 1670,
+    "shortest_depth_histogram": {
+      "0": 24,
+      "1": 217,
+      "2": 1212,
+      "3": 3803,
+      "4": 5441,
+      "5": 3460,
+      "6": 1599,
+      "7": 71
+    },
+    "longest_depth_histogram": {
+      "0": 24,
+      "1": 209,
+      "2": 1128,
+      "3": 3579,
+      "4": 5349,
+      "5": 3612,
+      "6": 1832,
+      "7": 94
+    },
+    "root_to_subject_routes": 16968,
+    "mean_route_depth": 4.063649222065064,
+    "route_depth_histogram": {
+      "0": 24,
+      "1": 218,
+      "2": 1223,
+      "3": 3868,
+      "4": 5694,
+      "5": 3856,
+      "6": 1967,
+      "7": 118
+    },
+    "single_child_subjects": 335
+  },
+  "new_compatibility_aliases": 128,
+  "source_heading_changes": [],
+  "restored_language_family_edges": 50,
+  "remaining_uncoded_leaves": 0,
+  "remaining_youth_codes_outside_youth": 0,
+  "remaining_bisac_codes_missing_reference": 0,
+  "corrected_coded_ancestry_subjects": [
+    291,
+    1443,
+    1450,
+    1642
+  ],
+  "after_sha256": "b5eb501509bd1173162eefb45300689c8c3d9a99db67dd1ac7abc3f86422df35"
+}

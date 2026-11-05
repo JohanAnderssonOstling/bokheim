@@ -1,5 +1,13 @@
 //! SQL methods shared by library operations and their callers.
 //! SQL text and parameter declarations remain in feature files.
+use crate::DatabaseError;
+use rusqlite::{
+    Error as SqlError, Row,
+    types::{Type, ValueRef},
+};
+use std::io::{Error, ErrorKind};
+use uuid::Uuid;
+
 macro_rules! impl_sql {
     ($sql_name:ident = $({ $kind:tt $name:ident ($($variant:tt $param:ident $ptype:tt)*) $doc:literal $s:tt $($text:tt)+ }),+) => {
         pub trait $sql_name {
@@ -11,25 +19,104 @@ macro_rules! impl_sql {
     };
 }
 
-pub(crate) fn first_column<T: rusqlite::types::FromSql>(query: impl FnOnce(&mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>) -> rusqlite::Result<Option<T>> {
+/// Borrow required TEXT without allocating a String for the query row.
+pub(crate) fn text_column<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<&'a str> {
+    text_value(row, index, row.get_ref(index)?)
+}
+
+pub(crate) fn optional_text_column<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<Option<&'a str>> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        value => text_value(row, index, value).map(Some),
+    }
+}
+
+fn text_value<'a>(row: &Row<'_>, index: usize, value: ValueRef<'a>) -> rusqlite::Result<&'a str> {
+    match value {
+        ValueRef::Text(bytes) => std::str::from_utf8(bytes).map_err(|error| SqlError::Utf8Error(index, error)),
+        value => Err(SqlError::InvalidColumnType(index, row.as_ref().column_name(index)?.to_owned(), value.data_type())),
+    }
+}
+
+/// Borrow a required BLOB while its query row remains alive.
+pub(crate) fn blob_column<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<&'a [u8]> {
+    blob_value(row, index, row.get_ref(index)?)
+}
+
+/// Borrow an optional BLOB, retaining SQL NULL as absence.
+pub(crate) fn optional_blob_column<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<Option<&'a [u8]>> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        value => blob_value(row, index, value).map(Some),
+    }
+}
+
+/// Validate a value already read from a row without copying its bytes.
+fn blob_value<'a>(row: &Row<'_>, index: usize, value: ValueRef<'a>) -> rusqlite::Result<&'a [u8]> {
+    match value {
+        ValueRef::Blob(bytes) => Ok(bytes),
+        value => Err(SqlError::InvalidColumnType(index, row.as_ref().column_name(index)?.to_owned(), value.data_type())),
+    }
+}
+
+pub fn invalid_text_column(column: usize, message: impl Into<String>) -> SqlError {
+    SqlError::FromSqlConversionFailure(column, Type::Text, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
+}
+
+pub fn invalid_integer_column(column: usize, message: impl Into<String>) -> SqlError {
+    SqlError::FromSqlConversionFailure(column, Type::Integer, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
+}
+
+pub(crate) fn uuid_blob_column(row: &Row<'_>, column: usize) -> rusqlite::Result<Uuid> {
+    Uuid::from_slice(blob_column(row, column)?).map_err(|error| SqlError::FromSqlConversionFailure(column, Type::Blob, Box::new(error)))
+}
+
+pub(crate) fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(&value).map_err(|error| invalid_text_column(column, error.to_string()))
+}
+
+pub(crate) fn first_column<T: rusqlite::types::FromSql>(query: impl FnOnce(&mut dyn FnMut(&Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>) -> rusqlite::Result<Option<T>> {
+    query_last(query, |row| row.get(0))
+}
+
+/// Map every row, retaining the last value and propagating all read errors.
+pub(crate) fn query_last<T>(query: impl FnOnce(&mut dyn FnMut(&Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>, mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>) -> rusqlite::Result<Option<T>> {
     let mut value = None;
     query(&mut |row| {
-        value = Some(row.get(0)?);
+        value = Some(map(row)?);
         Ok(())
     })?;
     Ok(value)
 }
 
-/// Map the rows returned by an include_sql-generated query.
+/// Collect mapped rows from an include_sql-generated query, returning any error before the caller processes them.
 pub(crate) fn query_rows<T>(
     query: impl FnOnce(&mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>, mut map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-) -> rusqlite::Result<std::vec::IntoIter<rusqlite::Result<T>>> {
+) -> rusqlite::Result<Vec<T>> {
     let mut rows = Vec::new();
     query(&mut |row| {
-        rows.push(Ok(map(row)?));
+        rows.push(map(row)?);
         Ok(())
     })?;
-    Ok(rows.into_iter())
+    Ok(rows)
+}
+
+/// Process generated query rows directly, preserving database errors from
+/// visitors that perform further reads or validate stored state.
+pub(crate) fn try_for_each_row(query: impl FnOnce(&mut dyn FnMut(&Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>, mut visit: impl FnMut(&Row<'_>) -> Result<(), DatabaseError>) -> Result<(), DatabaseError> {
+    let mut failure = None;
+    let result = query(&mut |row| {
+        visit(row).map_err(|error| {
+            failure = Some(error);
+            // Generated queries require a rusqlite error to stop iteration.
+            // The original visitor error is returned below instead.
+            SqlError::InvalidQuery
+        })
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    result.map_err(DatabaseError::from)
 }
 
 /// Borrowed SQL values retain their caller's lifetime.
@@ -53,5 +140,38 @@ pub(crate) fn active_query_fullscan_steps(connection: &rusqlite::Connection) -> 
             statement = ffi::sqlite3_next_stmt(handle, statement);
         }
         steps
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::{
+        Connection,
+        types::{FromSql, Type},
+    };
+
+    #[test]
+    fn optional_column_reads_preserve_null_last_row_and_errors() {
+        fn values<T: FromSql>(connection: &Connection, json: &str) -> rusqlite::Result<Option<T>> {
+            first_column(|read| {
+                let mut statement = connection.prepare("SELECT value FROM json_each(?1) ORDER BY key")?;
+                let mut rows = statement.query([json])?;
+                while let Some(row) = rows.next()? {
+                    read(row)?;
+                }
+                Ok(())
+            })
+        }
+        let connection = Connection::open_in_memory().unwrap();
+        assert_eq!(values::<i64>(&connection, "[]").unwrap(), None);
+        assert_eq!(values::<i64>(&connection, "[5,2,9]").unwrap(), Some(9));
+        assert_eq!(values::<i64>(&connection, "[9,2,5]").unwrap(), Some(5));
+        assert_eq!(values::<Option<i64>>(&connection, "[]").unwrap(), None);
+        assert_eq!(values::<Option<i64>>(&connection, "[5,null]").unwrap(), Some(None));
+        for invalid in [r#"[5,"broken"]"#, r#"["broken",5]"#] {
+            assert!(matches!(values::<i64>(&connection, invalid), Err(SqlError::InvalidColumnType(0, _, Type::Text))));
+        }
+        assert!(matches!(first_column::<i64>(|_| Err(SqlError::InvalidQuery)), Err(SqlError::InvalidQuery)));
     }
 }

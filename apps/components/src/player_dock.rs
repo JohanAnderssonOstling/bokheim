@@ -1,15 +1,13 @@
 //! The player dock along the bottom of a window, shared by audiobook playback
 //! and reader narration.
 //!
-//! One layout for both: what is playing (or a tool) on the left, the transport
-//! in the dock's true centre, the remaining tools on the right. The two sides
-//! fill equally, so the transport stays centred whatever each side holds —
-//! an audiobook's cover and title, or nothing at all for narration.
+//! Wide docks keep the transport centred between what is playing on the left
+//! and the remaining tools on the right. Compact narration docks use a flat
+//! row with equal space between every control and at both ends.
 
 use gpui::prelude::*;
-use gpui::{App, DispatchPhase, Div, ElementId, HitboxBehavior, SharedString, TouchEvent, TouchPhase, Window, canvas, div, px, relative, rems};
-use gpui_component::button::Button;
-use gpui_component::button::ButtonVariants;
+use gpui::{App, DispatchPhase, Div, ElementId, HitboxBehavior, SharedString, TouchEvent, TouchPhase, Window, canvas, div, px, rems};
+use crate::Button;
 
 use crate::{BrowserTheme, FlexItem, SPACE_SM, SPACE_XS, SPACE_XXS};
 
@@ -58,13 +56,18 @@ pub fn player_dock(leading: impl IntoElement, transport: impl IntoElement, trail
     )
 }
 
+/// A compact dock with the same free space between each control and at both ends.
+pub fn player_dock_evenly(controls: impl IntoIterator<Item = impl IntoElement>, theme: BrowserTheme) -> Div {
+    crate::bottom_bar(theme).occlude().relative().child(crate::row(0.0).w_full().h(rems(PLAYER_DOCK_HEIGHT_REM)).justify_evenly().children(controls))
+}
+
 /// The transport buttons, with an optional caption over them.
 pub fn player_dock_transport(caption: Option<SharedString>, buttons: impl IntoIterator<Item = impl IntoElement>, theme: BrowserTheme) -> Div {
     crate::column(0.0)
         .gap(rems(SPACE_XXS / 16.0))
         .flex_none()
         .items_center()
-        .children(caption.map(|caption| crate::caption_line(caption, theme).text_size(rems(PLAYER_DOCK_CAPTION_SIZE_REM)).line_height(relative(1.25))))
+        .children(caption.map(|caption| crate::caption_line(caption, theme).text_size(rems(PLAYER_DOCK_CAPTION_SIZE_REM)).line_height_auto()))
         .child(crate::row(0.0).gap(rems(SPACE_XXS / 16.0)).children(buttons))
 }
 
@@ -75,17 +78,10 @@ pub fn player_dock_tools() -> Div {
 
 /// A dock tool that shows a value instead of an icon (the speed, the sleep
 /// timer's time left), as tall as the icon buttons beside it.
-pub fn player_dock_text_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
+pub fn player_dock_text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
     // Keep the dock label independent of dropdown menu typography.
     let label = label.into();
-    crate::base_button(id)
-        .ghost()
-        .h(rems(crate::topbar_action_height_rem()))
-        .px(rems(SPACE_SM / 16.0))
-        .flex_none()
-        .text_color(theme.text)
-        .bg(theme.page_bg)
-        .child(div().flex_none().text_size(rems(crate::TEXT_SM)).line_height(relative(1.0)).child(label))
+    crate::playback_secondary_button(crate::base_button(id).ghost()).child(div().flex_none().text_size(rems(crate::TEXT_SM)).line_height_auto().child(label))
 }
 
 /// The chapter's progress as a thin line, for the top edge of a dock.

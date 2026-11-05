@@ -1,56 +1,56 @@
 //! API and shared resources scoped to one concrete library.
+//!
+//! Ownership, services, and worker coordination live here. Concrete operations
+//! live in the book, browse, downloads, import, storage, and sync modules.
 
-pub mod discovery;
-pub(crate) use library_runtime::events;
+pub(crate) use library_services::events;
 
-mod annotations;
-mod browse;
-pub mod commands;
-mod directory;
-mod open;
+// Shared infrastructure for every library operation.
+mod activity;
+mod event_processing;
+pub(crate) mod jobs;
+pub mod library_handle;
+mod library_resources;
+mod lifecycle;
 mod notifications;
-pub(crate) mod session;
 pub mod subscriptions;
 mod workers;
-pub use open::LibraryOpenConfig;
-pub mod handle;
-mod io;
-pub(crate) mod jobs;
-mod pending;
-mod reading;
-mod resources;
-#[cfg(not(target_arch = "wasm32"))]
-mod torrents;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod transfer;
+
+// Concrete library features.
+pub(crate) mod book;
+mod browse;
+mod downloads;
+mod import;
+mod storage;
+mod sync;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use book_access::remote_file::AudioStreamControl;
 pub use book_access::remote_file::RemoteFile;
-pub(crate) mod book;
+pub use downloads::LibraryBookStorage;
+pub use storage::StorageCopyProgress;
 #[cfg(target_arch = "wasm32")]
 #[path = "../browser_audiobook.rs"]
 pub mod browser_audiobook;
-mod directory_import;
-pub(crate) mod operations;
-mod playback;
-pub(crate) mod preparation;
-pub(crate) mod remote_access;
 
-
-pub use book::{AudiobookBook, DocumentBook, DocumentSource, ResolvedBook};
+pub use crate::book::{PlaybackLocation, PlaybackSource};
+pub use book::{AudiobookBook, DocumentBook, DocumentFormat, DocumentSource, PdfBook, ResolvedBook};
+pub use book_access::{BookReader, BoxedBookReader};
 #[cfg(target_arch = "wasm32")]
 pub use browser_audiobook::{BrowserAudiobook, PlaybackLease};
-pub use commands::{LibraryCommand, PendingCommand, ReadyCommand};
-pub use directory::LibraryDirectory;
-pub use notifications::LibraryNotifications;
-pub use handle::{LibraryHandle, LibrarySession};
-pub use io::{BookReader, BoxedBookReader, DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, ImportSource};
 pub use library_database::sync_status::{LibrarySyncState, LibrarySyncStatus};
 pub use library_database::LibraryBrowseData;
+pub use library_handle::LibraryHandle;
+pub use library_import::{DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, ImportSource};
 pub use library_model::{BookDownloadStatus, DownloadProgress, DownloadProgressError, DownloadState};
-pub use playback::{DirectPlayback, PlaybackLocation, PlaybackSource};
-pub use resources::LibraryRuntimeSpec;
-
+pub use library_resources::LibraryOpenOptions;
+pub(crate) use library_resources::LibraryResources;
+#[cfg(not(target_arch = "wasm32"))]
+pub use lifecycle::RootMoveOperation;
+pub use notifications::LibraryNotifications;
+pub use remote_book_access::DirectPlayback;
+#[cfg(target_arch = "wasm32")]
+pub use subscriptions::BookSubscription;
 
 #[cfg(target_arch = "wasm32")]
 pub use book::web_reader;

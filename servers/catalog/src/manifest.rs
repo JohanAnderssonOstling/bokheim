@@ -228,7 +228,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let http = Client::builder().no_proxy().timeout(std::time::Duration::from_millis(100)).build().unwrap();
+        let http = http_response::blocking_client_builder().no_proxy().timeout(std::time::Duration::from_millis(100)).build().unwrap();
         import(dir.path(), &db, &http, &manifest).unwrap();
         let versions = thumbnail::generate_thumbnail_versions_with_pdf_renderer("epub", Cursor::new(bytes.clone()), thumbnail::render_pdf_cover).unwrap().unwrap();
         assert_eq!(std::fs::read(dir.path().join(format!("covers/{hash}-card.jpg"))).unwrap(), versions.browse);

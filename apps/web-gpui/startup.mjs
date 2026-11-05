@@ -1,12 +1,14 @@
+import {text} from './ui-text.mjs';
+
 const RETRY_KEY = 'bokheim-startup-retry-v1';
 
-export async function startApplication(panel, initialize, {reload = () => location.reload(), storage} = {}) {
+export async function startApplication(panel, initialize, {reload = () => location.reload(), storage, onFailure = () => {}} = {}) {
     // Accessing sessionStorage itself can throw when browser storage is blocked.
     // In that case retain the manual Reload action without an automatic loop.
     if (storage === undefined) {
         try { storage = globalThis.sessionStorage; } catch { storage = null; }
     }
-    panel.textContent = 'Opening Bokheim…';
+    panel.textContent = text('web.opening_bokheim');
     const ready = new Promise((resolve, reject) => {
         globalThis.__BOKHEIM_STARTUP_READY__ = resolve;
         globalThis.__BOKHEIM_STARTUP_FAILED__ = detail => reject(new Error(detail));
@@ -19,6 +21,7 @@ export async function startApplication(panel, initialize, {reload = () => locati
         panel.remove();
         return true;
     } catch (error) {
+        onFailure();
         console.error('Bokheim startup failed', error);
         const busy = /BOKHEIM_STORAGE_BUSY|creating sync access handle/.test(String(error));
         let retry = false;
@@ -29,24 +32,16 @@ export async function startApplication(panel, initialize, {reload = () => locati
             } catch { retry = false; }
         }
         if (retry) {
-            panel.textContent = 'Retrying…';
+            panel.textContent = text('web.retrying');
             reload();
             return false;
         }
         const message = document.createElement('p');
-        message.textContent = busy ? 'Close other Bokheim tabs, then reload.' : 'Bokheim could not start. Reload to try again.';
-        const details = document.createElement('details');
-        const summary = document.createElement('summary');
-        summary.textContent = 'Error details';
-        const detail = document.createElement('pre');
-        detail.textContent = String(error);
-        detail.style.whiteSpace = 'pre-wrap';
-        detail.style.overflowWrap = 'anywhere';
-        details.append(summary, detail);
+        message.textContent = busy ? text('web.close_other_app_tabs_then_reload') : text('web.couldn_t_start_the_app_reload_to_retry');
         const button = document.createElement('button');
-        button.textContent = 'Reload';
+        button.textContent = text('browser.reload');
         button.addEventListener('click', () => reload());
-        panel.replaceChildren(message, details, button);
+        panel.replaceChildren(message, button);
         return false;
     } finally {
         delete globalThis.__BOKHEIM_STARTUP_READY__;

@@ -1,8 +1,16 @@
-//! Device-wide admission and cancellation for file transfers. Small requests
-//! such as sign-in and browsing do not need this gate.
+//! Device-wide admission and cancellation for automatic file transfers.
+//! Reading and explicit user downloads bypass this gate.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::executor::sleep;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::executor::{BackendExecutor, BackendTask};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::OnceLock;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{io, path::Path};
 use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -14,11 +22,16 @@ pub enum NetworkCost {
     Metered,
 }
 
-#[derive(Default)]
 pub struct TransferPolicy {
     allow_metered: AtomicBool,
     cost: AtomicU8,
     changes: OnceLock<watch::Sender<()>>,
+}
+
+impl Default for TransferPolicy {
+    fn default() -> Self {
+        Self { allow_metered: AtomicBool::new(false), cost: AtomicU8::new(0), changes: OnceLock::new() }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,6 +78,14 @@ impl TransferPolicy {
     /// retries it, keeping the original queue entry and publication intent.
     pub async fn run<T>(&self, request: impl Future<Output = T>) -> Result<T, Deferred> {
         self.wait().await;
+        self.try_run(request).await
+    }
+    /// Leave deferred work with its queue instead of occupying a worker while
+    /// waiting. This lets later user-initiated jobs bypass the restriction.
+    pub async fn try_run<T>(&self, request: impl Future<Output = T>) -> Result<T, Deferred> {
+        if !self.allowed() {
+            return Err(Deferred);
+        }
         tokio::select! {
             biased;
             _ = self.wait_until(false) => Err(Deferred),
@@ -91,6 +112,9 @@ pub async fn wait() {
 pub async fn run<T>(request: impl Future<Output = T>) -> Result<T, Deferred> {
     POLICY.run(request).await
 }
+pub async fn try_run<T>(request: impl Future<Output = T>) -> Result<T, Deferred> {
+    POLICY.try_run(request).await
+}
 pub async fn retry<T, F: Future<Output = T>>(request: impl FnMut() -> F) -> T {
     POLICY.retry(request).await
 }
@@ -98,7 +122,39 @@ pub async fn retry<T, F: Future<Output = T>>(request: impl FnMut() -> F) -> T {
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{configure_reader, initialize, save_allow_metered};
+pub use native::configure_reader;
+
+/// Mirror saved preferences for native helper processes. The preference store
+/// applies the live policy while committing the setting.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mirror_allow_metered<T: Send + Sync + 'static>(directory: &Path, mut preferences: watch::Receiver<T>, setting: fn(&T) -> bool, executor: &BackendExecutor) -> io::Result<BackendTask<()>> {
+    let initial = setting(&preferences.borrow_and_update());
+    native::initialize(directory, initial, executor)?;
+    Ok(executor.spawn(async move {
+        let mut mirrored = Some(initial);
+        loop {
+            let allow = setting(&preferences.borrow_and_update());
+            if Some(allow) != mirrored {
+                let result = crate::storage_queue::run(move || native::save_allow_metered(allow)).await.map_err(io::Error::other).and_then(|result| result);
+                if let Err(error) = result {
+                    mirrored = None;
+                    log::warn!("could not mirror transfer preferences: {error}");
+                    // A mirror failure must not undo a saved preference. Retry
+                    // independently, using the newest value if it changes.
+                    tokio::select! {
+                        changed = preferences.changed() => if changed.is_err() { return; },
+                        result = sleep(Duration::from_secs(1)) => if result.is_err() { return; },
+                    }
+                    continue;
+                }
+                mirrored = Some(allow);
+            }
+            if preferences.changed().await.is_err() {
+                return;
+            }
+        }
+    }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -126,6 +182,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deferred_queue_work_releases_the_worker_without_polling_the_request() {
+        let policy = TransferPolicy::default();
+        policy.set_network_cost(NetworkCost::Metered);
+        assert!(policy.try_run(async { panic!("deferred requests must not start") }).await.is_err());
+        policy.set_network_cost(NetworkCost::Unmetered);
+        assert_eq!(policy.try_run(async { 42 }).await.unwrap(), 42);
+    }
+
+    #[tokio::test]
     async fn metered_admission_waits_and_override_releases_it() {
         let policy = Arc::new(TransferPolicy::default());
         policy.set_network_cost(NetworkCost::Metered);
@@ -140,7 +205,7 @@ mod tests {
                     .await
             }
         });
-        sleep(Duration::from_millis(300)).await;
+        sleep(Duration::from_millis(300)).await.unwrap();
         assert!(received.try_recv().is_err());
         policy.set_allow_metered(true);
         worker.await.unwrap().unwrap();
@@ -180,7 +245,7 @@ mod tests {
             let policy = policy.clone();
             async move { policy.retry(|| async { 42 }).await }
         });
-        sleep(Duration::from_millis(300)).await;
+        sleep(Duration::from_millis(300)).await.unwrap();
         assert!(!resumed.is_finished());
         policy.set_network_cost(NetworkCost::Unmetered);
         assert_eq!(resumed.await.unwrap(), 42);

@@ -25,3 +25,10 @@ impl Database {
         Ok(cards)
     }
 }
+
+// Async access owns its arguments until the synchronous database call completes.
+database_methods! {
+    fn load_cards(ids: &[i64]) -> Vec<BookCardRow>;
+    arguments (Vec<i64>,) = (ids.to_vec(),);
+    execute database, arguments => database.load_cards(&arguments.0);
+}

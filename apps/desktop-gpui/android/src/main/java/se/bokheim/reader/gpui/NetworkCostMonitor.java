@@ -4,6 +4,7 @@ import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.os.Build;
 import android.util.Log;
 import java.util.function.IntConsumer;
 
@@ -38,7 +39,12 @@ final class NetworkCostMonitor extends ConnectivityManager.NetworkCallback {
 
     private static int cost(NetworkCapabilities capabilities) {
         if (capabilities == null) return 0;
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) ? 1 : 2;
+        // Android 11+ can waive metering temporarily without setting NOT_METERED.
+        // Capability updates also revoke that waiver, suspending transfers again.
+        boolean unmetered = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_TEMPORARILY_NOT_METERED));
+        return unmetered ? 1 : 2;
     }
 
     @Override public synchronized void onAvailable(Network network) {

@@ -1,5 +1,7 @@
 //! Window-level browser shell.
 
+use ui_text::text;
+
 use ui_components::user_facing_error;
 
 use app_preferences::{ApplicationTheme, BrowsingPreferencePatch, ResolvedAppearance};
@@ -36,6 +38,8 @@ pub struct NowPlayingBook {
     /// from the player, so the page's chapter mark and cover bar keep up
     /// rather than waiting for the position to be saved and reloaded.
     pub position: Rc<dyn Fn(&App) -> Option<(std::time::Duration, f32)>>,
+    pub chapter_read_status: Rc<dyn Fn(&App) -> book_model::ChapterReadStatus>,
+    pub reset_chapter_read_status: Rc<dyn Fn(Option<String>, &mut App)>,
 }
 
 impl gpui::Global for NowPlaying {}
@@ -58,6 +62,7 @@ impl PaletteSelectionService for PalettePreferences {
 pub struct BrowserRoot {
     preferences: Entity<Preferences>,
     shell: Entity<BrowserShell>,
+    split_enabled: bool,
     focus: FocusHandle,
     _shell_subscription: Subscription,
     _preference_subscription: Subscription,
@@ -66,6 +71,22 @@ pub struct BrowserRoot {
 }
 
 impl BrowserRoot {
+    pub fn restore_navigation(&mut self, saved: NavigationSession, window: &mut Window, cx: &mut Context<Self>) {
+        self.shell.update(cx, |shell, cx| shell.restore_navigation(saved, window, cx));
+    }
+
+    pub fn set_now_playing(&self, book: Option<NowPlayingBook>, cx: &mut App) {
+        self.shell.update(cx, |shell, cx| shell.set_now_playing(book, cx));
+    }
+
+    pub fn set_reader_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        self.shell.update(cx, |shell, cx| shell.set_reader_surface(surface, cx));
+    }
+
+    pub fn set_split_close_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.split_enabled = enabled;
+        self.shell.update(cx, |shell, cx| shell.set_split_close_enabled(enabled, cx));
+    }
     #[cfg(target_arch = "wasm32")]
     pub fn apply_sync_event(&mut self, event: crate::SyncEvent, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.apply_sync_event(event, cx));
@@ -74,8 +95,8 @@ impl BrowserRoot {
         self.shell.update(cx, |shell, cx| shell.set_content_footer(footer, cx));
     }
 
-    pub fn open_book_detail(&mut self, library_id: sync_common::LibraryId, content_hash: sync_common::ContentHash, window: &mut Window, cx: &mut Context<Self>) {
-        self.shell.update(cx, |shell, cx| shell.open_book_detail(library_id, content_hash, window, cx));
+    pub fn open_book_detail(&mut self, library_id: sync_common::LibraryId, book_id: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
+        self.shell.update(cx, |shell, cx| shell.open_book_detail(library_id, book_id, window, cx));
     }
 
     /// The library book whose detail page is on screen, if one is.
@@ -112,6 +133,7 @@ impl BrowserRoot {
             let _ = browser.update(cx, |_, cx| cx.emit(OpenBookRequested { locator, title, initial_target }));
         });
         let shell = cx.new(|cx| BrowserShell::new(services.clone(), saved, sync_state, open_book, preferences.clone(), window, cx));
+        cx.subscribe(&shell, |_, _, request: &crate::PaneRequest, cx| cx.emit(request.clone())).detach();
         let shell_subscription = cx.observe(&shell, |_, _, cx| cx.notify());
 
         let updates = services.updates.clone();
@@ -123,7 +145,7 @@ impl BrowserRoot {
 
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self { preferences, shell, focus, _shell_subscription: shell_subscription, _preference_subscription: preference_subscription, updates, _update_subscription: update_subscription }
+        Self { preferences, shell, split_enabled: false, focus, _shell_subscription: shell_subscription, _preference_subscription: preference_subscription, updates, _update_subscription: update_subscription }
     }
 
     fn prompt_for_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -137,9 +159,9 @@ impl BrowserRoot {
             let handler = handler.clone();
             let shell = shell.clone();
             ui_components::confirmation_dialog(dialog, window)
-                .title("Update available")
-                .description("A new Bokheim update is available. Would you like to update now?")
-                .button_props(DialogButtonProps::default().ok_text("Update").cancel_text("Later").show_cancel(true))
+                .title(text!(browse::update_available))
+                .description(text!(browse::a_new_bokheim_update_is_available_would_you_like_to_update_now))
+                .button_props(DialogButtonProps::default().ok_text(text!(browse::update)).cancel_text(text!(browse::later)).show_cancel(true))
                 .on_ok(move |_, window, cx| {
                     // The existing Settings flow shows download progress and
                     // the platform's permission, install, or restart action.
@@ -179,7 +201,7 @@ impl BrowserRoot {
     }
 
     /// Reports a failure that occurred before an incoming file reached the shell.
-    pub fn incoming_import_failed(&mut self, error: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn incoming_import_failed(&mut self, error: app::BackendError, window: &mut Window, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.incoming_import_failed(error, window, cx));
     }
 
@@ -205,12 +227,13 @@ impl BrowserRoot {
             return;
         }
         if let Err(error) = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(app_preferences::BrowsingPreferencePatch::UiFontSizePx(next), cx)) {
-            crate::services::notify_error("browser-error", format!("Could not save interface font size. {}", user_facing_error(&error, "Please try again.")), window, cx);
+            crate::services::notify_error("browser-error", format!(text!(browse::could_not_save_interface_font_size), user_facing_error(&error, text!(common::please_try_again))), window, cx);
         }
     }
 }
 
 impl EventEmitter<OpenBookRequested> for BrowserRoot {}
+impl EventEmitter<crate::PaneRequest> for BrowserRoot {}
 
 impl Focusable for BrowserRoot {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -226,7 +249,7 @@ impl Render for BrowserRoot {
         let ui_font_size = preferences.ui_font_size_px();
         window.set_rem_size(px(ui_font_size as f32));
 
-        ui_components::app_page(preferences.interface_font_name(), ui_font_size, theme)
+        ui_components::app_page(preferences.interface_font_name(cx), ui_font_size, theme)
             .key_context("Browser")
             .track_focus(&self.focus)
             .capture_action(cx.listener(Self::capture_dismiss))
@@ -251,7 +274,7 @@ impl Render for BrowserRoot {
                 root.shell.update(cx, |shell, cx| shell.navigate(GlobalRoute::Settings.into(), window, cx));
             }))
             .child(self.shell.clone())
-            .children(Root::render_dialog_layer(window, cx))
+            .when(!self.split_enabled, |root| root.children(Root::render_dialog_layer(window, cx)))
             .into_any_element()
     }
 }
@@ -270,20 +293,51 @@ mod session_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = app::AppClient::start_native(launch).unwrap();
-        let first = backend.create_library_with_asset_storage("First".into(), true).await.unwrap();
-        let second = backend.create_library_with_asset_storage("Second".into(), true).await.unwrap();
-        let startup = AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status };
+        let first = backend.management.create_library_with_asset_storage("First".into(), true).await.unwrap();
+        let second = backend.management.create_library_with_asset_storage("Second".into(), true).await.unwrap();
+        let startup = AppStartup {
+            libraries: backend.management.libraries().await.unwrap(),
+
+            default_library_root: startup.default_library_root,
+            dictionary_storage_root: startup.dictionary_storage_root,
+            preference_storage_root: startup.preference_storage_root,
+            browsing_preferences: startup.browsing_preferences,
+            account_status: startup.account_status,
+        };
+        // Leave this library out of the startup list so its first navigation
+        // request waits for asynchronous discovery.
+        let third = backend.management.create_library_with_asset_storage("Discovered later".into(), true).await.unwrap();
         let saved = NavigationSession { library_id: Some(*second.library_id()), route: Route::Library(LibraryRoute::Authors), ..Default::default() };
         let services = AppServices::new(backend, startup);
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);
         });
-        let sync = cx.new(|_| SyncState::new(&services));
+        let sync = cx.new(|cx| SyncState::new(&services, cx));
         let window = cx.add_window(|window, cx| BrowserRoot::new(services.clone(), saved.clone(), sync, window, cx));
         let snapshot = window.update(cx, |root, _, cx| root.navigation_session(cx)).unwrap();
         assert_eq!(snapshot.library_id, saved.library_id);
         assert_eq!(snapshot.route, saved.route);
+
+        window
+            .update(cx, |root, window, cx| {
+                root.shell.update(cx, |shell, cx| {
+                    shell.open_folder(*third.library_id(), ROOT_DIR_ID, "Stale folder request".into(), window, cx);
+                    shell.open_subject(*first.library_id(), library_model::BrowseLocation::Subject(0), "Subjects".into(), window, cx);
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let snapshot = window.update(cx, |root, _, cx| root.navigation_session(cx)).unwrap();
+        assert_eq!(snapshot.library_id, Some(*first.library_id()));
+        assert_eq!(snapshot.route, Route::Library(LibraryRoute::Subjects));
+        let restored = NavigationSession { library_id: Some(*third.library_id()), route: GlobalRoute::Settings.into(), ..Default::default() };
+        window.update(cx, |root, window, cx| root.shell.update(cx, |shell, cx| shell.restore_navigation(restored.clone(), window, cx))).unwrap();
+        let shell = window.update(cx, |root, _, _| root.shell.clone()).unwrap();
+        cx.condition(&shell, |shell, cx| shell.navigation_session(cx).library_id == restored.library_id).await;
+        let snapshot = window.update(cx, |root, _, cx| root.navigation_session(cx)).unwrap();
+        assert_eq!(snapshot.library_id, restored.library_id);
+        assert_eq!(snapshot.route, restored.route, "a superseded folder request must not reopen when its library is selected later");
 
         window.update(cx, |root, window, cx| root.open_folder(*first.library_id(), ROOT_DIR_ID, "Folders".into(), window, cx)).unwrap();
         cx.run_until_parked();
@@ -304,13 +358,24 @@ mod session_tests {
         let directory = tempfile::tempdir().unwrap();
         let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, startup) = app::AppClient::start_native(launch).unwrap();
-        let library = backend.create_library_with_asset_storage("Shared".into(), true).await.unwrap();
-        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        let library = backend.management.create_library_with_asset_storage("Shared".into(), true).await.unwrap();
+        let services = AppServices::new(
+            backend.clone(),
+            AppStartup {
+                libraries: backend.management.libraries().await.unwrap(),
+
+                default_library_root: startup.default_library_root,
+                dictionary_storage_root: startup.dictionary_storage_root,
+                preference_storage_root: startup.preference_storage_root,
+                browsing_preferences: startup.browsing_preferences,
+                account_status: startup.account_status,
+            },
+        );
         cx.update(|cx| {
             gpui_component::init(cx);
             ui_components::init_page_scrolling(cx);
         });
-        let sync = cx.new(|_| SyncState::new(&services));
+        let sync = cx.new(|cx| SyncState::new(&services, cx));
         let first = cx.add_window(|window, cx| BrowserRoot::new(services.clone(), NavigationSession::default(), sync.clone(), window, cx));
         first.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.update_browsing(BrowsingPreferencePatch::UiFontSizePx(18), cx)).unwrap()).unwrap();
         // A new window receives startup data from before the edit. It must read
@@ -320,6 +385,10 @@ mod session_tests {
         let first_preferences = first.update(cx, |root, _, _| root.preferences.clone()).unwrap();
         let second_preferences = second.update(cx, |root, _, _| root.preferences.clone()).unwrap();
         assert_eq!(first_preferences.entity_id(), second_preferences.entity_id());
+        let shortcuts = app_preferences::KeyboardShortcuts::from([("browse.undo".into(), vec!["alt-z".into()])]);
+        let shortcut_save = first.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.save_keyboard_shortcuts(shortcuts.clone(), cx))).unwrap();
+        shortcut_save.await.unwrap();
+        second.update(cx, |root, _, cx| assert_eq!(root.preferences.read(cx).browsing().keyboard_shortcuts(), &shortcuts)).unwrap();
         assert_eq!(second.update(cx, |root, _, cx| root.preferences.read(cx).ui_font_size_px()).unwrap(), 18);
         let metered_save = first.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.save_metered_transfers(true, cx))).unwrap();
         second.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.update_browsing(BrowsingPreferencePatch::CatalogLanguages(Some(vec!["swe".into()])), cx)).unwrap()).unwrap();

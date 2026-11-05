@@ -1,48 +1,28 @@
 use crate::api::SyncCredentials;
 use reqwest::StatusCode;
-use std::{error::Error, fmt};
+use std::time::Duration;
 use sync_common::api::assets::BlobManifestValidationError;
 use sync_common::transport::WireError;
 use sync_common::{LibraryId, ReplicaId, SyncCursor, SyncExchangeRequest, SyncExchangeResponse};
 use url::ParseError;
-use std::time::Duration;
 
 /// Failures from synchronization endpoints, including the statuses that drive recovery.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SyncRequestError {
+    #[error("synchronization authentication is required")]
     AuthenticationRequired,
+    #[error("the synchronization cursor was rejected")]
     CursorRejected,
-    Http(reqwest::Error),
-    Wire(WireError),
-    Url(ParseError),
-    InvalidManifest(BlobManifestValidationError),
+    #[error("{0}")]
+    Http(#[source] reqwest::Error),
+    #[error("{0}")]
+    Wire(#[from] WireError),
+    #[error("{0}")]
+    Url(#[from] ParseError),
+    #[error("{0}")]
+    InvalidManifest(#[source] BlobManifestValidationError),
+    #[error("sync server returned {status}; retry after {} seconds", .delay.as_secs())]
     RetryAfter { status: StatusCode, delay: Duration },
-}
-
-impl fmt::Display for SyncRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
-            Self::CursorRejected => formatter.write_str("the synchronization cursor was rejected"),
-            Self::Http(error) => error.fmt(formatter),
-            Self::Wire(error) => error.fmt(formatter),
-            Self::Url(error) => error.fmt(formatter),
-            Self::InvalidManifest(error) => error.fmt(formatter),
-            Self::RetryAfter { status, delay } => write!(formatter, "sync server returned {status}; retry after {} seconds", delay.as_secs()),
-        }
-    }
-}
-
-impl Error for SyncRequestError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Http(error) => Some(error),
-            Self::Wire(error) => Some(error),
-            Self::Url(error) => Some(error),
-            Self::InvalidManifest(error) => Some(error),
-            Self::AuthenticationRequired | Self::CursorRejected | Self::RetryAfter { .. } => None,
-        }
-    }
 }
 
 impl From<reqwest::Error> for SyncRequestError {
@@ -52,18 +32,6 @@ impl From<reqwest::Error> for SyncRequestError {
             Some(StatusCode::GONE) => Self::CursorRejected,
             _ => Self::Http(error),
         }
-    }
-}
-
-impl From<WireError> for SyncRequestError {
-    fn from(error: WireError) -> Self {
-        Self::Wire(error)
-    }
-}
-
-impl From<ParseError> for SyncRequestError {
-    fn from(error: ParseError) -> Self {
-        Self::Url(error)
     }
 }
 

@@ -1,6 +1,14 @@
 //! Import storage lifecycle. The caller retains the content lease and metadata commit.
-use super::{AssetStore, AssetStoreError, CopiedBook};
+use super::{AssetStore, AssetStoreError, CopiedBook, PublishedStagedBook, StagedBook};
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_native::filesystem::parent_directory;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::executor::run_blocking;
+#[cfg(target_arch = "wasm32")]
+use client_platform_runtime::executor::storage_call;
 use library_model::RelativeBookPath;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::PoisonError;
 
 #[derive(Default)]
 pub struct ImportOptions {
@@ -17,15 +25,20 @@ impl AssetStore {
             if options.direct {
                 let mut occupied = occupied;
                 let store = self.clone();
-                return client_platform_runtime::executor::run_blocking(move || {
-                    use crate::asset_store::native::{DIRECT_IMPORTS, DirectBook, placement_path, write_import_bytes};
+                let root = self.lock_root_shared().await;
+                return run_blocking(move || {
+                    let _root = root;
+                    if !store.root_available() {
+                        return Err(AssetStoreError::operation("library folder is unavailable"));
+                    }
+                    use crate::asset_store::native::{placement_path, write_import_bytes, DirectBook, DIRECT_IMPORTS};
                     let requested = relative.file_name();
-                    let directory = placement_path(&store.0, &relative).parent().expect("a book path has a folder").canonicalize()?;
+                    let directory = parent_directory(&placement_path(&store.0, &relative))?.canonicalize()?;
                     occupied.extend(std::fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
                     for name in library_replica::file_name_candidates(requested, occupied.iter().map(String::as_str)) {
                         let path = directory.join(&name);
                         let imports = DIRECT_IMPORTS.get_or_init(Default::default);
-                        if !imports.lock().unwrap().insert(path.clone()) {
+                        if !imports.lock().unwrap_or_else(PoisonError::into_inner).insert(path.clone()) {
                             continue;
                         }
                         let direct = DirectBook { path: path.clone() };
@@ -40,8 +53,9 @@ impl AssetStore {
                         // No temporary filename, rename, hard link, or second copy is involved.
                         let cleanup = tempfile::TempPath::try_from_path(path)?;
                         let mut file = tempfile::NamedTempFile::from_parts(file, cleanup);
-                        write_import_bytes(file.as_file_mut(), source.as_mut(), &directory)?;
-                        return Ok((name, CopiedBook { inner: super::imp::CopiedBook { temporary_path: file.into_temp_path(), direct: Some(direct) } }));
+                        let (checksum, size) = write_import_bytes(&store.0, file.as_file_mut(), source.as_mut(), &directory)?;
+                        let copied_digest = Some((checksum, size, crate::filesystem::fingerprint(file.path())?));
+                        return Ok((name, CopiedBook { inner: super::imp::CopiedBook { copied_digest, temporary_path: file.into_temp_path(), direct: Some(direct) } }));
                     }
                     unreachable!("numeric name suffix space is unbounded")
                 })
@@ -53,8 +67,45 @@ impl AssetStore {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (occupied, options);
-            let inner = super::imp::stage_book(&self.0, source.as_mut()).await?;
-            Ok((relative.file_name().to_owned(), super::StagedBook { inner }))
+            let store = self.clone();
+            storage_call(move || async move {
+                let inner = super::imp::stage_book(&store.0, source.as_mut()).await?;
+                Ok((relative.file_name().to_owned(), StagedBook { inner }))
+            })
+            .await
+            .map_err(AssetStoreError::operation)?
+        }
+    }
+
+    /// Prepare, publish and flush one import using a resolved placement. The
+    /// caller validates its destination first and commits metadata afterward.
+    pub async fn publish_import(&self, staged: StagedBook, relative: RelativeBookPath, occupied: Vec<String>, audiobook_archive: bool) -> Result<PublishedStagedBook, AssetStoreError> {
+        // Dispatched work may outlive the caller, so retain its own file lease.
+        let lease = self.lease_book(&staged.book_id()).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let store = self.clone();
+            let root = self.lock_root_shared().await;
+            run_blocking(move || {
+                let _access = (root, lease);
+                if !store.root_available() {
+                    return Err(AssetStoreError::operation("library folder is unavailable"));
+                }
+                staged.publish_snapshot(&store, &relative, &occupied, audiobook_archive)
+            })
+            .await
+            .map_err(AssetStoreError::operation)?
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (occupied, audiobook_archive);
+            storage_call(move || async move {
+                let _lease = lease;
+                staged.commit().await?;
+                Ok(PublishedStagedBook { name: relative.file_name().to_owned(), relative_path: String::new(), published: true, fingerprint: None })
+            })
+            .await
+            .map_err(AssetStoreError::operation)?
         }
     }
 }

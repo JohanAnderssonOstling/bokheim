@@ -135,19 +135,21 @@ pub fn router_with_operational_limits(
         .route("/api/health", get(ready))
         .route("/api/notifications", get(notifications::connect))
         .route("/api/account/snapshot", get(account::get_snapshot))
+        .route("/api/account/storage/books", get(account::get_book_storage))
         .route("/api/sync/exchange", post(sync::exchange_events))
         .route("/api/cloud-storage", axum::routing::get(sync::cloud_storage))
         .route("/api/libraries/:library_id/cloud-storage", axum::routing::put(sync::set_cloud_storage))
         .route("/api/libraries", post(sync::create_library).put(sync::rename_library))
         .route("/api/libraries/:library_id", delete(sync::delete_library))
-        .route("/api/opds-feeds", get(sync::list_opds_feeds).put(sync::put_opds_feed))
-        .route("/api/opds-feeds/:id", delete(sync::delete_opds_feed))
         .route("/api/libraries/:library_id/blobs/:hash", head(assets::head_blob).get(assets::get_blob).put(assets::put_blob))
         .route("/api/libraries/:library_id/blobs/:hash/playback", post(playback::issue))
         .route("/api/playback/:ticket", get(playback::read).head(playback::read).delete(playback::revoke))
         .route("/api/playback/:ticket/tracks/:index", get(playback::read_track).head(playback::read_track))
         .route("/api/libraries/:library_id/blobs/negotiate", post(assets::post_blob_manifest))
-        .route("/api/libraries/:library_id/thumbnails/:content_hash", head(assets::head_thumbnail).get(assets::get_thumbnail).put(assets::put_thumbnail).delete(assets::delete_thumbnail).layer(DefaultBodyLimit::max(2 * sync_common::MAX_THUMBNAIL_BYTES as usize + 64 * 1024)))
+        .route(
+            "/api/libraries/:library_id/thumbnails/:content_hash",
+            head(assets::head_thumbnail).get(assets::get_thumbnail).put(assets::put_thumbnail).delete(assets::delete_thumbnail).layer(DefaultBodyLimit::max(2 * sync_common::MAX_THUMBNAIL_BYTES as usize + 64 * 1024)),
+        )
         .route("/api/libraries/:library_id/thumbnails/presence", post(assets::post_thumbnail_presence))
         .route("/api/libraries/:library_id/thumbnail-batch", post(assets::post_thumbnail_batch).put(assets::put_thumbnail_batch).layer(DefaultBodyLimit::max(sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
@@ -162,8 +164,8 @@ fn browser_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::HeaderName::from_static("x-bokheim-trace-id"), header::ACCEPT, header::AUTHORIZATION, header::CONTENT_TYPE, header::IF_RANGE, header::RANGE])
-        .expose_headers([header::ACCEPT_RANGES, header::CONTENT_LENGTH, header::CONTENT_RANGE, header::CONTENT_TYPE, header::ETAG])
+        .allow_headers([header::HeaderName::from_static("x-bokheim-content-hash"), header::HeaderName::from_static("x-bokheim-trace-id"), header::ACCEPT, header::AUTHORIZATION, header::CONTENT_TYPE, header::IF_RANGE, header::RANGE])
+        .expose_headers([header::HeaderName::from_static("x-bokheim-content-hash"), header::ACCEPT_RANGES, header::CONTENT_LENGTH, header::CONTENT_RANGE, header::CONTENT_TYPE, header::ETAG])
 }
 
 async fn live() -> (StatusCode, &'static str) {

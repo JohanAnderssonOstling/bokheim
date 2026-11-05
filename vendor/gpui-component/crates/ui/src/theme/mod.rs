@@ -1,16 +1,15 @@
-use crate::{
-    highlighter::HighlightTheme, list::ListSettings, notification::NotificationSettings,
-    scroll::ScrollbarShow, sheet::SheetSettings,
-};
+use crate::{list::ListSettings, notification::NotificationSettings, scroll::ScrollbarShow, sheet::SheetSettings};
 use gpui::{App, Global, Hsla, Pixels, SharedString, Window, WindowAppearance, px};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     ops::{Deref, DerefMut},
     rc::Rc,
-    sync::Arc,
 };
 
+mod compiled {
+    include!(concat!(env!("OUT_DIR"), "/compiled_themes.rs"));
+}
 mod color;
 mod registry;
 mod schema;
@@ -46,7 +45,6 @@ pub struct Theme {
     pub colors: ThemeColor,
     #[serde(default)]
     pub tokens: ThemeTokens,
-    pub highlight_theme: Arc<HighlightTheme>,
     pub light_theme: Rc<ThemeConfig>,
     pub dark_theme: Rc<ThemeConfig>,
 
@@ -131,32 +129,21 @@ impl Theme {
 
     /// Returns the current theme name.
     pub fn theme_name(&self) -> &SharedString {
-        if self.is_dark() {
-            &self.dark_theme.name
-        } else {
-            &self.light_theme.name
-        }
+        if self.is_dark() { &self.dark_theme.name } else { &self.light_theme.name }
     }
 
     /// Sync the theme with the system appearance
     pub fn sync_system_appearance(window: Option<&mut Window>, cx: &mut App) {
         // Better use window.appearance() for avoid error on Linux.
         // https://github.com/longbridge/gpui-component/issues/104
-        let appearance = window
-            .as_ref()
-            .map(|window| window.appearance())
-            .unwrap_or_else(|| cx.window_appearance());
+        let appearance = window.as_ref().map(|window| window.appearance()).unwrap_or_else(|| cx.window_appearance());
 
         Self::change(appearance, window, cx);
     }
 
     /// Sync the Scrollbar showing behavior with the system
     pub fn sync_scrollbar_appearance(cx: &mut App) {
-        Theme::global_mut(cx).scrollbar_show = if cx.should_auto_hide_scrollbars() {
-            ScrollbarShow::Scrolling
-        } else {
-            ScrollbarShow::Hover
-        };
+        Theme::global_mut(cx).scrollbar_show = if cx.should_auto_hide_scrollbars() { ScrollbarShow::Scrolling } else { ScrollbarShow::Hover };
     }
 
     /// Change the theme mode.
@@ -171,10 +158,17 @@ impl Theme {
 
         let theme = cx.global_mut::<Theme>();
         theme.mode = mode;
+        #[cfg(feature = "json-themes")]
         if mode.is_dark() {
             theme.apply_config(&theme.dark_theme.clone());
         } else {
             theme.apply_config(&theme.light_theme.clone());
+        }
+        #[cfg(not(feature = "json-themes"))]
+        {
+            theme.colors = if mode.is_dark() { *ThemeColor::dark() } else { *ThemeColor::light() };
+            theme.tokens = ThemeTokens::from(&theme.colors);
+            compiled::settings(theme, mode);
         }
 
         if let Some(window) = window {
@@ -188,20 +182,7 @@ impl Theme {
     /// otherwise use the `cx.theme().background` color.
     #[inline]
     pub fn input_background(&self) -> Hsla {
-        if self.is_dark() {
-            self.input.mix_oklab(self.transparent, 0.3)
-        } else {
-            self.background
-        }
-    }
-
-    /// Get the editor background color, if not set, use the input background color.
-    #[inline]
-    pub(crate) fn editor_background(&self) -> Hsla {
-        self.highlight_theme
-            .style
-            .editor_background
-            .unwrap_or_else(|| self.input_background())
+        if self.is_dark() { self.input.mix_oklab(self.transparent, 0.3) } else { self.background }
     }
 }
 
@@ -234,26 +215,12 @@ impl From<&ThemeColor> for Theme {
             tokens: ThemeTokens::from(colors),
             light_theme: Rc::new(ThemeConfig::default()),
             dark_theme: Rc::new(ThemeConfig::default()),
-            highlight_theme: HighlightTheme::default_light(),
             sheet: SheetSettings::default(),
         }
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    PartialOrd,
-    Eq,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
     #[default]

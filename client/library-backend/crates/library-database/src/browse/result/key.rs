@@ -8,6 +8,8 @@ pub(super) struct ResultKey {
     pub(super) location: BrowseLocation,
     pub(super) options: BrowseOptions,
     library: Revision,
+    notebook: Option<i64>,
+    text_index: Option<(bool, i64)>,
     taxonomy: Option<TaxonomyRevision>,
     catalog: Option<CatalogRevision>,
 }
@@ -44,15 +46,14 @@ impl Dependencies {
             BrowseLocation::Subject(_) => Self { subjects: true, ..Self::default() },
             BrowseLocation::Author(_) => Self { authors: true, ..Self::default() },
             BrowseLocation::Folder(_) => Self { folders: true, ..Self::default() },
-            BrowseLocation::Books | BrowseLocation::Home(_) => Self::default(),
-            _ => return Err(DatabaseError::message("this location does not own a paged browse result")),
+            BrowseLocation::Books | BrowseLocation::Home(_) | BrowseLocation::Notebook(_) | BrowseLocation::TextSearch(_) => Self::default(),
         })
     }
 
     fn library_revision(&self, revision: Revision) -> Revision {
         if self.catalog {
             // Library membership only affects the catalog's held-book exclusions.
-            return Revision { visibility: revision.visibility, legacy: revision.legacy, ..Revision::default() };
+            return Revision { visibility: revision.visibility, ..Revision::default() };
         }
         Revision { subjects: if self.subjects { revision.subjects } else { 0 }, authors: if self.authors { revision.authors } else { 0 }, folders: if self.folders { revision.folders } else { 0 }, ..revision }
     }
@@ -64,6 +65,8 @@ impl Dependencies {
             location: query.location,
             options: BrowseOptions::from_query(query, downloaded_only),
             library: self.library_revision(Revision::read(&db.connection)?),
+            text_index: if matches!(query.location, BrowseLocation::TextSearch(_)) { Some(db.text_index_revision()?) } else { None },
+            notebook: if matches!(query.location, BrowseLocation::Notebook(_)) { Some(db.connection.query_row("SELECT revision FROM notebook_revision WHERE singleton=1", [], |row| row.get(0))?) } else { None },
             taxonomy: if self.subjects { Some(TaxonomyRevision::read(&db.connection)?) } else { None },
             catalog: catalog.map(|catalog| CatalogRevision::read(catalog, generation)).transpose()?,
         })

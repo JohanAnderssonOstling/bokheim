@@ -5,7 +5,7 @@ use crate::core::IssuedSession;
 use crate::core::AuthAttempt;
 use crate::postgres::PostgresAccountService;
 use account_contract::{
-    AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, MeResponse, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary,
+    AuthResponse, DeleteAccountRequest, EmailRequest, EmailVerificationRequest, LoginRequest, MeResponse, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary,
 };
 use axum::async_trait;
 use axum::body::Bytes;
@@ -16,7 +16,7 @@ use axum::http::{
 };
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -53,6 +53,7 @@ pub fn router(accounts: Arc<PostgresAccountService>, client_address_source: Clie
     let state = AccountState { accounts, client_address_source };
     Router::new()
         .route("/api/auth/login", post(post_login).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
+        .route("/api/auth/delete-account", post(post_delete_account).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
         .route("/api/auth/refresh", post(post_refresh).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
         .route("/api/auth/logout", post(post_logout))
         .route("/api/auth/me", get(get_me))
@@ -113,6 +114,20 @@ async fn post_login(State(state): State<AccountState>, headers: HeaderMap, remot
     server_wire_http::response(&headers, auth_response(issued))
 }
 
+// This standalone website form uses JSON rather than the app's binary wire
+// format. It requires fresh credentials and never accepts ambient cookies.
+async fn post_delete_account(
+    State(state): State<AccountState>, headers: HeaderMap, remote: Option<ConnectInfo<SocketAddr>>, Json(request): Json<DeleteAccountRequest>,
+) -> Result<StatusCode, StatusCode> {
+    if request.confirmation != "DELETE" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let address = client_address(state.client_address_source, &headers, remote)?.to_string();
+    state.accounts.enforce_rate_limit(AuthAttempt::DeleteAccount, &address, &request.email).await.map_err(auth_error)?;
+    state.accounts.delete_account(&request.email, &request.password).await.map_err(auth_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 
 async fn post_logout(State(state): State<AccountState>, headers: HeaderMap, body: Bytes) -> Result<StatusCode, StatusCode> {
     let token = match server_wire_http::decode_optional_request::<RefreshRequest>(&headers, &body, MAX_AUTH_BODY_BYTES)? {
@@ -156,7 +171,7 @@ async fn post_verify_email(State(state): State<AccountState>, headers: HeaderMap
     let request: EmailVerificationRequest = server_wire_http::decode_request(&headers, &body, MAX_AUTH_BODY_BYTES)?;
     let address = client_address(state.client_address_source, &headers, remote)?.to_string();
     state.accounts.enforce_rate_limit(AuthAttempt::VerifyEmail, &address, &request.email).await.map_err(auth_error)?;
-    let issued = state.accounts.verify_email(&request.email, &request.pin).await.map_err(auth_error)?;
+    let issued = state.accounts.verify_email(&request.email, &request.pin, &request.password).await.map_err(auth_error)?;
     state.accounts.clear_subject_rate_limit(AuthAttempt::VerifyEmail, &request.email).await.map_err(auth_error)?;
     server_wire_http::response(&headers, auth_response(issued))
 }

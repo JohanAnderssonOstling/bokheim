@@ -1,27 +1,23 @@
 //! Transactional maintenance of work LCC in an existing answer database.
 use super::{
-    batch::{load_work_codes_cached, WorkEvidenceCache},
+    batch::{WorkEvidenceCache, load_work_codes_cached},
     incremental::{self, InputIdentity, RECIPE_VERSION},
     *,
 };
-use metadata_contract::{classification_consensus_notation, RichWorkMetadataMatch};
-use rusqlite::{backup::Backup, params_from_iter};
+use metadata_contract::{RichWorkMetadataMatch, classification_consensus_notation};
+use rusqlite::params_from_iter;
 
 type BuildState = (i64, String, i64, i64);
 
-fn state(c: &Connection) -> Result<Option<BuildState>, MetadataError> {
-    if !has_table(c, "answer_build")? {
-        return Ok(None);
-    }
-    c.query_row("SELECT recipe_version,inputs,isbn_rows,json_bytes FROM answer_build WHERE singleton=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional().map_err(error)
+fn state(c: &Connection) -> Result<BuildState, MetadataError> {
+    c.query_row("SELECT recipe_version,inputs,isbn_rows,json_bytes FROM answer_build WHERE singleton=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(error)
 }
 
 fn lcc(m: &RichWorkMetadataMatch) -> Vec<Classification> {
     m.classifications.iter().filter(|c| c.scheme == ClassificationScheme::LibraryOfCongress).cloned().collect()
 }
 
-/// Explicit legacy migration asserts that SNAPSHOT is the input of ANSWERS.
-/// Recorded inputs are checked exactly; legacy files must share the dump date.
+/// Reclassification requires the recorded immutable inputs and current recipe.
 /// Only work LCC and dependent search/queue entries are changed, together with
 /// pending provider/demand evidence. Readers must use ordinary SQLite reads.
 pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, ratings: Option<&Path>, answers: &Path) -> Result<BuildReport, MetadataError> {
@@ -43,21 +39,11 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
     if version != schema::ANSWER_VERSION || date != resolver.state.snapshot.dump_date {
         return Err(MetadataError("reclassification requires the same answer schema and imported dump date".into()));
     }
-    let old_state = state(&out)?;
-    if let Some((recipe, identity, _, _)) = &old_state {
-        if ![2, RECIPE_VERSION].contains(recipe) || serde_json::from_str::<InputIdentity>(identity).map_err(error)? != inputs {
-            return Err(MetadataError("reclassification requires supported classification rules and unchanged immutable inputs".into()));
-        }
+    let (recipe, identity, count, bytes) = state(&out)?;
+    if recipe != RECIPE_VERSION || serde_json::from_str::<InputIdentity>(&identity).map_err(error)? != inputs {
+        return Err(MetadataError("reclassification requires current classification rules and unchanged immutable inputs".into()));
     }
-    // Legacy bootstrapping reads record lengths once, without deserializing or
-    // resolving them. Subsequent updates use the saved exact totals.
-    let (mut count, mut bytes) = if let Some((_, _, count, bytes)) = old_state {
-        (u64::try_from(count).map_err(error)?, u64::try_from(bytes).map_err(error)?)
-    } else {
-        tracing::info!("counting legacy answer rows and bytes for incremental state");
-        let (count, bytes): (i64, i64) = out.query_row("SELECT count(*),COALESCE(sum(length(answer)),0) FROM isbn_answer", [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(error)?;
-        (u64::try_from(count).map_err(error)?, u64::try_from(bytes).map_err(error)?)
-    };
+    let (mut count, mut bytes) = (u64::try_from(count).map_err(error)?, u64::try_from(bytes).map_err(error)?);
     let provider = providers.map(read_connection).transpose()?;
     let original_count = count;
     let demand_input = demand.map(read_connection).transpose()?;
@@ -284,36 +270,6 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
     if result.is_err() {
         let _ = out.execute_batch("ROLLBACK");
     }
-    result
-}
-
-// Preserve the existing `build --previous` publication contract. Explicit
-// `reclassify` updates ANSWERS directly; dated publications reuse its SQL path
-// on a copy and keep PREVIOUS untouched.
-pub(super) fn publish_reclassification(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, ratings: Option<&Path>, previous: &Path, output: &Path) -> Result<BuildReport, MetadataError> {
-    let temporary = output.with_extension(format!("reclassifying-{}", std::process::id()));
-    let _reservation = fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(error)?;
-    let result = (|| {
-        let old = crate::snapshot::open(previous)?;
-        if crate::snapshot::is_update(&old)? {
-            return Err(MetadataError("classification recipe migration of an overlay requires a full database".into()));
-        }
-        // A mutable base may have committed pages in WAL. SQLite backup also
-        // gives a consistent source if another writer commits during copying.
-        let mut copy = Connection::open(&temporary).map_err(error)?;
-        Backup::new(&old, &mut copy).map_err(error)?.run_to_completion(8192, Duration::from_millis(10), None).map_err(error)?;
-        drop(copy);
-        let mut report = reclassify_answers(snapshot, providers, demand, descriptions, ratings, &temporary)?;
-        // A dated file must be self-contained for read-only deployment.
-        // There are no readers on this private copy while journaling changes.
-        let copy = Connection::open(&temporary).map_err(error)?;
-        copy.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;").map_err(error)?;
-        drop(copy);
-        report.file_bytes = fs::metadata(&temporary).map_err(error)?.len();
-        fs::hard_link(&temporary, output).map_err(error)?;
-        Ok(report)
-    })();
-    let _ = fs::remove_file(temporary);
     result
 }
 

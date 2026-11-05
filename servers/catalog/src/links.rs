@@ -66,7 +66,7 @@ pub fn import(db: &Connection, http: &Client, path: &Path, analyze: bool) -> Res
                                         attempt += 1;
                                         eprintln!("retry {attempt}: {error}");
                                     }
-                                    Err(error) => return Err(error),
+                                    Err(error) => return Err(error.to_string()),
                                 }
                             };
                             let bytes_len = bytes.len();

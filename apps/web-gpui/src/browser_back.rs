@@ -23,7 +23,7 @@ pub(super) fn install(window: &Window, cx: &mut App) {
     });
 
     let mut window = window.to_async(cx);
-    let callback = Closure::new(move || -> bool {
+    let callback = Closure::own_aborting(move || -> bool {
         window
             .update(|window, cx| {
                 let Some(focus) = window.focused(cx) else {

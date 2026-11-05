@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use html::resources::ResourceProvider;
-use html::style::property_name_is_supported;
+use html_style::property_name_is_supported;
 #[path = "../book.rs"]
 mod book;
 use book::BookSource;

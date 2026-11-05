@@ -11,6 +11,10 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
 
+    <queries>
+        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
+    </queries>
+
     <application
         android:label="Bokheim"
         android:icon="@mipmap/ic_launcher"
@@ -30,12 +34,12 @@
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/update_paths" />
         </provider>
         <service android:name=".AudiobookService"
-            android:foregroundServiceType="mediaPlayback" android:exported="true">
+            android:foregroundServiceType="mediaPlayback" android:exported="true" android:stopWithTask="true">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
-        <service android:name=".SpeechService" android:foregroundServiceType="mediaPlayback" android:exported="false" />
+        <service android:name=".SpeechService" android:foregroundServiceType="mediaPlayback" android:exported="false" android:stopWithTask="true" />
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|density|uiMode"
@@ -54,14 +58,11 @@
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="application/epub+zip" />
-                <data android:mimeType="application/pdf" />
-                <data android:mimeType="application/x-mobipocket-ebook" />
-                <data android:mimeType="application/vnd.amazon.ebook" />
-                <data android:mimeType="application/x-mobi8-ebook" />
-                <data android:mimeType="audio/x-m4b" />
-                <data android:mimeType="audio/mp4" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="bokheim" android:host="open" />
             </intent-filter>
+
+            <!-- Book VIEW MIME types are generated from shared/book-model/formats.json. -->
         </activity>
     </application>
 </manifest>

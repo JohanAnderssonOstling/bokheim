@@ -1,5 +1,94 @@
 # Public Internet deployment
 
+## Curated dictionary files
+
+Web dictionary downloads are public static files served by Caddy at
+`https://app.bokheim.se/dictionaries/<sha256>.zip`; they do not use the sync API.
+Before deploying a web release that adds dictionary editions, publish the
+catalog's archives on the deployment host from the matching source checkout:
+
+```sh
+python3 scripts/dictionaries/publish.py \
+  --output /srv/bokheim-updates/public/dictionaries
+python3 scripts/dictionaries/publish.py \
+  --output /srv/bokheim-updates/public/dictionaries --verify-only
+```
+
+Run as an account with write access to that persistent directory. Give Caddy
+read access to the files and traversal access to their parent directories. Keep
+this directory outside the rotating web release bundles. No API cache directory
+or dictionary environment variable is needed.
+
+The publisher reads `shared/dictionary-catalog/data/curated.json`, checks exact
+size and SHA-256 before publishing each file atomically, and preserves the
+original archive and its license/attribution notices. Repeated runs reverify and
+skip existing files. Corrupt existing files cause an error; investigate and
+remove that file before retrying. Interrupted downloads are not published.
+Older archives are retained so released clients can still download their pinned
+editions. `--id ID` can limit a diagnostic run; publish and verify the full
+catalog before a web release.
+
+Install the updated Caddyfile with the existing helper:
+
+```sh
+sudo servers/sync/deploy/install-caddy-config.sh
+```
+
+The `/dictionaries/*` handler precedes the SPA fallback, so absent files return
+404 rather than HTML. Archive URLs are immutable and allow cross-origin Fetch
+for development clients; production downloads use the web app's own origin.
+The client still verifies every download before installing it into browser
+storage. Dictionary downloads always require an explicit action in Settings.
+
+## Reuse hosted catalog books
+
+After deploying a server with catalog reuse support, opt in with:
+
+```sh
+sudo bash servers/sync/deploy/provision-catalog-storage.sh
+sudo systemctl restart bokheim-sync.service
+```
+
+The setup uses `/srv/bokheim-updates/public/catalog/books` as the trusted public
+source and `/srv/bokheim-updates/catalog-sync-pins` as a private retention
+directory. The existing sync assets can stay on their separate large-disk
+mount: hard links are made entirely on the catalog filesystem, so no book bytes
+are duplicated or moved. The pin directory is outside Caddy's public root and
+has mode 0700. Never expose it, or the private sync blob directory, through a
+public file-server route.
+
+The script grants the sync service the source-inode access Linux requires for
+protected hard links, while keeping catalog directory access read-only. Its
+default ACL covers normally created future catalog files. A publisher that
+resets file permissions/ACLs must preserve the `bokheim` ACL or run the setup
+again after publication. The service never modifies catalog book contents.
+
+The setup writes `/srv/bokheim-updates/sync-catalog.env`, which the production
+unit reads optionally. This file survives ordinary server deployments. The unit
+makes the common catalog ancestor one writable mount in its otherwise read-only
+namespace. Do not replace it with separate bind mounts for the book and pin
+directories: `link` rejects links across mount boundaries, even when both mounts
+have the same backing device. Startup probes a hosted file's hard-link
+permissions and fails clearly if the storage or sandbox setup prevents reuse.
+
+No client or database schema upgrade is needed for catalog reuse. The server
+returns the existing manifest `owned` result after atomically claiming and
+charging the verified public file. Existing uploaded duplicates are consolidated
+by the background asset collector. Per-account quotas and private-book access
+checks remain in force.
+
+Sync pull pages use a decoded-byte budget of 63.5 MiB, with 512 KiB reserved
+below the 64 MiB response ceiling. There is no independent pull change-count
+cap. Native and web clients share this budget and cursor validation.
+
+The Caddy configuration enables Zstandard/gzip for protobuf responses on the
+API host, browser API proxy, and metadata API. Its explicit media-type matcher
+includes `application/vnd.bokheim+protobuf`, which is outside the
+[default compression matcher](https://caddyserver.com/docs/caddyfile/directives/encode).
+The transferred size depends on the negotiated encoding; 4 MiB is not a strict
+compressed-page limit. Install the updated Caddy configuration as well as the
+coordinated client/server release to enable compression in production.
+
 ## Remote code deployment
 
 After the host has been prepared once with `install-server.sh`, deploy a new
@@ -26,9 +115,23 @@ sudo /tmp/bokheim-deploy.ABC123/deploy-sudo.sh
 `deploy-sudo.sh` takes no arguments. It validates the staged artifacts and
 credentials and the installed schema before stopping services.
 
-The script builds `sync-server`, transfers its release artifact and systemd
-unit over SSH, and invokes the fixed root-owned sync activation helper. It
-runs a transactional schema upgrade and check and never recreates the PostgreSQL database. Provision a
+The script builds `sync-server` and the separate `library-cloud-upgrade`
+maintenance tool, transfers their artifacts and the systemd unit over SSH,
+and invokes the fixed root-owned sync activation helper. It validates every
+stored client payload before stopping the service, then takes a full PostgreSQL
+backup and upgrades schema 14 to 17 in one transaction. Existing payloads and
+retired storage configuration are retained in `bokheim_upgrade_archive`;
+legacy feed records remain in `opds_feeds`. External-storage configuration is
+retained in the archive while its library uses the current local storage policy.
+Authored versions, asset references, accounts, and libraries are preserved.
+The synchronization generation changes so clients fetch the converted values.
+
+During activation Caddy cannot reach the candidate socket until private
+readiness and protocol checks pass. Failure before publication restores the
+previous database and executables. Backups remain under
+`/var/backups/bokheim-sync/`. Once public traffic is admitted, deployment never
+automatically restores an older database over newly acknowledged writes.
+Provision a
 fresh database with `sync-server migrate` before the first release. Catalogue
 and metadata services are deployed independently. The
 script defaults to `192.168.1.68`;
@@ -312,15 +415,15 @@ fails. It reloads only Caddy and does not restart the Bokheim services.
 ## Database recovery and synchronization history
 
 The sync activation helper preserves PostgreSQL state. Normal restarts,
-deployments, and repeated schema upgrades also preserve the `sync_history`
+and deployments preserve the `sync_history`
 generation UUID. Do not rotate it during an ordinary release.
 
 After restoring a PostgreSQL backup or replacing database history:
 
 1. Stop `bokheim-sync.service` and any other synchronization-server process
    that uses the same database. Keep traffic stopped throughout restoration.
-2. Restore the database. If the backup has an older schema, run the installed
-   `sync-server upgrade` with its database credentials before continuing.
+2. Restore a backup with the current schema, then run `sync-server verify-schema`
+   with its database credentials before continuing.
 3. Explicitly rotate the history generation using the installed database
    credential, then restart synchronization:
 
@@ -345,12 +448,8 @@ republish canonical cells with their original authored versions. Client-retained
 state can repair missing server state; data absent from both the backup and
 all clients cannot be recovered by this protocol.
 
-### Existing production baseline
+### Database initialization
 
-`sync-server upgrade` transactionally adopts the deployed v14 baseline with
-cloud-storage support. It retains user/library/blob/sync data, updates the two
-LWW triggers to permit revision-only repair, and records schema version 1.
-Subsequent migrations bring this baseline to schema 11, including the persisted
-sync history UUID. The old migration history is retained. Repeated upgrades are no-ops; older
-unsupported baselines fail without partial changes. Server startup still only
-verifies the schema. Never run `migrate` against an existing production database.
+Run `sync-server migrate` only against an empty database. Existing databases
+must already use the current schema. Deployment and startup verify that schema;
+historical schema upgrades are not supported.

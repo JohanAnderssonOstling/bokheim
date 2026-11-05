@@ -1,68 +1,68 @@
 //! Adding a book downloaded over the network: a public-domain catalog book,
 //! checked against the catalog's hash and with the catalog's record as its
 //! enrichment answer, an external catalog audiobook from its source, or a
-//! book from an OPDS feed, enriched like any import.
+//! book from a website, enriched like any import.
 
-use client_runtime::BackendError;
+use client_protocol::BackendError;
 use library_database::catalog::CatalogBook;
-use library_model::{CardKey, LibraryUpdate};
+use library_model::CardKey;
 use library_placement::stage_import;
-use library_runtime::events::LibraryEvent;
-use sync_common::{ContentHash, DirId};
+use sync_common::{BookId, DirId};
 
 use crate::LibraryImport;
 
-impl LibraryImport {
-    pub async fn import_catalog_book(&self, parent_id: DirId, hash: ContentHash) -> Result<ContentHash, BackendError> {
-        let book = library_database::catalog::entry(CardKey(*hash.as_bytes())).map_err(BackendError::operation)?.filter(|book| book.hash.is_some()).ok_or("the book is not in the catalog")?;
-        let entry = CardKey(*hash.as_bytes());
-        let bytes = library_catalog::download_book_with_progress(hash, &|progress| self.events.publish_update(LibraryUpdate::CatalogImport { entry, progress })).await.map_err(BackendError::message)?;
-        self.import_catalog_download(parent_id, &book, bytes).await
-    }
-
-    /// Downloads an external audiobook from its source and imports it with
-    /// the catalog's record, as a hosted catalog book is.
-    pub async fn import_external_catalog_audiobook(&self, parent_id: DirId, entry: CardKey) -> Result<ContentHash, BackendError> {
-        let book = library_database::catalog::entry(entry).map_err(BackendError::operation)?.filter(|book| book.hash.is_none()).ok_or("the audiobook is not in the catalog")?;
-        let bytes = library_catalog::download_audiobook_with_progress(entry, &|progress| self.events.publish_update(LibraryUpdate::CatalogImport { entry, progress })).await.map_err(BackendError::message)?;
-        let imported = self.import_catalog_download(parent_id, &book, bytes).await?;
-        self.refresh_external_catalog_audiobook_cover(imported, entry).await?;
-        Ok(imported)
-    }
-
-    /// Uses selected catalog artwork to replace all cached thumbnail sizes,
-    /// including those of an audiobook already imported into the library.
-    /// Audio files and their source artwork are never rewritten.
-    pub async fn refresh_external_catalog_audiobook_cover(&self, hash: ContentHash, entry: CardKey) -> Result<bool, BackendError> {
-        if self.database.thumbnail_book_format(hash).map_err(BackendError::operation)? != Some(book_model::BookFormat::Mp3Folder) {
+impl LibraryImport<'_> {
+    /// Try catalog artwork once during import. Fetch or decode failure leaves
+    /// the generated cover in place; publication errors are still reported.
+    async fn refresh_external_catalog_audiobook_cover(&self, hash: BookId, entry: CardKey) -> Result<bool, BackendError> {
+        if self.storage.database().thumbnail_book_format(hash).await.map_err(BackendError::operation)? != Some(book_model::BookFormat::Mp3Folder) {
             return Ok(false);
         }
-        let Some(bytes) = library_catalog::fresh_external_cover(entry).await.map_err(BackendError::message)? else { return Ok(false) };
-        let versions = cpu_host::cover(&*self.cpu, bytes).await?;
-        // Fetch and CPU work may overlap removal of the book. Keep old valid
-        // thumbnails until the replacement has been decoded successfully.
-        if self.database.thumbnail_book_format(hash).map_err(BackendError::operation)? != Some(book_model::BookFormat::Mp3Folder) {
+        let versions = match Self::fetch_external_catalog_audiobook_cover(&*self.cpu, entry).await {
+            Ok(Some(versions)) => versions,
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                log::warn!("catalog cover for {hash} unavailable; keeping the generated cover: {error}");
+                return Ok(false);
+            }
+        };
+        self.store_external_catalog_audiobook_cover(hash, &versions).await
+    }
+
+    async fn fetch_external_catalog_audiobook_cover(cpu: &dyn cpu_host::CpuHost, entry: CardKey) -> Result<Option<cpu_host::ThumbnailBytes>, BackendError> {
+        let Some(bytes) = library_catalog::fresh_external_cover(entry).await.map_err(BackendError::message)? else { return Ok(None) };
+        cpu_host::cover(cpu, bytes).await.map(Some)
+    }
+
+    /// The caller holds the library state lock while publishing artwork.
+    async fn store_external_catalog_audiobook_cover(&self, hash: BookId, versions: &cpu_host::ThumbnailBytes) -> Result<bool, BackendError> {
+        // Keep existing thumbnails until the replacement has been decoded.
+        if self.storage.database().thumbnail_book_format(hash).await.map_err(BackendError::operation)? != Some(book_model::BookFormat::Mp3Folder) {
             return Ok(false);
         }
-        self.assets.write_thumbnail_set(&hash, &versions.high_density, &versions.browse, &versions.card_high_density).await.map_err(BackendError::operation)?;
-        self.database.complete_thumbnail_work(&hash, true).map_err(BackendError::operation)?;
-        self.events.emit(LibraryEvent::ThumbnailGenerated { content_hash: hash });
+        self.storage.assets().write_thumbnail_set(&hash, &versions.high_density, &versions.browse, &versions.card_high_density).await.map_err(BackendError::operation)?;
+        self.storage.database().complete_thumbnail_work(&hash, true).await.map_err(BackendError::operation)?;
+        self.events.cover_changed(hash);
         Ok(true)
     }
 
-    async fn import_catalog_download(&self, parent_id: DirId, book: &CatalogBook, bytes: Vec<u8>) -> Result<ContentHash, BackendError> {
-        let name = if book.author.is_empty() { book.title.clone() } else { format!("{} - {}", book.author, book.title) };
+    pub async fn import_catalog_download(&self, parent_id: DirId, book: CatalogBook, bytes: Vec<u8>) -> Result<BookId, BackendError> {
+        let external = book.hash.is_none().then_some(book.key);
         let extension = book.format().canonical_extension();
+        let name = if book.author.is_empty() { book.title } else { format!("{} - {}", book.author, book.title) };
         let file_name = format!("{}.{extension}", name.replace(['/', '\\', ':'], " ").trim());
         let imported = self.import_downloaded_book(parent_id, &file_name, bytes).await?;
-        self.database.record_catalog_answer(&imported, book.record.clone()).map_err(BackendError::operation)?;
+        self.storage.database().record_catalog_answer(&imported, book.record).await.map_err(BackendError::operation)?;
+        if let Some(entry) = external {
+            self.refresh_external_catalog_audiobook_cover(imported, entry).await?;
+        }
         Ok(imported)
     }
 
     /// Imports a downloaded file as if it were a local one.
-    pub async fn import_downloaded_book(&self, parent_id: DirId, file_name: &str, bytes: Vec<u8>) -> Result<ContentHash, BackendError> {
-        let mut import = self.validate_import(&parent_id, file_name)?;
-        let (name, staged) = stage_import(&self.assets, &self.database, parent_id, import.file_name.clone(), Box::new(std::io::Cursor::new(bytes)), Default::default()).await.map_err(BackendError::operation)?;
+    pub async fn import_downloaded_book(&self, parent_id: DirId, file_name: &str, bytes: Vec<u8>) -> Result<BookId, BackendError> {
+        let mut import = self.validate_import(&parent_id, file_name).await?;
+        let (name, staged) = stage_import(self.storage.assets(), self.storage.database(), parent_id, &import.file_name, Box::new(std::io::Cursor::new(bytes)), Default::default()).await.map_err(BackendError::operation)?;
         import.file_name = name;
         self.finish_import(import, staged).await
     }
@@ -74,11 +74,11 @@ mod tests {
     use book_model::{BookDetails, BookFormat, BookRecord};
     use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
     use library_database::catalog::import_record;
-    use library_database::{Database, FilesystemScan, ImportCommit, InspectedFilesystemScan, ScanApplyResult, ScanFileObservation, ScannedBook};
+    use library_database::{DatabaseClient, Database, FilesystemScan, ImportCommit, InspectedFilesystemScan, ScanApplyResult, ScanFileObservation, ScannedBook, executor::BackendExecutor};
     use library_files::AssetStore;
     use library_model::{BlobKind, PublishedStagedBook};
-    use library_placement::LibraryPlacement;
-    use library_runtime::{events::LibraryEventRouter, scheduler::SyncScheduler};
+    use library_placement::LibraryState;
+    use library_services::events::LibraryEventRouter;
     use rusqlite::Connection;
     use std::{
         io::{Cursor, Read, Write},
@@ -97,17 +97,19 @@ mod tests {
     #[tokio::test]
     async fn catalog_answers_follow_file_hashes_and_selected_audio_covers_preserve_files() {
         let root = tempfile::tempdir().unwrap();
-        let database = Arc::new(Database::open(":memory:").unwrap());
-        database.initialize_library().unwrap();
-        let hash = ContentHash::new(&"a".repeat(64));
+        let database = DatabaseClient::open(":memory:", &BackendExecutor::new().unwrap()).await.unwrap();
+        database.initialize_library().await.unwrap();
+        let hash = BookId::new(&"a".repeat(64));
         let key = CardKey([8; 32]);
         let record = BookRecord { metadata: BookDetails { title: "Audio book".into(), ..Default::default() }, description: String::new() };
         database
             .commit_import(ImportCommit {
+                source_identity: None,
+                byte_checksum: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: "Story".into(),
                 format: BookFormat::Mp3Folder,
-                content_hash: hash,
+                book_id: hash,
                 size_bytes: 10,
                 inspection_version: 1,
                 inspection: Some(book_inspection::InspectedBook { metadata: record.clone(), pdf: None, audiobook: None, toc: Vec::new() }),
@@ -115,53 +117,51 @@ mod tests {
                 request_thumbnail: false,
                 restore_paths: Vec::new(),
             })
+            .await
             .unwrap();
-        let cpu = Arc::new(client_platform_native::cpu_host::NativeHost);
+        let cpu = Arc::new(cpu_host::NativeHost);
         let epub_path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../book-inspection/tests/fixtures/back-matter-evidence.epub"));
         let inspected = filesystem_scanner::ingestion::ingest_file(epub_path.clone(), "fixture.epub".into(), &*cpu).await.unwrap();
-        let epub_hash = inspected.content_hash;
+        let epub_hash = inspected.book_id;
         let epub_bytes = std::fs::read(epub_path).unwrap();
         let catalog = Connection::open_in_memory().unwrap();
         catalog.execute_batch(include_str!("../../library-database/tests/sql/catalog_pagination.sql")).unwrap();
         catalog
             .execute_batch(
-                "INSERT INTO snapshot VALUES(1,8,1);
+                "INSERT INTO snapshot VALUES(1,11,1);
                  INSERT INTO source VALUES(1,'example.org');
-                 INSERT INTO description VALUES(1,''),(2,'Reviewed catalog description');
-                 INSERT INTO subject_source VALUES(1,'manual:subject');
-                 INSERT INTO subject_authority VALUES(1,'unified');
-                 INSERT INTO subject VALUES(1,NULL,'Short Stories',NULL,1,1,'Literature / Genres / Literary Forms / Forms & Literary Traditions / Short Stories');",
+                 INSERT INTO description VALUES(1,''),(2,'Reviewed catalog description');",
             )
             .unwrap();
         catalog.execute("INSERT INTO book(row_id,key,external,title,description_id,source_id,entry_url,format) VALUES(1,?1,1,'Audio book',1,1,'https://example.org/book',16)", [&key.0[..]]).unwrap();
-        catalog.execute("INSERT INTO book(row_id,key,external,title,description_id,source_id,format) VALUES(2,?1,0,'Curated fixture',2,1,1)", [epub_hash.as_bytes().as_slice()]).unwrap();
-        catalog.execute_batch("INSERT INTO book_source VALUES(1,1),(2,1); INSERT INTO book_subject VALUES(2,1);").unwrap();
+        catalog.execute("INSERT INTO book(row_id,key,external,title,description_id,source_id,format) VALUES(2,?1,0,'Curated fixture',2,1,1)", [epub_hash.as_bytes()]).unwrap();
+        catalog.execute_batch("INSERT INTO book_source VALUES(1,1),(2,1); INSERT INTO book_concept VALUES(2,4107);").unwrap();
         library_database::catalog::activate(catalog.serialize("main").unwrap().to_vec()).unwrap();
 
         let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap();
         let old = cpu_host::cover(&*cpu, picture([240, 20, 20])).await.unwrap();
         assets.write_thumbnail_set(&hash, &old.high_density, &old.browse, &old.card_high_density).await.unwrap();
-        database.complete_thumbnail_work(&hash, true).unwrap();
+        database.complete_thumbnail_work(&hash, true).await.unwrap();
         let story = root.path().join("Story");
         std::fs::create_dir(&story).unwrap();
         std::fs::write(story.join("01.mp3"), b"original audio and tags").unwrap();
-        let (sync, _) = SyncScheduler::new();
-        let (asset_work, _) = SyncScheduler::new();
-        let (files, _) = SyncScheduler::new();
-        let (enrichment, _) = SyncScheduler::new();
-        let (events, _) = LibraryEventRouter::new(sync, asset_work, files, enrichment);
-        let placement = Arc::new(LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
-        let importer = LibraryImport { database: database.clone(), assets: assets.clone(), cpu: cpu.clone(), events, placement, root: root.path().to_str().unwrap().into() };
+
+        let (events, _) = LibraryEventRouter::new();
+        let placement = Arc::new(tokio::sync::RwLock::new(LibraryState::new(database.clone(), assets.clone(), events.clone())));
+        let storage = placement.write().await;
+        let importer = LibraryImport::new(&storage, cpu.clone());
         // A renamed copy uses the catalog only when its actual bytes match.
         let added = importer.import_downloaded_book(ROOT_DIR_ID, "renamed.epub", epub_bytes.clone()).await.unwrap();
-        assert_eq!(added, epub_hash);
-        let answer = database.enrichment_cover_record(&added).unwrap().unwrap();
+        assert!(added.is_local());
+        assert_eq!(database.resolve_book_identity(epub_hash).unwrap(), added);
+        let answer = database.enrichment_cover_record(&added).await.unwrap().unwrap();
         assert_eq!(answer.metadata.title, inspected.inspection.metadata.metadata.title);
-        assert_eq!(answer.book.subjects[0].source(), "manual:subject");
+        assert_eq!(answer.book.subjects[0].source(), "catalog:concept");
+        assert_eq!(answer.book.subjects[0].code(), Some("concept:4107"));
         assert_eq!(answer.book.subjects[0].authority(), Some("unified"));
         assert!(database.enrichment_candidates(&[added], i64::MAX).unwrap().is_empty());
         assert!(import_record(added, BookFormat::Pdf).unwrap().is_none());
-        assert!(import_record(ContentHash::from_bytes(key.0), BookFormat::Mp3Folder).unwrap().is_none());
+        assert!(import_record(BookId::from_bytes(key.0), BookFormat::Mp3Folder).unwrap().is_none());
         // Discovery of an EPUB already on disk uses the same curated answer.
         let discovered = Database::open(":memory:").unwrap();
         discovered.initialize_library().unwrap();
@@ -171,20 +171,22 @@ mod tests {
         let books = InspectedFilesystemScan {
             readable: true,
             books: vec![ScannedBook {
+                source_identity: None,
                 directory: ROOT_DIR_ID,
                 name: "discovered.epub".into(),
                 path: "discovered.epub".into(),
                 fingerprint: inspected.fingerprint,
-                content_hash: added,
+                book_id: epub_hash,
                 size_bytes: inspected.size_bytes,
                 extension: "epub".into(),
                 inspection: inspected.inspection,
                 inspection_version: book_inspection::inspection_version(BookFormat::Epub),
             }],
         };
-        assert_eq!(discovered.apply_filesystem_scan_batch(&mut snapshot, &discovery, &books, true, None).unwrap(), ScanApplyResult::Applied);
-        assert_eq!(discovered.enrichment_cover_record(&added).unwrap().unwrap().book.subjects, answer.book.subjects);
-        assert!(discovered.enrichment_candidates(&[added], i64::MAX).unwrap().is_empty());
+        assert_eq!(discovered.apply_filesystem_scan_batch(&mut snapshot, &discovery, books, true, None).unwrap(), ScanApplyResult::Applied);
+        let discovered_id = discovered.resolve_book_identity(epub_hash).unwrap();
+        assert_eq!(discovered.enrichment_cover_record(&discovered_id).unwrap().unwrap().book.subjects, answer.book.subjects);
+        assert!(discovered.enrichment_candidates(&[discovered_id], i64::MAX).unwrap().is_empty());
         // A valid EPUB with different bytes and the same embedded metadata must
         // still use ordinary enrichment rather than a title/author match.
         let mut different = epub_bytes.clone();
@@ -214,7 +216,7 @@ mod tests {
         assert!(importer.refresh_external_catalog_audiobook_cover(hash, key).await.unwrap());
         let master = assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap();
         assert_ne!(master, old.high_density);
-        assert!(importer.refresh_external_catalog_audiobook_cover(hash, key).await.is_err());
+        assert!(!importer.refresh_external_catalog_audiobook_cover(hash, key).await.unwrap());
         server.join().unwrap();
         assert_eq!(assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), master);
         let decoded = image::load_from_memory(&master).unwrap().to_rgb8();

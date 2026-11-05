@@ -3,9 +3,9 @@
 //! Every format's navigation reaches the same tree of title, target and
 //! children; what differs is only the target value. An EPUB target needs no
 //! prefix — it is the publisher's own href, and resolving it to a document and
-//! anchor is the renderer's business. A PDF entry points at a page rather than
-//! at a document fragment, and an audiobook chapter at an offset, so both carry
-//! their value behind a scheme.
+//! anchor is the publication content resolver's business. A PDF entry points
+//! at a page rather than at a document fragment, and an audiobook chapter at
+//! an offset, so both carry their value behind a scheme.
 //!
 //! [`BookTocEntry::target`]: crate::BookTocEntry::target
 
@@ -49,4 +49,12 @@ pub fn pdf_toc_target(page_index: usize) -> String {
 
 pub fn pdf_toc_page(target: &str) -> Option<usize> {
     target.strip_prefix(PDF_TOC_TARGET_PREFIX)?.parse().ok()
+}
+
+pub fn cbz_toc_target(page_index: usize) -> String {
+    format!("cbz-page:{page_index}")
+}
+
+pub fn cbz_toc_page(target: &str) -> Option<usize> {
+    target.strip_prefix("cbz-page:")?.parse().ok()
 }

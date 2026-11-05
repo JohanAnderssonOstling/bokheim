@@ -3,17 +3,19 @@ use super::runtime_index::{build_runtime, LccSelector};
 use super::runtime_index::{compare_cutter_endpoint, compare_upper_cutters, cutter_components, UnifiedTaxonomyRuntime};
 pub use super::runtime_index::{lcc_subject_sort_orders, UnifiedConceptDefinition, UnifiedConceptRoute};
 use super::{compact_whitespace, DDC_SYSTEM_ID, LCC_SYSTEM_ID};
+use crate::sqlite_matcher::SqliteTaxonomy;
 use crate::LccMatchReport;
+use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 /// Release identifier of the bundled taxonomy image. Keep this cheap constant
 /// separate from the runtime so an already-projected library can be opened
 /// without materializing the complete taxonomy matcher.
 pub const BUNDLED_UNIFIED_TAXONOMY_REVISION_ID: &str = include_str!(concat!(env!("OUT_DIR"), "/unified-taxonomy-revision-id.txt"));
 
-static RUNTIME: OnceLock<RwLock<Arc<UnifiedTaxonomyRuntime>>> = OnceLock::new();
+static RUNTIME: OnceLock<Mutex<SqliteTaxonomy>> = OnceLock::new();
 
 #[derive(Deserialize)]
 struct ReviewedPathAliases {
@@ -26,7 +28,7 @@ struct ReviewedPathAlias {
     concept_id: i64,
 }
 
-fn reviewed_path_aliases() -> &'static BTreeMap<String, i64> {
+pub(super) fn reviewed_path_aliases() -> &'static BTreeMap<String, i64> {
     static ALIASES: OnceLock<BTreeMap<String, i64>> = OnceLock::new();
     ALIASES.get_or_init(|| {
         let reviewed: ReviewedPathAliases = serde_json::from_str(include_str!("../data/reviewed-literature-path-aliases.json")).expect("reviewed path aliases must be valid");
@@ -38,14 +40,26 @@ fn reviewed_path_aliases() -> &'static BTreeMap<String, i64> {
     })
 }
 
+#[cfg(test)]
 fn concept_for_path(runtime: &UnifiedTaxonomyRuntime, path: &str) -> Option<i64> {
-    if let Some(route) = runtime.routes.find(path) {
+    if let Some(route) = (!path.starts_with("concept:")).then(|| runtime.routes.find(path)).flatten() {
         return Some(runtime.routes.concept_id(route));
+    }
+    reviewed_concept_reference(path, |identity| runtime.routes.paths_for_concept(identity).next().is_some())
+}
+
+/// Retired IDs can have the same reviewed redirects as former display paths.
+/// An ID still present in an older selected snapshot keeps its original meaning.
+pub(super) fn reviewed_concept_reference(path: &str, mut contains: impl FnMut(i64) -> bool) -> Option<i64> {
+    if let Some(identity) = path.strip_prefix("concept:").and_then(|value| value.parse::<i64>().ok()) {
+        if contains(identity) {
+            return Some(identity);
+        }
     }
     let identity = *reviewed_path_aliases().get(path)?;
     // A selected/installed taxonomy may omit a subject. Never manufacture
     // assignments to identities absent from the active graph.
-    runtime.routes.paths_for_concept(identity).next().map(|_| identity)
+    contains(identity).then_some(identity)
 }
 
 /// An owned, immutable taxonomy matcher suitable for servers and tools that
@@ -65,22 +79,18 @@ impl UnifiedTaxonomy {
     }
 
     pub fn matching_concept_ids(&self, system_id: &str, code: &str) -> Vec<i64> {
-        matching_concepts(&self.runtime, system_id, code).into_iter().collect()
-    }
-
-    pub fn most_specific_concept_ids(&self, concepts: impl IntoIterator<Item = i64>) -> BTreeSet<i64> {
-        most_specific_concept_ids_in(&self.runtime, concepts)
+        matching_concepts(self.runtime.as_ref(), system_id, code).into_iter().collect()
     }
 
     /// Returns candidates for one code, or independently resolved subjects for an explicit LCC list.
     pub fn match_candidates(&self, system_id: &str, code: &str) -> Vec<i64> {
-        matching_candidates(&self.runtime, system_id, code).into_iter().collect()
+        matching_candidates(self.runtime.as_ref(), system_id, code).into_iter().collect()
     }
 
     /// Returns candidates for one code, or independently resolved subjects for an explicit list.
     /// Resolved subjects, recovery methods and fragments that still need review.
     pub fn lcc_match_report(&self, code: &str) -> LccMatchReport {
-        lcc_match_report(&self.runtime, code)
+        lcc_match_report(self.runtime.as_ref(), code)
     }
 
     /// Unrelated exact-selector conflicts require curation; ancestors are shadowed.
@@ -103,19 +113,30 @@ impl UnifiedTaxonomy {
     }
 
     pub fn has_exact_source_code(&self, system_id: &str, code: &str) -> bool {
-        has_exact_source_code(&self.runtime, system_id, code)
+        has_exact_source_code(self.runtime.as_ref(), system_id, code)
     }
 }
 
-pub(super) fn current() -> Arc<UnifiedTaxonomyRuntime> {
-    RUNTIME.get_or_init(|| RwLock::new(default_runtime())).read().expect("unified taxonomy runtime lock must not be poisoned").clone()
+fn current() -> MutexGuard<'static, SqliteTaxonomy> {
+    RUNTIME.get_or_init(|| Mutex::new(default_runtime())).lock().unwrap_or_else(|error| error.into_inner())
 }
 
 pub fn install_unified_taxonomy_concepts(concepts: Vec<UnifiedConceptDefinition>) -> Result<(), String> {
-    let replacement = Arc::new(build_runtime(concepts)?);
-    let runtime = RUNTIME.get_or_init(|| RwLock::new(replacement.clone()));
-    *runtime.write().map_err(|_| "unified taxonomy runtime lock is poisoned".to_owned())? = replacement;
+    install_runtime(SqliteTaxonomy::from_concepts(concepts)?)
+}
+
+fn install_runtime(replacement: SqliteTaxonomy) -> Result<(), String> {
+    // Initialize with the replacement without opening the default database.
+    let mut replacement = Some(replacement);
+    let runtime = RUNTIME.get_or_init(|| Mutex::new(replacement.take().unwrap()));
+    if let Some(replacement) = replacement {
+        *runtime.lock().map_err(|_| "unified taxonomy lock is poisoned".to_owned())? = replacement;
+    }
     Ok(())
+}
+
+pub(crate) fn install_from_connection(db: Connection) -> Result<(), String> {
+    install_runtime(SqliteTaxonomy::from_connection(db)?)
 }
 
 pub fn unified_taxonomy_revision_id() -> String {
@@ -125,48 +146,45 @@ pub fn unified_taxonomy_revision_id() -> String {
 /// Returns the active content revision only when a matcher has already been built.
 /// This is intentionally non-initializing for startup-sensitive callers.
 pub fn loaded_unified_taxonomy_revision_id() -> Option<String> {
-    RUNTIME.get().and_then(|runtime| runtime.read().ok().map(|runtime| runtime.revision_id.clone()))
+    RUNTIME.get().and_then(|runtime| runtime.lock().ok().map(|runtime| runtime.revision_id.clone()))
 }
 
 pub fn unified_subject_paths(system_id: &str, code: &str) -> Vec<String> {
     let runtime = current();
     if system_id == crate::UNIFIED_SYSTEM_ID {
-        if runtime.routes.find(code).is_some() {
+        if runtime.find_path(code).is_some() {
             return vec![code.to_owned()];
         }
-        return concept_for_path(&runtime, code).into_iter().flat_map(|id| runtime.routes.paths_for_concept(id)).collect();
+        return runtime.concept_for_path(code).map(|id| runtime.paths_for_concept(id)).unwrap_or_default();
     }
-    matching_concepts(&runtime, system_id, code).into_iter().flat_map(|id| runtime.routes.paths_for_concept(id)).collect::<BTreeSet<_>>().into_iter().collect()
+    matching_concepts(&*runtime, system_id, code).into_iter().flat_map(|id| runtime.paths_for_concept(id)).collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+pub(super) fn resolved_subject_concepts(system_id: &str, code: &str) -> BTreeSet<i64> {
+    let runtime = current();
+    if system_id == crate::UNIFIED_SYSTEM_ID {
+        return runtime.concept_for_path(code).into_iter().collect();
+    }
+    matching_concepts(&*runtime, system_id, code)
 }
 
 /// Remove only assigned ancestors of other assignments. Sibling branches and
 /// unrelated roots remain independent, regardless of their depth or source code.
 pub fn most_specific_concept_ids(concepts: impl IntoIterator<Item = i64>) -> BTreeSet<i64> {
-    most_specific_concept_ids_in(&current(), concepts)
+    most_specific_concept_ids_in(&*current(), concepts)
 }
 
-fn most_specific_concept_ids_in(runtime: &UnifiedTaxonomyRuntime, concepts: impl IntoIterator<Item = i64>) -> BTreeSet<i64> {
+fn most_specific_concept_ids_in(runtime: &impl MatchSource, concepts: impl IntoIterator<Item = i64>) -> BTreeSet<i64> {
     let mut concepts = concepts.into_iter().collect::<BTreeSet<_>>();
-    let ancestors = concepts
-        .iter()
-        .filter_map(|id| runtime.ancestors.binary_search_by_key(id, |(id, _)| *id).ok())
-        .flat_map(|index| runtime.ancestors[index].1.iter().copied())
-        .collect::<BTreeSet<_>>();
+    let ancestors = runtime.assigned_ancestors(&concepts);
     concepts.retain(|id| !ancestors.contains(id));
     concepts
 }
 
-/// True only when the installed taxonomy names this precise external code.
-/// Falling inside a broader range is deliberately not exact coverage.
-pub fn unified_has_exact_source_code(system_id: &str, code: &str) -> bool {
-    has_exact_source_code(&current(), system_id, code)
-}
-
-fn has_exact_source_code(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: &str) -> bool {
-    let Some(index) = runtime.selectors.get(system_id) else { return false };
+fn has_exact_source_code(runtime: &impl MatchSource, system_id: &str, code: &str) -> bool {
     let code = compact_whitespace(code).to_ascii_uppercase();
     let code = if system_id == LCC_SYSTEM_ID { lcc_match_keys(&code).and_then(|keys| keys.last().cloned()).unwrap_or(code) } else { code };
-    index.exact.contains_key(&code)
+    !runtime.exact(system_id, &code).is_empty()
 }
 
 /// Returns the nearest stable taxonomy branches used to compare external
@@ -187,17 +205,11 @@ pub fn unified_subject_similarity_keys(system_id: &str, code: &str) -> Vec<Strin
 
 /// Returns the ID assigned in the immutable taxonomy; unknown paths have no ID.
 pub fn unified_concept_id(path: &str) -> Option<i64> {
-    let runtime = current();
-    concept_for_path(&runtime, path)
-}
-
-pub fn unified_subject_sort_order(path: &str) -> i64 {
-    let runtime = current();
-    runtime.routes.find(path).map_or(i64::MAX, |id| runtime.routes.sort_order(id))
+    current().concept_for_path(path)
 }
 
 pub fn unified_taxonomy_routes() -> Vec<UnifiedConceptRoute> {
-    current().routes.values().collect()
+    current().routes()
 }
 /// Whether the class number has numeric coverage in the local taxonomy.
 /// A bare letter prefix (or a range spanning different subclasses) cannot
@@ -207,36 +219,41 @@ pub fn unified_lcc_has_numeric_coverage(code: &str) -> bool {
     let Some(canonical) = canonical_lcc_notation(code) else { return false };
     let Some(call) = parse_lcc_call(&canonical) else { return false };
     let runtime = current();
-    let Some(index) = runtime.selectors.get(LCC_SYSTEM_ID) else { return false };
-    if lcc_match_keys(&canonical).is_some_and(|keys| keys.iter().any(|key| index.exact.contains_key(key) && parse_lcc_call(key).is_some_and(|known| known.number == call.number))) {
+    if lcc_match_keys(&canonical).is_some_and(|keys| keys.iter().any(|key| !runtime.exact(LCC_SYSTEM_ID, key).is_empty() && parse_lcc_call(key).is_some_and(|known| known.number == call.number))) {
         return true;
     }
-    index.lcc_ranges.iter().any(|range| range.start_letters == call.letters && range.end_letters == call.letters && range.start_number <= call.number && call.number <= range.end_number)
+    runtime.ranges(&call.letters, call.number).iter().any(|range| range.start_letters == call.letters && range.end_letters == call.letters)
 }
 
 pub fn unified_lcc_match_report(code: &str) -> LccMatchReport {
-    lcc_match_report(&current(), code)
+    lcc_match_report(&*current(), code)
 }
 
-pub(super) fn lcc_match_report(runtime: &UnifiedTaxonomyRuntime, code: &str) -> LccMatchReport {
-    if matching_candidates(runtime, LCC_SYSTEM_ID, code).len() > 1 {
+pub(super) fn lcc_match_report(runtime: &impl MatchSource, code: &str) -> LccMatchReport {
+    lcc_match_report_with_candidates(runtime, code, matching_candidates(runtime, LCC_SYSTEM_ID, code))
+}
+
+fn lcc_match_report_with_candidates(runtime: &impl MatchSource, code: &str, candidates: BTreeSet<i64>) -> LccMatchReport {
+    if candidates.len() > 1 {
         return LccMatchReport { original: code.to_owned(), assignments: Vec::new(), unresolved_fragments: vec![code.to_owned()] };
     }
-    crate::lcc_recovery::report(code, |part| strict_matching_concepts(runtime, LCC_SYSTEM_ID, part).into_iter().collect(), |letters| runtime.selectors.get(LCC_SYSTEM_ID).is_some_and(|index| index.lcc_subclasses.contains(letters)))
+    // Recovery first asks for the whole field again. Reuse this call's result,
+    // including misses, instead of executing the same database queries twice.
+    crate::lcc_recovery::report(code, |part| if part == code { candidates.iter().copied().collect() } else { strict_matching_concepts(runtime, LCC_SYSTEM_ID, part).into_iter().collect() }, |letters| runtime.has_subclass(letters))
 }
 
-pub(super) fn matching_concepts(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: &str) -> BTreeSet<i64> {
+pub(super) fn matching_concepts(runtime: &impl MatchSource, system_id: &str, code: &str) -> BTreeSet<i64> {
     let candidates = matching_candidates(runtime, system_id, code);
     // Conflicting complete selectors require curation; recovery must not
     // silently bypass an existing ambiguity by shortening a valid code.
     match candidates.len() {
-        0 if system_id == LCC_SYSTEM_ID => lcc_match_report(runtime, code).assignments.into_iter().map(|a| a.concept_id).collect(),
+        0 if system_id == LCC_SYSTEM_ID => lcc_match_report_with_candidates(runtime, code, candidates).assignments.into_iter().map(|a| a.concept_id).collect(),
         0 | 1 => candidates,
         _ => BTreeSet::new(),
     }
 }
 
-fn strict_matching_concepts(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: &str) -> BTreeSet<i64> {
+fn strict_matching_concepts(runtime: &impl MatchSource, system_id: &str, code: &str) -> BTreeSet<i64> {
     let candidates = matching_candidates(runtime, system_id, code);
     if candidates.len() > 1 {
         BTreeSet::new()
@@ -245,8 +262,7 @@ fn strict_matching_concepts(runtime: &UnifiedTaxonomyRuntime, system_id: &str, c
     }
 }
 
-fn matching_candidates(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: &str) -> BTreeSet<i64> {
-    let Some(index) = runtime.selectors.get(system_id) else { return BTreeSet::new() };
+fn matching_candidates(runtime: &impl MatchSource, system_id: &str, code: &str) -> BTreeSet<i64> {
     let canonical = if system_id == LCC_SYSTEM_ID {
         let Some(code) = canonical_lcc_notation(code) else { return BTreeSet::new() };
         code
@@ -271,17 +287,16 @@ fn matching_candidates(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: 
     let mut matches = Vec::<(i64, Rank<'_>)>::new();
     let keys = if system_id == LCC_SYSTEM_ID { lcc_match_keys(&canonical).unwrap_or_default() } else { vec![canonical.clone()] };
     for (specificity, key) in keys.iter().enumerate() {
-        if let Some(ids) = index.exact.get(key) {
-            matches.extend(ids.iter().map(|id| (*id, (2, specificity, false, 0.0, None))));
-        }
+        matches.extend(runtime.exact(system_id, key).into_iter().map(|id| (id, (2, specificity, false, 0.0, None))));
     }
 
     let call = (system_id == LCC_SYSTEM_ID).then(|| parse_lcc_call(match_code)).flatten();
-    let allow_range_matching = system_id != LCC_SYSTEM_ID || (!match_code.contains('-') && call.as_ref().is_some_and(|call| index.lcc_subclasses.contains(&call.letters)));
+    let allow_range_matching = system_id != LCC_SYSTEM_ID || (!match_code.contains('-') && call.as_ref().is_some_and(|call| runtime.has_subclass(&call.letters)));
+    let ranges = call.as_ref().filter(|_| allow_range_matching).map(|call| runtime.ranges(&call.letters, call.number)).unwrap_or_default();
     if allow_range_matching {
         if let Some(call) = &call {
             let cutters = cutter_components(call.remainder);
-            index.lcc_intervals.containing(&index.lcc_ranges, (&call.letters, call.number), (&call.letters, call.number), |range| {
+            for range in &ranges {
                 if compare_lcc_key(&range.start_letters, range.start_number, &call.letters, call.number).is_le()
                     && compare_lcc_key(&call.letters, call.number, &range.end_letters, range.end_number).is_le()
                     && (call.letters != range.start_letters || call.number != range.start_number || compare_cutter_endpoint(&cutters, &range.start_cutters).is_ge())
@@ -290,20 +305,20 @@ fn matching_candidates(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: 
                     let single = range.start_letters == call.letters && range.end_letters == call.letters;
                     matches.push((range.concept_id, (1, range.start_cutters.len().max(range.end_cutters.len()), single, if single { range.end_number - range.start_number } else { f64::INFINITY }, Some(range))));
                 }
-            });
+            }
         }
-        for (prefix, id) in &index.prefixes {
+        runtime.visit_prefixes(system_id, |prefix, id| {
             let accepts = if system_id != LCC_SYSTEM_ID || prefix.bytes().all(|byte| byte.is_ascii_alphabetic()) {
                 canonical.starts_with(prefix)
             } else {
                 lcc_match_keys(prefix).and_then(|keys| keys.last().cloned()).is_some_and(|key| keys.contains(&key))
             };
             if accepts {
-                matches.push((*id, (0, prefix.len(), false, 0.0, None)));
+                matches.push((id, (0, prefix.len(), false, 0.0, None)));
             }
-        }
+        });
     }
-    let shadowed = matches.iter().flat_map(|(id, _)| runtime.ancestors(*id).iter().copied()).collect::<BTreeSet<_>>();
+    let shadowed = runtime.assigned_ancestors(&matches.iter().map(|(id, _)| *id).collect());
     matches.retain(|(id, _)| !shadowed.contains(id));
     let compare = |left: &Rank<'_>, right: &Rank<'_>| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)).then_with(|| left.2.cmp(&right.2)).then_with(|| right.3.total_cmp(&left.3));
     let Some(best) = matches.iter().map(|(_, rank)| rank).max_by(|a, b| compare(a, b)) else { return BTreeSet::new() };
@@ -323,13 +338,53 @@ fn lcc_range_contains(outer: &LccSelector, inner: &LccSelector) -> bool {
     start.is_le() && end.is_le() && (!start.is_eq() || compare_cutter_endpoint(&inner.start_cutters, &outer.start_cutters).is_ge()) && (!end.is_eq() || compare_upper_cutters(&inner.end_cutters, &outer.end_cutters).is_le())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn default_runtime() -> Arc<UnifiedTaxonomyRuntime> {
-    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/unified-taxonomy-matcher.bin"));
-    let (runtime, consumed): (UnifiedTaxonomyRuntime, usize) = bincode::serde::decode_from_slice(bytes, bincode::config::standard()).expect("bundled taxonomy matcher must be valid");
-    assert_eq!(consumed, bytes.len(), "bundled taxonomy matcher has trailing bytes");
-    assert_eq!(runtime.revision_id, BUNDLED_UNIFIED_TAXONOMY_REVISION_ID, "bundled taxonomy revision constant must track the compiled matcher");
-    Arc::new(runtime)
+pub(super) trait MatchSource {
+    fn exact(&self, system: &str, code: &str) -> Vec<i64>;
+    fn visit_prefixes(&self, system: &str, visit: impl FnMut(&str, i64));
+    fn ranges(&self, letters: &str, number: f64) -> Vec<LccSelector>;
+    fn has_subclass(&self, letters: &str) -> bool;
+    fn assigned_ancestors(&self, concepts: &BTreeSet<i64>) -> BTreeSet<i64>;
+}
+
+impl MatchSource for UnifiedTaxonomyRuntime {
+    fn exact(&self, system: &str, code: &str) -> Vec<i64> {
+        self.selectors.get(system).and_then(|index| index.exact.get(code)).cloned().unwrap_or_default()
+    }
+    fn visit_prefixes(&self, system: &str, mut visit: impl FnMut(&str, i64)) {
+        if let Some(index) = self.selectors.get(system) {
+            for (prefix, id) in &index.prefixes {
+                visit(prefix, *id);
+            }
+        }
+    }
+    fn ranges(&self, letters: &str, number: f64) -> Vec<LccSelector> {
+        let Some(index) = self.selectors.get(LCC_SYSTEM_ID) else { return Vec::new() };
+        let mut ranges = Vec::new();
+        index.lcc_intervals.containing(&index.lcc_ranges, (letters, number), (letters, number), |range| {
+            ranges.push(LccSelector {
+                start_letters: range.start_letters.clone(),
+                start_number: range.start_number,
+                end_letters: range.end_letters.clone(),
+                end_number: range.end_number,
+                start_cutters: range.start_cutters.clone(),
+                end_cutters: range.end_cutters.clone(),
+                concept_id: range.concept_id,
+            })
+        });
+        ranges
+    }
+    fn has_subclass(&self, letters: &str) -> bool {
+        self.selectors.get(LCC_SYSTEM_ID).is_some_and(|index| index.lcc_subclasses.contains(letters))
+    }
+    fn assigned_ancestors(&self, concepts: &BTreeSet<i64>) -> BTreeSet<i64> {
+        concepts.iter().filter_map(|id| self.ancestors.binary_search_by_key(id, |(id, _)| *id).ok()).flat_map(|index| self.ancestors[index].1.iter().copied()).collect()
+    }
+}
+
+fn default_runtime() -> SqliteTaxonomy {
+    let path = crate::installed::path().expect("taxonomy must be selected before matching");
+    let db = crate::installed::open_read_only(&path).expect("selected taxonomy must be readable");
+    SqliteTaxonomy::from_connection(db).expect("selected taxonomy queries must be available")
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -337,15 +392,22 @@ fn default_concepts() -> Vec<UnifiedConceptDefinition> {
     crate::taxonomy_sqlite::read_bundled_unified_taxonomy().expect("bundled unified taxonomy SQLite must be readable")
 }
 
-#[cfg(target_arch = "wasm32")]
-fn default_runtime() -> Arc<UnifiedTaxonomyRuntime> {
-    panic!("the browser host installs the taxonomy before using it")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime_index::validate;
+
+    #[test]
+    fn catalog_concept_identity_survives_renaming_and_reparenting() {
+        let before = UnifiedTaxonomy::from_concepts(vec![concept(1, "Original parent", &[], &[]), concept(2, "Original label", &[1], &[])]).unwrap();
+        let after = UnifiedTaxonomy::from_concepts(vec![concept(3, "New parent", &[], &[]), concept(2, "New label", &[3], &[])]).unwrap();
+        assert_eq!(concept_for_path(&before.runtime, "concept:2"), Some(2));
+        assert_eq!(concept_for_path(&after.runtime, "concept:2"), Some(2));
+        assert_eq!(concept_for_path(&after.runtime, "Original parent / Original label"), None);
+        for unknown in ["concept:999", "concept:0", "concept:-1", "concept:invalid"] {
+            assert_eq!(concept_for_path(&after.runtime, unknown), None);
+        }
+    }
 
     #[test]
     fn most_specific_assignments_keep_divergent_branches_and_shared_routes() {
@@ -358,13 +420,13 @@ mod tests {
             concept(6, "Shared topic", &[3, 5], &[]),
         ])
         .unwrap();
-        assert_eq!(taxonomy.most_specific_concept_ids([1, 2, 3, 4, 5, 3]), BTreeSet::from([3, 4, 5]));
-        assert_eq!(taxonomy.most_specific_concept_ids([1, 2, 3, 4, 5, 6]), BTreeSet::from([4, 6]));
-        assert_eq!(taxonomy.most_specific_concept_ids([2, 4]), BTreeSet::from([2, 4]));
-        assert_eq!(taxonomy.most_specific_concept_ids([2]), BTreeSet::from([2]));
-        assert_eq!(taxonomy.most_specific_concept_ids([]), BTreeSet::new());
+        assert_eq!(most_specific_concept_ids_in(taxonomy.runtime.as_ref(), [1, 2, 3, 4, 5, 3]), BTreeSet::from([3, 4, 5]));
+        assert_eq!(most_specific_concept_ids_in(taxonomy.runtime.as_ref(), [1, 2, 3, 4, 5, 6]), BTreeSet::from([4, 6]));
+        assert_eq!(most_specific_concept_ids_in(taxonomy.runtime.as_ref(), [2, 4]), BTreeSet::from([2, 4]));
+        assert_eq!(most_specific_concept_ids_in(taxonomy.runtime.as_ref(), [2]), BTreeSet::from([2]));
+        assert_eq!(most_specific_concept_ids_in(taxonomy.runtime.as_ref(), []), BTreeSet::new());
         // Unknown identities must still reach normal database validation.
-        assert_eq!(taxonomy.most_specific_concept_ids([0, 2]), BTreeSet::from([0, 2]));
+        assert_eq!(most_specific_concept_ids_in(taxonomy.runtime.as_ref(), [0, 2]), BTreeSet::from([0, 2]));
     }
 
     #[test]
@@ -439,13 +501,174 @@ mod tests {
     }
 
     #[test]
-    fn bundled_matcher_equals_runtime_compilation() {
+    fn sqlite_matches_compiled_taxonomy_selectors_ranges_and_navigation() {
         let rebuilt = build_runtime(default_concepts()).expect("compile bundled definitions");
-        let bundled = default_runtime();
-        assert_eq!(bundled.as_ref(), &rebuilt);
-        // Also verifies deterministic encoding despite randomized HashMap seeds.
-        let encoded = bincode::serde::encode_to_vec(&rebuilt, bincode::config::standard()).unwrap();
-        assert_eq!(encoded.as_slice(), include_bytes!(concat!(env!("OUT_DIR"), "/unified-taxonomy-matcher.bin")));
+        let sqlite = default_runtime();
+        assert_eq!(sqlite.revision_id, rebuilt.revision_id);
+        assert_eq!(sqlite.routes(), rebuilt.routes.values().collect::<Vec<_>>());
+        let mut checked = 0;
+        for (system, index) in rebuilt.selectors.iter() {
+            let mut codes = index.exact.keys().cloned().collect::<BTreeSet<_>>();
+            for (prefix, _) in &index.prefixes {
+                codes.insert(format!("{prefix}10"));
+            }
+            for range in &index.lcc_ranges {
+                for (letters, number, cutters) in [(&range.start_letters, range.start_number, &range.start_cutters), (&range.end_letters, range.end_number, &range.end_cutters)] {
+                    if number.is_finite() {
+                        let tail = cutters.iter().map(|(letters, digits)| format!(".{letters}{digits}")).collect::<String>();
+                        codes.insert(format!("{letters}{number}{tail}"));
+                    }
+                }
+            }
+            for code in codes {
+                assert_eq!(matching_candidates(&sqlite, system, &code), matching_candidates(&rebuilt, system, &code), "{system}:{code}");
+                checked += 1;
+            }
+        }
+        for route in rebuilt.routes.values() {
+            assert_eq!(sqlite.concept_for_path(&route.path), Some(route.concept_id), "{}", route.path);
+        }
+        eprintln!("Compared {checked} selector/range lookups and all navigation routes");
+    }
+
+    #[test]
+    fn sqlite_preserves_cutters_ambiguity_recovery_and_multiple_parents() {
+        let definitions = vec![
+            concept(1, "Root", &[], &["QA1..QB100"]),
+            concept(2, "Branch", &[1], &["QA10..QA99", "QA20.A1", "QA30"]),
+            concept(3, "Other root", &[], &["QA30"]),
+            concept(4, "Leaf / literal separator", &[2, 3], &["QA40.A..QA40.Z", "QA50*"]),
+            concept(5, "Nested", &[4], &["QA40.L37..QA40.L379"]),
+            concept(7, "Taxonomy-only subclass", &[], &["FC1..FC200"]),
+            UnifiedConceptDefinition::new(6, "Private system".into(), vec![], BTreeMap::from([("private".into(), vec!["A*".into(), "ABC".into()])])),
+        ];
+        let runtime = build_runtime(definitions.clone()).unwrap();
+        let sqlite = SqliteTaxonomy::from_concepts(definitions).unwrap();
+        for code in ["QA", "QB20", "QA9", "QA10", "QA99", "QA100", "QA20.A1 2025", "QA20.A2", "QA30", "QA40.L37 A9", "QA40.Z", "QA50.9", "QA20; QB20", "QA20QB20", "QA20 (v. 2)", "QA20 c.1", "未分類 QA20", "QA20 YEAR 2020"] {
+            assert_eq!(matching_candidates(&sqlite, LCC_SYSTEM_ID, code), matching_candidates(&runtime, LCC_SYSTEM_ID, code), "{code}");
+            assert_eq!(lcc_match_report(&sqlite, code), lcc_match_report(&runtime, code), "{code}");
+        }
+        assert_eq!(matching_candidates(&sqlite, LCC_SYSTEM_ID, "FC123 .A1 2001 F"), BTreeSet::from([7]));
+        // QAA is syntactically valid and lies within QA..QB, but the selected
+        // taxonomy does not declare it as a class. Item suffixes cannot bypass
+        // that boundary now that parsing is independent of reference data.
+        for code in ["QAA20 .A1 2001 F", "QAA20 .A1 1999-2000", "QAA20 .A1 (SET)", "QAA20 .A1 2001EB"] {
+            assert!(matching_candidates(&sqlite, LCC_SYSTEM_ID, code).is_empty(), "{code}");
+            assert!(matching_candidates(&runtime, LCC_SYSTEM_ID, code).is_empty(), "{code}");
+        }
+        for route in runtime.routes.values() {
+            assert_eq!(sqlite.concept_for_path(&route.path), Some(route.concept_id));
+            assert_eq!(sqlite.paths_for_concept(route.concept_id), runtime.routes.paths_for_concept(route.concept_id).collect::<Vec<_>>());
+        }
+        for ids in [vec![1, 2, 3, 4, 5], vec![0, 2, 3], vec![]] {
+            assert_eq!(most_specific_concept_ids_in(&sqlite, ids.clone()), most_specific_concept_ids_in(&runtime, ids));
+        }
+        assert_eq!(sqlite.concept_for_path("concept:4"), Some(4));
+        assert_eq!(sqlite.concept_for_path("concept:999"), None);
+        for code in ["A", "ABC", "AXYZ", "other"] {
+            assert_eq!(matching_candidates(&sqlite, "private", code), matching_candidates(&runtime, "private", code));
+        }
+    }
+
+    #[test]
+    fn sqlite_preserves_canonical_ownership_when_display_paths_collide() {
+        let definitions = vec![concept(1, "A", &[], &[]), concept(2, "A / B", &[], &["QA20"]), concept(3, "B", &[1], &["QA10"]), concept(4, "Child", &[3], &["QA30"])];
+        let runtime = build_runtime(definitions.clone()).unwrap();
+        let sqlite = SqliteTaxonomy::from_concepts(definitions).unwrap();
+        assert_eq!(sqlite.routes(), runtime.routes.values().collect::<Vec<_>>());
+        assert_eq!(sqlite.find_path("A / B"), Some(2));
+        assert_eq!(sqlite.concept_for_path("concept:3"), None);
+        assert!(sqlite.paths_for_concept(3).is_empty());
+        for path in ["A", "A / B", "A / B / Child", "concept:1", "concept:2", "concept:3", "concept:4"] {
+            assert_eq!(sqlite.concept_for_path(path), concept_for_path(&runtime, path), "{path}");
+        }
+        for id in 1..=4 {
+            assert_eq!(sqlite.paths_for_concept(id), runtime.routes.paths_for_concept(id).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn sqlite_preserves_ancestry_without_a_canonical_navigation_route() {
+        let definitions = vec![concept(1, "A", &[], &[]), concept(2, "A / B", &[], &["QA20"]), concept(3, "B", &[1], &["QA10"])];
+        let runtime = build_runtime(definitions.clone()).unwrap();
+        let sqlite = SqliteTaxonomy::from_concepts(definitions).unwrap();
+        assert!(runtime.routes.paths_for_concept(3).next().is_none());
+        assert_eq!(most_specific_concept_ids_in(&sqlite, [1, 3]), BTreeSet::from([3]));
+        for ids in [vec![1, 3], vec![1, 2, 3], vec![3], vec![1, 999], vec![]] {
+            assert_eq!(most_specific_concept_ids_in(&sqlite, ids.clone()), most_specific_concept_ids_in(&runtime, ids));
+        }
+    }
+
+    #[test]
+    fn sqlite_path_lookup_requires_the_complete_literal_path() {
+        let definitions = vec![concept(1, "Root", &[], &[]), concept(2, "Leaf", &[1], &["QA10"]), concept(3, "Label / separator", &[1], &["QA20"]), concept(4, "Subject", &[], &["QA30"])];
+        let runtime = build_runtime(definitions.clone()).unwrap();
+        let sqlite = SqliteTaxonomy::from_concepts(definitions).unwrap();
+        for path in ["Root", "Root / Leaf", "Root / Label / separator", "Subject"] {
+            assert_eq!(sqlite.concept_for_path(path), concept_for_path(&runtime, path));
+            for invalid in [format!("{path} / "), format!("{path} /"), format!("{path} "), format!(" {path}")] {
+                assert_eq!(sqlite.find_path(&invalid), None, "{invalid:?}");
+                assert_eq!(sqlite.concept_for_path(&invalid), None, "{invalid:?}");
+            }
+        }
+        assert_eq!(sqlite.routes(), runtime.routes.values().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sqlite_numeric_intervals_preserve_closed_endpoints_gaps_and_cross_subclasses() {
+        let definitions = vec![
+            concept(1, "Root", &[], &[]),
+            concept(2, "First", &[1], &["QA1..QA2", "QA8..QA8.5"]),
+            concept(3, "Adjacent", &[1], &["QA2..QA3"]),
+            concept(4, "Point", &[1], &["QA5..QA5"]),
+            concept(5, "Cutters", &[1], &["QA7.A..QA7.Z"]),
+            concept(6, "Cross subclass", &[1], &["QA9..QB2"]),
+            concept(7, "Whole subclasses", &[1], &["QC..QD"]),
+            concept(8, "Empty reversed range", &[1], &["QA10..QA9", "QF..QE"]),
+        ];
+        let runtime = build_runtime(definitions.clone()).unwrap();
+        let sqlite = SqliteTaxonomy::from_concepts(definitions).unwrap();
+        let keys = |ranges: Vec<LccSelector>| ranges.into_iter().map(|range| format!("{range:?}")).collect::<BTreeSet<_>>();
+        for letters in ["QA", "QB", "QC", "QD"] {
+            for boundary in [0.0_f64, 1.0, 2.0, 3.0, 5.0, 7.0, 8.0, 8.5, 9.0, 100.0, f64::MAX] {
+                for number in [boundary.next_down().max(0.0), boundary, boundary.next_up()] {
+                    if number.is_finite() {
+                        assert_eq!(keys(sqlite.ranges(letters, number)), keys(runtime.ranges(letters, number)), "{letters}{number}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sqlite_numeric_candidates_match_every_bundled_boundary_and_gap() {
+        let runtime = build_runtime(default_concepts()).unwrap();
+        let sqlite = default_runtime();
+        let index = &runtime.selectors[LCC_SYSTEM_ID];
+        let keys = |ranges: Vec<LccSelector>| ranges.into_iter().map(|range| format!("{range:?}")).collect::<BTreeSet<_>>();
+        let mut checked = 0;
+        for letters in &index.lcc_subclasses {
+            let mut boundaries = vec![0.0_f64];
+            for range in &index.lcc_ranges {
+                if &range.start_letters == letters && range.start_number.is_finite() {
+                    boundaries.push(range.start_number);
+                }
+                if &range.end_letters == letters && range.end_number.is_finite() {
+                    boundaries.push(range.end_number);
+                }
+            }
+            boundaries.sort_unstable_by(f64::total_cmp);
+            boundaries.dedup();
+            let mut points = boundaries.iter().flat_map(|&number| [number.next_down().max(0.0), number, number.next_up()]).filter(|number| number.is_finite()).collect::<Vec<_>>();
+            points.extend(boundaries.windows(2).map(|pair| pair[0] + (pair[1] - pair[0]) / 2.0));
+            points.sort_unstable_by(f64::total_cmp);
+            points.dedup();
+            for number in points {
+                assert_eq!(keys(sqlite.ranges(letters, number)), keys(runtime.ranges(letters, number)), "{letters}{number}");
+                checked += 1;
+            }
+        }
+        eprintln!("Compared {checked} numeric coverage probes across {} subclasses", index.lcc_subclasses.len());
     }
 
     #[cfg(feature = "authoritative-taxonomy")]

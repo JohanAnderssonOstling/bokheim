@@ -2,7 +2,8 @@
 //! playback source and forwards service position events to library persistence,
 //! independently of the GPUI activity's rendering/lifetime.
 
-use crate::{AudiobookBook, PlaybackPosition, ReadSeek, playback_progress, position_save_required};
+use crate::{AudiobookBook, PlaybackPosition, ReadSeek, lock_state, playback_progress, position_save_required};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 #[cfg(not(target_arch = "wasm32"))]
 use library_backend::library::AudioStreamControl;
 use serde_json::{Value, json};
@@ -48,6 +49,12 @@ pub fn initialize(directory: PathBuf, dispatch: impl Fn(&str) -> Result<(), Stri
 fn dispatch(command: Value) -> Result<(), String> {
     (BRIDGE.get().ok_or("Android audio bridge is not initialized")?.dispatch)(&command.to_string())
 }
+/// A file handoff leaves an idle service ready for its replacement. Closing
+/// or failing that handoff must also retire the idle service; a newer book's
+/// nonzero ID makes this cancellation harmless to replacement sessions.
+pub(crate) fn stop_detached_service() {
+    let _ = dispatch(json!({"command":"stop", "id":0}));
+}
 #[derive(Default)]
 struct Status {
     position: Duration,
@@ -60,6 +67,9 @@ struct Status {
     sequence: u64,
     rate: Option<f64>,
     sleep_finished: bool,
+    remote_seek: Option<Duration>,
+    initial_seek: Option<Duration>,
+    requested: bool,
     sleep_reset: Option<(Option<web_time::Instant>, Option<Duration>)>,
 }
 struct Session {
@@ -79,11 +89,14 @@ struct Session {
 #[derive(Clone)]
 pub(crate) struct PositionSnapshot(Arc<Mutex<Status>>);
 impl PositionSnapshot {
+    pub fn take_seek_request(&self) -> Option<Duration> {
+        lock_state(&self.0).remote_seek.take()
+    }
     pub fn last_position(&self) -> Duration {
-        self.0.lock().unwrap().position
+        lock_state(&self.0).position
     }
     pub fn confirmed_position(&self) -> Option<Duration> {
-        let status = self.0.lock().unwrap();
+        let status = lock_state(&self.0);
         status.confirmed.then_some(status.position)
     }
 }
@@ -92,8 +105,8 @@ pub fn read_source(id: u64, offset: u64, length: usize) -> Result<Vec<u8>, Strin
     if length > 256 * 1024 {
         return Err("audio read is too large".into());
     }
-    let session = sessions().lock().unwrap().get(&id).cloned().ok_or("audio session ended")?;
-    let mut guard = session.reader.lock().unwrap();
+    let session = lock_state(sessions()).get(&id).cloned().ok_or("audio session ended")?;
+    let mut guard = session.reader.lock().map_err(|_| "audio source reader failed; reopen the audiobook".to_owned())?;
     let generation = session.read_generation.load(Ordering::Acquire);
     if let Some(control) = &session.control {
         if !control.begin_seek(generation) {
@@ -113,7 +126,7 @@ pub fn read_source(id: u64, offset: u64, length: usize) -> Result<Vec<u8>, Strin
 /// Media3 reports seek discontinuities from both application and media controls.
 /// Invalidate the blocked range; the next loader read acknowledges the generation.
 pub fn interrupt_source(id: u64) {
-    let session = sessions().lock().unwrap().get(&id).cloned();
+    let session = lock_state(sessions()).get(&id).cloned();
     if let Some(session) = session {
         if let Some(control) = &session.control {
             let generation = session.read_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -143,8 +156,22 @@ impl AudioEngine {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let global_offset = track.map(|track| Duration::from_millis(track.start_ms)).unwrap_or_default();
         let duration = track.map(|track| Duration::from_millis(track.end_ms - track.start_ms)).unwrap_or(book.duration);
-        let chapter_ends = book.chapters.iter().filter_map(|chapter| (chapter.end() > global_offset && chapter.start() < global_offset + duration).then_some(chapter.end().saturating_sub(global_offset).min(duration).as_millis() as u64)).collect::<Vec<_>>();
-        let load = json!({"command":"load", "id":id, "path":path, "length":length, "title":book.title, "author":book.author, "position":initial.min(duration).as_millis() as u64, "chapterEnds":chapter_ends});
+        let chapter_ends = book
+            .chapters
+            .iter()
+            .filter_map(|chapter| (chapter.end() > global_offset && chapter.start() < global_offset + duration).then_some(chapter.end().saturating_sub(global_offset).min(duration).as_millis() as u64))
+            .collect::<Vec<_>>();
+        let chapters = book.chapters.iter().map(|chapter| {
+            json!({"start":chapter.start().as_millis() as u64, "end":chapter.end().as_millis() as u64, "title":crate::chapter_display_title(&chapter.title)})
+        }).collect::<Vec<_>>();
+        // A JSON number array expands cover bytes into Java objects. Encode one string instead.
+        let cover = book.cover.as_ref().map(|cover| STANDARD.encode(cover.bytes()));
+        let load = json!({
+            "command":"load", "id":id, "path":path, "length":length,
+            "title":book.title, "author":book.author, "coverBase64":cover, "chapters":chapters,
+            "offset":global_offset.as_millis() as u64, "duration":duration.as_millis() as u64,
+            "position":initial.min(duration).as_millis() as u64, "chapterEnds":chapter_ends,
+        });
         let session = Arc::new(Session {
             read_generation: AtomicU64::new(0),
             control,
@@ -160,20 +187,40 @@ impl AudioEngine {
         });
         Ok(Self { id, session, load, started: AtomicBool::new(false) })
     }
-    pub fn play(&self) {
+    pub fn play(&self) { self.start(true); }
+    pub fn prepare_paused(&self) { self.start(false); }
+    fn start(&self, playing: bool) {
         if let Some(control) = &self.session.control {
-            control.set_paused(false);
+            control.set_paused(!playing);
         }
+        let mut load = self.load.clone();
+        {
+            let mut status = lock_state(&self.session.status);
+            if let Some(position) = status.initial_seek.take() { status.position = position; }
+            status.requested = playing;
+            load["position"] = json!(status.position.as_millis() as u64);
+            load["sequence"] = json!(status.sequence);
+        }
+        load["playWhenReady"] = json!(playing);
         self.started.store(true, Ordering::Release);
-        sessions().lock().unwrap().insert(self.id, self.session.clone());
-        if let Err(error) = dispatch(self.load.clone()) {
-            self.session.status.lock().unwrap().error = Some(error);
-            sessions().lock().unwrap().remove(&self.id);
+        lock_state(sessions()).insert(self.id, self.session.clone());
+        if let Err(error) = dispatch(load) {
+            lock_state(&self.session.status).error = Some(error);
+            lock_state(sessions()).remove(&self.id);
             self.session.release.0.close();
         }
     }
+    pub fn take_seek_request(&self) -> Option<Duration> {
+        self.position_snapshot().take_seek_request()
+    }
+    pub fn playback_requested(&self) -> bool {
+        lock_state(&self.session.status).requested
+    }
+    pub fn set_artwork(&self, cover: &[u8]) -> Result<(), String> {
+        dispatch(json!({"command":"artwork", "id":self.id, "coverBase64":STANDARD.encode(cover)}))
+    }
     pub fn position(&self) -> Duration {
-        self.session.status.lock().unwrap().position
+        lock_state(&self.session.status).position
     }
     pub fn position_snapshot(&self) -> PositionSnapshot {
         PositionSnapshot(self.session.status.clone())
@@ -182,17 +229,17 @@ impl AudioEngine {
         self.position_snapshot().confirmed_position()
     }
     pub fn rate(&self) -> f64 {
-        self.session.status.lock().unwrap().rate.unwrap_or_else(|| self.load["speed"].as_f64().unwrap_or(1.0))
+        lock_state(&self.session.status).rate.unwrap_or_else(|| self.load["speed"].as_f64().unwrap_or(1.0))
     }
     pub fn is_playing(&self) -> bool {
-        self.session.status.lock().unwrap().playing
+        lock_state(&self.session.status).playing
     }
     pub fn finished(&self) -> bool {
-        let status = self.session.status.lock().unwrap();
+        let status = lock_state(&self.session.status);
         status.confirmed && status.ended && !status.playing && !status.buffering
     }
     pub fn is_buffering(&self) -> bool {
-        self.session.status.lock().unwrap().buffering
+        lock_state(&self.session.status).buffering
     }
     pub fn toggle(&self) -> Result<(), String> {
         dispatch(json!({"command":"toggle", "id":self.id}))
@@ -205,9 +252,14 @@ impl AudioEngine {
         Ok(())
     }
     pub fn seek_to(&self, position: Duration) -> Result<(), String> {
+        if !self.started.load(Ordering::Acquire) {
+            lock_state(&self.session.status).initial_seek = Some(position.min(self.session.duration));
+            return Ok(());
+        }
         let sequence = {
-            let mut s = self.session.status.lock().unwrap();
+            let mut s = lock_state(&self.session.status);
             s.sequence += 1;
+            s.remote_seek = None;
             s.confirmed = false;
             s.sequence
         };
@@ -225,7 +277,7 @@ impl AudioEngine {
     }
     pub fn set_sleep(&self, remaining: Option<Duration>, chapter_end: Option<Duration>) -> Result<(), String> {
         {
-            let mut status = self.session.status.lock().unwrap();
+            let mut status = lock_state(&self.session.status);
             status.sleep_finished = false;
             status.sleep_reset = None;
         }
@@ -234,13 +286,20 @@ impl AudioEngine {
             "chapterEnd":chapter_end.map(|time| time.saturating_sub(self.session.global_offset).as_millis() as u64)}))
     }
     pub fn take_sleep_reset(&self) -> Option<(Option<web_time::Instant>, Option<Duration>)> {
-        self.session.status.lock().unwrap().sleep_reset.take().map(|(deadline, chapter_end)| (deadline, chapter_end.map(|end| self.session.global_offset.saturating_add(end))))
+        lock_state(&self.session.status).sleep_reset.take().map(|(deadline, chapter_end)| (deadline, chapter_end.map(|end| self.session.global_offset.saturating_add(end))))
     }
     pub fn take_sleep_finished(&self) -> bool {
-        std::mem::take(&mut self.session.status.lock().unwrap().sleep_finished)
+        std::mem::take(&mut lock_state(&self.session.status).sleep_finished)
     }
     pub fn take_error(&self) -> Option<String> {
-        self.session.status.lock().unwrap().error.take()
+        lock_state(&self.session.status).error.take()
+    }
+    /// Retire this file while keeping the Android service available for the
+    /// replacement, including a paused seek initiated with the screen locked.
+    pub fn stop_for_seek(&self) {
+        if self.started.load(Ordering::Acquire) {
+            let _ = dispatch(json!({"command":"detach", "id":self.id}));
+        }
     }
     pub fn stop(&self) {
         // Release can wait for the Media3 loader; unblock its native read first.
@@ -252,7 +311,7 @@ impl AudioEngine {
         }
         if let Err(error) = dispatch(json!({"command":"stop", "id":self.id})) {
             log::warn!("Could not stop Android audio: {error}");
-            *self.session.stop_error.lock().unwrap() = Some(error);
+            *lock_state(&self.session.stop_error) = Some(error);
             self.session.release.0.close();
         }
     }
@@ -283,7 +342,7 @@ impl AudioEngine {
                 Poll::Pending
             })
             .await?;
-            session.stop_error.lock().unwrap().clone().map_or(Ok(()), Err)
+            lock_state(&session.stop_error).clone().map_or(Ok(()), Err)
         })
     }
 }
@@ -292,9 +351,15 @@ impl AudioEngine {
 pub fn playback_state(event: &str) {
     let Ok(event) = serde_json::from_str::<Value>(event) else { return };
     let Some(id) = event["id"].as_u64() else { return };
-    let session = sessions().lock().unwrap().get(&id).cloned();
+    let session = lock_state(sessions()).get(&id).cloned();
     let Some(session) = session else { return };
-    let mut status = session.status.lock().unwrap();
+    let mut status = lock_state(&session.status);
+    if let Some(target) = event["seekTarget"].as_u64() {
+        if event["sequence"].as_u64().unwrap_or(0) >= status.sequence {
+            status.remote_seek = Some(Duration::from_millis(target).min(session.global_duration));
+        }
+        return;
+    }
     if let Some(reset) = event["sleepReset"].as_object() {
         status.sleep_reset = Some((reset.get("remaining").and_then(Value::as_u64).map(|millis| web_time::Instant::now() + Duration::from_millis(millis)), reset.get("chapterEnd").and_then(Value::as_u64).map(Duration::from_millis)));
     }
@@ -312,6 +377,7 @@ pub fn playback_state(event: &str) {
         }
         status.playing = playing;
         status.buffering = event["buffering"].as_bool().unwrap_or(false);
+        status.requested = event["requested"].as_bool().unwrap_or(playing || status.buffering);
         status.ended = event["ended"].as_bool().unwrap_or(false);
         if let Some(control) = &session.control {
             let requested = event["requested"].as_bool().unwrap_or(playing || status.buffering);
@@ -320,7 +386,7 @@ pub fn playback_state(event: &str) {
         status.rate = event["speed"].as_f64().filter(|rate| rate.is_finite() && *rate > 0.0);
         if status.confirmed && position_save_required(status.last_saved, status.position, force) {
             let position = session.global_offset.saturating_add(status.position);
-            let _ = session.updates.try_send((position, playback_progress(position, session.global_duration)));
+            let _ = session.updates.try_send(PlaybackPosition::new(position, playback_progress(position, session.global_duration)));
             status.last_saved = Some(status.position);
         }
     }
@@ -331,7 +397,7 @@ pub fn playback_state(event: &str) {
         status.playing = false;
         status.buffering = false;
         session.release.0.close();
-        sessions().lock().unwrap().remove(&id);
+        lock_state(sessions()).remove(&id);
     }
 }
 
@@ -361,6 +427,39 @@ mod tests {
         playback_state(&json!({"id":id,"sequence":sequence,"position":position,"playing":playing,"ready":ready,"released":released}).to_string());
     }
 
+    #[test]
+    fn remote_chapter_seek_does_not_overwrite_confirmed_file_position() {
+        let (id, session, _) = session();
+        event(id, 0, 15_000, true, true, false);
+        playback_state(&json!({"id":id,"seekTarget":60_000}).to_string());
+        let mut state = session.status.lock().unwrap();
+        assert_eq!(state.remote_seek.take(), Some(Duration::from_secs(60)));
+        assert_eq!(state.position, Duration::from_secs(15));
+        assert!(state.confirmed);
+        assert!(state.playing);
+        drop(state);
+        sessions().lock().unwrap().remove(&id);
+    }
+
+    #[test]
+    fn late_remote_seek_cannot_override_a_newer_application_seek() {
+        let (id, session, _) = session();
+        session.status.lock().unwrap().sequence = 2;
+        playback_state(&json!({"id":id,"sequence":1,"seekTarget":60_000}).to_string());
+        assert!(session.status.lock().unwrap().remote_seek.is_none());
+        sessions().lock().unwrap().remove(&id);
+    }
+
+    #[test]
+    fn a_poisoned_source_reader_returns_an_error_without_reusing_the_stream() {
+        let (id, session, _) = session();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = session.reader.lock().unwrap();
+            panic!("source reader failed");
+        }));
+        assert_eq!(read_source(id, 0, 2), Err("audio source reader failed; reopen the audiobook".into()));
+        sessions().lock().unwrap().remove(&id);
+    }
 
     #[test]
     fn seek_during_read_cannot_deliver_old_generation_bytes() {
@@ -390,7 +489,6 @@ mod tests {
         event(id, 0, 0, false, false, true);
     }
 
-
     #[test]
     fn release_during_pending_seek_retains_last_accepted_position() {
         let (id, session, _) = session();
@@ -409,7 +507,6 @@ mod tests {
         assert_eq!(snapshot.last_position(), Duration::from_secs(40));
         assert_eq!(snapshot.confirmed_position(), None);
     }
-
 
     #[test]
     fn missing_service_acknowledgement_fails_instead_of_allowing_removal() {
@@ -456,14 +553,17 @@ mod tests {
         audio.set_tempo(1.5).unwrap();
         audio.stop();
         assert!(commands.lock().unwrap().is_empty(), "Preparing speed and stopping an unstarted reader must not contact a missing service");
-        audio.play();
+        audio.seek_to(Duration::from_secs(30)).unwrap();
+        assert!(commands.lock().unwrap().is_empty(), "A seek before loading must be included in the load command");
+        audio.prepare_paused();
         assert_eq!(read_source(audio.id, 9, 3).unwrap(), b"M4B");
         assert_eq!(read_source(audio.id, 0, 8).unwrap(), b"seekable");
         assert!(read_source(audio.id, 18, 8).unwrap().is_empty());
         assert!(read_source(audio.id, 0, 256 * 1024 + 1).is_err());
         let command = commands.lock().unwrap()[0].clone();
         assert_eq!(command["speed"], 1.5);
-        assert_eq!(command["position"], 60_000);
+        assert_eq!(command["position"], 30_000);
+        assert_eq!(command["playWhenReady"], false);
         assert_eq!(command["title"], "Example");
         event(audio.id, 0, 60_000, false, true, true);
         let id = audio.id;

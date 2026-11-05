@@ -1,5 +1,6 @@
-//! Chapter points from a CUE sheet. Audio remains in the discovered MP3 tracks.
+//! Chapter points and credits from a CUE sheet. Audio remains in the discovered MP3 tracks.
 
+use super::{author_credit, AudiobookMetadata};
 use book_model::{AudiobookChapter, AudiobookTrack};
 
 struct Point {
@@ -17,6 +18,48 @@ fn argument(input: &str) -> Option<&str> {
     }
 }
 
+pub(super) fn apply_credits(input: &str, audio: &mut AudiobookMetadata) {
+    let mut authors = Vec::<String>::new();
+    let mut narrators = Vec::<String>::new();
+    let mut songwriters = Vec::<String>::new();
+    let mut performers = Vec::<String>::new();
+    for line in input.lines() {
+        let Some((command, rest)) = line.trim().split_once(char::is_whitespace) else { continue };
+        let (command, rest) = if command.eq_ignore_ascii_case("REM") {
+            let Some(field) = rest.trim().split_once(char::is_whitespace) else { continue };
+            field
+        } else {
+            (command, rest)
+        };
+        let names = match command.to_ascii_uppercase().as_str() {
+            "AUTHOR" | "AUTHORS" => &mut authors,
+            "NARRATOR" | "NARRATORS" | "READ_BY" | "READBY" => &mut narrators,
+            "SONGWRITER" => &mut songwriters,
+            "PERFORMER" => &mut performers,
+            _ => continue,
+        };
+        let rest = rest.trim();
+        let value = if rest.starts_with('"') {
+            let Some(value) = argument(rest) else { continue };
+            value
+        } else {
+            rest
+        };
+        for name in value.split(';').map(str::trim).filter(|name| !name.is_empty()) {
+            if !names.iter().any(|existing| existing.eq_ignore_ascii_case(name)) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    // Explicit audiobook roles take precedence over the generic CUE credits.
+    if audio.authors.is_empty() {
+        audio.authors = if authors.is_empty() { songwriters } else { authors }.into_iter().filter_map(|name| author_credit(name).ok()).collect();
+    }
+    if audio.recording.narrators.is_empty() {
+        audio.recording.narrators = if narrators.is_empty() { performers } else { narrators };
+    }
+}
+
 pub(super) fn chapters(input: &str, tracks: &[AudiobookTrack]) -> Result<Vec<AudiobookChapter>, String> {
     let mut file = None::<String>;
     let mut current = None::<(Option<String>, Option<u64>)>;
@@ -31,47 +74,60 @@ pub(super) fn chapters(input: &str, tracks: &[AudiobookTrack]) -> Result<Vec<Aud
                     points.push(Point { file: file.clone().ok_or("CUE track has no FILE")?, title, offset_ms: offset_ms.ok_or("CUE track has no INDEX 01")? });
                 }
                 let name = argument(rest).ok_or("CUE FILE has no filename")?;
-                if !name.to_ascii_lowercase().ends_with(".mp3") { return Err("CUE references a non-MP3 file".into()); }
+                if !name.to_ascii_lowercase().ends_with(".mp3") {
+                    return Err("CUE references a non-MP3 file".into());
+                }
                 file = Some(name.to_owned());
             }
             "TRACK" => {
                 if let Some((title, offset_ms)) = current.take() {
                     points.push(Point { file: file.clone().ok_or("CUE track has no FILE")?, title, offset_ms: offset_ms.ok_or("CUE track has no INDEX 01")? });
                 }
-                if file.is_none() || !rest.split_whitespace().nth(1).is_some_and(|kind| kind.eq_ignore_ascii_case("AUDIO")) { return Err("CUE track is not audio".into()); }
+                if file.is_none() || !rest.split_whitespace().nth(1).is_some_and(|kind| kind.eq_ignore_ascii_case("AUDIO")) {
+                    return Err("CUE track is not audio".into());
+                }
                 current = Some((None, None));
             }
-            "TITLE" if current.is_some() => {
+            "TITLE" => {
+                let Some((current_title, _)) = current.as_mut() else { continue };
                 let title = if rest.starts_with('"') { argument(rest).ok_or("CUE TITLE is empty")? } else { rest };
-                current.as_mut().unwrap().0 = Some(title.to_owned());
+                *current_title = Some(title.to_owned());
             }
-            "INDEX" if current.is_some() => {
+            "INDEX" => {
+                let Some((_, current_offset)) = current.as_mut() else { continue };
                 let mut fields = rest.split_whitespace();
                 if fields.next() == Some("01") {
                     // mm:ss:ff, with 75 frames to the second.
                     let mut parts = fields.next().ok_or("missing CUE INDEX 01 position")?.split(':').map(|part| part.parse::<u64>().ok());
                     let (Some(Some(minutes)), Some(Some(seconds)), Some(Some(frames)), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return Err("invalid CUE INDEX 01".into()) };
-                    if seconds >= 60 || frames >= 75 { return Err("invalid CUE INDEX 01".into()); }
-                    let offset_ms = minutes.checked_mul(60).and_then(|value| value.checked_add(seconds)).and_then(|value| value.checked_mul(1000)).and_then(|value| value.checked_add((frames * 1000 + 37) / 75)).ok_or("invalid CUE INDEX 01")?;
-                    current.as_mut().unwrap().1 = Some(offset_ms);
+                    if seconds >= 60 || frames >= 75 {
+                        return Err("invalid CUE INDEX 01".into());
+                    }
+                    let offset_ms =
+                        minutes.checked_mul(60).and_then(|value| value.checked_add(seconds)).and_then(|value| value.checked_mul(1000)).and_then(|value| value.checked_add((frames * 1000 + 37) / 75)).ok_or("invalid CUE INDEX 01")?;
+                    *current_offset = Some(offset_ms);
                 }
             }
-            _ => {},
+            _ => {}
         }
     }
     if let Some((title, offset_ms)) = current.take() {
         points.push(Point { file: file.ok_or("CUE track has no FILE")?, title, offset_ms: offset_ms.ok_or("CUE track has no INDEX 01")? });
     }
-    if points.is_empty() { return Err("CUE has no INDEX 01 chapters".into()); }
+    if points.is_empty() {
+        return Err("CUE has no INDEX 01 chapters".into());
+    }
     let mut starts = Vec::with_capacity(points.len());
     for (index, point) in points.into_iter().enumerate() {
         let file = point.file.replace('\\', "/");
-        if file.starts_with('/') || file.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.contains(':')) { return Err("unsafe CUE filename".into()); }
+        if file.starts_with('/') || file.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.contains(':')) {
+            return Err("unsafe CUE filename".into());
+        }
         let exact = tracks.iter().filter(|track| track.name.eq_ignore_ascii_case(&file)).collect::<Vec<_>>();
-        let matches = if exact.is_empty() {
-            tracks.iter().filter(|track| track.name.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case(&file))).collect::<Vec<_>>()
-        } else { exact };
-        if matches.len() != 1 { return Err(format!("CUE filename does not identify one MP3: {file}")); }
+        let matches = if exact.is_empty() { tracks.iter().filter(|track| track.name.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case(&file))).collect::<Vec<_>>() } else { exact };
+        if matches.len() != 1 {
+            return Err(format!("CUE filename does not identify one MP3: {file}"));
+        }
         let track = matches[0];
         let start = track.start_ms.checked_add(point.offset_ms).ok_or("CUE position overflow")?;
         if start >= track.end_ms || starts.last().is_some_and(|(_, previous): &(String, u64)| *previous >= start) {
@@ -83,7 +139,5 @@ pub(super) fn chapters(input: &str, tracks: &[AudiobookTrack]) -> Result<Vec<Aud
     if starts.first().is_some_and(|(_, start)| *start > 0) {
         starts.insert(0, ("Opening".into(), 0));
     }
-    Ok(starts.iter().enumerate().map(|(index, (title, start_ms))| AudiobookChapter {
-        title: title.clone(), start_ms: *start_ms, end_ms: starts.get(index + 1).map_or(duration, |(_, next)| *next),
-    }).collect())
+    Ok(starts.iter().enumerate().map(|(index, (title, start_ms))| AudiobookChapter { title: title.clone(), start_ms: *start_ms, end_ms: starts.get(index + 1).map_or(duration, |(_, next)| *next) }).collect())
 }

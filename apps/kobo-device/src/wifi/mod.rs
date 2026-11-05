@@ -1,8 +1,11 @@
 //! Serialized Kobo Wi-Fi operations. Hardware and supplicant work never runs on GPUI.
 
+use crate::bluetooth::SleepGuard as BluetoothSleepGuard;
 use std::ffi::OsStr;
 mod control;
+mod events;
 use control::{Control, Result, decode_ssid, fields, hex};
+use events::{Events, Sender, Wake};
 use std::fs;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -10,6 +13,43 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
+
+pub use operation_failure::WifiFailure;
+
+/// A failed Wi-Fi operation: what the user can do about it, when known, and
+/// a diagnostic for logs. Diagnostics never contain credentials.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WifiError {
+    pub failure: Option<WifiFailure>,
+    pub message: String,
+}
+impl WifiError {
+    fn new(failure: WifiFailure, message: &str) -> Self {
+        Self { failure: Some(failure), message: message.to_owned() }
+    }
+}
+impl From<String> for WifiError {
+    fn from(message: String) -> Self {
+        Self { failure: None, message }
+    }
+}
+impl From<&str> for WifiError {
+    fn from(message: &str) -> Self {
+        Self { failure: None, message: message.to_owned() }
+    }
+}
+impl std::fmt::Display for WifiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+impl std::error::Error for WifiError {}
+impl operation_failure::Classified for WifiError {
+    fn failure(&self) -> Option<operation_failure::Failure> {
+        self.failure.map(operation_failure::Failure::Wifi)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Security {
@@ -50,7 +90,7 @@ pub struct Snapshot {
     pub saved: Vec<SavedNetwork>,
     pub scanning: bool,
     pub power_available: bool,
-    pub error: Option<String>,
+    pub error: Option<WifiError>,
 }
 // Deliberately no Debug: requests may contain credentials.
 pub enum Request {
@@ -63,33 +103,118 @@ pub enum Request {
 }
 enum Job {
     Request(Request, async_channel::Sender<Result<Snapshot>>),
+    Refresh,
     PrepareSleep { reply: mpsc::SyncSender<Result<()>>, deadline: Instant },
     FinishSleep,
     UiReady,
 }
-static WORKER: OnceLock<std::result::Result<mpsc::Sender<Job>, String>> = OnceLock::new();
+static WORKER: OnceLock<std::result::Result<Sender, String>> = OnceLock::new();
+static SNAPSHOTS: OnceLock<watch::Sender<Snapshot>> = OnceLock::new();
+static CONNECTIVITY: OnceLock<watch::Sender<bool>> = OnceLock::new();
 
-fn worker() -> Result<&'static mpsc::Sender<Job>> {
+fn connectivity() -> &'static watch::Sender<bool> {
+    CONNECTIVITY.get_or_init(|| watch::channel(false).0)
+}
+
+pub fn subscribe_connectivity() -> Result<watch::Receiver<bool>> {
+    let receiver = connectivity().subscribe();
+    worker()?;
+    Ok(receiver)
+}
+
+fn publish(snapshot: &Snapshot) {
+    publish_snapshot(snapshots(), snapshot);
+    let online = snapshot.phase == Phase::Connected;
+    connectivity().send_if_modified(|previous| {
+        if *previous == online {
+            return false;
+        }
+        *previous = online;
+        true
+    });
+}
+
+fn snapshots() -> &'static watch::Sender<Snapshot> {
+    SNAPSHOTS.get_or_init(|| watch::channel(Snapshot::default()).0)
+}
+
+fn publish_snapshot(sender: &watch::Sender<Snapshot>, snapshot: &Snapshot) {
+    sender.send_if_modified(|previous| {
+        if previous == snapshot {
+            return false;
+        }
+        *previous = snapshot.clone();
+        true
+    });
+}
+
+/// Subscribe before starting the worker so the initial hardware observation
+/// cannot be missed. The worker blocks on hardware events and requests.
+pub fn subscribe() -> Result<watch::Receiver<Snapshot>> {
+    let receiver = snapshots().subscribe();
+    worker()?;
+    Ok(receiver)
+}
+
+/// Bluetooth can cycle the shared module without making a Wi-Fi request.
+pub(crate) fn radio_changed() {
+    if let Some(Ok(worker)) = WORKER.get() {
+        let _ = worker.send(Job::Refresh);
+    }
+}
+
+/// Automatic network work waits for device events instead of retrying offline.
+pub async fn wait_for_connection() -> Result<()> {
+    wait_for_connection_changes(subscribe()?).await
+}
+
+async fn wait_for_connection_changes(mut changes: watch::Receiver<Snapshot>) -> Result<()> {
+    while changes.borrow_and_update().phase != Phase::Connected {
+        changes.changed().await.map_err(|_| "Wi-Fi status worker stopped")?;
+    }
+    Ok(())
+}
+
+fn worker() -> Result<&'static Sender> {
     WORKER
         .get_or_init(|| {
-            let (send, receive) = mpsc::channel::<Job>();
+            let (send, receive, mut events) = Events::channel(None).map_err(|_| "Could not create Wi-Fi event channel".to_owned())?;
             std::thread::Builder::new()
                 .name("kobo-wifi".into())
                 .spawn(move || {
                     let mut controller = Controller::new();
+                    events.observe(controller.socket_path.as_deref());
+                    if let Err(error) = controller.refresh() {
+                        controller.snapshot.error = Some(error);
+                    }
+                    publish(&controller.snapshot);
                     loop {
-                        match receive.recv_timeout(Duration::from_secs(2)) {
-                            Ok(Job::Request(request, reply)) => {
+                        let job = events.receive(&receive, &controller);
+                        match job {
+                            Ok(Wake::Job(Job::Request(request, reply))) => {
                                 let result = controller.execute(request);
+                                publish(&controller.snapshot);
                                 let _ = reply.send_blocking(result);
                             }
-                            Ok(Job::PrepareSleep { reply, deadline }) => {
-                                let result =
-                                    if Instant::now() >= deadline { Err("Wi-Fi sleep preparation expired before it could start".into()) } else {
-                                        controller.prepare_sleep_with(|controller| {
-                                            controller.power_before(false, deadline)
-                                        })
-                                    };
+                            Ok(Wake::Job(Job::Refresh)) => {
+                                if !controller.sleeping
+                                    && let Err(error) = controller.refresh()
+                                {
+                                    controller.snapshot.error = Some(error);
+                                }
+                            }
+                            Ok(Wake::Job(Job::PrepareSleep { reply, deadline })) => {
+                                let result = if Instant::now() >= deadline {
+                                    Err("Wi-Fi sleep preparation expired before it could start".into())
+                                } else {
+                                    match BluetoothSleepGuard::prepare() {
+                                        Ok(bluetooth) => {
+                                            controller.bluetooth_sleep = Some(bluetooth);
+                                            controller.prepare_sleep_with(|controller| controller.power_before(false, deadline))
+                                        }
+                                        Err(error) => Err(format!("Could not prepare Bluetooth for sleep: {error}").into()),
+                                    }
+                                };
                                 // Rendezvous with the caller: an expired request cannot leave
                                 // a late sleep guard holding the radio off after UI recovery.
                                 if reply.send(result).is_err() {
@@ -97,25 +222,32 @@ fn worker() -> Result<&'static mpsc::Sender<Job>> {
                                     controller.resume_after_ui_with(|controller| controller.power(true));
                                 }
                             }
-                            Ok(Job::FinishSleep) => controller.sleeping = false,
-                            Ok(Job::UiReady) => controller.resume_after_ui_with(|controller| controller.power(true)),
-                            Err(mpsc::RecvTimeoutError::Timeout) => {
-                                if !controller.sleeping
-                                    && (controller.attempt.is_some() || controller.scan_started.is_some() || controller.address_requested)
-                                    && let Err(error) = controller.refresh()
-                                {
+                            Ok(Wake::Job(Job::FinishSleep)) => controller.sleeping = false,
+                            Ok(Wake::Job(Job::UiReady)) => controller.resume_after_ui_with(|controller| controller.power(true)),
+                            Ok(Wake::Refresh { service_changed, monitor_failed, monitor_only }) => {
+                                if service_changed || monitor_failed {
+                                    controller.monitor = None;
+                                }
+                                let result = if monitor_only { controller.refresh_events() } else { controller.refresh() };
+                                if let Err(error) = result {
                                     controller.snapshot.error = Some(error);
                                 }
                             }
-                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Ok(Wake::Closed) => break,
+                            Err(error) => {
+                                controller.snapshot.error = Some(format!("Wi-Fi event wait failed: {error}").into());
+                                publish(&controller.snapshot);
+                                break;
+                            }
                         }
+                        publish(&controller.snapshot);
                     }
                 })
                 .map_err(|_| "Could not start Wi-Fi worker".to_owned())?;
             Ok(send)
         })
         .as_ref()
-        .map_err(Clone::clone)
+        .map_err(|error| WifiError::from(error.as_str()))
 }
 
 pub async fn request(request: Request) -> Result<Snapshot> {
@@ -166,9 +298,9 @@ fn run_bounded(command: &mut Command, timeout: Duration, operation: &str) -> Res
                 return if status.success() {
                     Ok(())
                 } else if diagnostic.is_empty() {
-                    Err(format!("{operation} failed ({status})"))
+                    Err(format!("{operation} failed ({status})").into())
                 } else {
-                    Err(format!("{operation} failed ({status}): {diagnostic}"))
+                    Err(format!("{operation} failed ({status}): {diagnostic}").into())
                 };
             }
             Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
@@ -188,7 +320,8 @@ fn run_bounded(command: &mut Command, timeout: Duration, operation: &str) -> Res
                     format!("{operation} timed out")
                 } else {
                     format!("{operation} timed out: {diagnostic}")
-                });
+                }
+                .into());
             }
         }
     }
@@ -210,7 +343,9 @@ struct Attempt {
 }
 struct Controller {
     sleeping: bool,
+    radio_enabled: bool,
     restore_after_ui: bool,
+    bluetooth_sleep: Option<BluetoothSleepGuard>,
     interface: Option<String>,
     socket_path: Option<PathBuf>,
     snapshot: Snapshot,
@@ -219,6 +354,7 @@ struct Controller {
     scan_started: Option<Instant>,
     monitor: Option<Control>,
     address_requested: bool,
+    reconnect_started: Option<Instant>,
     address_started: Option<Instant>,
 }
 
@@ -227,6 +363,19 @@ fn valid_interface(value: &str) -> bool {
 }
 
 impl Controller {
+    fn poll_interval(&self, notifications_available: bool) -> Option<Duration> {
+        if self.sleeping {
+            return None;
+        }
+        if self.attempt.is_some() || self.scan_started.is_some() || self.address_requested || self.snapshot.phase == Phase::ObtainingAddress || self.dhcp.is_some() {
+            Some(Duration::from_secs(2))
+        } else if (self.radio_enabled || self.snapshot.phase != Phase::Off) && (self.monitor.is_none() || !notifications_available) {
+            Some(Duration::from_secs(30))
+        } else {
+            None
+        }
+    }
+
     fn new() -> Self {
         let interface = std::env::var("INTERFACE")
             .ok()
@@ -236,7 +385,9 @@ impl Controller {
         let socket_path = interface.as_ref().map(|name| PathBuf::from("/var/run/wpa_supplicant").join(name));
         Self {
             sleeping: false,
+            radio_enabled: false,
             restore_after_ui: false,
+            bluetooth_sleep: None,
             interface,
             socket_path,
             snapshot: Snapshot { power_available, ..Snapshot::default() },
@@ -245,11 +396,12 @@ impl Controller {
             scan_started: None,
             monitor: None,
             address_requested: false,
+            reconnect_started: None,
             address_started: None,
         }
     }
     fn control(&self) -> Result<Control> {
-        Control::open(self.socket_path.as_ref().ok_or("Wi-Fi interface is unknown. Restart Bokheim from the Kobo launcher.")?)
+        Control::open(self.socket_path.as_ref().ok_or("Wi-Fi interface is unknown. Restart the app from the Kobo launcher.")?)
     }
     fn prepare_sleep_with(&mut self, power_off: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
         self.restore_after_ui = self.snapshot.phase != Phase::Off || self.control().is_ok();
@@ -266,18 +418,24 @@ impl Controller {
         Ok(())
     }
     fn resume_after_ui_with(&mut self, power_on: impl FnOnce(&mut Self) -> Result<()>) {
-        if self.sleeping || !self.restore_after_ui {
+        if self.sleeping {
             return;
         }
-        self.restore_after_ui = false;
-        self.snapshot.error = None;
-        if let Err(error) = power_on(self) {
-            self.snapshot.error = Some(error);
+        if self.restore_after_ui {
+            self.restore_after_ui = false;
+            self.snapshot.error = None;
+            if let Err(error) = power_on(self) {
+                self.snapshot.error = Some(error);
+            }
         }
+        // Restore Bluetooth only after confirmed wake and Wi-Fi recovery. It
+        // remains off across unsolicited kernel wakes and failed preparations.
+        self.bluetooth_sleep.take();
     }
+
     fn execute(&mut self, request: Request) -> Result<Snapshot> {
         if self.sleeping {
-            return if matches!(request, Request::Status) { Ok(self.snapshot.clone()) } else { Err("Wi-Fi is unavailable while the device is going to sleep".into()) };
+            return if matches!(request, Request::Status) { Ok(self.snapshot.clone()) } else { Err(WifiError::new(WifiFailure::Sleeping, "Wi-Fi is unavailable while the device is going to sleep")) };
         }
         if !matches!(request, Request::Status) {
             self.snapshot.error = None;
@@ -305,7 +463,9 @@ impl Controller {
         Ok(self.snapshot.clone())
     }
     fn ensure_monitor(&mut self) -> Result<()> {
-        self.monitor = Some(Control::monitor(self.socket_path.as_ref().ok_or("Wi-Fi interface is unknown")?)?);
+        if self.monitor.is_none() {
+            self.monitor = Some(Control::monitor(self.socket_path.as_ref().ok_or("Wi-Fi interface is unknown")?)?);
+        }
         Ok(())
     }
     fn service_lost(&mut self) {
@@ -314,22 +474,67 @@ impl Controller {
         self.attempt = None;
         self.scan_started = None;
         self.address_requested = false;
+        self.reconnect_started = None;
         self.address_started = None;
         self.snapshot = Snapshot { power_available: self.snapshot.power_available, ..Snapshot::default() };
     }
     fn refresh(&mut self) -> Result<()> {
+        self.refresh_with_events(Vec::new())
+    }
+    fn refresh_events(&mut self) -> Result<()> {
+        let events = match self.monitor.as_ref().map(Control::events).transpose() {
+            Ok(events) => events.unwrap_or_default(),
+            Err(error) => {
+                self.service_lost();
+                return Err(error);
+            }
+        };
+        // Supplicant also emits BSS updates, signal reports and debug messages.
+        // Drain those without issuing STATUS/LIST_NETWORKS for every message.
+        if !events.iter().any(|event| {
+            event.contains("CTRL-EVENT-")
+                && !["CTRL-EVENT-BSS-ADDED", "CTRL-EVENT-BSS-REMOVED", "CTRL-EVENT-SIGNAL-CHANGE", "CTRL-EVENT-SCAN-STARTED"].iter().any(|ignored| event.contains(ignored))
+                && (self.scan_started.is_some() || !event.contains("CTRL-EVENT-SCAN-RESULTS"))
+        }) {
+            return Ok(());
+        }
+        self.refresh_with_events(events)
+    }
+    fn refresh_with_events(&mut self, mut events: Vec<String>) -> Result<()> {
         let control = match self.control() {
-            Ok(control) => control,
+            Ok(control) => {
+                self.radio_enabled = true;
+                control
+            }
             Err(error) => {
                 self.service_lost();
                 if let Some(interface) = &self.interface
                     && !PathBuf::from("/sys/class/net").join(interface).exists()
                 {
+                    self.radio_enabled = false;
                     return Ok(());
                 }
                 return Err(error);
             }
         };
+        // Attach before taking the status snapshot so a state change between
+        // STATUS and the blocking wait always leaves an unread event. Older
+        // firmware without monitoring retains the recovery polling fallback.
+        let _ = self.ensure_monitor();
+        // Drain before STATUS. Events arriving during the queries must remain
+        // readable, since they can describe a newer state than the replies.
+        let pending = match self.monitor.as_ref().map(Control::events).transpose() {
+            Ok(events) => events.unwrap_or_default(),
+            Err(error) => {
+                self.service_lost();
+                return Err(error);
+            }
+        };
+        events.extend(pending);
+        if events.iter().any(|event| event.contains("CTRL-EVENT-TERMINATING")) {
+            self.service_lost();
+            return Err("Wi-Fi service stopped".into());
+        }
         let (status, saved) = match control.command("STATUS").and_then(|status| control.command("LIST_NETWORKS").map(|saved| (status, saved))) {
             Ok(replies) => replies,
             Err(error) => {
@@ -341,16 +546,9 @@ impl Controller {
         self.snapshot.phase = phase(&data);
         self.snapshot.network = data.get("ssid").map(|ssid| String::from_utf8_lossy(&decode_ssid(ssid)).into_owned());
         self.snapshot.saved = parse_saved(&saved);
-        let events = match self.monitor.as_ref().map(Control::events).transpose() {
-            Ok(events) => events.unwrap_or_default(),
-            Err(error) => {
-                self.service_lost();
-                return Err(error);
-            }
-        };
         if self.attempt.is_some() && events.iter().any(|event| event.contains("reason=WRONG_KEY") || event.contains("CTRL-EVENT-AUTH-REJECT")) {
             self.cancel_attempt(&control)?;
-            return Err("Authentication failed. Check the network password.".into());
+            return Err(WifiError::new(WifiFailure::AuthenticationFailed, "supplicant reported a wrong key or rejected authentication"));
         }
         if let Some(started) = self.scan_started {
             if events.iter().any(|event| event.contains("CTRL-EVENT-SCAN-RESULTS")) {
@@ -360,8 +558,15 @@ impl Controller {
             } else if started.elapsed() > Duration::from_secs(20) {
                 self.scan_started = None;
                 self.snapshot.scanning = false;
-                return Err("Network scan timed out. Try Refresh again.".into());
+                return Err(WifiError::new(WifiFailure::ScanTimedOut, "network scan timed out"));
             }
+        }
+        if self.snapshot.phase != Phase::Connected && self.reconnect_started.is_some_and(|started| started.elapsed() >= Duration::from_secs(45)) {
+            self.cancel_attempt(&control)?;
+            self.snapshot.phase = Phase::Disconnected;
+            self.snapshot.network = None;
+            control.ok("DISCONNECT")?;
+            return Err(WifiError::new(WifiFailure::ConnectTimedOut, "automatic connection attempt timed out"));
         }
         if self.address_requested && self.snapshot.phase == Phase::ObtainingAddress && self.address_started.is_none() {
             self.start_dhcp()?;
@@ -369,20 +574,21 @@ impl Controller {
         }
         if self.snapshot.phase == Phase::Connected {
             self.address_requested = false;
+            self.reconnect_started = None;
         }
         if self.address_started.is_some_and(|started| started.elapsed() > Duration::from_secs(25)) && self.address_requested {
             self.cancel_attempt(&control)?;
             self.address_requested = false;
-            return Err("Obtaining a network address timed out".into());
+            self.reconnect_started = None;
+            return Err(WifiError::new(WifiFailure::NoAddress, "obtaining a network address timed out"));
         }
-        if self.attempt.is_some() {
-            let requested = self.attempt.as_ref().unwrap();
+        if let Some(requested) = &self.attempt {
             let current_id = data.get("id").and_then(|id| id.parse::<u32>().ok());
             if self.snapshot.phase == Phase::Connected && current_id == Some(requested.id) {
                 self.attempt = None;
             } else if requested.started.elapsed() > Duration::from_secs(45) {
                 self.cancel_attempt(&control)?;
-                return Err("Connection timed out. Check the password and network availability.".into());
+                return Err(WifiError::new(WifiFailure::ConnectTimedOut, "connection attempt timed out"));
             }
         }
         if let Some(child) = self.dhcp.as_mut()
@@ -391,7 +597,7 @@ impl Controller {
             self.dhcp = None;
             if !status.success() && self.address_requested {
                 self.cancel_attempt(&control)?;
-                return Err("Could not obtain a network address. Try connecting again.".into());
+                return Err(WifiError::new(WifiFailure::NoAddress, "address acquisition failed"));
             }
         }
         Ok(())
@@ -413,20 +619,23 @@ impl Controller {
     }
     fn power_with_helper_timeout(&mut self, enabled: bool, helper: &OsStr, timeout: Duration) -> Result<()> {
         if !self.snapshot.power_available {
-            return Err("Wi-Fi power control is unavailable on this device".into());
+            return Err(WifiError::new(WifiFailure::PowerControlUnavailable, "Wi-Fi power control is unavailable on this device"));
         }
         if !enabled {
             // Radio shutdown must still run when supplicant is unresponsive.
             self.stop_dhcp();
             self.attempt = None;
             self.address_requested = false;
+            self.reconnect_started = None;
             self.address_started = None;
         }
         run_bounded(Command::new("/bin/sh").env("INTERFACE", self.interface.as_deref().ok_or("Wi-Fi interface is missing")?).arg(helper).arg(if enabled { "on" } else { "off" }), timeout, "Wi-Fi power control")?;
+        self.radio_enabled = enabled;
         self.monitor = None;
         self.scan_started = None;
         self.snapshot.scanning = false;
         self.address_requested = enabled;
+        self.reconnect_started = enabled.then(Instant::now);
         self.address_started = None;
         if enabled {
             self.refresh()
@@ -441,7 +650,7 @@ impl Controller {
         let saved = control.command("LIST_NETWORKS")?;
         let previous = enabled_networks(&saved);
         if !parse_saved(&saved).iter().any(|network| network.id == id) {
-            return Err("The selected network is no longer available".into());
+            return Err(WifiError::new(WifiFailure::NetworkGone, "the selected saved network is gone"));
         }
         self.ensure_monitor()?;
         if cfg!(target_arch = "arm") {
@@ -459,16 +668,16 @@ impl Controller {
     }
     fn join(&mut self, network: Network, password: String) -> Result<()> {
         if network.ssid.is_empty() || network.ssid.len() > 32 {
-            return Err("Network name must contain 1 to 32 bytes".into());
+            return Err(WifiError::new(WifiFailure::InvalidNetworkName, "network name must contain 1 to 32 bytes"));
         }
         if network.security == Security::Unsupported {
-            return Err("This network's security mode is not supported yet".into());
+            return Err(WifiError::new(WifiFailure::UnsupportedSecurity, "unsupported network security mode"));
         }
         let psk = match network.security {
             Security::Open => None,
             Security::WpaPersonal => {
                 if !(8..=63).contains(&password.len()) || !password.is_ascii() || password.bytes().any(|b| b.is_ascii_control()) {
-                    return Err("Enter a WPA password containing 8 to 63 printable ASCII characters".into());
+                    return Err(WifiError::new(WifiFailure::InvalidPassword, "WPA password is not 8 to 63 printable ASCII characters"));
                 }
                 let mut derived = [0_u8; 32];
                 pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password.as_bytes(), &network.ssid, 4096, &mut derived);
@@ -494,6 +703,7 @@ impl Controller {
     fn cancel_attempt(&mut self, control: &Control) -> Result<()> {
         self.stop_dhcp();
         self.address_requested = false;
+        self.reconnect_started = None;
         self.address_started = None;
         if let Some(attempt) = self.attempt.take() {
             control.ok("DISCONNECT")?;
@@ -529,7 +739,7 @@ impl Controller {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .map_err(|_| "Could not start network address acquisition")?,
+                .map_err(|_| WifiError::new(WifiFailure::NoAddress, "could not start address acquisition"))?,
         );
         Ok(())
     }

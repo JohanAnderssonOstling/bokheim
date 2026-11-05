@@ -1,5 +1,5 @@
 use library_database::{Database, ImportCommit};
-use sync_common::{ContentHash, ROOT_DIR_ID};
+use sync_common::{BookId, ROOT_DIR_ID};
 
 fn database() -> Database {
     let db = Database::open(":memory:").unwrap();
@@ -8,12 +8,14 @@ fn database() -> Database {
 }
 
 fn import() -> ImportCommit {
-    let hash = ContentHash::new(&"9".repeat(64));
+    let hash = BookId::new(&"9".repeat(64));
     ImportCommit {
+        source_identity: None,
+        byte_checksum: None,
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
         format: book_model::BookFormat::Epub,
-        content_hash: hash,
+        book_id: hash,
         size_bytes: 10,
         inspection_version: 1,
         inspection: Some(book_inspection::InspectedBook {
@@ -33,10 +35,10 @@ fn import() -> ImportCommit {
 
 /// A library holding one downloaded book, through the same calls production
 /// uses to request and complete a download.
-fn downloaded_book() -> (Database, ContentHash) {
+fn downloaded_book() -> (Database, BookId) {
     let db = database();
     let commit = import();
-    let hash = commit.content_hash;
+    let hash = commit.book_id;
     db.commit_import(commit).unwrap();
     db.sync_request_book_downloads(&[hash], library_model::TransferOrigin::UserInitiated).unwrap();
     db.complete_local_book_request(&hash).unwrap();
@@ -60,4 +62,20 @@ fn evicting_a_downloaded_book_with_a_server_copy_keeps_the_entry() {
     assert!(!db.is_book_downloaded(&hash).unwrap(), "eviction must clear the download");
     assert!(!db.book_paths(&hash).unwrap().is_empty(), "eviction must keep the book's placements");
     assert!(!db.evict_local_book(&hash).unwrap(), "evicting a non-download is a no-op");
+}
+
+#[test]
+fn eviction_requires_current_book_presence_and_a_cover_cannot_authorize_it() {
+    use library_model::BlobKind;
+
+    let (db, hash) = downloaded_book();
+    db.record_remote_asset(BlobKind::Thumbnail, &hash).unwrap();
+    assert!(db.check_local_book_eviction(&hash).is_err());
+    assert!(db.is_book_downloaded(&hash).unwrap());
+    db.record_remote_asset(BlobKind::Book, &hash).unwrap();
+    assert!(db.check_local_book_eviction(&hash).unwrap());
+    db.forget_remote_asset(BlobKind::Book, &hash).unwrap();
+    assert!(db.check_local_book_eviction(&hash).is_err());
+    assert!(db.is_book_downloaded(&hash).unwrap());
+    assert!(!db.check_local_book_eviction(&BookId::from_bytes([1; 32])).unwrap());
 }

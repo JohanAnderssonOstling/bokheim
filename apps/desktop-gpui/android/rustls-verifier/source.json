@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/rustls/rustls-platform-verifier",
+  "commit": "252e25161a91af476cbea620e29d277592d27ec7",
+  "android_version": "0.2.0",
+  "file": "src/main/java/org/rustls/platformverifier/CertificateVerifier.kt",
+  "sha256": "3f47c2a05875ab06b02a9811d5d9c688b6397fcf648b396e9998c8e9f3889568",
+  "upstream_sha256": "251031aec27214398328c4755744cd3274c54e9d51e10952712bcd5ba64bc4ed",
+  "local_changes": [
+    "Reuse the trust anchor returned by Android chain validation for revocation checks instead of enumerating the full keystore; exclude that anchor from the CertPath."
+  ]
+}

@@ -7,20 +7,16 @@ edition = "2021"
 websocket = ["dep:tokio-tungstenite", "dep:rustls", "dep:tokio", "dep:futures-util"]
 
 [dependencies]
-book-inspection = { path = "../../library-backend/crates/book-inspection" }
-cpu-host = { path = "../../library-backend/crates/cpu-host" }
 client-platform-runtime = { path = "../runtime" }
-thumbnail = { path = "../../library-backend/crates/thumbnail" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"], optional = true }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls = { workspace = true, optional = true }
 tokio = { version = "1", features = ["net"], optional = true }
 futures-util = { version = "0.3", features = ["sink"], optional = true }
 tempfile = "3"
 blake3 = "1"
 libc = "0.2"
-rusqlite = { version = "0.40.0", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

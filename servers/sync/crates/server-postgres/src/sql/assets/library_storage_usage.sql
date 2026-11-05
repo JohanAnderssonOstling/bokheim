@@ -1,7 +1,7 @@
 -- Per-library breakdown of the bytes an account is charged for.
 --
--- The quota charges each unique blob once (user_blob_charge is keyed by user
--- and content hash), but the same book may be referenced from several
+-- The quota charges each canonical checksum once, while different logical
+-- book IDs can refer to those same bytes from several
 -- libraries. Summing per library would therefore double count shared books and
 -- overrun the quota, so each charged blob is attributed to exactly one library:
 -- the lowest library id that still holds an unpurged book_lifecycle reference to
@@ -28,20 +28,15 @@ WITH referenced AS (
     WHERE claim.user_id=$1
 ),
 owning AS (
-    SELECT referenced.content_hash, MIN(referenced.library_id) AS library_id
+    SELECT object.byte_checksum,MIN(referenced.library_id) AS library_id
     FROM referenced
-    JOIN user_blob_charge AS charge
-      ON charge.user_id = $1
-     AND charge.content_hash = referenced.content_hash
-    GROUP BY referenced.content_hash
+    JOIN user_blob_charge ownership ON ownership.user_id=$1 AND ownership.content_hash=referenced.content_hash
+    JOIN blob_object object ON object.content_hash=referenced.content_hash
+    JOIN user_canonical_charge charge ON charge.user_id=$1 AND charge.byte_checksum=object.byte_checksum
+    GROUP BY object.byte_checksum
 ), book_usage AS (
-    SELECT owning.library_id AS library_id,
-           COALESCE(SUM(object.size_bytes), 0)::BIGINT AS used_bytes
-    FROM owning
-    JOIN blob_object AS object
-      ON object.content_hash = owning.content_hash
+    SELECT owning.library_id,COALESCE(SUM(object.size_bytes),0)::BIGINT AS used_bytes
+    FROM owning JOIN canonical_blob_object object USING(byte_checksum)
     GROUP BY owning.library_id
 )
-SELECT library_id, used_bytes
-FROM book_usage
-ORDER BY library_id;
+SELECT library_id,used_bytes FROM book_usage ORDER BY library_id;

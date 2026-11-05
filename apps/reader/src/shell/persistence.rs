@@ -4,17 +4,21 @@
 //! folds loaded data back into its entity, serializes optimistic mutations,
 //! and debounces position updates.
 
-use library_backend::ContentHash;
+use ui_text::text;
+
+use async_channel::{Receiver, Sender};
+use library_backend::BookId;
 use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{App, Context};
-use library_backend::LibraryClient;
+use gpui::{AnyElement, App, Context};
+use library_backend::{BackendError, LibraryClient};
+use ui_components::BrowserTheme;
 
-pub(crate) type PersistenceFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
-type Mutation = Box<dyn FnOnce(&LibraryClient) -> PersistenceFuture<()> + 'static>;
+pub(crate) type PersistenceFuture<T> = Pin<Box<dyn Future<Output = Result<T, BackendError>> + 'static>>;
+type Mutation = Box<dyn Fn(&LibraryClient) -> PersistenceFuture<()> + 'static>;
 
 /// Awaits `op` against the library, then applies `apply` to the view with its
 /// result.
@@ -41,28 +45,150 @@ where
 ///
 /// Reader state is changed optimistically on the GPUI thread. This queue then
 /// preserves the same order in storage.
+#[derive(Clone)]
 pub(crate) struct MutationWriter {
-    mutations: async_channel::Sender<(&'static str, Mutation)>,
+    mutations: Sender<MutationMessage>,
+    notice: MutationStatus,
+}
+
+#[derive(Clone)]
+struct MutationStatus {
+    retry: Sender<()>,
+    retries: Receiver<()>,
+    state: Rc<RefCell<MutationState>>,
+    changes: Receiver<()>,
+    changed: Sender<()>,
+    subject: PersistenceSubject,
+}
+
+enum MutationMessage {
+    Write { what: &'static str, mutation: Mutation, finished: Sender<()> },
+    Flush(Sender<Result<(), BackendError>>),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PersistenceSubject {
+    Annotations,
+    Progress,
+}
+
+#[derive(Default)]
+struct MutationState {
+    pending: usize,
+    failure: Option<BackendError>,
 }
 
 impl MutationWriter {
-    pub(crate) fn new(cx: &App, library: Rc<LibraryClient>) -> Self {
-        let (mutations, incoming) = async_channel::unbounded::<(&'static str, Mutation)>();
+    pub(crate) fn new(cx: &App, library: Rc<LibraryClient>, subject: PersistenceSubject) -> Self {
+        let (mutations, incoming) = async_channel::unbounded();
+        let notice = MutationStatus::new(subject);
+        let retries = notice.retries.clone();
+        let changed = notice.changed.clone();
+        let status = notice.state.clone();
+        let executor = cx.background_executor().clone();
         cx.spawn(async move |_cx| {
-            while let Ok((what, mutation)) = incoming.recv().await {
-                if let Err(error) = mutation(library.as_ref()).await {
-                    log::error!("failed to {what}: {error}");
+            while let Ok(message) = incoming.recv().await {
+                match message {
+                    MutationMessage::Write { what, mutation, finished } => {
+                        let mut delay = Duration::from_secs(1);
+                        // Keep the failed operation ahead of later edits: a
+                        // retry must not overwrite a newer successful write.
+                        while let Err(error) = mutation(library.as_ref()).await {
+                            log::error!("failed to {what}; retaining for retry: {error}");
+                            status.borrow_mut().failure = Some(error);
+                            let _ = changed.try_send(());
+                            futures_lite::future::race(executor.timer(delay), async {
+                                if retries.recv().await.is_err() {
+                                    std::future::pending::<()>().await;
+                                }
+                            })
+                            .await;
+                            delay = (delay * 2).min(Duration::from_secs(30));
+                        }
+                        {
+                            let mut status = status.borrow_mut();
+                            status.pending -= 1;
+                            status.failure = None;
+                        }
+                        let _ = changed.try_send(());
+                        let _ = finished.try_send(());
+                    }
+                    MutationMessage::Flush(finished) => {
+                        let _ = finished.try_send(Ok(()));
+                    }
                 }
             }
         })
         .detach();
-        Self { mutations }
+        Self { mutations, notice }
     }
 
-    pub(crate) fn record(&self, what: &'static str, mutation: impl FnOnce(&LibraryClient) -> PersistenceFuture<()> + 'static) {
-        if self.mutations.try_send((what, Box::new(mutation))).is_err() {
-            log::error!("failed to queue {what}");
+    /// The completion signal arrives only after the retained write succeeds.
+    /// Debounced producers await it so failures cannot accumulate extra batches.
+    pub(crate) fn record(&self, what: &'static str, mutation: impl Fn(&LibraryClient) -> PersistenceFuture<()> + 'static) -> Receiver<()> {
+        let (finished, completion) = async_channel::bounded(1);
+        self.notice.state.borrow_mut().pending += 1;
+        if self.mutations.try_send(MutationMessage::Write { what, mutation: Box::new(mutation), finished }).is_err() {
+            self.notice.state.borrow_mut().failure = Some(BackendError::message(format!("Could not queue {what}: reader persistence stopped")));
+            let _ = self.notice.changed.try_send(());
         }
+        completion
+    }
+
+    pub(crate) fn changes(&self) -> Receiver<()> {
+        self.notice.changes.clone()
+    }
+
+    pub(crate) fn with_notice(&self, document: AnyElement, theme: BrowserTheme) -> AnyElement {
+        self.notice.with_notice(document, theme)
+    }
+
+    /// A snapshot taken after this barrier observes all writes already queued.
+    /// Later optimistic edits are still protected by the session revision.
+    pub(crate) fn flush(&self) -> Receiver<Result<(), BackendError>> {
+        let (finished, receiver) = async_channel::bounded(1);
+        if let Some(error) = self.notice.state.borrow().failure.clone() {
+            let _ = finished.try_send(Err(error));
+        } else if self.mutations.try_send(MutationMessage::Flush(finished.clone())).is_err() {
+            let _ = finished.try_send(Err(BackendError::message("Reader persistence stopped before flushing annotations")));
+        }
+        receiver
+    }
+}
+
+impl MutationStatus {
+    fn new(subject: PersistenceSubject) -> Self {
+        let (retry, retries) = async_channel::bounded(1);
+        let (changed, changes) = async_channel::bounded(1);
+        Self { retry, retries, changed, changes, state: Rc::new(RefCell::new(MutationState::default())), subject }
+    }
+
+    /// Keep the failure visible beside the document until the retained edits
+    /// have actually reached storage. Retry wakes the same ordered writer.
+    fn with_notice(&self, document: AnyElement, theme: BrowserTheme) -> AnyElement {
+        use gpui::prelude::*;
+        use gpui::{div, px};
+
+        let state = self.state.borrow();
+        let Some(error) = &state.failure else { return document };
+        let detail = ui_components::user_facing_error(error, text!(reader::check_that_the_library_is_available));
+        let (description, error_id, retry_id) = match self.subject {
+            PersistenceSubject::Annotations => (text!(reader::notes_or_bookmarks), "reader-persistence-error", "reader-persistence-retry"),
+            PersistenceSubject::Progress => (text!(reader::reading_progress), "reader-progress-error", "reader-progress-retry"),
+        };
+        let message = format!(text!(reader::couldn_t_save_changes_are_waiting_to_save_retrying_automatically), state.pending, description = description, detail = detail);
+        let retry = self.retry.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(div().id(error_id).flex_none().flex().items_center().gap(px(8.0)).p(px(8.0)).bg(theme.page_bg).text_color(theme.text).child(div().flex_1().child(message)).child(
+                ui_components::outlined_text_button(retry_id, text!(reader::retry_now)).on_click(move |_, _, _| {
+                    let _ = retry.try_send(());
+                }),
+            ))
+            .child(div().flex_1().min_h_0().min_w_0().child(document))
+            .into_any_element()
     }
 }
 
@@ -74,31 +200,44 @@ const POSITION_DEBOUNCE: Duration = Duration::from_secs(1);
 ///
 /// Page turns arrive far faster than the database should be written. Each
 /// update waits out [`POSITION_DEBOUNCE`]; anything that queued up meanwhile is
-/// drained and only the newest position is persisted.
+/// coalesced within a chapter. Chapter transitions and resets stay ordered so
+/// a rapid sequence of navigations retains every chapter the user entered.
 pub(crate) struct PositionWriter<P> {
-    updates: async_channel::Sender<P>,
+    updates: Sender<P>,
+    notice: MutationStatus,
 }
 
 impl<P: 'static> PositionWriter<P> {
     /// Starts the debouncing task. `persist` performs the actual library
     /// write for the newest position; `what` names it for log messages.
-    pub(crate) fn new(cx: &App, what: &'static str, persist: impl Fn(&LibraryClient, &P) -> PersistenceFuture<()> + 'static, library: Rc<LibraryClient>) -> Self {
+    pub(crate) fn new(cx: &App, what: &'static str, persist: impl Fn(&LibraryClient, &P) -> PersistenceFuture<()> + 'static, coalesce: impl Fn(&P, &P) -> bool + 'static, library: Rc<LibraryClient>) -> Self {
         let (updates, incoming) = async_channel::unbounded::<P>();
         let executor = cx.background_executor().clone();
         let persist = Rc::new(persist);
+        let writes = MutationWriter::new(cx, library, PersistenceSubject::Progress);
+        let notice = writes.notice.clone();
+        let queued_writes = writes;
         cx.spawn(async move |_cx| {
-            while let Ok(mut position) = incoming.recv().await {
+            while let Ok(position) = incoming.recv().await {
                 executor.timer(POSITION_DEBOUNCE).await;
+                let mut positions = vec![position];
                 while let Ok(newer) = incoming.try_recv() {
-                    position = newer;
+                    if positions.last().is_some_and(|previous| coalesce(previous, &newer)) {
+                        positions.pop();
+                    }
+                    positions.push(newer);
                 }
-                if let Err(error) = persist(library.as_ref(), &position).await {
-                    log::error!("failed to {what}: {error}");
+                for position in positions {
+                    let persist = persist.clone();
+                    let completion = queued_writes.record(what, move |library| persist(library, &position));
+                    if completion.recv().await.is_err() {
+                        return;
+                    }
                 }
             }
         })
         .detach();
-        Self { updates }
+        Self { updates, notice }
     }
 
     /// Records a new position. Dropping it because the task has stopped is
@@ -108,6 +247,12 @@ impl<P: 'static> PositionWriter<P> {
             log::warn!("{what} persistence task stopped");
         }
     }
+}
+
+#[derive(Clone)]
+enum ChapterReadReset {
+    All,
+    Chapter(String),
 }
 
 /// One reading position as the library stores it.
@@ -125,13 +270,22 @@ pub(crate) struct StoredPosition {
     /// it. Only the renderer can resolve a CFI or a page to an entry, so the
     /// library cannot work it out later — it travels with the position instead.
     entry: Option<String>,
+    reset_read_status: Option<ChapterReadReset>,
 }
 
 impl StoredPosition {
+    pub(crate) fn comic_page(page: usize, offset: f32, count: usize, visible_count: usize) -> Self {
+        Self {
+            position: book_model::ReadingPosition::Cbz { page: page as u32, full_page_position: offset.clamp(0.0, 1.0) }.as_str(),
+            percent: book_model::pdf_page_progress(page.saturating_add(visible_count.saturating_sub(1)), count),
+            entry: Some(book_model::cbz_toc_target(page)),
+            reset_read_status: None,
+        }
+    }
     /// The renderer reports how far through the book layout has reached as a
     /// 0–1 fraction.
     pub(crate) fn epub(cfi: String, fraction: f32) -> Self {
-        Self { position: cfi, percent: book_model::layout_fraction_progress(fraction), entry: None }
+        Self { position: cfi, percent: book_model::layout_fraction_progress(fraction), entry: None, reset_read_status: None }
     }
 
     /// Pages are a PDF's only progress signal: there is no reflowed text to
@@ -139,7 +293,12 @@ impl StoredPosition {
     /// stored. `offset` locates the view within the page and rides along in
     /// the position string without affecting progress.
     pub(crate) fn pdf_page(page_index: usize, offset: f32, page_count: usize) -> Self {
-        Self { position: book_model::pdf_page_position_reading_position(page_index as u32, offset), percent: book_model::pdf_page_progress(page_index, page_count), entry: Some(book_model::pdf_toc_target(page_index)) }
+        Self {
+            position: book_model::pdf_page_position_reading_position(page_index as u32, offset),
+            percent: book_model::pdf_page_progress(page_index, page_count),
+            entry: Some(book_model::pdf_toc_target(page_index)),
+            reset_read_status: None,
+        }
     }
 
     /// The entry resolved from this reading position. It may become available
@@ -162,11 +321,13 @@ impl StoredPosition {
 /// coordinates.
 pub(crate) struct ReadingPositionWriter {
     writer: PositionWriter<StoredPosition>,
+    saving_enabled: bool,
     narration_position: RefCell<Option<(u64, StoredPosition)>>,
+    last_position: RefCell<Option<StoredPosition>>,
 }
 
 impl ReadingPositionWriter {
-    pub(crate) fn new(cx: &App, content_hash: ContentHash, library: Rc<LibraryClient>) -> Self {
+    pub(crate) fn new(cx: &App, book_id: BookId, library: Rc<LibraryClient>) -> Self {
         let writer = PositionWriter::new(
             cx,
             "save reading position",
@@ -174,12 +335,54 @@ impl ReadingPositionWriter {
                 let stored = position.position.clone();
                 let percent = position.percent;
                 let entry = position.entry.clone();
+                let reset = position.reset_read_status.clone();
                 let library = library.clone();
-                Box::pin(async move { library.update_reading_position(content_hash, stored, Some(percent), entry).await })
+                Box::pin(async move {
+                    library.update_reading_position(book_id, stored, Some(percent), entry).await?;
+                    match reset {
+                        Some(ChapterReadReset::All) => {
+                            library.reset_chapter_read_status(book_id).await?;
+                        }
+                        Some(ChapterReadReset::Chapter(target)) => {
+                            library.reset_chapter_read_status_at(book_id, target).await?;
+                        }
+                        None => {}
+                    }
+                    Ok(())
+                })
             },
+            |previous, next| previous.entry == next.entry && (previous.percent >= 100.0) == (next.percent >= 100.0) && previous.reset_read_status.is_none() && next.reset_read_status.is_none(),
             library,
         );
-        Self { writer, narration_position: RefCell::new(None) }
+        Self { writer, saving_enabled: true, narration_position: RefCell::new(None), last_position: RefCell::new(None) }
+    }
+
+    pub(crate) fn watch<C: 'static>(&self, cx: &mut Context<C>) {
+        let changes = self.writer.notice.changes.clone();
+        cx.spawn(async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn with_notice(&self, document: AnyElement, theme: BrowserTheme) -> AnyElement {
+        self.writer.notice.with_notice(document, theme)
+    }
+
+    /// Recovery must not replace an unread saved position with the fallback.
+    pub(crate) fn with_saving_enabled(mut self, enabled: bool) -> Self {
+        self.saving_enabled = enabled;
+        self
+    }
+
+    fn persist(&self, position: StoredPosition, what: &'static str) {
+        if self.saving_enabled {
+            self.writer.record(position, what);
+        }
     }
 
     pub(crate) fn record(&self, position: StoredPosition, navigation_revision: u64) {
@@ -191,14 +394,30 @@ impl ReadingPositionWriter {
                 position
             }
         };
-        self.writer.record(position, "reading position");
+        *self.last_position.borrow_mut() = Some(position.clone());
+        self.persist(position, "reading position");
     }
 
     /// Keep the audible source address until the user navigates. Following a
     /// passage or reflowing its page may emit a coarser viewport position later.
     pub(crate) fn record_narration(&self, position: StoredPosition, navigation_revision: u64) {
         *self.narration_position.borrow_mut() = Some((navigation_revision, position.clone()));
-        self.writer.record(position, "reading position");
+        *self.last_position.borrow_mut() = Some(position.clone());
+        self.persist(position, "reading position");
+    }
+
+    pub(crate) fn reset_read_status(&self) {
+        if let Some(mut position) = self.last_position.borrow().clone() {
+            position.reset_read_status = Some(ChapterReadReset::All);
+            self.persist(position, text!(reader::reset_chapter_read_status));
+        }
+    }
+
+    pub(crate) fn reset_chapter_read_status(&self, target: String) {
+        if let Some(mut position) = self.last_position.borrow().clone() {
+            position.reset_read_status = Some(ChapterReadReset::Chapter(target));
+            self.persist(position, text!(reader::reset_chapter_read_status));
+        }
     }
 }
 
@@ -206,9 +425,29 @@ impl ReadingPositionWriter {
 mod tests {
     use super::*;
 
-    fn writer() -> (ReadingPositionWriter, async_channel::Receiver<StoredPosition>) {
+    #[test]
+    fn comic_spreads_finish_at_the_last_visible_page_and_resume_at_the_first() {
+        let position = StoredPosition::comic_page(8, 0.25, 10, 2);
+        assert_eq!(position.percent(), 100.0);
+        assert_eq!(position.position, "cbzpage(8,0.25)");
+        assert_eq!(position.entry.as_deref(), Some("cbz-page:8"));
+    }
+
+    fn writer() -> (ReadingPositionWriter, Receiver<StoredPosition>) {
         let (updates, incoming) = async_channel::unbounded();
-        (ReadingPositionWriter { writer: PositionWriter { updates }, narration_position: RefCell::new(None) }, incoming)
+        (ReadingPositionWriter { writer: PositionWriter { updates, notice: MutationStatus::new(PersistenceSubject::Progress) }, saving_enabled: true, narration_position: RefCell::new(None), last_position: RefCell::new(None) }, incoming)
+    }
+
+    #[test]
+    fn recovery_sessions_never_overwrite_positions_or_chapter_read_status() {
+        let (writer, incoming) = writer();
+        let writer = writer.with_saving_enabled(false);
+        let position = || StoredPosition::epub("fallback-position".into(), 0.0);
+        writer.record(position(), 0);
+        writer.record_narration(position(), 1);
+        writer.reset_read_status();
+        writer.reset_chapter_read_status("chapter.xhtml".into());
+        assert!(matches!(incoming.try_recv(), Err(async_channel::TryRecvError::Empty)));
     }
 
     #[test]

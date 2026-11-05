@@ -1,8 +1,8 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClickEvent, DefiniteLength, DismissEvent, Edges,
-    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, DismissEvent, Edges,
+    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding, Length, MouseButton,
     ParentElement, Pixels, RenderOnce, StyleRefinement, Styled, Window, WindowControlArea,
     anchored, div, point, prelude::FluentBuilder as _, px,
 };
@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActiveTheme, FocusTrapElement as _, IconName, Placement, Sizable, StyledExt as _,
+    ActiveTheme, ElementExt as _, FocusTrapElement as _, IconName, Placement, Sizable, StyledExt as _,
     WindowExt as _,
     actions::Cancel,
     button::{Button, ButtonVariants as _},
@@ -51,7 +51,7 @@ impl Default for SheetSettings {
 pub struct Sheet {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) placement: Placement,
-    pub(crate) size: DefiniteLength,
+    size: Length,
     resizable: bool,
     on_close: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
     title: Option<AnyElement>,
@@ -73,7 +73,7 @@ impl Sheet {
         Self {
             focus_handle: cx.focus_handle(),
             placement: Placement::Right,
-            size: DefiniteLength::Absolute(px(350.).into()),
+            size: px(350.).into(),
             resizable: true,
             title: None,
             footer: None,
@@ -97,8 +97,9 @@ impl Sheet {
         self
     }
 
-    /// Sets the size of the sheet, default is 350px.
-    pub fn size(mut self, size: impl Into<DefiniteLength>) -> Self {
+    /// Sets the size of the sheet, default is 350px. Use [`Length::Auto`]
+    /// with a maximum width or height to fit the sheet to its content.
+    pub fn size(mut self, size: impl Into<Length>) -> Self {
         self.size = size.into();
         self
     }
@@ -234,9 +235,20 @@ impl RenderOnce for Sheet {
                                 }
                                 Placement::Left => this.top(top).left_0().bottom_0().border_r_1(),
                             })
+                            .on_prepaint(move |bounds, window, cx| {
+                                if let Some(root) = window.root::<crate::Root>().flatten() {
+                                    let size = if placement.is_horizontal() {
+                                        bounds.size.width
+                                    } else {
+                                        bounds.size.height
+                                    };
+                                    root.update(cx, |root, _| root.sheet_size = Some(size.into()));
+                                }
+                            })
                             .child(
                                 // TitleBar
                                 h_flex()
+                                    .flex_none()
                                     .justify_between()
                                     .pl_4()
                                     .pr_3()
@@ -256,7 +268,7 @@ impl RenderOnce for Sheet {
                                     ),
                             )
                             .child(
-                                div().flex_1().overflow_hidden().child(
+                                div().flex_1().min_h_0().overflow_hidden().child(
                                     // Body
                                     v_flex()
                                         .size_full()

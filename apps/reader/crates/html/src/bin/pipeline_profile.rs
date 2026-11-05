@@ -4,12 +4,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use html::engine::Engine;
-use html::layout::{FontSlant, GlyphId, GlyphMetric, GlyphRegistry, GlyphShaper, LayoutConstraints, LayoutTimings, ShapedTextRun, TextRunShapeRequest};
-use html::pipeline::{
-    BookStylesheetCache, BuildPipelineTimings, DocumentFactory, FontEnvironmentRevision, ImageMetricsRevision, PaintSettingsRevision, PipelineInputs, ResourceRevision, SourceRevision, StyleEnvironment, StylesheetRevision,
-    parse_html_document,
+use html_pipeline::PipelineSession;
+use html_pipeline::engine::{LayoutConstraints, LayoutTimings};
+use html::{
+    text::{
+        GlyphHandle, GlyphRequest, GlyphResourceGeneration, GlyphShaper, ShapeError, FontMetrics,
+        ShapedGlyph,
+    },
 };
+use html_pipeline::{
+    BookStylesheetCache, BuildPipelineTimings, DocumentFactory, PipelineInputs, StyleEnvironment,
+};
+use html_pipeline::parse_html_document;
 use html::resources::ResourceProvider;
 #[path = "../book.rs"]
 mod book;
@@ -18,46 +24,31 @@ use book_content::BookFormat as BookSourceFormat;
 
 #[derive(Default)]
 struct ProfileShaper {
-    glyphs: HashMap<(char, u32), GlyphId>,
+    glyphs: HashMap<(char, u32), GlyphHandle>,
+    generation: GlyphResourceGeneration,
 }
 
 impl GlyphShaper for ProfileShaper {
+    fn resource_generation(&self) -> GlyphResourceGeneration {
+        self.generation
+    }
+
     fn reset(&mut self) {
         self.glyphs.clear();
+        self.generation = GlyphResourceGeneration::default();
     }
 
-    fn shape_glyph<'a>(&mut self, glyph_metrics: &mut GlyphRegistry<'a>, ch: char, font_size: f32, _font_weight: u16, _font_slant: FontSlant, _color: u32, _family: Option<&str>) -> Result<GlyphId, html::layout::ShapeError> {
-        let key = (ch, font_size.to_bits());
-        if let Some(&glyph) = self.glyphs.get(&key) {
-            return Ok(glyph);
-        }
-
-        let metric = GlyphMetric::try_new(ch, font_size * 0.5, font_size * 0.75, font_size * 0.25, 0.0).map_err(html::layout::ShapeError::rejected_metric)?;
-        let glyph = glyph_metrics.register(metric)?;
-        self.glyphs.insert(key, glyph);
-        Ok(glyph)
-    }
-
-    fn shape_glyph_run<'a>(&mut self, glyph_metrics: &mut GlyphRegistry<'a>, request: TextRunShapeRequest<'_>, glyphs: &mut [GlyphId]) -> Result<Option<ShapedTextRun>, html::layout::ShapeError> {
-        let mut ascii = [GlyphId::MAX; 128];
-        let mut non_ascii = HashMap::<char, GlyphId>::new();
-        let style = request.style();
-        for (slot, character) in glyphs.iter_mut().zip(request.text().chars()) {
-            let cached = if character.is_ascii() { ascii[character as usize] } else { non_ascii.get(&character).copied().unwrap_or(GlyphId::MAX) };
-            let glyph = if cached != GlyphId::MAX {
-                cached
-            } else {
-                let glyph = self.shape_glyph(glyph_metrics, character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family())?;
-                if character.is_ascii() {
-                    ascii[character as usize] = glyph;
-                } else {
-                    non_ascii.insert(character, glyph);
-                }
-                glyph
-            };
-            *slot = glyph;
-        }
-        Ok(None)
+    fn shape_glyph(&mut self, request: GlyphRequest<'_>) -> Result<ShapedGlyph, ShapeError> {
+        let key = (request.character, request.style.font_size.to_bits());
+        let next = GlyphHandle(self.glyphs.len() as u32);
+        let handle = *self.glyphs.entry(key).or_insert(next);
+        let size = request.style.font_size;
+        let advance = size * 0.5;
+        let metrics = FontMetrics {
+            ascent: size * 0.75,
+            descent: size * 0.25,
+        };
+        Ok(ShapedGlyph::new(handle, advance, metrics))
     }
 }
 
@@ -120,7 +111,7 @@ impl Totals {
         self.layout_detail.layout_tree_traversal += timing.layout_tree_traversal;
         self.layout_detail.root_box_layout += timing.root_box_layout;
         self.layout_detail.finalize_layout += timing.finalize_layout;
-        self.layout_detail.sort_lines_and_remap_images += timing.sort_lines_and_remap_images;
+        self.layout_detail.build_line_traversals += timing.build_line_traversals;
         self.layout_detail.collect_inline_decorations += timing.collect_inline_decorations;
         self.layout_detail.rebuild_image_fragments_by_line += timing.rebuild_image_fragments_by_line;
         self.layout_detail.layout_box_total += timing.layout_box_total;
@@ -276,7 +267,7 @@ fn print_cold_totals(totals: &Totals) {
     print_timing("        write fragments", totals.layout_detail.write_line_fragments, totals.epubs);
     print_timing("      place floats", totals.layout_detail.place_float_anchor, totals.epubs);
     print_timing("finalize layout", totals.layout_detail.finalize_layout, totals.epubs);
-    print_timing("  sort lines/images", totals.layout_detail.sort_lines_and_remap_images, totals.epubs);
+    print_timing("  build line traversals", totals.layout_detail.build_line_traversals, totals.epubs);
     print_timing("  inline decorations", totals.layout_detail.collect_inline_decorations, totals.epubs);
     print_timing("  image line index", totals.layout_detail.rebuild_image_fragments_by_line, totals.epubs);
 }
@@ -312,30 +303,14 @@ fn profile_file(provider: Arc<dyn ResourceProvider>, uri: &str, stylesheet_cache
 
 fn profile_warm_file(provider: Arc<dyn ResourceProvider>, uri: &str, totals: &mut WarmTotals) -> Result<(), String> {
     let html = provider.read_string(uri).map_err(|error| error.to_string())?;
-    let inputs = PipelineInputs {
-        source: html.into(),
-        markup_syntax: html::pipeline::MarkupSyntax::from_uri(uri),
-        user_styles: Vec::new(),
-        reader_overrides: Default::default(),
-        note_flow: Default::default(),
-        source_revision: SourceRevision::INITIAL,
-        base_uri: uri.to_owned(),
-        resource_revision: ResourceRevision::INITIAL,
-        stylesheet_revision: StylesheetRevision::INITIAL,
-        style_environment: StyleEnvironment::default(),
-        font_environment: FontEnvironmentRevision::INITIAL,
-        image_metrics_revision: ImageMetricsRevision::INITIAL,
-        layout: html::pipeline::LayoutConstraints {
-            viewport_width: 600.0,
-            viewport_height: None,
-            line_height: 16.0,
-            image_sizing_policy: html::pipeline::ImageSizingPolicy::WebCompatible,
-            text_composition_policy: html::pipeline::TextCompositionPolicy::WebCompatible,
-        },
-        image_metrics: Default::default(),
-        paint: PaintSettingsRevision::INITIAL,
-    };
-    let mut session = Engine::new(provider);
+    let inputs = PipelineInputs::new(
+        html.into(),
+        html_pipeline::MarkupSyntax::from_uri(uri),
+        uri.to_owned(),
+        StyleEnvironment::default(),
+        html_pipeline::engine::LayoutConstraints::new(600.0, 16.0).unwrap(),
+    );
+    let mut session = PipelineSession::new(provider);
     let mut shaper = ProfileShaper::default();
     let started = Instant::now();
     session.update(inputs.clone(), &mut shaper).map_err(|error| error.to_string())?;

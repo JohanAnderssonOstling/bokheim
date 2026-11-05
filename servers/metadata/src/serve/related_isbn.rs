@@ -1,7 +1,7 @@
 //! Pure verification policy; callers perform ISBN requests without uploading book bytes.
 use metadata_contract::{
     matching::{author_match_keys, matching_author_count, NormalizedTitle},
-    Classification, ClassificationEvidence, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, RichWorkMetadataMatch,
+    Classification, ClassificationEvidence, ClassificationMethod, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, RichWorkMetadataMatch,
 };
 
 /// All checksum-valid ISBN references identified as a candidate edition of this
@@ -46,7 +46,7 @@ pub fn classifications(verified: &[String], records: impl Fn(&str) -> Vec<RichWo
             for code in &mut codes {
                 code.source = ClassificationSource::Work;
                 code.evidence.push(ClassificationEvidence {
-                    method: "local_bibliographic_print_isbn_verified_title_author".into(),
+                    method: ClassificationMethod::LocalPrintIsbnVerifiedTitleAuthor,
                     isbn13: isbn.clone(),
                     open_library_work_id: record.open_library_work_id.clone().unwrap_or_default(),
                     open_library_edition_id: record.exact_edition_ids.first().cloned().unwrap_or_default(),
@@ -66,10 +66,10 @@ pub fn classification_record(classifications: Vec<Classification>) -> RichWorkMe
 
 /// Keep the supporting print ISBN in the persisted subject's provenance.
 pub fn subject(code: &Classification) -> Option<book_model::BookSubject> {
-    if let Some(evidence) = code.evidence.iter().find(|e| e.method == "local_bibliographic_isbn_reference") {
+    if let Some(evidence) = code.evidence.iter().find(|e| e.method == ClassificationMethod::LocalIsbnReference) {
         return book_model::BookSubject::new(None, &code.notation, format!("inspection:isbn-reference:{}", evidence.isbn13), Some("lcc".into()), Some(code.notation.clone())).ok();
     }
-    let evidence = code.evidence.iter().find(|e| e.method == "local_bibliographic_print_isbn_verified_title_author")?;
+    let evidence = code.evidence.iter().find(|e| e.method == ClassificationMethod::LocalPrintIsbnVerifiedTitleAuthor)?;
     book_model::BookSubject::new(None, &code.notation, format!("inspection:verified-print-isbn:{}", evidence.isbn13), Some("lcc".into()), Some(code.notation.clone())).ok()
 }
 

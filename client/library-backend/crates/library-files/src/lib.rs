@@ -9,8 +9,12 @@ pub mod hashing;
 pub use asset_store::{AssetStore, AssetStoreError};
 pub use book_access::BoxedBookReader;
 
-impl From<AssetStoreError> for client_runtime::BackendError {
+impl From<AssetStoreError> for client_protocol::BackendError {
     fn from(error: AssetStoreError) -> Self {
         Self::operation(error)
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
+pub mod import_move;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod library_move;

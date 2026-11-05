@@ -107,7 +107,7 @@ CREATE SEQUENCE sync_server_sequence
     NO MAXVALUE
     CACHE 1;
 
--- Stable across restarts and schema upgrades. Explicitly rotate this ID after
+-- Stable across restarts and deployments. Explicitly rotate this ID after
 -- restoring/replacing database history, before accepting synchronization.
 CREATE TABLE sync_history (
     singleton boolean PRIMARY KEY CHECK (singleton),

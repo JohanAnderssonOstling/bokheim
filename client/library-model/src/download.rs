@@ -1,8 +1,9 @@
-use content_address::ContentHash;
+use content_address::BookId;
+use operation_failure::Failure;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// One lifecycle for browser HTTP downloads and library-owned torrents.
+/// Progress and completion for browser HTTP downloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserDownloadPhase {
@@ -11,25 +12,25 @@ pub enum BrowserDownloadPhase {
     Importing,
     Waiting,
     Completed,
-    Failed,
+    /// Why it failed, when that is known; the UI words it.
+    Failed(Option<Failure>),
     Dismissed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserDownloadUpdate {
     pub download: String,
-    /// Transfer an existing notification to the resolved torrent's stable ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<String>,
     pub name: String,
     pub phase: BrowserDownloadPhase,
     #[serde(default)]
     pub percent: Option<u8>,
+    /// Progress wording for an ongoing download. A failure's wording comes
+    /// from its phase, never from this text.
     #[serde(default)]
     pub message: Option<String>,
 }
 
-/// Source download observations before a catalog entry has a library file hash.
+/// Source download observations before a catalog entry has a library book identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatalogImportProgress {
     Waiting,
@@ -78,12 +79,13 @@ pub enum DownloadState {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BookDownloadStatus {
-    pub content_hash: ContentHash,
+    #[serde(rename = "content_hash")]
+    pub book_id: BookId,
     pub state: DownloadState,
 }
 
 impl BookDownloadStatus {
-    pub fn new(content_hash: ContentHash, state: DownloadState) -> Self {
-        Self { content_hash, state }
+    pub fn new(book_id: BookId, state: DownloadState) -> Self {
+        Self { book_id, state }
     }
 }

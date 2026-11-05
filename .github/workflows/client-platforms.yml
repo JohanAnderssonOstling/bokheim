@@ -45,7 +45,6 @@ jobs:
         working-directory: bokheim
         shell: bash
     env:
-      RUSTUP_TOOLCHAIN: stable
       RUSTC_BOOTSTRAP: '1'
       CARGO_BUILD_JOBS: '1'
       CARGO_TERM_COLOR: always
@@ -53,25 +52,36 @@ jobs:
       - uses: actions/checkout@v6
         with:
           path: bokheim
-      # Match the pinned sibling sources used by desktop-release.yml.
+      # Shared release inputs are loaded from the checked-out source.
+      - name: Load release configuration
+        shell: python {0}
+        env:
+          BOKHEIM_UPDATE_PUBLIC_KEY_HEX: ${{ vars.BOKHEIM_UPDATE_PUBLIC_KEY_HEX }}
+          BOKHEIM_UPDATE_KEY_ID: ${{ vars.BOKHEIM_UPDATE_KEY_ID }}
+          BOKHEIM_UPDATE_ENDPOINT: ${{ vars.BOKHEIM_UPDATE_ENDPOINT }}
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          source = Path(os.environ['GITHUB_WORKSPACE']) / 'bokheim'
+          subprocess.run([sys.executable, str(source / 'scripts/ci/release_config.py'), '--github-env'], check=True)
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/GPUI-Fork
-          ref: c186a827d40ba6b3f85789138dabe55554e2a4c0
+          ref: ${{ env.GPUI_FORK_REF }}
           path: GPUI-Fork
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlEngine
-          ref: fbdc9748d7ddb339d23b8f3cd65e54c16f371fad
+          ref: ${{ env.HTML_ENGINE_REF }}
           path: HtmlEngine
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlViewCore
-          ref: e34aba1f7d91f5e4ce95d5d9141f97c74d42f6a9
+          ref: ${{ env.HTML_VIEW_CORE_REF }}
           path: HtmlViewCore
       - name: Install Rust and build dependencies
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
       - name: Restore hosted platform build cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -87,6 +97,11 @@ jobs:
         run: |
           target=$(rustc -vV | sed -n 's/^host: //p')
           python shared/pdfium/prepare.py --target "$target"
+      - name: UI panic lint checks
+        if: inputs.fixture_only != true
+        run: |
+          cargo clippy --release --locked --no-deps --lib -p browser-ui -p reader-ui -p ui-components -p application-shell -p audiobook-player
+          cargo clippy --release --locked --no-deps --lib --manifest-path ../HtmlEngine/adapters/Cargo.toml -p html-gpui
       - name: Windows standalone PDF runtime
         if: inputs.fixture_only != true
         run: cargo test --release -p pdf-reader-core --test packaged_runtime

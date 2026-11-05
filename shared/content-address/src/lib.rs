@@ -4,6 +4,9 @@ use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::str::FromStr;
 
+mod book_id;
+pub use book_id::{BookId, InvalidBookId};
+
 /// The raw 32-byte BLAKE3 digest. Hexadecimal is only a text representation.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentHash([u8; 32]);
@@ -83,13 +86,7 @@ impl fmt::Debug for ContentHash {
 }
 impl serde::Serialize for ContentHash {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        struct Encoding<'a>(&'a ContentHash);
-        impl serde::Serialize for Encoding<'_> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                if serializer.is_human_readable() { serializer.collect_str(self.0) } else { serializer.serialize_bytes(self.0.as_bytes()) }
-            }
-        }
-        serializer.serialize_newtype_struct("ContentHash", &Encoding(self))
+        serde_transport::text_or_bytes(self, self.as_bytes(), serializer)
     }
 }
 impl<'de> serde::Deserialize<'de> for ContentHash {
@@ -123,22 +120,52 @@ impl<'de> serde::Deserialize<'de> for ContentHash {
                 self.visit_bytes(&value)
             }
         }
-        if deserializer.is_human_readable() { deserializer.deserialize_any(HashVisitor) } else { deserializer.deserialize_bytes(HashVisitor) }
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(HashVisitor)
+        } else {
+            deserializer.deserialize_bytes(HashVisitor)
+        }
     }
 }
 
 /// Hashes bytes from the reader's current position to EOF using BLAKE3.
 pub fn hash_reader(reader: &mut impl Read) -> io::Result<ContentHash> {
-    let mut hash = blake3::Hasher::new();
-    let mut bytes = vec![0; 1024 * 1024];
-    loop {
-        let count = reader.read(&mut bytes)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&bytes[..count]);
+    Ok(hash_reader_with_size(reader)?.0)
+}
+
+/// Hash bytes as another operation consumes them, without a second read.
+pub struct HashingReader<R> {
+    inner: R,
+    hasher: blake3::Hasher,
+}
+
+impl<R> HashingReader<R> {
+    pub fn new(inner: R) -> Self {
+        Self { inner, hasher: blake3::Hasher::new() }
     }
-    Ok(ContentHash::from(hash.finalize()))
+
+    pub fn checksum(&self) -> ContentHash {
+        self.hasher.finalize().into()
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.hasher.count()
+    }
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let length = self.inner.read(buffer)?;
+        self.hasher.update(&buffer[..length]);
+        Ok(length)
+    }
+}
+
+/// Hash bytes and count their length in one pass.
+pub fn hash_reader_with_size(reader: &mut impl Read) -> io::Result<(ContentHash, u64)> {
+    let mut reader = HashingReader::new(reader);
+    io::copy(&mut reader, &mut io::sink())?;
+    Ok((reader.checksum(), reader.size_bytes()))
 }
 
 /// Hash the complete file, regardless of the reader's current position.

@@ -1,41 +1,72 @@
 pub(crate) use super::*;
+use client_platform_native::filesystem::parent_directory;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 pub(crate) use sync_common::DirId;
 // Native asset-store projections. The shared model owns paths;
 // these snapshots remember which physical paths this device has materialized.
 pub(crate) fn readable_path(handle: &Handle, name: String) -> Result<Option<PathBuf>, AssetStoreError> {
-    if !handle.enabled.load(std::sync::atomic::Ordering::Acquire) {
+    if !handle.enabled.load(Ordering::Acquire) {
         return Ok(None);
     }
     if name.starts_with("book/") {
         return Err(AssetStoreError::operation("native books require explicit paths"));
     }
     let path = handle.assets_root.join(name);
-    Ok(path.is_file().then_some(path))
+    if path.is_file() {
+        return Ok(Some(path));
+    }
+    root_available(handle);
+    Ok(None)
 }
 
-pub(crate) fn evict_book_files(handle: &Handle, relative_paths: &[RelativeBookPath], hash: &ContentHash) -> Result<(), AssetStoreError> {
+/// The same selection drives eviction and its disk-space review. Other files
+/// in an audiobook folder belong to the user and are left in place.
+/// Explicit eviction trusts the recorded paths without revalidating content.
+pub(crate) fn book_eviction_files(path: &Path) -> Result<Vec<PathBuf>, AssetStoreError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(vec![path.to_owned()]);
+    }
+    if !metadata.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = audiobook_folder::discover(path)?.into_iter().map(|track| track.path).collect::<Vec<_>>();
+    files.extend([audiobook_folder::discover_nfo(path)?, audiobook_folder::discover_cue(path)?, audiobook_folder::discover_cover(path)?].into_iter().flatten().map(|sidecar| sidecar.path));
+    let mapping = path.join(audiobook_folder::PATH_MAPPING_FILE);
+    if mapping.try_exists()? {
+        files.push(mapping);
+    }
+    Ok(files)
+}
+
+pub(crate) fn evict_book_files(handle: &Handle, relative_paths: &[RelativeBookPath]) -> Result<(), AssetStoreError> {
+    if !root_available(handle) {
+        return Err(AssetStoreError::operation("library storage is unavailable"));
+    }
     for relative in relative_paths {
         let path = placement_path(handle, relative);
-        if (path.is_file() || path.is_dir()) && content_matches(&path, hash)? {
-            if path.is_dir() {
-                for track in audiobook_folder::discover(&path)? {
-                    std::fs::remove_file(&track.path)?;
-                    if let Some(parent) = track.path.parent().filter(|parent| *parent != path.as_path()) {
-                        let _ = std::fs::remove_dir(parent);
-                    }
-                }
-                let mapping = path.join(audiobook_folder::PATH_MAPPING_FILE);
-                if mapping.try_exists()? {
-                    std::fs::remove_file(mapping)?;
-                }
-                let _ = std::fs::remove_dir(&path);
-            } else {
-                std::fs::remove_file(&path)?;
-            }
-            sync_parent(&path)?;
+        let files = book_eviction_files(&path)?;
+        if files.is_empty() {
+            continue;
         }
+        let directory = std::fs::symlink_metadata(&path)?.is_dir();
+        for file in files {
+            std::fs::remove_file(&file)?;
+            if directory {
+                if let Some(parent) = file.parent().filter(|parent| *parent != path.as_path()) {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+        }
+        if directory {
+            let _ = std::fs::remove_dir(&path);
+        }
+        sync_parent(&path)?;
     }
     Ok(())
 }
@@ -70,9 +101,7 @@ pub(crate) struct PreparedDirectory {
 
 impl PreparedDirectory {
     pub(crate) fn inspect(handle: &Handle, id: DirId, relative: &str, projected: Option<&str>, name: &str, sibling_names: &[String]) -> Result<Self, AssetStoreError> {
-        let relative = relative.to_owned();
-        let old = projected.map(str::to_owned);
-        let mut destination = library_path(handle, &relative);
+        let mut destination = library_path(handle, relative);
         let mut inspected = Vec::new();
         let mut record = |path: &Path| -> Result<bool, AssetStoreError> {
             let stamp = directory_entry_stamp(path)?;
@@ -85,9 +114,8 @@ impl PreparedDirectory {
         let marker_exists = record(&marker)?;
         let owned = marker_exists && std::fs::read_to_string(&marker)?.trim() == id.to_string();
         let chosen = if exists && !owned {
-            let mut occupied = std::fs::read_dir(destination.parent().unwrap())?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
-            occupied.extend(sibling_names.iter().cloned());
-            let chosen = library_replica::unique_folder_name(name, occupied.iter().map(String::as_str));
+            let occupied = std::fs::read_dir(parent_directory(&destination)?)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?;
+            let chosen = library_replica::unique_folder_name(name, occupied.iter().chain(sibling_names).map(String::as_str));
             destination.set_file_name(&chosen);
             exists = record(&destination)?;
             if exists {
@@ -97,9 +125,9 @@ impl PreparedDirectory {
         } else {
             None
         };
-        let missing_external = old.as_deref() == Some(relative.as_str()) && !exists && chosen.is_none();
+        let missing_external = projected == Some(relative) && !exists && chosen.is_none();
         let source = if !exists && !missing_external {
-            if let Some(old) = old.as_ref().filter(|old| *old != &relative || chosen.is_some()) {
+            if let Some(old) = projected.filter(|old| *old != relative || chosen.is_some()) {
                 let source = library_path(handle, old);
                 let source_exists = record(&source)?;
                 if source_exists && source.is_dir() {
@@ -133,7 +161,7 @@ impl PreparedDirectory {
             return Ok(true);
         }
         if let Some(source) = &self.source {
-            std::fs::rename(source, &self.destination)?;
+            crate::filesystem::rename_entry(source, &self.destination)?;
             sync_parent(source)?;
             sync_parent(&self.destination)?;
         } else if !self.exists {
@@ -168,9 +196,13 @@ pub(crate) fn create_directory(handle: &Handle, relative: &str, id: DirId) -> Re
         // than risk removing contents created concurrently by another process.
         let mut marker = OpenOptions::new().write(true).create_new(true).open(destination.join(".biblos_uuid"))?;
         marker.write_all(id.to_string().as_bytes())?;
-        marker.sync_all()?;
-        sync_parent(&destination.join(".biblos_uuid"))?;
-        sync_parent(&destination)?;
+        if handle.import_batch.is_some() {
+            sync_import_file(handle, &destination.join(".biblos_uuid"))?;
+        } else {
+            marker.sync_all()?;
+            sync_parent(&destination.join(".biblos_uuid"))?;
+            sync_parent(&destination)?;
+        }
         return Ok(chosen);
     }
     unreachable!("numeric name suffix space is unbounded")

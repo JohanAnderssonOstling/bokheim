@@ -9,12 +9,14 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 pub mod api;
+pub mod storage;
 pub use protobuf_wire as transport;
 pub use wire;
 mod protocol;
-pub use protocol::{validate_pull_batch, validate_push_response, MutationIssue, PullBatchError, PushBatcher, PushResponseError, ValidatedPushResponse};
+mod transport_fields;
+pub use protocol::{MutationIssue, PullBatchError, PushBatcher, PushResponseError, ValidatedPushResponse, validate_pull_batch, validate_push_response};
 
-pub use content_address::ContentHash;
+pub use content_address::BookId;
 
 /// Deterministic content-address fixture shared by protocol client and server tests.
 
@@ -40,17 +42,15 @@ pub const ROOT_DIR_ID: DirId = uuid::Uuid::nil();
 
 /// Maximum encoded size of a synchronized JPEG cover.
 pub const MAX_THUMBNAIL_BYTES: u64 = 4 * 1024 * 1024;
-pub const MAX_PULL_CHANGES: usize = 1_000;
-/// Conservative wire budget for a pull page. One historical cell larger than
-/// this target is delivered alone, subject to the hard response limit.
-pub const MAX_PULL_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// Decoded-byte budget for a pull page, without a separate change-count cap.
+/// Reserve 512 KiB below the hard response limit for the outer envelope and
+/// push rejections. HTTP compression determines the transferred byte count.
+pub const MAX_PULL_BATCH_BYTES: usize = transport::MAX_DECODED_RESPONSE_BYTES - 512 * 1024;
 /// Fixed protobuf wrapper allowance; variable-length fields are counted too.
 pub const STATE_DELIVERY_OVERHEAD_BYTES: usize = 1_024;
 pub const MAX_PUSH_MUTATIONS: usize = 1_000;
 /// Target ceiling for the encoded mutations in one push request.
 pub const MAX_PUSH_BATCH_BYTES: usize = 4 * 1024 * 1024;
-/// Backwards-compatible name for the batch ceiling.
-pub const MAX_PUSH_MUTATION_BYTES: usize = MAX_PUSH_BATCH_BYTES;
 /// Admission bound shared by the generic service and domain clients.
 pub const MAX_LWW_FUTURE_SKEW_MS: u64 = 5 * 60 * 1_000;
 
@@ -230,7 +230,7 @@ pub struct Publication<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpaqueStateEntry {
     pub address: StateAddress,
-    pub book: Option<ContentHash>,
+    pub book: Option<BookId>,
     // Keep opaque payloads as byte buffers in the codec's intermediate trees.
     // Protobuf bytes and the persisted bincode layout stay identical.
     #[serde(with = "serde_bytes")]
@@ -258,10 +258,10 @@ pub trait StatePayload: Serialize + serde::de::DeserializeOwned + Sized {
 
 impl StatePayload for OpaqueStateEntry {
     fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.serialize(serializer)
+        transport_fields::opaque::serialize(self, serializer)
     }
     fn deserialize_entry<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::deserialize(deserializer)
+        transport_fields::opaque::deserialize(deserializer)
     }
 }
 
@@ -308,7 +308,7 @@ impl<T: StatePayload> Serialize for Versioned<T> {
         }
         let mut fields = serializer.serialize_struct("Versioned", 2)?;
         fields.serialize_field("value", &Entry(&self.value))?;
-        fields.serialize_field("version", &self.version)?;
+        fields.serialize_field("version", &transport_fields::VersionRef(&self.version))?;
         fields.end()
     }
 }
@@ -319,6 +319,7 @@ impl<'de, T: StatePayload> Deserialize<'de> for Versioned<T> {
         struct Fields<T> {
             #[serde(deserialize_with = "state_encoding::deserialize")]
             value: T,
+            #[serde(with = "transport_fields::version")]
             version: VersionKey,
         }
         let fields = Fields::<T>::deserialize(deserializer)?;
@@ -424,7 +425,12 @@ pub use state_key::StateKey;
 impl<'de> Deserialize<'de> for StateAddress {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        struct Address { kind: String, entity_key: StateKey, #[serde(default)] entity_subkey: String }
+        struct Address {
+            kind: String,
+            entity_key: StateKey,
+            #[serde(default)]
+            entity_subkey: String,
+        }
         let Address { kind, mut entity_key, entity_subkey } = Address::deserialize(deserializer)?;
         if state_key::book_kind(&kind) {
             if let StateKey::Text(text) = entity_key { entity_key = StateKey::Book(text.parse().map_err(serde::de::Error::custom)?); }

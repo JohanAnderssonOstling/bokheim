@@ -5,6 +5,14 @@
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use tokio::sync::{Semaphore, SemaphorePermit};
+
+static HEAVY_INSPECTIONS: Semaphore = Semaphore::const_new(2);
+
+/// Shared by every library and CPU host in this process.
+pub async fn inspection_permit() -> SemaphorePermit<'static> {
+    HEAVY_INSPECTIONS.acquire().await.expect("inspection semaphore is never closed")
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendExecutorError(String);
@@ -52,7 +60,7 @@ pub use futures_util::future::LocalBoxFuture as BoxedBackendFuture;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{available_parallelism, defer_background_work, defer_library_maintenance, library_maintenance_ready, run_blocking, sleep, spawn_detached, timeout, BackendExecutor, LibraryExecutor, LibraryMaintenancePermit, StartupPermit};
+pub use native::{available_parallelism, run_blocking, sleep, spawn_detached, timeout, BackendExecutor};
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -61,3 +69,9 @@ pub use wasm::*;
 
 mod task;
 pub use task::BackendTask;
+
+mod service;
+pub use service::{local_service_on_current_thread, ServiceHandle};
+
+mod startup;
+pub use startup::{defer_background_work, StartupPermit};

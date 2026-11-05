@@ -1,31 +1,36 @@
 //! Library account renewal around a transfer operation, with at most one retry.
 use crate::TransferError;
-
-/// The pre-flight half of a refreshable operation: credentials and user are
-/// captured before any work so a refresh for another session cannot silently
-/// adopt the operation.
-pub(super) struct RefreshGuard {
-    credentials: sync_transport::SyncCredentials,
-    user: Option<String>,
-}
+use library_services::account::{AccountSessionError, AuthenticatedRequestError, RefreshPolicy, authenticated_request};
+use std::future::Future;
 
 impl super::AssetExecutor {
-    pub(super) fn refresh_guard(&self) -> Result<RefreshGuard, TransferError> {
-        Ok(RefreshGuard { credentials: self.credentials()?, user: self.live_user_id() })
-    }
-
-    /// Renew the same account after an unauthorized request.
-    pub(super) async fn refresh_after_auth(&self, guard: RefreshGuard) -> Result<(), TransferError> {
-        let Some(account) = &self.account else {
-            return Err(TransferError::AuthenticationRequired);
-        };
-        match account.refresh_after_unauthorized(guard.credentials.access_token()).await {
-            Ok(Some(session)) if guard.user.as_deref() == Some(session.user_id()) => {
-                self.check_transfer_account(&guard.credentials)?;
-                Ok(())
-            }
-            Ok(_) => Err(TransferError::AuthenticationRequired),
-            Err(error) => Err(TransferError::retryable(error)),
-        }
+    /// Capture credentials and the user before work so a retry cannot adopt
+    /// an account that signed in while the operation was in flight.
+    pub(super) async fn refreshed<T, F, Fut>(&self, mut operation: F) -> Result<T, TransferError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, TransferError>>,
+    {
+        let credentials = self.credentials().await?;
+        let Some(account) = self.authentication.account() else { return operation().await };
+        authenticated_request(
+            account,
+            RefreshPolicy::OnRejection,
+            |_| {
+                let check = self.check_transfer_account(&credentials);
+                let pending = operation();
+                async move {
+                    check.await?;
+                    pending.await
+                }
+            },
+            |error| matches!(error, TransferError::AuthenticationRequired),
+        )
+        .await
+        .map_err(|error| match error {
+            AuthenticatedRequestError::Request(error) => error,
+            AuthenticatedRequestError::Session(AccountSessionError::Changed) | AuthenticatedRequestError::MissingSession => TransferError::AuthenticationRequired,
+            AuthenticatedRequestError::Session(error) => TransferError::retryable(error),
+        })
     }
 }

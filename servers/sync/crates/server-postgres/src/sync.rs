@@ -1,9 +1,12 @@
-use std::time::Instant;
 use crate::{PostgresDatabase, assets, sync_store};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Instant;
+use sync_common::ConflictRank;
 use sync_common::api::libraries::{LibraryNameRequest, LibrarySummary};
 use sync_common::{PullStateQuery, PullStateResponse, PushMutationsResponse, SyncExchangeRequest, SyncExchangeResponse};
+use tokio::sync::Notify;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -13,10 +16,6 @@ pub enum SyncError {
     LibraryOwnershipConflict,
     #[error("invalid library name")]
     InvalidLibraryName,
-    #[error("invalid OPDS feed")]
-    InvalidOpdsFeed,
-    #[error("OPDS feed was removed or belongs to a different user")]
-    OpdsFeedConflict,
     #[error("synchronization request contains too many mutations")]
     TooManyMutations,
     #[error("synchronization request contains an ambiguous mutation identity")]
@@ -40,11 +39,12 @@ pub struct LibraryNameOutcome {
 #[derive(Clone)]
 pub struct PostgresSyncRepository {
     pub(super) pool: PgPool,
+    pub(super) cleanup: Arc<Notify>,
 }
 
 impl PostgresSyncRepository {
     pub fn new(database: PostgresDatabase) -> Self {
-        Self { pool: database.pool().clone() }
+        Self { pool: database.pool().clone(), cleanup: database.asset_cleanup_signal() }
     }
 
     async fn authorize_owned_library(&self, transaction: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &sync_common::LibraryId) -> Result<bool, SyncError> {
@@ -95,8 +95,7 @@ impl PostgresSyncRepository {
         sync_store::rename_library(&self.pool, user_id, &LibraryNameRequest { library_name: name.to_owned(), ..request.clone() }).await.map_err(internal)
     }
 
-    /// Deletes server-side library and synchronization state while retaining
-    /// physical book and thumbnail objects in the asset store.
+    /// Deletes library state and requests cleanup of unused physical assets.
     pub async fn delete_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<bool, SyncError> {
         let phase_started = Instant::now();
         let mut transaction = self.pool.begin().await.map_err(internal)?;
@@ -132,12 +131,19 @@ impl PostgresSyncRepository {
             .await
             .map_err(internal)?;
         let cloud_enabled: bool = sqlx::query_scalar(include_str!("sql/cloud_storage/enabled.sql")).bind(&library_id).fetch_one(&mut *transaction).await.map_err(internal)?;
-        assets::apply_lifecycle_reference_deltas(&mut transaction, user_id, lifecycle_hashes.into_iter().filter(|_| cloud_enabled).map(|hash| sync_common::ContentHash::try_from(hash.as_slice()).map(|hash| (hash, -1))).collect::<Result<Vec<_>, _>>().map_err(internal)?).await.map_err(internal)?;
+        assets::apply_lifecycle_reference_deltas(
+            &mut transaction,
+            user_id,
+            lifecycle_hashes.into_iter().filter(|_| cloud_enabled).map(|hash| sync_common::BookId::try_from(hash.as_slice()).map(|hash| (hash, -1))).collect::<Result<Vec<_>, _>>().map_err(internal)?,
+        )
+        .await
+        .map_err(internal)?;
         sqlx::query(include_str!("sql/cloud_storage/release_unreferenced.sql")).bind(user_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM book_upload_reservation WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_state WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_library_revision WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         transaction.commit().await.map_err(internal)?;
+        self.cleanup.notify_one();
         Ok(true)
     }
 
@@ -182,6 +188,9 @@ impl PostgresSyncRepository {
         let phase_started = Instant::now();
         transaction.commit().await.map_err(internal)?;
         tracing::debug!(target: "sync_performance", phase = "commit", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
+        if request.mutations.iter().any(|mutation| mutation.state.value.address.kind == "book_lifecycle" && mutation.state.version.conflict_rank == ConflictRank::Purge) {
+            self.cleanup.notify_one();
+        }
         return Ok(SyncExchangeResponse { push: PushMutationsResponse { rejected: inserted.rejected }, pull: pull_response(page) });
     }
 }

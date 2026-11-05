@@ -1,27 +1,49 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::pin::Pin;
 use wasm_bindgen::prelude::*;
 
-thread_local! {
-    /// Picked files that arrived with an import request, by the request's
-    /// token, until the import takes them one at a time.
-    static SELECTED: RefCell<HashMap<String, Vec<JsValue>>> = RefCell::new(HashMap::new());
+#[wasm_bindgen(module = "/src/transport/selected_files.js")]
+extern "C" {
+    #[wasm_bindgen(catch, js_name = initializeSelectedFiles)]
+    fn initialize_selected_files() -> Result<(), JsValue>;
+    #[wasm_bindgen(js_name = takeSelectedFile)]
+    pub fn take_selected_file(token: &str, index: usize) -> JsValue;
+    #[wasm_bindgen(js_name = releaseSelectedFiles)]
+    pub fn release_selected_files(token: &str);
+    #[wasm_bindgen(catch, js_name = sendSelectedFiles)]
+    async fn send_files(token: &str, files: &js_sys::Array, signal: &web_sys::AbortSignal) -> Result<(), JsValue>;
+}
+pub fn initialize() -> Result<(), String> {
+    initialize_selected_files().map_err(|error| super::error_message(&error))
 }
 
-/// Keeps the files sent with an import request until the import reads them.
-pub fn hold_selected_files(token: String, files: &js_sys::Array) {
-    SELECTED.with(|selected| selected.borrow_mut().insert(token, files.iter().collect()));
+/// A Rust lease can cross workers; browser files stay on the storage owner.
+pub struct SelectedFiles {
+    id: String,
+    release: Option<Box<dyn FnOnce(String) + Send>>,
 }
-
-/// The picked file at `index` of an import request; undefined once taken.
-pub fn take_selected_file(token: &str, index: usize) -> JsValue {
-    SELECTED.with(|selected| selected.borrow_mut().get_mut(token).and_then(|files| files.get_mut(index)).map(std::mem::take).unwrap_or(JsValue::UNDEFINED))
+impl SelectedFiles {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 }
-
-/// Drops whatever an import request did not take.
-pub fn release_selected_files(token: &str) {
-    SELECTED.with(|selected| selected.borrow_mut().remove(token));
+impl Drop for SelectedFiles {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release(self.id.clone());
+        }
+    }
+}
+pub async fn send_selected_files(files: &js_sys::Array, release: impl FnOnce(String) + Send + 'static) -> Result<SelectedFiles, String> {
+    let lease = SelectedFiles { id: uuid::Uuid::new_v4().to_string(), release: Some(Box::new(release)) };
+    struct Sending(web_sys::AbortController);
+    impl Drop for Sending {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let sending = Sending(web_sys::AbortController::new().map_err(|error| super::error_message(&error))?);
+    send_files(lease.id(), files, &sending.0.signal()).await.map_err(|error| super::error_message(&error))?;
+    Ok(lease)
 }
 
 /// A picker-owned browser source, sent to the database worker with its import.

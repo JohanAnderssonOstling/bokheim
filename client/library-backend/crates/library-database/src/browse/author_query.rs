@@ -1,10 +1,11 @@
 //! Relational author selection. Only heading aggregates cross into Rust;
 //! each requested author's ordered membership is loaded on demand.
 use super::{BrowseOptions, BrowseRow, invalid_integer_column, parse_uuid_column, popularity};
-use crate::{Database, DatabaseError};
+use crate::query_methods::uuid_blob_column;
+use crate::{Database, DatabaseError, SqlParam};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AuthorId, normalize_search_text};
 use library_model::{BrowseBookSort, BrowseChipSort, BrowseLocation, FINISHED_PROGRESS_THRESHOLD};
-use rusqlite::{Connection, Row, types::Value};
+use rusqlite::{Connection, Row, Statement, types::Value};
 use std::collections::HashMap;
 
 const LIBRARY: &str = r#"
@@ -48,6 +49,8 @@ eligible AS (
  WHERE (:formats=0 OR (:formats & source.format)!=0)
    AND (:languages='' OR EXISTS(SELECT 1 FROM book_language language
         WHERE language.book_row_id=source.row_id AND instr(:languages,',' || lower(CASE WHEN instr(language.language,'-')>0 THEN substr(language.language,1,instr(language.language,'-')-1) ELSE language.language END) || ',')>0))
+   AND (:languages='' OR NOT EXISTS(SELECT 1 FROM book_language language
+        WHERE language.book_row_id=source.row_id AND instr(:languages,',' || lower(CASE WHEN instr(language.language,'-')>0 THEN substr(language.language,1,instr(language.language,'-')-1) ELSE language.language END) || ',')=0))
    AND (source.external=1 OR lower(hex(source.key)) NOT IN (SELECT value FROM json_each(:held)))
 )
 "#;
@@ -62,7 +65,7 @@ pub(super) struct AuthorQuery<'a> {
 
 impl Database {
     pub(super) fn author_query<'a>(&'a self, catalog: Option<&'a Connection>, options: &'a BrowseOptions) -> Result<AuthorQuery<'a>, DatabaseError> {
-        let held = if catalog.is_some() { serde_json::to_string(&self.library_book_hashes()?.iter().map(ToString::to_string).collect::<Vec<_>>()).map_err(DatabaseError::operation)? } else { String::new() };
+        let held = if catalog.is_some() { serde_json::to_string(&self.library_book_hashes()?).map_err(DatabaseError::operation)? } else { String::new() };
         let empty = catalog.map(|catalog| catalog.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_browse_revision)", [], |row| row.get::<_, bool>(0))).transpose()?.unwrap_or(false);
         Ok(AuthorQuery { connection: catalog.unwrap_or(&self.connection), catalog: catalog.is_some(), options, held, empty })
     }
@@ -82,9 +85,8 @@ impl AuthorQuery<'_> {
         } else {
             String::new()
         };
-        let member_scope = name_scope.replace(identity, &format!("{member}"));
         let member_scope = if name_scope.is_empty() {
-            member_scope
+            String::new()
         } else {
             let predicate = name_scope.replace(identity, stable).trim_start_matches("AND ").to_owned();
             format!("AND {member} IN (SELECT {key} FROM {table} WHERE {predicate})")
@@ -96,30 +98,33 @@ impl AuthorQuery<'_> {
         let sql = format!("WITH {source} {sql}");
         let mut statement = self.connection.prepare_cached(&sql)?;
         let author = author.map(|id| if self.catalog { Value::Blob(id.as_bytes().to_vec()) } else { Value::Text(id.to_string()) }).unwrap_or(Value::Null);
-        let parameters = [
-            (":author", author),
-            (":authors", Value::Text(serde_json::to_string(&selected.iter().map(|id| if self.catalog { id.simple().to_string() } else { id.to_string() }).collect::<Vec<_>>()).map_err(DatabaseError::operation)?)),
-            (":role", Value::Blob(AUTHOR_MARC_RELATOR_CODE.0.to_vec())),
-            (":held", Value::Text(self.held.clone())),
-            (":search", Value::Text(self.options.search.clone())),
-            (":languages", Value::Text(self.options.languages.clone())),
-            (":formats", Value::Integer(self.options.file_types.into())),
-            (":downloaded", Value::Integer(self.options.downloaded_only.into())),
-            (":finished", Value::Integer(self.options.hide_finished.into())),
-            (":threshold", Value::Real(FINISHED_PROGRESS_THRESHOLD.into())),
+        let authors = if self.catalog { serde_json::to_string(&selected.iter().map(|id| id.simple()).collect::<Vec<_>>()) } else { serde_json::to_string(selected) }.map_err(DatabaseError::operation)?;
+        let role = &AUTHOR_MARC_RELATOR_CODE.0[..];
+        let threshold = f64::from(FINISHED_PROGRESS_THRESHOLD);
+        let parameters: [(&str, &SqlParam<'_>); 10] = [
+            (":author", &author),
+            (":authors", &authors),
+            (":role", &role),
+            (":held", &self.held),
+            (":search", &self.options.search),
+            (":languages", &self.options.languages),
+            (":formats", &self.options.file_types),
+            (":downloaded", &self.options.downloaded_only),
+            (":finished", &self.options.hide_finished),
+            (":threshold", &threshold),
         ];
-        for (name, value) in &parameters {
-            if let Some(index) = statement.parameter_index(name)? {
-                statement.raw_bind_parameter(index, value)?;
-            }
-        }
-        if log::log_enabled!(target: "browse_query_plan", log::Level::Debug) {
-            let mut plan = self.connection.prepare_cached(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+        let bind = |statement: &mut Statement<'_>| -> rusqlite::Result<()> {
             for (name, value) in &parameters {
-                if let Some(index) = plan.parameter_index(name)? {
-                    plan.raw_bind_parameter(index, value)?;
+                if let Some(index) = statement.parameter_index(name)? {
+                    statement.raw_bind_parameter(index, value)?;
                 }
             }
+            Ok(())
+        };
+        bind(&mut statement)?;
+        if log::log_enabled!(target: "browse_query_plan", log::Level::Debug) {
+            let mut plan = self.connection.prepare_cached(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            bind(&mut plan)?;
             let mut rows = plan.raw_query();
             while let Some(row) = rows.next()? {
                 log::debug!(target: "browse_query_plan", "{}", row.get::<_, String>(3)?);
@@ -133,26 +138,20 @@ impl AuthorQuery<'_> {
     }
 
     fn identity(&self, row: &Row<'_>, column: usize) -> rusqlite::Result<AuthorId> {
-        if self.catalog {
-            let bytes: Vec<u8> = row.get(column)?;
-            AuthorId::from_slice(&bytes).map_err(|error| rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Blob, Box::new(error)))
-        } else {
-            parse_uuid_column(row.get(column)?, column)
-        }
+        if self.catalog { uuid_blob_column(row, column) } else { parse_uuid_column(row.get(column)?, column) }
     }
 
     pub(super) fn headings(&self) -> Result<Vec<BrowseRow>, DatabaseError> {
         let popularity = self.options.chip_sort == BrowseChipSort::Popularity;
         let stats = if popularity {
             r#",credited AS (
-                 SELECT members.author_id,eligible.*,
-                        min(source_priority) OVER(PARTITION BY members.author_id) AS tier
+                 SELECT members.author_id,eligible.*
                  FROM members JOIN eligible ON eligible.row_id=members.book_row_id
                  {name_filter}
                ),stats AS (
                  SELECT author_id,count(*) AS total,sum(downloaded) AS downloaded,
                         min(source_priority) AS priority,
-                        sum(CASE WHEN source_priority=tier THEN score END) AS score
+                        sum(score) AS score
                  FROM credited GROUP BY author_id
                )"#
         } else {
@@ -182,11 +181,8 @@ impl AuthorQuery<'_> {
         })?;
         rows.sort_unstable_by_key(|row| row.id);
         popularity::sort_rows(&mut rows, self.options.chip_sort, |row| scores[&row.id]);
-        if self.catalog {
-            if popularity {
-                rows.sort_by_key(|row| priorities[&row.id]);
-            }
-            rows.sort_by_key(|row| priorities[&row.id] != 0);
+        if self.catalog && !popularity {
+            popularity::prefer_rows(&mut rows, &|row| priorities[&row.id] == 0);
         }
         Ok(rows)
     }
@@ -216,7 +212,7 @@ impl AuthorQuery<'_> {
 
     fn order(&self) -> &'static str {
         if self.catalog {
-            if self.options.book_sort == BrowseBookSort::Popularity { "(source_priority=0) DESC,source_priority,score IS NULL,score DESC,search_title,title,key" } else { "(source_priority=0) DESC,search_title,title,key" }
+            if self.options.book_sort == BrowseBookSort::Popularity { "score IS NULL,score DESC,search_title,title,key" } else { "(source_priority=0) DESC,search_title,title,key" }
         } else {
             match self.options.book_sort {
                 BrowseBookSort::RecentlyRead => "read_at DESC,search_title,title,key",

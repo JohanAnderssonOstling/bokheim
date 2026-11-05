@@ -1,33 +1,91 @@
-//! The library's workers. Each is a `run_timed` loop that asks the database
-//! for its work; events published through `LibraryEventRouter` wake them.
-//! They all run inside the actor's root future and end with it.
+//! Background workers and event/activity observers for one library.
+//! Timed workers ask the database for work; `LibraryEventRouter` wakes them.
+//! They share one owned task that stops when the library closes or changes folders.
 
+use account_client::{AccountSessionError, AuthError};
+use client_protocol::Failure;
 use std::future::Future;
 use std::time::Duration;
 
-use super::LibrarySession;
 use super::events::{LibraryEvent, LibraryEventRouter};
+#[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+use super::import::watcher::watch;
+use super::LibraryResources;
 use crate::BackendError;
-#[cfg(not(target_arch = "wasm32"))]
-use client_platform_runtime::startup_profile::StartupProfile;
+#[cfg(all(feature = "kobo", target_os = "linux"))]
+use client_platform_kobo::device::wifi::{self, Phase as WifiPhase};
+use client_platform_runtime::executor::{BackendSend, BoxedBackendFuture};
+use client_platform_runtime::transfers;
 use futures_util::FutureExt;
-use library_database::Database;
-use library_runtime::scheduler::{CycleInput, SyncRequest};
-use library_sync::LibrarySync;
+use library_database::DatabaseClient;
+use library_model::LibraryUpdate;
+use library_services::account::LibraryAccount;
+use library_services::scheduler::SyncScheduler;
 use std::panic::AssertUnwindSafe;
-use std::rc::Rc;
+use std::sync::atomic::Ordering;
+#[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+use std::sync::Arc;
 
-/// Wake receivers, one per worker; the router holds the senders.
-pub(crate) struct WorkerRequests {
-    pub(crate) sync: async_channel::Receiver<SyncRequest>,
-    pub(crate) assets: async_channel::Receiver<SyncRequest>,
-    pub(crate) files: async_channel::Receiver<SyncRequest>,
-    pub(crate) enrichment: async_channel::Receiver<SyncRequest>,
+#[derive(Clone, Copy)]
+enum WorkerKind {
+    Sync,
+    Assets,
+    Files,
+    Enrichment,
 }
 
-/// Subscribes immediately, so an account change between opening
-/// and the first poll is not missed.
-pub(super) fn observe_account(account: crate::integration::LibraryAccount, events: LibraryEventRouter) -> impl Future<Output = ()> {
+impl WorkerKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sync => "synchronization",
+            Self::Assets => "asset transfers",
+            Self::Files => "file replay",
+            Self::Enrichment => "enrichment",
+        }
+    }
+
+    fn pass(self, session: &LibraryResources, remote: bool) -> BoxedBackendFuture<'_, Result<(), ()>> {
+        match self {
+            Self::Sync => Box::pin(sync_pass(session, remote)),
+            Self::Assets => Box::pin(asset_pass(session)),
+            Self::Files => Box::pin(replay_and_prepare(session)),
+            Self::Enrichment => Box::pin(async move { session.enrichment.run().await }),
+        }
+    }
+
+    async fn run(self, session: &LibraryResources, scheduler: &SyncScheduler) {
+        // Workers share retry and panic recovery logic.
+        // Box only the active pass so its large state does not fill the root.
+        run_timed(
+            self.name(),
+            move |remote| async move {
+                if matches!(self, Self::Sync | Self::Assets) {
+                    wait_for_network().await?;
+                    match session.account.while_authorized(self.pass(session, remote)).await {
+                        Ok(result) => result,
+                        Err(error @ (AccountSessionError::Changed | AccountSessionError::Authentication(AuthError::SignInRequired(_)))) => {
+                            log::debug!("library {} paused until its account is available: {error}", self.name());
+                            Ok(())
+                        }
+                        Err(error) => {
+                            log::warn!("could not read account state for library {}: {error}", self.name());
+                            Err(())
+                        }
+                    }
+                } else {
+                    self.pass(session, remote).await
+                }
+            },
+            scheduler,
+        )
+        .await;
+    }
+}
+
+/// Subscribes immediately, so an account change between opening and the first
+/// poll is not missed. Credential renewal also wakes workers; only identity
+/// changes cancel their in-flight remote work.
+pub(super) fn observe_account(account: LibraryAccount, events: LibraryEventRouter) -> impl Future<Output = ()> {
     let mut account_changed = account.subscribe();
     account_changed.borrow_and_update();
     async move {
@@ -40,99 +98,187 @@ pub(super) fn observe_account(account: crate::integration::LibraryAccount, event
 }
 
 /// Runs every worker until dropped; none of them ends on its own.
-pub(super) async fn run_workers(session: Rc<LibrarySession>, requests: WorkerRequests, observers: impl Future<Output = ()>) {
-    #[cfg(not(target_arch = "wasm32"))]
+pub(super) fn run_workers<'a>(session: &'a LibraryResources, observers: impl Future<Output = ()> + BackendSend + 'a) -> BoxedBackendFuture<'a, ()> {
+    Box::pin(async move {
+        {
+            let database = &session.database;
+            if let Err(error) = database.refresh_taxonomy_assignments().await {
+                log::warn!("library taxonomy refresh will retry next launch: {error}");
+            } else {
+                session.events.refresh_contents();
+            }
+        }
+        // Keep each scoped worker on the heap: their state machines contain large
+        // parser/network futures, and the owning root must fit a normal thread stack.
+        let observers: BoxedBackendFuture<'_, ()> = Box::pin(observers);
+        let network: BoxedBackendFuture<'_, ()> = Box::pin(observe_network(session.events.clone()));
+        let mut transfer_changes = transfers::POLICY.subscribe();
+        let transfer_policy: BoxedBackendFuture<'_, ()> = Box::pin(async move {
+            while transfer_changes.changed().await.is_ok() {
+                session.events.assets.wake();
+                if transfers::allowed() {
+                    session.events.notify_contents_changed();
+                }
+            }
+        });
+        let sync: BoxedBackendFuture<'_, ()> = Box::pin(WorkerKind::Sync.run(session, &session.events.sync));
+        let assets: BoxedBackendFuture<'_, ()> = Box::pin(WorkerKind::Assets.run(session, &session.events.assets));
+        let files: BoxedBackendFuture<'_, ()> = Box::pin(WorkerKind::Files.run(session, &session.events.files));
+        let enrichment: BoxedBackendFuture<'_, ()> = Box::pin(WorkerKind::Enrichment.run(session, &session.events.enrichment));
+        #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+        let scan: BoxedBackendFuture<'_, ()> = Box::pin(run_scan_worker(session));
+        #[cfg(any(not(feature = "scanner"), target_arch = "wasm32"))]
+        let scan: BoxedBackendFuture<'_, ()> = Box::pin(async {});
+        let text_search: BoxedBackendFuture<'_, ()> = Box::pin(super::browse::text_search::run(session, session.events.text_search.subscribe()));
+        let thumbnails: BoxedBackendFuture<'_, ()> = Box::pin(run_thumbnails(session));
+        futures_util::join!(observers, network, transfer_policy, sync, assets, files, enrichment, scan, text_search, thumbnails);
+    })
+}
+
+pub(super) async fn process_events(resources: &LibraryResources) {
+    let mut events = resources.events.subscribe();
+    events.mark_changed();
+    while events.changed().await.is_ok() {
+        let storage = resources.state.write().await;
+        resources.drain_events(&storage).await;
+    }
+}
+
+pub(super) async fn publish_activity(resources: &LibraryResources) {
+    let mut changes = resources.activity.subscribe();
+    changes.mark_changed();
+    while changes.changed().await.is_ok() {
+        resources.publish_book_file_activity().await;
+    }
+}
+
+/// Thumbnail CPU and file work has its own lane and never retains the
+/// library's gate. File replay and foreground operations can continue meanwhile.
+async fn run_thumbnails(session: &LibraryResources) {
+    let mut changes = session.events.thumbnails.subscribe();
+    loop {
+        let failed = recover_pass("thumbnail generation", async { session.run_thumbnail_jobs().await.map_err(|error| log::warn!("thumbnail work will retry: {error}")) }).await.is_err();
+        if failed {
+            tokio::select! {
+                _ = changes.changed() => {},
+                _ = crate::executor::sleep(Duration::from_secs(30)) => {},
+            }
+        } else if changes.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn observe_network(_events: LibraryEventRouter) {
+    #[cfg(all(feature = "kobo", target_os = "linux"))]
     {
-        let mut profile = StartupProfile::for_library("library_maintenance", session.id);
-        client_platform_runtime::executor::library_maintenance_ready().await;
-        profile.mark("ready");
+        let Ok(mut changes) = wifi::subscribe() else {
+            return;
+        };
+        let mut was_connected = false;
+        loop {
+            let connected = changes.borrow_and_update().phase == WifiPhase::Connected;
+            if connected && !was_connected {
+                _events.sync.request_remote_refresh();
+                _events.assets.request_remote_refresh();
+            }
+            was_connected = connected;
+            if changes.changed().await.is_err() {
+                break;
+            }
+        }
     }
-    let session = &*session;
-    // Keep each scoped worker on the heap: their state machines contain large
-    // parser/network futures, and the owning root must fit a normal thread stack.
-    let observers = Box::pin(observers);
-    let sync = Box::pin(run_timed(move |input| sync_pass(session, input), requests.sync));
-    let assets = Box::pin(run_timed(move |_| asset_pass(session), requests.assets));
-    let files = Box::pin(run_timed(move |_| replay_and_admit(session), requests.files));
-    let enrichment = Box::pin(run_timed(move |_| session.enrichment.run(), requests.enrichment));
-    #[cfg(not(target_arch = "wasm32"))]
-    let scan = Box::pin(run_scan_worker(session));
-    #[cfg(target_arch = "wasm32")]
-    let scan = async {};
-    #[cfg(not(target_arch = "wasm32"))]
-    let torrents = Box::pin(session.torrents.run(session));
-    #[cfg(target_arch = "wasm32")]
-    let torrents = async {};
-    futures_util::join!(observers, sync, assets, files, enrichment, scan, torrents);
 }
 
-/// Every worker retries a failed pass after 30 s; wakes within 100 ms coalesce.
-async fn run_timed<F: Future<Output = Result<(), ()>>>(mut pass: impl FnMut(CycleInput) -> F, requests: async_channel::Receiver<SyncRequest>) {
-    library_runtime::scheduler::run_timed(async move |input| pass(input).await, requests, Duration::from_secs(30), Duration::from_millis(100)).await;
+/// Wakes within 100 ms coalesce. Kobo backs repeated failures off to 15 minutes.
+async fn run_timed<F: Future<Output = Result<(), ()>>>(name: &str, mut pass: impl FnMut(bool) -> F, scheduler: &SyncScheduler) {
+    let cycle = move |remote| {
+        let pending = std::panic::catch_unwind(AssertUnwindSafe(|| pass(remote)));
+        async move {
+            match pending {
+                Ok(pass) => recover_pass(name, pass).await,
+                Err(_) => {
+                    log::error!("library {name} panicked; queued work will retry");
+                    Err(())
+                }
+            }
+        }
+    };
+    #[cfg(feature = "kobo")]
+    library_services::scheduler::run_timed_with_backoff(cycle, scheduler, Duration::from_secs(30), Duration::from_secs(15 * 60), Duration::from_millis(100)).await;
+    #[cfg(not(feature = "kobo"))]
+    library_services::scheduler::run_timed(cycle, scheduler, Duration::from_secs(30), Duration::from_millis(100)).await;
 }
 
-/// Create the remote library once for the current server and user.
-async fn ensure_remote_library(sync: &LibrarySync, database: &Database) -> Result<(), BackendError> {
-    let account = sync.account().ok_or_else(|| BackendError::message("library has no account capability"))?;
-    let session = account.require().map_err(crate::BackendError::operation)?;
-    let identity = format!("{}|{}", session.server_url(), session.user_id());
-    if database.sync_metadata("server_library_created")?.as_deref() == Some(identity.as_str()) {
-        return Ok(());
-    }
-    let name = database.sync_metadata("remote_library_name")?.ok_or_else(|| BackendError::message("library has no remote name"))?;
-    account.create_library(sync.library_id, name).await.map_err(crate::BackendError::operation)?;
-    database.set_sync_metadata("server_library_created", &identity)?;
+async fn wait_for_network() -> Result<(), ()> {
+    #[cfg(all(feature = "kobo", target_os = "linux"))]
+    wifi::wait_for_connection().await.map_err(|error| log::warn!("could not observe network availability: {error}"))?;
     Ok(())
 }
 
-async fn sync_pass(session: &LibrarySession, input: CycleInput) -> Result<(), ()> {
-    let sync = &session.sync;
+/// These passes reconstruct their work from committed database state. Drop
+/// the failed future and its activity guards before scheduling another pass.
+/// Panic recovery applies when the target supports unwinding.
+async fn recover_pass(name: &str, pass: impl Future<Output = Result<(), ()>>) -> Result<(), ()> {
+    AssertUnwindSafe(pass).catch_unwind().await.unwrap_or_else(|_| {
+        log::error!("library {name} panicked; queued work will retry");
+        Err(())
+    })
+}
+
+async fn sync_pass(library: &LibraryResources, remote: bool) -> Result<(), ()> {
+    let sync = &library.sync;
+    let events = &library.events;
     let result = async {
-        if !sync.bind_current_account().map_err(crate::BackendError::operation)? {
-            // Account discovery can lag behind library startup.
-            // This is a deferred pass, not a successful sync:
-            // returning an error preserves the scheduler retry
-            // until the account observer wakes us on sign-in.
-            return Err(BackendError::message("waiting for account session"));
+        if !sync.remote_ready().await.map_err(BackendError::operation)? {
+            // Management confirms server registration before sync starts.
+            // Keep retrying while account discovery or offline creation waits.
+            return Err(BackendError::message("waiting for account session or library registration"));
         }
-        ensure_remote_library(sync, &session.db).await?;
-        if input.remote { sync.synchronize_state_mode(false).await.map(|_| ()).map_err(crate::BackendError::operation) } else { sync.drain_outbox().await.map(|_| ()).map_err(crate::BackendError::operation) }
+        if remote {
+            sync.synchronize_state_mode(false).await.map(|_| ()).map_err(BackendError::operation)
+        } else {
+            sync.drain_outbox().await.map(|_| ()).map_err(BackendError::operation)
+        }
     }
     .await;
     // Unrelated sync work may run before a reading position's quiet period ends.
     // Arrange another pass even if no further page turn or event arrives.
-    match session.db.sync_queued_reading_positions() {
+    match library.database.sync_queued_reading_positions().await {
         Ok(queued) => {
-            let policy = session.events.reading_positions.borrow().clone();
+            let policy = events.reading_positions.borrow();
             let discarded = policy.no_longer_queued(&queued);
             if !discarded.is_empty() {
-                session.events.emit(LibraryEvent::ReadingPositionsSelected(discarded));
+                events.emit(LibraryEvent::ReadingPositionsSelected(discarded));
             }
             if let Some(delay) = policy.delay(web_time::Instant::now(), &queued) {
-                session.events.sync.wake_after(delay);
+                events.sync.wake_after(delay);
             }
         }
-        Err(error) => log::warn!("could not schedule reading-position sync: {error}"),
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    if result.is_ok() {
-        let _torrents = if session.db.native_directory_replay_work().map_err(|error| log::warn!("could not read directory moves: {error}"))?.is_empty() {
-            None
-        } else {
-            Some(session.torrents.before_moves().await.map_err(|error| log::warn!("could not release torrent files: {error}"))?)
-        };
-        if let Err(error) = library_placement::replay_directories(&session.db, &session.assets) {
-            log::warn!("directory rename will retry from the durable queue: {error}");
+        Err(error) => {
+            log::warn!("could not schedule reading-position sync; retrying: {error}");
+            // A successful network pass must not suppress recovery of the
+            // pending reading-position deadlines after a storage failure.
+            events.sync.wake_after(Duration::from_secs(30));
         }
+    }
+    if result.is_ok() {
+        // The file worker owns physical replay; sync only commits protocol pages.
+        events.files.wake();
     }
     result.map_err(|error| log::warn!("library synchronization will resume: {error}"))
 }
 
-async fn asset_pass(session: &LibrarySession) -> Result<(), ()> {
-    if !session.sync.bind_current_account().map_err(|error| log::warn!("could not bind asset account: {error}"))? {
+async fn asset_pass(library: &LibraryResources) -> Result<(), ()> {
+    if !library.sync.remote_ready().await.map_err(|error| log::warn!("could not check asset registration: {error}"))? {
         return Ok(());
     }
-    match session.sync.run_asset_pass().await {
+    let result = library.transfers.run_asset_pass().await;
+    let quota_blocked = result.as_ref().err().and_then(|error| error.failure()) == Some(Failure::CloudStorageFull);
+    if library.upload_quota_blocked.swap(quota_blocked, Ordering::AcqRel) != quota_blocked {
+        library.events.updates.publish(LibraryUpdate::SyncStatusChanged);
+    }
+    match result {
         Ok(()) | Err(asset_transfer::TransferError::AuthenticationRequired) => Ok(()),
         Err(error) => {
             log::warn!("asset pass will retry: {error}");
@@ -141,76 +287,102 @@ async fn asset_pass(session: &LibrarySession) -> Result<(), ()> {
     }
 }
 
-/// File replay, then upload admission. A scan or folder import owns the
+async fn prepare_uploads(db: &DatabaseClient, events: &LibraryEventRouter) -> Result<(), BackendError> {
+    // File preparation and enrichment are separate gates. Prepared files
+    // remain withheld from upload until enrichment finalizes the addition.
+    db.prepare_uploads().await?;
+    events.sync.wake();
+    events.assets.wake();
+    Ok(())
+}
+
+/// File replay, then durable upload preparation. A scan or folder import owns the
 /// files meanwhile; their completion events wake this worker again.
-async fn replay_and_admit(session: &LibrarySession) -> Result<(), ()> {
-    if session.scanner_running() {
-        return Ok(());
+async fn replay_and_prepare(session: &LibraryResources) -> Result<(), ()> {
+    let database = &session.database;
+    let result = AssertUnwindSafe(async { session.run_file_jobs().await }).catch_unwind().await.unwrap_or_else(|_| Err(BackendError::message("library file replay panicked")));
+    if let Err(error) = &result {
+        log::warn!("library file replay will resume: {error}");
     }
-    let mut failed = false;
-    if session.assets.local_access_enabled() {
-        let result = AssertUnwindSafe(async {
-            let Some(_files) = session.runtime.begin_local_work() else {
-                return Err(BackendError::message("local file preparation is already running"));
-            };
-            session.run_file_jobs().await
-        })
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(BackendError::message("library file replay panicked")));
-        if let Err(error) = &result {
-            log::warn!("library file replay will resume: {error}");
-        }
-        // A lease can leave durable work queued even after a successful pass.
-        failed = result.is_err() || session.db.has_pending_file_work().unwrap_or(true) || session.db.has_pending_purge_work().unwrap_or(true);
-    }
-    // Admission never waits for a failed replay of other books.
-    if let Err(error) = session.admit_uploads() {
-        log::warn!("upload admission will resume: {error}");
+    // A lease can leave durable work queued even after a successful pass.
+    let failed = result.is_err() || database.has_pending_storage_work().await.unwrap_or(true);
+    // Preparation never waits for a failed replay of other books.
+
+    if let Err(error) = prepare_uploads(database, &session.events).await {
+        log::warn!("upload preparation will resume: {error}");
         return Err(());
     }
-    session.emit(LibraryEvent::FilesPrepared);
-    if failed { Err(()) } else { Ok(()) }
+
+    session.events.thumbnails.send_replace(());
+    session.events.text_search.send_replace(());
+    session.events.enrichment.wake();
+    if failed {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
-type FolderWatcher = notify::RecommendedWatcher;
-#[cfg(all(not(feature = "watcher"), not(target_arch = "wasm32")))]
+type FolderWatcher = super::import::watcher::WatchSubscription;
+#[cfg(all(feature = "scanner", not(feature = "watcher"), not(target_arch = "wasm32")))]
 type FolderWatcher = ();
 
 /// Scans on open, on folder changes, and after failures.
-#[cfg(not(target_arch = "wasm32"))]
-async fn run_scan_worker(session: &LibrarySession) {
-    let (wake, requests) = library_runtime::scheduler::SyncScheduler::new();
-    let mut watcher = None;
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+async fn run_scan_worker(session: &LibraryResources) {
     #[cfg(feature = "watcher")]
-    if session.assets.local_access_enabled() {
-        watcher = super::handle::start_filesystem_watcher(session._scanner.root(), wake.clone()).map_err(|error| log::warn!("could not watch library folder {}: {error}", session._scanner.root())).ok();
-    }
+    let assets = session.state.read().await.assets().clone();
+    let wake = SyncScheduler::default();
+    #[cfg(feature = "watcher")]
+    let watcher = {
+        let root = assets.native_library_root();
+        watch(root, wake.clone()).map_err(|error| log::warn!("could not watch library folder {}: {error}", root.display())).ok()
+    };
+    #[cfg(not(feature = "watcher"))]
+    let watcher: Option<FolderWatcher> = None;
     wake.wake();
     let wake = &wake;
+    let watcher = std::sync::Arc::new(tokio::sync::Mutex::new(watcher));
     // The debounce is the quiet period while a file manager is still copying.
-    library_runtime::scheduler::run_timed(async move |_| scan_and_watch(session, wake, &mut watcher).await, requests, Duration::from_secs(30), Duration::from_millis(500)).await;
+    library_services::scheduler::run_timed(
+        move |_| {
+            let watcher = watcher.clone();
+            recover_pass("filesystem scan", async move { scan_and_watch(session, wake, &mut *watcher.lock().await).await })
+        },
+        wake,
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+    )
+    .await;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn scan_and_watch(session: &LibrarySession, wake: &library_runtime::scheduler::SyncScheduler, watcher: &mut Option<FolderWatcher>) -> Result<(), ()> {
-    // Explicit imports own their in-progress files, including external moves.
-    if session.directory_imports_active() {
-        return Ok(());
-    }
-    if let Err(error) = session.scan_folder().await {
-        log::warn!("filesystem scan failed; retrying in 30 seconds: {error}");
-        #[cfg(feature = "watcher")]
-        if !std::path::Path::new(session._scanner.root()).is_dir() {
-            *watcher = None;
-        }
-        return Err(());
-    }
-    session.torrents.wake();
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+async fn scan_and_watch(session: &LibraryResources, wake: &SyncScheduler, watcher: &mut Option<FolderWatcher>) -> Result<(), ()> {
     #[cfg(feature = "watcher")]
-    if watcher.is_none() && session.assets.local_access_enabled() {
-        let started = super::handle::start_filesystem_watcher(session._scanner.root(), wake.clone()).map_err(|error| log::warn!("could not watch library folder {}: {error}", session._scanner.root())).ok();
+    let assets = session.state.read().await.assets().clone();
+    #[cfg(feature = "watcher")]
+    if watcher.as_ref().is_some_and(|watcher| !watcher.is_active()) {
+        *watcher = None;
+    }
+    match session.scan_folder().await {
+        Ok(super::import::filesystem_scan::FolderScan::Complete) => {}
+        // File replay owns excluded paths. Release the scan's busy state so
+        // replay can finish, then verify those files even without a watch event.
+        Ok(super::import::filesystem_scan::FolderScan::Deferred) => wake.wake_after(Duration::from_secs(1)),
+        Err(error) => {
+            log::warn!("filesystem scan failed; retrying in 30 seconds: {error}");
+            #[cfg(feature = "watcher")]
+            if !assets.native_library_root().is_dir() {
+                *watcher = None;
+            }
+            return Err(());
+        }
+    }
+    #[cfg(feature = "watcher")]
+    if watcher.is_none() {
+        let root = assets.native_library_root();
+        let started = watch(root, wake.clone()).map_err(|error| log::warn!("could not watch library folder {}: {error}", root.display())).ok();
         // Recheck files that may have arrived before registration.
         wake.wake_after(if started.is_some() { Duration::from_millis(250) } else { Duration::from_secs(30) });
         *watcher = started;
@@ -218,4 +390,56 @@ async fn scan_and_watch(session: &LibrarySession, wake: &library_runtime::schedu
     #[cfg(not(feature = "watcher"))]
     let _ = (wake, watcher);
     Ok(())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use library_services::scheduler::SyncScheduler;
+
+    #[tokio::test]
+    async fn worker_retries_factory_and_poll_panics_and_releases_activity() {
+        let operation_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let scheduler = SyncScheduler::default();
+        let (completed, results) = async_channel::unbounded();
+        let mut attempts = 0;
+        scheduler.wake();
+        let worker = run_timed(
+            "recovery test",
+            move |_| {
+                attempts += 1;
+                let attempt = attempts;
+                let activity = operation_lock.clone().try_lock_owned().expect("failed passes must release their lock");
+                if attempt == 1 {
+                    completed.try_send(attempt).unwrap();
+                    panic!("failed while creating the pass");
+                }
+                let completed = completed.clone();
+                async move {
+                    let _activity = activity;
+                    tokio::task::yield_now().await;
+                    completed.try_send(attempt).unwrap();
+                    if attempt == 2 {
+                        panic!("failed while polling the pass");
+                    }
+                    Ok(())
+                }
+            },
+            &scheduler,
+        );
+        let exercise = async {
+            for attempt in 1..=3 {
+                assert_eq!(results.recv().await.unwrap(), attempt);
+                if attempt < 3 {
+                    // A fresh refresh bypasses the normal retry delay.
+                    scheduler.request_remote_refresh();
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! { _ = worker => panic!("worker ended before cancellation"), () = exercise => {} }
+        })
+        .await
+        .expect("a failed pass must not end or strand the worker");
+    }
 }

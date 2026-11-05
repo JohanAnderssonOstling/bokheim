@@ -72,7 +72,11 @@ authenticated ChaCha20-Poly1305 encryption bound to the row ID, recipient, and
 message kind. Successful delivery deletes the outbox row.
 
 Registration reserves the canonical email and username for 24 hours and stores
-only an Argon2 password hash plus a keyed hash of a six-digit verification PIN. PIN redemption
+only an Argon2 password hash plus a keyed hash of a six-digit verification PIN.
+Registering an address that is still pending replaces its password hash, so the
+latest registrant's password wins. Verification requires that password together
+with the PIN: the PIN proves control of the mailbox, the password proves the
+verifier chose the account's password. PIN redemption
 is scoped to the normalized email address and persistently limited to five attempts per
 address per hour, in addition to the network limit. Verification
 is single-use and creates a one-hour access token plus a 90-day rotating refresh
@@ -85,6 +89,38 @@ Requests for existing accounts and unknown password-reset emails deliberately
 return the same `202 Accepted` response. Disposable-domain policy rejection and
 malformed email/password inputs return `400` because they reveal no account
 existence.
+
+## Public account deletion
+
+`https://bokheim.se/delete-account/` posts JSON to
+`POST /api/auth/delete-account` with `email`, `password`, and
+`confirmation: "DELETE"`. This standalone website endpoint requires the current
+password; cookies and existing bearer sessions do not authorize deletion. It
+allows five attempts per email and twenty per client address per five minutes.
+
+The application's Settings → Account → Delete account action calls the same
+endpoint with the current account email, password and explicit confirmation.
+It clears persisted credentials only after the server confirms deletion, and
+preserves device-local libraries.
+
+Deletion removes the actual `users` row in a transaction. Foreign-key cascades
+remove libraries, synced metadata and reading state, sessions,
+password-reset tokens, storage quota, upload reservations, and blob ownership
+and access records. Pending registrations and queued account emails for that
+email address are also removed. The identity cache is invalidated after commit
+so cached access tokens stop working immediately. After commit, deletion wakes
+asset cleanup. Shared book files are removed when no account owns them; covers
+are removed when no live library in their account retains the book. Files
+already downloaded to devices remain on those devices.
+
+Permanent book deletion, library deletion and disabling cloud storage also wake
+cleanup. Books in the trash retain their files so they can be restored. A sweep
+runs at startup and every minute to retry failures and reclaim published files
+left without ownership records. Uploads are staged before publication; database
+advisory locks protect publication and ownership checks against concurrent
+cleanup. No database migration is required for cleanup.
+
+Deploy the sync server before publishing the static page in `bokheim-site`.
 
 ## Configured test account
 
@@ -113,6 +149,28 @@ service-level invalidations are immediate. Before horizontally running multiple
 server processes, add shared invalidation delivery (for example PostgreSQL
 `LISTEN`/`NOTIFY`) or accept the bounded 30-second cross-process cache window.
 
+## Curated dictionaries
+
+Browser clients download checksum-pinned StarDict archives from
+`https://app.bokheim.se/dictionaries/<sha256>.zip`. Caddy serves these static
+files from `/srv/bokheim-updates/public/dictionaries`, independently of the
+synchronization server. Native clients download the same verified bytes directly
+from their upstream sources. The browser and native installers both check the
+catalog's exact byte count and SHA-256 before installation.
+
+Publish all entries in `shared/dictionary-catalog/data/curated.json` and install
+the updated Caddy configuration before releasing the web client. The publisher
+streams into temporary files, verifies size and checksum, and atomically exposes
+only complete archives. It preserves the ZIP bytes, including upstream license
+and attribution files. Existing archives are reverified and older editions are
+never deleted. See [deployment instructions](deploy/README.md#curated-dictionary-files).
+
+Dictionary downloads require an explicit selection in Settings. Device locales
+and languages on personal-library books only suggest packs; startup, imports,
+metadata changes, and reader lookups never trigger a dictionary download. Older
+automatic-download preferences are ignored. Source attribution and license
+notices remain available in dictionary details after installation.
+
 ## Asset quota and transfer fairness
 
 Book blobs and thumbnails share a PostgreSQL account quota ledger. Physical book
@@ -120,13 +178,41 @@ files remain globally deduplicated by content hash, while each user is charged
 once for every unique book hash referenced anywhere in that user's libraries.
 Thumbnails are physically and financially scoped to the account and are charged
 once per unique thumbnail hash. Metadata does not consume storage quota. New
-accounts receive a 5 GiB quota lazily.
+accounts receive a 5 GB (5,000,000,000 bytes) quota lazily.
 
-Global deduplication is not an authorization capability. A stored book can be
-claimed or downloaded only when the authenticated account already owns it or
-has a synchronized lifecycle reference to its hash. An unreferenced manifest
-entry is reported as requiring upload whether or not another account has stored
-the same hash; the upload path verifies the complete BLAKE3-matching body.
+Hosted public catalog EPUBs can reuse their existing file without a sync
+upload. Configure `BOKHEIM_CATALOG_BOOKS_DIR` to the trusted directory of
+public `<BLAKE3>.epub` downloads and `BOKHEIM_CATALOG_PINS_DIR` to a private
+directory on that same filesystem, outside every public web root. Both paths
+are required together; without them ordinary upload behavior is unchanged.
+
+Manifest negotiation verifies the public file's actual hash and size, takes a
+private hard link to retain its inode, and atomically records account charges
+and library ownership. Clients receive the existing `owned` response and settle
+the transfer without uploading. Retained links allow authenticated downloads
+after public catalog removal; a retained link alone cannot authorize a new
+account. Private uploaded files still require proof of possession by uploading.
+Each account remains charged once per unique book, including catalog books.
+
+The minute-based asset collector also consolidates older uploaded copies when
+the same hash is publicly hosted. Catalog and sync own separate hard links:
+catalog removal leaves a retained link while a library needs it, and sync
+cleanup removes only the retained link, never the public download. Temporary
+preparation links left by crashes are removed after the upload-duration limit
+plus five minutes. No book bytes are copied if hard linking is unavailable;
+configuration or acquisition fails explicitly instead.
+
+See [catalog storage setup](deploy/README.md#reuse-hosted-catalog-books) for the
+production permissions and systemd mount configuration.
+
+Private-book deduplication is not an authorization capability. A private book
+is charged to an account after it uploads the complete BLAKE3-matching body,
+and only a charged book can be downloaded. Synchronized lifecycle references
+are client-declared and grant no access. A private manifest entry the account
+has not uploaded requires upload even if another account stores the same hash;
+the store then keeps its single existing copy. An account that drops its last
+reference to a private book and later adds it back uploads it again. Verified
+public catalog files use the explicit adoption flow above.
 
 Uploads require an exact `Content-Length`. The server reserves that many bytes
 before storage, validates the completed asset, then atomically converts the
@@ -176,19 +262,13 @@ modification time, and deletion flag; the client's stored annotation blob
 serializes that same type. Existing flat JSON and positional binary layouts
 remain readable and writable without converting between mirrored value types.
 
-Protocol 23 requires clients and servers to upgrade together. Clients retain a
-read-only decoder for historical typed payloads already stored by the relay;
-new writes use direct domain serialization. SQLite schema 22 removes UUID identities
-from the outbox and authored versions. Queue generations use the publisher's monotonic
-sequence; forwarded state retains its original authored version. Push responses list
+Protocol 32 requires matching clients and servers. Historical inner payload
+versions are rejected. Storage codec 18 and SQLite library schema 54 use the
+current domain layout; PostgreSQL sync schema 17 starts new installations.
+Queue generations use the publisher's monotonic sequence; forwarded state
+retains its original authored version. Push responses list
 only rejected sequences, and clients acknowledge exactly the submitted sequences
 that were accepted or permanently rejected. Transient rejections remain queued.
-Server schema 4 merges reading state into `sync_state` and removes unused channel
-revision columns. The explicit upgrade command applies schema 1's owner migration,
-schema 3's UUID removal, schema 4's row-preserving table merge, and schema 5's
-content hash consolidation as needed. Schema 5 removes the book-to-blob revision
-mapping and redundant claim hash; it rejects differing legacy mappings until
-those identities have been migrated or the books reimported.
 Unfrozen queue entries obtain their payload and version from canonical state.
 Push and exchange pages are bounded to 1,000 mutations and clients also stop at
 the 4 MiB encoded-mutation target, whichever limit is reached first.
@@ -198,17 +278,14 @@ activate the hierarchy only when its real parent state arrives. A child or book
 placement can consequently commit on one page without violating foreign keys or
 becoming visible before a dependency delivered by a later page.
 
-Protocol 29 binds each pull cursor to a persisted server history UUID. The
+The protocol binds each pull cursor to a persisted server history UUID. The
 generation is returned even for empty libraries and is committed with both
 client cursor revisions. A different generation, or a nonzero checkpoint with
 no generation, returns HTTP 410 before a push can commit. Clients use their
 durable cursor recovery: pull from zero, then republish retained canonical
-cells without changing their original authored versions. Server schema 11
-adds the history singleton; repeated upgrades and ordinary startups keep its
-ID. SQLite's history migration, introduced in schema 38, upgrades versions
-36 and 37 without removing state or
-outbox work. HTTP clients and servers must upgrade together; opaque domain
-payloads stored with protocol 28 remain readable.
+cells without changing their original authored versions. The history singleton
+keeps its ID across ordinary startups. HTTP clients and servers must use
+compatible protocol versions.
 
 After restoring or replacing PostgreSQL history, run `sync-server
 rotate-sync-generation` while synchronization traffic is stopped. This changes
@@ -355,9 +432,10 @@ address. Embedded certificate management is deliberately not part of the
 application. See [`deploy/README.md`](deploy/README.md) for the complete public
 Internet deployment.
 
-Schema 6 stores content hashes as 32-byte bytea values. The explicit schema
-upgrade converts hexadecimal columns; transport version 26 and storage
-version 15 require coordinated client/server updates. JSON remains hexadecimal.
+PostgreSQL stores content hashes and book register keys as raw 32-byte digests,
+and other register keys as UTF-8 bytea values. JSON hashes remain hexadecimal
+and register addresses retain their existing strings.
 
-Schema 7 also stores book register keys as raw digests and other register keys
-as UTF-8 bytea values. JSON register addresses retain their existing strings.
+Initialize an empty database with `sync-server migrate`. Existing databases
+must already match the current schema; `sync-server verify-schema` checks it.
+Historical schema upgrades are not supported.

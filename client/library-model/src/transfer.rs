@@ -1,5 +1,5 @@
 //! Shared transfer values.
-use content_address::ContentHash;
+use content_address::BookId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,18 +20,18 @@ impl BlobKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BlobKey {
     kind: BlobKind,
-    content_hash: ContentHash,
+    book_id: BookId,
 }
 
 impl BlobKey {
-    pub fn new(kind: BlobKind, content_hash: ContentHash) -> Self {
-        Self { kind, content_hash }
+    pub fn new(kind: BlobKind, book_id: BookId) -> Self {
+        Self { kind, book_id }
     }
     pub const fn kind(&self) -> BlobKind {
         self.kind
     }
-    pub fn content_hash(&self) -> &ContentHash {
-        &self.content_hash
+    pub fn book_id(&self) -> &BookId {
+        &self.book_id
     }
 }
 

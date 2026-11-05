@@ -1,7 +1,8 @@
 use super::cache::{MAX_CACHED_BYTES, MAX_RESULTS};
 use super::*;
 use crate::sql_fixtures::FixturesSql;
-use library_model::{BrowseBookSort, BrowseChipSort};
+use book_model::{Annotation, AnnotationAnchor, AnnotationStyle};
+use library_model::{BrowseBookSort, BrowseChipSort, HomeShelf, NotebookSort};
 use rusqlite::params;
 use uuid::Uuid;
 
@@ -24,24 +25,34 @@ fn populate(db: &Database) {
 }
 
 fn query(location: BrowseLocation) -> LibraryBrowseQuery {
-    LibraryBrowseQuery { location, search: String::new(), languages: vec![], file_types: vec![], chip_sort: BrowseChipSort::Alphabetical, book_sort: BrowseBookSort::Alphabetical, hide_finished: false, include_direct_child_books: false }
+    LibraryBrowseQuery { location, search: String::new(), languages: vec![], file_types: vec![], chip_sort: BrowseChipSort::Alphabetical, book_sort: BrowseBookSort::Alphabetical, hide_finished: false }
 }
 
 #[test]
 fn heading_and_card_continuations_reuse_the_same_prepared_selection() {
     let db = fixture();
-    for location in [BrowseLocation::Author(None), BrowseLocation::Subject(0), BrowseLocation::Books] {
+    for id in 1..=37 {
+        let book = db.connection.query_row("SELECT content_hash FROM book WHERE row_id=?1", [id], |row| row.get(0)).unwrap();
+        db.upsert_annotation(&Annotation {
+            id: format!("prepared-{id}"), book_id: book,
+            anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:0)"),
+            exact_text: "A searchable passage".into(), note: String::new(), style: AnnotationStyle::Highlight,
+            color: 0xe0bb4b, created_at: id as u64, modified_at: id as u64,
+            toc_ordinal: None, progress: None, deleted: false,
+        }).unwrap();
+    }
+    for location in [BrowseLocation::Author(None), BrowseLocation::Subject(0), BrowseLocation::Books, BrowseLocation::Notebook(NotebookSort::Recent), BrowseLocation::Notebook(NotebookSort::BookName)] {
         let query = query(location);
         let first = db.browse_page(&query, false, BrowsePageRequest::default()).unwrap();
         let revision = first.page.as_ref().unwrap().result_revision.as_ref().unwrap();
         let prepared = db.browse_results.borrow().preparations;
-        let complete = db.legacy_browse_sections(&query, false, BROWSE_SECTION_BOOK_LIMIT).unwrap();
+        let complete = db.browse(&query, false).unwrap();
         let next = db.browse_result_page(&query, false, revision, BrowsePageRequest { section_offset: 24, book_offset: 24, ..Default::default() }).unwrap().unwrap();
         assert_eq!(next.page.as_ref().unwrap().result_revision.as_ref(), Some(revision));
         if location == BrowseLocation::Author(None) {
             assert_eq!(next.contents.children, complete.contents.children[24..]);
         }
-        if location == BrowseLocation::Books {
+        if matches!(location, BrowseLocation::Books | BrowseLocation::Notebook(_)) {
             assert_eq!(next.contents.books, complete.contents.books[24..]);
         }
         for section in &first.sections {
@@ -273,15 +284,22 @@ fn folder_pages_preserve_placements_and_home_pages_preserve_activity_order() {
     for id in 1..=17 {
         db.connection.fixtures_insert_book_dir_2(&nested.to_string(), &id, &format!("copy{id}.epub"), &(id % 2)).unwrap();
     }
-    db.connection.execute("UPDATE book SET read_at=row_id,added_at=100-row_id,read_progress=CASE WHEN row_id%3=0 THEN 1 WHEN row_id%2=0 THEN 0.4 ELSE 0 END", []).unwrap();
-    for location in [BrowseLocation::Folder(sync_common::ROOT_DIR_ID), BrowseLocation::Folder(nested), BrowseLocation::Home(None), BrowseLocation::Home(Some(library_model::HomeShelf::RecentlyRead))] {
+    db.connection.execute("UPDATE book SET read_at=CASE WHEN row_id%5=0 THEN NULL ELSE row_id END,added_at=100-row_id,read_progress=CASE WHEN row_id%3=0 THEN 1 WHEN row_id%2=0 THEN 0.4 ELSE 0 END", []).unwrap();
+    for location in [
+        BrowseLocation::Folder(sync_common::ROOT_DIR_ID),
+        BrowseLocation::Folder(nested),
+        BrowseLocation::Home(None),
+        BrowseLocation::Home(Some(HomeShelf::RecentlyRead)),
+        BrowseLocation::Home(Some(HomeShelf::Finished)),
+        BrowseLocation::Home(Some(HomeShelf::RecentlyAdded)),
+    ] {
         for sort in [BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical, BrowseBookSort::RecentlyRead, BrowseBookSort::Popularity] {
             for search in ["", "book"] {
                 for downloaded_only in [false, true] {
                     let mut query = query(location);
                     query.book_sort = sort;
                     query.search = search.into();
-                    let full = db.legacy_browse(&query, downloaded_only).unwrap();
+                    let full = db.browse(&query, downloaded_only).unwrap();
                     let first = db.browse_page(&query, downloaded_only, BrowsePageRequest { section_limit: 1, book_limit: 2, ..Default::default() }).unwrap();
                     let revision = first.page.as_ref().unwrap().result_revision.as_ref().unwrap();
                     assert_eq!(first.contents.children, full.contents.children);
@@ -330,7 +348,7 @@ fn continuation_pages_omit_unchanged_navigation_and_facets() {
 }
 
 #[test]
-fn growing_lazy_orders_are_evicted_when_the_result_budget_is_exceeded() {
+fn growing_lazy_orders_retain_the_last_result_for_continuation() {
     let db = fixture();
     let query = query(BrowseLocation::Author(None));
     let first = db.browse_page(&query, false, BrowsePageRequest { section_limit: 1, ..Default::default() }).unwrap();
@@ -338,13 +356,14 @@ fn growing_lazy_orders_are_evicted_when_the_result_budget_is_exceeded() {
     let section = first.sections[0].parent.id;
     let cache = db.browse_results.borrow();
     let result = &cache.entries.back().unwrap().result;
-    let book = result.section_orders.lock().unwrap()[&section][0];
-    // Model a large lazily prepared ordering without an enormous SQL fixture.
-    result.section_orders.lock().unwrap().insert(section, Arc::new(vec![book; MAX_CACHED_BYTES / size_of::<Item>() + 1]));
+    let mut order = result.section_orders.lock().unwrap()[&section].as_ref().clone();
+    // Model retained ordering capacity without changing the selected books.
+    order.reserve(MAX_CACHED_BYTES / size_of::<Item>() + 1);
+    result.section_orders.lock().unwrap().insert(section, Arc::new(order));
     assert!(result.estimated_bytes() > MAX_CACHED_BYTES);
     drop(cache);
     db.browse_result_page(&query, false, &revision, BrowsePageRequest { section_limit: 0, book_limit: 0, ..Default::default() }).unwrap().unwrap();
-    assert!(db.browse_results.borrow().entries.is_empty());
+    assert_eq!(db.browse_results.borrow().entries.len(), 1);
     let resumed = db.browse_result_page(&query, false, &revision, BrowsePageRequest { section_limit: 1, ..Default::default() }).unwrap().unwrap();
     assert_eq!(resumed.sections, first.sections);
 }

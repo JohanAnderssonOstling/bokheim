@@ -1,0 +1,22 @@
+[package]
+name = "library-cloud-upgrade"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Deployment maintenance interprets client-owned payloads without linking the
+# client replica into the synchronization relay.
+[workspace]
+resolver = "2"
+
+[dependencies]
+library-replica = { path = "../library-replica" }
+sync-common = { path = "../../../../shared/sync-common" }
+prost = "0.14.4"
+serde_json = "1"
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres", "json", "uuid"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+strip = "symbols"

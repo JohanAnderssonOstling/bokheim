@@ -1,10 +1,10 @@
 //! Ingest sources directly into the authority database's existing relational tables.
 
-use crate::build::wikidata_books::profile;
 use crate::Isbn13;
+use crate::build::wikidata_books::profile;
 use crate::*;
 use metadata_contract::matching::{author_match_keys, bibliographic_match_key, bibliographic_title_match_key};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use std::path::Path;
 
 pub(crate) fn available(c: &Connection) -> Result<bool, MetadataError> {
@@ -21,27 +21,15 @@ pub(crate) fn available(c: &Connection) -> Result<bool, MetadataError> {
 fn qkey(qid: &str) -> Result<i64, MetadataError> {
     qid.strip_prefix('Q').and_then(|q| q.parse::<i64>().ok()).filter(|q| *q > 0).map(|q| -q).ok_or_else(|| MetadataError("invalid Wikidata QID".into()))
 }
-fn add_column(c: &Connection, table: &str, column: &str, kind: &str) -> Result<(), MetadataError> {
-    let has: bool = c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"), [column], |r| r.get(0)).map_err(error)?;
-    if !has {
-        c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}")).map_err(error)?;
-    }
-    Ok(())
-}
 fn schema(c: &Connection) -> Result<(), MetadataError> {
     c.execute_batch("PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS edition_description(edition_id INTEGER PRIMARY KEY,description TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS wikidata_ingestion(id INTEGER PRIMARY KEY CHECK(id=1),signature TEXT NOT NULL,status TEXT NOT NULL,after_isbn TEXT NOT NULL,after_author TEXT NOT NULL DEFAULT '');
+    CREATE TABLE IF NOT EXISTS wikidata_ingestion(id INTEGER PRIMARY KEY CHECK(id=1),signature TEXT NOT NULL,status TEXT NOT NULL,after_isbn TEXT NOT NULL,after_author TEXT NOT NULL DEFAULT '',after_book TEXT NOT NULL DEFAULT '');
     CREATE TABLE IF NOT EXISTS isbn_classification(isbn13 INTEGER NOT NULL,scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),notation TEXT NOT NULL,PRIMARY KEY(isbn13,scheme,notation)) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS isbn_classification_by_code ON isbn_classification(scheme,notation,isbn13);
     CREATE TABLE IF NOT EXISTS title_author_classification(normalized_title TEXT NOT NULL,normalized_subtitle TEXT NOT NULL,normalized_author TEXT NOT NULL,book_year INTEGER NOT NULL,normalized_publisher TEXT NOT NULL,scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),notation TEXT NOT NULL,PRIMARY KEY(normalized_title,normalized_subtitle,normalized_author,book_year,normalized_publisher,scheme,notation)) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS title_author_classification_lookup ON title_author_classification(normalized_title,normalized_subtitle,normalized_author,book_year,normalized_publisher);
     CREATE INDEX IF NOT EXISTS author_identifier_by_external ON author_identifier(authority,external_id,author_id);").map_err(error)?;
-    for (column, kind) in [("aliases", "TEXT"), ("birth_year", "INTEGER"), ("death_year", "INTEGER"), ("image", "TEXT"), ("description", "TEXT")] {
-        add_column(c, "author", column, kind)?;
-    }
-    add_column(c, "edition_bibliography", "description", "TEXT")?;
-    add_column(c, "wikidata_ingestion", "after_book", "TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 fn author(c: &Connection, a: &metadata_contract::WikidataAuthorEvidence) -> Result<i64, MetadataError> {

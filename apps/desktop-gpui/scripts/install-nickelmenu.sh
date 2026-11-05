@@ -29,6 +29,12 @@ if [ -d "$DEVICE_ROOT/.kobo/upgrade" ] && [ -n "$(ls -A "$DEVICE_ROOT/.kobo/upgr
     exit 1
 fi
 [ "$CHECK_ONLY" -eq 0 ] || exit 0
+for entry in "$DEVICE_ROOT/.adds/nm/"*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "${entry##*/}" != desktop-gpui-kobo ] || continue
+    printf 'Existing NickelMenu installation preserved.\n'
+    exit 0
+done
 ICONS="$DEVICE_ROOT/.adds/bokheim/nickelmenu-icons"
 mkdir -p "$ICONS"
 cp "$SCRIPT_DIR/../../ui/design-tokens/assets/icon/bokheim-kobo.png" "$ICONS/bokheim.png"
@@ -41,4 +47,4 @@ cp "$PAYLOAD" "$TEMPORARY"
 cmp -s "$PAYLOAD" "$TEMPORARY"
 mv "$TEMPORARY" "$DEVICE_ROOT/.kobo/KoboRoot.tgz"
 TEMPORARY=''
-printf 'Bokheim direct-launch integration queued for installation when the Kobo disconnects.\n'
+printf 'NickelMenu queued for installation when the Kobo disconnects.\n'

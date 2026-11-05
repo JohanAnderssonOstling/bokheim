@@ -22,12 +22,8 @@ impl PostgresAccountService {
         .await
         .map_err(internal)?;
         row.map(|(id, recipient, kind_name, token_ciphertext)| {
-            let kind = match kind_name.as_str() {
-                "verify_email" => AccountEmailKind::VerifyEmail,
-                "reset_password" => AccountEmailKind::ResetPassword,
-                _ => return Err(AuthError::Internal("email outbox contains an unknown message kind".to_string())),
-            };
-            let token = self.token_protector.decrypt_outbox_token(&id, &recipient, &kind_name, &token_ciphertext)?;
+            let kind = AccountEmailKind::from_stored_name(&kind_name).ok_or_else(|| AuthError::Internal("email outbox contains an unknown message kind".to_string()))?;
+            let token = self.token_protector.decrypt_outbox_token(&id, &recipient, kind, &token_ciphertext)?;
             Ok(QueuedAccountEmail { id, recipient, kind, token })
         })
         .transpose()

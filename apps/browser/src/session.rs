@@ -5,11 +5,19 @@ use std::rc::Rc;
 use gpui::App;
 use library_model::{BookLocator, BrowseLocation};
 use serde::{Deserialize, Serialize};
-use sync_common::{ContentHash, LibraryId};
+use sync_common::{BookId, LibraryId};
 
 use crate::{LibraryRoute, Route};
 
 pub type SaveNavigationSession = Rc<dyn Fn(NavigationSession, &mut App)>;
+
+/// Requests composition outside the browser so readers and playback split too.
+#[derive(Clone)]
+pub enum PaneRequest {
+    Open { session: NavigationSession, side: ui_components::SplitSide },
+    Close,
+    Browse,
+}
 
 /// Restoration input and persistence policy for one window. Runtime state is
 /// owned by its application root and browser, not by application services.
@@ -33,7 +41,7 @@ pub struct ReaderSession {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowsePageSession {
     pub path: Vec<(BrowseLocation, String)>,
-    pub detail: Option<ContentHash>,
+    pub detail: Option<BookId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,17 +51,24 @@ pub struct NavigationSession {
     pub route: Route,
     pub pages: Vec<BrowsePageSession>,
     pub reader: Option<ReaderSession>,
+    pub pane_id: Option<uuid::Uuid>,
+    pub panes: Vec<NavigationSession>,
+    pub active_pane: usize,
 }
 
 impl Default for NavigationSession {
     fn default() -> Self {
-        Self { library_id: None, route: Route::Library(LibraryRoute::Home), pages: Vec::new(), reader: None }
+        Self { library_id: None, route: Route::Library(LibraryRoute::Home), pages: Vec::new(), reader: None, pane_id: None, panes: Vec::new(), active_pane: 0 }
     }
 }
 
 impl NavigationSession {
     /// A removed library must not restore its pages into a different library.
     pub(crate) fn reconcile(&mut self, libraries: &[LibraryId]) {
+        for pane in &mut self.panes {
+            pane.reconcile(libraries);
+        }
+        self.active_pane = self.active_pane.min(self.panes.len().saturating_sub(1));
         if self.library_id.is_some_and(|id| !libraries.contains(&id)) {
             self.library_id = None;
             self.pages.clear();
@@ -81,7 +96,8 @@ mod tests {
             library_id: Some(selected),
             route: Route::Library(LibraryRoute::Folders),
             pages: vec![BrowsePageSession { path: vec![(BrowseLocation::Folder(LibraryId::from_u128(3)), "Fiction".into())], detail: None }],
-            reader: Some(ReaderSession { locator: BookLocator::new(selected, ContentHash::from_bytes([7; 32])), title: "Book".into() }),
+            reader: Some(ReaderSession { locator: BookLocator::new(selected, BookId::from_bytes([7; 32])), title: "Book".into() }),
+            ..Default::default()
         };
         let expected = session.clone();
         session.reconcile(&[first, selected]);
@@ -96,7 +112,8 @@ mod tests {
             library_id: Some(removed),
             route: Route::Library(LibraryRoute::Folders),
             pages: vec![BrowsePageSession::default()],
-            reader: Some(ReaderSession { locator: BookLocator::new(removed, ContentHash::from_bytes([7; 32])), title: "Book".into() }),
+            reader: Some(ReaderSession { locator: BookLocator::new(removed, BookId::from_bytes([7; 32])), title: "Book".into() }),
+            ..Default::default()
         };
         session.reconcile(&[remaining]);
         assert_eq!(session.library_id, Some(remaining));

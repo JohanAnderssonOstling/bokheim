@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Reading history</title>
+  <style>
+    @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family: Raleway; src: url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf'); }
+    @font-face { font-family: Bodoni; src: url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf'); }
+    :root { color-scheme: light; --canvas:#eae5dc; --paper:#f6f2eb; --ink:#22201d; --muted:#6b675f; --rule:#c5bdac; --accent:#466853; --wash:#d9e8de; }
+    [data-theme="dark"] { color-scheme:dark; --canvas:#1c1a16; --paper:#11100d; --ink:#efe6d0; --muted:#a69c86; --rule:#4e4334; --accent:#d3b271; --wash:#3c3423; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--canvas); color:var(--ink); font:14px/1.5 Raleway,system-ui,sans-serif; }
+    button { font:inherit; color:inherit; cursor:pointer; }
+    button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    button:disabled { cursor:default; opacity:.35; }
+    button:not(:disabled):hover { background:var(--wash); }
+    .sprite { position:absolute; width:0; height:0; overflow:hidden; }
+    svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+    main { max-width:1480px; margin:auto; padding:28px 32px 40px; }
+    header,.brand,.controls,.scenario,.screen-label { display:flex; align-items:center; gap:16px; }
+    header { justify-content:space-between; padding-bottom:20px; border-bottom:1px solid var(--rule); }
+    .brand { font:32px Bodoni,serif; }
+    h1 { font:14px Raleway,sans-serif; margin:0; border-left:1px solid var(--rule); padding-left:16px; }
+    .text-button { background:var(--paper); border:1px solid var(--rule); padding:8px 12px; min-height:36px; }
+    .intro { display:flex; align-items:baseline; justify-content:space-between; gap:32px; margin:24px 0; }
+    h2 { font:36px/1.15 Bodoni,serif; margin:0; }
+    .intro p { max-width:540px; margin:0; color:var(--muted); font-size:13px; }
+    .scenario { flex-wrap:wrap; gap:8px; padding:14px 0; border-block:1px solid var(--rule); margin-bottom:26px; }
+    .scenario > span { margin-right:8px; font-size:12px; color:var(--muted); }
+    .scenario button { font-size:12px; }
+    .scenario .reset { margin-left:auto; }
+    .gallery { display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:28px; align-items:start; }
+    .screen-label { justify-content:space-between; font-size:12px; margin:0 0 10px; }
+    .screen-label span { color:var(--muted); font-size:11px; }
+    .reader { height:580px; background:var(--paper); color:var(--ink); border:1px solid var(--rule); display:flex; overflow:hidden; }
+    .rail { width:52px; flex:none; display:flex; flex-direction:column; align-items:center; gap:4px; padding:8px 0; border-right:1px solid var(--rule); }
+    .icon-button,.tool { display:inline-flex; align-items:center; justify-content:center; flex:none; width:32px; height:32px; border:0; background:transparent; padding:0; }
+    .tool { width:40px; height:40px; color:var(--muted); }
+    .tool svg { width:20px; height:20px; }
+    .icon-button svg { width:16px; height:16px; }
+    .rail .history { width:32px; height:32px; }
+    .rail-gap { height:8px; flex:none; }
+    .spacer { flex:1; }
+    .ring { width:28px; height:28px; margin:10px 0 4px; border:2px solid var(--rule); border-top-color:var(--accent); border-right-color:var(--accent); border-radius:50%; display:grid; place-items:center; color:var(--muted); font-size:9px; }
+    .spread { display:grid; grid-template-columns:1fr 1fr; gap:36px; min-width:0; width:100%; padding:32px 36px; }
+    .page { min-width:0; overflow:hidden; font:20px/1.55 Garamond,Georgia,serif; }
+    .running { font:10px/1.4 Raleway,sans-serif; text-transform:uppercase; letter-spacing:.12em; text-align:center; color:var(--muted); margin:0 0 26px; }
+    .page h3 { font:25px/1.2 Bodoni,serif; text-align:center; margin:0 0 24px; }
+    .page p { margin:0 0 16px; }
+    .page p + p { text-indent:1.3em; }
+    .kobo { --paper:#fff; --ink:#171717; --muted:#5c5c5c; --rule:#bdbdbd; --accent:#171717; --wash:#ededed; color-scheme:light; flex-direction:column; }
+    .topbar { display:flex; align-items:center; gap:12px; padding:4px; border-bottom:1px solid var(--rule); flex:none; }
+    .topbar .icon-button { width:32px; height:40px; }
+    .topbar .title { flex:1; min-width:0; font:14px/1.3 Garamond,serif; }
+    .topbar .title small { display:block; color:var(--muted); font-size:12px; }
+    .topbar .progress { font:12px Garamond,serif; }
+    .kobo .page { flex:1; padding:24px 26px; }
+    .kobo .running { margin-bottom:18px; }
+    .kobo .page h3 { font-size:24px; }
+    .bottom-bar { display:flex; justify-content:space-around; border-top:1px solid var(--rule); padding:6px; flex:none; }
+    .bottom-item { display:flex; flex-direction:column; align-items:center; gap:3px; font-size:10px; min-width:64px; }
+    .caption { margin:12px 0 0; font-size:12px; color:var(--muted); }
+    .caption strong { color:var(--ink); font-weight:400; }
+    .session { display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-top:26px; padding:16px 0; border-block:1px solid var(--rule); font-size:12px; }
+    .session strong { font-weight:400; color:var(--accent); }
+    .session .counts { margin-left:auto; color:var(--muted); }
+    .hint { font-size:12px; color:var(--muted); margin:14px 0 0; }
+    kbd { font:11px ui-monospace,monospace; color:var(--ink); border:1px solid var(--rule); padding:2px 5px; }
+    @media(max-width:1100px) { .gallery { grid-template-columns:minmax(0,1fr) 340px; gap:20px; } .spread { grid-template-columns:1fr; padding:28px; } .spread .page:last-child { display:none; } .topbar { gap:8px; } }
+    @media(max-width:760px) { main { padding:20px 16px; } .intro { display:block; } .intro p { margin-top:14px; } .gallery { grid-template-columns:1fr; } .reader { height:560px; } .kobo { max-width:420px; } .scenario .reset { margin-left:0; } .brand { font-size:26px; gap:10px; } h1 { font-size:12px; padding-left:10px; } .session .counts { margin-left:0; } }
+  </style>
+</head>
+<body>
+  <svg class="sprite" aria-hidden="true"><defs>
+    <symbol id="back" viewBox="0 0 24 24"><path d="m12 5-7 7 7 7M5 12h14"/></symbol>
+    <symbol id="forward" viewBox="0 0 24 24"><path d="m12 5 7 7-7 7M5 12h14"/></symbol>
+    <symbol id="contents" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="notes" viewBox="0 0 24 24"><path d="M14 4H5v16h14v-9M11 13l8-8 2 2-8 8-3 1z"/></symbol>
+    <symbol id="search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></symbol>
+    <symbol id="audio" viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3M4 12H2v7h4v-7zm16 0h2v7h-4v-7z"/></symbol>
+  </defs></svg>
+  <main>
+    <header>
+      <div class="brand">Bokheim <h1>Reading history</h1></div>
+      <button class="text-button" id="theme" type="button" aria-pressed="false">Dark appearance</button>
+    </header>
+    <div class="intro">
+      <h2>A way back to your place.</h2>
+      <p>The desktop rail and Kobo toolbar, showing the same reading session. Use either pair of arrows to go back and forward. Unavailable directions stay visible and dimmed.</p>
+    </div>
+    <div class="scenario" role="group" aria-label="Try reading history">
+      <span>Try it</span>
+      <button class="text-button" type="button" id="jump">Jump to Chapter II</button>
+      <button class="text-button" type="button" id="read">Read a little farther</button>
+      <button class="text-button reset" type="button" id="reset">Reset to empty history</button>
+    </div>
+    <div class="gallery">
+      <section aria-labelledby="desktop-label">
+        <div class="screen-label" id="desktop-label">Desktop <span>Persistent left rail</span></div>
+        <div class="reader" id="desktop" tabindex="0" aria-label="Desktop reading preview">
+          <nav class="rail" aria-label="Desktop reader controls">
+            <span class="tool" role="img" aria-label="Return to library" title="Return to library"><svg><use href="#back"/></svg></span>
+            <div class="rail-gap"></div>
+            <span class="tool" role="img" aria-label="Contents" title="Contents"><svg><use href="#contents"/></svg></span>
+            <span class="tool" role="img" aria-label="Notes" title="Notes"><svg><use href="#notes"/></svg></span>
+            <span class="tool" role="img" aria-label="Search" title="Search"><svg><use href="#search"/></svg></span>
+            <button class="icon-button history" type="button" data-direction="back" aria-label="Back" title="Back (Alt+Left)" aria-keyshortcuts="Alt+ArrowLeft"><svg aria-hidden="true"><use href="#back"/></svg></button>
+            <button class="icon-button history" type="button" data-direction="forward" aria-label="Forward" title="Forward (Alt+Right)" aria-keyshortcuts="Alt+ArrowRight"><svg aria-hidden="true"><use href="#forward"/></svg></button>
+            <div class="spacer"></div>
+            <span class="tool" role="img" aria-label="Reader settings" title="Reader settings">Aa</span>
+            <span class="tool" role="img" aria-label="Read aloud" title="Read aloud"><svg><use href="#audio"/></svg></span>
+            <div class="ring" data-progress></div>
+          </nav>
+          <div class="spread">
+            <article class="page"><div class="running">Middlemarch · George Eliot</div><h3 data-chapter></h3><div data-copy></div></article>
+            <article class="page"><div class="running" data-location></div><div data-continuation></div></article>
+          </div>
+        </div>
+        <p class="caption"><strong>Back and Forward sit below Search.</strong> Return to library stays on its own at the top of the rail.</p>
+      </section>
+      <section aria-labelledby="kobo-label">
+        <div class="screen-label" id="kobo-label">Kobo <span>Top reading toolbar</span></div>
+        <div class="reader kobo" id="kobo" tabindex="0" aria-label="Kobo reading preview">
+          <nav class="topbar" aria-label="Kobo reader controls">
+            <span class="icon-button" role="img" aria-label="Return to library" title="Return to library"><svg><use href="#back"/></svg></span>
+            <span class="progress" data-percent></span>
+            <span class="title">Middlemarch<small data-chapter></small></span>
+            <span class="icon-button" role="img" aria-label="Search" title="Search"><svg><use href="#search"/></svg></span>
+            <button class="icon-button history" type="button" data-direction="back" aria-label="Back" title="Back"><svg aria-hidden="true"><use href="#back"/></svg></button>
+            <button class="icon-button history" type="button" data-direction="forward" aria-label="Forward" title="Forward"><svg aria-hidden="true"><use href="#forward"/></svg></button>
+          </nav>
+          <article class="page"><div class="running">George Eliot</div><h3 data-chapter></h3><div data-copy></div></article>
+          <div class="bottom-bar" aria-label="Other reader tools">
+            <span class="bottom-item"><svg aria-hidden="true"><use href="#contents"/></svg>Contents</span>
+            <span class="bottom-item"><svg aria-hidden="true"><use href="#notes"/></svg>Notes</span>
+            <span class="bottom-item"><span style="font-size:20px;line-height:20px">Aa</span>Settings</span>
+          </div>
+        </div>
+        <p class="caption">Back and Forward sit beside Search, at the right of the toolbar. Tap the reading page to reveal the toolbar in the app.</p>
+      </section>
+    </div>
+    <div class="session" role="status" aria-live="polite" aria-atomic="true">
+      <strong id="status"></strong><span id="position"></span><span class="counts" id="counts"></span>
+    </div>
+    <p class="hint">Also try <kbd>Alt + ←</kbd> / <kbd>Alt + →</kbd>. Reading farther preserves Forward; jumping to another place clears it. This is an interactive appearance preview of the implemented controls.</p>
+  </main>
+  <script>
+    const chapters = {
+      xv: {
+        title: 'Chapter XV', progress: 34,
+        copy: [
+          'A great historian, as he insisted on calling himself, who had the happiness to be dead a hundred and twenty years ago, and so to take his place among the colossi whose huge legs our living pettiness is observed to walk under, glories in his copious remarks and digressions as the least imitable part of his work.',
+          'But Fielding lived when the days were longer (for time, like money, is measured by our needs), when summer afternoons were spacious, and the clock ticked slowly in the winter evenings.'
+        ],
+        continuation: [
+          'We belated historians must not linger after his example; and if we did so, it is probable that our chat would be thin and eager, as if delivered from a camp-stool in a parrot-house.',
+          'I at least have so much to do in unraveling certain human lots, and seeing how they were woven and interwoven, that all the light I can command must be concentrated on this particular web, and not dispersed over that tempting range of relevancies called the universe.'
+        ]
+      },
+      ii: {
+        title: 'Chapter II', progress: 6,
+        copy: [
+          '“Sir James seems determined to do everything you wish,” said Celia, as they were sitting at work in the library.',
+          '“He is a good creature, and more sensible than any one would imagine,” said Dorothea, inconsiderately.',
+          '“You mean that he appears silly.”',
+          '“No, no,” said Dorothea, recollecting herself, and laying down her work. “I did not mean that.”'
+        ],
+        continuation: [
+          'They were both in the habit of looking at the old house, and the park and gardens, as something that belonged to the order of the world.',
+          'The library was a pleasant room, and the afternoon light fell softly over the books and the work laid out before them.'
+        ]
+      }
+    };
+    let current, back, forward;
+    const equal = (a, b) => a.chapter === b.chapter && a.progress === b.progress;
+    const paragraphs = lines => lines.map(line => `<p>${line}</p>`).join('');
+    function render(message) {
+      const chapter = chapters[current.chapter];
+      document.querySelectorAll('[data-chapter]').forEach(el => el.textContent = chapter.title);
+      document.querySelectorAll('[data-copy]').forEach(el => el.innerHTML = paragraphs(chapter.copy));
+      document.querySelectorAll('[data-continuation]').forEach(el => el.innerHTML = paragraphs(chapter.continuation));
+      document.querySelectorAll('[data-progress]').forEach(el => { el.textContent = current.progress; el.setAttribute('aria-label', `${current.progress} percent read`); });
+      document.querySelectorAll('[data-percent]').forEach(el => el.textContent = `${current.progress}%`);
+      document.querySelectorAll('[data-location]').forEach(el => el.textContent = `${chapter.title} · ${current.progress}%`);
+      document.querySelectorAll('[data-direction]').forEach(button => button.disabled = !(button.dataset.direction === 'back' ? back.length : forward.length));
+      document.getElementById('status').textContent = message;
+      document.getElementById('position').textContent = `${chapter.title} · ${current.progress}%`;
+      document.getElementById('counts').textContent = `Back: ${back.length} · Forward: ${forward.length}`;
+    }
+    function jump() {
+      const target = { chapter:'ii', progress:chapters.ii.progress };
+      if (!equal(current, target)) { back.push(current); forward = []; current = target; }
+      render('Jumped to Chapter II');
+    }
+    function navigate(direction) {
+      const source = direction === 'back' ? back : forward;
+      const destination = direction === 'back' ? forward : back;
+      while (source.length) {
+        const target = source.pop();
+        if (equal(current, target)) continue;
+        destination.push(current);
+        current = target;
+        render(direction === 'back' ? 'Returned to your previous place' : 'Returned forward');
+        return;
+      }
+      render(direction === 'back' ? 'No earlier place' : 'No later place');
+    }
+    function reset() {
+      current = { chapter:'xv', progress:chapters.xv.progress }; back = []; forward = [];
+      render('Reading · no jumps yet');
+    }
+    document.querySelectorAll('[data-direction]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.direction)));
+    document.getElementById('jump').addEventListener('click', jump);
+    document.getElementById('read').addEventListener('click', () => {
+      current = { ...current, progress:Math.min(current.progress + 1, 100) };
+      render('Reading farther · history preserved');
+    });
+    document.getElementById('reset').addEventListener('click', reset);
+    document.getElementById('theme').addEventListener('click', event => {
+      const dark = document.documentElement.dataset.theme !== 'dark';
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      event.currentTarget.setAttribute('aria-pressed', String(dark));
+      event.currentTarget.textContent = dark ? 'Light appearance' : 'Dark appearance';
+    });
+    document.addEventListener('keydown', event => {
+      if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        event.preventDefault();
+        navigate(event.key === 'ArrowLeft' ? 'back' : 'forward');
+      }
+    });
+    for (const type of ['mousedown', 'mouseup', 'auxclick']) document.getElementById('desktop').addEventListener(type, event => {
+      if (event.button !== 3 && event.button !== 4) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (type === 'mousedown') navigate(event.button === 3 ? 'back' : 'forward');
+    });
+    reset();
+    jump();
+  </script>
+</body>
+</html>

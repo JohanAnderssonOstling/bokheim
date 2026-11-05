@@ -1,4 +1,4 @@
-# Browser worker runtime
+# Browser worker hosting
 
 The JavaScript loaders bootstrap WASM, buffer events until Rust installs its
 handlers, and attach the coordinator MessagePort to each dedicated worker. Pre-WASM failures must also be reported here.
@@ -17,7 +17,7 @@ owned byte vectors and Rust futures internally. Sync passes receive their
 storage operation directly, including test runners. Active passes are tracked
 by library key; only individual storage commands need request IDs. Network
 routing uses a Rust callback installed by
-the coordinator. The worker runtime installs no `bokheim*` JavaScript hooks.
+the coordinator. The worker host installs no `bokheim*` JavaScript hooks.
 The global fetch bridge remains because reqwest calls the browser fetch API.
 
 Browser transport mechanisms live in `client/platforms/web/src/transport`:

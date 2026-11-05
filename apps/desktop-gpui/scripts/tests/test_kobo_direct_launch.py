@@ -40,8 +40,8 @@ class KoboDirectLaunchTests(unittest.TestCase):
         self.assertIn(b'menu_main_15505_direct\0', plugin)
         self.assertIn(b'v0.6.0-bokheim.1\0', plugin)
         config = (SCRIPTS.parent / 'kobo/nickelmenu').read_text()
-        label = re.search(r'experimental\s*:menu_main_15505_direct\s*:(.+)', config).group(1).strip()
-        self.assertRegex(config, rf'menu_item\s*:main\s*:{re.escape(label)}\s*:cmd_spawn\s*:quiet:/bin/sh /mnt/onboard/\.adds/bokheim/run-monitored\.sh')
+        self.assertNotRegex(config, r'(?m)^\s*experimental\s*:menu_main_15505_')
+        self.assertRegex(config, r'menu_item\s*:main\s*:Bokheim Kobo\s*:cmd_spawn\s*:quiet:/bin/sh /mnt/onboard/\.adds/bokheim/run-monitored\.sh')
 
 
 if __name__ == '__main__':

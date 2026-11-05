@@ -39,6 +39,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends GameActivity {
+    /** Distribution policy is compiled into the Java package, never read from
+     * intent extras or inferred from the installer. Rust shares this policy. */
+    public static boolean isPlayStoreBuild() {
+        return BuildConfig.PLAY_STORE;
+    }
+
+    public static boolean isSelfUpdateEnabled() {
+        return !BuildConfig.PLAY_STORE && !BuildConfig.FDROID;
+    }
+
     public static String taxonomyFile(android.content.Context context) throws IOException {
         return TaxonomyAssets.prepare(context).getAbsolutePath();
     }
@@ -115,10 +125,8 @@ public final class MainActivity extends GameActivity {
             switch (message.getString("command")) {
                 case "open":
                     if (accountDialog != null) accountDialog.dismiss();
-                    org.json.JSONArray palette = message.getJSONArray("colors");
-                    int[] colors = new int[9];
-                    for (int i = 0; i < colors.length; i++) colors[i] = (int) palette.getLong(i);
-                    accountDialog = new AccountDialog(this, id, message.getInt("minimum"), colors, (session, request) -> {
+                    AccountDialog.Theme theme = new AccountDialog.Theme(message.getJSONObject("theme"));
+                    accountDialog = new AccountDialog(this, id, message.getInt("minimum"), message.getInt("resendCooldownSeconds"), theme, (session, request) -> {
                         nativeAuthenticationRequest(session, request);
                         try {
                             if (new org.json.JSONObject(request).getString("action").equals("closed") && accountDialog != null && accountDialog.sessionId == session) accountDialog = null;
@@ -141,7 +149,7 @@ public final class MainActivity extends GameActivity {
 
     private static final String LOG_TAG = "Bokheim";
     private static final String DIRECTORY_MIME = DocumentsContract.Document.MIME_TYPE_DIR;
-    private static final String[] BOOK_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b"};
+    private static final String[] BOOK_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b", "fb2", "fbz", "fb2.zip", "cbz"};
 
     private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
     private ActivityResultLauncher<Intent> pathPromptLauncher;
@@ -151,6 +159,7 @@ public final class MainActivity extends GameActivity {
      * explicit Settings action; installer return codes never prove activation.
      */
     public static String updateCommand(android.content.Context context, String encoded) throws Exception {
+        if (!isSelfUpdateEnabled()) throw new UnsupportedOperationException("Application updates are managed by the distribution channel");
         org.json.JSONObject request = new org.json.JSONObject(encoded);
         String action = request.getString("action");
         if (action.equals("prepare")) {
@@ -237,10 +246,9 @@ public final class MainActivity extends GameActivity {
     private native void nativeSelectedDirectoryLocalRoot(long requestId, String path);
     private native void nativeStorageAccessChanged(boolean granted, String documentsLibraryRoot);
     private native void nativeOpenBook(String name, int fileDescriptor);
-    static native boolean nativeTransfersAllowed();
+    private native void nativeOpenReaderLink(String url);
     static native void nativeNetworkCostChanged(int cost);
     static void startNetworkCostMonitor(android.content.Context context) { NetworkCostMonitor.start(context); }
-    static void useTransferPolicy() { BookDownload.transfersAllowed = MainActivity::nativeTransfersAllowed; }
     private native void nativeVolumeButton(boolean next);
     private native void nativeWindowInsets(
         int safeLeft,
@@ -302,6 +310,7 @@ public final class MainActivity extends GameActivity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        suppressReaderChromeReveal();
         applyKeepScreenAwake();
         boolean granted = AllFilesAccess.isGranted();
         if (publishedStorageAccess == null || publishedStorageAccess != granted) {
@@ -318,6 +327,10 @@ public final class MainActivity extends GameActivity {
         Uri uri = intent.getData();
         intent.setAction(null);
         intent.setData(null);
+        if ("bokheim".equals(uri.getScheme())) {
+            nativeOpenReaderLink(uri.toString());
+            return;
+        }
         fileExecutor.execute(() -> {
             try {
                 String name = queryDisplayName(uri);
@@ -383,6 +396,10 @@ public final class MainActivity extends GameActivity {
         promptForPlaybackBatteryAccess(command, "load");
     }
 
+    public static String localSpeechCommand(android.content.Context context, String command) {
+        return DeviceSpeech.dispatch(context.getApplicationContext(), command);
+    }
+
     public static void speechCommand(android.content.Context context, String command) {
         SpeechService.dispatch(context, command);
         promptForPlaybackBatteryAccess(command, "start");
@@ -414,8 +431,7 @@ public final class MainActivity extends GameActivity {
             // A visibility transition requested by the reader can itself
             // produce a system-bar animation. Do not interpret that animation
             // (or an immediate follow-up) as the user's edge-swipe reveal.
-            suppressReaderChromeRevealUntil = android.os.SystemClock.uptimeMillis() + 400;
-            immersiveBarsHidden = false;
+            suppressReaderChromeReveal();
         }
         systemBarsVisible = visible;
         applySystemBarsVisibility();
@@ -429,6 +445,7 @@ public final class MainActivity extends GameActivity {
     @Override
     protected void onPause() {
         resumed = false;
+        suppressReaderChromeReveal();
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         super.onPause();
     }
@@ -451,6 +468,7 @@ public final class MainActivity extends GameActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        suppressReaderChromeReveal();
         if (hasFocus) {
             applySystemBarsVisibility();
         }
@@ -493,6 +511,10 @@ public final class MainActivity extends GameActivity {
 
     @Override
     protected void onDestroy() {
+        if (isFinishing()) {
+            AudiobookService.stopForAppClose(this);
+            SpeechService.stopForAppClose(this);
+        }
         if (batteryPermissionPrompt != null) batteryPermissionPrompt.dismiss();
         if (accountDialog != null) accountDialog.dismiss();
         for (BookBrowserSurface browser : new ArrayList<>(bookBrowsers.values())) browser.close();
@@ -500,6 +522,11 @@ public final class MainActivity extends GameActivity {
         if (accountActivity.get() == this) accountActivity.clear();
         fileExecutor.shutdownNow();
         super.onDestroy();
+    }
+
+    private void suppressReaderChromeReveal() {
+        immersiveBarsHidden = false;
+        suppressReaderChromeRevealUntil = android.os.SystemClock.uptimeMillis() + 400;
     }
 
     private void applySystemBarsVisibility() {
@@ -528,6 +555,10 @@ public final class MainActivity extends GameActivity {
                     WindowInsetsAnimationCompat animation,
                     WindowInsetsAnimationCompat.BoundsCompat bounds
                 ) {
+                    if (!resumed || !decorView.hasWindowFocus()) {
+                        suppressReaderChromeReveal();
+                        return bounds;
+                    }
                     // Showing or dismissing the keyboard can animate the
                     // navigation bar too. That is not an edge-swipe request
                     // to reveal the reader's controls.
@@ -563,7 +594,8 @@ public final class MainActivity extends GameActivity {
     }
 
     private void publishWindowInsets(WindowInsetsCompat insets) {
-        if (!systemBarsVisible && !insets.isVisible(WindowInsetsCompat.Type.systemBars())) {
+        if (resumed && getWindow().getDecorView().hasWindowFocus()
+            && !systemBarsVisible && !insets.isVisible(WindowInsetsCompat.Type.systemBars())) {
             immersiveBarsHidden = true;
         }
         Insets safeArea = insets.getInsets(
@@ -671,9 +703,8 @@ public final class MainActivity extends GameActivity {
         if (separator < 0 || separator == name.length() - 1) {
             return false;
         }
-        String extension = name.substring(separator + 1).toLowerCase(Locale.ROOT);
         for (String accepted : extensions) {
-            if (extension.equals(accepted.toLowerCase(Locale.ROOT))) {
+            if (name.toLowerCase(Locale.ROOT).endsWith("." + accepted.toLowerCase(Locale.ROOT))) {
                 return true;
             }
         }
@@ -734,39 +765,10 @@ public final class MainActivity extends GameActivity {
         }
     }
 
-    private static String[] mimeTypesFor(String[] extensions) {
-        Set<String> mimeTypes = new LinkedHashSet<>();
-        for (String extension : extensions) {
-            switch (extension.toLowerCase(Locale.ROOT)) {
-                case "epub":
-                    mimeTypes.add("application/epub+zip");
-                    break;
-                case "pdf":
-                    mimeTypes.add("application/pdf");
-                    break;
-                case "mobi":
-                    mimeTypes.add("application/x-mobipocket-ebook");
-                    break;
-                case "azw":
-                case "azw3":
-                    mimeTypes.add("application/vnd.amazon.ebook");
-                    mimeTypes.add("application/x-mobi8-ebook");
-                    break;
-                case "m4b":
-                    mimeTypes.add("audio/mp4");
-                    mimeTypes.add("audio/x-m4b");
-                    break;
-                default:
-                    break;
-            }
-        }
-        return mimeTypes.toArray(new String[0]);
-    }
-
     private static Intent filePromptIntent(boolean multiple, String[] extensions) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        String[] mimeTypes = mimeTypesFor(extensions);
+        String[] mimeTypes = BookFormats.mimeTypesFor(extensions);
         intent.setType(mimeTypes.length == 1 ? mimeTypes[0] : "*/*");
         if (mimeTypes.length > 1) {
             intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);

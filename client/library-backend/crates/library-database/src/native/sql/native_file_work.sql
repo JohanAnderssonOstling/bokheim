@@ -3,6 +3,9 @@
 -- name: native_directory_replay_work?
 SELECT id, dir_id FROM local_directory_work ORDER BY id;
 
+-- name: native_directory_work_revision ->
+SELECT COALESCE(MAX(seq), 0) FROM sqlite_sequence WHERE name='local_directory_work';
+
 -- name: native_book_replay_work_ids?
 SELECT id FROM local_book_work ORDER BY id;
 
@@ -16,14 +19,8 @@ DELETE FROM local_book_work WHERE id IN (SELECT value FROM json_each(:ids))
 AND NOT EXISTS(SELECT 1 FROM local_file_work f WHERE f.content_hash=local_book_work.content_hash)
 AND NOT EXISTS(SELECT 1 FROM local_directory_work);
 
--- name: native_directory_work_ids?
-SELECT dir_id FROM local_directory_work ORDER BY id;
-
 -- name: local_book_work_hashes?
 SELECT content_hash FROM local_book_work ORDER BY id;
-
--- name: clear_local_directory_work!
-DELETE FROM local_directory_work;
 
 -- name: native_book_work_directory_ids?
 SELECT DISTINCT bd.dir_id
@@ -81,7 +78,7 @@ INSERT INTO local_directory_projection(dir_id, relative_path) VALUES (:dir_id, :
 ON CONFLICT(dir_id) DO UPDATE SET relative_path = excluded.relative_path;
 
 -- name: requested_purge_books?
--- param: after: Option<&ContentHash>
+-- param: after: Option<&BookId>
 SELECT content_hash
 FROM local_purge_work
 WHERE content_hash > COALESCE(:after,X'')
@@ -89,11 +86,11 @@ ORDER BY content_hash
 LIMIT 32;
 
 -- name: purge_book_is_retired ->
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT NOT EXISTS(SELECT 1 FROM book WHERE content_hash = :content_hash);
 
 -- name: acknowledge_purge_book!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: work_id: i64
 DELETE FROM local_purge_work
 WHERE content_hash = :content_hash AND id = :work_id;
@@ -102,35 +99,39 @@ WHERE content_hash = :content_hash AND id = :work_id;
 
 -- name: native_rename_book!
 -- param: dir_id: &str
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 -- param: name: &str
 UPDATE book_dir SET file_name=:name WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
 
 -- name: native_file_work_rows?
-SELECT id,operation,content_hash,relative_path FROM local_file_work ORDER BY id;
+SELECT id,operation,content_hash,dir_id,relative_path,source_root,source_identity,source_library FROM local_file_work ORDER BY id;
 
--- Lazy file-work resolution: current live placements for a hash; Rust adds
--- each one's path. The queued path is only a hint; a directory
--- move after queueing must not strand the job.
+-- Current placement names and ancestry are resolved only when work starts.
 -- name: native_live_placement_paths?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT bd.dir_id, bd.file_name FROM book_dir bd JOIN book ON book.row_id=bd.book_row_id WHERE book.content_hash=:content_hash AND bd.deleted_at IS NULL AND book.deleted_at IS NULL;
 
 -- Last materialized locations for a hash; trash work for a retired book
 -- resolves here instead of the stale queued path.
 -- name: native_file_projection_paths?
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 SELECT dir_id, relative_path FROM local_file_projection WHERE content_hash=:content_hash ORDER BY relative_path;
 
 -- name: native_file_is_current ->
 -- param: id: i64
 -- param: operation: &str
--- param: content_hash: &ContentHash
--- param: relative_path: &str
-SELECT EXISTS(SELECT 1 FROM local_file_work WHERE id=:id AND operation=:operation AND content_hash=:content_hash AND relative_path=:relative_path);
+-- param: content_hash: &BookId
+-- param: dir_id: Option<&str>
+-- param: relative_path: Option<&str>
+-- param: source_root: Option<&str>
+-- param: source_identity: Option<&str>
+-- param: source_library: Option<&str>
+SELECT EXISTS(SELECT 1 FROM local_file_work WHERE id=:id AND operation=:operation AND content_hash=:content_hash
+AND dir_id IS :dir_id AND relative_path IS :relative_path AND source_root IS :source_root
+AND source_identity IS :source_identity AND source_library IS :source_library);
 
 -- name: native_request_thumbnail!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT INTO book_transfer(content_hash,cover_state) SELECT content_hash,'pending' FROM book WHERE content_hash=:content_hash AND deleted_at IS NULL
 ON CONFLICT(content_hash) DO UPDATE SET cover_state='pending' WHERE cover_state IS NULL OR cover_state='ready';
 
@@ -139,15 +140,15 @@ ON CONFLICT(content_hash) DO UPDATE SET cover_state='pending' WHERE cover_state 
 DELETE FROM local_file_work WHERE id=:id;
 
 -- name: native_record_remote_book!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT INTO book_transfer(content_hash,server_has_book) SELECT content_hash,1 FROM book WHERE content_hash=:content_hash
 ON CONFLICT(content_hash) DO UPDATE SET server_has_book=1;
 
 -- name: native_queue_book_work!
--- param: content_hash: &ContentHash
+-- param: content_hash: &BookId
 INSERT INTO local_book_work(content_hash) VALUES(:content_hash) ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
 
--- name: native_has_pending_purge_work?
+-- name: native_has_pending_purge_work ->
 SELECT EXISTS(SELECT 1 FROM local_purge_work);
 
 -- name: native_move_file_work_paths!
@@ -156,7 +157,7 @@ SELECT EXISTS(SELECT 1 FROM local_purge_work);
 -- param: upper: &str
 UPDATE OR REPLACE local_file_work
 SET relative_path = :replacement || substr(relative_path, length(:prefix) + 1)
-WHERE relative_path >= :prefix AND relative_path < :upper;
+WHERE source_root IS NULL AND relative_path >= :prefix AND relative_path < :upper;
 
 -- name: native_has_pending_file_work ->
 SELECT EXISTS(SELECT 1 FROM local_directory_work)

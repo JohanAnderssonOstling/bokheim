@@ -1,0 +1,15 @@
+[package]
+name = "remote-book-access"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+account-client = { path = "../../../account-client" }
+book-access = { path = "../book-access" }
+client-platform-runtime = { path = "../../../platforms/runtime" }
+library-services = { path = "../library-services" }
+sync-common = { path = "../../../../shared/sync-common" }
+sync-transport = { path = "../sync-transport" }
+reqwest = { workspace = true }
+serde = { version = "1", features = ["derive"] }

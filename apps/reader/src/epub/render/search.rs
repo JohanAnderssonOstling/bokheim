@@ -3,7 +3,7 @@
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, Modifiers, Window, div, list, px};
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
-use html_view_core::RendererCommand;
+use skrift_column_paginator::RendererCommand;
 use ui_components as components;
 
 use crate::epub::ReaderView;
@@ -59,7 +59,7 @@ impl ReaderView {
                 let selected = self.search.match_position.is_some_and(|(current, _)| current == index + 1);
                 let request = self.search.current_request();
                 let reader = reader.downgrade();
-                search::result_row(("epub-search-hit", index), result.excerpt.clone(), selected, theme)
+                search::result_row(("epub-search-hit", index), result.excerpt.clone(), self.search.query.as_deref().unwrap_or_default(), self.search.options, selected, theme)
                     .on_click(move |_, window, cx| {
                         let Some(reader) = reader.upgrade() else { return };
                         reader.update(cx, |reader, cx| {
@@ -67,7 +67,7 @@ impl ReaderView {
                                 return;
                             }
                             reader.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::NavigateSearchTo(index), cx));
-                            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                            #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
                             reader.tts_navigation_changed(cx);
                             if components::uses_mobile_reader_controls(window) {
                                 reader.sidebar.close(cx);
@@ -88,17 +88,18 @@ impl ReaderView {
 mod tests {
     use crate::epub::search::search_groups;
     use crate::epub::toc::TocState;
-    use html_view_core::TocEntry;
-    use html_view_core::{BookSearchMatch, BookSearchTarget};
+    use book_content::BookToc;
+    use book_model::BookTocEntry;
+    use skrift_column_paginator::{BookSearchMatch, BookSearchTarget};
 
     #[test]
     fn excerpts_group_nested_sections_by_chapter_and_keep_unmapped_documents_in_order() {
         let entries = vec![
-            TocEntry { title: "First".into(), link: "first".into(), children: vec![TocEntry { title: "Section".into(), link: "section".into(), children: vec![] }] },
-            TocEntry { title: "Second".into(), link: "second".into(), children: vec![] },
+            BookTocEntry { title: "First".into(), target: "first".into(), children: vec![BookTocEntry { title: "Section".into(), target: "section".into(), children: vec![] }] },
+            BookTocEntry { title: "Second".into(), target: "second".into(), children: vec![] },
         ];
         let mut toc = TocState::default();
-        let resolutions = TocState::resolve(&entries, |link| match link {
+        let resolutions = BookToc::resolve(&entries, |link| match link {
             "first" => Some((1, None)),
             "section" => Some((1, Some("section".into()))),
             "second" => Some((2, None)),

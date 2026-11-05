@@ -1,22 +1,16 @@
 //! Read immutable leaf evidence and derive totals over unique, filtered members.
 use super::books::MatchingBooks;
 use crate::browse::BrowseRow;
-use library_model::BrowseChipSort;
+use library_model::{BrowseChipSort, BrowseLocation};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 mod tests;
 
 pub(super) fn sum(members: &BTreeSet<i64>, matching: &MatchingBooks) -> Option<f64> {
-    let source = source_priority(members, matching);
     let mut groups = BTreeMap::<&str, f64>::new();
     let mut total = None;
     for id in members.intersection(&matching.books) {
-        // Raw counts from different sources have different scales. A catalog
-        // group uses only the books in its highest-priority source tier.
-        if source.is_some() && matching.source_priorities.get(id).copied() != source {
-            continue;
-        }
         let Some(&score) = matching.popularity.get(id) else { continue };
         if let Some(group) = matching.popularity_groups.get(id) {
             groups.entry(group).and_modify(|previous| *previous = previous.max(score)).or_insert(score);
@@ -25,10 +19,6 @@ pub(super) fn sum(members: &BTreeSet<i64>, matching: &MatchingBooks) -> Option<f
         }
     }
     groups.values().fold(total, |total, score| Some(total.unwrap_or(0.0) + score))
-}
-
-pub(super) fn source_priority(members: &BTreeSet<i64>, matching: &MatchingBooks) -> Option<u8> {
-    members.intersection(&matching.books).filter_map(|id| matching.source_priorities.get(id)).copied().min()
 }
 
 /// Descending known scores, followed by unknowns. A known zero stays known.
@@ -46,10 +36,29 @@ pub(super) fn sort_rows(rows: &mut [BrowseRow], sort: BrowseChipSort, score: imp
         return;
     }
     let scores: BTreeMap<_, _> = if sort == BrowseChipSort::Popularity { rows.iter().map(|row| (row.id, score(row))).collect() } else { BTreeMap::new() };
+    sort_scored_rows(rows, sort, &scores);
+}
+
+fn sort_scored_rows(rows: &mut [BrowseRow], sort: BrowseChipSort, scores: &BTreeMap<BrowseLocation, Option<f64>>) {
     rows.sort_by_cached_key(|row| (book_model::normalize_search_text(&row.name), row.name.clone(), row.id));
     match sort {
         BrowseChipSort::Popularity => rows.sort_by(|left, right| compare(scores.get(&left.id).copied().flatten(), scores.get(&right.id).copied().flatten())),
         BrowseChipSort::BookCount => rows.sort_by_key(|row| std::cmp::Reverse(row.book_count)),
         BrowseChipSort::Alphabetical | BrowseChipSort::DefaultOrder => {}
     }
+}
+
+/// Put preferred rows first while preserving the order within both groups.
+pub(super) fn prefer_rows(rows: &mut Vec<BrowseRow>, preferred: &dyn Fn(&BrowseRow) -> bool) {
+    let mut first = Vec::new();
+    let mut rest = Vec::new();
+    for row in rows.drain(..) {
+        if preferred(&row) {
+            first.push(row);
+        } else {
+            rest.push(row);
+        }
+    }
+    rows.extend(first);
+    rows.extend(rest);
 }

@@ -6,12 +6,21 @@ pub const PASSWORD_MIN_CHARACTERS: usize = 12;
 pub const PASSWORD_MAX_BYTES: usize = 1024;
 pub const EMAIL_MAX_BYTES: usize = 254;
 pub const EMAIL_VERIFICATION_PIN_DIGITS: usize = 6;
+pub const EMAIL_RESEND_COOLDOWN_SECONDS: u32 = 60;
 pub const ONE_TIME_TOKEN_BYTES: usize = 43;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+}
+
+/// Explicit credentials and confirmation for the public account-deletion page.
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteAccountRequest {
+    pub email: String,
+    pub password: String,
+    pub confirmation: String,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -29,6 +38,9 @@ pub struct EmailRequest {
 pub struct EmailVerificationRequest {
     pub email: String,
     pub pin: String,
+    /// The registration password. The PIN proves mailbox control; the password
+    /// proves the verifier is the registrant whose password the account gets.
+    pub password: String,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +103,16 @@ pub struct LibraryStorageUsage {
     /// attributions across libraries partition the account's used bytes, so a
     /// book held by two libraries is counted under one of them only. A thumbnail
     /// is attributed to the first library that uploads it.
+    pub used_bytes: u64,
+}
+
+pub const MAX_ACCOUNT_STORAGE_BOOKS: usize = 100;
+
+/// An account-owned book's charged bytes. Titles remain client-owned metadata.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BookStorageUsage {
+    #[serde(rename = "content_hash")]
+    pub book_id: sync_common::BookId,
     pub used_bytes: u64,
 }
 

@@ -1,8 +1,16 @@
 //! GPUI reader surfaces embedded by the application shell.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
+use app_preferences::ReaderPreferencePatch;
+
 mod book;
+mod cjk;
+mod comic;
 mod epub;
 mod invalidation;
+mod opening_error;
+mod opening_recovery;
 mod pdf;
 mod settings;
 mod shell;
@@ -15,17 +23,17 @@ type CloseReader = std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
 pub use app_preferences::PdfZoomMode;
 pub use app_preferences::{ReaderFontFamily, ReaderTextAlignment};
 pub use audiobook_player::{ActiveAudiobook, AudiobookDock, DockAction, PlaybackSession};
-pub use settings::{ReaderPreferences, SaveReaderSettings};
+pub use settings::{CjkFontChoice, ReaderPreferences, SaveReaderSettings, SystemFontsLoading};
 pub use windows::AudiobookOpened;
 pub use windows::{BookOpenFailed, CloseRequested, ReaderView, configure};
 
 fn save_audiobook_speed(speed: f64, cx: &mut gpui::App) {
-    settings::ReaderSettings::update(cx, |preferences| preferences.audiobook_speed = speed);
+    settings::ReaderSettings::update(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::AudiobookSpeed(speed)));
 }
 
 pub fn open_audiobook(locator: library_model::BookLocator, library: library_backend::LibraryClient, resolved: library_backend::ResolvedBook, initial_target: Option<String>, cx: &mut gpui::App) -> gpui::Entity<PlaybackSession> {
     use gpui::AppContext;
-    let speed = settings::ReaderSettings::preferences(cx).audiobook_speed;
+    let speed = settings::ReaderSettings::preferences(cx).synchronized.audiobook_speed();
     cx.new(|cx| PlaybackSession::open(locator, library, resolved, initial_target, speed, save_audiobook_speed, cx))
 }
 
@@ -37,6 +45,8 @@ pub fn restore_audiobook(record: &ActiveAudiobook, library: library_backend::Lib
 actions!(
     bokheim_reader,
     [
+        NavigateBack,
+        NavigateForward,
         PreviousPage,
         NextPage,
         PreviousLine,
@@ -44,10 +54,14 @@ actions!(
         PreviousSection,
         NextSection,
         ToggleToc,
+        RevealReaderChrome,
+        ToggleNotes,
+        ToggleTts,
         ToggleSidebar,
         NextSidebarTab,
         PreviousSidebarTab,
         FocusReaderSearch,
+        OpenReaderSettings,
         ToggleSearch,
         CloseSearch,
         IncreaseFont,
@@ -65,6 +79,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
     shell::input::bind_reader_keys(cx);
     epub::render::bind_keys(cx);
     pdf::bind_pdf_keys(cx);
+    shell::input::bind_document_keys(cx, "ComicReaderDocument");
 }
 
 /// Returns debug-only invalidation counts grouped by component and reason.
@@ -90,3 +105,6 @@ pub fn reset_performance_measurements() {
 
 #[cfg(feature = "kobo")]
 pub use shell::brightness::{BrightnessControls, popover as brightness_popover, popover_with_height as brightness_popover_with_height};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use html_view_gpui::configure_font_cache;

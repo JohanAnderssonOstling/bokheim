@@ -5,19 +5,28 @@ edition = "2021"
 publish = false
 
 [dependencies]
+http-response = { workspace = true }
 client-platform-runtime = { path = "../../../platforms/runtime" }
+client-protocol = { path = "../../../client-protocol", features = ["http"] }
 audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 content-address = { path = "../../../../shared/content-address" }
-cpu-host = { path = "../cpu-host" }
 thumbnail = { path = "../thumbnail" }
 library-database = { path = "../library-database" }
 library-model = { path = "../../../library-model" }
-reqwest = { workspace = true, default-features = false, features = ["stream"] }
+update-client = { path = "../../../updates/core" }
+reqwest = { workspace = true, features = ["stream"] }
 futures-util = "0.3"
+log = "0.4"
 web-time = "1"
+blake3.workspace = true
+tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
+client-platform-native = { path = "../../../platforms/native" }
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+client-platform-web = { path = "../../../platforms/web" }
 
 [dev-dependencies]
 rusqlite = { version = "0.40.0", features = ["bundled"] }

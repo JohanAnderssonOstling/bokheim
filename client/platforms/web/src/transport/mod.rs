@@ -1,16 +1,9 @@
 //! Browser worker transport. Payloads are opaque; callers own application policy.
-pub mod bridge;
 pub mod cpu;
 pub mod cpu_client;
 pub mod endpoint;
-pub mod network_client;
-pub mod network_server;
-pub mod pending;
 pub mod port;
-mod relay;
 pub use port::Port;
-pub use relay::ClientRelay;
-pub type BytesOperation = std::rc::Rc<dyn Fn(Vec<u8>) -> BytesFuture>;
 pub type BytesFuture = futures_util::future::LocalBoxFuture<'static, Result<Vec<u8>, String>>;
 
 use js_sys::{Array, ArrayBuffer, Object, Reflect};
@@ -71,11 +64,6 @@ pub fn error_message(error: &JsValue) -> String {
     error.as_string().or_else(|| field(error, "message").as_string()).unwrap_or_else(|| format!("{error:?}"))
 }
 
-pub mod lifetime;
-pub mod tab;
-
-pub mod session;
-
 pub mod range;
 
 pub mod import_io;
@@ -87,7 +75,3 @@ pub mod upload;
 
 pub mod protocol;
 pub mod request;
-
-pub mod control;
-
-pub mod host;

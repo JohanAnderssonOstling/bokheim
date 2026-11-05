@@ -1,7 +1,7 @@
-use server_postgres::{migrate, rotate_sync_generation, upgrade_existing, verify_schema, PostgresDatabase, PostgresSyncRepository, SyncError};
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use server_postgres::{PostgresDatabase, PostgresSyncRepository, SyncError, migrate, rotate_sync_generation, verify_schema};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use sync_common::api::libraries::LibraryNameRequest;
-use sync_common::{ConflictRank, LibraryId, LibraryRevision, OpaquePublication, OpaqueStateEntry, ReplicaId, ReplicaSeq, StateAddress, SyncCursor, SyncExchangeRequest, SyncGeneration, VersionKey, Versioned, MAX_PUSH_MUTATIONS};
+use sync_common::{ConflictRank, LibraryId, LibraryRevision, MAX_PUSH_MUTATIONS, OpaquePublication, OpaqueStateEntry, ReplicaId, ReplicaSeq, StateAddress, SyncCursor, SyncExchangeRequest, SyncGeneration, VersionKey, Versioned};
 
 /// Every test owns a schema; never alter the caller's existing tables.
 async fn test_database() -> (PostgresDatabase, PgPool, String) {
@@ -50,7 +50,7 @@ async fn restored_history_rejects_old_cursors_even_after_passing_their_revision(
     sqlx::query("INSERT INTO users(id) VALUES($1)").bind(user).execute(database.pool()).await.unwrap();
     let library = LibraryId::new_v4();
     let replica = ReplicaId::new_v4();
-    repository.create_library(user, &LibraryNameRequest { library_id: library, library_name: "History".into() }).await.unwrap();
+    repository.create_library(user, &LibraryNameRequest { library_id: library, library_name: "History".into(), storage: Default::default() }).await.unwrap();
     let empty = repository.exchange(user, &SyncExchangeRequest { library_id: library, replica_id: replica, mutations: Vec::new(), cursor: SyncCursor::default() }).await.unwrap();
     assert!(empty.pull.next_cursor.generation.is_some(), "even an empty library binds its checkpoint to the history");
     assert!(empty.pull.next_cursor.lifecycle_revision.is_none());
@@ -67,7 +67,7 @@ async fn restored_history_rejects_old_cursors_even_after_passing_their_revision(
     sqlx::raw_sql("DELETE FROM sync_state; DELETE FROM sync_library_revision; SELECT setval('sync_server_sequence', 800);").execute(database.pool()).await.unwrap();
     let generation = rotate_sync_generation(&database).await.unwrap();
     assert_ne!(Some(generation), old.generation);
-    // More than one pull page, including new cells below the old checkpoint.
+    // More than the old 1,000-cell pull cap, including cells below the checkpoint.
     let new_count = 1_201;
     for start in (0..new_count).step_by(MAX_PUSH_MUTATIONS) {
         request.mutations = (start..(start + MAX_PUSH_MUTATIONS).min(new_count)).map(|index| publication(replica, index as u64 + 2, format!("new-{index:04}"))).collect();
@@ -93,17 +93,20 @@ async fn restored_history_rejects_old_cursors_even_after_passing_their_revision(
     request.cursor = SyncCursor::default();
     request.mutations.clear();
     let mut delivered = Vec::new();
+    let mut pages = 0;
     loop {
         let response = repository.exchange(user, &request).await.unwrap();
         sync_common::validate_pull_batch(&response.pull, request.cursor).unwrap();
         assert_eq!(response.pull.next_cursor.generation, Some(generation));
         request.cursor = response.pull.next_cursor;
         delivered.extend(response.pull.mutations);
+        pages += 1;
         if !response.pull.has_more {
             break;
         }
     }
     assert_eq!(delivered.len(), new_count);
+    assert_eq!(pages, 1, "small states must not split at an arbitrary change count");
     assert!(delivered.iter().any(|row| row.revision.get() <= old.field_revision.unwrap().get()), "recovery must include cells hidden behind the old checkpoint");
     assert!(delivered.iter().all(|row| row.state.version.changed_at == 1 && row.state.version.replica_id == replica));
     cleanup(database, admin, schema).await;
@@ -111,26 +114,14 @@ async fn restored_history_rejects_old_cursors_even_after_passing_their_revision(
 
 #[tokio::test]
 #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-async fn generation_survives_startup_and_upgrades_and_migrates_existing_state() {
+async fn generation_survives_startup_and_explicit_rotation() {
     let (database, admin, schema) = test_database().await;
     let read = || async { sqlx::query_scalar::<_, SyncGeneration>("SELECT generation FROM sync_history").fetch_one(database.pool()).await.unwrap() };
     let initial = read().await;
     verify_schema(&database).await.unwrap();
-    upgrade_existing(&database).await.unwrap();
     assert_eq!(read().await, initial);
     let replacement = rotate_sync_generation(&database).await.unwrap();
     verify_schema(&database).await.unwrap();
-    upgrade_existing(&database).await.unwrap();
     assert_eq!(read().await, replacement);
-
-    // Version 10 has every current domain table except the history singleton.
-    sqlx::raw_sql("DROP TABLE sync_history; ALTER TABLE bokheim_schema_version DROP CONSTRAINT bokheim_schema_version_version_check; UPDATE bokheim_schema_version SET version=10; ALTER TABLE bokheim_schema_version ADD CONSTRAINT bokheim_schema_version_version_check CHECK(version=10);").execute(database.pool()).await.unwrap();
-    sqlx::query("INSERT INTO users(id) VALUES('migration-user')").execute(database.pool()).await.unwrap();
-    upgrade_existing(&database).await.unwrap();
-    let migrated = read().await;
-    assert!(!migrated.is_nil());
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users WHERE id='migration-user'").fetch_one(database.pool()).await.unwrap(), 1);
-    upgrade_existing(&database).await.unwrap();
-    assert_eq!(read().await, migrated);
     cleanup(database, admin, schema).await;
 }

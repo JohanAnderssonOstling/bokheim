@@ -11,7 +11,6 @@ pub(crate) struct BrowseOptions {
     pub book_sort: BrowseBookSort,
     pub downloaded_only: bool,
     pub hide_finished: bool,
-    pub include_direct_child_books: bool,
 }
 
 impl BrowseOptions {
@@ -20,7 +19,9 @@ impl BrowseOptions {
     }
     pub fn from_query(query: &LibraryBrowseQuery, downloaded_only: bool) -> Self {
         Self {
-            search: book_model::normalize_search_text(&query.search),
+            // FTS normalizes both sides with its own tokenizer. NFKD here
+            // would change scripts such as Hangul without changing the index.
+            search: if matches!(query.location, library_model::BrowseLocation::TextSearch(_)) { query.search.trim().to_owned() } else { book_model::normalize_search_text(&query.search) },
             file_types: if query.file_types.is_empty() || query.file_types.contains(&LibraryFileTypeFilter::All) { 0 } else { query.file_types.iter().fold(0, |mask, filter| mask | file_type_query_value(*filter)) },
             languages: {
                 let mut languages = query.languages.iter().map(|language| base_language(language)).filter(|language| !language.is_empty()).collect::<Vec<_>>();
@@ -32,7 +33,6 @@ impl BrowseOptions {
             book_sort: query.book_sort,
             downloaded_only,
             hide_finished: query.hide_finished,
-            include_direct_child_books: query.include_direct_child_books,
         }
     }
 }
@@ -41,7 +41,7 @@ impl BrowseOptions {
 pub(crate) fn file_type_query_value(filter: LibraryFileTypeFilter) -> i32 {
     match filter {
         LibraryFileTypeFilter::All => 0,
-        LibraryFileTypeFilter::Book => BookFormat::Epub as i32 | BookFormat::Mobi as i32,
+        LibraryFileTypeFilter::Book => BookFormat::Epub as i32 | BookFormat::Mobi as i32 | BookFormat::Fb2 as i32 | BookFormat::Cbz as i32,
         LibraryFileTypeFilter::Pdf => BookFormat::Pdf as i32,
         LibraryFileTypeFilter::Audiobook => BookFormat::M4b as i32 | BookFormat::Mp3Folder as i32,
     }

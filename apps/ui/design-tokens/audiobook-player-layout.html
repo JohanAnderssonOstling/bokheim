@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bokheim · Audiobook player layout · Desktop and mobile</title>
+<style>
+@font-face{font-family:Raleway;src:url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf')}
+@font-face{font-family:Raleway;src:url('../../desktop-gpui/assets/fonts/Raleway-Bold.ttf');font-weight:700}
+@font-face{font-family:Bodoni;src:url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf')}
+*{box-sizing:border-box}
+:root{color-scheme:light;--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--rule:#c5bdac;--accent:#466853;--accent-ink:#fffdfa;--hover:#46685314}
+body{margin:0;background:#eae5dc;color:var(--ink);font:16px/1.45 Raleway,sans-serif}
+body.dark{color-scheme:dark;--paper:#1e1c18;--ink:#efe6d0;--muted:#a69c86;--rule:#4e4334;--accent:#d3b271;--accent-ink:#11100d;--hover:#d3b27114;background:#12110f}
+button{font:inherit;color:inherit;cursor:pointer;background:none;border:0}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}
+main{max-width:1580px;margin:auto;padding:28px 32px 36px}
+.review-header{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:28px}
+h1{font:400 34px/1.2 Bodoni,Georgia,serif;margin:0 0 7px}
+.review-header p{font-size:13px;color:var(--muted);margin:0}
+.theme-toggle{border:1px solid var(--rule);padding:8px 13px;white-space:nowrap}
+.examples{display:grid;grid-template-columns:minmax(680px,1fr) 390px;gap:30px;align-items:start}
+figure{margin:0;min-width:0}
+figcaption{display:flex;justify-content:space-between;gap:16px;color:var(--muted);font-size:13px;margin-bottom:12px}
+figcaption strong{font-weight:700;color:var(--ink)}
+.app{background:var(--paper);border:1px solid var(--rule);height:790px;overflow:hidden;display:flex;flex-direction:column}
+.app-header{display:flex;align-items:center;gap:24px;padding:18px 24px;border-bottom:1px solid var(--rule);flex:none}
+.wordmark{font:28px/1 Bodoni,Georgia,serif}.crumb{font-size:14px;color:var(--muted)}
+.desktop-body{display:grid;grid-template-columns:240px minmax(0,1fr);flex:1;min-height:0}
+.book{padding:28px 24px;border-right:1px solid var(--rule)}
+.cover{aspect-ratio:1;background:#183e33;color:#e9dfb8;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;outline:1px solid #e9dfb854;outline-offset:-10px;padding:22px}
+.cover small{font-size:9px;letter-spacing:.12em;margin-bottom:14px}.cover strong{font:30px/.98 Bodoni,Georgia,serif}.cover em{font-size:10px;margin-top:20px}
+.book h2{font:24px/1.15 Bodoni,Georgia,serif;margin:22px 0 9px}.book p{font-size:13px;color:var(--muted);margin:5px 0}
+.book .length{padding-top:16px;margin-top:18px;border-top:1px solid var(--rule)}
+.chapter-panel{display:flex;flex-direction:column;min-width:0;min-height:0;padding:26px 24px 0}
+.chapter-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px;flex:none}
+.chapter-heading h2{font:26px/1.2 Bodoni,Georgia,serif;margin:0}.count{font:13px Raleway,sans-serif;color:var(--muted);margin-left:9px}
+.reset{font-size:23px;width:32px;height:32px}.reset:hover{background:var(--hover)}
+.chapter-columns{display:flex;align-items:center;gap:4px;padding:8px;border-top:1px solid var(--rule);border-bottom:1px solid color-mix(in srgb,var(--rule) 45%,transparent);color:var(--muted)}
+.chapter-list{overflow:auto;scrollbar-width:thin;min-height:0;flex:1}
+.chapter-row{display:flex;align-items:center;gap:4px;width:100%;min-height:36px;padding:8px;text-align:left;border-bottom:1px solid color-mix(in srgb,var(--rule) 45%,transparent)}
+.chapter-row:hover{background:var(--hover)}.chapter-row[aria-current=true]{background:var(--accent);color:var(--accent-ink)}
+.chapter-row[aria-current=true]:hover{filter:brightness(.96)}.chapter-row.read{color:var(--muted)}
+.chapter-copy{flex:1;min-width:0}.chapter-title{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;font-size:16px;line-height:1.4}
+.chapter-timing{display:contents;color:var(--muted)}
+.chapter-timing span,.chapter-columns>span:not(.chapter-copy):not(.read-status){width:5.125rem;flex:none;text-align:right;white-space:nowrap;font-size:14px;font-variant-numeric:tabular-nums}.chapter-row[aria-current=true] .chapter-timing{color:var(--accent-ink)}
+.read-status{width:32px;flex:none;text-align:center;font-size:17px}
+.mini-player{display:flex;align-items:center;gap:16px;padding:14px 24px;border-top:1px solid var(--rule);font-size:13px;flex:none}
+.mini-player .copy{flex:1;min-width:0}.mini-player small{display:block;color:var(--muted);margin-top:3px}.play{width:36px;height:36px;display:grid;place-items:center;border-radius:50%;background:var(--accent);color:var(--accent-ink);font-size:15px}
+.mobile .app{height:790px}.mobile .app-header{padding:17px 16px;justify-content:space-between}.mobile .app-header h2{font:25px/1.1 Bodoni,Georgia,serif;margin:0}.close{font-size:25px;width:32px;height:32px}
+.mobile .book-title{padding:15px 16px 0;margin:0;font-size:14px;color:var(--muted)}
+.mobile .chapter-panel{padding:17px 16px 0}.mobile .chapter-heading{margin-bottom:12px}.mobile .chapter-heading h2{font:14px Raleway,sans-serif;color:var(--muted)}
+.mobile .mini-player{padding:12px 16px}.mobile .chapter-row{padding-top:12px;padding-bottom:12px}
+.note{color:var(--muted);font-size:13px;margin:16px 0 0;max-width:850px}
+@media(max-width:1150px){.examples{grid-template-columns:1fr}.mobile{width:min(390px,100%)}.desktop{min-width:680px}.examples{overflow-x:auto}}
+@media(max-width:650px){main{padding:20px 12px}.review-header{align-items:flex-start}h1{font-size:27px}.theme-toggle{font-size:13px}}
+
+.desktop-body{grid-template-columns:360px minmax(0,1fr)}
+.app{position:relative;height:840px}
+.book{display:flex;flex-direction:column;min-height:0;overflow:auto;padding:24px;align-items:stretch;text-align:center}
+.book .cover{width:264px;max-width:100%;align-self:center;flex:none}.cover strong{font-size:40px}
+.book h2{font-size:25px;margin-top:20px}.book .player{margin-top:auto;padding-top:26px}
+.player{width:100%;min-width:0;flex:none}.chapter-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;text-align:center;margin:0;color:var(--ink)}
+.player-times{display:flex;align-items:baseline;gap:8px;justify-content:space-between;color:var(--muted);font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums}
+.scrub{appearance:none;display:block;background:transparent;width:100%;height:24px;margin:0;cursor:pointer;accent-color:var(--accent)}
+.scrub::-moz-range-track{height:4px;background:var(--rule)}.scrub::-moz-range-progress{height:4px;background:var(--accent)}.scrub::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:var(--accent)}
+.scrub::-webkit-slider-runnable-track{height:4px;background:var(--rule)}.scrub::-webkit-slider-thumb{appearance:none;width:14px;height:14px;background:var(--accent);border-radius:50%;margin-top:-5px}
+.transport{display:flex;align-items:center;justify-content:space-between;margin-top:2px;gap:0}
+.transport button{display:grid;place-items:center;width:40px;height:40px;padding:0;flex:none}
+.transport .play{width:64px;height:64px;border-radius:50%;background:var(--accent);color:var(--accent-ink)}
+.control-icon{display:block;width:24px;height:24px;background:currentColor;mask:var(--icon) center / contain no-repeat}
+.transport .skip .control-icon{width:28px;height:28px}.transport .chapter-skip{color:var(--muted)}
+.play-symbol{width:18px;height:22px;background:currentColor;clip-path:polygon(0 0,100% 50%,0 100%);margin-left:3px}
+.play[aria-pressed=true] .play-symbol{clip-path:polygon(0 0,35% 0,35% 100%,0 100%,0 0,65% 0,100% 0,100% 100%,65% 100%,65% 0);margin-left:0}
+.player-tools{display:flex;align-items:center;justify-content:space-evenly;margin-top:24px}
+.player-tools button{width:40px;height:40px;padding:0;display:grid;place-items:center;font-size:16px;flex:none}.player-tools button:hover,.transport button:not(.play):hover{background:var(--hover)}
+.player-tools .control-icon{width:23px;height:23px}.player-tools .active{color:var(--accent)}
+.phone-body{padding:18px 16px 20px;display:flex;flex-direction:column;flex:1;min-height:0}
+.phone-introduction{text-align:center;min-height:0;overflow:auto;flex:1}.phone-introduction .cover{width:248px;max-width:100%;margin:auto}
+.phone-introduction h2{font:28px/1.15 Bodoni,Georgia,serif;margin:18px 0 8px}.phone-introduction p{font-size:14px;color:var(--muted);margin:5px 0}
+.mobile .player{padding-top:22px}.mobile .transport .play{width:72px;height:72px}.mobile .transport .skip .control-icon{width:32px;height:32px}
+.mobile .app{height:840px}.mobile .app-header{padding:15px 16px;justify-content:space-between}.mobile .app-header h2{font:24px/1.1 Bodoni,Georgia,serif;margin:0}
+.mobile .app-header button{width:32px;height:32px;display:grid;place-items:center}
+.sheet{position:absolute;z-index:3;top:72px;bottom:0;right:0;width:min(480px,100%);background:var(--paper);border:1px solid var(--rule);display:flex;flex-direction:column;box-shadow:-12px 0 35px #0001}
+.sheet[hidden]{display:none}.sheet>header{display:flex;align-items:center;justify-content:space-between;padding:16px}.sheet h2{font:25px Bodoni,Georgia,serif;margin:0}.sheet>header button{width:40px;height:40px;font-size:24px}.sheet .chapter-panel{padding-top:0;flex:1}.description-copy{padding:0 22px;overflow:auto;font-size:16px;line-height:1.7}
+.mockup-note{font-size:13px;color:var(--muted);margin:16px 0 0}
+</style>
+</head>
+<body><main><header class="review-header"><div><h1>Audiobook player</h1><p>HTML design mockup · Desktop and mobile · Simulated playback, no audio</p></div><button class="theme-toggle" aria-pressed="false">Dark mode</button></header><div class="examples">
+<figure class="desktop"><figcaption><strong>Desktop</strong><span>Player and chapters</span></figcaption><section class="app"><header class="app-header"><span class="wordmark">bokheim</span><span class="crumb">My library / The Secret Garden</span></header><div class="desktop-body"><aside class="book"><div class="cover"><small>FRANCES HODGSON BURNETT</small><strong>The<br>Secret<br>Garden</strong><em>UNABRIDGED AUDIOBOOK</em></div><h2>The Secret Garden</h2><p>Frances Hodgson Burnett</p><p>Narrated by Karen Savage</p><section class="player" aria-label="Audiobook playback">
+<div class="player-times"><span data-elapsed>14 m</span><span class="chapter-name">Martha</span><span data-remaining>−25 m</span></div>
+<input class="scrub" type="range" min="0" max="2364" value="851" aria-label="Chapter playback position">
+<div class="transport" aria-label="Playback controls"><button class="chapter-skip" data-previous title="Previous chapter" aria-label="Previous chapter"><span class="control-icon" style="--icon:url(assets/phosphor-light/caret-left.svg)" aria-hidden="true"></span></button><button class="skip" data-back title="Back 15 seconds" aria-label="Back 15 seconds"><span class="control-icon" style="--icon:url(assets/icon/skip-back-15.svg)" aria-hidden="true"></span></button><button class="play" aria-label="Play preview" aria-pressed="false"><span class="play-symbol" aria-hidden="true"></span></button><button class="skip" data-forward title="Forward 30 seconds" aria-label="Forward 30 seconds"><span class="control-icon" style="--icon:url(assets/icon/skip-forward-30.svg)" aria-hidden="true"></span></button><button class="chapter-skip" data-next title="Next chapter" aria-label="Next chapter"><span class="control-icon" style="--icon:url(assets/phosphor-light/caret-right.svg)" aria-hidden="true"></span></button></div>
+<div class="player-tools" aria-label="Playback options and book information"><button data-speed title="Playback speed" aria-label="Playback speed">1×</button><button data-sleep title="Sleep timer" aria-label="Sleep timer"><span class="control-icon" style="--icon:url(assets/phosphor-light/alarm.svg)" aria-hidden="true"></span></button><button data-contents title="Contents" aria-label="Contents"><span class="control-icon" style="--icon:url(assets/phosphor-light/list.svg)" aria-hidden="true"></span></button><button data-description title="Description" aria-label="Description"><span class="control-icon" style="--icon:url(assets/phosphor-light/info.svg)" aria-hidden="true"></span></button></div></section></aside><section class="chapter-panel"><header class="chapter-heading"><h2>Chapters <span class="count">27</span></h2></header><div class="chapter-columns"><span class="chapter-copy"></span><span>Start</span><span>Duration</span><span class="read-status"></span></div><div class="chapter-list" aria-label="Chapters"></div></section></div><section class="sheet" data-sheet="contents" hidden><header><h2>Chapters</h2><button data-dismiss aria-label="Close chapters">×</button></header><section class="chapter-panel"><header class="chapter-heading"><h2>Chapters <span class="count">27</span></h2></header><div class="chapter-columns"><span class="chapter-copy"></span><span>Start</span><span>Duration</span><span class="read-status"></span></div><div class="chapter-list" aria-label="Chapters"></div></section></section><section class="sheet" data-sheet="description" hidden><header><h2>Description</h2><button data-dismiss aria-label="Close description">×</button></header><div class="description-copy"><p>When Mary Lennox arrives at her uncle’s house on the Yorkshire moors, she discovers a garden locked away for ten years.</p><p>With a robin for a guide and an unexpected friendship, Mary begins to discover what can grow when something forgotten is given a little care.</p></div></section></section></figure>
+<figure class="mobile"><figcaption><strong>Mobile</strong><span>390 px · Full player</span></figcaption><section class="app"><header class="app-header"><button title="Return to library" aria-label="Return to library"><span class="control-icon" style="--icon:url(assets/phosphor-light/caret-left.svg)" aria-hidden="true"></span></button><h2>Now playing</h2><span style="width:32px"></span></header><div class="phone-body"><div class="phone-introduction"><div class="cover"><small>FRANCES HODGSON BURNETT</small><strong>The<br>Secret<br>Garden</strong><em>UNABRIDGED AUDIOBOOK</em></div><h2>The Secret Garden</h2><p>Frances Hodgson Burnett</p><p>Narrated by Karen Savage</p></div><section class="player" aria-label="Audiobook playback">
+<div class="player-times"><span data-elapsed>14 m</span><span class="chapter-name">Martha</span><span data-remaining>−25 m</span></div>
+<input class="scrub" type="range" min="0" max="2364" value="851" aria-label="Chapter playback position">
+<div class="transport" aria-label="Playback controls"><button class="chapter-skip" data-previous title="Previous chapter" aria-label="Previous chapter"><span class="control-icon" style="--icon:url(assets/phosphor-light/caret-left.svg)" aria-hidden="true"></span></button><button class="skip" data-back title="Back 15 seconds" aria-label="Back 15 seconds"><span class="control-icon" style="--icon:url(assets/icon/skip-back-15.svg)" aria-hidden="true"></span></button><button class="play" aria-label="Play preview" aria-pressed="false"><span class="play-symbol" aria-hidden="true"></span></button><button class="skip" data-forward title="Forward 30 seconds" aria-label="Forward 30 seconds"><span class="control-icon" style="--icon:url(assets/icon/skip-forward-30.svg)" aria-hidden="true"></span></button><button class="chapter-skip" data-next title="Next chapter" aria-label="Next chapter"><span class="control-icon" style="--icon:url(assets/phosphor-light/caret-right.svg)" aria-hidden="true"></span></button></div>
+<div class="player-tools" aria-label="Playback options and book information"><button data-speed title="Playback speed" aria-label="Playback speed">1×</button><button data-sleep title="Sleep timer" aria-label="Sleep timer"><span class="control-icon" style="--icon:url(assets/phosphor-light/alarm.svg)" aria-hidden="true"></span></button><button data-contents title="Contents" aria-label="Contents"><span class="control-icon" style="--icon:url(assets/phosphor-light/list.svg)" aria-hidden="true"></span></button><button data-description title="Description" aria-label="Description"><span class="control-icon" style="--icon:url(assets/phosphor-light/info.svg)" aria-hidden="true"></span></button><button data-close-player title="Close player" aria-label="Close player"><span class="control-icon" style="--icon:url(assets/phosphor-light/x.svg)" aria-hidden="true"></span></button></div></section></div><section class="sheet" data-sheet="contents" hidden><header><h2>Chapters</h2><button data-dismiss aria-label="Close chapters">×</button></header><section class="chapter-panel"><header class="chapter-heading"><h2>Chapters <span class="count">27</span></h2></header><div class="chapter-columns"><span class="chapter-copy"></span><span>Start</span><span>Duration</span><span class="read-status"></span></div><div class="chapter-list" aria-label="Chapters"></div></section></section><section class="sheet" data-sheet="description" hidden><header><h2>Description</h2><button data-dismiss aria-label="Close description">×</button></header><div class="description-copy"><p>When Mary Lennox arrives at her uncle’s house on the Yorkshire moors, she discovers a garden locked away for ten years.</p><p>With a robin for a guide and an unexpected friendship, Mary begins to discover what can grow when something forgotten is given a little care.</p></div></section></section></figure>
+</div><p class="mockup-note">Chapter times above the progress bar. Main playback controls immediately below it. Speed, sleep timer, Contents and Description share one lower row.</p></main>
+<script>
+const chapters=[['There Is No One Left',1218],['Mistress Mary Quite Contrary',1641],['Across the Moor',1320],['Martha',2364],['The Cry in the Corridor',1094],['“There Was Some One Crying—There Was!”',1495],['The Key of the Garden',1127],['The Robin Who Showed the Way',1340],['The Strangest House Any One Ever Lived In',1499],['Dickon',1858],['The Nest of the Missel Thrush',1528],['“Might I Have a Bit of Earth?”',1366],['“I Am Colin”',1602],['A Young Rajah',1398],['Nest Building',1247],['“I Won’t!” Said Mary',1026],['A Tantrum',1270],['“Tha’ Munnot Waste No Time”',1263],['“It Has Come!”',1055],['“I Shall Live Forever—and Ever—and Ever!”',1308],['Ben Weatherstaff',1256],['When the Sun Went Down',1035],['Magic',1587],['“Let Them Laugh”',1239],['The Curtain',980],['“It’s Mother!”',1224],['In the Garden',1743]];
+
+let active=3,position=851,playing=false,rate=1,sleep=0,dragging=false;
+const read=new Set([0,1,2]);
+function time(seconds){seconds=Math.floor(seconds);const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=String(seconds%60).padStart(2,'0');return h?`${h}:${String(m).padStart(2,'0')}:${s}`:`${m}:${s}`}
+function minutes(seconds){const m=Math.floor(seconds/60);return m>=60?`${Math.floor(m/60)} h ${m%60} m`:`${m} m`}
+function update(){document.querySelectorAll('.chapter-name').forEach(e=>e.textContent=chapters[active][0]);document.querySelectorAll('[data-elapsed]').forEach(e=>e.textContent=dragging?time(position):minutes(position));document.querySelectorAll('[data-remaining]').forEach(e=>e.textContent='−'+(dragging?time(chapters[active][1]-position):minutes(chapters[active][1]-position)));document.querySelectorAll('.scrub').forEach(e=>{e.max=chapters[active][1];e.value=position;e.setAttribute('aria-valuetext',`${time(position)} of ${time(chapters[active][1])}`)});document.querySelectorAll('.play').forEach(e=>{e.setAttribute('aria-pressed',String(playing));e.setAttribute('aria-label',playing?'Pause preview':'Play preview')});document.querySelectorAll('.chapter-row').forEach(e=>e.setAttribute('aria-current',String(Number(e.dataset.index)===active)));}
+function select(index){active=index;position=0;update();document.querySelectorAll('.sheet').forEach(e=>e.hidden=true)}
+for(const list of document.querySelectorAll('.chapter-list')){let start=0;chapters.forEach(([title,duration],index)=>{const row=document.createElement('button');row.className=`chapter-row${read.has(index)?' read':''}`;row.dataset.index=index;const copy=document.createElement('span');copy.className='chapter-copy';const name=document.createElement('span');name.className='chapter-title';name.textContent=title;copy.append(name);const timing=document.createElement('span');timing.className='chapter-timing';for(const value of [time(start),time(duration)]){const field=document.createElement('span');field.textContent=value;timing.append(field)}const status=document.createElement('span');status.className='read-status';status.textContent=read.has(index)?'✓':'';row.append(copy,timing,status);row.addEventListener('click',()=>select(index));list.append(row);start+=duration})}
+for(const button of document.querySelectorAll('.play'))button.addEventListener('click',()=>{playing=!playing;update()});
+for(const slider of document.querySelectorAll('.scrub')){slider.addEventListener('input',()=>{position=Number(slider.value);dragging=true;update()});slider.addEventListener('change',()=>{dragging=false;update()})}
+for(const [selector,delta] of [['[data-back]',-15],['[data-forward]',30]])for(const button of document.querySelectorAll(selector))button.addEventListener('click',()=>{position=Math.max(0,Math.min(chapters[active][1],position+delta));update()});
+for(const button of document.querySelectorAll('[data-previous]'))button.addEventListener('click',()=>select(Math.max(0,active-1)));
+for(const button of document.querySelectorAll('[data-next]'))button.addEventListener('click',()=>select(Math.min(chapters.length-1,active+1)));
+for(const button of document.querySelectorAll('[data-speed]'))button.addEventListener('click',()=>{rate=rate>=2?.75:rate+.25;document.querySelectorAll('[data-speed]').forEach(e=>{e.textContent=`${rate}×`;e.classList.toggle('active',rate!==1)})});
+for(const button of document.querySelectorAll('[data-sleep]'))button.addEventListener('click',()=>{sleep=sleep===0?15:sleep===15?30:0;document.querySelectorAll('[data-sleep]').forEach(e=>{e.innerHTML=sleep?`${sleep} m`:'<span class="control-icon" style="--icon:url(assets/phosphor-light/alarm.svg)" aria-hidden="true"></span>';e.classList.toggle('active',sleep!==0)})});
+for(const kind of ['contents','description'])for(const button of document.querySelectorAll(`[data-${kind}]`))button.addEventListener('click',()=>button.closest('.app').querySelector(`[data-sheet=${kind}]`).hidden=false);
+for(const button of document.querySelectorAll('[data-dismiss]'))button.addEventListener('click',()=>button.closest('.sheet').hidden=true);
+for(const button of document.querySelectorAll('[data-close-player]'))button.addEventListener('click',()=>{playing=false;update()});
+document.querySelector('.theme-toggle').addEventListener('click',event=>{const dark=document.body.classList.toggle('dark');event.currentTarget.textContent=dark?'Light mode':'Dark mode';event.currentTarget.setAttribute('aria-pressed',String(dark))});
+setInterval(()=>{if(playing&&!dragging){position=Math.min(position+rate,chapters[active][1]);if(position===chapters[active][1])playing=false;update()}},1000);
+update();
+
+</script>
+</body>
+</html>

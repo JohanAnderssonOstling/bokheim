@@ -1,6 +1,6 @@
 //! Pull-page commit: wire decoding plus one atomic apply transaction.
 
-use crate::query_methods::query_rows;
+use crate::query_methods::{query_last, query_rows};
 pub(crate) use crate::sync::{SyncApplySql, invalid_integer_column, nonnegative_u64, parse_uuid_column, read_pull_cursor, storage_i64, write_pull_cursor};
 #[cfg(test)]
 pub use crate::transactions::commit;
@@ -28,12 +28,7 @@ impl StoredVersion {
 }
 
 pub(crate) fn read_version(conn: &rusqlite::Connection, kind: &str, key: &StateKey, subkey: &str) -> Result<Option<VersionKey>, DatabaseError> {
-    let mut stored = None;
-    conn.read_sync_state_version_select(kind, key, subkey, |row| {
-        stored = StoredVersion::decode(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, [0, 1, 2, 3])?.map(|version| version.0);
-        Ok(())
-    })?;
-    Ok(stored)
+    Ok(query_last(|read| conn.read_sync_state_version_select(kind, key, subkey, read), |row| StoredVersion::decode(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, [0, 1, 2, 3]))?.flatten().map(|version| version.0))
 }
 
 /// Mutable registers carry an ordered version; immutable records retain an
@@ -43,12 +38,6 @@ pub(crate) fn publication_version(conn: &rusqlite::Connection, kind: &str, key: 
         return records::publication_version(conn, kind, key, subkey);
     }
     read_version(conn, kind, key, subkey)
-}
-
-/// Decoded wire values and state identities only. Never snapshots database
-/// state: winning versions and lifecycle checks still run under the writer.
-pub(crate) struct PreparedRemoteChanges {
-    pub(crate) changes: Vec<sync_common::Versioned<LibraryStateEntry>>,
 }
 
 pub(crate) fn sync_state_identity(body: &LibraryStateEntry) -> (&'static str, StateKey, String) {
@@ -82,28 +71,7 @@ pub(crate) mod registers;
 
 /// Replace a book's complete local subject projection inside the caller's transaction.
 pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: i64, projected: &PreparedBook) -> Result<(), DatabaseError> {
-    let mut concepts = projected.concepts.clone();
-    // Read retained manual identities before deleting their old evidence.
-    // Their source paths may have changed after a taxonomy rename/reparenting.
-    for (index, code) in projected.subject_codes.iter().enumerate() {
-        if code.system_id() != subject_projection::UNIFIED_SYSTEM_ID {
-            continue;
-        }
-        let mut retained = Vec::new();
-        for position in code.evidence_positions() {
-            retained.extend(query_rows(|callback| tx.subject_projection_retained_manual_concepts(book_id, *position as i64, code.code(), callback), |row| row.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?);
-        }
-        if !retained.is_empty() {
-            concepts.retain(|(i, _)| *i != index);
-            concepts.extend(retained.into_iter().map(|concept| (index, concept)));
-        }
-    }
-
-    // Retained manual identities may have moved since the initial projection.
-    let excluded = projected.subject_codes.iter().flat_map(|code| code.excluded_concept_ids.iter().copied()).collect::<BTreeSet<_>>();
-    concepts.retain(|(_, concept)| !excluded.contains(concept));
-    let retained = most_specific_concept_ids(concepts.iter().map(|(_, concept)| *concept));
-    concepts.retain(|(_, concept)| retained.contains(concept));
+    let concepts = retained_subject_concepts(tx, book_id, projected)?;
 
     tx.subject_projection_clear_subjects(book_id)?;
     // Deleting assignments also deletes their evidence through the foreign key.
@@ -121,6 +89,35 @@ pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: 
     Ok(())
 }
 
+/// Resolve manual identities while their old evidence is still present. Both
+/// single-book edits and batched projections use the same retention rules.
+pub(crate) fn retained_subject_concepts(tx: &rusqlite::Transaction<'_>, book_id: i64, projected: &PreparedBook) -> Result<Vec<(usize, i64)>, DatabaseError> {
+    let mut concepts = projected.concepts.clone();
+    // Read retained manual identities before deleting their old evidence.
+    // Their source paths may have changed after a taxonomy rename/reparenting.
+    for (index, code) in projected.subject_codes.iter().enumerate() {
+        if code.system_id() != subject_projection::UNIFIED_SYSTEM_ID {
+            continue;
+        }
+        let mut retained = Vec::new();
+        for position in code.evidence_positions() {
+            retained.extend(query_rows(|callback| tx.subject_projection_retained_manual_concepts(book_id, *position as i64, code.code(), callback), |row| row.get::<_, i64>(0))?);
+        }
+        if !retained.is_empty() {
+            concepts.retain(|(i, _)| *i != index);
+            concepts.extend(retained.into_iter().map(|concept| (index, concept)));
+        }
+    }
+
+    // Retained manual identities may have moved since the initial projection.
+    let excluded = projected.subject_codes.iter().flat_map(|code| code.excluded_concept_ids.iter().copied()).collect::<BTreeSet<_>>();
+    concepts.retain(|(_, concept)| !excluded.contains(concept));
+    let retained = most_specific_concept_ids(concepts.iter().map(|(_, concept)| *concept));
+    concepts.retain(|(_, concept)| retained.contains(concept));
+
+    Ok(concepts)
+}
+
 include_sqlite_sql::include_sql!("src/sql/subject_projection.sql");
 
 #[cfg(test)]
@@ -133,7 +130,7 @@ mod subject_projection_tests {
     fn database() -> (Database, i64, i64) {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let hash = sync_common::ContentHash::new(&"d".repeat(64));
+        let hash = sync_common::BookId::new(&"d".repeat(64));
         db.connection.fixtures_insert_book(&hash).unwrap();
         let book = db.connection.fixtures_read_book_row_id(&hash, |row| row.get(0)).unwrap();
         let concept = db.connection.fixtures_first_curated_concept(|row| row.get(0)).unwrap();
@@ -202,7 +199,7 @@ mod subject_projection_tests {
         let projected = project_book(&metadata).unwrap();
         assert_eq!(projected.metadata.subjects, metadata.subjects);
         db.write(|tx| write_subject_projection(tx, book, &projected)).unwrap();
-        let ids = query_rows(|callback| db.connection.fixtures_subject_projection_concepts(book, callback), |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let ids = query_rows(|callback| db.connection.fixtures_subject_projection_concepts(book, callback), |row| row.get::<_, i64>(0)).unwrap();
         assert_eq!(ids, [3915, 4034]);
         assert_eq!(counts(&db, book), (3, 2, 2));
     }
@@ -227,7 +224,7 @@ mod subject_projection_tests {
         };
         let projected = project_book(&metadata).unwrap();
         db.write(|tx| write_subject_projection(tx, book, &projected)).unwrap();
-        let ids = query_rows(|callback| db.connection.fixtures_subject_projection_concepts(book, callback), |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let ids = query_rows(|callback| db.connection.fixtures_subject_projection_concepts(book, callback), |row| row.get::<_, i64>(0)).unwrap();
         assert_eq!(ids, [4034]);
         assert_eq!(counts(&db, book), (3, 1, 1));
     }

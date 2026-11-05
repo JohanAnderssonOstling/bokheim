@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bokheim · Reader dictionary preview</title>
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Bold.ttf');font-weight:700}
+@font-face{font-family:Jost;src:url('../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf')}
+:root{color-scheme:light;--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--accent:#466853;--border:#8c7f64;--rule:#c5bdac;--hover:#46685314}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:18px/1.5 Garamond,Georgia,serif}button,textarea{font:inherit;color:inherit}button{background:transparent;border:1px solid var(--border);border-radius:0;padding:5px 12px;cursor:pointer}button:hover{background:var(--hover)}button:focus-visible,textarea:focus-visible{outline:1px solid var(--rule);outline-offset:3px}[hidden]{display:none!important}.preview{padding:9px 20px;border-bottom:1px solid var(--rule);font:12px/1.5 Jost,sans-serif;color:var(--muted)}header{border-bottom:1px solid var(--rule);padding:14px 24px;display:flex;justify-content:space-between;align-items:center;gap:20px}.brand{font-size:25px}header>span:last-child{color:var(--muted);font-size:16px}.book{max-width:720px;margin:64px auto;padding:0 32px 80px;font-size:24px;line-height:1.65}.chapter{text-align:center;font-size:15px;letter-spacing:.12em;font-variant-caps:all-small-caps;color:var(--muted)}h1{font-size:40px;line-height:1.2;text-align:center;font-weight:400;margin:18px 0 40px}.book p{margin:0 0 22px}.word{cursor:text}.word.marked{background:#c5bdac;border-radius:2px}.word::selection{background:#c4d7c4;color:var(--ink)}.hint{font-size:14px;color:var(--muted);border-top:1px solid var(--rule);padding-top:16px;margin-top:36px}.scrim{position:fixed;inset:0;z-index:1}.overlay-surface{position:fixed;padding:16px;border:1px solid var(--rule);border-radius:0;background:var(--paper);box-shadow:0 8px 24px #0002;display:flex;flex-direction:column;font-size:16px;line-height:1.4}.overlay-surface:focus{outline:none}.popup{z-index:2;width:min(420px,calc(100vw - 24px));gap:16px;overflow:hidden}.overlay-surface button,.overlay-surface button:hover,.overlay-surface button:active{background:transparent}.popup h2{font-size:20px;font-weight:400;margin:0}.definitions{overflow:auto;min-height:0;flex:1}#definition{white-space:pre-line}.actions{display:flex;flex-wrap:wrap;gap:8px;flex:none}.selection-menu{width:min(240px,calc(100vw - 24px));padding:4px}.selection-menu .actions{flex-direction:column;gap:0}.selection-menu button{width:100%;min-height:44px;border:0;text-align:left}.note-input{width:100%;resize:vertical;min-height:72px;background:transparent;border:1px solid var(--rule);border-radius:0;padding:8px}.saved{color:var(--accent);font-size:14px}.editor-label{display:block;color:var(--muted);font-size:14px;margin-bottom:5px}
+@media(max-width:540px){.book{margin-top:32px;font-size:21px;padding:0 20px 40px}h1{font-size:32px}header{padding:12px 20px}}
+</style>
+<style>
+.preview{position:relative;z-index:5;background:var(--paper);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.examples{display:flex;gap:6px;flex-wrap:wrap}.examples button{font:12px/1.5 Jost,sans-serif;padding:4px 9px}.examples button[aria-pressed=true]{border-color:var(--rule);text-decoration:underline}.lookup-heading{display:flex;align-items:center;gap:8px}.lookup-heading h2{flex:1;min-width:0}.lookup-heading h2 a{color:inherit;text-decoration:none}.lookup-heading h2 a:hover{text-decoration:underline}.info-button{display:grid;place-items:center;flex:none;border:0;border-radius:0;padding:6px;width:32px;height:32px}.info-popup{z-index:4;width:min(260px,calc(100vw - 48px));gap:8px}.info-popup h3{font-size:20px;font-weight:400;margin:0}.info-popup p{margin:0}.info-popup a{color:inherit}a:focus-visible{outline:1px solid var(--rule);outline-offset:3px}
+</style>
+<div class="preview"><span>Reader UI preview · Sample content · Changes stay in this tab</span><nav class="examples" aria-label="Preview states"><button data-example="selection">Selection menu</button><button data-example="dictionary">Dictionary match</button><button data-example="dictionaries">Multiple dictionary matches</button><button data-example="wikipedia">Wikipedia summary</button><button data-example="choices">Multiple articles</button><button data-example="silent">No result</button></nav></div>
+<header><span class="brand">Bokheim</span><span>A quiet afternoon · Chapter three</span></header>
+<main class="book" id="book" tabindex="-1">
+<div class="chapter">Chapter three</div><h1>The shape of a<br>quiet afternoon</h1>
+<p>There was a certain hour when the light settled on the windowsill and the town seemed to pause. Beyond the garden, the path continued between the trees, turning slowly out of sight.</p>
+<p>She had brought a book, although she had not yet opened it. The river was close enough to hear, a steady sound beneath the movement of the leaves.</p>
+<p>The book lay open at a drawing of Earth and Mercury. She followed the thin lines around the planets, then looked up at the afternoon sky.</p>
+<p>When she finally turned the first page, the afternoon had become a place of its own. The words and the garden belonged to the same quiet silence.</p>
+<div class="hint">Double-click selects a word; a second double-click selects its paragraph. Right-click a word when no text is selected to look it up. Right-click selected text to open the selection menu. Wikipedia appears only when the dictionary has no match. Press Escape or click outside to return to the book.</div>
+</main>
+<div id="scrim" class="scrim" hidden></div>
+<section id="selection-menu" class="overlay-surface popup selection-menu" role="dialog" aria-label="Selected text actions" hidden><div class="actions"><button id="selection-lookup">Lookup</button><button id="highlight">Highlight</button><button id="copy-markdown">Copy Markdown</button><button id="copy-link">Copy link</button></div></section>
+<section id="lookup" class="overlay-surface popup" role="dialog" aria-labelledby="lookup-word" tabindex="-1" hidden>
+<div id="lookup-pager" class="result-pager" hidden><button id="lookup-previous" aria-label="Previous result"><img src="../../../vendor/gpui-component/crates/assets/assets/icons/chevron-left.svg" width="20" height="20" alt=""></button><span id="lookup-counter" aria-live="polite"></span><button id="lookup-next" aria-label="Next result"><img src="../../../vendor/gpui-component/crates/assets/assets/icons/chevron-right.svg" width="20" height="20" alt=""></button></div>
+<div class="lookup-heading"><h2 id="lookup-word"></h2><button id="wikipedia-info" class="info-button" aria-label="Source and license" aria-expanded="false" aria-controls="wikipedia-attribution" hidden><img src="../../../vendor/gpui-component/crates/assets/assets/icons/info.svg" width="20" height="20" alt=""></button></div>
+<div class="definitions"><div id="definition"></div></div>
+</section>
+<style>.result-pager{display:grid;grid-template-columns:32px 1fr 32px;align-items:center;gap:8px}.result-pager span{text-align:center;font-variant-numeric:tabular-nums}.result-pager button{display:grid;place-items:center;border:0;border-radius:0;padding:6px;width:32px;height:32px}.result-pager button:disabled{opacity:.4;cursor:default}</style>
+<aside id="wikipedia-attribution" class="overlay-surface info-popup" role="dialog" aria-labelledby="attribution-title" hidden><h3 id="attribution-title">Source and license</h3><p>Wikipedia contributors</p><a id="wikipedia-source" target="_blank" rel="noopener noreferrer">Wikipedia article</a><a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a></aside>
+<section id="editor" class="overlay-surface popup" role="dialog" aria-labelledby="editor-title" hidden>
+<h2 id="editor-title">Highlight</h2><div class="saved" role="status">Highlight saved</div>
+<div><label class="editor-label" for="note">Note</label><textarea class="note-input" id="note" placeholder="Add a note"></textarea></div>
+<div class="actions"><button id="remove">Remove highlight</button><button id="editor-close">Close</button></div>
+</section>
+<script>
+const book=document.querySelector('#book'),lookup=document.querySelector('#lookup'),editor=document.querySelector('#editor'),scrim=document.querySelector('#scrim'),selectionMenu=document.querySelector('#selection-menu');
+let selectedWord=null,selectionTarget=null,selectedRange=null,currentPopup=null,press=null,dragged=false;
+document.addEventListener('pointerdown',event=>{press=event.button===0?{x:event.clientX,y:event.clientY}:null;dragged=false},true);
+function trackMovement(event){if(press&&(Math.abs(event.clientX-press.x)>8||Math.abs(event.clientY-press.y)>8))dragged=true}
+document.addEventListener('pointermove',trackMovement,true);
+document.addEventListener('pointerup',trackMovement,true);
+document.addEventListener('pointercancel',()=>{press=null;dragged=true},true);
+const entries={quiet:'Making little or no noise; calm and free from disturbance.',afternoon:'The part of the day between noon and evening.',garden:'An area of ground used for growing flowers, fruit, or vegetables.',river:'A natural flowing stream of water.',book:'A written or printed work consisting of pages bound together.',silence:'The absence of sound or noise.',light:'The visible radiation that makes things visible.'};
+const articles={Earth:{title:'Earth',text:'Earth is the third planet from the Sun. Its surface has oceans and continents, and its atmosphere supports life.'},'Mercury (planet)':{title:'Mercury (planet)',text:'Mercury is the closest planet to the Sun. It is a small, rocky world with a heavily cratered surface.'},'Mercury (element)':{title:'Mercury (element)',text:'Mercury is a chemical element with the symbol Hg and atomic number 80. It is a metal that is liquid at ordinary room temperature.'},'Mercury (mythology)':{title:'Mercury (mythology)',text:'Mercury is a god in Roman mythology, associated with trade, travel and communication. He is often depicted as a messenger with winged sandals.'}};
+Object.assign(articles,{
+ 'Mercury (automobile)':{title:'Mercury (automobile)',text:'Mercury was an automobile brand sold by Ford Motor Company. Its cars occupied a place between the company’s Ford and Lincoln ranges, offering familiar engineering with different styling and equipment.'},
+ 'Project Mercury':{title:'Project Mercury',text:'Project Mercury was an early United States human spaceflight program. It developed a small spacecraft to carry one astronaut and helped establish the methods used for later crewed missions.'},
+ 'Mercury Records':{title:'Mercury Records',text:'Mercury Records is an American record label. Its releases have spanned popular music, jazz and other genres, with a history involving many recording artists and changes in ownership.'},
+ 'Mercury (programming language)':{title:'Mercury (programming language)',text:'Mercury is a programming language that combines logic programming with a strong type system. Programs describe relationships, while the compiler checks how information flows through those relationships.'},
+ 'Mercury Prize':{title:'Mercury Prize',text:'The Mercury Prize is an annual music award associated with albums released by British and Irish artists. A judging panel selects a shortlist and chooses a winning album.'},
+ 'Freddie Mercury':{title:'Freddie Mercury',text:'Freddie Mercury was a singer and songwriter best known as the lead vocalist of Queen. His vocal range and theatrical performances became central to the band’s public identity.'},
+ 'The Mercury News':{title:'The Mercury News',text:'The Mercury News is a newspaper based in San Jose, California. It covers local and regional reporting as well as national news, with a long connection to the surrounding Silicon Valley region.'}
+});
+const choices=[['Mercury (planet)','The planet closest to the Sun'],['Mercury (element)','Chemical element with symbol Hg'],['Mercury (mythology)','Roman god and messenger'],['Mercury (automobile)','A former American automobile brand'],['Project Mercury','An early United States human spaceflight program'],['Mercury Records','An American record label'],['Mercury (programming language)','A functional logic programming language'],['Mercury Prize','A music prize awarded in the United Kingdom'],['Freddie Mercury','A singer and songwriter, best known as the lead vocalist of Queen'],['The Mercury News','A newspaper based in San Jose, California']];
+const dictionaryExamples=[
+ {word:'light',text:'1. Visible radiation that makes things visible.\n2. A source of illumination.'},
+ {word:'light',text:'Of little weight; easy to carry.'},
+ {word:'light',text:'1. ljus (illumination)\n2. lätt (not heavy).'}
+];
+let articleHits=[],articleIndex=0,dictionaryHits=[],dictionaryIndex=0;
+function node(tag,text,className){const element=document.createElement(tag);if(text)element.textContent=text;if(className)element.className=className;return element}
+const infoButton=document.querySelector('#wikipedia-info'),infoPopup=document.querySelector('#wikipedia-attribution');
+function closeInfo(restoreFocus=false){infoPopup.hidden=true;infoButton.setAttribute('aria-expanded','false');if(restoreFocus)infoButton.focus({preventScroll:true})}
+function placeInfo(){const bounds=infoButton.getBoundingClientRect();infoPopup.style.left=Math.max(12,Math.min(bounds.right-infoPopup.offsetWidth,innerWidth-infoPopup.offsetWidth-12))+'px';infoPopup.style.top=Math.max(12,Math.min(bounds.bottom+4,innerHeight-infoPopup.offsetHeight-12))+'px'}
+infoButton.addEventListener('click',()=>{const open=infoPopup.hidden;closeInfo();if(open){infoPopup.hidden=false;infoButton.setAttribute('aria-expanded','true');placeInfo();infoPopup.querySelector('a').focus({preventScroll:true})}});
+document.addEventListener('pointerdown',event=>{if(!infoPopup.hidden&&!infoPopup.contains(event.target)&&!infoButton.contains(event.target))closeInfo()},true);
+function resetTitle(text){closeInfo();infoButton.hidden=true;document.querySelector('#lookup-word').textContent=text}
+function articleResult(article){
+ closeInfo();
+ const title=node('a',article.title);title.href='https://en.wikipedia.org/wiki/'+encodeURIComponent(article.title.replaceAll(' ','_'));title.target='_blank';title.rel='noopener noreferrer';title.title='Open article on Wikipedia';
+ document.querySelector('#lookup-word').replaceChildren(title);infoButton.hidden=false;
+ document.querySelector('#wikipedia-source').href=title.href;
+ document.querySelector('#definition').replaceChildren(node('div',article.text));
+}
+function pager(index,total){document.querySelector('#lookup-pager').hidden=total<2;document.querySelector('#lookup-counter').textContent=(index+1)+'/'+total;document.querySelector('#lookup-previous').disabled=total<2;document.querySelector('#lookup-next').disabled=total<2;document.querySelector('.definitions').scrollTop=0;if(currentPopup)place(lookup)}
+function showArticle(index){if(index<0||index>=articleHits.length)return;articleIndex=index;const [title,description]=articleHits[index];articleResult(articles[title]||{title,text:description});pager(index,articleHits.length)}
+function dictionaryResult(entry){resetTitle(entry.word);document.querySelector('#definition').textContent=entry.text}
+function showDictionary(index){if(index<0||index>=dictionaryHits.length)return;dictionaryIndex=index;dictionaryResult(dictionaryHits[index]);pager(index,dictionaryHits.length)}
+function choiceResults(){articleHits=choices;showArticle(0)}
+function navigateResult(delta){const total=dictionaryHits.length||articleHits.length;if(total<2)return;const index=((dictionaryHits.length?dictionaryIndex:articleIndex)+delta+total)%total;if(dictionaryHits.length)showDictionary(index);else showArticle(index)}
+document.querySelector('#lookup-previous').addEventListener('click',()=>navigateResult(-1));
+document.querySelector('#lookup-next').addEventListener('click',()=>navigateResult(1));
+for(const paragraph of book.querySelectorAll('p')){
+ const text=paragraph.textContent;paragraph.replaceChildren();
+ for(const token of text.split(/(\s+)/)){if(/^\s+$/.test(token)){paragraph.append(token);continue}const word=document.createElement('span');word.className='word';word.textContent=token;paragraph.append(word)}
+}
+function place(popup){
+ const bounds=(selectedRange||selectionTarget).getBoundingClientRect(),above=bounds.top-20,below=innerHeight-bounds.bottom-20,placeAbove=above>below,center=Math.max(above,below)<160;
+ popup.style.maxHeight=Math.max(1,Math.min(420,innerHeight-24,center?innerHeight-24:placeAbove?above:below))+'px';
+ popup.style.left=Math.max(12,Math.min(bounds.left,innerWidth-popup.offsetWidth-12))+'px';
+ popup.style.top=Math.max(12,Math.min(center?(innerHeight-popup.offsetHeight)/2:placeAbove?bounds.top-popup.offsetHeight-8:bounds.bottom+8,innerHeight-popup.offsetHeight-12))+'px';
+}
+function dismiss(){closeInfo();lookup.hidden=true;editor.hidden=true;selectionMenu.hidden=true;scrim.hidden=true;currentPopup=null;getSelection().removeAllRanges();book.focus({preventScroll:true})}
+function show(popup){lookup.hidden=true;editor.hidden=true;selectionMenu.hidden=true;popup.hidden=false;scrim.hidden=false;currentPopup=popup;place(popup)}
+function selectTarget(target){selectedRange=null;selectionTarget=target;const range=document.createRange();range.selectNodeContents(target);const selection=getSelection();selection.removeAllRanges();selection.addRange(range)}
+function lookupWord(word){
+ selectedWord=word;selectTarget(word);lookupText(word.textContent.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu,''));
+}
+function lookupText(text){
+ articleHits=[];articleIndex=0;dictionaryHits=[];dictionaryIndex=0;document.querySelector('#lookup-pager').hidden=true;document.querySelector('.definitions').scrollTop=0;
+ resetTitle(text);
+ const definition=entries[text.toLowerCase()];
+ if(text.toLowerCase()==='light'){dictionaryHits=dictionaryExamples;showDictionary(0)}
+ else if(definition)dictionaryResult({word:text,text:definition});
+ else if(text==='Mercury')choiceResults();else if(articles[text])articleResult(articles[text]);
+ else{document.querySelector('#definition').textContent='No definition found in the enabled dictionaries.'}
+ show(lookup);lookup.focus({preventScroll:true});
+}
+book.addEventListener('dblclick',event=>{const word=event.target.closest('.word');if(word&&!dragged&&!event.shiftKey&&!event.ctrlKey&&!event.altKey&&!event.metaKey){selectedWord=word;selectTarget(event.detail>=4?word.closest('p'):word)}});
+function selectedWords(){return selectedRange?[...book.querySelectorAll('.word')].filter(word=>selectedRange.intersectsNode(word)):selectionTarget.matches('.word')?[selectionTarget]:[...selectionTarget.querySelectorAll('.word')]}
+book.addEventListener('contextmenu',event=>{
+ event.preventDefault();
+ const selection=getSelection();const range=selection.rangeCount&&!selection.isCollapsed?selection.getRangeAt(0).cloneRange():null;
+ if(range&&book.contains(range.commonAncestorContainer)){selectedRange=range;selectionTarget=range.commonAncestorContainer.nodeType===1?range.commonAncestorContainer:range.commonAncestorContainer.parentElement;selectedWord=event.target.closest('.word')||selectionTarget;show(selectionMenu);document.querySelector('#selection-lookup').focus({preventScroll:true})}
+ else{const word=event.target.closest('.word');if(word)lookupWord(word)}
+});
+document.querySelector('#selection-lookup').addEventListener('click',()=>lookupText(selectedRange?selectedRange.toString().trim():selectionTarget.textContent.replace(/[.,]$/,'')));
+document.querySelector('#highlight').addEventListener('click',()=>{for(const word of selectedWords())word.classList.add('marked');getSelection().removeAllRanges();document.querySelector('#note').value=selectionTarget.dataset.note||'';show(editor);document.querySelector('#note').focus({preventScroll:true})});
+document.querySelector('#note').addEventListener('input',event=>{selectionTarget.dataset.note=event.target.value});
+document.querySelector('#remove').addEventListener('click',()=>{for(const word of selectedWords())word.classList.remove('marked');delete selectionTarget.dataset.note;dismiss()});
+document.querySelector('#copy-markdown').addEventListener('click',()=>{navigator.clipboard?.writeText(selectedRange?selectedRange.toString():selectionTarget.textContent).catch(()=>{});dismiss()});
+document.querySelector('#copy-link').addEventListener('click',()=>{navigator.clipboard?.writeText(location.href.split('#')[0]+'#'+encodeURIComponent(selectedRange?selectedRange.toString():selectionTarget.textContent)).catch(()=>{});dismiss()});
+document.querySelector('#editor-close').addEventListener('click',dismiss);
+scrim.addEventListener('mousedown',event=>event.preventDefault());
+scrim.addEventListener('click',event=>{
+ const bounds=selectedWord.getBoundingClientRect(),inWord=event.clientX>=bounds.left&&event.clientX<=bounds.right&&event.clientY>=bounds.top&&event.clientY<=bounds.bottom;
+ if(currentPopup===lookup&&selectionTarget===selectedWord&&inWord&&!event.shiftKey&&!event.ctrlKey&&!event.altKey&&!event.metaKey){
+  if(!dragged&&press&&press.x>=bounds.left&&press.x<=bounds.right&&press.y>=bounds.top&&press.y<=bounds.bottom&&(event.detail===2||event.detail===4)){selectTarget(selectedWord.closest('p'));resetTitle('Selected text');document.querySelector('#lookup-pager').hidden=true;document.querySelector('#definition').textContent=selectionTarget.textContent;place(lookup)}
+  if([1,2,3,4].includes(event.detail))return;
+ }
+ dismiss();
+});
+document.addEventListener('keydown',event=>{if(!currentPopup)return;if(event.key==='Escape'){event.preventDefault();if(!infoPopup.hidden)closeInfo(true);else dismiss()}else if(currentPopup===lookup&&infoPopup.hidden&&!document.querySelector('#lookup-pager').hidden&&!event.shiftKey&&!event.ctrlKey&&!event.altKey&&!event.metaKey&&(event.key==='ArrowLeft'||event.key==='ArrowRight')){event.preventDefault();navigateResult(event.key==='ArrowLeft'?-1:1)}else if(event.key==='Tab'){const focusScope=infoPopup.hidden?currentPopup:infoPopup;const controls=[...focusScope.querySelectorAll('button:not(:disabled),textarea,a[href]')].filter(element=>element.getClientRects().length);const first=controls[0],last=controls.at(-1);if(!first){event.preventDefault();currentPopup.focus({preventScroll:true})}else if(event.shiftKey&&(document.activeElement===first||document.activeElement===currentPopup)){event.preventDefault();last.focus()}else if(!event.shiftKey&&(document.activeElement===last||document.activeElement===currentPopup)){event.preventDefault();first.focus()}}});
+window.addEventListener('resize',()=>{if(currentPopup)place(currentPopup);if(!infoPopup.hidden)placeInfo()});
+function example(state){const target={selection:'Earth',dictionary:'quiet',dictionaries:'light',wikipedia:'Earth',choices:'Mercury',silent:'town'}[state];const word=[...book.querySelectorAll('.word')].find(word=>word.textContent.replace(/[.,]$/,'')===target);if(word){if(state==='selection'){selectedWord=word;selectTarget(word);show(selectionMenu);document.querySelector('#selection-lookup').focus({preventScroll:true})}else lookupWord(word)}for(const button of document.querySelectorAll('[data-example]'))button.setAttribute('aria-pressed',String(button.dataset.example===state))}
+for(const button of document.querySelectorAll('[data-example]'))button.addEventListener('click',()=>{history.replaceState(null,'','#'+button.dataset.example);example(button.dataset.example)});
+if(location.hash==='#lookup')example('dictionary');else if(location.hash)example(location.hash.slice(1));
+</script>
+</html>

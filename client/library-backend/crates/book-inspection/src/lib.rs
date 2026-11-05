@@ -1,34 +1,39 @@
 //! Portable book metadata inspection: EPUB, MOBI and PDF documents, and M4B
 //! and MP3-folder audiobooks.
 
-use book_content::{Book, BookFormat as ContainerFormat, DeclaredMetadata, TocEntry};
+use book_content::{Book, BookFormat as ContainerFormat, DeclaredMetadata};
 use book_content::{IdentifierScheme, MetadataCredit, MetadataProperty};
-use book_model::{
-    marc_relator_code_from_metadata_role, unique_book_year, BookFormat, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE,
-};
+use book_model::{AUTHOR_MARC_RELATOR_CODE, BookFormat, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, Scheme, Scope, marc_relator_code_from_metadata_role, unique_book_year};
 use regex::Regex;
+use std::fs::File;
 use std::io::{Read, Seek};
-use std::sync::OnceLock;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn cached_regex(cache: &'static OnceLock<Result<Regex, String>>, pattern: &str) -> std::io::Result<&'static Regex> {
+    cache.get_or_init(|| Regex::new(pattern).map_err(|error| error.to_string())).as_ref().map_err(|error| std::io::Error::other(error.clone()))
+}
+
 mod book;
-pub use book::{AudiobookMetadata, InspectedBook, inspect_book_reader, inspect_book_reader_with_hash};
+pub use book::{AudiobookMetadata, CachedPdfReader, InspectedBook, inspect_book_reader, inspect_book_reader_with_cached_pdf, inspect_book_reader_with_hash};
 pub mod evidence;
 mod mobi;
 pub use mobi::{inspect_mobi_metadata_reader, inspect_mobi_pages_reader, inspect_mobi_reader};
 mod document_evidence;
-mod filename_identity;
 mod filename_identifiers;
+mod filename_identity;
 mod filename_isbn;
-mod title_identity;
 mod identity_evidence;
+mod title_identity;
 pub use title_identity::{normalize_with_filename, title_readings};
 mod pdf;
 mod pdf_ranges;
-pub use pdf::{inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspect_pdf_reader, InspectedPdf};
+mod pdf_source_identity;
+pub use pdf::{InspectedPdf, inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspect_pdf_reader};
+pub use pdf_source_identity::PdfSourceIdentity;
 
 /// Inspection cache version for a format. Matches the extractor contract:
 /// EPUB/MOBI include the shared declared-metadata projection; PDF follows
@@ -38,7 +43,7 @@ pub use pdf::{inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspe
 pub fn inspection_version(format: BookFormat) -> i64 {
     match format {
         BookFormat::Epub => i64::from(evidence::INSPECTION_VERSION) + 4,
-        BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION) + 2,
+        BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION) + 3,
         BookFormat::Mobi => 7,
         _ => 4,
     }
@@ -74,7 +79,7 @@ pub fn inspect_epub(path: &Path) -> MetadataResult<InspectedEpub> {
     inspect_epub_pages(&mut provider, &mut metadata);
     let evidence_ms = u64::try_from(evidence_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let toc_started = Instant::now();
-    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
+    let toc = sanitize_toc_entries(provider.toc()?.unwrap_or_default());
     let toc_ms = u64::try_from(toc_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings { container_ms, evidence_ms, toc_ms } })
 }
@@ -89,16 +94,16 @@ where
     let mut provider = Book::open_reader(ContainerFormat::Epub, reader)?;
     let mut metadata = metadata_from_book(source_name, &mut provider)?;
     inspect_epub_pages(&mut provider, &mut metadata);
-    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
+    let toc = sanitize_toc_entries(provider.toc()?.unwrap_or_default());
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings::default() })
 }
 
-fn book_toc_entries(entries: Vec<TocEntry>) -> Vec<BookTocEntry> {
+fn sanitize_toc_entries(entries: Vec<BookTocEntry>) -> Vec<BookTocEntry> {
     let mut count = 0;
-    entries.into_iter().filter_map(|entry| book_toc_entry(entry, 0, &mut count)).collect()
+    entries.into_iter().filter_map(|entry| sanitize_toc_entry(entry, 0, &mut count)).collect()
 }
 
-fn book_toc_entry(entry: TocEntry, depth: usize, count: &mut usize) -> Option<BookTocEntry> {
+fn sanitize_toc_entry(entry: BookTocEntry, depth: usize, count: &mut usize) -> Option<BookTocEntry> {
     const MAX_TOC_DEPTH: usize = 32;
     const MAX_TOC_ENTRIES: usize = 8_192;
     const MAX_TOC_TEXT_BYTES: usize = 4_096;
@@ -110,15 +115,22 @@ fn book_toc_entry(entry: TocEntry, depth: usize, count: &mut usize) -> Option<Bo
         (!value.is_empty() && value.len() <= MAX_TOC_TEXT_BYTES && !value.chars().any(char::is_control)).then(|| value.split_whitespace().collect::<Vec<_>>().join(" "))
     };
     let title = valid_text(entry.title)?;
-    let target = valid_text(entry.link).unwrap_or_default();
+    let target = valid_text(entry.target).unwrap_or_default();
     *count += 1;
-    let children = entry.children.into_iter().filter_map(|entry| book_toc_entry(entry, depth + 1, count)).collect();
+    let children = entry.children.into_iter().filter_map(|entry| sanitize_toc_entry(entry, depth + 1, count)).collect();
     Some(BookTocEntry { title, target, children })
 }
 
 /// Reads all metadata relevant to indexing. Formats without useful embedded
 fn fallback_metadata(path: &Path) -> BookRecord {
-    let title = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("Untitled").to_owned();
+    let title = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.to_ascii_lowercase().ends_with(".fb2.zip"))
+        .map(|name| &name[..name.len() - 8])
+        .or_else(|| path.file_stem().and_then(|stem| stem.to_str()))
+        .unwrap_or("Untitled")
+        .to_owned();
     BookRecord { metadata: book_model::BookDetails { title, subtitle: None, contributors: Vec::new(), book: Default::default() }, description: String::new() }
 }
 
@@ -165,9 +177,7 @@ fn author_names(raw: &str) -> Vec<String> {
     // A comma after an explicit role ends that credit, rather than inverting
     // two complete names as though they were one surname-first name.
     static ROLE_SEPARATOR: OnceLock<Regex> = OnceLock::new();
-    let raw = ROLE_SEPARATOR
-        .get_or_init(|| Regex::new(r"(?i)(\((?:authors?|editors?|translators?|illustrators?|compiler|ed\.?|trans\.?)\))\s*,\s*").unwrap())
-        .replace_all(raw, "$1;");
+    let raw = ROLE_SEPARATOR.get_or_init(|| Regex::new(r"(?i)(\((?:authors?|editors?|translators?|illustrators?|compiler|ed\.?|trans\.?)\))\s*,\s*").unwrap()).replace_all(raw, "$1;");
     let mut parts = vec![raw.trim().to_owned()];
     for separator in SEPARATORS {
         parts = parts.iter().flat_map(|part| part.split(separator)).map(str::to_owned).collect();
@@ -307,6 +317,9 @@ fn metadata_from_declared(path: &Path, metadata: DeclaredMetadata) -> MetadataRe
         metadata.contributors.into_iter().chain(metadata.creators.into_iter().filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) != AUTHOR_MARC_RELATOR_CODE)).filter_map(contributor).collect::<Vec<_>>();
     let long_description = long_description(&metadata.properties);
     for property in &metadata.properties {
+        if property.property.starts_with("fb2:print:") {
+            continue;
+        }
         if let Some(isbn) = from_metadata_value(&property.value) {
             book_model::push_isbn(&mut identifiers, isbn, Scope::Book)?;
         }
@@ -412,6 +425,18 @@ mod tests {
     }
 
     #[test]
+    fn reader_metadata_keeps_navigation_and_declared_facts_without_page_evidence() {
+        let bytes = include_bytes!("../tests/fixtures/back-matter-evidence.epub");
+        let full = inspect_epub_reader(Path::new("book.epub"), std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let light = inspect_epub_metadata_reader(Path::new("book.epub"), std::io::Cursor::new(bytes.to_vec())).unwrap();
+        assert_eq!(light.metadata.title, full.metadata.title);
+        assert_eq!(light.toc, full.toc);
+        assert!(light.metadata.book.identifiers.is_empty(), "page-only ISBN evidence must stay out of package inspection");
+        assert!(!full.metadata.book.identifiers.is_empty());
+        assert!(!light.metadata.book.subjects.iter().any(|subject| subject.source().starts_with("inspection:local-cip:")));
+    }
+
+    #[test]
     fn malformed_optional_languages_do_not_reject_epub() {
         let bytes = include_bytes!("../tests/fixtures/malformed-language.epub").to_vec();
         let inspected = inspect_epub_reader(Path::new("book.epub"), std::io::Cursor::new(bytes)).unwrap();
@@ -436,9 +461,15 @@ pub fn inspect_epub_pages_reader<R: Read + Seek + Send + 'static>(source_name: &
 
 /// Package metadata and navigation only; page inspection is a separate stage.
 pub fn inspect_epub_metadata_with_toc(path: &Path) -> MetadataResult<InspectedEpub> {
-    let mut provider = open_epub(path)?;
-    let metadata = metadata_from_book(path, &mut provider)?;
-    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
+    inspect_epub_metadata_reader(path, File::open(path)?)
+}
+
+/// Package facts and navigation for external-reader imports. Copyright-page
+/// evidence remains part of full inspection, not this admission contract.
+pub fn inspect_epub_metadata_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedEpub> {
+    let mut provider = Book::open_reader(ContainerFormat::Epub, reader)?;
+    let metadata = metadata_from_book(source_name, &mut provider)?;
+    let toc = sanitize_toc_entries(provider.toc()?.unwrap_or_default());
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings::default() })
 }
 
@@ -496,3 +527,6 @@ mod title_tests {
         assert_eq!(book.subtitle(), Some("A Guide"));
     }
 }
+
+mod pdf_annotation_export;
+pub use pdf_annotation_export::{PreparedPdfAnnotationExport, prepare_pdf_annotation_export};

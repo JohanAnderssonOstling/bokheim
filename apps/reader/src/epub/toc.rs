@@ -5,44 +5,80 @@
 //! settled page's source address back to a link. Resolutions stay in TOC
 //! order so duplicate targets and document-level fallbacks are deterministic.
 
-use std::{collections::HashMap, sync::Arc};
+use book_content::is_navigation_section_title;
+use std::collections::HashMap;
 
-use html::document::{MarkupSyntax, decode_html_bytes, parse_document};
+use book_content::{BookToc, toc_entries};
+pub(crate) use book_content::{ResolvedTocEntry, TocSourcePositions as SourcePositions};
+
+use book_model::{BookTocEntry, ChapterReadStatus};
+use gpui_component::tree::TreeItem;
+use html_pipeline::MarkupSyntax;
+use html_dom::NodeRef;
+use html_pipeline::decode_html_bytes;
+use html_pipeline::parse_document;
 use html::resources::ResourceProvider;
-use html_view_core::cfi::parse_source_position;
-use html_view_core::{SourcePosition, TocEntry};
+use skrift_column_paginator::SourcePosition;
+use skrift_column_paginator::cfi::PublicationCfi;
+#[cfg(test)]
+use skrift_column_paginator::cfi::parse_source_position;
 
 use crate::shell::annotation_tree::{AnnotationBranch, AnnotationTree};
 
-/// Where a TOC link points, as `(document index, optional anchor)`.
-pub(crate) type Resolution = (usize, Option<String>);
-pub(crate) type SourcePositions = HashMap<usize, Vec<(Vec<usize>, usize)>>;
+const TOC_ID_PREFIX: &str = "epub-toc-";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedTocEntry {
-    link: String,
-    document: usize,
-    anchor: Option<String>,
+fn toc_id(order: usize) -> String {
+    format!("{TOC_ID_PREFIX}{order}")
 }
 
 #[derive(Default)]
 pub(crate) struct TocState {
-    entries: Arc<Vec<TocEntry>>,
-    resolutions: Vec<ResolvedTocEntry>,
+    pub(crate) cfi: PublicationCfi,
+    toc: BookToc,
+    pub(crate) read_status: ChapterReadStatus,
     /// The link the reader is currently inside, if any.
     active_link: Option<String>,
+    active_sidebar_id: Option<String>,
     position: Option<SourcePosition>,
-    source_positions: SourcePositions,
-    document_count: usize,
+    loaded: bool,
 }
 
 impl TocState {
-    pub(crate) fn set(&mut self, entries: Vec<TocEntry>, resolutions: Vec<ResolvedTocEntry>) {
-        self.entries = Arc::new(entries);
-        self.resolutions = resolutions;
-        self.source_positions.clear();
-        self.document_count = self.resolutions.iter().map(|entry| entry.document + 1).max().unwrap_or(0);
+    /// Sidebar identity uses the full publisher tree's preorder position,
+    /// including unresolved headings and repeated destinations.
+    pub(crate) fn tree_items(&self) -> Vec<TreeItem> {
+        fn visit(entries: &[BookTocEntry], next: &mut usize) -> Vec<TreeItem> {
+            entries
+                .iter()
+                .map(|entry| {
+                    let id = toc_id(*next);
+                    *next += 1;
+                    TreeItem::new(id, entry.title.clone()).children(visit(&entry.children, next))
+                })
+                .collect()
+        }
+        visit(&self.toc.entries, &mut 0)
+    }
+
+    /// Hrefs stay navigation targets rather than sidebar row identities.
+    pub(crate) fn link_for_id(&self, id: &str) -> Option<&str> {
+        let order = id.strip_prefix(TOC_ID_PREFIX)?.parse::<usize>().ok()?;
+        toc_entries(&self.toc.entries).nth(order).map(|(_, entry)| entry.target.as_str())
+    }
+
+    pub(crate) fn active_id(&self) -> Option<&str> {
+        self.active_sidebar_id.as_deref()
+    }
+
+    pub(crate) fn is_read(&self, id: &str) -> bool {
+        self.link_for_id(id).is_some_and(|link| self.read_status.completed.contains(link))
+    }
+
+    pub(crate) fn set(&mut self, entries: Vec<BookTocEntry>, resolutions: Vec<ResolvedTocEntry>) {
+        self.loaded = false;
+        self.toc = BookToc::new(entries, resolutions);
         self.refresh_position();
+        self.update_active_sidebar_id();
     }
 
     /// Retain early renderer positions even when the TOC is still loading.
@@ -51,104 +87,91 @@ impl TocState {
         self.refresh_position()
     }
 
-    fn refresh_position(&mut self) -> bool {
-        let link = self.position.as_ref().and_then(|position| self.ordinal_for_position(position)).map(|ordinal| self.resolutions[ordinal].link.clone());
-        self.set_active_link(link)
+    pub(crate) fn update_read_status(&mut self, at_end: bool) {
+        self.read_status.update(&self.toc.entries, self.active_link.as_deref(), at_end);
     }
 
-    /// Publisher links are relative to the container root, not the chapter
-    /// that happens to be on screen while the metadata request completes.
-    pub(crate) fn resolve_publication_href(href: &str, documents: &[String], provider: &dyn ResourceProvider) -> Option<Resolution> {
-        let (path, fragment) = href.split_once('#').unwrap_or((href, ""));
-        let uri = provider.resolve("", path);
-        let mut matches = documents.iter().enumerate().filter(|(_, document)| **document == uri).map(|(index, _)| index);
-        let index = matches.next()?;
-        matches.next().is_none().then(|| (index, (!fragment.is_empty()).then(|| fragment.to_owned())))
+    pub(crate) fn reset_chapter_read_status(&mut self, target: &str) {
+        self.read_status.reset_chapter(&self.toc.entries, target);
+    }
+
+    fn refresh_position(&mut self) -> bool {
+        let link = self.position.as_ref().and_then(|position| self.ordinal_for_position(position)).and_then(|ordinal| self.toc.resolved_entries().nth(ordinal)).map(|entry| entry.target.clone());
+        self.set_active_link(link)
     }
 
     /// Index TOC anchors in source order for reading position and annotations.
     pub(crate) fn source_positions(resolutions: &[ResolvedTocEntry], documents: &[String], provider: &dyn ResourceProvider) -> SourcePositions {
-        let mut positions = HashMap::new();
-        for (index, uri) in documents.iter().enumerate() {
-            if !resolutions.iter().any(|entry| entry.document == index && entry.anchor.is_some()) {
-                continue;
-            }
-            let Ok(bytes) = provider.read_bytes(uri) else { continue };
+        BookToc::collect_source_positions(resolutions, documents, None, |index, uri| {
+            let bytes = provider.read_bytes(uri).ok()?;
             let metadata = provider.metadata(uri).ok();
             let source = decode_html_bytes(&bytes, metadata.as_ref().and_then(|metadata| metadata.charset.as_deref()));
             let syntax = if metadata.as_ref().and_then(|metadata| metadata.media_type.as_deref()) == Some("application/xhtml+xml") { MarkupSyntax::Xml } else { MarkupSyntax::from_uri(uri) };
-            let Some(paths) = anchor_source_positions(resolutions, index, &source, syntax) else { continue };
-            positions.insert(index, paths);
-        }
-        positions
+            anchor_source_positions(resolutions, index, &source, syntax)
+        })
     }
 
     pub(crate) fn install_source_positions(&mut self, positions: SourcePositions, document_count: usize) {
-        self.source_positions = positions;
-        self.document_count = document_count;
+        self.loaded = true;
+        self.toc.source_positions = positions;
+        self.toc.document_count = document_count;
         self.refresh_position();
     }
 
+    pub(crate) fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    /// Before the first chapter, use the first entry. With no TOC, ordinal
+    /// zero represents the whole book and remains in the ungrouped sidebar.
+    pub(crate) fn bookmark_ordinal_for_cfi(&self, cfi: &str) -> usize {
+        self.ordinal_for_cfi(cfi).unwrap_or(0)
+    }
+
     pub(crate) fn ordinal_for_cfi(&self, cfi: &str) -> Option<usize> {
-        self.ordinal_for_position(&parse_source_position(cfi)?)
+        self.ordinal_for_position(&self.cfi.parse_source_position(cfi)?)
+    }
+
+    /// Resolve a document without inventing a CFI location inside it.
+    pub(crate) fn ordinal_for_document(&self, document: usize) -> Option<usize> {
+        self.ordinal_for_position(&SourcePosition { document, path: Vec::new(), utf16_offset: None })
     }
 
     pub(crate) fn ordinal_for_position(&self, position: &SourcePosition) -> Option<usize> {
-        let document = position.document;
-        if document >= self.document_count {
-            return None;
-        }
-        let section = self.source_positions.get(&document).and_then(|positions| positions.iter().filter(|(anchor, _)| anchor <= &position.path).max_by(|(left, _), (right, _)| left.cmp(right)).map(|(_, ordinal)| *ordinal));
-        section
-            .or_else(|| self.resolutions.iter().position(|entry| entry.document == document && entry.anchor.is_none()))
-            .or_else(|| self.resolutions.iter().position(|entry| entry.document == document))
-            .or_else(|| self.resolutions.iter().enumerate().filter(|(_, entry)| entry.document < document).max_by_key(|(ordinal, entry)| (entry.document, *ordinal)).map(|(ordinal, _)| ordinal))
+        self.toc.ordinal_for_position(position.document, &position.path)
     }
 
     /// Navigable roots are chapters; unresolved grouping nodes delegate to
     /// their children. Nested sections remain within their owning chapter.
     pub(in crate::epub) fn chapter_ordinals(&self) -> Vec<usize> {
-        fn visit(entries: &[TocEntry], resolved: &[ResolvedTocEntry], result: &mut Vec<usize>) {
-            for entry in entries {
-                if let Some(index) = resolved.iter().position(|item| item.link == entry.link) {
-                    if !result.contains(&index) {
-                        result.push(index);
-                    }
-                } else {
-                    visit(&entry.children, resolved, result);
-                }
-            }
-        }
-        let mut result = Vec::new();
-        visit(&self.entries, &self.resolutions, &mut result);
-        result
+        self.toc.chapter_ordinals()
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
     pub(crate) fn chapter_for_cfi(&self, cfi: &str) -> Option<usize> {
         let ordinal = self.ordinal_for_cfi(cfi)?;
         self.chapter_ordinals().into_iter().rev().find(|chapter| *chapter <= ordinal)
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn chapter_for_document(&self, document: usize) -> Option<usize> {
-        self.chapter_for_cfi(&format!("epubcfi(/6/{}!/0)", (document + 1) * 2))
+        let ordinal = self.ordinal_for_document(document)?;
+        self.chapter_ordinals().into_iter().rev().find(|chapter| *chapter <= ordinal)
     }
 
-    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    #[cfg(any(test, all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo"))))]
     pub(crate) fn narration_excludes_cfi(&self, cfi: &str) -> bool {
-        let Some(position) = parse_source_position(cfi) else { return false };
+        let Some(position) = self.cfi.parse_source_position(cfi) else { return false };
         let Some(ordinal) = self.ordinal_for_position(&position) else { return false };
-        let entry = &self.resolutions[ordinal];
+        let entry = &self.toc.resolutions[ordinal];
         // The sidebar falls back to an earlier entry across documents and
         // before the first anchor. Those fallbacks must not suppress prose.
         if entry.document != position.document {
             return false;
         }
-        if entry.anchor.is_some() && !self.source_positions.get(&position.document).is_some_and(|anchors| anchors.iter().any(|(path, index)| *index == ordinal && path <= &position.path)) {
+        if entry.anchor.is_some() && !self.toc.source_positions.get(&position.document).is_some_and(|anchors| anchors.iter().any(|(path, index)| *index == ordinal && path <= &position.path)) {
             return false;
         }
-        self.title_for_ordinal(ordinal).is_some_and(|title| html::layout::is_navigation_section_title(&title))
+        self.title_for_ordinal(ordinal).is_some_and(|title| is_navigation_section_title(&title))
     }
 
     /// The publisher's own href for the entry the reader is inside — the
@@ -163,38 +186,12 @@ impl TocState {
             return false;
         }
         self.active_link = active_link;
+        self.update_active_sidebar_id();
         true
     }
 
-    /// Resolves every link depth-first, preserving the publisher's TOC order
-    /// and skipping links the renderer cannot place.
-    pub(crate) fn resolve(entries: &[TocEntry], resolve: impl Fn(&str) -> Option<Resolution>) -> Vec<ResolvedTocEntry> {
-        fn visit(entries: &[TocEntry], resolve: &impl Fn(&str) -> Option<Resolution>, resolutions: &mut Vec<ResolvedTocEntry>) {
-            for entry in entries {
-                if let Some((document, anchor)) = resolve(&entry.link) {
-                    resolutions.push(ResolvedTocEntry { link: entry.link.clone(), document, anchor });
-                }
-                visit(&entry.children, resolve, resolutions);
-            }
-        }
-
-        let mut resolutions = Vec::new();
-        visit(entries, &resolve, &mut resolutions);
-        resolutions
-    }
-
-    /// Groups publisher TOC anchors for the renderer's nearest-preceding-anchor
-    /// filter. Anchor order is retained and duplicate targets are omitted.
-    pub(crate) fn anchor_strings_by_doc(resolutions: &[ResolvedTocEntry], document_count: usize) -> Vec<Vec<String>> {
-        let mut anchors_by_doc = vec![Vec::new(); document_count];
-        for resolution in resolutions {
-            let Some(anchor) = resolution.anchor.as_ref() else { continue };
-            let Some(document_anchors) = anchors_by_doc.get_mut(resolution.document) else { continue };
-            if !document_anchors.contains(anchor) {
-                document_anchors.push(anchor.clone());
-            }
-        }
-        anchors_by_doc
+    fn update_active_sidebar_id(&mut self) {
+        self.active_sidebar_id = self.active_link.as_ref().and_then(|active| toc_entries(&self.toc.entries).position(|(_, entry)| &entry.target == active)).map(toc_id);
     }
 
     /// Depth-first ordinal of the entry the reader is inside, for reading
@@ -203,7 +200,7 @@ impl TocState {
     /// `active_title`.
     pub(crate) fn ordinal_of_active(&self) -> Option<usize> {
         let active = self.active_link.as_ref()?;
-        self.resolutions.iter().position(|resolved| &resolved.link == active)
+        self.toc.resolved_entries().position(|entry| &entry.target == active)
     }
 
     /// Attaches annotation indices to the full publisher hierarchy, keeping
@@ -211,14 +208,14 @@ impl TocState {
     /// Stored ordinals use resolved TOC order, which can skip unresolved
     /// entries; those entries still survive when they parent an annotated one.
     pub(crate) fn annotation_tree(&self, ordinals: impl IntoIterator<Item = Option<usize>>) -> AnnotationTree {
-        fn visit(entries: &[TocEntry], groups: &mut HashMap<&str, Vec<usize>>, next: &mut usize) -> Vec<AnnotationBranch> {
+        fn visit(entries: &[BookTocEntry], groups: &mut HashMap<&str, Vec<usize>>, next: &mut usize) -> Vec<AnnotationBranch> {
             let mut branches = Vec::new();
             for entry in entries {
                 let id = *next;
                 *next += 1;
                 // Removing the group also ensures duplicate TOC links cannot
                 // show the same annotation more than once.
-                let annotations = groups.remove(entry.link.as_str()).unwrap_or_default();
+                let annotations = groups.remove(entry.target.as_str()).unwrap_or_default();
                 let children = visit(&entry.children, groups, next);
                 if !annotations.is_empty() || !children.is_empty() {
                     branches.push(AnnotationBranch { id, title: entry.title.clone(), annotations, children });
@@ -229,14 +226,15 @@ impl TocState {
 
         let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
         let mut other = Vec::new();
+        let resolved = self.toc.resolved_entries().collect::<Vec<_>>();
         for (index, ordinal) in ordinals.into_iter().enumerate() {
-            if let Some(resolved) = ordinal.and_then(|ordinal| self.resolutions.get(ordinal)) {
-                groups.entry(resolved.link.as_str()).or_default().push(index);
+            if let Some(resolved) = ordinal.and_then(|ordinal| resolved.get(ordinal)) {
+                groups.entry(resolved.target.as_str()).or_default().push(index);
             } else {
                 other.push(index);
             }
         }
-        let branches = visit(&self.entries, &mut groups, &mut 0);
+        let branches = visit(&self.toc.entries, &mut groups, &mut 0);
         other.extend(groups.into_values().flatten());
         other.sort_unstable();
         AnnotationTree { branches, other }
@@ -244,7 +242,7 @@ impl TocState {
 
     /// Publisher title for a resolved TOC ordinal, including chapter groups.
     pub(crate) fn title_for_ordinal(&self, ordinal: usize) -> Option<String> {
-        self.title_for_link(&self.resolutions.get(ordinal)?.link)
+        self.title_for_link(&self.toc.resolved_entries().nth(ordinal)?.target)
     }
 
     /// The title of the active entry, searched depth-first through the tree.
@@ -253,38 +251,20 @@ impl TocState {
     }
 
     fn title_for_link(&self, active: &str) -> Option<String> {
-        fn find(entries: &[TocEntry], active: &str) -> Option<String> {
-            for entry in entries {
-                if entry.link == active {
-                    return Some(entry.title.clone());
-                }
-                if let Some(found) = find(&entry.children, active) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-
-        find(&self.entries, active)
+        toc_entries(&self.toc.entries).find(|(_, entry)| entry.target == active).map(|(_, entry)| entry.title.clone())
     }
 }
 
 fn anchor_source_positions(resolutions: &[ResolvedTocEntry], document_index: usize, source: &str, syntax: MarkupSyntax) -> Option<Vec<(Vec<usize>, usize)>> {
-    let document = parse_document(source, syntax).ok()?.build_dom_checked().ok()?;
-    let ids: HashMap<_, _> = document.node_ids().filter_map(|node| document.get_dom_id(node).map(|id| (id, node))).collect();
-    Some(
-        resolutions
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.document == document_index)
-            .filter_map(|(ordinal, entry)| {
-                let anchor = entry.anchor.as_deref()?;
-                let node = *ids.get(anchor)?;
-                let path = document.get_dom_path_to_node(node).into_iter().skip(1).map(|node| document.get_element_step(node)).collect::<Option<Vec<_>>>()?;
-                Some((path, ordinal))
-            })
-            .collect(),
-    )
+    let document = parse_document(source, syntax).ok()?.into_dom_checked().ok()?;
+    let ids: HashMap<_, _> = document.nodes().filter_map(|(_, node)| match node {
+        NodeRef::Element(element) => element.id().map(|id| (id, element.node_id())),
+        NodeRef::Text(_) => None,
+    }).collect();
+    Some(BookToc::positions_for_anchors(resolutions, document_index, |anchor| {
+        let node = *ids.get(anchor)?;
+        document.element_source_path(node).map(|path| path.into_iter().map(|step| step.step()).collect())
+    }))
 }
 
 #[cfg(test)]
@@ -292,21 +272,64 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Write};
 
-    fn entry(title: &str, children: Vec<TocEntry>) -> TocEntry {
-        TocEntry { title: title.into(), link: format!("{title}.xhtml"), children }
+    fn entry(title: &str, children: Vec<BookTocEntry>) -> BookTocEntry {
+        BookTocEntry { title: title.into(), target: format!("{title}.xhtml"), children }
     }
 
-    fn toc(entries: Vec<TocEntry>) -> TocState {
-        let resolutions = TocState::resolve(&entries, |link| (link != "Part.xhtml").then_some((0, None)));
+    fn toc(entries: Vec<BookTocEntry>) -> TocState {
+        let resolutions = BookToc::resolve(&entries, |link| (link != "Part.xhtml").then_some((0, None)));
         let mut toc = TocState::default();
         toc.set(entries, resolutions);
         toc
     }
 
     #[test]
+    fn bookmark_ordinals_wait_for_source_positions_and_support_books_without_a_toc() {
+        let mut toc = TocState::default();
+        assert!(!toc.is_loaded());
+        toc.set(vec![], vec![]);
+        assert!(!toc.is_loaded());
+        toc.install_source_positions(HashMap::new(), 1);
+        assert!(toc.is_loaded());
+        assert_eq!(toc.bookmark_ordinal_for_cfi("epubcfi(/6/2!/4/2/1:0)"), 0);
+        assert_eq!(toc.annotation_tree([Some(0)]).other, vec![0]);
+    }
+
+    #[test]
+    fn sidebar_positions_include_unresolved_headings_and_repeated_names_and_links() {
+        let mut toc = toc(vec![entry("Part", vec![entry("Chapter", vec![]), entry("Chapter", vec![])]), entry("Last", vec![])]);
+        let items = toc.tree_items();
+        assert_eq!(items[0].id, "epub-toc-0");
+        assert_eq!(items[0].children[0].id, "epub-toc-1");
+        assert_eq!(items[0].children[1].id, "epub-toc-2");
+        assert_eq!(items[1].id, "epub-toc-3");
+        assert_eq!(toc.link_for_id("epub-toc-0"), Some("Part.xhtml"));
+        assert_eq!(toc.link_for_id("epub-toc-1"), Some("Chapter.xhtml"));
+        assert_eq!(toc.link_for_id("epub-toc-2"), Some("Chapter.xhtml"));
+        assert_eq!(toc.link_for_id("epub-toc-3"), Some("Last.xhtml"));
+        assert_eq!(toc.link_for_id("Chapter.xhtml"), None);
+        assert_eq!(toc.link_for_id("epub-toc-4"), None);
+        assert_eq!(toc.link_for_id("epub-toc-invalid"), None);
+
+        toc.set_active_link(Some("Chapter.xhtml".into()));
+        assert_eq!(toc.active_id().as_deref(), Some("epub-toc-1"));
+        toc.read_status.completed.insert("Chapter.xhtml".into());
+        assert!(toc.is_read("epub-toc-1"));
+        assert!(toc.is_read("epub-toc-2"));
+        assert!(!toc.is_read("epub-toc-0"));
+        let target = toc.link_for_id("epub-toc-2").unwrap().to_owned();
+        toc.reset_chapter_read_status(&target);
+        assert!(!toc.is_read("epub-toc-1"));
+        assert!(!toc.is_read("epub-toc-2"));
+        // Sidebar positions include Part, while persisted annotation ordinals
+        // still refer to the resolved entries only.
+        assert_eq!(toc.ordinal_of_active(), Some(0));
+    }
+
+    #[test]
     fn narration_skips_named_sections_without_leaking_before_or_after_them() {
-        let entries = vec![TocEntry { title: "Contents".into(), link: "contents".into(), children: vec![] }, TocEntry { title: "Chapter One".into(), link: "one".into(), children: vec![] }];
-        let resolutions = TocState::resolve(&entries, |link| Some((0, Some(link.into()))));
+        let entries = vec![BookTocEntry { title: "Contents".into(), target: "contents".into(), children: vec![] }, BookTocEntry { title: "Chapter One".into(), target: "one".into(), children: vec![] }];
+        let resolutions = BookToc::resolve(&entries, |link| Some((0, Some(link.into()))));
         let mut toc = TocState::default();
         toc.set(entries, resolutions);
         toc.install_source_positions(HashMap::from([(0, vec![(vec![4, 4], 0), (vec![4, 8], 1)])]), 2);
@@ -321,7 +344,7 @@ mod tests {
     #[test]
     fn narration_document_labels_do_not_exclude_following_unlisted_documents() {
         let mut toc = TocState::default();
-        toc.set(vec![entry("Table of Contents", vec![])], vec![ResolvedTocEntry { link: "Table of Contents.xhtml".into(), document: 0, anchor: None }]);
+        toc.set(vec![entry("Table of Contents", vec![])], vec![ResolvedTocEntry { entry: 0, document: 0, anchor: None }]);
         toc.install_source_positions(HashMap::new(), 2);
         assert!(toc.narration_excludes_cfi("epubcfi(/6/2!/4/2/1:0)"));
         assert!(!toc.narration_excludes_cfi("epubcfi(/6/4!/4/2/1:0)"));
@@ -329,9 +352,11 @@ mod tests {
 
     #[test]
     fn sleep_chapters_group_nested_sections_in_the_same_document() {
-        let entries =
-            vec![TocEntry { title: "One".into(), link: "one".into(), children: vec![TocEntry { title: "Section".into(), link: "section".into(), children: vec![] }] }, TocEntry { title: "Two".into(), link: "two".into(), children: vec![] }];
-        let resolutions = TocState::resolve(&entries, |link| Some((0, Some(link.into()))));
+        let entries = vec![
+            BookTocEntry { title: "One".into(), target: "one".into(), children: vec![BookTocEntry { title: "Section".into(), target: "section".into(), children: vec![] }] },
+            BookTocEntry { title: "Two".into(), target: "two".into(), children: vec![] },
+        ];
+        let resolutions = BookToc::resolve(&entries, |link| Some((0, Some(link.into()))));
         let source = r#"<html><body><h1 id="one">One</h1><p>Body</p><h2 id="section">Section</h2><p>Body</p><h1 id="two">Two</h1><p>Body</p></body></html>"#;
         let positions = anchor_source_positions(&resolutions, 0, source, MarkupSyntax::Xml).unwrap();
         let section_path = positions.iter().find(|(_, ordinal)| *ordinal == 1).unwrap().0.iter().map(|step| format!("/{step}")).collect::<String>();
@@ -343,6 +368,28 @@ mod tests {
         state.install_source_positions(HashMap::from([(0, positions)]), 1);
         assert_eq!(state.chapter_for_cfi(&section_cfi), Some(0));
         assert_eq!(state.chapter_for_cfi(&second_cfi), Some(2));
+    }
+
+    #[test]
+    fn document_lookup_preserves_chapter_fallbacks_without_a_source_path() {
+        let entries = vec![
+            BookTocEntry { title: "One".into(), target: "one".into(), children: vec![BookTocEntry { title: "Section".into(), target: "section".into(), children: vec![] }] },
+            BookTocEntry { title: "Two".into(), target: "two".into(), children: vec![] },
+        ];
+        let resolutions = BookToc::resolve(&entries, |link| Some((1, Some(link.into()))));
+        let mut state = TocState::default();
+        state.set(entries, resolutions);
+        state.install_source_positions(HashMap::from([(1, vec![(vec![4, 2], 0), (vec![4, 6], 1), (vec![4, 10], 2)])]), 3);
+
+        // A document-only target cannot distinguish its anchors, so use the
+        // first entry; a precise CFI still selects the later chapter.
+        assert_eq!(state.ordinal_for_document(1), Some(0));
+        assert_eq!(state.chapter_for_document(1), Some(0));
+        assert_eq!(state.chapter_for_cfi("epubcfi(/6/4!/4/10/1:0)"), Some(2));
+        assert_eq!(state.chapter_for_document(0), None);
+        assert_eq!(state.chapter_for_document(2), Some(2));
+        assert_eq!(state.chapter_for_document(3), None);
+        assert_eq!(state.chapter_for_document(usize::MAX), None);
     }
 
     #[test]
@@ -401,8 +448,8 @@ mod tests {
         let mut state = TocState::default();
         let position = SourcePosition { document: 0, path: vec![4, 6, 1], utf16_offset: Some(0) };
         assert!(!state.update_position(&position));
-        let entries = vec![TocEntry { title: "Section".into(), link: "/chapter.xhtml#section".into(), children: vec![] }];
-        let resolutions = TocState::resolve(&entries, |_| Some((0, Some("section".into()))));
+        let entries = vec![BookTocEntry { title: "Section".into(), target: "/chapter.xhtml#section".into(), children: vec![] }];
+        let resolutions = BookToc::resolve(&entries, |_| Some((0, Some("section".into()))));
         state.set(entries, resolutions);
         assert_eq!(state.active_link().as_deref(), Some("/chapter.xhtml#section"));
         assert_eq!(state.ordinal_of_active(), Some(0));
@@ -410,8 +457,8 @@ mod tests {
 
     #[test]
     fn late_source_index_recomputes_the_retained_position() {
-        let entries = vec![TocEntry { title: "First".into(), link: "chapter.xhtml#first".into(), children: vec![] }, TocEntry { title: "Second".into(), link: "chapter.xhtml#second".into(), children: vec![] }];
-        let resolutions = TocState::resolve(&entries, |href| Some((0, href.split_once('#').map(|(_, anchor)| anchor.into()))));
+        let entries = vec![BookTocEntry { title: "First".into(), target: "chapter.xhtml#first".into(), children: vec![] }, BookTocEntry { title: "Second".into(), target: "chapter.xhtml#second".into(), children: vec![] }];
+        let resolutions = BookToc::resolve(&entries, |href| Some((0, href.split_once('#').map(|(_, anchor)| anchor.into()))));
         let positions = anchor_source_positions(&resolutions, 0, "<html><head/><body><h1 id='first'>First</h1><div id='second'/><p>Second</p></body></html>", MarkupSyntax::Xml).unwrap();
         let mut state = TocState::default();
         let position = SourcePosition { document: 0, path: vec![4, 6, 1], utf16_offset: Some(0) };
@@ -425,8 +472,8 @@ mod tests {
 
     #[test]
     fn source_order_tracks_empty_markers_images_and_reverse_navigation() {
-        let entries = ["first", "empty", "image"].map(|anchor| TocEntry { title: anchor.into(), link: format!("chapter.xhtml#{anchor}"), children: vec![] }).to_vec();
-        let resolutions = TocState::resolve(&entries, |href| Some((0, href.split_once('#').map(|(_, anchor)| anchor.into()))));
+        let entries = ["first", "empty", "image"].map(|anchor| BookTocEntry { title: anchor.into(), target: format!("chapter.xhtml#{anchor}"), children: vec![] }).to_vec();
+        let resolutions = BookToc::resolve(&entries, |href| Some((0, href.split_once('#').map(|(_, anchor)| anchor.into()))));
         let source = "<html><head/><body><h1 id='first'>First</h1><div id='empty'/><p>After empty marker</p><div id='image'><img src='picture.svg'/></div><p>After image</p></body></html>";
         let positions = anchor_source_positions(&resolutions, 0, source, MarkupSyntax::Xml).unwrap();
         let mut state = TocState::default();
@@ -441,8 +488,8 @@ mod tests {
 
     #[test]
     fn selected_text_is_assigned_to_its_section_at_creation() {
-        let entries = vec![TocEntry { title: "Chapter".into(), link: "/chapter.xhtml#chapter".into(), children: vec![TocEntry { title: "Section".into(), link: "/chapter.xhtml#section".into(), children: vec![] }] }];
-        let resolutions = TocState::resolve(&entries, |href| Some((0, href.split_once('#').map(|(_, fragment)| fragment.to_owned()))));
+        let entries = vec![BookTocEntry { title: "Chapter".into(), target: "/chapter.xhtml#chapter".into(), children: vec![BookTocEntry { title: "Section".into(), target: "/chapter.xhtml#section".into(), children: vec![] }] }];
+        let resolutions = BookToc::resolve(&entries, |href| Some((0, href.split_once('#').map(|(_, fragment)| fragment.to_owned()))));
         let source = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><h1 id="chapter">Chapter</h1><p>Before the section</p><h2 id="section">Section</h2><p>Annotated text</p></body></html>"#;
         let positions = anchor_source_positions(&resolutions, 0, source, MarkupSyntax::Xml).unwrap();
         let mut state = TocState::default();
@@ -486,11 +533,8 @@ mod tests {
             archive.write_all(bytes.as_bytes()).unwrap();
         }
         let book = crate::book::NativeBook::from_reader(book_content::BookFormat::Epub, archive.finish().unwrap()).unwrap();
-        fn entries(source: &[book_content::TocEntry]) -> Vec<TocEntry> {
-            source.iter().map(|entry| TocEntry { title: entry.title.clone(), link: entry.link.clone(), children: entries(&entry.children) }).collect()
-        }
-        let entries = entries(book.toc());
-        let resolutions = TocState::resolve(&entries, |href| TocState::resolve_publication_href(href, book.document_uris(), book.provider.as_ref()));
+        let entries = book.toc().to_vec();
+        let resolutions = BookToc::resolve(&entries, |href| BookToc::resolve_publication_href(href, book.document_uris(), |path| book.provider.resolve("", path)));
         assert_eq!(resolutions.len(), 3);
         let positions = TocState::source_positions(&resolutions, book.document_uris(), book.provider.as_ref());
         let mut state = TocState::default();
@@ -498,11 +542,11 @@ mod tests {
         state.set(entries, resolutions);
         state.install_source_positions(positions, book.document_uris().len());
         assert_eq!(state.ordinal_of_active(), Some(2));
-        let parsed = parse_document(source, MarkupSyntax::Xml).unwrap();
-        let text = html::document::DocumentTextIndex::from_parsed(&parsed).unwrap();
+        let parsed = html_pipeline::parse_document(source, MarkupSyntax::Xml).unwrap();
+        let text = html_pipeline::DocumentTextIndex::from_parsed(&parsed).unwrap();
         let start = text.text().find("Annotated text").unwrap();
         let position = text.source_position_in(start..start + 9).unwrap();
-        let cfi = html_view_core::cfi::generate_cfi_from_source_position(0, &position);
+        let cfi = skrift_column_paginator::cfi::generate_cfi_from_source_position(0, &position);
         assert_eq!(state.ordinal_for_cfi(&cfi), Some(1));
         let tree = state.annotation_tree([state.ordinal_for_cfi(&cfi)]);
         assert!(tree.other.is_empty());

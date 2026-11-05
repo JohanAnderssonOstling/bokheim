@@ -1,6 +1,6 @@
 //! Run with two SQLite paths and optional --profile. Inputs are copied from
 //! SQLite snapshots; the benchmark migrates and writes only its own copies.
-use client_runtime::wire::{decode_worker_message, encode_worker_message};
+use client_protocol::wire::{decode_worker_message, encode_worker_message};
 use library_database::{Database, LibraryBrowseData, catalog};
 use library_model::{BrowseBookPage, BrowseBookSort, BrowseChipSort, BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
 use rusqlite::{Connection, OpenFlags};
@@ -103,7 +103,7 @@ fn measure<T: Rows>(case: String, profile: bool, mut run: impl FnMut() -> T) -> 
 }
 
 fn query(location: BrowseLocation) -> LibraryBrowseQuery {
-    LibraryBrowseQuery { location, search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::DefaultOrder, book_sort: BrowseBookSort::DefaultOrder, hide_finished: false, include_direct_child_books: false }
+    LibraryBrowseQuery { location, search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::DefaultOrder, book_sort: BrowseBookSort::DefaultOrder, hide_finished: false }
 }
 
 fn main() {

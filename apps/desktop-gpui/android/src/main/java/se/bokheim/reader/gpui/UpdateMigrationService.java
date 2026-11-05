@@ -6,12 +6,16 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.Binder;
+import android.os.Build;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Process;
 import android.os.RemoteException;
 import java.io.File;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -23,6 +27,8 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class UpdateMigrationService extends Service {
     private static final int PID = IBinder.FIRST_CALL_TRANSACTION;
     private static final int PREPARE = PID + 1;
+    private static final int CONNECTED = IBinder.FIRST_CALL_TRANSACTION;
+    private static final String CALLBACK = "migration_callback";
     private final AtomicBoolean started = new AtomicBoolean();
     private static native void nativePrepare(String job, String taxonomy);
 
@@ -52,6 +58,26 @@ public final class UpdateMigrationService extends Service {
     };
 
     @Override public IBinder onBind(Intent intent) { return binder; }
+
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        Bundle extras = intent == null ? null : intent.getExtras();
+        IBinder callback = extras == null ? null : extras.getBinder(CALLBACK);
+        if (callback == null) {
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+        Parcel request = Parcel.obtain();
+        try {
+            request.writeStrongBinder(binder);
+            if (!callback.transact(CONNECTED, request, null, IBinder.FLAG_ONEWAY)) {
+                throw new RemoteException("Migration client rejected helper");
+            }
+        } catch (RemoteException error) {
+            android.util.Log.e("Bokheim", "Cannot connect migration helper", error);
+            stopSelf(startId);
+        } finally { request.recycle(); }
+        return START_NOT_STICKY;
+    }
 
     /** Called from the native startup worker, never Android's main thread. */
     public static void prepare(Context context, String path) throws Exception {
@@ -91,8 +117,34 @@ public final class UpdateMigrationService extends Service {
             }
         };
         Intent intent = new Intent(context, UpdateMigrationService.class);
-        if (!context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) throw new IllegalStateException("Cannot bind migration helper");
+        // GameActivity's main thread can be waiting for the native startup
+        // thread to accept its surface. Deliver binding callbacks independently
+        // so startup can finish migration before it begins polling that surface.
+        ExecutorService callbacks = Executors.newSingleThreadExecutor();
+        boolean useBinding = Build.VERSION.SDK_INT >= 29;
+        boolean registered = false;
         try {
+            if (useBinding) {
+                registered = context.bindService(intent, Context.BIND_AUTO_CREATE, callbacks, connection);
+                if (!registered) throw new IllegalStateException("Cannot bind migration helper");
+            } else {
+                // API 26–28 cannot choose a service-binding callback executor.
+                // Start the private helper and receive its endpoint directly on
+                // a Binder thread instead of the blocked application main loop.
+                Bundle extras = new Bundle();
+                extras.putBinder(CALLBACK, new Binder() {
+                    @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
+                        if (code != CONNECTED) return false;
+                        IBinder service = data.readStrongBinder();
+                        if (service == null) connection.onNullBinding(intent.getComponent());
+                        else connection.onServiceConnected(intent.getComponent(), service);
+                        return true;
+                    }
+                });
+                intent.putExtras(extras);
+                registered = context.startService(intent) != null;
+                if (!registered) throw new IllegalStateException("Cannot start migration helper");
+            }
             if (!exited.await(30, TimeUnit.MINUTES)) throw new IllegalStateException("Migration helper timed out");
             if (failure.get() != null) throw failure.get();
             // Rust reads the atomically written result; death without a result fails.
@@ -101,8 +153,14 @@ public final class UpdateMigrationService extends Service {
             int child = pid.get();
             IBinder service = bound.get();
             if (service != null && service.isBinderAlive() && child > 0 && child != Process.myPid()) Process.killProcess(child);
-            context.unbindService(connection);
-            context.stopService(intent);
+            try {
+                if (registered) {
+                    if (useBinding) context.unbindService(connection);
+                    context.stopService(intent);
+                }
+            } finally {
+                callbacks.shutdownNow();
+            }
         }
     }
 }

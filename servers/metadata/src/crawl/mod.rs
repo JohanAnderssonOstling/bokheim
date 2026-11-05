@@ -195,7 +195,7 @@ mod tests {
             serde_json::json!({"key":"/books/OL2M","isbn_13":["9780131103627"]}),
         ], &[], &[]);
         let base = temp.path().join("base.sqlite");
-        crate::build_answers(&source, None, None, None, &base).unwrap();
+        crate::build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
         let first = temp.path().join("first.sqlite");
         let out = crate::snapshot::create_update(&base, &first).unwrap();
         out.execute_batch("DELETE FROM wanted WHERE isbn13=9780306406157; UPDATE wanted SET rank=-9 WHERE isbn13=9780131103627; INSERT INTO wanted VALUES(9781691706631,-5,NULL);").unwrap();

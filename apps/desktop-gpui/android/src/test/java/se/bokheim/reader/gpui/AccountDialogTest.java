@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import android.app.Activity;
 import android.graphics.Rect;
+import android.os.Looper;
 import android.text.method.PasswordTransformationMethod;
 import android.view.View;
 import android.view.ViewGroup;
@@ -16,6 +17,7 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import java.util.ArrayList;
 import java.util.List;
+import java.time.Duration;
 import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
@@ -25,14 +27,13 @@ import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
+import static org.robolectric.Shadows.shadowOf;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 30)
 public class AccountDialogTest {
-    private static final int[] LIGHT = {0xfff6f2eb, 0xff22201d, 0xff6b675f, 0xff466853, 0xfffffdfa,
-        0xff8c7f64, 0xff8a6a2b, 0xffa13029, 0xffd9e8de};
-    private static final int[] DARK = {0xff11100d, 0xffefe6d0, 0xffa69c86, 0xffd3b271, 0xff11100d,
-        0xff786644, 0xffd3b271, 0xffdf8a83, 0xff3c3423};
+    private static final String LIGHT = "{\"background\":4294374123,\"text\":4280426525,\"muted\":4285228895,\"accent\":4282804307,\"accentText\":4294966778,\"border\":4287397732,\"link\":4287261227,\"danger\":4288753705,\"selection\":4292471006}";
+    private static final String DARK = "{\"background\":4279308301,\"text\":4293912272,\"muted\":4289109126,\"accent\":4292063857,\"accentText\":4279308301,\"border\":4286080580,\"link\":4292063857,\"danger\":4292840067,\"selection\":4282135587}";
     private ActivityController<Activity> controller;
     private Activity activity;
     private AccountDialog dialog;
@@ -48,10 +49,14 @@ public class AccountDialogTest {
         controller.pause().stop().destroy();
     }
 
-    private void open(int[] colors) {
-        dialog = new AccountDialog(activity, 42, 12, colors, (id, message) -> {
+    private void open(String encodedTheme) {
+        AccountDialog.Theme theme;
+        try { theme = new AccountDialog.Theme(new JSONObject(encodedTheme)); }
+        catch (Exception error) { throw new AssertionError(error); }
+        dialog = new AccountDialog(activity, 42, 12, 60, theme, (id, message) -> {
             assertEquals(42, id);
-            try { requests.add(new JSONObject(message)); }
+            if (message.equals("\"closed\"")) return;
+            try { requests.add(new JSONObject(message).getJSONObject("submit")); }
             catch (Exception error) { throw new AssertionError(error); }
         });
         dialog.show();
@@ -149,9 +154,9 @@ public class AccountDialogTest {
         open(DARK);
         field(R.id.account_email).setText("reader@example.com");
         field(R.id.account_password).setText("correct horse battery");
-        assertEquals(DARK[1], field(R.id.account_email).getCurrentTextColor());
-        assertEquals(DARK[4], button("Sign in").getCurrentTextColor());
-        assertEquals(DARK[6], button("Create account").getCurrentTextColor());
+        assertEquals(0xffefe6d0, field(R.id.account_email).getCurrentTextColor());
+        assertEquals(0xff11100d, button("Sign in").getCurrentTextColor());
+        assertEquals(0xffd3b271, button("Create account").getCurrentTextColor());
         button("Show password").performClick();
         assertNull(field(R.id.account_password).getTransformationMethod());
         button("Hide password").performClick();
@@ -159,11 +164,11 @@ public class AccountDialogTest {
         button("Sign in").performClick();
         assertFalse(button("Sign in").isEnabled());
         assertEquals("login", requests.get(0).getString("action"));
-        assertEquals("correct horse battery", requests.get(0).getString("secret"));
+        assertEquals("correct horse battery", requests.get(0).getString("password"));
         dialog.complete("Could not sign in");
         TextView feedback = findText(content(), "Could not sign in");
         assertEquals(View.VISIBLE, feedback.getVisibility());
-        assertEquals(DARK[7], feedback.getCurrentTextColor());
+        assertEquals(0xffdf8a83, feedback.getCurrentTextColor());
         assertEquals("reader@example.com", field(R.id.account_email).getText().toString());
         assertEquals("correct horse battery", field(R.id.account_password).getText().toString());
         assertTrue(button("Sign in").isEnabled());
@@ -179,10 +184,23 @@ public class AccountDialogTest {
         button("Create account").performClick();
         dialog.complete(null);
         assertNotNull(field(R.id.account_pin));
+        assertNull(field(R.id.account_email));
         assertNull(field(R.id.account_password));
         field(R.id.account_pin).setText("123456");
+        Button resend = button("Resend PIN (60s)");
+        assertFalse(resend.isEnabled());
+        int count = requests.size();
+        resend.performClick();
+        assertEquals(count, requests.size());
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(61));
+        assertEquals("Resend PIN", resend.getText().toString());
         button("Resend PIN").performClick();
+        JSONObject resendRequest = requests.get(requests.size() - 1);
+        assertEquals("resend", resendRequest.getString("action"));
+        assertEquals("reader@example.com", resendRequest.getString("email"));
+        assertEquals(2, resendRequest.length());
         dialog.complete(null);
+        assertFalse(button("Resend PIN (60s)").isEnabled());
         assertEquals("123456", field(R.id.account_pin).getText().toString());
         button("Back to sign in").performClick();
         button("Forgot password?").performClick();
@@ -196,6 +214,45 @@ public class AccountDialogTest {
         assertEquals("reset-code", reset.getString("token"));
         dialog.complete(null);
         assertEquals("", field(R.id.account_password).getText().toString());
-        assertEquals(LIGHT[2], findText(content(), "Password updated. Sign in with your new password.").getCurrentTextColor());
+        assertEquals(0xff6b675f, findText(content(), "Password updated. Sign in with your new password.").getCurrentTextColor());
+    }
+
+    @Test public void verificationNeedsOnlyPinAndRetainsSignupCredentialsAfterAnError() throws Exception {
+        open(LIGHT);
+        button("Create account").performClick();
+        field(R.id.account_email).setText("reader@example.com");
+        field(R.id.account_password).setText("correct horse battery");
+        button("Create account").performClick();
+        dialog.complete(null);
+        assertNull(field(R.id.account_email));
+        assertNull(field(R.id.account_password));
+        EditText pin = field(R.id.account_pin);
+        assertTrue(pin.hasFocus());
+        pin.setText("123456");
+        button("Verify email").performClick();
+        JSONObject verification = requests.get(requests.size() - 1);
+        assertEquals("verify", verification.getString("action"));
+        assertEquals("reader@example.com", verification.getString("email"));
+        assertEquals("correct horse battery", verification.getString("password"));
+        assertEquals("123456", verification.getString("pin"));
+        dialog.complete("Invalid PIN");
+        pin.setText("654321");
+        button("Verify email").performClick();
+        assertEquals("654321", requests.get(requests.size() - 1).getString("pin"));
+        assertEquals("correct horse battery", requests.get(requests.size() - 1).getString("password"));
+        dialog.complete(null);
+        assertFalse(dialog.isShowing());
+    }
+
+    @Test public void changingSignupEmailStartsWithAnEmptyPassword() {
+        open(LIGHT);
+        button("Create account").performClick();
+        field(R.id.account_email).setText("reader@example.com");
+        field(R.id.account_password).setText("correct horse battery");
+        button("Create account").performClick();
+        dialog.complete(null);
+        button("Use a different email").performClick();
+        assertEquals("reader@example.com", field(R.id.account_email).getText().toString());
+        assertEquals("", field(R.id.account_password).getText().toString());
     }
 }
