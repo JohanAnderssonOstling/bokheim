@@ -178,7 +178,9 @@ impl Database {
         let transaction = self.connection.unchecked_transaction()?;
         const VERSION: i64 = LIBRARY_SCHEMA_VERSION;
         let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version == VERSION {
+        // Schema 53 has the same persisted records. Its extra remote-name
+        // column is unused; keep it while installing the new local audio cache.
+        if version == VERSION || version == 53 {
             transaction.execute_batch(include_str!("audiobook_content.sql"))?;
             transaction.schema_placements_views()?;
             transaction.schema_assets_views()?;
@@ -186,6 +188,9 @@ impl Database {
             let raw: String = transaction.initialization_replica_id(|row| row.get(0))?;
             let replica_id = raw.parse().map_err(DatabaseError::operation)?;
             content_identity::initialize_scope(&transaction, library, replica_id)?;
+            if version != VERSION {
+                transaction.pragma_update(None, "user_version", VERSION)?;
+            }
             transaction.commit()?;
             if refresh_taxonomy {
                 self.refresh_taxonomy_assignments()?;
