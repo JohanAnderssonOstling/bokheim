@@ -617,8 +617,8 @@ impl SyncPage {
                 let has_actions = cloud_enabled || libraries.read(cx).annotation_export_available();
                 library_row.when(has_actions, |library_row| {
                     let more = components::library_switcher_menu_button(format!("settings-library-menu-{library_id}"), row.name.clone(), false, theme).dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, cx| {
-                        let menu = crate::universal::library_book_menu(menu, backend.clone(), library_id, name.clone(), cloud_enabled, files_busy).touch_friendly(compact || components::touch_ui());
-                        libraries.read(cx).annotation_export_menu(library_id, menu)
+                        let menu = crate::universal::library_book_menu(menu, libraries.clone(), backend.clone(), library_id, name.clone(), cloud_enabled, files_busy).touch_friendly(compact || components::touch_ui());
+                        Libraries::annotation_export_menu(libraries.clone(), library_id, menu, cx)
                     });
                     library_row.child(more)
                 })

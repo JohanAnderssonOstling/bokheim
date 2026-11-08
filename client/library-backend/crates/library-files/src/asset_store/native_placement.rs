@@ -196,6 +196,22 @@ impl AssetStore {
         imp::create_directory(&self.0, relative, id)
     }
 
+    /// Remove the physical tree after its registered book files are reconciled.
+    pub fn purge_directory(&self, id: DirId, relative: &str) -> Result<(), AssetStoreError> {
+        if id == sync_common::ROOT_DIR_ID || !self.root_available() {
+            return Err(AssetStoreError::operation("purge requires an available non-root library folder"));
+        }
+        let path = crate::library_move::checked_path(&self.0.library_root, Path::new(relative.trim_start_matches('/')))?;
+        if !path.try_exists()? {
+            return Ok(());
+        }
+        if self.import_directory_id(relative)? != Some(id) {
+            return Err(AssetStoreError::operation("folder identity changed before purge"));
+        }
+        std::fs::remove_dir_all(&path)?;
+        imp::sync_parent(&path)
+    }
+
     /// A valid marker identifies a managed folder left by an interrupted import.
     /// Symlinks and unmarked foreign folders are never recovery candidates.
     pub fn import_directory_id(&self, relative: &str) -> Result<Option<DirId>, AssetStoreError> {

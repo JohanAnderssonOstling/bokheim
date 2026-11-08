@@ -1,5 +1,6 @@
 use ui_text::text;
 
+mod annotation_paint;
 mod ruler;
 mod session;
 pub use ruler::ReadingRulerStyle;
@@ -244,6 +245,7 @@ pub struct PdfView {
     selection_granularity: SelectionGranularity,
     selection: Option<Arc<PdfTextSelection>>,
     annotations: Arc<[PdfAnnotationOverlay]>,
+    annotation_paint: Arc<[PdfAnnotationOverlay]>,
     embedded_annotation_pages: HashSet<usize>,
     reading_highlight: Option<(usize, Arc<[NormalizedRect]>)>,
     ruler: ruler::ReadingRuler,
@@ -473,6 +475,7 @@ impl PdfView {
             selection_granularity: SelectionGranularity::Word,
             selection: None,
             annotations: Arc::from([]),
+            annotation_paint: Arc::from([]),
             embedded_annotation_pages: Default::default(),
             reading_highlight: None,
             ruler: ruler::ReadingRuler::default(),
@@ -1117,7 +1120,18 @@ impl PdfView {
             return;
         }
         self.annotations = Arc::from(annotations);
+        self.annotation_paint = annotation_paint::quiet_overlays(&self.annotations, self.active_annotation_id.as_deref()).into();
         cx.notify();
+    }
+
+    /// All hit targets sharing page text with the supplied annotation.
+    pub fn overlapping_annotation_ids(&self, id: &str) -> Vec<String> {
+        let Some(anchor) = self.annotations.iter().find(|annotation| annotation.id == id) else { return Vec::new() };
+        annotations_for_page(&self.annotations, anchor.page_index)
+            .iter()
+            .filter(|annotation| anchor.rects.iter().any(|left| annotation.rects.iter().any(|right| annotation_paint::overlaps(*left, *right))))
+            .map(|annotation| annotation.id.clone())
+            .collect()
     }
 
     pub fn reading_request(&self, page: usize) -> Option<impl std::future::Future<Output = PdfResult<Vec<pdf_reader_core::PdfReadingFragment>>> + 'static> {
@@ -1148,6 +1162,7 @@ impl PdfView {
             return;
         }
         self.active_annotation_id = id.map(Arc::from);
+        self.annotation_paint = annotation_paint::quiet_overlays(&self.annotations, self.active_annotation_id.as_deref()).into();
         cx.notify();
     }
 
@@ -2472,7 +2487,7 @@ impl Element for PdfPageElement {
                     let Some(rect) = self.page.map_rect(*source_rect).and_then(|rect| self.column.page_rect_to_column(rect)) else { continue };
                     if active {
                         self.record_passage(normalized_bounds(rect, prepaint.column_bounds));
-                        window.paint_quad(fill(normalized_bounds(rect, prepaint.column_bounds), rgba(self.interaction_style.active_annotation.packed_rgba())));
+                        window.paint_quad(gpui::outline(normalized_bounds(rect, prepaint.column_bounds), rgba(self.interaction_style.active_annotation.packed_rgba()), gpui::BorderStyle::Solid));
                     }
                     for rect in annotation_paint_rects(rect, annotation.style) {
                         window.paint_quad(fill(normalized_bounds(rect, prepaint.column_bounds), rgba(annotation.color)));
@@ -2530,7 +2545,7 @@ impl PdfView {
                                     page: page.clone(),
                                     tiles: self.pages.iter().filter(|(candidate, _)| *candidate == page_index).map(|(_, page)| page.clone()).collect(),
                                     selection: (self.selection_page == Some(page_index)).then(|| self.selection.clone()).flatten(),
-                                    annotations: self.annotations.clone(),
+                                    annotations: self.annotation_paint.clone(),
                                     reading_highlight: self.reading_highlight.as_ref().filter(|(page, _)| *page == page_index).map(|(_, rects)| rects.clone()),
                                     active_annotation_id: self.active_annotation_id.clone(),
                                     search_hits: self.search_page_hits.get(&page_index).cloned(),

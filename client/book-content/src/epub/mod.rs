@@ -55,6 +55,7 @@ pub(crate) struct EpubPackage {
     opf_path: String,
     opf_xml: String,
     manifest_cache: OnceLock<Arc<ParsedManifest>>,
+    documents_cache: OnceLock<Vec<String>>,
 }
 
 impl EpubPackage {
@@ -84,11 +85,11 @@ impl EpubPackage {
         }
         for opf_path in candidates {
             if let Ok(opf) = reader.read(&opf_path, MAX_PACKAGE_DOCUMENT_BYTES).await {
-                return Ok(Self { archive: reader.metadata.clone(), opf_path, opf_xml: decode_package_xml(&opf), manifest_cache: OnceLock::new() });
+                return Ok(Self { archive: reader.metadata.clone(), opf_path, opf_xml: decode_package_xml(&opf), manifest_cache: OnceLock::new(), documents_cache: OnceLock::new() });
             }
         }
         // Package metadata is useful, but readable HTML can stand on its own.
-        Ok(Self { archive: reader.metadata.clone(), opf_path: String::new(), opf_xml: String::new(), manifest_cache: OnceLock::new() })
+        Ok(Self { archive: reader.metadata.clone(), opf_path: String::new(), opf_xml: String::new(), manifest_cache: OnceLock::new(), documents_cache: OnceLock::new() })
     }
 
     /// Returns the package-declared media type for an archive resource.
@@ -261,18 +262,23 @@ impl EpubPackage {
         ParsedManifest { items, spine, nav_href, ncx_href }
     }
 
-    fn resolve_spine_entries(&self) -> io::Result<Option<Vec<String>>> {
+    fn resolve_spine_entries(&self) -> Option<Vec<String>> {
         let manifest = self.get_or_parse_manifest();
 
         if manifest.spine.is_empty() {
-            return Ok(None);
+            return None;
         }
 
         let mut out = Vec::new();
         let mut seen = HashSet::new();
+        let mut items = HashMap::with_capacity(manifest.items.len());
+        for item in &manifest.items {
+            // Preserve the first declared item when an exporter repeats an ID.
+            items.entry(item.id.as_str()).or_insert(item);
+        }
 
         for idref in &manifest.spine {
-            let Some(item) = manifest.items.iter().find(|item| &item.id == idref) else {
+            let Some(item) = items.get(idref.as_str()) else {
                 continue;
             };
             if !is_container_resource(&item.href) {
@@ -285,7 +291,7 @@ impl EpubPackage {
             }
         }
 
-        if out.is_empty() { Ok(None) } else { Ok(Some(out)) }
+        if out.is_empty() { None } else { Some(out) }
     }
 
     /// Package addresses stay tied to the original XML element positions,
@@ -327,11 +333,7 @@ impl EpubPackage {
     /// Returns the documents the reader can present, preferring the package
     /// spine and falling back to HTML archive entries in ZIP directory order.
     pub(crate) fn document_uris(&self) -> io::Result<Vec<String>> {
-        if let Some(spine) = self.resolve_spine_entries()? {
-            return Ok(spine);
-        }
-
-        Ok(self.fallback_documents())
+        Ok(self.documents_cache.get_or_init(|| self.resolve_spine_entries().unwrap_or_else(|| self.fallback_documents())).clone())
     }
 
     pub(crate) fn fallback_documents(&self) -> Vec<String> {

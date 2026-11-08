@@ -12,6 +12,7 @@ fn import() -> ImportCommit {
     ImportCommit {
         source_identity: None,
         byte_checksum: None,
+        audiobook_content_hash: None,
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
         format: book_model::BookFormat::Epub,

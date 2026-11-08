@@ -9,7 +9,6 @@ use std::io;
 pub(crate) use std::sync::OnceLock;
 
 pub const INSPECTION_VERSION: u32 = 11;
-pub const EDGE_SECTIONS: usize = 8;
 
 pub(crate) const LOCAL_CIP_SOURCE_PREFIX: &str = "inspection:local-cip:";
 
@@ -38,6 +37,32 @@ pub struct SectionEvidence {
     pub reason: String,
     pub isbns: Vec<IsbnEvidence>,
     pub lcc: Vec<String>,
+}
+
+pub(crate) struct EvidenceProgress {
+    isbn: bool,
+    classification: bool,
+}
+
+impl EvidenceProgress {
+    pub(crate) fn from_book(book: &BookRecord) -> Self {
+        Self {
+            isbn: book.book.identifiers.iter().any(|identifier| identifier.scheme() == &Scheme::Isbn && identifier.canonical_value().is_some()),
+            classification: book.book.subjects.iter().any(|subject| subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.code().is_some_and(usable_lcc)),
+        }
+    }
+
+    pub(crate) fn observe(&mut self, section: &SectionEvidence) {
+        // Extracted ISBN candidates have already passed checksum validation.
+        self.isbn |= !section.isbns.is_empty();
+        if !self.classification {
+            self.classification = section.lcc.iter().any(|code| usable_lcc(code));
+        }
+    }
+
+    pub(crate) fn complete(&self) -> bool {
+        self.isbn && self.classification
+    }
 }
 
 // Cross a line boundary only around an explicit hyphen, so printing-number

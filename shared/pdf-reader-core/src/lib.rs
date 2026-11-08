@@ -25,13 +25,14 @@ use std::io::{Read, Seek};
 use std::mem::{size_of, size_of_val};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 mod annotations;
 mod metadata;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 mod runtime;
-pub use metadata::{inspect_reader_metadata, inspect_reader_metadata_with_identity};
+pub use metadata::{PdfInspection, inspect_reader_metadata, inspect_reader_metadata_with_identity, inspect_reader_with_text, inspect_reader_with_text_visitor};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::PdfDocumentSession;
 pub use pdf_view_common::{PdfReaderMetadata, PdfStoredAnnotationKind};
@@ -71,6 +72,12 @@ impl fmt::Display for PdfError {
 }
 
 impl std::error::Error for PdfError {}
+
+impl From<std::io::Error> for PdfError {
+    fn from(error: std::io::Error) -> Self {
+        Self::new(error.to_string())
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 pub struct PdfDocumentSession {
@@ -299,25 +306,77 @@ pub fn inspect_page_text_with_count(reader: impl Read + Seek + Send + 'static, e
     runtime::run(move || inspect_page_text_local(reader, edge_pages, max_text_bytes))
 }
 
+/// Receives complete visible-page text. Return false to skip all later pages.
+pub trait PdfPageTextVisitor: Send + 'static {
+    fn visit(&mut self, page: usize, text: String) -> PdfResult<bool>;
+}
+
+#[derive(Default)]
+struct PageTextCollector(Vec<(usize, String)>);
+
+impl PdfPageTextVisitor for PageTextCollector {
+    fn visit(&mut self, page: usize, text: String) -> PdfResult<bool> {
+        self.0.push((page, text));
+        Ok(true)
+    }
+}
+
+/// Visit the supplied one-based pages in order without collecting their text.
+/// Returns the full document page count and the visitor with its accumulated state.
+pub fn visit_page_text<R: Read + Seek + Send + 'static, V: PdfPageTextVisitor>(reader: R, pages: Vec<usize>, max_text_bytes: usize, mut visitor: V) -> PdfResult<(usize, V)> {
+    runtime::run(move || {
+        let document = load_document(reader)?;
+        let count = visit_document_page_text(&document, &pages, max_text_bytes, &mut visitor)?;
+        Ok((count, visitor))
+    })
+}
+
 fn inspect_page_text_local(reader: impl Read + Seek + 'static, edge_pages: usize, max_text_bytes: usize) -> PdfResult<(usize, Vec<(usize, String)>)> {
     let document = load_document(reader)?;
+    inspect_document_page_text(&document, edge_pages, max_text_bytes)
+}
+
+fn inspect_document_page_text(document: &runtime::Document, edge_pages: usize, max_text_bytes: usize) -> PdfResult<(usize, Vec<(usize, String)>)> {
     let count = document.pages().len() as usize;
-    let mut result = Vec::new();
-    for index in 0..count.min(edge_pages) {
+    let pages: Vec<_> = (1..=count.min(edge_pages)).collect();
+    let mut collector = PageTextCollector::default();
+    visit_document_page_text(document, &pages, max_text_bytes, &mut collector)?;
+    Ok((count, collector.0))
+}
+
+fn visit_document_page_text(document: &runtime::Document, pages: &[usize], max_text_bytes: usize, visitor: &mut impl PdfPageTextVisitor) -> PdfResult<usize> {
+    let count = document.pages().len() as usize;
+    for &number in pages.iter().filter(|&&number| number > 0 && number <= count) {
+        let index = number - 1;
+        let started = pdf_profile_start();
         let page = document.pages().get(index as i32).map_err(|e| PdfError::new(e.to_string()))?;
+        profile_pdf_phase("page_load", index + 1, started);
+        let started = pdf_profile_start();
         let text = page.text().map_err(|e| PdfError::new(e.to_string()))?;
-        if text.len() as usize > max_text_bytes {
+        profile_pdf_phase("text_page_load", index + 1, started);
+        let started = pdf_profile_start();
+        let length = text.len() as usize;
+        profile_pdf_phase("text_character_count", index + 1, started);
+        if length > max_text_bytes {
             continue;
         }
         // Respect offset crop/media boxes just as character selection does,
         // without fetching Unicode and two bounds for every character.
+        let started = pdf_profile_start();
         let value = text.inside_rect(PdfPageCoordinates::new(&page).bounds);
+        profile_pdf_phase("text_extract", index + 1, started);
+        let started = pdf_profile_start();
         let value = value.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
-        if value.len() <= max_text_bytes {
-            result.push((index + 1, value));
+        profile_pdf_phase("text_normalize", index + 1, started);
+        let started = pdf_profile_start();
+        drop(text);
+        drop(page);
+        profile_pdf_phase("page_close", index + 1, started);
+        if value.len() <= max_text_bytes && !visitor.visit(number, value)? {
+            break;
         }
     }
-    Ok((count, result))
+    Ok(count)
 }
 
 /// Renders a bounded set of inspection pages one at a time. The visitor can stop
@@ -338,7 +397,20 @@ pub fn inspect_page_images(reader: impl Read + Seek + Send + 'static, pages: &[u
 
 // Both native and WASM keep a seekable source alive for on-demand reads.
 fn load_document(reader: impl Read + Seek + 'static) -> PdfResult<runtime::Document> {
-    shared_pdfium()?.load_pdf_from_reader(PdfiumExactReader::new(reader), None).map_err(|error| PdfError::new(error.to_string()))
+    let started = pdf_profile_start();
+    let result = shared_pdfium()?.load_pdf_from_reader(PdfiumExactReader::new(reader), None).map_err(|error| PdfError::new(error.to_string()));
+    profile_pdf_phase("document_open", 0, started);
+    result
+}
+
+fn pdf_profile_start() -> Option<Instant> {
+    log::log_enabled!(target: "library_pdf_profile", log::Level::Debug).then(Instant::now)
+}
+
+fn profile_pdf_phase(stage: &str, page: usize, started: Option<Instant>) {
+    if let Some(started) = started {
+        log::debug!(target: "library_pdf_profile", "{{\"event\":\"pdf_phase\",\"stage\":\"{stage}\",\"page\":{page},\"elapsed_ns\":{}}}", started.elapsed().as_nanos());
+    }
 }
 
 /// Adapts Rust's short-read semantics to Pdfium's custom file-access contract.
@@ -394,6 +466,7 @@ impl LocalDocumentSession {
     }
 
     fn from_document(source_name: String, document: runtime::Document) -> PdfResult<Self> {
+        let started = pdf_profile_start();
         let pages = document
             .pages()
             .page_sizes()
@@ -401,11 +474,16 @@ impl LocalDocumentSession {
             .into_iter()
             .map(|size| PdfPageInfo { width_points: size.width().value, height_points: size.height().value })
             .collect::<Vec<_>>();
+        profile_pdf_phase("page_geometry", 0, started);
         if pages.is_empty() {
             return Err(PdfError::new("the PDF has no pages"));
         }
+        let started = pdf_profile_start();
         let outline = document_outline(&document);
+        profile_pdf_phase("outline", 0, started);
+        let started = pdf_profile_start();
         let right_to_left = document.catalog().is_right_to_left();
+        profile_pdf_phase("reading_direction", 0, started);
         Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline, right_to_left }, analysis: RefCell::new(PageAnalysisCache::default()) })
     }
 

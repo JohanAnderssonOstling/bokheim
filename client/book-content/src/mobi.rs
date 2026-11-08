@@ -11,15 +11,47 @@ use ::mobi::HuffmanDecoder;
 use ::mobi::headers::{Compression, Encryption, TextEncoding};
 pub use ::mobi::{MobiMetadata, headers::ExthRecord};
 
-use std::io::{self, Read, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
+
+fn profile_start() -> Option<Instant> {
+    log::log_enabled!(target: "library_mobi_profile", log::Level::Debug).then(Instant::now)
+}
+
+fn profile_phase(stage: &str, started: Option<Instant>) {
+    if let Some(started) = started {
+        log::debug!(target: "library_mobi_profile", "{{\"event\":\"mobi_phase\",\"stage\":\"{stage}\",\"elapsed_ns\":{}}}", started.elapsed().as_nanos());
+    }
+}
 
 pub(crate) struct MobiContainer {
     metadata: MobiMetadata,
     source: Source,
     length: u64,
     extra_data_flags: u32,
+}
+
+/// Declared metadata, navigation, and bounded frontmatter from one text decode.
+pub struct MobiInspection {
+    pub metadata: DeclaredMetadata,
+    pub toc: Option<Vec<crate::BookTocEntry>>,
+    pub frontmatter: Option<String>,
+}
+
+pub fn inspect_reader(reader: impl Read + Seek + Send + 'static) -> io::Result<MobiInspection> {
+    futures_lite::future::block_on(async move {
+        let started = profile_start();
+        let mut container = MobiContainer::open(Source::from_reader(reader)).await?;
+        profile_phase("container_open", started);
+        let metadata = container.metadata();
+        let started = profile_start();
+        let (text, frontmatter) = container.decoded_text(true).await?;
+        profile_phase("text_decode", started);
+        let toc = container.navigation(text, true).await?.toc();
+        Ok(MobiInspection { metadata, toc, frontmatter })
+    })
 }
 
 /// Read only the headers and EXTH fields, including for non-seekable imports.
@@ -147,7 +179,7 @@ impl MobiContainer {
         read_record(self.source.reader.as_mut(), range).await
     }
 
-    async fn reading_text(&mut self) -> io::Result<navigation::ReadingText> {
+    async fn decoded_text(&mut self, frontmatter: bool) -> io::Result<(String, Option<String>)> {
         if u64::from(self.metadata.palmdoc.text_length) > MAX_PREPARED_TEXT_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "MOBI text exceeds the prepared text limit"));
         }
@@ -164,9 +196,13 @@ impl MobiContainer {
             decoder.load_huff(&records).map_err(io::Error::other)?;
         }
         let (start, end) = mobi_text_record_bounds(self.metadata.mobi.first_content_record, self.metadata.palmdoc.record_count, self.metadata.records.records.len()).map_err(io::Error::other)?;
+        let mut prefix_length = None;
         for index in start..end {
             let record = self.record(index, 64 * 1024).await?;
             decoder.decode_record(&record).map_err(io::Error::other)?;
+            if frontmatter && prefix_length.is_none() && (index - start + 1 >= 32 || decoder.decoded.len() >= 128 * 1024 || decoder.complete()) {
+                prefix_length = Some(decoder.decoded.len().min(128 * 1024));
+            }
             if decoder.complete() {
                 break;
             }
@@ -174,9 +210,26 @@ impl MobiContainer {
         if !decoder.complete() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "MOBI text is shorter than its declared length"));
         }
+        // Match the independent evidence reader's input/record/byte limits,
+        // including lossy decoding of a UTF-8 character cut by the prefix bound.
+        let frontmatter = (frontmatter && self.length <= 16 * 1024 * 1024).then(|| decoder.prefix(prefix_length.unwrap_or(0)));
         let text = decoder.finish(true).map_err(io::Error::other)?;
+        Ok((text, frontmatter))
+    }
+
+    async fn navigation(&mut self, text: String, inspection: bool) -> io::Result<navigation::ReadingText> {
+        let started = profile_start();
         let entries = navigation::index::read(self).await.ok().flatten();
-        navigation::ReadingText::new(&self.metadata, text, entries)
+        profile_phase("navigation_index", started);
+        let started = profile_start();
+        let result = if inspection { navigation::ReadingText::for_inspection(&self.metadata, text, entries) } else { navigation::ReadingText::new(&self.metadata, text, entries) };
+        profile_phase("navigation_build", started);
+        result
+    }
+
+    async fn reading_text(&mut self) -> io::Result<navigation::ReadingText> {
+        let (text, _) = self.decoded_text(false).await?;
+        self.navigation(text, false).await
     }
 
     pub(crate) async fn toc(&mut self) -> io::Result<Option<Vec<crate::BookTocEntry>>> {
@@ -304,6 +357,14 @@ impl TextDecoder {
 
     fn complete(&self) -> bool {
         self.decoded.len() == self.limit
+    }
+
+    fn prefix(&self, length: usize) -> String {
+        let bytes = &self.decoded[..length];
+        match self.encoding {
+            TextEncoding::CP1252 => encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes).0.into_owned(),
+            _ => String::from_utf8_lossy(bytes).into_owned(),
+        }
     }
 
     fn finish(self, strict_utf8: bool) -> Result<String, String> {

@@ -1,6 +1,7 @@
 //! Execution and bounded storage scheduling for native and browser clients.
 pub mod connectivity;
 pub mod executor;
+pub mod profiling;
 pub mod file_storage;
 pub mod storage_queue;
 pub mod transfers;

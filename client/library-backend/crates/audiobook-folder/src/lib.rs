@@ -6,11 +6,18 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::Path;
+use symphonia::core::io::MediaSource;
+use symphonia::core::units::TimeBase;
 
 use audiobook_archive::{Cover, Cue, MAX_COVER_BYTES, MAX_CUE_BYTES, MAX_NFO_BYTES, MAX_TRACKS, Nfo, Track, audio_file, natural_cmp, valid_sidecar_name};
 
 mod local_names;
+mod mp3_frames;
 pub use local_names::{PATH_MAPPING_FILE, copy_path_mapping, extract_download, resolve_track_path};
+#[cfg(not(target_arch = "wasm32"))]
+mod archive_reader;
+#[cfg(not(target_arch = "wasm32"))]
+pub use archive_reader::{FolderArchive, folder_archive_reader};
 
 #[derive(Default)]
 pub struct Mp3Facts {
@@ -74,19 +81,111 @@ impl Mp3Facts {
     }
 }
 
-/// Reads MP3 packet timestamps without decoding samples. The scan uses the
+/// Counts MP3 samples without decoding audio. The scan uses the
 /// same result for chapter boundaries and the book-wide playback clock.
-pub fn duration_ms<R: symphonia::core::io::MediaSource + 'static>(reader: R) -> io::Result<u64> {
+pub fn duration_ms<R: MediaSource + 'static>(reader: R) -> io::Result<u64> {
     Ok(inspect_mp3(reader, false)?.duration_ms)
 }
 
-pub fn inspect_mp3<R: symphonia::core::io::MediaSource + 'static>(reader: R, artwork: bool) -> io::Result<Mp3Facts> {
+/// Inspect an owned seekable source with a known byte length, including
+/// instrumented filesystem readers that do not implement MediaSource.
+pub fn inspect_mp3_reader<R: io::Read + io::Seek + Send + Sync + 'static>(reader: R, length: u64, artwork: bool) -> io::Result<Mp3Facts> {
+    struct Source<R> {
+        reader: R,
+        length: u64,
+    }
+    impl<R: io::Read> io::Read for Source<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.reader.read(buffer)
+        }
+    }
+    impl<R: io::Seek> io::Seek for Source<R> {
+        fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+            self.reader.seek(position)
+        }
+    }
+    impl<R: io::Read + io::Seek + Send + Sync> symphonia::core::io::MediaSource for Source<R> {
+        fn is_seekable(&self) -> bool {
+            true
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            Some(self.length)
+        }
+    }
+    inspect_mp3(Source { reader, length }, artwork)
+}
+
+// Trust an explicit CBR frame count only when its declared audio extent fits
+// the file exactly, optionally followed by a validated ID3v1 footer. VBR frame
+// counts can include the header frame itself, so count actual audio frames.
+fn cbr_sample_count(reader: &mut impl MediaSource, length: u64, start: u64) -> io::Result<Option<u64>> {
+    use io::SeekFrom;
+    let mut tag = [0; 10];
+    reader.read_exact(&mut tag)?;
+    let audio_start = if tag.starts_with(b"ID3") {
+        if !matches!(tag[3], 2..=4) || tag[5] & 0x10 != 0 || tag[6..].iter().any(|byte| byte & 0x80 != 0) {
+            return Ok(None);
+        }
+        let size = tag[6..].iter().fold(0_u64, |size, byte| (size << 7) | u64::from(*byte));
+        start.checked_add(10).and_then(|start| start.checked_add(size)).ok_or_else(|| io::Error::other("MP3 tag size overflow"))?
+    } else {
+        start
+    };
+    if audio_start >= length {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::Start(audio_start))?;
+    let mut frame = [0; 60];
+    reader.read_exact(&mut frame)?;
+    let Some(header) = mp3_frames::FrameHeader::parse(u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]])) else { return Ok(None) };
+    let offset = 4 + header.side_info_len;
+    let number = |offset: usize| u32::from_be_bytes([frame[offset], frame[offset + 1], frame[offset + 2], frame[offset + 3]]);
+    if &frame[offset..offset + 4] != b"Info" || number(offset + 4) & 3 != 3 {
+        return Ok(None);
+    }
+    let frames = number(offset + 8);
+    let bytes = number(offset + 12);
+    let end = audio_start.checked_add(u64::from(bytes)).ok_or_else(|| io::Error::other("MP3 audio size overflow"))?;
+    if frames == 0 || bytes < frame.len() as u32 {
+        return Ok(None);
+    }
+    let frame_bytes = u64::from(header.bytes - u32::from((frame[2] >> 1) & 1));
+    let frame_count = u64::from(frames) + 1; // Includes the Info header frame.
+    if u64::from(bytes) < frame_count * frame_bytes || u64::from(bytes) > frame_count * (frame_bytes + 1) {
+        return Ok(None);
+    }
+    if end != length {
+        if end.checked_add(128) != Some(length) {
+            return Ok(None);
+        }
+        reader.seek(SeekFrom::Start(end))?;
+        let mut footer = [0; 3];
+        reader.read_exact(&mut footer)?;
+        if &footer != b"TAG" {
+            return Ok(None);
+        }
+    }
+    Ok(Some(u64::from(frames) * u64::from(header.samples)))
+}
+
+pub fn inspect_mp3<R: MediaSource + 'static>(mut reader: R, artwork: bool) -> io::Result<Mp3Facts> {
+    use io::Seek;
     use symphonia::core::errors::Error;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
+    let length = if reader.is_seekable() { reader.byte_len() } else { None };
+    let start = if length.is_some() { Some(reader.stream_position()?) } else { None };
+    let samples = if let (Some(start), Some(length)) = (start, length) {
+        let samples = cbr_sample_count(&mut reader, length, start).ok().flatten();
+        reader.seek(io::SeekFrom::Start(start))?;
+        samples
+    } else {
+        None
+    };
     let source = MediaSourceStream::new(Box::new(reader), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
     hint.with_extension("mp3");
@@ -104,24 +203,44 @@ pub fn inspect_mp3<R: symphonia::core::io::MediaSource + 'static>(reader: R, art
     let track = format.default_track().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "MP3 has no audio track"))?;
     let track_id = track.id;
     let time_base = track.codec_params.time_base.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "MP3 has no time base"))?;
-    let mut end = 0u64;
-    loop {
-        match format.next_packet() {
-            Ok(packet) if packet.track_id() == track_id => end = end.max(packet.ts().saturating_add(packet.dur())),
-            Ok(_) => {}
-            Err(Error::IoError(error)) if error.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(io::Error::other(error)),
+    let sample_rate = track.codec_params.sample_rate;
+    let mp3 = track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_MP3;
+    let end = match samples.filter(|samples| track.codec_params.n_frames == Some(*samples)) {
+        Some(samples) => samples,
+        None => {
+            if let (true, Some(start), Some(length), Some(sample_rate)) = (mp3, start, length, sample_rate) {
+                let mut source = format.into_inner();
+                if let Ok(Some(samples)) = mp3_frames::sample_count(&mut source, length, sample_rate) {
+                    return finish_duration(facts, time_base, samples);
+                }
+                source.seek(io::SeekFrom::Start(start))?;
+                format = symphonia::default::get_probe().format(&hint, source, &FormatOptions::default(), &MetadataOptions::default()).map_err(io::Error::other)?.format;
+            }
+            let mut end = 0u64;
+            loop {
+                match format.next_packet() {
+                    Ok(packet) if packet.track_id() == track_id => end = end.max(packet.ts().saturating_add(packet.dur())),
+                    Ok(_) => {}
+                    Err(Error::IoError(error)) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(error) => return Err(io::Error::other(error)),
+                }
+            }
+            end
         }
+    };
+    if let Some(revision) = format.metadata().current() {
+        facts.absorb(revision, artwork);
     }
-    let duration = time_base.calc_time(end);
+    finish_duration(facts, time_base, end)
+}
+
+fn finish_duration(mut facts: Mp3Facts, time_base: TimeBase, samples: u64) -> io::Result<Mp3Facts> {
+    let duration = time_base.calc_time(samples);
     let millis = duration.seconds.saturating_mul(1000).saturating_add((duration.frac * 1000.0).round() as u64);
     if millis == 0 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "MP3 has no audio duration"));
     }
     facts.duration_ms = millis;
-    if let Some(revision) = format.metadata().current() {
-        facts.absorb(revision, artwork);
-    }
     Ok(facts)
 }
 
@@ -353,14 +472,43 @@ pub fn folder_hash(folder: &Path) -> io::Result<blake3::Hash> {
     audiobook_archive::archive_hash(archive)
 }
 
-/// Use logical member names and source ZIP metadata for mapped native files.
-pub fn write_folder_archive<W: io::Write + io::Seek>(folder: &Path, writer: W, tracks: &[Track]) -> io::Result<W> {
+/// Inspect content identity without creating or checksumming ZIP payloads.
+pub fn folder_content_with_reader<R: io::Read>(folder: &Path, tracks: &[Track], open: impl FnMut(&Path) -> io::Result<R>) -> io::Result<audiobook_archive::ContentManifest> {
     let nfo = discover_nfo(folder)?;
     let cue = discover_cue(folder)?;
     let cover = discover_cover(folder)?;
     let mapping = local_names::load(folder)?;
     let formats = mapping.as_ref().map_or(&[][..], |mapping| mapping.formats.as_slice());
-    audiobook_archive::write_archive_with_formats(writer, tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref(), formats)
+    audiobook_archive::folder_content_with_reader(tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref(), formats, open)
+}
+
+pub fn folder_content_hash(folder: &Path) -> io::Result<blake3::Hash> {
+    let tracks = discover(folder)?;
+    Ok(folder_content_with_reader(folder, &tracks, |path| fs::File::open(path))?.checksum)
+}
+
+/// Retain the original transport's metadata precedence for mapped downloads.
+pub fn metadata_sidecars(folder: &Path) -> io::Result<Vec<Nfo>> {
+    let mut sidecars = discover_nfo(folder)?.into_iter().chain(discover_cue(folder)?).collect::<Vec<_>>();
+    let mapping = local_names::load(folder)?;
+    let formats = mapping.as_ref().map_or(&[][..], |mapping| mapping.formats.as_slice());
+    sidecars.sort_by_key(|sidecar| formats.iter().position(|format| format.name == sidecar.name).unwrap_or(formats.len()));
+    Ok(sidecars)
+}
+
+/// Use logical member names and source ZIP metadata for mapped native files.
+pub fn write_folder_archive<W: io::Write + io::Seek>(folder: &Path, writer: W, tracks: &[Track]) -> io::Result<W> {
+    write_folder_archive_with_reader(folder, writer, tracks, |path| fs::File::open(path))
+}
+
+/// Archive through caller-supplied member readers, preserving identical bytes.
+pub fn write_folder_archive_with_reader<W: io::Write + io::Seek, R: io::Read>(folder: &Path, writer: W, tracks: &[Track], open: impl FnMut(&Path) -> io::Result<R>) -> io::Result<W> {
+    let nfo = discover_nfo(folder)?;
+    let cue = discover_cue(folder)?;
+    let cover = discover_cover(folder)?;
+    let mapping = local_names::load(folder)?;
+    let formats = mapping.as_ref().map_or(&[][..], |mapping| mapping.formats.as_slice());
+    audiobook_archive::write_archive_with_formats_and_reader(writer, tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref(), formats, open)
 }
 
 #[cfg(test)]

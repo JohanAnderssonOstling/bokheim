@@ -69,7 +69,7 @@ impl AssetExecutor {
                     credentials.access_token(),
                     &self.library_id,
                     book_id,
-                    intent.byte_checksum,
+                    Some(uploaded_checksum),
                     intent.size_bytes,
                     reqwest::Body::wrap_stream(book.into_upload_stream()),
                 ),

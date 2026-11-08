@@ -83,7 +83,7 @@ impl ReaderView {
         self.recurring.editor_passage = Some(Selection { cfi_range: overlay.cfi_range.clone(), text: overlay.exact_text.clone() });
         self.marks.append(annotation, "save reader annotation");
         self.marks.select(annotation_id);
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
+        self.project_annotations(cx);
         notify(cx, Component::ReaderShell, "annotation_created");
     }
 
@@ -113,6 +113,7 @@ impl ReaderView {
                 input.focus(window, cx);
             }
         });
+        self.project_annotations(cx);
         notify(cx, Component::ReaderShell, "annotation_selected");
     }
 
@@ -121,6 +122,7 @@ impl ReaderView {
             self.annotation_popup_anchor = None;
             self.recurring.editor_overlay = None;
             self.recurring.editor_passage = None;
+            self.project_annotations(cx);
             notify(cx, Component::ReaderShell, "annotation_closed");
         }
     }

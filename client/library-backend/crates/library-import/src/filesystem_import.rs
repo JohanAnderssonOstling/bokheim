@@ -222,16 +222,21 @@ impl LibraryImport<'_> {
         let (import, ingested) = if path.is_dir() {
             validate_import_destination(self.storage.database(), &parent).await?;
             let import = ValidatedImport { parent_id: parent, file_name: filenames::validate_component(name)?, format: BookFormat::Mp3Folder };
-            (import, ingest_audiobook_folder(path, name.to_owned(), &*self.cpu).await?)
+            (import, ingest_audiobook_folder(path, name.to_owned()).await?)
         } else {
             let import = self.validate_import(&parent, name).await?;
             (import, ingest_file(path, name.to_owned(), &*self.cpu).await?)
         };
 
         let byte_checksum = ingested.book_id.content_hash().ok_or_else(|| BackendError::message("imported bytes have no checksum"))?;
-        let content = self.resolve_import_content(byte_checksum, ingested.size_bytes, ingested.source_identity).await?;
+        let content = if let Some(checksum) = ingested.audiobook_content_hash {
+            let known = self.storage.database().audiobook_at_revision(parent, name, ingested.fingerprint).await?;
+            self.resolve_audiobook_import(checksum, ingested.byte_checksum, ingested.size_bytes, known).await?
+        } else {
+            self.resolve_import_content(byte_checksum, ingested.size_bytes, ingested.source_identity).await?
+        };
         let identity = content.book_id;
-        self.storage.assets().remember_local_content(identity, byte_checksum)?;
+        self.storage.assets().remember_local_content(identity, ingested.byte_checksum.unwrap_or(byte_checksum))?;
         let _lease = self.lease_import_content(&content).await?;
         // A concurrent folder move must not register these bytes at another path.
         validate_import_destination(self.storage.database(), &parent).await?;

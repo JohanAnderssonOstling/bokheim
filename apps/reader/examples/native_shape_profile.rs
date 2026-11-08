@@ -17,8 +17,8 @@
 //! previous paragraph before each shape. It emits HTML_SHAPE_PROFILE records.
 //! `NATIVE_SHAPE_ADAPTER_RETAIN=1` instead keeps the measured paragraphs' paint
 //! resources alive together, to measure the cost of a prepared chapter.
-//! `NATIVE_SHAPE_ADAPTER_BATCH` commits an append transaction after this many
-//! paragraphs, including commit cost and following-batch refaults in timing.
+//! `NATIVE_SHAPE_ADAPTER_BATCH` finalizes shaping scratch after this many
+//! paragraphs, including finalization and following-batch refaults in timing.
 //! Batch profiling requires retained adapter resources.
 //! `NATIVE_SHAPE_ADAPTER_REGISTER=1` also registers each shaped run in the
 //! engine's glyph metric store, matching the reader's ownership of advances.
@@ -43,7 +43,6 @@ use html::text::FontSlant;
 use html_pipeline::engine::GlyphId as HtmlGlyphId;
 use html::text::GlyphShaper;
 #[cfg(test)]
-use html_pipeline::engine::ShapedRun as HtmlShapedRun;
 use html_engine_model::GlyphResourceStore;
 use html_gpui::backend::GpuiTextCache;
 
@@ -300,7 +299,7 @@ fn main() {
         let serif = if mixed_fonts { fallback_serif } else { serif };
         let mut allocations = Allocations::default();
         let mut time_ns = 0;
-        let mut batch_commit_ns = 0;
+        let mut batch_finalize_ns = 0;
         let mut batches = 0;
         let mut metric_read_ns = 0;
         let mut advance_read_ns = 0;
@@ -329,17 +328,14 @@ fn main() {
                         adapter_resources = Some(GlyphResourceStore::new(adapter.resource_generation()));
                     }
                 }
-                if adapter_batch_size.is_some_and(|size| index <= 1 || (index - 1) % size == 0) {
-                    adapter.begin_append_shaping().expect("begin adapter shaping batch");
-                }
+
                 let style = shaping::style(
                     font_size,
                     400,
                     FontSlant::Normal,
-                    0x000000ff,
                     Some("NV Garamond"),
                 );
-                let request = shaping::run(&text, style, None);
+                let request = shaping::run(&text, style);
                 let mut registered_glyphs = register_adapter_runs
                     .then(|| vec![HtmlGlyphId(u32::MAX); text.chars().count()]);
                 if index > 0 {
@@ -348,13 +344,11 @@ fn main() {
                 let started = Instant::now();
                 let shaped = if let Some(glyphs) = &mut registered_glyphs {
                     let resources = adapter_resources.as_mut().expect("adapter resource store");
-                    resources.shape_run(adapter, black_box(request), glyphs)
+                    resources.shape_run(adapter, black_box(request), glyphs).expect("engine registration")
                 } else {
-                    adapter
-                        .shape_run(black_box(request))
-                        .map(|run| run.map(shaping_contracts::shaped_run_into_geometry))
+                    shaping_contracts::shaped_run_into_geometry(adapter.shape_run(black_box(request)))
                 };
-                let shaped = black_box(shaped).expect("adapter shaping").expect("adapter geometry");
+                let shaped = black_box(shaped).expect("adapter geometry");
                 let elapsed = started.elapsed().as_nanos();
                 if let Some(measured) = COUNTS.with(|counts| counts.replace(None)) {
                     allocations.calls += measured.calls;
@@ -406,14 +400,14 @@ fn main() {
                         COUNTS.with(|counts| counts.set(Some(Allocations::default())));
                     }
                     let started = Instant::now();
-                    adapter.commit_append_shaping();
+                    adapter.finish_shaping();
                     let elapsed = started.elapsed().as_nanos();
                     if let Some(measured) = COUNTS.with(|counts| counts.replace(None)) {
                         allocations.calls += measured.calls;
                         allocations.bytes += measured.bytes;
                         allocations.reallocations += measured.reallocations;
                         time_ns += elapsed;
-                        batch_commit_ns += elapsed;
+                        batch_finalize_ns += elapsed;
                         batches += 1;
                     }
                 }
@@ -467,7 +461,7 @@ fn main() {
             if let Some(size) = adapter_batch_size {
                 profile["batch_size"] = size.into();
                 profile["batches"] = batches.into();
-                profile["batch_commit_ms"] = (batch_commit_ns as f64 / 1e6).into();
+                profile["batch_finalize_ms"] = (batch_finalize_ns as f64 / 1e6).into();
             }
             profile["characters"] = glyphs.into();
             profile["retained_adapter_resources"] = retain_adapter_resources.into();

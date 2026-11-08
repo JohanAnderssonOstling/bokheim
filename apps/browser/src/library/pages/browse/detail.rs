@@ -495,6 +495,7 @@ impl BookDetailPage {
 
         let audiobook = book.format_category == LibraryFileTypeFilter::Audiobook;
         let mobile = compact && layout == DetailLayout::Stacked && !cfg!(feature = "kobo");
+        let left_aligned_actions = !mobile && layout != DetailLayout::Columns;
         let page_padding = if mobile && width < 360.0 { components::SPACE_MD } else { components::SPACE_LG };
         let back_size = components::topbar_action_height_rem() * rem_size;
         // The book that is playing: its controls, and where playback is now.
@@ -588,7 +589,7 @@ impl BookDetailPage {
         let position = book.library_file().and_then(|_| {
             let entry = detail.as_ref().and_then(|detail| detail.current_entry.clone()).filter(|entry| !entry.trim().is_empty()).map(SharedString::from);
             let percentage = (book.progress > 0.0).then(|| SharedString::from(format!("{}%", book.progress.round() as i32)));
-            (entry.is_some() || percentage.is_some()).then(|| components::book_detail_position(entry, percentage, theme))
+            (entry.is_some() || percentage.is_some()).then(|| components::book_detail_position(entry, percentage, left_aligned_actions, theme))
         });
 
         let download_state = book.library_file().and_then(|book_id| self.ui.updates().read(cx).download_state(book_id)).unwrap_or(DownloadState::Queued);
@@ -632,6 +633,7 @@ impl BookDetailPage {
                 );
             }
         }
+        actions = actions.when(left_aligned_actions, |actions| actions.justify_start());
         // The book that is playing is controlled here rather than offered: its
         // controls stand where Listen and the reading position would. Beside
         // the cover they would get half the row, so there they go under both.

@@ -179,6 +179,7 @@ impl Database {
         const VERSION: i64 = LIBRARY_SCHEMA_VERSION;
         let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version == VERSION {
+            transaction.execute_batch(include_str!("audiobook_content.sql"))?;
             transaction.schema_placements_views()?;
             transaction.schema_assets_views()?;
             transaction.initialization_reset_enrichment_policy()?;
@@ -208,6 +209,7 @@ impl Database {
         transaction.schema_placements_views()?;
         transaction.schema_assets_tables()?;
         transaction.execute_batch(include_str!("content_identity.sql"))?;
+        transaction.execute_batch(include_str!("audiobook_content.sql"))?;
         transaction.execute_batch(include_str!("storage.sql"))?;
         transaction.schema_assets_views()?;
         transaction.schema_annotations_tables()?;

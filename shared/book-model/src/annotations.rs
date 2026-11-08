@@ -3,6 +3,7 @@ use ui_text::text;
 use crate::{PUBLICATION_CFI_PREFIX, UnixMillis};
 use content_address::BookId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use wire::WireError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +92,12 @@ pub enum AnnotationAnchor {
         origin: Box<AnnotationAnchor>,
         scope: RecurringScope,
     },
+    /// Appended to preserve the binary layout of annotations without aliases.
+    RecurringAliases {
+        origin: Box<AnnotationAnchor>,
+        scope: RecurringScope,
+        aliases: Vec<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,15 +120,30 @@ impl RecurringScope {
 impl AnnotationAnchor {
     pub fn origin(&self) -> &Self {
         match self {
-            Self::Recurring { origin, .. } => origin.origin(),
+            Self::Recurring { origin, .. } | Self::RecurringAliases { origin, .. } => origin.origin(),
             _ => self,
         }
     }
 
     pub fn recurring_scope(&self) -> Option<RecurringScope> {
         match self {
-            Self::Recurring { scope, .. } => Some(*scope),
+            Self::Recurring { scope, .. } | Self::RecurringAliases { scope, .. } => Some(*scope),
             _ => None,
+        }
+    }
+
+    pub fn recurring_aliases(&self) -> &[String] {
+        match self {
+            Self::RecurringAliases { aliases, .. } => aliases,
+            _ => &[],
+        }
+    }
+
+    pub fn with_recurring_aliases(&self, aliases: Vec<String>) -> Self {
+        match self.recurring_scope() {
+            Some(scope) if !aliases.is_empty() => Self::RecurringAliases { origin: Box::new(self.origin().clone()), scope, aliases },
+            Some(scope) => Self::Recurring { origin: Box::new(self.origin().clone()), scope },
+            None => self.clone(),
         }
     }
 
@@ -129,13 +151,14 @@ impl AnnotationAnchor {
     pub fn with_recurring_scope(&self, scope: Option<RecurringScope>) -> Self {
         let origin = self.origin().clone();
         match scope {
+            Some(scope) if !self.recurring_aliases().is_empty() => Self::RecurringAliases { origin: Box::new(origin), scope, aliases: self.recurring_aliases().to_vec() },
             Some(scope) => Self::Recurring { origin: Box::new(origin), scope },
             None => origin,
         }
     }
 
     pub fn with_origin(&self, origin: Self) -> Self {
-        origin.with_recurring_scope(self.recurring_scope())
+        origin.with_recurring_scope(self.recurring_scope()).with_recurring_aliases(self.recurring_aliases().to_vec())
     }
 
     /// An explicit reader-opening destination. Keeps publication-CFI versioning
@@ -162,14 +185,14 @@ impl AnnotationAnchor {
         match self {
             Self::EpubCfi { cfi } => Some(cfi.strip_prefix(PUBLICATION_CFI_PREFIX).unwrap_or(cfi)),
             Self::Pdf(anchor) => anchor.fallback_cfi.as_deref(),
-            Self::Recurring { origin, .. } => origin.epub_cfi_value(),
+            Self::Recurring { origin, .. } | Self::RecurringAliases { origin, .. } => origin.epub_cfi_value(),
         }
     }
     pub fn pdf_anchor(&self) -> Option<&PdfAnnotationAnchor> {
         match self {
             Self::EpubCfi { .. } => None,
             Self::Pdf(anchor) => Some(anchor),
-            Self::Recurring { origin, .. } => origin.pdf_anchor(),
+            Self::Recurring { origin, .. } | Self::RecurringAliases { origin, .. } => origin.pdf_anchor(),
         }
     }
 }
@@ -205,6 +228,10 @@ pub const BOOKMARK_ID_PREFIX: &str = "bookmark:";
 pub const EXTERNAL_PDF_ANNOTATION_ID_PREFIX: &str = "pdf-external:";
 
 impl Annotation {
+    pub fn recurring_phrases(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.exact_text.as_str()).chain(self.anchor.recurring_aliases().iter().map(String::as_str))
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, WireError> {
         wire::encode(self)
     }
@@ -222,9 +249,15 @@ impl Annotation {
     }
 
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let AnnotationAnchor::Recurring { origin, .. } = &self.anchor {
-            if matches!(origin.as_ref(), AnnotationAnchor::Recurring { .. }) || self.exact_text.trim().is_empty() {
+        if let AnnotationAnchor::Recurring { origin, .. } | AnnotationAnchor::RecurringAliases { origin, .. } = &self.anchor {
+            if origin.recurring_scope().is_some() || self.exact_text.trim().is_empty() {
                 return Err("recurring annotations require text and a single creation anchor".into());
+            }
+            let mut phrases = HashSet::from([self.exact_text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()]);
+            for alias in self.anchor.recurring_aliases() {
+                if alias.is_empty() || alias.contains('\0') || alias.split_whitespace().collect::<Vec<_>>().join(" ") != *alias || !phrases.insert(alias.to_lowercase()) {
+                    return Err("recurring aliases must be distinct, non-empty names or phrases".into());
+                }
             }
         }
         if self.created_at > i64::MAX as u64 || self.modified_at > i64::MAX as u64 {

@@ -126,7 +126,7 @@ impl LibraryImport<'_> {
         if PathBuf::from(&self.root).canonicalize()?.join(relative.as_str().trim_start_matches('/')) != path || fingerprint(&path)? != revision {
             return Err(BackendError::message("destination changed during transfer verification; retry the import"));
         }
-        let content = ImportContent { book_id: identity, byte_checksum: checksum, size_bytes, source_identity: None };
+        let content = ImportContent { book_id: identity, byte_checksum: Some(checksum), audiobook_content_hash: None, size_bytes, source_identity: None };
         let import = ValidatedImport { parent_id: import.parent_id, file_name: name.clone(), format: state.addition.facts.format };
         let published = PublishedStagedBook { name, relative_path: relative.to_string(), published: true, fingerprint: Some(revision.to_string()) };
         let version = reader_inspection_version(import.format);
@@ -152,7 +152,12 @@ impl LibraryImport<'_> {
         let format = state.addition.facts.format;
         let byte_checksum = staged.byte_checksum();
         state.byte_checksum = Some(byte_checksum);
-        let content = self.resolve_import_content(byte_checksum, staged.size_bytes(), None).await?;
+        let content = if format == BookFormat::Mp3Folder {
+            let checksum = self.staged_audiobook_content(&staged).await?;
+            self.resolve_audiobook_import(checksum, Some(byte_checksum), staged.size_bytes(), None).await?
+        } else {
+            self.resolve_import_content(byte_checksum, staged.size_bytes(), None).await?
+        };
         let book_id = content.book_id;
         #[cfg(not(target_arch = "wasm32"))]
         let assets = batch.as_ref().map_or(self.storage.assets(), |batch| &batch.assets);

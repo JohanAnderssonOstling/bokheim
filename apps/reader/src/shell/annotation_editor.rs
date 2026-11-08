@@ -10,7 +10,7 @@ use ui_text::text;
 
 use gpui::prelude::*;
 
-use gpui::{AnyElement, App, Context, Edges, Entity, Pixels, Point, ScrollHandle, Window, px};
+use gpui::{AnyElement, App, Context, Edges, Entity, Pixels, Point, ScrollHandle, Window, div, px};
 use gpui_component::Disableable;
 use gpui_component::input::{Enter as InputEnter, Input, InputState};
 use ui_components as components;
@@ -148,6 +148,11 @@ fn editor<C: AnnotationEditorTarget>(
 ) -> AnyElement {
     let dismiss_target = target.clone();
     let controls = components::annotation_editor_controls(id_prefix, annotation, target, theme, window, cx);
+    let controls = if extra.is_some() && annotation.anchor.recurring_scope().is_some() {
+        div().flex().flex_col().gap(px(components::SPACE_SM)).child(components::annotation_alias_controls(annotation, target, window, cx)).child(controls).into_any_element()
+    } else {
+        controls
+    };
     components::annotation_editor_panel(extra, Input::new(note).appearance(false).w_full(), controls, scroll, theme)
         .debug_selector(|| "reader-annotation-popup".to_owned())
         .absolute()

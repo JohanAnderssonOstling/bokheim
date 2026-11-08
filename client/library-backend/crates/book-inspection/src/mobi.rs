@@ -17,6 +17,29 @@ pub fn inspect_mobi_reader(path: &Path, reader: impl Read + Seek + Send + 'stati
     Ok((metadata, toc))
 }
 
+/// Native and worker ingestion share one parsed container. The caller chooses
+/// whether frontmatter evidence is available on that execution platform.
+pub fn inspect_mobi_with_frontmatter(path: &Path, reader: impl Read + Seek + Send + 'static, inspect_frontmatter: impl FnOnce(&BookRecord, &str) -> Option<BookMetadata>) -> MetadataResult<InspectedBook> {
+    let parsed = book_content::mobi::inspect_reader(reader)?;
+    let mut metadata = metadata_from_declared(path, parsed.metadata)?;
+    let evidence = parsed.frontmatter.as_deref().and_then(|text| inspect_frontmatter(&metadata, text));
+    let toc = sanitize_toc_entries(parsed.toc.unwrap_or_default());
+    normalize_with_filename(&mut metadata, &path.to_string_lossy())?;
+    if let Some(evidence) = evidence {
+        for identifier in evidence.identifiers {
+            if !metadata.book.identifiers.contains(&identifier) {
+                metadata.book.identifiers.push(identifier);
+            }
+        }
+        for subject in evidence.subjects {
+            if !metadata.book.subjects.contains(&subject) {
+                metadata.book.subjects.push(subject);
+            }
+        }
+    }
+    Ok(InspectedBook { metadata, toc, pdf: None, audiobook: None })
+}
+
 #[cfg(test)]
 fn metadata_from_raw(path: &Path, raw: &MobiMetadata) -> MetadataResult<BookRecord> {
     metadata_from_declared(path, book_content::mobi::declared_metadata(raw))
@@ -24,14 +47,16 @@ fn metadata_from_raw(path: &Path, raw: &MobiMetadata) -> MetadataResult<BookReco
 
 pub fn inspect_mobi_pages_reader(path: &Path, reader: impl Read) -> MetadataResult<BookRecord> {
     let (metadata, text) = book_content::mobi::inspect_text(reader)?;
-    let mut book = metadata_from_declared(path, metadata)?;
+    inspect_mobi_frontmatter(metadata_from_declared(path, metadata)?, &text)
+}
+
+pub fn inspect_mobi_frontmatter(mut book: BookRecord, markup: &str) -> MetadataResult<BookRecord> {
     static TAGS: OnceLock<Result<Regex, String>> = OnceLock::new();
     static BLOCKS: OnceLock<Result<Regex, String>> = OnceLock::new();
     static PAGES: OnceLock<Result<Regex, String>> = OnceLock::new();
     static HIDDEN: OnceLock<Result<Regex, String>> = OnceLock::new();
     static ENTITIES: OnceLock<Result<Regex, String>> = OnceLock::new();
     static CIP: OnceLock<Result<Regex, String>> = OnceLock::new();
-    let markup = text.as_str();
     let end = markup.char_indices().nth(128 * 1024).map_or(markup.len(), |(i, _)| i);
     let markup = &markup[..end];
     let visible = cached_regex(&HIDDEN, r"(?is)<(script|style|head)\b[^>]*>.*?</(?:script|style|head)>")?.replace_all(markup, "");

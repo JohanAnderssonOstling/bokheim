@@ -158,13 +158,16 @@ impl LibraryResources {
         if track.archive_hash != Some(source.hash) {
             return Err(BackendError::message("audiobook track index does not match the remote archive; sync the book metadata and retry"));
         }
-        if track.offset.checked_add(track.length).is_none_or(|end| end > source.length) {
-            return Err(BackendError::message("audiobook track exceeds remote archive"));
-        }
+        let archive_length = source.length;
         let access = RemoteBookAccess::new(self.sync.http_client().clone(), self.account.clone(), self.id, source);
-        let prefix = access.read(track.offset, track.length.min(64 * 1024) as usize).await.map_err(BackendError::operation)?;
-        let base = track.offset;
-        let length = track.length;
+        let archive = book_access::remote_file::native_reader(archive_length, Vec::new(), access.clone().fetch()).map_err(BackendError::operation)?;
+        let member = client_platform_runtime::executor::run_blocking(move || audiobook_archive::archived_track(archive, index)).await.map_err(BackendError::operation)?.map_err(BackendError::operation)?;
+        if member.name != track.name || member.length != track.length || member.offset.checked_add(member.length).is_none_or(|end| end > archive_length) {
+            return Err(BackendError::message("remote audiobook track differs from its metadata"));
+        }
+        let prefix = access.read(member.offset, member.length.min(64 * 1024) as usize).await.map_err(BackendError::operation)?;
+        let base = member.offset;
+        let length = member.length;
         let fetch = move |offset: u64, count: usize| {
             let access = access.clone();
             Box::pin(async move {
@@ -225,6 +228,7 @@ mod tests {
                 .commit_import(ImportCommit {
                     source_identity: None,
                     byte_checksum: None,
+                    audiobook_content_hash: None,
                     parent_id: ROOT_DIR_ID,
                     file_name: name.clone(),
                     format,

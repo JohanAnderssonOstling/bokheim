@@ -12,6 +12,7 @@ packaged-pdfium = []
 [dependencies]
 pdf-range-reader = { path = "../pdf-range-reader" }
 blake3 = "1"
+log = "0.4"
 image = { workspace = true }
 pdf-view-common = { path = "../pdf-view-common" }
 book-model = { path = "../book-model", default-features = false }

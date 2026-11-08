@@ -7,6 +7,7 @@ use crate::contributors::{ContributorNameMatcher, resolve_credits};
 use crate::sync::apply::{project_book, retained_subject_concepts};
 use crate::sync::storage_i64;
 use book_model::{AUTHOR_MARC_RELATOR_CODE, normalize_search_text};
+use client_platform_runtime::profiling::ProfileSpan;
 use content_address::BookId;
 use library_replica::{BookAddition, BookDetails};
 use rusqlite::{Transaction, limits::Limit, params_from_iter, types::Value};
@@ -32,6 +33,7 @@ fn placeholders(rows: usize, width: usize) -> String {
 fn write_rows<const N: usize>(tx: &Transaction<'_>, rows: &[[Value; N]], prefix: &str, suffix: &str) -> Result<(), DatabaseError> {
     for chunk in rows.chunks(batch_rows(tx, N)?) {
         let sql = format!("{prefix}{}{suffix}", placeholders(chunk.len(), N));
+        let _profile = ProfileSpan::new("metadata_sql", prefix);
         tx.execute(&sql, params_from_iter(chunk.iter().flatten()))?;
     }
     Ok(())
@@ -42,6 +44,7 @@ pub(super) fn project<'a>(tx: &Transaction<'_>, inputs: impl Iterator<Item = (&'
     if inputs.is_empty() {
         return Ok(());
     }
+    let preparing = ProfileSpan::new("metadata_table_preparation", "projection");
     // Resolve local row IDs once per group instead of embedding hash lookups
     // in every credit, language and subject write. Missing books stay absent.
     let mut ids = HashMap::<BookId, i64>::new();
@@ -107,6 +110,7 @@ pub(super) fn project<'a>(tx: &Transaction<'_>, inputs: impl Iterator<Item = (&'
             }
         }
     }
+    drop(preparing);
     // Combining the scalar updates avoids rewriting the book row and firing
     // the same browse invalidations several times. Unchanged rows are skipped.
     let set = BOOK_COLUMNS.split(',').map(|column| format!("{column}=incoming.{column}")).collect::<Vec<_>>().join(",");

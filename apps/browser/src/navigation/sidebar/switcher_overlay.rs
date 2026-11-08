@@ -23,7 +23,6 @@ pub(super) struct LibraryNameDialog {
     estimate: Option<(u64, u64, u64)>,
     asset_storage_enabled: bool,
     input: Entity<InputState>,
-    pub(super) busy: bool,
     error: Option<SharedString>,
     _subscription: Subscription,
 }
@@ -41,8 +40,8 @@ impl Sidebar {
         let delete = cx.entity();
         let libraries = self.libraries.clone();
         let menu = PopupMenu::build(window, cx, move |menu, _, cx| {
-            let menu = crate::universal::library_book_menu(menu, downloads.0.clone(), id, downloads.1.clone(), downloads.2, downloads.3);
-            let menu = libraries.read(cx).annotation_export_menu(id, menu);
+            let menu = crate::universal::library_book_menu(menu, libraries.clone(), downloads.0.clone(), id, downloads.1.clone(), downloads.2, downloads.3);
+            let menu = super::Libraries::annotation_export_menu(libraries.clone(), id, menu, cx);
             #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
             let menu = {
                 let relocate = rename.clone();
@@ -115,14 +114,11 @@ impl Sidebar {
         });
         input.focus_handle(cx).focus(window, cx);
         let asset_storage_enabled = self.sync_state.read(cx).account_status.signed_in();
-        self.library_name_dialog = Some(LibraryNameDialog { id, folders: None, estimate: Some((0, 0, 0)), asset_storage_enabled, input, busy: false, error: None, _subscription: subscription });
+        self.library_name_dialog = Some(LibraryNameDialog { id, folders: None, estimate: Some((0, 0, 0)), asset_storage_enabled, input, error: None, _subscription: subscription });
         cx.notify();
     }
 
     fn cancel_library_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.library_name_dialog.as_ref().is_some_and(|dialog| dialog.busy) {
-            return;
-        }
         self.library_name_dialog = None;
         self.switcher_focus.focus(window, cx);
         cx.notify();
@@ -131,7 +127,7 @@ impl Sidebar {
     fn submit_library_name(&mut self, cx: &mut Context<Self>) {
         let signed_in = self.sync_state.read(cx).account_status.signed_in();
         let Some(dialog) = self.library_name_dialog.as_mut() else { return };
-        if dialog.busy || dialog.estimate.is_none() {
+        if dialog.estimate.is_none() {
             return;
         }
         let cloud_available = self.sync_state.read(cx).cloud_storage_blocker(dialog.estimate.filter(|(_, _, unavailable)| *unavailable == 0).map(|(_, bytes, _)| bytes)).is_none();
@@ -156,27 +152,23 @@ impl Sidebar {
             cx.notify();
             return;
         }
-        dialog.busy = true;
-        dialog.error = None;
         let asset_storage_enabled = signed_in && cloud_available && dialog.asset_storage_enabled;
         let operation = self.libraries.read(cx).save_library_name(dialog.id, name, asset_storage_enabled);
+        let selection_epoch = self.libraries.read(cx).selection_epoch();
+        // Saving metadata must not keep the window-wide name form modal.
+        self.library_name_dialog = None;
+        self.switcher_open = false;
         cx.spawn(async move |navigation, cx| {
             let result = operation.await;
             let _ = navigation.update_in(cx, |navigation, window, cx| {
                 match result {
                     Ok(created) => {
-                        if let Some(id) = created {
+                        if let Some(id) = created.filter(|_| navigation.libraries.read(cx).selection_epoch() == selection_epoch) {
                             navigation.libraries.update(cx, |libraries, cx| libraries.select_library(id, cx));
                         }
-                        navigation.library_name_dialog = None;
-                        navigation.reset_switcher_cursor(cx);
-                        navigation.switcher_focus.focus(window, cx);
                     }
                     Err(error) => {
-                        if let Some(dialog) = navigation.library_name_dialog.as_mut() {
-                            dialog.busy = false;
-                            dialog.error = Some(user_facing_error(&error, text!(browse::could_not_save_the_library_changes_please_try_again)).into());
-                        }
+                        crate::services::notify_error("library-name-save", user_facing_error(&error, text!(browse::could_not_save_the_library_changes_please_try_again)), window, cx);
                     }
                 }
                 cx.notify();
@@ -196,7 +188,7 @@ impl Sidebar {
         let panel = components::modal_form_surface(theme)
             .w(gpui::px(360.0))
             .child(gpui::div().text_color(theme.text).child(if dialog.id.is_none() { text!(browse::create_library) } else { text!(browse::rename_library) }))
-            .child(Input::new(&dialog.input).disabled(dialog.busy || dialog.folders.is_some()))
+            .child(Input::new(&dialog.input).disabled(dialog.folders.is_some()))
             .children(dialog.folders.as_ref().filter(|folders| folders.iter().any(|folder| folder.local_path.is_none())).map(|_| gpui::div().child(text!(browse::books_will_be_copied_into_bokheim_the_originals_will_stay_in_the))))
             .children((dialog.id.is_none()).then(|| {
                 let toggle = emitter.clone();
@@ -210,7 +202,7 @@ impl Sidebar {
                     .gap(gpui::px(components::SPACE_SM))
                     .child(estimate)
                     .children(signed_in.then(|| {
-                        Checkbox::new("library-upload-choice").label(text!(browse::cloud_storage)).checked(dialog.asset_storage_enabled && cloud_blocker.is_none()).disabled(dialog.busy || cloud_blocker.is_some()).on_click(
+                        Checkbox::new("library-upload-choice").label(text!(browse::cloud_storage)).checked(dialog.asset_storage_enabled && cloud_blocker.is_none()).disabled(cloud_blocker.is_some()).on_click(
                             move |checked, _, cx| {
                                 toggle.update(cx, |navigation, cx| {
                                     if let Some(dialog) = &mut navigation.library_name_dialog {
@@ -229,23 +221,17 @@ impl Sidebar {
                     .flex()
                     .justify_end()
                     .gap(gpui::px(components::SPACE_SM))
-                    .child(components::dialog_cancel_button("cancel-library-rename", text!(common::cancel)).disabled(dialog.busy).on_click(move |_, window, cx| {
+                    .child(components::dialog_cancel_button("cancel-library-rename", text!(common::cancel)).on_click(move |_, window, cx| {
                         cancel.update(cx, |navigation, cx| navigation.cancel_library_name(window, cx));
                     }))
                     .child(
                         components::base_button("save-library-rename")
                             .primary()
-                            .label(if dialog.id.is_none() {
-                                if dialog.busy { text!(browse::creating) } else { text!(browse::create) }
-                            } else if dialog.busy {
-                                text!(browse::renaming)
-                            } else {
-                                text!(browse::rename)
-                            })
+                            .label(if dialog.id.is_none() { text!(browse::create) } else { text!(browse::rename) })
                             // Folder-import review disables the input, so its
                             // submit button has no Enter shortcut to advertise.
                             .when(dialog.folders.is_none(), |button| button.tooltip(components::shortcut_tooltip(if dialog.id.is_none() { text!(browse::create) } else { text!(browse::rename) }, "enter")))
-                            .disabled(dialog.busy || dialog.estimate.is_none() || dialog.input.read(cx).value().trim().is_empty())
+                            .disabled(dialog.estimate.is_none() || dialog.input.read(cx).value().trim().is_empty())
                             .on_click(move |_, _, cx| submit.update(cx, |navigation, cx| navigation.submit_library_name(cx))),
                     ),
             );
@@ -268,7 +254,7 @@ impl Sidebar {
     /// the same four steps, and an opener that forgot the focus left the panel
     /// on screen with no way to drive it.
     pub(crate) fn open_library_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.switcher_open || self.libraries.read(cx).import_blocks_navigation(cx) {
+        if self.switcher_open {
             return;
         }
         self.switcher_open = true;
@@ -380,7 +366,6 @@ impl Sidebar {
                 });
             });
             components::confirmation_dialog_row(components::confirmation_dialog(dialog, window), question.clone(), cancel, delete, theme)
-                .child(components::form_hint(text!(browse::cloud_libraries_are_kept_locally_after_every_book_is_saved_if_saving), theme))
         });
     }
 
@@ -400,6 +385,15 @@ impl Sidebar {
         } else {
             self.switcher_open = false;
         }
+        cx.notify();
+    }
+
+    /// A selected command has finished with every layer of the switcher.
+    pub(crate) fn finish_library_switcher(&mut self, cx: &mut Context<Self>) {
+        self.switcher_open = false;
+        self.library_menu = None;
+        self.library_name_dialog = None;
+        self.add_library_choices = None;
         cx.notify();
     }
 

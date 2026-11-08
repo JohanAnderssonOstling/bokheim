@@ -2,20 +2,22 @@
 //! record the library stores. EPUB, MOBI and PDF go through this crate's
 //! document inspection; M4B and MP3-folder audiobooks are read here.
 
-use crate::{MetadataResult, inspect_epub_reader, inspect_pdf_reader};
-use book_content::{Book, BookFormat as ContainerFormat, comic::ComicBook};
-use book_model::{AUTHOR_MARC_RELATOR_CODE, AudiobookChapter, BookFormat, BookMetadataError, BookRecord, BookTocEntry, ChapterOrigin, Contributor};
-use content_address::{BookId, hash_file};
+use crate::{inspect_epub_reader, MetadataResult};
+use book_content::{comic::ComicBook, Book, BookFormat as ContainerFormat};
+use book_model::{AudiobookChapter, BookFormat, BookMetadataError, BookRecord, BookTocEntry, ChapterOrigin, Contributor, AUTHOR_MARC_RELATOR_CODE};
+use content_address::BookId;
 use metadata_contract::audible::LookupRequest;
 use std::collections::HashSet;
-#[cfg(target_arch = "wasm32")]
-use std::io::Cursor;
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::time::Duration;
 
 mod cue;
+mod mp3;
 mod nfo;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use mp3::{inspect_folder_reader as inspect_audiobook_folder_reader, inspect_folder_content as inspect_audiobook_folder_content};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AudiobookMetadata {
@@ -71,29 +73,15 @@ pub fn inspect_book_reader_with_hash(source_name: &Path, format: BookFormat, rea
 }
 
 pub fn inspect_book_reader_with_cached_pdf(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static, book_id: Option<BookId>, cached_pdf: Option<CachedPdfReader>) -> MetadataResult<InspectedBook> {
+    inspect_book_reader_with_pdf_metadata(source_name, format, reader, book_id, cached_pdf, None)
+}
+
+/// Continue inspection with declared PDF metadata prepared from the same file
+/// revision. This avoids rebuilding its object index after probing provenance.
+pub fn inspect_book_reader_with_pdf_metadata(
+    source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static, book_id: Option<BookId>, cached_pdf: Option<CachedPdfReader>, declared_pdf: Option<BookRecord>,
+) -> MetadataResult<InspectedBook> {
     let mut pdf = None;
-    let mut pdf_toc = Vec::new();
-    let reader = if format == BookFormat::Pdf {
-        let (reader, extracted, outline) = match cached_pdf.filter(|cached| book_id.is_some_and(|identity| cached.metadata.valid_for(&identity.to_hex()))) {
-            Some(mut cached) => {
-                // Retired optional fields remain decode-compatible, but new
-                // inspections never retain or use their old analysis results.
-
-                cached.metadata.annotations.clear();
-
-                (reader, cached.metadata, cached.toc)
-            }
-            None => match book_id {
-                Some(identity) => pdf_reader_core::inspect_reader_metadata_with_identity(reader, identity.to_hex())?,
-                _ => pdf_reader_core::inspect_reader_metadata(reader)?,
-            },
-        };
-        pdf = extracted.valid_for(&extracted.book_id).then_some(extracted);
-        pdf_toc = outline;
-        reader
-    } else {
-        reader
-    };
     let mut reader = reader;
     let (mut metadata, audiobook, toc) = match format {
         BookFormat::Epub => {
@@ -121,7 +109,11 @@ pub fn inspect_book_reader_with_cached_pdf(source_name: &Path, format: BookForma
             );
             (metadata, None, toc)
         }
-        BookFormat::Pdf => (inspect_pdf_reader(source_name, reader)?.metadata, None, pdf_toc),
+        BookFormat::Pdf => {
+            let (inspected, extracted, outline) = crate::pdf::inspect_pdf_with_reader_facts(source_name, reader, book_id, cached_pdf, declared_pdf)?;
+            pdf = extracted.valid_for(&extracted.book_id).then_some(extracted);
+            (inspected.metadata, None, outline)
+        }
         BookFormat::M4b => {
             let tag = mp4ameta::Tag::read_from(&mut reader)?;
             // An empty title here is intentional: `normalize_with_filename` supplies a
@@ -199,104 +191,7 @@ pub fn inspect_book_reader_with_cached_pdf(source_name: &Path, format: BookForma
             (metadata, Some(audiobook), Vec::new())
         }
         BookFormat::Mp3Folder => {
-            let (audiobook, book) = {
-                let book_id = match book_id {
-                    Some(book_id) => book_id,
-                    None => BookId::from(hash_file(&mut reader)?),
-                };
-                let tracks = audiobook_archive::archived_tracks(&mut reader)?;
-                let mut archive = zip::ZipArchive::new(reader)?;
-                let mut chapters = Vec::with_capacity(tracks.len());
-                let mut track_index = Vec::with_capacity(tracks.len());
-                let mut embedded = Vec::with_capacity(tracks.len());
-                let mut total = 0u64;
-                for (index, track) in tracks.iter().enumerate() {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let facts = {
-                        let mut audio = tempfile::tempfile()?;
-                        std::io::copy(&mut archive.by_index(index)?, &mut audio)?;
-                        audio.rewind()?;
-                        audiobook_folder::inspect_mp3(audio, false)?
-                    };
-                    #[cfg(target_arch = "wasm32")]
-                    let facts = {
-                        let mut bytes = Vec::new();
-                        archive.by_index(index)?.read_to_end(&mut bytes)?;
-                        audiobook_folder::inspect_mp3(Cursor::new(bytes), false)?
-                    };
-                    let duration = facts.duration_ms;
-                    let stem = Path::new(&track.name).file_stem().and_then(|value| value.to_str()).unwrap_or(&track.name);
-                    let title = facts.track_title.as_deref().filter(|title| !title.trim().is_empty()).map(str::to_owned).unwrap_or_else(|| book_model::audiobook_chapter_display_title(stem, index + 1));
-                    let end = total.checked_add(duration).ok_or("audiobook duration overflow")?;
-                    chapters.push(AudiobookChapter { title, start_ms: total, end_ms: end });
-                    track_index.push(book_model::AudiobookTrack { name: track.name.clone(), start_ms: total, end_ms: end, offset: track.offset, length: track.length, archive_hash: Some(book_id) });
-                    embedded.push(facts);
-                    total = end;
-                }
-                let default_title = source_name.file_stem().and_then(|value| value.to_str()).unwrap_or("Untitled").to_owned();
-                let mut audiobook =
-                    AudiobookMetadata { title: default_title, authors: Vec::new(), description: String::new(), duration_ms: total, chapters, tracks: track_index, chapter_origin: ChapterOrigin::TrackFiles, recording: Default::default() };
-                if let Some(album) = embedded.iter().find_map(|facts| facts.album.as_deref()) {
-                    audiobook.title = album.to_owned();
-                }
-                if let Some(author) = embedded.iter().find_map(|facts| facts.album_artist.as_deref()).or_else(|| embedded.iter().find_map(|facts| facts.artist.as_deref())) {
-                    audiobook.authors = author.split(';').filter_map(|name| author_credit(name.trim().to_owned()).ok()).collect();
-                }
-                if let Some(description) = embedded.iter().find_map(|facts| facts.description.as_deref()) {
-                    audiobook.description = description.to_owned();
-                }
-                if let Some(narrator) = embedded.iter().find_map(|facts| facts.narrator.as_deref()) {
-                    audiobook.recording.narrators.push(narrator.to_owned());
-                }
-                if let Some(publisher) = embedded.iter().find_map(|facts| facts.publisher.as_deref()) {
-                    audiobook.recording.publishers.push(publisher.to_owned());
-                }
-                if let Some(asin) = embedded.iter().find_map(|facts| facts.asin.as_deref()).filter(|value| value.len() == 10 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())) {
-                    audiobook.recording.asins.push(asin.to_ascii_uppercase());
-                }
-                if let Some(isbn) = embedded.iter().find_map(|facts| facts.isbn.as_deref()).and_then(book_model::from_metadata_value) {
-                    audiobook.recording.isbns.push(isbn);
-                }
-                if let Some(date) = embedded.iter().find_map(|facts| facts.release_date.as_deref()) {
-                    if date.len() == 4 && date.bytes().all(|byte| byte.is_ascii_digit()) {
-                        audiobook.recording.recording_release_year = date.parse::<i32>().ok().filter(|year| (1000..=2100).contains(year));
-                    } else {
-                        audiobook.recording.recording_release_date = Some(date.to_owned());
-                    }
-                }
-                let mut book = recording_book(&audiobook.recording)?;
-                for index in tracks.len()..archive.len() {
-                    let mut entry = archive.by_index(index)?;
-                    let name = entry.name().to_ascii_lowercase();
-                    if !name.ends_with(".nfo") && !name.ends_with(".cue") {
-                        continue;
-                    }
-                    let mut bytes = Vec::new();
-                    entry.read_to_end(&mut bytes)?;
-                    if name.ends_with(".nfo") {
-                        if bytes.len() as u64 > audiobook_archive::MAX_NFO_BYTES {
-                            return Err("audiobook NFO is too large".into());
-                        }
-                        book = nfo::apply(&decode_sidecar(&bytes), &mut audiobook)?;
-                    } else if name.ends_with(".cue") {
-                        if bytes.len() as u64 > audiobook_archive::MAX_CUE_BYTES {
-                            return Err("audiobook CUE is too large".into());
-                        }
-                        let text = decode_sidecar(&bytes);
-                        cue::apply_credits(&text, &mut audiobook);
-                        match cue::chapters(&text, &audiobook.tracks) {
-                            Ok(chapters) => {
-                                audiobook.chapters = chapters;
-                                audiobook.chapter_origin = ChapterOrigin::CueSheet;
-                            }
-                            Err(error) => log::warn!("ignoring invalid audiobook CUE: {error}"),
-                        }
-                    }
-                }
-                (audiobook, book)
-            };
-            let metadata =
-                BookRecord { metadata: book_model::BookDetails { title: audiobook.title.clone(), subtitle: audiobook.recording.subtitle.clone(), contributors: audiobook.authors.clone(), book }, description: audiobook.description.clone() };
+            let (metadata, audiobook) = mp3::inspect_archive(source_name, reader, book_id)?;
             (metadata, Some(audiobook), Vec::new())
         }
     };

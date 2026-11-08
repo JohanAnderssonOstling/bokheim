@@ -56,16 +56,4 @@ impl LibraryHandle {
         library.events.notify_contents_changed();
         Ok(())
     }
-
-    pub async fn refresh_storage_copy(&self) -> Result<(), BackendError> {
-        self.run_io(async {
-            let _files = self.storage().await?;
-            let library = &self.owner.resources;
-            if !library.sync.remote_ready().await.map_err(BackendError::operation)? {
-                return Err(BackendError::message("library is not registered for this account"));
-            }
-            library.sync.synchronize_state_mode(false).await.map(|_| ()).map_err(BackendError::operation)
-        })
-        .await
-    }
 }

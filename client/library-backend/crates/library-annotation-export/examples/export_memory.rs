@@ -78,6 +78,7 @@ mod linux {
             db.commit_import(ImportCommit {
                 source_identity: None,
                 byte_checksum: Some(checksum),
+                audiobook_content_hash: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: file_name.clone(),
                 format: BookFormat::Epub,

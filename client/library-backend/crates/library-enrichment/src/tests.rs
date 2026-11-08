@@ -188,6 +188,7 @@ async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_
     db.commit_import(ImportCommit {
         source_identity: None,
         byte_checksum: None,
+        audiobook_content_hash: None,
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
         format: BookFormat::Epub,
@@ -301,6 +302,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
                 .commit_import(ImportCommit {
                     source_identity: None,
                     byte_checksum: None,
+                    audiobook_content_hash: None,
                     parent_id: ROOT_DIR_ID,
                     file_name: name.clone(),
                     format,

@@ -3,11 +3,13 @@
 //! write it; the server reads its layout to serve each track by byte range.
 
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, Cursor, Read, Seek, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, System, ZipArchive, ZipWriter};
@@ -40,7 +42,22 @@ pub struct ArchivedTrack {
     pub length: u64,
 }
 
-/// Header fields that differ between platforms but participate in content identity.
+/// Resolve one track against the actual transport. Recording identity is
+/// independent of packaging, so persisted offsets alone cannot identify it.
+pub fn archived_track<R: Read + Seek>(reader: R, index: usize) -> io::Result<ArchivedTrack> {
+    let mut archive = ZipArchive::new(reader).map_err(io::Error::other)?;
+    if index >= MAX_TRACKS || archive.len() > MAX_TRACKS + 3 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid audiobook track index"));
+    }
+    let entry = archive.by_index(index).map_err(io::Error::other)?;
+    if !valid_entry_name(entry.name()) || entry.compression() != CompressionMethod::Stored {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid audiobook track"));
+    }
+    let offset = entry.data_start().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "audiobook ZIP entry has no byte offset"))?;
+    Ok(ArchivedTrack { name: entry.name().to_owned(), offset, length: entry.size() })
+}
+
+/// Header fields needed to reproduce transport bytes across platforms.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EntryFormat {
@@ -66,7 +83,6 @@ impl EntryFormat {
 /// Read transport header metadata before extracting, including the ZIP origin
 /// OS byte, which ZipFile's portable file options do not currently expose.
 pub fn entry_formats<R: Read + Seek>(reader: &mut R) -> io::Result<Vec<EntryFormat>> {
-    use std::io::SeekFrom;
     let mut headers = Vec::new();
     {
         let mut archive = ZipArchive::new(&mut *reader).map_err(io::Error::other)?;
@@ -127,11 +143,37 @@ pub fn write_archive_with_sidecars<W: Write + Seek>(writer: W, tracks: &[Track],
 
 /// Rebuild a materialized archive with its original entry order and platform metadata.
 pub fn write_archive_with_formats<W: Write + Seek>(writer: W, tracks: &[Track], nfo: Option<&Nfo>, cue: Option<&Cue>, cover: Option<&Cover>, formats: &[EntryFormat]) -> io::Result<W> {
+    write_archive_with_formats_and_reader(writer, tracks, nfo, cue, cover, formats, |path| File::open(path))
+}
+
+/// Use an instrumented or storage-specific reader for each archive member.
+pub fn write_archive_with_formats_and_reader<W: Write + Seek, R: Read>(
+    writer: W, tracks: &[Track], nfo: Option<&Nfo>, cue: Option<&Cue>, cover: Option<&Cover>, formats: &[EntryFormat], mut open: impl FnMut(&Path) -> io::Result<R>,
+) -> io::Result<W> {
+    let entries = archive_entries(tracks, nfo, cue, cover, formats)?;
+    let mut zip = ZipWriter::new(writer);
+    for (name, path, maximum) in entries {
+        zip.start_file(name, entry_options(name, formats)?).map_err(io::Error::other)?;
+        let mut file = io::BufReader::with_capacity(64 * 1024, open(path)?);
+        if let Some(maximum) = maximum {
+            if io::copy(&mut file.take(maximum + 1), &mut zip)? > maximum {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook sidecar changed while archiving"));
+            }
+        } else {
+            io::copy(&mut file, &mut zip)?;
+        }
+    }
+    zip.finish().map_err(io::Error::other)
+}
+
+fn entry_options(name: &str, formats: &[EntryFormat]) -> io::Result<SimpleFileOptions> {
+    formats.iter().find(|format| format.name == name).map_or_else(|| Ok(SimpleFileOptions::default().compression_method(CompressionMethod::Stored)), EntryFormat::options)
+}
+
+fn archive_entries<'a>(tracks: &'a [Track], nfo: Option<&'a Nfo>, cue: Option<&'a Cue>, cover: Option<&'a Cover>, formats: &[EntryFormat]) -> io::Result<Vec<(&'a String, &'a PathBuf, Option<u64>)>> {
     if tracks.is_empty() || tracks.len() > MAX_TRACKS {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "audiobook has no MP3 tracks"));
     }
-    let mut zip = ZipWriter::new(writer);
-    let options = |name: &str| formats.iter().find(|format| format.name == name).map_or_else(|| Ok(SimpleFileOptions::default().compression_method(CompressionMethod::Stored)), EntryFormat::options);
     let mut names = HashSet::new();
     let mut entries = Vec::new();
     for track in tracks {
@@ -149,18 +191,142 @@ pub fn write_archive_with_formats<W: Write + Seek>(writer: W, tracks: &[Track], 
         }
     }
     entries.sort_by_key(|(name, _, maximum)| (maximum.is_some(), formats.iter().position(|format| &format.name == *name).unwrap_or(formats.len())));
-    for (name, path, maximum) in entries {
-        zip.start_file(name, options(name)?).map_err(io::Error::other)?;
-        let mut file = File::open(path)?;
-        if let Some(maximum) = maximum {
-            if io::copy(&mut file.take(maximum + 1), &mut zip)? > maximum {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook sidecar changed while archiving"));
-            }
-        } else {
-            io::copy(&mut file, &mut zip)?;
+    Ok(entries)
+}
+
+/// Content identity excludes ZIP timestamps, platform attributes, CRCs and
+/// offsets. Track order and logical names remain part of the recording.
+pub struct ContentManifest {
+    pub checksum: blake3::Hash,
+    pub tracks: Vec<ArchivedTrack>,
+    /// Length of the reproducible transport, calculated without reading it.
+    pub archive_size: u64,
+}
+
+struct ContentEntry {
+    name: String,
+    length: u64,
+    checksum: blake3::Hash,
+}
+
+fn hash_member(name: &str, mut reader: impl Read, maximum: Option<u64>, buffer: &mut [u8]) -> io::Result<ContentEntry> {
+    let mut hasher = blake3::Hasher::new();
+    let mut length = 0u64;
+    loop {
+        let count = match reader.read(buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if count == 0 {
+            break;
         }
+        length = length.checked_add(count as u64).ok_or_else(|| io::Error::other("audiobook member size overflow"))?;
+        if maximum.is_some_and(|maximum| length > maximum) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook sidecar exceeds byte limit"));
+        }
+        hasher.update(&buffer[..count]);
     }
-    zip.finish().map_err(io::Error::other)
+    Ok(ContentEntry { name: name.to_owned(), length, checksum: hasher.finalize() })
+}
+
+fn manifest_hash(entries: &[ContentEntry]) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new_derive_key("bokheim audiobook content manifest v1");
+    hasher.update(&(entries.len() as u64).to_le_bytes());
+    // ZIP sidecar order is a packaging detail; playback order is not.
+    let mut ordered = entries.iter().filter(|entry| sidecar_kind(&entry.name).is_none()).collect::<Vec<_>>();
+    let mut sidecars = entries.iter().filter(|entry| sidecar_kind(&entry.name).is_some()).collect::<Vec<_>>();
+    sidecars.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    ordered.extend(sidecars);
+    for entry in ordered {
+        hasher.update(&(entry.name.len() as u64).to_le_bytes());
+        hasher.update(entry.name.as_bytes());
+        hasher.update(&entry.length.to_le_bytes());
+        hasher.update(entry.checksum.as_bytes());
+    }
+    hasher.finalize()
+}
+
+/// Hash each original member once. CRC calculation and archive byte hashing
+/// belong to transfer preparation, not filesystem discovery.
+pub fn folder_content_with_reader<R: Read>(tracks: &[Track], nfo: Option<&Nfo>, cue: Option<&Cue>, cover: Option<&Cover>, formats: &[EntryFormat], mut open: impl FnMut(&Path) -> io::Result<R>) -> io::Result<ContentManifest> {
+    let entries = archive_entries(tracks, nfo, cue, cover, formats)?;
+    let mut buffer = vec![0; 64 * 1024];
+    let entries = entries.into_iter().map(|(name, path, maximum)| hash_member(name, open(path)?, maximum, &mut buffer)).collect::<io::Result<Vec<_>>>()?;
+    let checksum = manifest_hash(&entries);
+    let (tracks, archive_size) = stored_layout(&entries, formats)?;
+    Ok(ContentManifest { checksum, tracks, archive_size })
+}
+
+/// Derive the same recording identity from a validated transport archive.
+/// Reading entries also verifies the ZIP's CRCs on this import path.
+pub fn archive_content_hash<R: Read + Seek>(mut reader: R) -> io::Result<blake3::Hash> {
+    archived_tracks(&mut reader)?;
+    let mut archive = ZipArchive::new(reader).map_err(io::Error::other)?;
+    let mut entries = Vec::with_capacity(archive.len());
+    let mut buffer = vec![0; 64 * 1024];
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(io::Error::other)?;
+        let name = entry.name().to_owned();
+        let maximum = sidecar_kind(&name).map(sidecar_limit);
+        entries.push(hash_member(&name, entry, maximum, &mut buffer)?);
+    }
+    Ok(manifest_hash(&entries))
+}
+
+/// A counting sink used only to measure stored member offsets. No archive
+/// bytes or checksums are produced or exposed. Reserving payload ranges lets
+/// ZIP's own header/ZIP64 rules determine the layout in O(member count).
+struct LayoutCounter {
+    position: Rc<Cell<u64>>,
+    length: u64,
+}
+
+impl Write for LayoutCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let position = self.position.get().checked_add(bytes.len() as u64).ok_or_else(|| io::Error::other("audiobook layout overflow"))?;
+        self.position.set(position);
+        self.length = self.length.max(position);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for LayoutCounter {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let position = match from {
+            SeekFrom::Start(position) => Some(position),
+            SeekFrom::Current(offset) => self.position.get().checked_add_signed(offset),
+            SeekFrom::End(offset) => self.length.checked_add_signed(offset),
+        }
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid audiobook layout seek"))?;
+        self.position.set(position);
+        Ok(position)
+    }
+}
+
+fn stored_layout(entries: &[ContentEntry], formats: &[EntryFormat]) -> io::Result<(Vec<ArchivedTrack>, u64)> {
+    let position = Rc::new(Cell::new(0));
+    let mut zip = ZipWriter::new(LayoutCounter { position: position.clone(), length: 0 });
+    let mut tracks = Vec::new();
+    for entry in entries {
+        // The materializing writer uses non-ZIP64 members too. Larger members
+        // must not acquire a layout that it could not subsequently reproduce.
+        if entry.length > u32::MAX as u64 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook member exceeds stored ZIP size limit"));
+        }
+        zip.start_file(&entry.name, entry_options(&entry.name, formats)?).map_err(io::Error::other)?;
+        let offset = position.get();
+        if sidecar_kind(&entry.name).is_none() {
+            tracks.push(ArchivedTrack { name: entry.name.clone(), offset, length: entry.length });
+        }
+        position.set(offset.checked_add(entry.length).ok_or_else(|| io::Error::other("audiobook layout overflow"))?);
+    }
+    let measured = zip.finish().map_err(io::Error::other)?;
+    Ok((tracks, measured.length))
 }
 
 /// Repacks an ordinary ZIP of MP3s, such as a source site's download, into

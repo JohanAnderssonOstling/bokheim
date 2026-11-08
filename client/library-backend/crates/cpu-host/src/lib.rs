@@ -8,7 +8,9 @@
 
 use content_address::BookId;
 use serde::{Deserialize, Serialize};
-use std::io::{Cursor, Read, Seek};
+#[cfg(test)]
+use std::io::Cursor;
+use std::io::{Read, Seek};
 use std::path::Path;
 
 use client_platform_runtime::executor::BoxedBackendFuture;
@@ -44,10 +46,13 @@ pub enum BookTask {
         book_id: Option<BookId>,
         #[serde(default)]
         cached_pdf: Option<book_inspection::CachedPdfReader>,
+        #[serde(default)]
+        declared_pdf: Option<book_model::BookRecord>,
     },
     InspectEpubMetadata {
         source_name: String,
     },
+    HashAudiobookContent {},
     Thumbnail {
         extension: String,
     },
@@ -129,34 +134,17 @@ thread_local! {
     static HASHERS: std::cell::RefCell<std::collections::HashMap<String, blake3::Hasher>> = Default::default();
 }
 
-pub fn execute_book_with_mobi<R: Read + Seek + Send + Sync + 'static>(task: BookTask, mut reader: R, mobi_pages: fn(&Path, &[u8]) -> Result<book_model::BookMetadata, BackendError>) -> Result<CpuResponse, BackendError> {
+pub fn execute_book_with_mobi<R: Read + Seek + Send + Sync + 'static>(task: BookTask, reader: R, mobi_pages: fn(&book_model::BookRecord, &str) -> Result<book_model::BookMetadata, BackendError>) -> Result<CpuResponse, BackendError> {
     match task {
+        BookTask::HashAudiobookContent {} => book_inspection::audiobook_content_hash(reader).map(|hash| CpuResponse::Hash(BookId::from(hash))).map_err(BackendError::operation),
         BookTask::TextMatches { format, locations, query } => text_search::previews(format, Box::new(reader), locations, &query).map(CpuResponse::TextMatches),
         BookTask::IndexText { format } => text_search::index(format, Box::new(reader)).map(CpuResponse::TextIndex),
-        BookTask::Inspect { source_name, format, book_id, cached_pdf } => {
+        BookTask::Inspect { source_name, format, book_id, cached_pdf, declared_pdf } => {
             let path = Path::new(&source_name);
             if format != book_model::BookFormat::Mobi {
-                return book_inspection::inspect_book_reader_with_cached_pdf(path, format, reader, book_id, cached_pdf).map(CpuResponse::Inspection).map_err(BackendError::operation);
+                return book_inspection::inspect_book_reader_with_pdf_metadata(path, format, reader, book_id, cached_pdf, declared_pdf).map(CpuResponse::Inspection).map_err(BackendError::operation);
             }
-            // Page evidence joins the file facts the metadata server is asked about.
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).map_err(BackendError::operation)?;
-            let evidence = mobi_pages(path, &bytes).ok();
-            let mut inspected = book_inspection::inspect_book_reader_with_hash(path, format, Cursor::new(bytes), book_id).map_err(BackendError::operation)?;
-            if let Some(evidence) = evidence {
-                let book = &mut inspected.metadata.book;
-                for identifier in evidence.identifiers {
-                    if !book.identifiers.contains(&identifier) {
-                        book.identifiers.push(identifier);
-                    }
-                }
-                for subject in evidence.subjects {
-                    if !book.subjects.contains(&subject) {
-                        book.subjects.push(subject);
-                    }
-                }
-            }
-            Ok(CpuResponse::Inspection(inspected))
+            book_inspection::inspect_mobi_with_frontmatter(path, reader, |book, text| mobi_pages(book, text).ok()).map(CpuResponse::Inspection).map_err(BackendError::operation)
         }
         BookTask::InspectEpubMetadata { source_name } => {
             let inspected = book_inspection::inspect_epub_metadata_reader(Path::new(&source_name), reader).map_err(BackendError::operation)?;
@@ -219,9 +207,10 @@ macro_rules! book_operations {
     )*};
 }
 book_operations! {
+    HashAudiobookContent {} => BookId, CpuResponse::Hash(hash) => hash;
     IndexText { format: book_model::BookFormat } => book_model::BookTextIndex, CpuResponse::TextIndex(index) => index;
     TextMatches { format: book_model::BookFormat, locations: Vec<book_model::BookTextLocation>, query: String } => Vec<book_model::BookTextMatch>, CpuResponse::TextMatches(matches) => matches;
-    Inspect { source_name: String, format: book_model::BookFormat, book_id: Option<BookId>, cached_pdf: Option<book_inspection::CachedPdfReader> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
+    Inspect { source_name: String, format: book_model::BookFormat, book_id: Option<BookId>, cached_pdf: Option<book_inspection::CachedPdfReader>, declared_pdf: Option<book_model::BookRecord> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     InspectEpubMetadata { source_name: String } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     Thumbnail { extension: String } => Option<ThumbnailBytes>, CpuResponse::Thumbnail(versions) => versions;
 }

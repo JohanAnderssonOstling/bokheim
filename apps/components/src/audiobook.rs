@@ -177,9 +177,9 @@ pub fn playback_secondary_button(button: Button) -> Button {
     button.p_0().flex_none().size(rems(PLAYBACK_SECONDARY_SIZE_REM))
 }
 
-/// A secondary control in the detail page's evenly spaced row.
+/// Compact speed and sleep controls with no hover fill around their contents.
 fn inline_secondary_button(id: impl Into<ElementId>, tooltip: impl Into<SharedString>, set: bool, theme: BrowserTheme) -> Button {
-    playback_secondary_button(crate::base_button(id).ghost()).when(set, |button| button.text_color(theme.text_accent)).tooltip(tooltip)
+    crate::base_button(id).ghost().no_fill().flex_none().p_0().h(rems(2.0)).min_w(rems(2.0)).px(px(SPACE_XXS)).when(set, |button| button.text_color(theme.text_accent)).tooltip(tooltip)
 }
 
 /// The page itself, covering the window and everything on it.

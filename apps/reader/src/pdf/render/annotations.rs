@@ -9,7 +9,7 @@ use crate::shell::sidebar_list;
 use crate::shell::state_panel::{AnnotationSidebarTarget, reader_state_rows, render_annotation_row};
 use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, RecurringScope};
 use gpui::prelude::*;
-use gpui::{Context, Window, div};
+use gpui::{App, Context, Window, div};
 use library_backend::Annotation;
 use pdf_reader_core::NormalizedRect;
 use pdf_view_gpui::PdfSelectionSnapshot;
@@ -33,19 +33,52 @@ impl BookmarkEditorTarget for PdfReaderView {
 }
 
 impl AnnotationEditorTarget for PdfReaderView {
-    fn set_annotation_scope(&mut self, scope: Option<RecurringScope>, cx: &mut Context<Self>) {
-        if self.marks.selected().is_none_or(|annotation| annotation.is_external_pdf_annotation() || annotation.book_id != self.locator.book_id() || annotation.exact_text.trim().is_empty()) {
+    fn add_annotation_alias(&mut self, id: String, alias: String, cx: &mut Context<Self>) {
+        if self.marks.selected_id() != Some(id.as_str()) {
             return;
         }
         self.save_selected_annotation(None, None, cx);
-        self.marks.set_selected_scope(scope, "change recurring PDF annotation scope");
+        self.marks.add_selected_alias(&alias, "add PDF annotation alias");
         self.refresh_annotation_overlays(cx);
-        notify(cx, Component::PdfShell, "annotation_scope_changed");
+        notify(cx, Component::PdfShell, "annotation_alias_added");
+    }
+
+    fn remove_annotation_alias(&mut self, id: String, alias: String, cx: &mut Context<Self>) {
+        if self.marks.selected_id() != Some(id.as_str()) {
+            return;
+        }
+        self.save_selected_annotation(None, None, cx);
+        self.marks.remove_selected_alias(&alias, "remove PDF annotation alias");
+        self.refresh_annotation_overlays(cx);
+        notify(cx, Component::PdfShell, "annotation_alias_removed");
+    }
+
+    fn select_annotation_scope(&mut self, scope: Option<RecurringScope>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(passage) = self.recurring.editor_passage.clone().filter(|passage| !passage.text.trim().is_empty()) else { return };
+        if self.marks.selected().is_none_or(|annotation| annotation.is_external_pdf_annotation() || annotation.is_bookmark()) {
+            return;
+        }
+        self.save_selected_annotation(None, None, cx);
+        let Some(mut annotation) = self.marks.selected().cloned() else { return };
+        annotation.book_id = self.locator.book_id();
+        let rects = passage.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect();
+        annotation.anchor = AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(passage.page_index as u32, rects, None));
+        annotation.exact_text = passage.text;
+        annotation.toc_ordinal = self.toc.ordinal_at(passage.page_index).map(|ordinal| ordinal as i64);
+        annotation.progress = Some(book_model::pdf_page_progress(passage.page_index, self.page_count));
+        let note = self.marks.create_scoped_annotation(annotation, scope, "create PDF annotation for scope");
+        self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
+        self.recurring.editor_overlay = self.marks.selected_id().map(str::to_owned);
+        self.refresh_annotation_overlays(cx);
+        notify(cx, Component::PdfShell, "annotation_scope_selected");
     }
 
     fn select_editor_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.save_selected_annotation(None, None, cx);
         let bookmark = self.marks.annotation(&id).is_some_and(Annotation::is_bookmark);
+        if self.recurring.editor_overlay.is_none() {
+            self.recurring.editor_overlay = self.marks.selected_id().map(str::to_owned);
+        }
         let note = self.marks.select(id);
         self.annotation_note_input.update(cx, |input, cx| {
             input.set_placeholder(if bookmark { text!(reader::name_bookmark) } else { text!(common::add_a_note) }, window, cx);
@@ -54,6 +87,7 @@ impl AnnotationEditorTarget for PdfReaderView {
                 input.focus(window, cx);
             }
         });
+        self.sync_active_annotation(cx);
         notify(cx, Component::PdfShell, "annotation_source_selected");
     }
 
@@ -161,6 +195,24 @@ impl PdfReaderView {
         let mut overlays = annotation_overlays(self.marks.annotations());
         overlays.extend(self.recurring.occurrences.iter().map(|occurrence| occurrence.overlay.clone()));
         self.pdf.update(cx, |pdf, cx| pdf.set_annotations(overlays, cx));
+        self.sync_active_annotation(cx);
+    }
+
+    fn editor_overlay_ids(&self, cx: &App) -> Vec<String> {
+        let Some(anchor) = self.recurring.editor_overlay.as_deref().or(self.marks.selected_id()) else { return Vec::new() };
+        self.pdf.read(cx).overlapping_annotation_ids(anchor)
+    }
+
+    fn editor_annotation_ids(&self, cx: &App) -> Vec<String> {
+        self.editor_overlay_ids(cx).into_iter().map(|id| self.recurring.occurrences.iter().find(|occurrence| occurrence.overlay.id == id).map_or(id.clone(), |occurrence| occurrence.annotation_id.clone())).collect()
+    }
+
+    fn sync_active_annotation(&self, cx: &mut Context<Self>) {
+        let overlapping = self.editor_overlay_ids(cx);
+        let active = self.marks.selected().filter(|annotation| !annotation.is_bookmark()).map(|annotation| {
+            self.recurring.occurrences.iter().find(|occurrence| occurrence.annotation_id == annotation.id && overlapping.contains(&occurrence.overlay.id)).map_or_else(|| annotation.id.clone(), |occurrence| occurrence.overlay.id.clone())
+        });
+        self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(active, cx));
     }
 
     pub(super) fn watch_annotation_updates(&mut self, cx: &mut Context<Self>) {
@@ -234,8 +286,7 @@ impl PdfReaderView {
         }
         let bookmark = self.marks.annotation(&id).is_some_and(Annotation::is_bookmark);
         let note = self.marks.select(id.clone());
-        let active = self.recurring.editor_overlay.clone().unwrap_or(id);
-        self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(Some(active), cx));
+        self.sync_active_annotation(cx);
         self.annotation_note_input.update(cx, |input, cx| {
             input.set_placeholder(if bookmark { text!(reader::name_bookmark) } else { text!(common::add_a_note) }, window, cx);
             input.set_value(note, window, cx);
@@ -317,12 +368,23 @@ impl PdfReaderView {
         let passage = self.recurring.editor_passage.as_ref();
         let text = passage.map_or(annotation.exact_text.as_str(), |passage| passage.text.as_str());
         let matching_ids = self.marks.recurring_matches(text).map(|(annotation, _)| annotation.id.as_str()).collect::<HashSet<_>>();
-        let local_ids = self
+        let overlapping_ids = self.editor_annotation_ids(cx);
+        let mut local_ids = self
             .marks
             .annotations()
             .iter()
             .filter(|candidate| {
                 candidate.id == annotation.id
+                    || overlapping_ids.contains(&candidate.id)
+                    || candidate.anchor.pdf_anchor().is_some_and(|anchor| {
+                        passage.is_some_and(|passage| {
+                            anchor.page_index as usize == passage.page_index
+                                && anchor.rects.len() == passage.rects.len()
+                                && anchor.rects.iter().zip(&passage.rects).all(|(origin, rect)| {
+                                    (origin.left - rect.left()).abs() < 0.00001 && (origin.top - rect.top()).abs() < 0.00001 && (origin.width - rect.width()).abs() < 0.00001 && (origin.height - rect.height()).abs() < 0.00001
+                                })
+                        })
+                    })
                     || (candidate.anchor.recurring_scope().is_some()
                         && matching_ids.contains(candidate.id.as_str())
                         && (candidate.anchor.recurring_scope() != Some(RecurringScope::Chapter)
@@ -330,6 +392,7 @@ impl PdfReaderView {
             })
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
+        local_ids.extend(overlapping_ids);
         let context = self.marks.editor_context(self.locator.book_id(), text, &local_ids, self.toc.has_entries());
         annotation_editor::recurring_editor("pdf-popup", &cx.entity(), &annotation, context, geometry, &self.annotation_note_input, components::browser_theme(cx), window, cx)
     }

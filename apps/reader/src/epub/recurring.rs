@@ -1,7 +1,7 @@
 //! Disposable recurring matches on the currently composed reader page.
 use book_model::{Annotation, AnnotationAnchor};
 use content_address::BookId;
-use gpui::Context;
+use gpui::{App, Context};
 use skrift_column_paginator::VisibleTextMatch;
 use std::collections::HashMap;
 use skrift_column_paginator::{FrameGeometryCacheKey, RendererAnnotation, RendererCommand};
@@ -31,7 +31,24 @@ impl ReaderView {
             (overlay.style, overlay.color) = marks::renderer_appearance(annotation);
             Some(overlay)
         }));
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetAnnotations(overlays), cx));
+        self.with_renderer(cx, |renderer, cx| {
+            renderer.apply(RendererCommand::SetAnnotations(overlays), cx);
+            let anchor = self.recurring.editor_overlay.as_deref().or(self.marks.selected_id());
+            let overlapping = anchor.map_or_else(Vec::new, |id| renderer.overlapping_annotation_ids(id));
+            let active = self.selected_annotation_overlay(&overlapping);
+            renderer.apply(RendererCommand::SetActiveAnnotation(active), cx);
+        });
+    }
+
+    pub(in crate::epub) fn editor_annotation_ids(&self, cx: &App) -> Vec<String> {
+        let LoadState::Ready(renderer) = &self.load_state else { return Vec::new() };
+        let Some(anchor) = self.recurring.editor_overlay.as_deref().or(self.marks.selected_id()) else { return Vec::new() };
+        renderer.read(cx).overlapping_annotation_ids(anchor).into_iter().map(|id| self.recurring.occurrences.iter().find(|occurrence| occurrence.overlay.id == id).map_or(id.clone(), |occurrence| occurrence.annotation_id.clone())).collect()
+    }
+
+    fn selected_annotation_overlay(&self, overlapping: &[String]) -> Option<String> {
+        let annotation = self.marks.selected().filter(|annotation| !annotation.is_bookmark())?;
+        self.recurring.occurrences.iter().find(|occurrence| occurrence.annotation_id == annotation.id && overlapping.contains(&occurrence.overlay.id)).map(|occurrence| occurrence.overlay.id.clone()).or_else(|| Some(annotation.id.clone()))
     }
 
     pub(in crate::epub) fn refresh_recurring_annotations(
@@ -98,7 +115,7 @@ fn matched_page_occurrences<'a, 'text>(
     document: usize,
 ) -> Vec<Occurrence> {
     let mut result = Vec::new();
-    for (annotation, found) in matches {
+    for (annotation, found) in crate::shell::recurring::distinct_matches(matches, |found| found.glyphs.start as usize..found.glyphs.end as usize) {
         let start = found.glyphs.start;
         let range = found.cfi_range;
         if !occurrence_applies(annotation, current_book, book, toc, &range) {
@@ -127,7 +144,7 @@ fn matched_page_occurrences<'a, 'text>(
     result
 }
 
-fn occurrence_applies(annotation: &Annotation, current_book: BookId, book: &crate::book::NativeBook, toc: &TocState, range: &str) -> bool {
+pub(super) fn occurrence_applies(annotation: &Annotation, current_book: BookId, book: &crate::book::NativeBook, toc: &TocState, range: &str) -> bool {
     let origin = book.annotation_cfi(&annotation.anchor);
     let origin_chapter = origin.as_deref().and_then(|origin| toc.chapter_for_cfi(origin));
     let same_document = origin.as_deref().and_then(|origin| book.cfi.document_index(origin)).is_some_and(|document| Some(document) == book.cfi.document_index(range));

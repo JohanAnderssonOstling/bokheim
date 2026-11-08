@@ -11,7 +11,7 @@ use gpui::{
     linear_color_stop, linear_gradient, point, px, size,
 };
 use gpui_component::spinner::Spinner;
-use gpui_component::{Icon, IconName, Selectable, Sizable, box_shadow};
+use gpui_component::{Icon, IconName, Selectable, Sizable, Theme, box_shadow};
 use library_model::FINISHED_PROGRESS_THRESHOLD;
 use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
@@ -410,7 +410,7 @@ struct CoverLettering {
     author: SharedString,
 }
 
-/// Shapes `text` in Raleway to wrap at `width`, keeping at most `lines` lines.
+/// Shapes `text` in the supplied font to wrap at `width`, keeping at most `lines` lines.
 fn shape_cover_text(text: &SharedString, font: gpui::Font, color: gpui::Hsla, font_size: f32, width: f32, lines: usize, window: &Window) -> Vec<gpui::WrappedLine> {
     let run = gpui::TextRun { len: text.len(), font, color, background_color: None, underline: None, strikethrough: None };
     window.text_system().shape_text(text.clone(), px(font_size), &[run], Some(px(width)), Some(lines)).map(|shaped| shaped.into_iter().collect()).unwrap_or_default()
@@ -624,13 +624,14 @@ fn paint_generated_cover(design: CoverDesign, bounds: gpui::Bounds<Pixels>, lett
         paint_cover_pattern(design, bounds, line, down(40.0), height - down(9.0), window);
         return;
     };
-    crate::ensure_bundled_font("Raleway", cx);
+    let font_family = cx.try_global::<Theme>().map_or_else(|| window.text_style().font_family.clone(), |theme| theme.font_family.clone());
+    crate::ensure_bundled_font(font_family.as_ref(), cx);
     crate::ensure_text_fonts(&lettering.title, cx);
     crate::ensure_text_fonts(&lettering.author, cx);
     if let Some(subtitle) = &lettering.subtitle {
         crate::ensure_text_fonts(subtitle, cx);
     }
-    let raleway = gpui::font("Raleway");
+    let font = gpui::font(font_family);
 
     // The title panel: a ruled box with a second rule standing off it. Both
     // are filled, so the pattern stops at the outer rule.
@@ -643,8 +644,8 @@ fn paint_generated_cover(design: CoverDesign, bounds: gpui::Bounds<Pixels>, lett
     let text_width = inner_width - 2.0 * (line + pad_x);
     let (title_size, subtitle_size) = (across(8.4), across(4.6));
     let (title_line, subtitle_line) = (title_size * 1.18, subtitle_size * 1.25);
-    let title = shape_cover_text(&lettering.title, raleway.clone(), ink, title_size, text_width, 5, window);
-    let italic = gpui::Font { style: gpui::FontStyle::Italic, ..raleway.clone() };
+    let title = shape_cover_text(&lettering.title, font.clone(), ink, title_size, text_width, 5, window);
+    let italic = gpui::Font { style: gpui::FontStyle::Italic, ..font.clone() };
     // Softened on desktop; solid black on Kobo, where grey thresholds away on page turns.
     let subtitle_colour = if cfg!(feature = "kobo") { ink } else { ink.opacity(0.8) };
     let subtitle = lettering.subtitle.as_ref().map(|subtitle| shape_cover_text(subtitle, italic, subtitle_colour, subtitle_size, text_width, 2, window)).unwrap_or_default();
@@ -668,7 +669,7 @@ fn paint_generated_cover(design: CoverDesign, bounds: gpui::Bounds<Pixels>, lett
     let author_width = plate_width - 2.0 * (line + pad);
     let author_size = across(3.3).max(5.0);
     let author_line = author_size * 1.35;
-    let bold = gpui::Font { weight: gpui::FontWeight::BOLD, ..raleway };
+    let bold = gpui::Font { weight: gpui::FontWeight::BOLD, ..font };
     // Up to four lines: a book with several authors wraps rather than being cut off.
     let author = shape_cover_text(&lettering.author, bold, ink, author_size, author_width, 4, window);
     let plate_height = 2.0 * line + across(2.4) + cover_text_height(&author, author_line) + pad;
@@ -770,7 +771,7 @@ pub fn book_title_lines(title: impl Into<SharedString>, subtitle: Option<&str>) 
 }
 
 fn book_title_content(title: SharedString, subtitle: Option<SharedString>, width: Pixels, window: &mut Window, cx: &mut App) -> Div {
-    let font_family = cx.try_global::<gpui_component::Theme>().map_or_else(|| window.text_style().font_family.clone(), |theme| theme.font_family.clone());
+    let font_family = cx.try_global::<Theme>().map_or_else(|| window.text_style().font_family.clone(), |theme| theme.font_family.clone());
     let has_title = !title.trim().is_empty();
     let title_limit = BOOK_CARD_TEXT_LINES - usize::from(subtitle.is_some());
     let title_element = || div().w_full().min_w_0().flex_none().font_family(font_family.clone()).text_ellipsis().line_clamp(title_limit).child(title.clone());
@@ -859,6 +860,14 @@ mod book_title_tests {
 /// Reserves the paginator's full title budget even when the text is shorter.
 pub fn book_card_title_row(title: impl Into<SharedString>, subtitle: Option<&str>) -> Div {
     book_card_title().h(gpui::rems(BOOK_CARD_TITLE_HEIGHT_REM)).child(book_title_lines(title, subtitle))
+}
+
+/// The visible title block at its actual height, within the three-line limit.
+pub fn book_card_intrinsic_title(title: impl Into<SharedString>, subtitle: Option<&str>, width: Pixels, window: &mut Window, cx: &mut App) -> Div {
+    let subtitle = subtitle.map(str::trim).filter(|value| !value.is_empty()).map(SharedString::from);
+    let mut row = book_card_title();
+    let content = window.with_text_style(Some(row.style().text.clone()), |window| book_title_content(title.into(), subtitle, width, window, cx));
+    row.child(content)
 }
 
 /// The mark of a book that is not on this device, in its cover's top-right

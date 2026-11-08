@@ -106,6 +106,7 @@ mod tests {
             .commit_import(ImportCommit {
                 source_identity: None,
                 byte_checksum: None,
+                audiobook_content_hash: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: "Story".into(),
                 format: BookFormat::Mp3Folder,
@@ -172,6 +173,8 @@ mod tests {
             readable: true,
             books: vec![ScannedBook {
                 source_identity: None,
+                audiobook_content_hash: None,
+                byte_checksum: None,
                 directory: ROOT_DIR_ID,
                 name: "discovered.epub".into(),
                 path: "discovered.epub".into(),

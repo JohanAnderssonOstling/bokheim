@@ -36,6 +36,8 @@ use sync_common::{BookId, DirId, StateKey};
 pub struct ImportCommit {
     pub source_identity: Option<PdfSourceIdentity>,
     pub byte_checksum: Option<ContentHash>,
+    /// Recording identity; never used as an expected transfer-byte checksum.
+    pub audiobook_content_hash: Option<ContentHash>,
     pub parent_id: DirId,
     pub file_name: String,
     pub format: book_model::BookFormat,
@@ -235,11 +237,15 @@ fn commit_one_with_transfer(tx: &Transaction<'_>, import: ImportCommit, prepared
 }
 
 /// Admit canonical state without rebuilding derived rows after every book.
-fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared: Option<PreparedInspection>, matcher: Option<ContributorNameMatcher>, transfer: Option<BookTransferState>) -> Result<(bool, ImportObservation), DatabaseError> {
-    let ImportCommit { source_identity, byte_checksum, parent_id, file_name: _file_name, format, book_id, size_bytes, inspection_version, inspection: _inspection, published, request_thumbnail, restore_paths } = import;
+pub(crate) fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared: Option<PreparedInspection>, matcher: Option<ContributorNameMatcher>, transfer: Option<BookTransferState>) -> Result<(bool, ImportObservation), DatabaseError> {
+    let ImportCommit { source_identity, byte_checksum, audiobook_content_hash, parent_id, file_name: _file_name, format, book_id, size_bytes, inspection_version, inspection: _inspection, published, request_thumbnail, restore_paths } =
+        import;
     let hash = &book_id;
-    if book_id.is_local() && byte_checksum.is_none() {
-        return Err(DatabaseError::message("a local book identity requires a separate byte checksum"));
+    if audiobook_content_hash.is_some() && format != book_model::BookFormat::Mp3Folder {
+        return Err(DatabaseError::message("a recording fingerprint requires an MP3 audiobook"));
+    }
+    if book_id.is_local() && byte_checksum.is_none() && audiobook_content_hash.is_none() {
+        return Err(DatabaseError::message("a local book identity requires a verified content checksum"));
     }
     if directory_relative_path(tx, &parent_id)?.is_none() {
         return Err(DatabaseError::message(format!("library folder does not exist: {parent_id}")));
@@ -299,14 +305,15 @@ fn admit_import(tx: &Transaction<'_>, import: ImportCommit, prepared: Option<Pre
         }
     }
     crate::projection::place_book(tx, &parent_id, hash, &published.name)?;
-    Ok((placement_created, ImportObservation { book_id, parent_id, source_identity, byte_checksum, size_bytes, published, request_thumbnail, restore_paths }))
+    Ok((placement_created, ImportObservation { book_id, parent_id, source_identity, byte_checksum, audiobook_content_hash, size_bytes, published, request_thumbnail, restore_paths }))
 }
 
-struct ImportObservation {
+pub(crate) struct ImportObservation {
     book_id: BookId,
     parent_id: DirId,
     source_identity: Option<PdfSourceIdentity>,
     byte_checksum: Option<ContentHash>,
+    audiobook_content_hash: Option<ContentHash>,
     size_bytes: u64,
     published: PublishedStagedBook,
     request_thumbnail: bool,
@@ -314,11 +321,18 @@ struct ImportObservation {
 }
 
 impl ImportObservation {
-    fn record(self, tx: &Transaction<'_>) -> Result<(), DatabaseError> {
-        let Self { book_id, parent_id, source_identity, byte_checksum, size_bytes, published, request_thumbnail, restore_paths } = self;
+    pub(crate) fn record(self, tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+        let Self { book_id, parent_id, source_identity, byte_checksum, audiobook_content_hash, size_bytes, published, request_thumbnail, restore_paths } = self;
         let hash = &book_id;
         crate::content_identity::record_origin(tx, book_id, source_identity)?;
-        if let Some(checksum) = byte_checksum.or_else(|| book_id.content_hash()) {
+        if let Some(checksum) = audiobook_content_hash {
+            tx.execute("INSERT OR IGNORE INTO local_audiobook_content(content_hash,book_id) VALUES(?1,?2)", rusqlite::params![checksum, book_id])?;
+            if byte_checksum.is_none() {
+                // A folder fingerprint does not prove any particular ZIP revision.
+                tx.execute("DELETE FROM local_file_content WHERE book_id=?1 AND dir_id=?2", rusqlite::params![book_id, parent_id.to_string()])?;
+            }
+        }
+        if let Some(checksum) = byte_checksum.or_else(|| if audiobook_content_hash.is_none() { book_id.content_hash() } else { None }) {
             crate::content_identity::observe_content(tx, book_id, parent_id, checksum)?;
         }
         let revision = if published.published {
@@ -388,6 +402,7 @@ mod tests {
             ImportCommit {
                 source_identity: None,
                 byte_checksum: Some(checksum),
+                audiobook_content_hash: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: name.into(),
                 format: BookFormat::Epub,

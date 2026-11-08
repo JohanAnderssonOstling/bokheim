@@ -54,6 +54,7 @@ impl Fixture {
         db.commit_import(ImportCommit {
             source_identity: None,
             byte_checksum: Some(canonical),
+            audiobook_content_hash: None,
             parent_id: ROOT_DIR_ID,
             file_name: "Original.pdf".into(),
             format: BookFormat::Pdf,
@@ -232,6 +233,7 @@ async fn assert_foliate_export(bytes: &[u8], identifier: &str) {
     f.db.commit_import(ImportCommit {
         source_identity: None,
         byte_checksum: Some(checksum),
+        audiobook_content_hash: None,
         parent_id: ROOT_DIR_ID,
         file_name: "Book.epub".into(),
         format: BookFormat::Epub,
@@ -322,6 +324,7 @@ async fn add_epub(f: &Fixture) -> (BookId, Annotation) {
     f.db.commit_import(ImportCommit {
         source_identity: None,
         byte_checksum: Some(checksum),
+        audiobook_content_hash: None,
         parent_id: ROOT_DIR_ID,
         file_name: "Book.epub".into(),
         format: BookFormat::Epub,

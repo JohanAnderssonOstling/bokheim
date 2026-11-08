@@ -11,7 +11,7 @@ pub(crate) mod shell;
 mod sidebar;
 
 pub(crate) use libraries::Libraries;
-pub(crate) use library_session::LibrarySession;
+pub(crate) use library_session::{LibraryOperationDialog, LibrarySession};
 pub use route::{GlobalRoute, LibraryRoute, Route};
 pub use shell::BrowserShell;
 

@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use book_inspection::{CachedPdfReader, InspectedBook};
 use book_model::BookFormat;
 use client_platform_runtime::executor;
-use content_address::{ContentHash, hash_reader_with_size};
+use client_platform_runtime::profiling::{ProfileIo, ProfileSpan};
+use content_address::{hash_reader_with_size, ContentHash};
 use library_files::asset_store::CopiedBook;
 use sync_common::BookId;
 
@@ -19,6 +20,10 @@ pub const READER_EPUB_METADATA_VERSION: i64 = -2;
 
 pub struct IngestedFile {
     pub source_identity: Option<book_inspection::PdfSourceIdentity>,
+    /// Ordered member fingerprint, independent of ZIP packaging.
+    pub audiobook_content_hash: Option<ContentHash>,
+    /// Absent for native folders until an archive is prepared for transfer.
+    pub byte_checksum: Option<ContentHash>,
     pub book_id: BookId,
     pub size_bytes: u64,
     pub fingerprint: u64,
@@ -76,13 +81,24 @@ async fn ingest_file_inner(
     cached: impl AsyncFnOnce(BookId) -> io::Result<Option<InspectedBook>>,
 ) -> io::Result<IngestedFile> {
     let format = BookFormat::from_file_name(&name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unsupported book format"))?;
+    let waiting = ProfileSpan::new("inspection_permit_wait", &name);
     let permit = executor::inspection_permit().await;
-    let (book_id, size_bytes, fingerprint, source_identity, reader) = executor::run_blocking({
+    drop(waiting);
+    let queued = ProfileSpan::new("file_worker_queue", &name);
+    let profile_name = name.clone();
+    let (book_id, size_bytes, fingerprint, reader) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
+            drop(queued);
             let _permit = permit;
-            let fingerprint = fingerprint(&path)?;
-            let mut reader = library_files::filesystem::open(&path)?;
+            let fingerprint = {
+                let _profile = ProfileSpan::new("file_fingerprint", &profile_name);
+                fingerprint(&path)?
+            };
+            let mut reader = {
+                let _profile = ProfileSpan::new("file_open", &profile_name);
+                library_files::filesystem::open(&path)?
+            };
             let (checksum, size_bytes) = match copied {
                 Some((checksum, size, revision)) => {
                     if revision != fingerprint {
@@ -90,65 +106,130 @@ async fn ingest_file_inner(
                     }
                     (checksum, size)
                 }
-                None => hash_reader_with_size(&mut reader)?,
+                None => {
+                    let profile = ProfileSpan::new("checksum", &profile_name);
+                    hash_reader_with_size(&mut ProfileIo::new(&mut reader, profile.io()))?
+                }
             };
             if size_bytes == 0 {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "empty book"));
             }
-            require_unchanged(&path, fingerprint)?;
+            {
+                let _profile = ProfileSpan::new("file_revision_validation", &profile_name);
+                require_unchanged(&path, fingerprint)?;
+            }
             let book_id = BookId::from(checksum);
             reader.rewind()?;
-            let source_identity = if format == BookFormat::Pdf {
-                let identity = book_inspection::PdfSourceIdentity::read(&mut reader).ok().flatten();
-                reader.rewind()?;
-                identity
-            } else {
-                None
-            };
-            Ok((book_id, size_bytes, fingerprint, source_identity, reader))
+            Ok((book_id, size_bytes, fingerprint, reader))
         }
     })
     .await
     .map_err(|error| io::Error::other(error.to_string()))??;
-    let inspection = match cached(book_id).await? {
+    let cached_inspection = {
+        let _profile = ProfileSpan::new("inspection_cache_lookup", &name);
+        cached(book_id).await?
+    };
+    let (source_identity, declared_pdf, reader) = if format == BookFormat::Pdf {
+        let profile_name = name.clone();
+        let needs_metadata = cached_inspection.is_none();
+        executor::run_blocking(move || -> io::Result<_> {
+            let mut reader = reader;
+            let (identity, metadata) = if needs_metadata {
+                let profile = ProfileSpan::new("pdf_declared_metadata", &profile_name);
+                let (identity, metadata) = book_inspection::prepare_pdf_metadata(Path::new(&profile_name), ProfileIo::new(&mut reader, profile.io()));
+                (identity, Some(metadata))
+            } else {
+                let profile = ProfileSpan::new("pdf_identity_marker", &profile_name);
+                (book_inspection::PdfSourceIdentity::read(ProfileIo::new(&mut reader, profile.io())).ok().flatten(), None)
+            };
+            reader.rewind()?;
+            Ok((identity, metadata, reader))
+        })
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))??
+    } else {
+        (None, None, reader)
+    };
+    let (audiobook_content_hash, reader) = if format == BookFormat::Mp3Folder {
+        executor::run_blocking(move || -> io::Result<_> {
+            let mut reader = reader;
+            let checksum = audiobook_archive::archive_content_hash(&mut reader)?;
+            reader.rewind()?;
+            Ok((Some(ContentHash::from(checksum)), reader))
+        })
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))??
+    } else {
+        (None, reader)
+    };
+    let validation_name = name.clone();
+    let inspection = match cached_inspection {
         Some(inspection) => inspection,
         None if reader_metadata && format == BookFormat::Epub => cpu_host::submit_book(host, cpu_host::InspectEpubMetadata { source_name: name }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
-        None => cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, book_id: Some(book_id), cached_pdf: cached_pdf(book_id).await? }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
+        None => cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, book_id: Some(book_id), cached_pdf: cached_pdf(book_id).await?, declared_pdf }, cpu_host::as_cpu_reader(reader)).await.map_err(io::Error::other)?,
     };
     // A file edited during inspection must be retried rather than committed
     // with a content_hash and metadata from different revisions.
+    let _profile = ProfileSpan::new("file_revision_validation", &validation_name);
     require_unchanged(&path, fingerprint)?;
-    Ok(IngestedFile { source_identity, book_id, size_bytes, fingerprint, format, inspection })
+    Ok(IngestedFile { source_identity, audiobook_content_hash, byte_checksum: book_id.content_hash(), book_id, size_bytes, fingerprint, format, inspection })
 }
 
-/// Inspect the reproducible archive of a native MP3 folder, while keeping its
-/// tracks and sidecars as ordinary files at the library placement.
-pub async fn ingest_audiobook_folder(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
+/// Hash original members once, then inspect MP3s directly. ZIP CRCs and byte
+/// checksums are deferred until a transfer actually needs an archive.
+pub async fn ingest_audiobook_folder(path: PathBuf, name: String) -> io::Result<IngestedFile> {
+    let waiting = ProfileSpan::new("inspection_permit_wait", &name);
     let permit = executor::inspection_permit().await;
-    let (book_id, size_bytes, fingerprint, reader) = executor::run_blocking({
+    drop(waiting);
+    let queued = ProfileSpan::new("file_worker_queue", &name);
+    let profile_name = name.clone();
+    let (book_id, size_bytes, fingerprint, inspection) = executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
+            drop(queued);
             let _permit = permit;
-            let tracks = audiobook_folder::discover(&path)?;
+            let tracks = {
+                let _profile = ProfileSpan::new("audio_track_discovery", &profile_name);
+                audiobook_folder::discover(&path)?
+            };
             if tracks.is_empty() {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook folder has no MP3 tracks"));
             }
-            let fingerprint = library_files::filesystem::audiobook_fingerprint(&path, &tracks)?;
-            require_folder_unchanged(&path, fingerprint)?;
-            let mut archive = audiobook_folder::write_folder_archive(&path, tempfile::tempfile()?, &tracks)?;
-            require_folder_unchanged(&path, fingerprint)?;
-            archive.rewind()?;
-            let (checksum, size_bytes) = hash_reader_with_size(&mut archive)?;
-            archive.rewind()?;
-            Ok((BookId::from(checksum), size_bytes, fingerprint, archive))
+            let fingerprint = {
+                let _profile = ProfileSpan::new("audio_fingerprint", &profile_name);
+                library_files::filesystem::audiobook_fingerprint(&path, &tracks)?
+            };
+            {
+                let _profile = ProfileSpan::new("audio_revision_validation", &profile_name);
+                require_folder_unchanged(&path, fingerprint)?;
+            }
+            let content = {
+                let profile = ProfileSpan::new("audio_content_hash", &profile_name);
+                let timings = profile.io();
+                audiobook_folder::folder_content_with_reader(&path, &tracks, |path| Ok(ProfileIo::new(library_files::filesystem::open(path)?, timings.clone())))?
+            };
+            {
+                let _profile = ProfileSpan::new("audio_revision_validation", &profile_name);
+                require_folder_unchanged(&path, fingerprint)?;
+            }
+            let checksum = ContentHash::from(content.checksum);
+            let size_bytes = content.archive_size;
+            let book_id = BookId::from(checksum);
+            let inspection = {
+                let profile = ProfileSpan::new("metadata_parse", &profile_name);
+                let timings = profile.io();
+                book_inspection::inspect_audiobook_folder_content(Path::new(&profile_name), &path, book_id, &content.tracks, &tracks, |path| Ok(ProfileIo::new(library_files::filesystem::open(path)?, timings.clone())))
+                    .map_err(io::Error::other)?
+            };
+            Ok((book_id, size_bytes, fingerprint, inspection))
         }
     })
     .await
     .map_err(|error| io::Error::other(error.to_string()))??;
     let format = BookFormat::Mp3Folder;
-    let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, book_id: Some(book_id), cached_pdf: None }, cpu_host::as_cpu_reader(reader)).await;
+    let _profile = ProfileSpan::new("audio_revision_validation", &name);
     require_folder_unchanged(&path, fingerprint)?;
-    Ok(IngestedFile { source_identity: None, book_id, size_bytes, fingerprint, format, inspection: inspection.map_err(io::Error::other)? })
+    Ok(IngestedFile { source_identity: None, audiobook_content_hash: book_id.content_hash(), byte_checksum: None, book_id, size_bytes, fingerprint, format, inspection })
 }
 
 fn require_folder_unchanged(path: &Path, fingerprint: u64) -> io::Result<()> {

@@ -412,6 +412,7 @@ mod tests {
             .commit_import(ImportCommit {
                 source_identity: None,
                 byte_checksum: Some(checksum),
+                audiobook_content_hash: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: "Book.epub".into(),
                 format: BookFormat::Epub,

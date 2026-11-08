@@ -42,7 +42,7 @@ impl LibraryImport<'_> {
 
     pub(crate) async fn finish_import(&self, import: ValidatedImport, staged: CopiedBook) -> Result<BookId, BackendError> {
         #[cfg(not(target_arch = "wasm32"))]
-        let (staged, inspection, source_identity) = {
+        let (staged, inspection, source_identity, audiobook_content_hash) = {
             let cached_pdf = if import.format == BookFormat::Pdf {
                 match staged.copied_digest() {
                     Some((checksum, _, _)) => self.storage.database().cached_pdf_reader(BookId::from(checksum)).await.map_err(BackendError::operation)?,
@@ -55,7 +55,7 @@ impl LibraryImport<'_> {
                 .await
                 .map_err(|error| BackendError::operation(error).context(format!("invalid {} book", import.format.canonical_extension().to_ascii_uppercase())))?;
             let inspection = Some(ingested.inspection);
-            (staged.into_staged(ingested.book_id, ingested.size_bytes), inspection, ingested.source_identity)
+            (staged.into_staged(ingested.book_id, ingested.size_bytes), inspection, ingested.source_identity, ingested.audiobook_content_hash)
         };
         #[cfg(target_arch = "wasm32")]
         let inspection = {
@@ -71,6 +71,7 @@ impl LibraryImport<'_> {
                             source_name: import.file_name.clone(),
                             format: import.format,
                             book_id: Some(staged.book_id()),
+                            declared_pdf: None,
                             cached_pdf: if import.format == BookFormat::Pdf { self.storage.database().cached_pdf_reader(staged.book_id()).await.map_err(BackendError::operation)? } else { None },
                         },
                         cpu_host::as_cpu_reader(reader),
@@ -84,7 +85,13 @@ impl LibraryImport<'_> {
         let byte_checksum = staged.byte_checksum();
         #[cfg(target_arch = "wasm32")]
         let source_identity = None;
-        let content = self.resolve_import_content(byte_checksum, staged.size_bytes(), source_identity).await?;
+        #[cfg(target_arch = "wasm32")]
+        let audiobook_content_hash = if import.format == BookFormat::Mp3Folder { Some(self.staged_audiobook_content(&staged).await?) } else { None };
+        let content = if let Some(checksum) = audiobook_content_hash {
+            self.resolve_audiobook_import(checksum, Some(byte_checksum), staged.size_bytes(), None).await?
+        } else {
+            self.resolve_import_content(byte_checksum, staged.size_bytes(), source_identity).await?
+        };
         let book_id = content.book_id;
         let staged = staged.with_local_identity(self.storage.assets(), book_id).await.map_err(BackendError::operation)?;
         let _lease = self.lease_import_content(&content).await?;

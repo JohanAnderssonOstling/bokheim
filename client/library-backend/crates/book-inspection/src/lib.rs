@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -18,10 +18,13 @@ fn cached_regex(cache: &'static OnceLock<Result<Regex, String>>, pattern: &str) 
 }
 
 mod book;
-pub use book::{AudiobookMetadata, CachedPdfReader, InspectedBook, inspect_book_reader, inspect_book_reader_with_cached_pdf, inspect_book_reader_with_hash};
+#[cfg(not(target_arch = "wasm32"))]
+pub use book::{inspect_audiobook_folder_reader, inspect_audiobook_folder_content};
+pub use audiobook_archive::archive_content_hash as audiobook_content_hash;
+pub use book::{AudiobookMetadata, CachedPdfReader, InspectedBook, inspect_book_reader, inspect_book_reader_with_cached_pdf, inspect_book_reader_with_hash, inspect_book_reader_with_pdf_metadata};
 pub mod evidence;
 mod mobi;
-pub use mobi::{inspect_mobi_metadata_reader, inspect_mobi_pages_reader, inspect_mobi_reader};
+pub use mobi::{inspect_mobi_frontmatter, inspect_mobi_metadata_reader, inspect_mobi_pages_reader, inspect_mobi_reader, inspect_mobi_with_frontmatter};
 mod document_evidence;
 mod filename_identifiers;
 mod filename_identity;
@@ -32,7 +35,7 @@ pub use title_identity::{normalize_with_filename, title_readings};
 mod pdf;
 mod pdf_ranges;
 mod pdf_source_identity;
-pub use pdf::{InspectedPdf, inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspect_pdf_reader};
+pub use pdf::{InspectedPdf, inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspect_pdf_reader, prepare_pdf_metadata};
 pub use pdf_source_identity::PdfSourceIdentity;
 
 /// Inspection cache version for a format. Matches the extractor contract:
@@ -42,8 +45,8 @@ pub use pdf_source_identity::PdfSourceIdentity;
 /// results keyed on this value.
 pub fn inspection_version(format: BookFormat) -> i64 {
     match format {
-        BookFormat::Epub => i64::from(evidence::INSPECTION_VERSION) + 4,
-        BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION) + 3,
+        BookFormat::Epub => i64::from(evidence::INSPECTION_VERSION) + 7,
+        BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION) + 5,
         BookFormat::Mobi => 7,
         _ => 4,
     }
@@ -67,20 +70,31 @@ pub struct EpubInspectionTimings {
     pub toc_ms: u64,
 }
 
+fn profile_epub_phase(stage: &str, elapsed: Duration) {
+    log::debug!(target: "library_epub_profile", "{}", serde_json::json!({"event":"epub_phase", "stage":stage, "elapsed_ns":elapsed.as_nanos()}));
+}
+
 /// Reads package metadata and navigation from one EPUB provider instance.
 /// Authority ingestion uses this instead of maintaining a second EPUB
 /// metadata parser; ordinary library scans can continue to omit the TOC.
 pub fn inspect_epub(path: &Path) -> MetadataResult<InspectedEpub> {
     let container_started = Instant::now();
     let mut provider = open_epub(path)?;
+    let open_elapsed = container_started.elapsed();
+    let metadata_started = Instant::now();
     let mut metadata = metadata_from_book(path, &mut provider)?;
+    let metadata_elapsed = metadata_started.elapsed();
     let container_ms = u64::try_from(container_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    profile_epub_phase("archive_package_open", open_elapsed);
+    profile_epub_phase("declared_metadata", metadata_elapsed);
     let evidence_started = Instant::now();
     inspect_epub_pages(&mut provider, &mut metadata);
     let evidence_ms = u64::try_from(evidence_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let toc_started = Instant::now();
     let toc = sanitize_toc_entries(provider.toc()?.unwrap_or_default());
-    let toc_ms = u64::try_from(toc_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let toc_elapsed = toc_started.elapsed();
+    let toc_ms = u64::try_from(toc_elapsed.as_millis()).unwrap_or(u64::MAX);
+    profile_epub_phase("cached_navigation", toc_elapsed);
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings { container_ms, evidence_ms, toc_ms } })
 }
 
@@ -446,8 +460,17 @@ mod tests {
 }
 
 fn inspect_epub_pages(provider: &mut Book, book: &mut BookRecord) {
+    let profiling = log::log_enabled!(target: "library_epub_profile", log::Level::Debug);
+    let scan_started = profiling.then(Instant::now);
     let sections = document_evidence::inspect(provider, book);
+    if let Some(started) = scan_started {
+        profile_epub_phase("evidence_scan", started.elapsed());
+    }
+    let apply_started = profiling.then(Instant::now);
     evidence::apply_evidence(book, &sections, "epub");
+    if let Some(started) = apply_started {
+        profile_epub_phase("evidence_apply", started.elapsed());
+    }
 }
 
 /// Page evidence alone, for inspection tools.

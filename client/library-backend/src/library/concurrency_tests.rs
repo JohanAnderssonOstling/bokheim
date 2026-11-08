@@ -150,6 +150,7 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
         .commit_import(library_database::ImportCommit {
             source_identity: None,
             byte_checksum: None,
+            audiobook_content_hash: None,
             parent_id: ROOT_DIR_ID,
             file_name: "Book.epub".into(),
             format: book_model::BookFormat::Epub,

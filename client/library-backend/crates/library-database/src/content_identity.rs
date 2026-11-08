@@ -117,6 +117,34 @@ pub(crate) fn observe_content(connection: &Connection, book: BookId, directory: 
 }
 
 impl Database {
+    pub fn audiobook_at_revision(&self, directory: DirId, name: &str, fingerprint: u64) -> Result<Option<BookId>, DatabaseError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT b.content_hash FROM book b JOIN book_dir d ON d.book_row_id=b.row_id WHERE d.dir_id=?1 AND d.file_name=?2 AND d.local_hash=?3 AND d.is_downloaded=1 AND d.deleted_at IS NULL AND b.deleted_at IS NULL AND b.format=?4",
+                params![directory.to_string(), name, fingerprint.to_string(), BookFormat::Mp3Folder as i64],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// A recording fingerprint is not a checksum of its ZIP packaging. A
+    /// byte-verified archive or unchanged placement can retain its stable ID.
+    pub fn resolve_audiobook_content(&self, checksum: ContentHash, known: Option<BookId>) -> Result<BookId, DatabaseError> {
+        if let Some(known) = known {
+            let live = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1 AND format=?2 AND deleted_at IS NULL)", params![known, BookFormat::Mp3Folder as i64], |row| row.get::<_, bool>(0))?;
+            if live {
+                return Ok(known);
+            }
+        }
+        let mut query = self.connection.prepare_cached("SELECT a.book_id FROM local_audiobook_content a JOIN book b ON b.content_hash=a.book_id WHERE a.content_hash=?1 AND b.deleted_at IS NULL LIMIT 2")?;
+        let books = query.query_map([checksum], |row| row.get::<_, BookId>(0))?.collect::<Result<Vec<_>, _>>()?;
+        if books.len() == 1 {
+            return Ok(books[0]);
+        }
+        Ok(BookId::for_local_content(&identity_scope(&self.connection)?, checksum))
+    }
+
     /// Reuse only the exact device-observed file revision from a prior commit.
     pub fn cached_import_source(&self, path: &str, fingerprint: u64) -> Result<Option<ContentHash>, DatabaseError> {
         Ok(self.connection.query_row("SELECT byte_hash FROM local_import_source WHERE path=?1 AND fingerprint=?2", params![path, fingerprint.to_string()], |row| row.get(0)).optional()?)
@@ -364,6 +392,7 @@ mod tests {
         db.commit_import(crate::ImportCommit {
             source_identity: Some(source),
             byte_checksum: Some(edited),
+            audiobook_content_hash: None,
             parent_id: ROOT_DIR_ID,
             file_name: "Book.pdf".into(),
             format: BookFormat::Pdf,
@@ -413,6 +442,14 @@ mod tests {
 
 // Async access owns its arguments until the synchronous database call completes.
 database_methods! {
+    fn audiobook_at_revision(directory: DirId, name: &str, fingerprint: u64) -> Option<BookId>;
+    arguments (DirId, String, u64,) = (directory, name.to_owned(), fingerprint,);
+    execute database, arguments => database.audiobook_at_revision(arguments.0, &arguments.1, arguments.2);
+
+    fn resolve_audiobook_content(checksum: ContentHash, known: Option<BookId>) -> BookId;
+    arguments (ContentHash, Option<BookId>,) = (checksum, known,);
+    execute database, arguments => database.resolve_audiobook_content(arguments.0, arguments.1);
+
     fn cached_import_source(path: &str, fingerprint: u64) -> Option<ContentHash>;
     arguments (String, u64,) = (path.to_owned(), fingerprint,);
     execute database, arguments => database.cached_import_source(&arguments.0, arguments.1);

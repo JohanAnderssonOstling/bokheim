@@ -4,8 +4,9 @@ use ui_text::text;
 use crate as components;
 use book_model::{Annotation, AnnotationStyle, BookId, RecurringScope};
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Div, Entity, FocusHandle, SharedString, Window, div, rems};
+use gpui::{AnyElement, Context, Div, Entity, FocusHandle, SharedString, Window, div, px, rems};
 use gpui_component::input::InputState;
+use gpui_component::Selectable;
 use std::rc::Rc;
 
 /// Width shared by reader popups and notebook annotation overlays.
@@ -18,58 +19,105 @@ pub trait AnnotationEditorTarget: Sized + 'static {
     fn save_annotation_changes(&mut self, style: Option<AnnotationStyle>, color: Option<u32>, cx: &mut Context<Self>);
     fn dismiss_annotation_editor(&mut self, window: &mut Window, cx: &mut Context<Self>);
     fn delete_edited_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>);
-    fn set_annotation_scope(&mut self, _scope: Option<RecurringScope>, _cx: &mut Context<Self>) {}
+    fn select_annotation_scope(&mut self, _scope: Option<RecurringScope>, _window: &mut Window, _cx: &mut Context<Self>) {}
     fn select_editor_annotation(&mut self, _id: String, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn add_annotation_alias(&mut self, _id: String, _alias: String, _cx: &mut Context<Self>) {}
+    fn remove_annotation_alias(&mut self, _id: String, _alias: String, _cx: &mut Context<Self>) {}
 }
 
 pub struct EditorBook {
     pub id: BookId,
     pub title: String,
-    pub annotations: Vec<(String, String)>,
+    pub annotations: Vec<Annotation>,
 }
 
 pub struct RecurringEditorContext {
     pub books: Vec<EditorBook>,
     pub chapter_available: bool,
+    /// Whether the selected annotation belongs to the current book.
     pub scope_editable: bool,
 }
 
-/// Explicit source books only; inherited matches never become source books.
+/// Switch between independent notes at each scope, including their source books.
 pub fn recurring_annotation_editor_controls<C: AnnotationEditorTarget>(current: &Annotation, context: RecurringEditorContext, target: &Entity<C>, theme: components::BrowserTheme) -> AnyElement {
     let mut extra = components::column(components::SPACE_SM).w_full().min_w_0();
-    if context.books.len() > 1 || !context.scope_editable {
-        let books = context.books.iter().enumerate().filter_map(|(index, book)| {
-            let id = book.annotations.first()?.0.clone();
-            let target = target.clone();
-            Some(
-                components::settings_choice_button(("annotation-origin-book", index), book.title.clone(), book.id == current.book_id, theme)
-                    .debug_selector(move || format!("annotation-origin-book-{index}"))
-                    .on_click(move |_, window, cx| target.update(cx, |this, cx| this.select_editor_annotation(id.clone(), window, cx))),
-            )
-        });
-        extra = extra.child(components::reader_choice_button_group("annotation-origin-books", books, theme));
+    let scopes = [(None, text!(common::selection)), (Some(RecurringScope::Chapter), text!(audiobook::chapter)), (Some(RecurringScope::Book), text!(reader::book)), (Some(RecurringScope::Library), text!(common::library))];
+    let mut buttons = Vec::new();
+    for (index, (scope, label)) in scopes
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (scope, _))| *scope != Some(RecurringScope::Chapter) || context.chapter_available || context.books.iter().any(|book| book.annotations.iter().any(|note| note.anchor.recurring_scope() == *scope)))
+    {
+        let notes = context.books.iter().flat_map(|book| &book.annotations).filter(|note| note.anchor.recurring_scope() == scope).collect::<Vec<_>>();
+        let selected = current.anchor.recurring_scope() == scope;
+        let label = if notes.len() > 1 { format!("{label} · {}", notes.len()) } else { label.to_string() };
+        let existing = notes.iter().find(|note| note.id == current.id).or_else(|| notes.first()).map(|note| note.id.clone());
+        let target = target.clone();
+        buttons.push(
+            components::settings_choice_button(("annotation-scope", index), label, selected, theme)
+                .whitespace_nowrap()
+                .flex_basis(gpui::Length::Auto)
+                .flex_shrink_0()
+                .px(px(components::SPACE_XS))
+                .when(!selected && !notes.is_empty(), |button| button.bg(theme.accent_wash).text_color(theme.text_accent).hover(|style| style.bg(theme.accent_wash_hover)))
+                .on_click(move |_, window, cx| {
+                    target.update(cx, |this, cx| {
+                        if let Some(id) = &existing {
+                            this.select_editor_annotation(id.clone(), window, cx);
+                        } else {
+                            this.select_annotation_scope(scope, window, cx);
+                        }
+                    })
+                }),
+        );
     }
-    if let Some(book) = context.books.iter().find(|book| book.id == current.book_id).filter(|book| book.annotations.len() > 1) {
-        let notes = book.annotations.iter().enumerate().map(|(index, (id, note))| {
-            let selected = current.id == *id;
-            let id = id.clone();
+    extra = extra.child(components::reader_choice_button_group("annotation-scopes", buttons, theme));
+    let notes = context.books.iter().flat_map(|book| book.annotations.iter().map(move |note| (book, note))).filter(|(_, note)| note.anchor.recurring_scope() == current.anchor.recurring_scope()).collect::<Vec<_>>();
+    if notes.len() > 1 || !context.scope_editable {
+        let mut list = components::column(components::SPACE_XXS).w_full().min_w_0();
+        for (book, note) in notes {
+            let selected = current.id == note.id;
+            let source = note.book_id != context.books.first().map_or(current.book_id, |book| book.id) || !context.scope_editable;
+            let preview = note.note.split_whitespace().collect::<Vec<_>>().join(" ");
+            let preview = if source && !preview.is_empty() {
+                format!("{} · {preview}", book.title)
+            } else if source {
+                book.title.clone()
+            } else {
+                preview
+            };
+            let id = note.id.clone();
             let target = target.clone();
-            let label = if note.trim().is_empty() { format!(text!(common::note), index + 1) } else { note.chars().take(45).collect() };
-            components::settings_choice_button(("annotation-origin-note", index), label, selected, theme).on_click(move |_, window, cx| target.update(cx, |this, cx| this.select_editor_annotation(id.clone(), window, cx)))
-        });
-        extra = extra.child(components::reader_choice_button_group("annotation-origin-notes", notes, theme));
+            let row = components::base_button(SharedString::from(format!("annotation-note-{id}")))
+                .ghost()
+                .selected(selected)
+                .text_color(theme.text)
+                .w_full()
+                .h_auto()
+                .min_h(rems(components::settings_control_size_rem()))
+                .p(px(components::SPACE_SM))
+                .border_1()
+                .border_color(if selected { theme.rule } else { gpui::transparent_black() })
+                .bg(if selected { theme.accent_wash } else { theme.page_bg })
+                .hover(move |style| style.bg(if selected { theme.accent_wash_hover } else { theme.hover }))
+                .aria_label(format!("{} {preview}", note.exact_text))
+                .child(
+                    div().flex().items_start().gap(px(components::SPACE_SM)).w_full().min_w_0().child(div().flex_none().mt(px(4.0)).size(px(8.0)).rounded_full().bg(components::reader_annotation_color(note.color))).child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_left()
+                            .text_size(rems(components::TEXT_SM))
+                            .child(div().text_ellipsis().child(note.exact_text.clone()))
+                            .when(!preview.is_empty(), |content| content.child(div().text_size(rems(components::TEXT_XS)).text_color(theme.text_muted).text_ellipsis().child(preview))),
+                    ),
+                )
+                .on_click(move |_, window, cx| target.update(cx, |this, cx| this.select_editor_annotation(id.clone(), window, cx)));
+            list = list.child(row);
+        }
+        extra = extra.child(list);
     }
-    if context.scope_editable {
-        let current = current.anchor.recurring_scope();
-        let scopes = [(None, text!(common::selection)), (Some(RecurringScope::Chapter), text!(audiobook::chapter)), (Some(RecurringScope::Book), text!(reader::book)), (Some(RecurringScope::Library), text!(common::library))];
-        let buttons = scopes.into_iter().enumerate().filter(|(_, (scope, _))| *scope != Some(RecurringScope::Chapter) || context.chapter_available).map(|(index, (scope, label))| {
-            let target = target.clone();
-            components::settings_choice_button(("annotation-scope", index), label, current == scope, theme)
-                .debug_selector(move || format!("annotation-scope-{index}"))
-                .on_click(move |_, _, cx| target.update(cx, |this, cx| this.set_annotation_scope(scope, cx)))
-        });
-        extra = extra.child(components::reader_setting_row_smallcaps(text!(common::repeat_in), theme).child(components::reader_choice_button_group("annotation-scopes", buttons, theme)));
-    } else {
+    if !context.scope_editable {
         extra = extra.child(components::reader_state_note(text!(common::library_recurring_note_edits_apply_everywhere), theme));
     }
     extra.into_any_element()

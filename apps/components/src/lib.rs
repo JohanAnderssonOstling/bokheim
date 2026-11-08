@@ -2,6 +2,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod annotation_aliases;
+pub use annotation_aliases::annotation_alias_controls;
 mod annotation_editor;
 pub use annotation_editor::{
     ANNOTATION_EDITOR_MAX_HEIGHT, ANNOTATION_EDITOR_WIDTH, AnnotationEditorTarget, EditorBook, RecurringEditorContext, annotation_editor_controls, annotation_editor_passage, annotation_note_input, recurring_annotation_editor_controls,

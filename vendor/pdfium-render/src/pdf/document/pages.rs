@@ -16,11 +16,9 @@ use crate::pdf::document::PdfDocument;
 use crate::pdf::points::PdfPoints;
 use crate::pdf::rect::PdfRect;
 use crate::pdfium::PdfiumLibraryBindingsAccessor;
-use crate::utils::mem::create_byte_buffer;
-use crate::utils::utf16le::get_string_from_pdfium_utf16le_bytes;
 use std::marker::PhantomData;
 use std::ops::{Range, RangeInclusive};
-use std::os::raw::{c_double, c_int, c_void};
+use std::os::raw::{c_double, c_int};
 
 /// The zero-based index of a single [PdfPage] inside its containing [PdfPages] collection.
 pub type PdfPageIndex = c_int;
@@ -131,7 +129,7 @@ impl<'a> PdfPages<'a> {
                 .FPDF_LoadPage(self.document_handle, index as c_int)
         };
 
-        let result = self.pdfium_page_handle_to_result(index, page_handle);
+        let result = self.pdfium_page_handle_to_result(page_handle);
 
         if let Ok(page) = result.as_ref() {
             PdfPageIndexCache::cache_props_for_page(
@@ -234,7 +232,7 @@ impl<'a> PdfPages<'a> {
         size: PdfPagePaperSize,
         index: PdfPageIndex,
     ) -> Result<PdfPage<'a>, PdfiumError> {
-        let result = self.pdfium_page_handle_to_result(index, unsafe {
+        let result = self.pdfium_page_handle_to_result(unsafe {
             self.bindings().FPDFPage_New(
                 self.document_handle,
                 index as c_int,
@@ -435,7 +433,6 @@ impl<'a> PdfPages<'a> {
     /// Returns a [PdfPage] from the given `FPDF_PAGE` handle, if possible.
     pub(crate) fn pdfium_page_handle_to_result(
         &self,
-        index: PdfPageIndex,
         page_handle: FPDF_PAGE,
     ) -> Result<PdfPage<'a>, PdfiumError> {
         if page_handle.is_null() {
@@ -443,59 +440,10 @@ impl<'a> PdfPages<'a> {
                 PdfiumInternalError::Unknown,
             ))
         } else {
-            // The page's label (if any) is retrieved by index rather than by using the
-            // FPDF_PAGE handle. Since the index of any particular page can change
-            // (if other pages are inserted or removed), it's better if we don't treat the
-            // page index as an immutable property of the PdfPage; instead, we look up the label now.
-
-            // (Pdfium does not currently include an FPDF_SetPageLabel() function, so the label
-            // _will_ be an immutable property of the PdfPage for its entire lifetime.)
-
-            let label = {
-                // Retrieving the label text from Pdfium is a two-step operation. First, we call
-                // FPDF_GetPageLabel() with a null buffer; this will retrieve the length of
-                // the label text in bytes. If the length is zero, then there is no such tag.
-
-                // If the length is non-zero, then we reserve a byte buffer of the given
-                // length and call FPDF_GetPageLabel() again with a pointer to the buffer;
-                // this will write the label text to the buffer in UTF16LE format.
-
-                let buffer_length = unsafe {
-                    self.bindings().FPDF_GetPageLabel(
-                        self.document_handle,
-                        index as c_int,
-                        std::ptr::null_mut(),
-                        0,
-                    )
-                };
-
-                if buffer_length == 0 {
-                    // The label is not present.
-
-                    None
-                } else {
-                    let mut buffer = create_byte_buffer(buffer_length as usize);
-
-                    let result = unsafe {
-                        self.bindings().FPDF_GetPageLabel(
-                            self.document_handle,
-                            index as c_int,
-                            buffer.as_mut_ptr() as *mut c_void,
-                            buffer_length,
-                        )
-                    };
-
-                    debug_assert_eq!(result, buffer_length);
-
-                    get_string_from_pdfium_utf16le_bytes(buffer)
-                }
-            };
-
             Ok(PdfPage::from_pdfium(
                 self.document_handle,
                 page_handle,
                 self.form_handle,
-                label,
             ))
         }
     }

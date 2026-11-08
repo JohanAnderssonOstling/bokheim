@@ -206,7 +206,7 @@ pub fn book_detail_facts(facts: impl IntoIterator<Item = SharedString>, theme: B
 /// one and in the same place as on a card in the grid — a book is one thing
 /// wherever it is seen. Drawn here as well it ran the width of the hero, which
 /// at nought per cent is a rule under the byline saying nothing.
-pub fn book_detail_position(entry: Option<SharedString>, detail: Option<SharedString>, theme: BrowserTheme) -> Div {
+pub fn book_detail_position(entry: Option<SharedString>, detail: Option<SharedString>, left_aligned: bool, theme: BrowserTheme) -> Div {
     let has_detail = detail.is_some();
     div()
         .w_full()
@@ -217,13 +217,14 @@ pub fn book_detail_position(entry: Option<SharedString>, detail: Option<SharedSt
         .gap(px(SPACE_SM))
         .text_size(rems(TEXT_XS))
         .text_color(theme.text_muted)
-        .children(has_detail.then(|| div().flex_none().w(rems(3.5))))
+        .children((has_detail && !left_aligned).then(|| div().flex_none().w(rems(3.5))))
         .child(
             div()
                 .debug_selector(|| "book-detail-position-entry-box".into())
                 .flex_1()
                 .min_w_0()
                 .text_center()
+                .when(left_aligned, |entry| entry.text_left())
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -310,6 +311,7 @@ fn description_stylesheet(family: &str) -> String {
          :where(body) {{ font-family: \"{family}\"; font-size: {BOOK_DETAIL_DESCRIPTION_SIZE}rem; line-height: {BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM}; }}
          p:first-child {{ margin-top: 0; }}
          p:last-child {{ margin-bottom: 0; }}
+         a:any-link {{ color: inherit !important; text-decoration: none !important; }}
          * {{ font-family: \"{family}\" !important; }}"
     )
 }

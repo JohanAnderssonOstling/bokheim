@@ -343,8 +343,6 @@ impl Render for AudiobookDock {
         let title = player.book.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| text!(audiobook::opening_audiobook).into());
         let current_chapter = player.book.as_ref().and_then(|book| book.chapters.get(player.active_chapter_index())).map(|chapter| super::chapter_display_title(&chapter.title)).unwrap_or_else(|| text!(audiobook::no_chapter).into());
         let playing = player.transport_playing();
-        // Pointer and touchpad scrubbing show exact seconds as the position
-        // changes. Ordinary playback uses compact whole-minute captions.
         let display_fraction = self.scrub.unwrap_or(progress_fraction);
         let display_position = self.scrub.map(|fraction| super::chapter_position_at_fraction(Duration::ZERO, chapter_duration, fraction)).unwrap_or(chapter_position);
         let sleep_label = player.sleep_label();
@@ -352,11 +350,8 @@ impl Render for AudiobookDock {
         // The scrubber's ends in the phone player and the detail page: elapsed
         // and still to come in this chapter.
         let chapter_remaining = chapter_duration.saturating_sub(display_position);
-        let (elapsed, remaining) = if self.scrub.is_some() || self.seek_swipe.is_active() {
-            (super::format_time(display_position), format!("−{}", super::format_time(chapter_remaining)))
-        } else {
-            (super::format_duration_short(display_position), format!("−{}", super::format_duration_short(chapter_remaining)))
-        };
+        let elapsed = super::format_time(display_position);
+        let remaining = format!("−{}", super::format_time(chapter_remaining));
 
         // The playing book's detail page holds these controls in place of its
         // actions; the page itself already shows the cover, title and
@@ -408,14 +403,12 @@ impl Render for AudiobookDock {
                 .debug_selector(|| "audiobook-inline-speed".into())
                 .dropdown_menu_with_anchor(gpui::Anchor::TopLeft, move |menu, _, _| super::speed_menu(rate).dropdown(menu, set_rate.clone()));
             let transport = self.transport(playing, TransportLayout::Inline, theme, cx);
-            let controls = ui_components::now_playing_inline_controls().id("audiobook-inline-controls").overflow_x_scroll().children(transport.into_iter().map(|(_, button)| button));
-            let tools = ui_components::now_playing_tools().child(speed).child(sleep).child(ui_components::book_detail_contents_button(theme)).child(ui_components::book_detail_description_button(theme));
+            let controls = ui_components::now_playing_inline_controls().id("audiobook-inline-controls").overflow_x_scroll().child(speed).children(transport.into_iter().map(|(_, button)| button)).child(sleep);
             return ui_components::now_playing_inline()
                 .relative()
                 .child(ui_components::now_playing_inline_times(elapsed, current_chapter, remaining, theme))
                 .child(self.scrubbable(ui_components::now_playing_scrub_track(display_fraction, theme), cx))
                 .child(controls)
-                .child(tools)
                 .child(gestures::seek_swipe_capture(cx))
                 .when(self.scrub.is_some(), |controls| controls.child(dock_scrub_capture(cx)))
                 .into_any_element();
@@ -449,10 +442,7 @@ impl Render for AudiobookDock {
             return bar.into_any_element();
         }
 
-        let chapter_time = match self.scrub {
-            Some(_) => format!("{} / {}", super::format_time(display_position), super::format_time(chapter_duration)),
-            None => format!("{} / {}", super::format_duration_short(display_position), super::format_duration_short(chapter_duration)),
-        };
+        let chapter_time = format!("{} / {}", super::format_time(display_position), super::format_time(chapter_duration));
         // The line is drawn thin, inside a taller hit area.
         let scrub_track = self.scrubbable(ui_components::player_dock_track(display_fraction, theme), cx);
 

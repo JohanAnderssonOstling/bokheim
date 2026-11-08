@@ -27,7 +27,7 @@ pub(crate) async fn open_remote_audio(db: &DatabaseClient, assets: &AssetStore, 
 
 /// Remote authorization is polled only when no local file was supplied.
 pub(crate) async fn prepare(metadata: Option<PlaybackMetadata>, file: Option<FileReader>, remote: impl Future<Output = Result<DirectPlayback, RemoteFileError>>) -> Result<(PlaybackSource, PlaybackLease), BackendError> {
-    let metadata = metadata.ok_or("audiobook addition has no valid playback facts")?;
+    let mut metadata = metadata.ok_or("audiobook addition has no valid playback facts")?;
     let format = metadata.format;
     if !matches!(format, BookFormat::M4b | BookFormat::Mp3Folder) {
         return Err("book is not an audiobook".into());
@@ -38,6 +38,23 @@ pub(crate) async fn prepare(metadata: Option<PlaybackMetadata>, file: Option<Fil
             let current_hash = file.book_id().await.map_err(BackendError::message)?;
             if !current_hash.is_some_and(|book_id| tracks_match_archive(&metadata.tracks, book_id)) {
                 return Err("audiobook addition has no valid playback facts".into());
+            }
+            let (file, members) = client_platform_runtime::executor::run_blocking(move || {
+                let mut file = file;
+                let members = audiobook_archive::archived_tracks(&mut file)?;
+                Ok::<_, std::io::Error>((file, members))
+            })
+            .await
+            .map_err(BackendError::operation)?
+            .map_err(BackendError::operation)?;
+            if members.len() != metadata.tracks.len() {
+                return Err("local audiobook track count differs from its metadata".into());
+            }
+            for (track, member) in metadata.tracks.iter_mut().zip(members) {
+                if track.name != member.name || track.length != member.length {
+                    return Err("local audiobook tracks differ from their metadata".into());
+                }
+                track.offset = member.offset;
             }
             let (urls, lease) = client_platform_web::transport::resources::local_track_media_lease(file, &metadata.tracks).await.map_err(BackendError::operation)?;
             (PlaybackLocation::LocalTracks(urls), Some(lease))

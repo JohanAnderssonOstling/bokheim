@@ -525,12 +525,10 @@ fn same_rate(left: f64, right: f64) -> bool {
     (left - right).abs() < f64::EPSILON
 }
 
-/// Playback position as the dock shows it: whole minutes of the book. Every
-/// readout derives from this one value, so the dock changes at most once a
-/// minute while playing, all at once, rather than ticking every second (which
-/// on e-ink is a partial refresh each time).
+/// Whole-second playback position used to avoid redundant notifications
+/// between changes to the time readouts.
 fn shown_position(position: Duration) -> Duration {
-    Duration::from_secs(position.as_secs() / 60 * 60)
+    Duration::from_secs(position.as_secs())
 }
 
 fn format_time(duration: Duration) -> String {
@@ -539,16 +537,6 @@ fn format_time(duration: Duration) -> String {
     let minutes = (seconds % 3600) / 60;
     let seconds = seconds % 60;
     if hours > 0 { format!("{hours}:{minutes:02}:{seconds:02}") } else { format!("{minutes}:{seconds:02}") }
-}
-
-fn format_duration_short(duration: Duration) -> String {
-    format_minutes_short(duration.as_secs() / 60)
-}
-
-fn format_minutes_short(total_minutes: u64) -> String {
-    let hours = total_minutes / 60;
-    let minutes = total_minutes % 60;
-    if hours > 0 { format!(text!(common::hours_h_minutes_m), hours = hours, minutes = minutes) } else { format!(text!(common::minutes_m), minutes = minutes) }
 }
 
 fn chapter_display_title(title: &str) -> String {

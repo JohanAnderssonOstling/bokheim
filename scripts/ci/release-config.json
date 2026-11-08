@@ -1,9 +1,9 @@
 {
   "rust_version": "stable",
   "dependencies": {
-    "GPUI-Fork": "4983715ad407d1cadf31f0ea13488e793ad16e0a",
-    "HtmlEngine": "bb16a9c0c45ccdaa3d26c9785f81aab2ef57bbcb",
-    "HtmlViewCore": "0d0f99b5d236443f98cdccf83053d131267e39a6"
+    "GPUI-Fork": "3ef559832205ed516656ed022a3eaeb395cd9209",
+    "HtmlEngine": "e13d66b1c95c6e8086e7f33cfc16d31db45f6ba9",
+    "HtmlViewCore": "f04efe4833e042159ac226665131359e58e537f8"
   },
   "update": {
     "public_key_hex": "f9e4a3504b65243b84d497bc3b0434793803c794c0db129701ea563d0a51efa3",

@@ -14,6 +14,7 @@ use crate::shared_sql::SharedSql;
 use crate::stored_document;
 use crate::sync::SyncApplySql;
 use crate::sync::{nonnegative_u64, normalized_description, storage_i64, toc_entry_count};
+use client_platform_runtime::profiling::ProfileSpan;
 use content_address::BookId;
 use library_replica::{BookAddition, BookLifecycleState, DirectoryIntent, DirectoryLifecycleState, EnrichmentResult, LibraryStateEntry};
 use rusqlite::Transaction;
@@ -24,6 +25,7 @@ mod metadata;
 
 /// Project canonical winners inside the same transaction as their admission.
 pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+    let _profile = ProfileSpan::new("metadata_projection", "transaction");
     let dirty = query_rows(|callback| tx.projection_dirty_addresses(callback), |r| Ok((r.get::<_, String>(0)?, r.get::<_, StateKey>(1)?, r.get::<_, String>(2)?)))?;
     if dirty.is_empty() {
         return Ok(());
@@ -85,6 +87,7 @@ pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
             books.entry(hash).or_default().insert("placement".into());
         }
     }
+    let loading = ProfileSpan::new("metadata_state_loading", "projection");
     let mut pending = Vec::with_capacity(books.len());
     for (hash, changed) in books {
         let full = changed.contains("book_projection");
@@ -96,8 +99,19 @@ pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
             .collect::<Result<Vec<_>, DatabaseError>>()?;
         pending.push((hash, changed, values));
     }
+    // Bulk metadata projection updates the format too. Capture its old value
+    // before that write so metadata-only additions can avoid file replay while
+    // actual format changes still request it.
+    #[cfg(not(target_arch = "wasm32"))]
+    let previous_formats = pending
+        .iter()
+        .filter(|(hash, changed, _)| queued_books.contains(hash) && !changed.contains("book_lifecycle") && !changed.contains("placement"))
+        .map(|(hash, _, _)| tx.projection_book_format(hash, |row| row.get::<_, Option<i64>>(0)).map(|format| (*hash, format)))
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    drop(loading);
     // Canonical winners have already been admitted under this writer. Build
     // complete metadata sets, then write them together before reader documents.
+    let tables = ProfileSpan::new("metadata_tables", "projection");
     metadata::project(
         tx,
         pending.iter().filter_map(|(hash, changed, values)| {
@@ -105,15 +119,27 @@ pub(crate) fn project_dirty(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
             (needs_metadata && !book_is_purged(values)).then(|| (hash, book_addition(values)))
         }),
     )?;
+    drop(tables);
+    let documents = ProfileSpan::new("metadata_documents", "projection");
     for (hash, changed, values) in pending {
         project_book(tx, &hash, &values, &changed, &purged)?;
         // OPFS stores one object per book and has no placement files to replay.
         // A native work row would otherwise block browser upload preparation.
         #[cfg(not(target_arch = "wasm32"))]
+        // Enrichment can replace a book's addition without changing any file
+        // facts. Only a changed format needs replay in that case; lifecycle
+        // and placement changes retain their normal reconciliation policy.
         if queued_books.contains(&hash) {
-            tx.queue_book_work_insert(&hash)?;
+            let requires_replay = match previous_formats.get(&hash) {
+                Some(previous) => *previous != tx.projection_book_format(&hash, |row| row.get::<_, Option<i64>>(0))?,
+                None => true,
+            };
+            if requires_replay {
+                tx.queue_book_work_insert(&hash)?;
+            }
         }
     }
+    drop(documents);
     if directories {
         // Cache the canonical directory winners before deriving the display tree.
         for bytes in query_rows(|callback| tx.projection_directory_state(callback), |row| row.get::<_, Vec<u8>>(0))? {

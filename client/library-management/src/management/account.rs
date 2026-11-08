@@ -213,7 +213,10 @@ impl LibraryService {
                 .request(|session| {
                     Box::pin(async move {
                         self.check_library_account(&library_id, &session).await?;
-                        account_client::delete_library(&session, &library_id).await
+                        match account_client::delete_library(&session, &library_id).await.map(|_| ()) {
+                            Err(error) if error.is_not_found() => Ok(()),
+                            result => result,
+                        }
                     })
                 })
                 .await

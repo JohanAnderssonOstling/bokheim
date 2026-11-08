@@ -165,7 +165,7 @@ impl AssetStore {
     /// Persist one scan batch's checksum proofs without holding library state.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn remember_local_contents(&self, contents: Vec<(BookId, ContentHash)>) -> Result<(), AssetStoreError> {
-        let store = self.clone();
+        let store = self.for_import_batch();
         let root = self.lock_root_shared().await;
         run_blocking(move || {
             let _root = root;
@@ -175,6 +175,9 @@ impl AssetStore {
             for (book, checksum) in contents {
                 store.remember_local_content(book, checksum)?;
             }
+            // One durability boundary for the scan batch. Proofs must survive
+            // before the caller commits the identities that depend on them.
+            store.flush_import_batch_blocking()?;
             if !store.root_available() {
                 return Err(AssetStoreError::operation("library folder changed during scan"));
             }
@@ -272,13 +275,35 @@ impl AssetStore {
             run_blocking(move || {
                 use std::io::Seek as _;
                 for relative_path in paths {
+                    let expected = checksum.or(hash.content_hash());
+                    let path = imp::placement_path(&store.0, &relative_path);
+                    let folder_revision = if path.is_dir() { Some(crate::filesystem::audiobook_fingerprint(&path, &audiobook_folder::discover(&path)?)?) } else { None };
+                    // A newly scanned audiobook has a recording identity but
+                    // no ZIP-byte checksum yet. Verify its member proof before
+                    // constructing the transport, and pin that source revision.
+                    let source = if expected.is_none() {
+                        if folder_revision.is_none() {
+                            continue;
+                        }
+                        let Some(source) = imp::VerifiedPath::matching(path.clone(), &hash)? else { continue };
+                        Some(source)
+                    } else {
+                        None
+                    };
                     let Some(mut reader): Option<BoxedBookReader> = imp::open_book_at_path(&store.0, &relative_path)? else { continue };
                     let mut hasher = blake3::Hasher::new();
                     hasher.update_reader(&mut reader)?;
                     let actual = BookId::from(hasher.finalize());
-                    let expected = checksum.or(hash.content_hash());
-                    if actual.content_hash() != expected {
+                    if expected.is_some() && actual.content_hash() != expected {
                         continue;
+                    }
+                    if let Some(source) = source {
+                        source.check_metadata()?;
+                    }
+                    if let Some(revision) = folder_revision {
+                        if crate::filesystem::audiobook_fingerprint(&path, &audiobook_folder::discover(&path)?)? != revision {
+                            return Err(AssetStoreError::operation("audiobook changed while preparing transfer"));
+                        }
                     }
                     reader.seek(SeekFrom::Start(0))?;
                     return Ok(Some(VerifiedBook { reader, length: hasher.count(), book_id: actual, _lease: lease }));
@@ -844,6 +869,11 @@ impl CopiedBook {
 pub use library_model::PublishedStagedBook;
 
 impl StagedBook {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_reader(&self) -> Result<BoxedBookReader, AssetStoreError> {
+        Ok(Box::new(File::open(&self.inner.temporary_path)?))
+    }
+
     pub fn byte_checksum(&self) -> content_address::ContentHash {
         self.inner.byte_checksum
     }
@@ -960,7 +990,8 @@ fn asset_name(kind: BlobKind, book_id: &BookId) -> String {
 fn generated_thumbnail_name(name: &str) -> Option<String> {
     let name = name.strip_prefix("thumbnail/")?;
     let (book, suffix) = name.split_once('.').map_or((name, ""), |(book, suffix)| (book, suffix));
-    if book.len() != 64 || (!suffix.is_empty() && !suffix.starts_with("card-v")) {
+    // Local identities include a tag and are longer than content hashes.
+    if book.parse::<BookId>().is_err() || (!suffix.is_empty() && !suffix.starts_with("card-v")) {
         return None;
     }
     let suffix = if suffix.is_empty() { String::new() } else { format!(".{suffix}") };

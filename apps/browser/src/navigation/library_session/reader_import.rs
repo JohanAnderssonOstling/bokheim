@@ -25,6 +25,10 @@ impl LibrarySession {
         let library = self.library.backend().clone();
         let dialog = cx.new(|cx| ReaderImportDialog::new(management, library, source, parent, cx));
         let closed = cx.subscribe_in(&dialog, window, |session, dialog, _: &DismissEvent, window, cx| {
+            if session.reader_import.as_ref().is_none_or(|(current, _)| current.entity_id() != dialog.entity_id()) {
+                return;
+            }
+            let restore_focus = dialog.read(cx).focus_handle(cx).contains_focused(window, cx);
             let request = dialog.update(cx, |dialog, _| dialog.pending_import.take().map(|options| (dialog.library.clone(), dialog.source, options)));
             if let Some((library, source, options)) = request {
                 let updates = session.library.updates();
@@ -51,7 +55,9 @@ impl LibrarySession {
                 updates.update(cx, |updates, cx| updates.set_import_task(Some(task), cx));
             }
             session.reader_import = None;
-            session.focus_page(window, cx);
+            if restore_focus {
+                session.focus_page(window, cx);
+            }
             cx.notify();
         });
         dialog.read(cx).focus_handle(cx).focus(window, cx);

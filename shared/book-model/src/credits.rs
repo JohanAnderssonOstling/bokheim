@@ -183,8 +183,9 @@ pub struct AudiobookTrack {
     pub end_ms: u64,
     pub offset: u64,
     pub length: u64,
-    /// Book identity whose ZIP offsets this track index describes. Provider
-    /// readers also pin the file revision so replacements cannot reuse offsets.
+    /// Book identity associated with this transport index. Offsets depend on
+    /// packaging and must be resolved against the opened ZIP revision.
+    /// Provider readers also pin the file revision across reads.
     #[serde(default)]
     pub archive_hash: Option<BookId>,
 }

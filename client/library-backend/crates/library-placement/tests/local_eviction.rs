@@ -24,6 +24,7 @@ async fn local_book() -> (TempDir, AssetStore, DatabaseClient, BookId) {
         .commit_import(ImportCommit {
             source_identity: None,
             byte_checksum: None,
+            audiobook_content_hash: None,
             parent_id: ROOT_DIR_ID,
             file_name: "book.epub".into(),
             format: BookFormat::Epub,

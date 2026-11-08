@@ -7,3 +7,5 @@ publish = false
 [dependencies]
 pdf-view-common = { path = "../pdf-view-common" }
 lopdf = { version = "0.44", default-features = false }
+memchr = "2"
+log = "0.4"

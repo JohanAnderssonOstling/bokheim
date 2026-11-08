@@ -1,4 +1,4 @@
-//! Explicit durability scope for Copy imports. Metadata must not be committed
+//! Explicit durability scope for Copy imports and scan checksum proofs. Metadata must not be committed
 //! until the caller has successfully flushed this scope. Source files remain
 //! available throughout; Move and provider uploads use individual durability.
 use super::{AssetStore, AssetStoreError};
@@ -40,9 +40,9 @@ impl PendingDurability {
 }
 
 impl AssetStore {
-    /// An isolated store handle for a single, sequential Copy batch. Other
-    /// handles keep their normal durability policy. Publish only ordinary book
-    /// files through this handle, then flush before committing their metadata.
+    /// An isolated store handle for a single, sequential Copy or scan-proof
+    /// batch. Other handles keep their normal durability policy. Flush the
+    /// batch before committing metadata that depends on its files or proofs.
     pub fn for_import_batch(&self) -> Self {
         let mut store = self.clone();
         store.0.import_batch = Some(Arc::new(PendingDurability::default()));
@@ -63,7 +63,7 @@ impl AssetStore {
         .map_err(AssetStoreError::operation)?
     }
 
-    fn flush_import_batch_blocking(&self) -> Result<(), AssetStoreError> {
+    pub(super) fn flush_import_batch_blocking(&self) -> Result<(), AssetStoreError> {
         if !self.root_available() {
             return Err(AssetStoreError::operation("library folder is unavailable"));
         }

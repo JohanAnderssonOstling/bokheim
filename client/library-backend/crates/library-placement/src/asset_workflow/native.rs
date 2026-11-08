@@ -283,6 +283,38 @@ fn cleanup_owner_valid(work: &NativeFileWork) -> Result<bool, BackendError> {
     }
 }
 
+/// Remove purged folder trees after file replay has released their book paths.
+pub(super) async fn purge_background_directories(state: &RwLock<LibraryState>) -> Result<(), BackendError> {
+    let database = state.read().await.database().clone();
+    let mut failure = None;
+    for (directory, relative) in database.pending_directory_purges().await? {
+        let assets = state.read().await.assets().clone();
+        let root_access = assets.lock_root_shared().await;
+        let result = async {
+            let storage = state.write().await;
+            let database = storage.database();
+            if !database.directory_purge_ready(&directory, &relative).await? {
+                return Ok::<(), BackendError>(());
+            }
+            let path = relative.clone();
+            run_blocking(move || {
+                let _root = root_access;
+                assets.purge_directory(directory, &path)
+            })
+            .await
+            .map_err(BackendError::operation)??;
+            database.forget_purged_directory(&directory, &relative).await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            failure.get_or_insert(error);
+        }
+        tokio::task::yield_now().await;
+    }
+    failure.map_or(Ok(()), Err)
+}
+
 async fn materialize_directory(assets: &AssetStore, database: &DatabaseClient, id: DirId) -> Result<(), BackendError> {
     if id == ROOT_DIR_ID {
         return Ok(());

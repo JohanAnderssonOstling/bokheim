@@ -68,7 +68,11 @@ impl LibraryImport<'_> {
             .await
             .map_err(BackendError::operation)??;
             let checksum = ingested.book_id.content_hash().ok_or("import has no byte checksum")?;
-            let content = self.resolve_import_content(checksum, ingested.size_bytes, ingested.source_identity).await?;
+            let content = if let Some(content_hash) = ingested.audiobook_content_hash {
+                self.resolve_audiobook_import(content_hash, Some(checksum), ingested.size_bytes, None).await?
+            } else {
+                self.resolve_import_content(checksum, ingested.size_bytes, ingested.source_identity).await?
+            };
             let identity = content.book_id;
             let assets = self.storage.assets().clone();
             run_blocking(move || assets.remember_local_content(identity, checksum)).await.map_err(BackendError::operation)??;
@@ -87,7 +91,11 @@ impl LibraryImport<'_> {
                             return Ok(None);
                         }
                         let revision = fingerprint(&path)?;
-                        if hash_file(&mut File::open(&path)?)? == checksum && fingerprint(&path)? == revision { Ok(Some((path, revision))) } else { Ok(None) }
+                        if hash_file(&mut File::open(&path)?)? == checksum && fingerprint(&path)? == revision {
+                            Ok(Some((path, revision)))
+                        } else {
+                            Ok(None)
+                        }
                     })
                     .await
                     .map_err(BackendError::operation)??
