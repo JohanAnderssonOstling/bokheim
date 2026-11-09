@@ -27,7 +27,10 @@ export async function waitForTab(panel) {
                 lastCount = tabs.count;
                 lastActive = tabs.active;
                 const count = tabs.count === 1 ? text('web.one_other_tab_open') : text('web.other_tabs_open', {count: tabs.count});
-                const instruction = tabs.active ? text('web.close_running_tab_to_continue') : text('web.ready_to_open_here');
+                let instruction = text('web.ready_to_open_here');
+                if (tabs.active) {
+                    instruction = tabs.count === 1 ? text('web.close_running_tab_to_continue') : text('web.close_other_tabs_to_continue');
+                }
                 message.textContent = `${count} ${instruction}`;
             }
             button.disabled = tabs.active || opening;
