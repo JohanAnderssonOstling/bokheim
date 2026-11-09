@@ -6,7 +6,9 @@ use crate::transactions::WriteOutcome::{Commit, Rollback};
 use content_address::ContentHash;
 use library_model::RelativeBookPath;
 use rusqlite::{Error as SqlError, Row, types::Type};
+mod migration;
 pub(crate) mod observations;
+pub(crate) use migration::{migrate_cleanup_owners, migrate_file_work};
 #[cfg(not(target_arch = "wasm32"))]
 mod placement_edit;
 mod relocation;

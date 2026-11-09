@@ -178,9 +178,18 @@ impl Database {
         let transaction = self.connection.unchecked_transaction()?;
         const VERSION: i64 = LIBRARY_SCHEMA_VERSION;
         let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        // Schema 53 has the same persisted records. Its extra remote-name
-        // column is unused; keep it while installing the new local audio cache.
-        if version == VERSION || version == 53 {
+        // Retain the upgrade path used by the published Windows and Kobo
+        // packages. The unused remote-name column can remain in older files.
+        if (50..=VERSION).contains(&version) {
+            if version < 51 {
+                native::migrate_file_work(&transaction)?;
+            }
+            if version < 52 {
+                native::migrate_cleanup_owners(&transaction)?;
+            }
+            if version < 53 {
+                transaction.execute_batch(include_str!("placements/sql/schema/path_indexes.sql"))?;
+            }
             transaction.execute_batch(include_str!("audiobook_content.sql"))?;
             transaction.schema_placements_views()?;
             transaction.schema_assets_views()?;
