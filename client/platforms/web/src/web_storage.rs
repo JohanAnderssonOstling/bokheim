@@ -214,6 +214,9 @@ pub fn prune_reference_databases(prefix: &str, selected: &str) -> Result<(), Str
 }
 
 pub async fn reserve_database_capacity(additional_databases: usize) -> Result<(), String> {
+    if !on_storage_thread() {
+        return storage_call(move || async move { Box::pin(reserve_database_capacity(additional_databases)).await }).await.map_err(|error| error.to_string())?;
+    }
     let storage = storage()?;
     let additional_databases = u32::try_from(additional_databases).unwrap_or(u32::MAX);
     let required_capacity = storage.count().saturating_add(additional_databases).saturating_add(TRANSIENT_FILE_CAPACITY);
