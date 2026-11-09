@@ -4,6 +4,9 @@ const messages = {
     "web.browser_too_old": "Update {name} to version {minimum} or newer to use Bokheim.",
     "web.close_other_app_tabs_then_reload": "Close other app tabs, then reload.",
     "web.couldn_t_start_the_app_reload_to_retry": "Couldn't start the app. Reload to retry.",
+    "web.downloading_app": "Downloading app…",
+    "web.downloading_app_progress": "Downloading app… {percent}%",
+    "web.error_details": "Error details",
     "web.missing_async_wait": "Your browser can’t run Bokheim. Update it or try another browser.",
     "web.missing_exceptions": "Your browser can’t run Bokheim. Update it or try another browser.",
     "web.missing_isolation": "Bokheim couldn’t start on this website. Please try again later.",
@@ -14,6 +17,7 @@ const messages = {
     "web.opening_bokheim": "Opening Bokheim…",
     "web.requires_browser": "Bokheim requires {name} {minimum} or newer.",
     "web.retrying": "Retrying…",
+    "web.starting_app": "Starting app…",
     "web.update_your_browser_to_its_latest_version": "Update your browser to its latest version.",
     "web.use_https": "Open https://app.bokheim.se to use Bokheim."
 };

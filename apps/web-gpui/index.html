@@ -8,9 +8,9 @@
         <script type="module">
             globalThis.__BOKHEIM_ASSET_BASE__ = "./pkg";
             globalThis.__BOKHEIM_CJK_FONT_URL__ = new URL(`${globalThis.__BOKHEIM_ASSET_BASE__}/fonts/DroidSansFallback.ttf`, document.baseURI).href;
-            import {checkCompatibility, compatibilityMessage} from "./compatibility.mjs";
+            import {checkCompatibility, compatibilityMessage} from "./pkg/compatibility.mjs";
 
-            import {startApplication} from "./startup.mjs";
+            import {startApplication} from "./pkg/startup.mjs";
             const panel = document.getElementById('startup-status');
             const issues = await checkCompatibility();
             if (issues.length) {
@@ -81,6 +81,9 @@
             #startup-status progress[hidden] { display: none; }
             [data-startup-message] { margin-top: 20px; }
             [data-startup-message] p { margin: 0 0 20px; }
+            [data-startup-message] details { margin: 0 0 20px; text-align: left; }
+            [data-startup-message] summary { cursor: pointer; }
+            [data-startup-message] pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 monospace; }
             #startup-status button {
                 padding: 10px 24px;
                 border: 1px solid #2e3d31;

@@ -276,7 +276,8 @@ impl LibraryService {
             this.config.library_list_changed.send_replace(());
             this.config.account_wake.send_replace(());
             Ok(())
-        }).await
+        })
+        .await
     }
 
     pub async fn open(self: &Arc<Self>, library_id: &LibraryId) -> Result<(), BackendError> {
@@ -313,6 +314,9 @@ impl LibraryService {
     }
 
     pub(crate) fn open_options_on_storage(self: &Arc<Self>, library_id: LibraryId) -> Result<(LibraryOpenOptions, Option<CloudStorageReset>), BackendError> {
+        if matches!(self.config.registry.configuration(&library_id).map_err(BackendError::operation)?, library_registry::LibraryConfiguration::LegacyExternal { .. }) {
+            return Err(BackendError::message("this library uses cloud-folder storage that this app version cannot open"));
+        }
         let reset_token = self.config.registry.cloud_storage_reset(&library_id).map_err(BackendError::operation)?;
         let storage = self.config.registry.storage(&library_id).map_err(BackendError::operation)?;
         let entry = self.entry_on_storage(&library_id)?;

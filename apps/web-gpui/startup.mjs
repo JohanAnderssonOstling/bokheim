@@ -1,54 +1,90 @@
 import {text} from './ui-text.mjs';
 
-const RETRY_KEY = 'bokheim-startup-retry-v1';
-
-export async function startApplication(panel, initialize, {reload = () => location.reload(), storage, onFailure = () => {}} = {}) {
-    // Accessing sessionStorage itself can throw when browser storage is blocked.
-    // In that case retain the manual Reload action without an automatic loop.
-    if (storage === undefined) {
-        try { storage = globalThis.sessionStorage; } catch { storage = null; }
-    }
-    // A tab opened during deployment can still have the previous HTML shell.
+export async function startApplication(panel, initialize, {reload = () => location.reload(), onFailure = () => {}} = {}) {
+    // Tabs opened during deployment can still have the previous HTML shell.
     const status = panel.querySelector('[data-startup-message]') || panel;
     const progress = panel.querySelector('progress');
-    status.textContent = text('web.opening_bokheim');
+    let animation;
+    let initializing = false;
+    let started = false;
+    let percent = -1;
+    const beginInitialization = () => {
+        if (initializing || started) return;
+        initializing = true;
+        status.textContent = text('web.starting_app');
+        if (!progress) return;
+        progress.max = 100;
+        progress.value = 0;
+        progress.setAttribute('aria-label', text('web.starting_app'));
+        const since = performance.now();
+        // Initialization has no measurable total. Estimate movement while
+        // waiting for the real ready signal, and never complete on a timer.
+        animation = setInterval(() => {
+            progress.value = 95 * (1 - Math.exp(-(performance.now() - since) / 6000));
+        }, 100);
+    };
+    status.textContent = text('web.downloading_app');
+    if (progress) {
+        progress.max = 100;
+        progress.value = 0;
+        progress.setAttribute('aria-label', text('web.downloading_app'));
+    }
+    let fail;
     const ready = new Promise((resolve, reject) => {
-        globalThis.__BOKHEIM_STARTUP_READY__ = resolve;
-        globalThis.__BOKHEIM_STARTUP_FAILED__ = detail => reject(new Error(detail));
+        fail = error => reject(error instanceof Error ? error : new Error(String(error)));
+        globalThis.__BOKHEIM_STARTUP_READY__ = () => {
+            started = true;
+            if (progress) progress.value = 100;
+            resolve();
+        };
+        globalThis.__BOKHEIM_STARTUP_FAILED__ = fail;
     });
-    // A backend failure can arrive before the WASM initialization promise settles.
+    // A backend failure can arrive before the WASM initialization settles.
     ready.catch(() => {});
+    globalThis.__BOKHEIM_STARTUP_DOWNLOAD__ = ({loaded, total, complete}) => {
+        if (complete) {
+            beginInitialization();
+            return;
+        }
+        if (initializing || started) return;
+        const next = Math.min(100, Math.floor(100 * loaded / total));
+        if (next === percent) return;
+        percent = next;
+        status.textContent = text('web.downloading_app_progress', {percent});
+        if (progress) progress.value = next;
+    };
+    const failed = event => fail(event.error || event.reason || event.message || text('web.couldn_t_start_the_app_reload_to_retry'));
+    globalThis.addEventListener('error', failed);
+    globalThis.addEventListener('unhandledrejection', failed);
     try {
-        await Promise.all([initialize(), ready]);
-        try { storage.removeItem(RETRY_KEY); } catch { /* Storage may be disabled. */ }
+        await Promise.all([Promise.resolve().then(initialize).then(beginInitialization), ready]);
         panel.remove();
         return true;
     } catch (error) {
         onFailure();
         console.error('Bokheim startup failed', error);
-        const busy = /BOKHEIM_STORAGE_BUSY|creating sync access handle/.test(String(error));
-        let retry = false;
-        if (!busy) {
-            try {
-                retry = storage.getItem(RETRY_KEY) !== '1';
-                if (retry) storage.setItem(RETRY_KEY, '1');
-            } catch { retry = false; }
-        }
-        if (retry) {
-            status.textContent = text('web.retrying');
-            reload();
-            return false;
-        }
+        const reason = error?.message || String(error);
+        const busy = /BOKHEIM_STORAGE_BUSY|creating sync access handle/.test(reason);
         const message = document.createElement('p');
         message.textContent = busy ? text('web.close_other_app_tabs_then_reload') : text('web.couldn_t_start_the_app_reload_to_retry');
+        const detail = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = text('web.error_details');
+        const description = document.createElement('pre');
+        description.textContent = reason;
+        detail.append(summary, description);
         const button = document.createElement('button');
         button.textContent = text('browser.reload');
         button.addEventListener('click', () => reload());
         if (progress) progress.hidden = true;
-        status.replaceChildren(message, button);
+        status.replaceChildren(message, detail, button);
         return false;
     } finally {
+        clearInterval(animation);
+        globalThis.removeEventListener('error', failed);
+        globalThis.removeEventListener('unhandledrejection', failed);
         delete globalThis.__BOKHEIM_STARTUP_READY__;
         delete globalThis.__BOKHEIM_STARTUP_FAILED__;
+        delete globalThis.__BOKHEIM_STARTUP_DOWNLOAD__;
     }
 }
