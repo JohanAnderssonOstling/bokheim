@@ -7,6 +7,8 @@ const messages = {
     "web.downloading_app": "Downloading app…",
     "web.downloading_app_progress": "Downloading app… {percent}%",
     "web.error_details": "Error details",
+    "web.loading_app": "Loading app…",
+    "web.loading_app_progress": "Loading app… {percent}%",
     "web.missing_async_wait": "Your browser can’t run Bokheim. Update it or try another browser.",
     "web.missing_exceptions": "Your browser can’t run Bokheim. Update it or try another browser.",
     "web.missing_isolation": "Bokheim couldn’t start on this website. Please try again later.",

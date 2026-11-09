@@ -1304,6 +1304,8 @@
     "missing_shared_workers": "Your browser can’t run Bokheim. Update it or try another browser.",
     "missing_workers": "Your browser can’t run Bokheim. Update it or try another browser.",
     "opening_bokheim": "Opening Bokheim…",
+    "loading_app": "Loading app…",
+    "loading_app_progress": "Loading app… {percent}%",
     "downloading_app": "Downloading app…",
     "downloading_app_progress": "Downloading app… {percent}%",
     "starting_app": "Starting app…",

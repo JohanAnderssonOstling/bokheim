@@ -23,11 +23,11 @@ export async function startApplication(panel, initialize, {reload = () => locati
             progress.value = 95 * (1 - Math.exp(-(performance.now() - since) / 6000));
         }, 100);
     };
-    status.textContent = text('web.downloading_app');
+    status.textContent = text('web.loading_app');
     if (progress) {
         progress.max = 100;
         progress.value = 0;
-        progress.setAttribute('aria-label', text('web.downloading_app'));
+        progress.setAttribute('aria-label', text('web.loading_app'));
     }
     let fail;
     const ready = new Promise((resolve, reject) => {
@@ -50,7 +50,7 @@ export async function startApplication(panel, initialize, {reload = () => locati
         const next = Math.min(100, Math.floor(100 * loaded / total));
         if (next === percent) return;
         percent = next;
-        status.textContent = text('web.downloading_app_progress', {percent});
+        status.textContent = text('web.loading_app_progress', {percent});
         if (progress) progress.value = next;
     };
     const failed = event => fail(event.error || event.reason || event.message || text('web.couldn_t_start_the_app_reload_to_retry'));
