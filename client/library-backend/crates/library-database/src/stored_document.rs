@@ -9,7 +9,7 @@ pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Databa
 }
 
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DatabaseError> {
-    wire::decode(bytes, wire::MAX_DECODED_RESPONSE_BYTES).map_err(DatabaseError::operation)
+    if bytes.starts_with(b"BKHM") { wire::decode(bytes, wire::MAX_DECODED_RESPONSE_BYTES).map_err(DatabaseError::operation) } else { serde_json::from_slice(bytes).map_err(DatabaseError::operation) }
 }
 
 #[cfg(test)]

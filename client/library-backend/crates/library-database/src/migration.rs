@@ -4,7 +4,11 @@ use book_model::Annotation;
 use rusqlite::Transaction;
 use sync_common::BookId;
 
+mod storage;
+pub(crate) use storage::upgrade as upgrade_storage;
+
 pub(crate) fn upgrade_before_50(tx: &Transaction<'_>, version: i64) -> Result<(), DatabaseError> {
+    tx.execute_batch(include_str!("annotations/sql/schema/tables.sql"))?;
     tx.execute_batch(include_str!("content_identity.sql"))?;
     if version < 45 {
         let has_checksum: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('book_transfer') WHERE name='upload_checksum')", [], |row| row.get(0))?;

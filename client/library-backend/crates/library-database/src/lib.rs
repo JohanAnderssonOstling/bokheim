@@ -21,14 +21,14 @@ use book_model::BookFormat;
 use std::cell::RefCell;
 use std::error::Error;
 use std::sync::Arc;
-use sync_common::storage::LibraryStorage;
 use sync_common::BookId;
+use sync_common::storage::LibraryStorage;
 #[macro_use]
 mod query_methods;
-mod migration;
 mod annotation_export;
 mod content_identity;
 pub(crate) mod contributors;
+mod migration;
 pub(crate) mod purge;
 pub mod shared_sql;
 mod taxonomy_update;
@@ -182,6 +182,9 @@ impl Database {
         // Retain upgrades from the published web (44), Windows and Kobo
         // libraries. The unused remote-name column can remain in older files.
         if (44..=VERSION).contains(&version) {
+            if version < 54 {
+                migration::upgrade_storage(&transaction)?;
+            }
             if version < 50 {
                 migration::upgrade_before_50(&transaction, version)?;
             }
