@@ -30,3 +30,7 @@ this override therefore also requires resolving that version constraint.
 See https://github.com/MattiasBuelens/wasm-streams/blob/v0.7.0/CHANGELOG.md.
 The js-sys executor issue is fixed by the upstream bindings update; js-sys
 does not need a local patch.
+
+Backport the upstream 0.7 artifact and symbol fixes: consume this dependency
+as rlib only and mark adapter exports private so the 0.4 and 0.5 versions
+can coexist without overwriting Cargo outputs or wasm-bindgen symbols.

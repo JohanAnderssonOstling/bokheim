@@ -12,7 +12,7 @@ use crate::util::{checked_cast_to_u32, clamp_to_usize};
 
 use super::sys;
 
-#[wasm_bindgen]
+#[wasm_bindgen(private)]
 pub(crate) struct IntoUnderlyingByteSource {
     state: AbortOnPanic<State>,
 }

@@ -16,3 +16,7 @@ The operation implementations and sink error handling remain from upstream 0.5.
 No blanket unwind-safety assertion is added to arbitrary user streams or sinks.
 
 Remove this override when Reqwest can use a compatible upstream stream adapter.
+
+Backport the upstream 0.7 artifact and symbol fixes: consume this dependency
+as rlib only and mark adapter exports private so the 0.4 and 0.5 versions
+can coexist without overwriting Cargo outputs or wasm-bindgen symbols.

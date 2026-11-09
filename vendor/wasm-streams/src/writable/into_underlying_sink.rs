@@ -7,7 +7,7 @@ use futures_util::{Sink, SinkExt};
 use js_sys::Promise;
 use wasm_bindgen::prelude::*;
 
-#[wasm_bindgen]
+#[wasm_bindgen(private)]
 pub(crate) struct IntoUnderlyingSink {
     inner: AbortOnPanic<Rc<RefCell<Inner>>>,
 }

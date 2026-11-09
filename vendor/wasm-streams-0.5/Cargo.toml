@@ -36,10 +36,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [lib]
 name = "wasm_streams"
-crate-type = [
-    "cdylib",
-    "rlib",
-]
+crate-type = ["rlib"]
 path = "src/lib.rs"
 
 [dependencies.futures-util]
