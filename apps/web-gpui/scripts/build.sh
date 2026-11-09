@@ -41,6 +41,7 @@ mkdir -p "$bundle_dir"
     cargo run --release -p subject-projection --example export_web_taxonomy -- "$bundle_dir"
 )
 install -d "$output_dir/assets/icons"
+cp "$workspace_dir/apps/ui/design-tokens/assets/icon/bokheim.svg" "$output_dir/assets/bokheim.svg"
 cp -a "$workspace_dir/vendor/gpui-component/crates/assets/assets/icons/." "$output_dir/assets/icons/"
 bindgen_version=$(python3 - "$workspace_dir/Cargo.lock" <<'PY_BINDGEN'
 import sys, tomllib

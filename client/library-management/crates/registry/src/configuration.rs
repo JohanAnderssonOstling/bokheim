@@ -3,6 +3,7 @@
 use super::{LocalRegistry, RegistryResult};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use sync_common::{LibraryId, storage::LibraryStorage};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -234,4 +235,57 @@ impl LocalRegistry {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Import old flags once, retaining ownership and outstanding deletion intents.
+/// An explicit device-only choice wins over a conflicting cached server policy.
+pub(super) fn migrate(connection: &mut Connection) -> RegistryResult<()> {
+    let tx = connection.transaction()?;
+    let old_accounts: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_account')", [], |row| row.get(0))?;
+    let keys =
+        tx.prepare("SELECT key FROM app_value WHERE key GLOB 'library-storage:*' OR key GLOB 'library_sync_disabled:*' OR key GLOB 'device-only-library:*'")?.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let mut ids = tx
+        .prepare("SELECT library_id FROM library_registry UNION SELECT library_id FROM detached_library UNION SELECT library_id FROM pending_local_purge")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if old_accounts {
+        ids.extend(tx.prepare("SELECT library_id FROM library_account")?.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
+    }
+    ids.extend(keys.iter().filter_map(|key| key.split_once(':').map(|(_, id)| id.to_owned())));
+    for id in ids {
+        let parsed = LibraryId::parse_str(&id)?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM library_configuration WHERE library_id=?1)", [&id], |row| row.get(0))?;
+        if exists {
+            continue;
+        }
+        let value = |key: String| -> rusqlite::Result<Option<Vec<u8>>> { tx.query_row("SELECT value FROM app_value WHERE key=?1", [key], |row| row.get(0)).optional() };
+        let configuration = if value(format!("device-only-library:{id}"))?.is_some() {
+            tx.execute("DELETE FROM app_value WHERE key=?1 OR key=?2", params![format!("pending-cloud-storage:{id}"), format!("pending-library-rename/{id}")])?;
+            LibraryConfiguration::DeviceOnly
+        } else {
+            let storage = match value(format!("library-storage:{id}"))? {
+                Some(bytes) => serde_json::from_slice(&bytes)?,
+                None => {
+                    if value(format!("library_sync_disabled:{id}"))?.as_deref() == Some(b"1") {
+                        LibraryStorage::Local
+                    } else {
+                        LibraryStorage::Bokheim
+                    }
+                }
+            };
+            let owner: Option<Option<String>> = if old_accounts { tx.query_row("SELECT account FROM library_account WHERE library_id=?1", [&id], |row| row.get(0)).optional()? } else { None };
+            match owner {
+                Some(Some(owner)) => LibraryConfiguration::Account { owner, storage },
+                Some(None) => LibraryConfiguration::Unbound { storage },
+                None => LibraryConfiguration::Undiscovered { storage },
+            }
+        };
+        write(&tx, &parsed, &configuration)?;
+    }
+    tx.execute("DELETE FROM app_value WHERE key GLOB 'library-storage:*' OR key GLOB 'library_sync_disabled:*' OR key GLOB 'device-only-library:*'", [])?;
+    if old_accounts {
+        tx.execute_batch("DROP TABLE library_account;")?;
+    }
+    tx.commit()?;
+    Ok(())
 }

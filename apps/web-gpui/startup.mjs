@@ -8,7 +8,9 @@ export async function startApplication(panel, initialize, {reload = () => locati
     if (storage === undefined) {
         try { storage = globalThis.sessionStorage; } catch { storage = null; }
     }
-    panel.textContent = text('web.opening_bokheim');
+    const status = panel.querySelector('[data-startup-message]');
+    const progress = panel.querySelector('progress');
+    status.textContent = text('web.opening_bokheim');
     const ready = new Promise((resolve, reject) => {
         globalThis.__BOKHEIM_STARTUP_READY__ = resolve;
         globalThis.__BOKHEIM_STARTUP_FAILED__ = detail => reject(new Error(detail));
@@ -32,7 +34,7 @@ export async function startApplication(panel, initialize, {reload = () => locati
             } catch { retry = false; }
         }
         if (retry) {
-            panel.textContent = text('web.retrying');
+            status.textContent = text('web.retrying');
             reload();
             return false;
         }
@@ -41,7 +43,8 @@ export async function startApplication(panel, initialize, {reload = () => locati
         const button = document.createElement('button');
         button.textContent = text('browser.reload');
         button.addEventListener('click', () => reload());
-        panel.replaceChildren(message, button);
+        progress.hidden = true;
+        status.replaceChildren(message, button);
         return false;
     } finally {
         delete globalThis.__BOKHEIM_STARTUP_READY__;
