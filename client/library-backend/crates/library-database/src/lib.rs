@@ -25,6 +25,7 @@ use sync_common::storage::LibraryStorage;
 use sync_common::BookId;
 #[macro_use]
 mod query_methods;
+mod migration;
 mod annotation_export;
 mod content_identity;
 pub(crate) mod contributors;
@@ -178,9 +179,12 @@ impl Database {
         let transaction = self.connection.unchecked_transaction()?;
         const VERSION: i64 = LIBRARY_SCHEMA_VERSION;
         let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        // Retain the upgrade path used by the published Windows and Kobo
-        // packages. The unused remote-name column can remain in older files.
-        if (50..=VERSION).contains(&version) {
+        // Retain upgrades from the published web (44), Windows and Kobo
+        // libraries. The unused remote-name column can remain in older files.
+        if (44..=VERSION).contains(&version) {
+            if version < 50 {
+                migration::upgrade_before_50(&transaction, version)?;
+            }
             if version < 51 {
                 native::migrate_file_work(&transaction)?;
             }
