@@ -78,7 +78,8 @@ bind_module web_gpui "$target_dir/wasm32-unknown-unknown/web-release/web_gpui.wa
 bind_module cpu_worker "$target_dir/wasm32-unknown-unknown/web-release/web_backend_worker.wasm"
 cp "$app_dir/compressed_wasm.js" "$bundle_dir/compressed_wasm.js"
 # Startup modules share the same immutable identity as their WASM loaders.
-cp "$app_dir/startup.mjs" "$app_dir/compatibility.mjs" "$app_dir/ui-text.mjs" "$bundle_dir/"
+cp "$app_dir/startup.mjs" "$app_dir/compatibility.mjs" "$app_dir/ui-text.mjs" "$app_dir/tabs.mjs" "$bundle_dir/"
+cp "$workspace_dir/client/app/src/hosting/single_tab.js" "$bundle_dir/single_tab.js"
 if command -v wasm-opt >/dev/null 2>&1; then
     for wasm in "$bundle_dir"/*/*_bg.wasm; do
         # Rust and wgpu emit post-MVP WebAssembly features such as SIMD and
@@ -143,6 +144,8 @@ fi
 python3 "$workspace_dir/apps/ui-text/export.py" --output-dir "$output_dir"
 cp "$app_dir/compatibility.mjs" "$output_dir/compatibility.mjs"
 cp "$app_dir/startup.mjs" "$output_dir/startup.mjs"
+cp "$app_dir/tabs.mjs" "$output_dir/tabs.mjs"
+cp "$workspace_dir/client/app/src/hosting/single_tab.js" "$output_dir/single_tab.js"
 sed -i "s|\"\./pkg|\"./${asset_base}|g" "$output_dir/index.html"
 
 # These files refer to the final bundle identity, so compress them afterwards.

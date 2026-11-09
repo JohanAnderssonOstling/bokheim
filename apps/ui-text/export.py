@@ -63,7 +63,7 @@ def web_outputs(web_dir, output_dir, values):
     # Only include messages used by the small browser startup modules.
     # Older HTML can finish loading its startup module during deployment.
     used = {"web.opening_bokheim", "web.retrying", "web.downloading_app", "web.downloading_app_progress"}
-    for name in ("startup.mjs", "compatibility.mjs"):
+    for name in ("startup.mjs", "compatibility.mjs", "tabs.mjs"):
         used.update(re.findall(r"\btext\('([a-z0-9_.]+)'", (web_dir / name).read_text()))
     entries = {key: values[key] for key in sorted(used)}
     module = "// Generated from apps/ui-text/english.json by export.py.\n"

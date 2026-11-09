@@ -1293,6 +1293,12 @@
   "web": {
     "browser_too_old": "Update {name} to version {minimum} or newer to use Bokheim.",
     "checking_browser_compatibility": "Checking your browser…",
+    "running_in_another_tab": "Bokheim is running in another tab.",
+    "one_other_tab_open": "1 other Bokheim tab is open.",
+    "other_tabs_open": "{count} other Bokheim tabs are open.",
+    "close_running_tab_to_continue": "Close the tab running Bokheim, then continue here.",
+    "ready_to_open_here": "Bokheim can now open in this tab.",
+    "continue_here": "Continue here",
     "close_other_app_tabs_then_reload": "Close other app tabs, then reload.",
     "couldn_t_start_the_app_reload_to_retry": "Couldn't start the app. Reload to retry.",
     "missing_async_wait": "Your browser can’t run Bokheim. Update it or try another browser.",

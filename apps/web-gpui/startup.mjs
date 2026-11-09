@@ -1,4 +1,5 @@
 import {text} from './ui-text.mjs';
+import {waitForTab} from './tabs.mjs';
 
 export async function startApplication(panel, initialize, {reload = () => location.reload(), onFailure = () => {}} = {}) {
     // Tabs opened during deployment can still have the previous HTML shell.
@@ -57,6 +58,9 @@ export async function startApplication(panel, initialize, {reload = () => locati
     globalThis.addEventListener('error', failed);
     globalThis.addEventListener('unhandledrejection', failed);
     try {
+        await waitForTab(panel);
+        status.textContent = text('web.loading_app');
+        if (progress) progress.hidden = false;
         await Promise.all([Promise.resolve().then(initialize).then(beginInitialization), ready]);
         panel.remove();
         return true;
