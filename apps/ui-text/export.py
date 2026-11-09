@@ -62,7 +62,7 @@ def javascript_messages(entries, function_name, dictionary_name):
 def web_outputs(web_dir, output_dir, values):
     # Only include messages used by the small browser startup modules.
     # Older HTML can finish loading its startup module during deployment.
-    used = {"web.opening_bokheim", "web.retrying", "web.downloading_app", "web.downloading_app_progress"}
+    used = {"web.opening_bokheim", "web.retrying", "web.downloading_app", "web.downloading_app_progress", "web.running_in_another_tab"}
     for name in ("startup.mjs", "compatibility.mjs", "tabs.mjs"):
         used.update(re.findall(r"\btext\('([a-z0-9_.]+)'", (web_dir / name).read_text()))
     entries = {key: values[key] for key in sorted(used)}

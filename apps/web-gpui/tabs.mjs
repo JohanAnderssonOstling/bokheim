@@ -6,13 +6,11 @@ export async function waitForTab(panel) {
     const status = panel.querySelector('[data-startup-message]') || panel;
     const progress = panel.querySelector('progress');
     const message = document.createElement('p');
-    const count = document.createElement('p');
-    const instruction = document.createElement('p');
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = text('web.continue_here');
     button.disabled = true;
-    status.replaceChildren(message, count, instruction, button);
+    status.replaceChildren(message, button);
     if (progress) progress.hidden = true;
     let finished = false;
     let checking = false;
@@ -25,15 +23,12 @@ export async function waitForTab(panel) {
         try {
             const tabs = await otherTabs();
             if (finished) return;
-            if (tabs.count !== lastCount) {
+            if (tabs.count !== lastCount || tabs.active !== lastActive) {
                 lastCount = tabs.count;
-                count.textContent = tabs.count === 1 ? text('web.one_other_tab_open') : text('web.other_tabs_open', {count: tabs.count});
-            }
-            if (tabs.active !== lastActive) {
                 lastActive = tabs.active;
-                message.textContent = tabs.active ? text('web.running_in_another_tab') : text('web.ready_to_open_here');
-                instruction.textContent = tabs.active ? text('web.close_running_tab_to_continue') : '';
-                instruction.hidden = !tabs.active;
+                const count = tabs.count === 1 ? text('web.one_other_tab_open') : text('web.other_tabs_open', {count: tabs.count});
+                const instruction = tabs.active ? text('web.close_running_tab_to_continue') : text('web.ready_to_open_here');
+                message.textContent = `${count} ${instruction}`;
             }
             button.disabled = tabs.active || opening;
         } finally {
