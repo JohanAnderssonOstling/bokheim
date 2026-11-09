@@ -8,7 +8,8 @@ export async function startApplication(panel, initialize, {reload = () => locati
     if (storage === undefined) {
         try { storage = globalThis.sessionStorage; } catch { storage = null; }
     }
-    const status = panel.querySelector('[data-startup-message]');
+    // A tab opened during deployment can still have the previous HTML shell.
+    const status = panel.querySelector('[data-startup-message]') || panel;
     const progress = panel.querySelector('progress');
     status.textContent = text('web.opening_bokheim');
     const ready = new Promise((resolve, reject) => {
@@ -43,7 +44,7 @@ export async function startApplication(panel, initialize, {reload = () => locati
         const button = document.createElement('button');
         button.textContent = text('browser.reload');
         button.addEventListener('click', () => reload());
-        progress.hidden = true;
+        if (progress) progress.hidden = true;
         status.replaceChildren(message, button);
         return false;
     } finally {
