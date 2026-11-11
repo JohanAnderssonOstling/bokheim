@@ -86,9 +86,9 @@ fn main() -> Result<(), String> {
         std::process::exit(status);
     }
     let install_root = std::env::var_os("BOKHEIM_KOBO_INSTALL_ROOT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/mnt/onboard"));
-    kobo_update::initialize(install_root, env!("CARGO_PKG_VERSION"))?;
+    kobo_update::initialize(install_root, env!("CARGO_PKG_VERSION")).map_err(|error| error.to_string())?;
     if std::env::args().nth(1).as_deref() == Some("--apply-update") {
-        return kobo_update::installation()?.apply();
+        return kobo_update::installation().and_then(|installation| installation.apply()).map_err(|error| error.to_string());
     }
     let profile = kobo_device::profile::current().map_err(|error| error.to_string())?;
     let auto_rotate = profile.has_gyroscope() && !args.iter().any(|argument| argument == "--no-rotation");
