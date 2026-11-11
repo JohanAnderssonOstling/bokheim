@@ -102,7 +102,8 @@ def verified_receipts(repository, source, sha, tag, directory):
         release_artifacts.validate(receipt, platform, sha, source)
         if platform == 'windows':
             run = gh_json('api', f'repos/{source}/actions/runs/{receipt["workflow_run"]}')
-            require(validate_run(run, source) == sha, 'Windows workflow differs from build source')
+            require(validate_run(run, source) == receipt.get('workflow_commit', sha),
+                    'Windows workflow differs from build receipt')
         receipts[release_artifacts.TARGETS[platform]] = receipt
     return receipts
 
