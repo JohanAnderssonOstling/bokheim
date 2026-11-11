@@ -11,8 +11,8 @@ self.onmessage = event => {
             const rust = await init({ module_or_path: event.data.module, memory: event.data.memory });
             if (!initialize_pdfium_render(pdfium, rust, false)) throw new Error('PDFium WASM initialization failed');
         })();
-        ready.catch(error => self.postMessage({ error: String(error) }));
+        ready.catch(error => self.postMessage({ error: {message: error.message || String(error), name: error.name, failure: error.failure} }));
     } else if (event.data.run) {
-        ready.then(() => run_pdf_worker_job()).catch(error => self.postMessage({ error: String(error) }));
+        ready.then(() => run_pdf_worker_job()).catch(error => self.postMessage({ error: {message: error.message || String(error), name: error.name, failure: error.failure} }));
     }
 };

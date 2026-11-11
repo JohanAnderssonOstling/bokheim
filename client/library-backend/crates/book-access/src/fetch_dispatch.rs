@@ -1,5 +1,7 @@
 //! Byte fetches run on their owning executor; readers own cancellable replies.
 
+#[cfg(target_arch = "wasm32")]
+use operation_failure::OperationError;
 use crate::{FetchFuture, RemoteFileError};
 use futures_channel::oneshot;
 use futures_util::future::{select, BoxFuture, Either};
@@ -37,7 +39,7 @@ pub(crate) fn native<Args: Send + 'static>(fetch: impl Fn(Args) -> FetchFuture<'
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn browser<Args: Send + 'static>(mut fetch: impl FnMut(Args) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static) -> Fetch<Args> {
+pub(crate) fn browser<Args: Send + 'static>(mut fetch: impl FnMut(Args) -> FetchFuture<'static, Result<Vec<u8>, OperationError>> + 'static) -> Fetch<Args> {
     let (sender, receiver) = async_channel::unbounded::<(Args, oneshot::Sender<io::Result<Vec<u8>>>)>();
     wasm_bindgen_futures::spawn_local(async move {
         while let Ok((args, reply)) = receiver.recv().await {

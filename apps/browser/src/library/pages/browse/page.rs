@@ -191,7 +191,7 @@ impl BrowsePage {
             let result = library.download_browse(query).await;
             let _ = page.update_in(cx, |page, window, cx| {
                 if let Err(error) = result {
-                    notify_error("hierarchy-download-error", format!(text!(browse::could_not_queue_downloads), user_facing_error(&error, text!(common::please_try_again))), window, cx);
+                    notify_error("hierarchy-download-error", format!(text!(browse::could_not_queue_downloads), user_facing_error(&error, "")), window, cx);
                 }
                 page.navigator.update(cx, |navigator, cx| navigator.refresh(cx));
             });
@@ -635,7 +635,7 @@ impl BrowsePage {
                     // Undo is an inverse operation, not a rollback: the library
                     // can have moved on since, and then the inverse no longer
                     // fits what is there.
-                    Err(error) => notify_error("undo-error", format!(text!(browse::could_not_undo), user_facing_error(&error, text!(common::please_try_again)), label = label), window, cx),
+                    Err(error) => notify_error("undo-error", format!(text!(browse::could_not_undo), user_facing_error(&error, ""), label = label), window, cx),
                 }
             });
         })

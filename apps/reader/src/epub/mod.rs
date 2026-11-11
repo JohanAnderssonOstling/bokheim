@@ -16,7 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use gpui::{Entity, FocusHandle, ListState, Pixels, Point, Size, Subscription};
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, ListState, Pixels, Point, Size, Subscription};
 use gpui_component::input::InputState;
 use gpui_component::tree::TreeState;
 use html::export::TableExportFormat;
@@ -39,14 +39,49 @@ enum LoadState {
     Ready(Entity<HtmlView>),
 }
 
+pub(crate) enum DocumentNavigation {
+    Link(String),
+    BeginJump(String),
+    Settled(String),
+    History(bool),
+}
+
+impl EventEmitter<DocumentNavigation> for ReaderView {}
+
+impl ReaderView {
+    pub(crate) fn set_document_history(&mut self, availability: (bool, bool), cx: &mut Context<Self>) {
+        if self.document_history != Some(availability) {
+            self.document_history = Some(availability);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn current_cfi(&self, cx: &App) -> Option<String> {
+        match &self.load_state {
+            LoadState::Ready(renderer) => renderer.read(cx).current_cfi(),
+            _ => None,
+        }
+    }
+}
+
+impl Drop for ReaderView {
+    fn drop(&mut self) {
+        #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
+        self.tts.close();
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum EpubContextCommand {
+    OpenLinkInNewWindow(String),
     CopySelectionMarkdown,
     CopySelectionWithSource,
     AnnotateSelection,
     LookupSelection,
     TranslateSelection,
     CopyTable { view: Entity<HtmlView>, position: Point<Pixels>, format: TableExportFormat },
+    SaveImage { view: Entity<HtmlView>, position: Point<Pixels> },
+    OpenImage { view: Entity<HtmlView>, position: Point<Pixels> },
     CopyImage { view: Entity<HtmlView>, position: Point<Pixels> },
     CopyEquationLatex { view: Entity<HtmlView>, position: Point<Pixels> },
 }
@@ -111,16 +146,13 @@ pub(crate) struct ReaderView {
     bookmark_tree: crate::shell::bookmarks::BookmarkTree,
     sidebar: SidebarState,
     chrome: crate::shell::chrome::ChromeState,
-    /// A wheel burst is one gesture: every event postpones the turn,
-    /// and once input goes quiet the net direction advances exactly one page.
-    wheel_delta: f32,
-    wheel_debounce: Option<gpui::Task<()>>,
     touchpad: ui_components::TouchpadNavigation,
     /// How far the finger has travelled on both axes, while a touch swipe is
     /// in progress.
     touch_swipe: Option<gpui::Point<f32>>,
     swipe_preview: ui_components::SwipePreview,
     page_turn: Option<PageTurn<HtmlPageSnapshot>>,
+    pending_wheel_turn: Option<bool>,
     page_size: Option<Size<Pixels>>,
     /// The swipe began in the bottom gesture area, so it is the system's and
     /// turns no page.
@@ -133,6 +165,7 @@ pub(crate) struct ReaderView {
     cjk_font: Option<crate::cjk::CjkFont>,
     reading_position: Option<ReadingPosition>,
     history: crate::shell::history::NavigationHistory<String>,
+    document_history: Option<(bool, bool)>,
     #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
     tts: crate::shell::tts::Narration,
     #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
@@ -156,6 +189,9 @@ pub(crate) struct ReaderView {
     annotation_popup_anchor: Option<Point<Pixels>>,
     footnote: Option<(skrift_column_paginator::FootnotePreview, html_view_gpui::PreparedNote)>,
     image_preview: Option<(String, Arc<gpui::Image>)>,
+    image_backdrop: Option<HtmlPageSnapshot>,
+    save_opened_image: bool,
+    image_canvas: Entity<ui_components::InfiniteCanvas>,
     context_sheet: Option<ContextActions<EpubContextCommand>>,
     focus: FocusHandle,
     sidebar_focus: FocusHandle,

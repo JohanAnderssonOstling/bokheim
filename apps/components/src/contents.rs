@@ -19,14 +19,26 @@ use ui_text::text;
 
 use crate::Button;
 use gpui::prelude::*;
-use gpui::{Div, ElementId, MouseButton, SharedString, Stateful, div, px};
+use gpui::{App, AppContext, Entity, Window, Div, ElementId, MouseButton, SharedString, Stateful, div, px};
 use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::input::{Input, InputState};
 use std::rc::Rc;
 use std::time::Duration;
 
 use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, CONTENTS_ROW_MIN_HEIGHT_REM, SPACE_SM, TEXT_SM, TEXT_XS};
 
 pub type ContentsReadReset = Rc<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App)>;
+
+pub fn contents_filter_input(window: &mut Window, cx: &mut App) -> Entity<InputState> {
+    cx.new(|cx| InputState::new(window, cx).placeholder(text!(reader::filter_contents)))
+}
+
+/// Shared contents toolbar: the filter grows and reset stays at its right edge.
+pub fn contents_filter_bar(input: &Entity<InputState>, reset: Option<Button>, theme: BrowserTheme) -> Div {
+    crate::reader_search_bar(theme)
+        .child(crate::reader_search_box(theme).debug_selector(|| "reader-toc-filter".into()).child(Input::new(input).appearance(false).cleanable(true).size_full()))
+        .children(reset)
+}
 
 pub fn contents_read_reset_button(id: impl Into<ElementId>) -> Button {
     crate::outlined_icon_button(id, text!(common::reset_read_status), IconName::Undo2).flex_none().when(crate::touch_ui(), |button| button.large())

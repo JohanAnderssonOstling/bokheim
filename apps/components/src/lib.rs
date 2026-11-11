@@ -2,9 +2,11 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod annotation_aliases;
+pub use annotation_aliases::annotation_alias_controls;
 mod annotation_editor;
 pub use annotation_editor::{
-    ANNOTATION_EDITOR_MAX_HEIGHT, ANNOTATION_EDITOR_WIDTH, AnnotationEditorTarget, EditorBook, RecurringEditorContext, annotation_editor_controls, annotation_editor_passage, annotation_note_input, recurring_annotation_editor_controls,
+    ANNOTATION_EDITOR_MAX_HEIGHT, ANNOTATION_EDITOR_WIDTH_REM, AnnotationEditorTarget, EditorBook, RecurringEditorContext, annotation_editor_controls, annotation_editor_passage, annotation_note_input, recurring_annotation_editor_controls,
 };
 
 pub mod account;
@@ -21,6 +23,8 @@ pub mod contents;
 pub mod detail;
 mod errors;
 mod fonts;
+mod languages;
+pub use languages::LANGUAGE_NAMES;
 pub mod graph;
 pub mod infinite_canvas;
 pub mod keyboard;
@@ -94,3 +98,6 @@ pub mod kobo;
 pub use fonts::configure_bundled_font_source;
 #[cfg(target_arch = "wasm32")]
 pub use fonts::{InterfaceFontFace, interface_font_faces};
+
+mod image_save;
+pub use image_save::{image_saving_available, save_image};

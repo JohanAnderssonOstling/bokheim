@@ -14,6 +14,7 @@ fn import() -> ImportCommit {
     ImportCommit {
         source_identity: None,
         byte_checksum: None,
+        audiobook_content_hash: None,
         parent_id: ROOT_DIR_ID,
         file_name: "book.epub".into(),
         format: book_model::BookFormat::Epub,
@@ -452,6 +453,8 @@ mod scanner {
         let hash = BookId::new(&"b".repeat(64));
         ScannedBook {
             source_identity: None,
+            audiobook_content_hash: None,
+            byte_checksum: None,
             directory: ROOT_DIR_ID,
             name: "book.epub".into(),
             path: "book.epub".into(),
@@ -1398,7 +1401,7 @@ fn transfer_snapshot_preserves_versions_projected_paths_and_requested_order() {
     let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
     let first = import_in_folder(&db, 910, ROOT_DIR_ID);
     let second = import_in_folder(&db, 911, shelf);
-    let missing = BookId::for_local_content(&[9; 16], blake3::hash(b"separate book").into());
+    let missing = BookId::for_local_content(blake3::hash(b"separate book").into());
     db.copy_book_to_directory(&first, Some(&ROOT_DIR_ID), &shelf).unwrap();
     db.connection.execute("UPDATE book_dir SET local_hash=CASE WHEN dir_id=?1 THEN 'root-version' ELSE 'shelf-version' END WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)", (ROOT_DIR_ID.to_string(), first)).unwrap();
     db.connection

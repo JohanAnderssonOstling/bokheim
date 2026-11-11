@@ -33,7 +33,7 @@ pub(crate) enum SettingsRow {
     SideMargins,
     VerticalMargins,
     ColumnGap,
-    LineLength,
+    ColumnWidth,
     PdfMargins,
     PdfFit,
     PdfPages,

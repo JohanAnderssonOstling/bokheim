@@ -8,14 +8,15 @@
         <script type="module">
             globalThis.__BOKHEIM_ASSET_BASE__ = "./pkg";
             globalThis.__BOKHEIM_CJK_FONT_URL__ = new URL(`${globalThis.__BOKHEIM_ASSET_BASE__}/fonts/DroidSansFallback.ttf`, document.baseURI).href;
-            import {checkCompatibility, compatibilityMessage} from "./compatibility.mjs";
+            import {checkCompatibility, compatibilityMessage} from "./pkg/compatibility.mjs";
 
-            import {startApplication} from "./startup.mjs";
+            import {startApplication} from "./pkg/startup.mjs";
             const panel = document.getElementById('startup-status');
             const issues = await checkCompatibility();
             if (issues.length) {
                 console.error('Bokheim compatibility check failed', issues);
-                panel.textContent = compatibilityMessage(navigator.userAgent);
+                panel.querySelector('[data-startup-message]').textContent = compatibilityMessage(navigator.userAgent);
+                panel.querySelector('progress').hidden = true;
             } else {
                 await startApplication(panel, async () => {
                     const {default: initialize} = await import("./pkg/web_gpui.js");
@@ -53,17 +54,57 @@
             #startup-status {
                 position: fixed;
                 inset: 0;
+                display: grid;
+                place-items: center;
                 overflow: auto;
-                padding: max(24px, 6vw);
+                padding: 32px 24px;
                 background: #f5f1e7;
                 color: #243c30;
-                font: 18px/1.6 system-ui, sans-serif;
+                font: 16px/1.5 system-ui, sans-serif;
+                text-align: center;
                 z-index: 1000;
             }
 
-            #startup-status h1 { font-size: 26px; }
-            #startup-status li { margin-block: 12px; max-width: 65ch; }
+            .startup-content { width: min(100%, 360px); }
+            .startup-logo { width: 96px; height: 96px; }
+            #startup-status h1 {
+                margin: 16px 0 36px;
+                font: 500 clamp(48px, 10vw, 72px)/1.1 Georgia, serif;
+                letter-spacing: -0.04em;
+            }
+            #startup-status progress {
+                display: block;
+                width: 100%;
+                height: 6px;
+                accent-color: #2e3d31;
+            }
+            #startup-status progress[hidden] { display: none; }
+            [data-startup-message] { margin-top: 20px; }
+            [data-startup-message] p { margin: 0 0 20px; }
+            [data-startup-message] details { margin: 0 0 20px; text-align: left; }
+            [data-startup-message] summary { cursor: pointer; }
+            [data-startup-message] pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 monospace; }
+            #startup-status button {
+                padding: 10px 24px;
+                border: 1px solid #2e3d31;
+                border-radius: 8px;
+                background: #2e3d31;
+                color: #f5f1e7;
+                font: inherit;
+                cursor: pointer;
+            }
+            #startup-status button:disabled { opacity: 0.55; cursor: not-allowed; }
+            #startup-status button:focus-visible { outline: 2px solid #2e3d31; outline-offset: 4px; }
         </style>
     </head>
-    <body><main id="startup-status" role="status" aria-live="polite" data-ui-text="web.checking_browser_compatibility">Checking your browser…</main></body>
+    <body>
+        <main id="startup-status" role="status" aria-live="polite" aria-labelledby="startup-title">
+            <div class="startup-content">
+                <img class="startup-logo" src="./assets/bokheim.svg" alt="" width="96" height="96" />
+                <h1 id="startup-title" data-ui-text="common.bokheim">Bokheim</h1>
+                <progress aria-labelledby="startup-title"></progress>
+                <div data-startup-message data-ui-text="web.checking_browser_compatibility">Checking your browser</div>
+            </div>
+        </main>
+    </body>
 </html>

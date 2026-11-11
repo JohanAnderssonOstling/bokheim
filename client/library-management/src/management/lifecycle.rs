@@ -82,20 +82,6 @@ impl LibraryService {
         Ok((created_ids, errors))
     }
 
-    pub(crate) async fn remove_library_from_device(self: &Arc<Self>, library_id: &LibraryId) -> Result<(), BackendError> {
-        let id = *library_id;
-        self.run(move |this| {
-            this.entry_on_storage(&id)?;
-            this.config.registry.begin_local_removal(&id).map_err(BackendError::operation)?;
-            this.retire(&id);
-            Ok(())
-        })
-        .await?;
-        self.send_library_list_changed();
-        self.finish_local_purge(*library_id).await?;
-        Ok(())
-    }
-
     pub fn start_pending_local_purges(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         self.config.executor.spawn_detached(async move {
@@ -124,34 +110,24 @@ impl LibraryService {
 
     pub async fn delete_library(self: &Arc<Self>, library_id: &LibraryId) -> Result<(), BackendError> {
         let _location = self.config.library_location_lock.lock().await;
-        self.entry(library_id).await?;
-        let device_only = {
-            let id = *library_id;
-            self.config.registry.access(move |registry| registry.device_only(&id)).await
-        }
-        .map_err(BackendError::operation)?;
-        if self.current_account().await?.is_none() && {
-            let id = *library_id;
-            self.config.registry.access(move |registry| registry.has_account(&id)).await
-        }
-        .map_err(BackendError::operation)?
-        {
-            return Err(BackendError::classified(Failure::SignInRequired, "sign in to save the full library locally before removing it from cloud"));
-        }
-        if !device_only && self.current_account().await?.is_some() {
-            self.make_library_local_only(*library_id).await?;
-            return Ok(());
-        }
-        // Local actions never depend on network/account availability. Removal
-        // records a durable server-deletion intent before discarding local state.
-        self.remove_library_from_device(library_id).await?;
-        if device_only {
-            {
-                let id = *library_id;
-                self.config.registry.access(move |registry| registry.complete_server_deletion(&id)).await
+        let id = *library_id;
+        // Removal needs registry metadata only, including for libraries whose
+        // databases cannot open. Persist cloud deletion before local cleanup.
+        self.run(move |this| {
+            this.entry_on_storage(&id)?;
+            this.bind_to_current_account_on_storage(&id)?;
+            let device_only = this.config.registry.device_only(&id).map_err(BackendError::operation)?;
+            this.config.registry.begin_local_removal(&id).map_err(BackendError::operation)?;
+            this.retire(&id);
+            if device_only {
+                this.config.registry.complete_server_deletion(&id).map_err(BackendError::operation)?;
             }
-            .map_err(BackendError::operation)?;
-        }
+            Ok(())
+        })
+        .await?;
+        self.send_library_list_changed();
+        self.config.account_wake.send_replace(());
+        self.finish_local_purge(id).await?;
         Ok(())
     }
 

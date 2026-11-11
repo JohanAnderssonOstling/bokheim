@@ -86,8 +86,6 @@ pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 64.0;
 pub const LINE_WIDTH_MIN: f64 = 200.0;
 pub const LINE_WIDTH_MAX: f64 = 1200.0;
-pub const LINE_WIDTH_CH_MIN: f64 = 20.0;
-pub const LINE_WIDTH_CH_MAX: f64 = 100.0;
 pub const ZOOM_MIN: f64 = 0.5;
 pub const ZOOM_MAX: f64 = 3.0;
 pub const LINE_HEIGHT_MIN: f32 = 1.0;
@@ -481,8 +479,6 @@ pub enum ReaderTextAlignment {
 pub struct ReaderPreferences {
     font_size_px: FontSize,
     max_line_width_px: LineWidth,
-    min_line_width_ch: LineWidthCh,
-    max_line_width_ch: LineWidthCh,
     zoom: Zoom,
     line_height: LineHeight,
     /// Keep the last custom value when publisher line spacing is selected.
@@ -545,14 +541,6 @@ const fn default_override_line_height() -> bool {
     true
 }
 
-const fn default_min_line_width_ch() -> LineWidthCh {
-    LineWidthCh(45.0)
-}
-
-const fn default_max_line_width_ch() -> LineWidthCh {
-    LineWidthCh(65.0)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreferenceValueError(&'static str);
 
@@ -610,7 +598,6 @@ macro_rules! bounded_float {
 
 bounded_float!(FontSize, f32, "font size", FONT_SIZE_MIN, FONT_SIZE_MAX);
 bounded_float!(LineWidth, f64, "line width", LINE_WIDTH_MIN, LINE_WIDTH_MAX);
-bounded_float!(LineWidthCh, f64, "line width in ch", LINE_WIDTH_CH_MIN, LINE_WIDTH_CH_MAX);
 bounded_float!(Zoom, f64, "zoom", ZOOM_MIN, ZOOM_MAX);
 bounded_float!(LineHeight, f32, "line height", LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
 bounded_float!(WordSpacingPercent, f32, "word spacing", WORD_SPACING_MIN_PERCENT, WORD_SPACING_MAX_PERCENT);
@@ -681,8 +668,6 @@ impl Default for ReaderPreferences {
         Self {
             font_size_px: FontSize(20.0),
             max_line_width_px: LineWidth(600.0),
-            min_line_width_ch: default_min_line_width_ch(),
-            max_line_width_ch: default_max_line_width_ch(),
             zoom: Zoom(1.0),
             line_height: LineHeight(1.5),
             override_line_height: default_override_line_height(),
@@ -729,8 +714,6 @@ impl ReaderPreferences {
         }
         changed!(font_size_px, FontSizePx);
         changed!(max_line_width_px, MaxLineWidthPx);
-        changed!(min_line_width_ch, MinLineWidthCh);
-        changed!(max_line_width_ch, MaxLineWidthCh);
         changed!(zoom, Zoom);
         changed!(line_height, LineHeight);
         changed!(override_line_height, OverrideLineHeight);
@@ -813,12 +796,6 @@ impl ReaderPreferences {
     pub fn max_line_width_px(self) -> f64 {
         self.max_line_width_px.get()
     }
-    pub fn min_line_width_ch(self) -> f64 {
-        self.min_line_width_ch.get()
-    }
-    pub fn max_line_width_ch(self) -> f64 {
-        self.max_line_width_ch.get()
-    }
     pub fn zoom(self) -> f64 {
         self.zoom.get()
     }
@@ -892,26 +869,6 @@ impl ReaderPreferences {
     }
     pub fn set_max_line_width_px(&mut self, value: f64) -> Result<(), PreferenceValueError> {
         self.max_line_width_px = LineWidth::new(value)?;
-        Ok(())
-    }
-    pub fn set_min_line_width_ch(&mut self, value: f64) -> Result<(), PreferenceValueError> {
-        let value = LineWidthCh::new(value)?;
-        // Treat the endpoints as a movable range: honour the edited endpoint
-        // and bring the other one along if it would otherwise cross it.
-        if value.get() > self.max_line_width_ch.get() {
-            self.max_line_width_ch = value;
-        }
-        self.min_line_width_ch = value;
-        Ok(())
-    }
-    pub fn set_max_line_width_ch(&mut self, value: f64) -> Result<(), PreferenceValueError> {
-        let value = LineWidthCh::new(value)?;
-        // See `set_min_line_width_ch`: setting the maximum below the minimum
-        // moves the minimum instead of rejecting or clamping the request.
-        if value.get() < self.min_line_width_ch.get() {
-            self.min_line_width_ch = value;
-        }
-        self.max_line_width_ch = value;
         Ok(())
     }
     pub fn set_zoom(&mut self, value: f64) -> Result<(), PreferenceValueError> {
@@ -1003,8 +960,6 @@ impl ReaderPreferences {
 pub enum ReaderPreferencePatch {
     FontSizePx(f32),
     MaxLineWidthPx(f64),
-    MinLineWidthCh(f64),
-    MaxLineWidthCh(f64),
     Zoom(f64),
     LineHeight(f32),
     Flow(ReaderFlow),
@@ -1040,8 +995,6 @@ impl ReaderPreferencePatch {
         match self {
             Self::FontSizePx(value) => preferences.set_font_size_px(value),
             Self::MaxLineWidthPx(value) => preferences.set_max_line_width_px(value),
-            Self::MinLineWidthCh(value) => preferences.set_min_line_width_ch(value),
-            Self::MaxLineWidthCh(value) => preferences.set_max_line_width_ch(value),
             Self::Zoom(value) => preferences.set_zoom(value),
             Self::LineHeight(value) => preferences.set_line_height(value),
             Self::OverrideLineHeight(value) => {

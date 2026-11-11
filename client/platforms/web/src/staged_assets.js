@@ -2,7 +2,7 @@
 const handles = new Map();
 const opening = new Map();
 async function stagedFile(name, create = false) {
-    if (!/^__libraries\/[0-9a-f-]{36}\/(?:book|thumbnail)\/[0-9a-f-]{36}$/.test(name)) throw Error('Invalid staged file path');
+    if (!/^__libraries\/[0-9a-f-]{36}\/(?:book|thumbnail|text-cache-v1)\/[0-9a-f-]{36}$/.test(name)) throw Error('Invalid staged file path');
     const parts = name.split('/');
     let directory = await navigator.storage.getDirectory();
     for (const component of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(component, {create});
@@ -51,7 +51,7 @@ export async function listAssets() {
     catch (error) { if (error.name === 'NotFoundError') return names; throw error; }
     for await (const [id, library] of libraries.entries()) {
         if (library.kind !== 'directory') continue;
-        for (const kind of ['book', 'thumbnail']) {
+        for (const kind of ['book', 'thumbnail', 'text-cache-v1']) {
             let directory;
             try { directory = await library.getDirectoryHandle(kind); }
             catch (error) { if (error.name === 'NotFoundError') continue; throw error; }
@@ -61,7 +61,7 @@ export async function listAssets() {
     return names;
 }
 export async function removeAsset(name) {
-    if (!/^__libraries\/[0-9a-f-]{36}\/(?:book|thumbnail)\/[0-9a-f-]{36}$/.test(name)) throw Error('Invalid asset file path');
+    if (!/^__libraries\/[0-9a-f-]{36}\/(?:book|thumbnail|text-cache-v1)\/[0-9a-f-]{36}$/.test(name)) throw Error('Invalid asset file path');
     const parts = name.split('/');
     try {
         let directory = await navigator.storage.getDirectory();

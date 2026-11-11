@@ -6,9 +6,10 @@ use crate::invalidation::notify;
 use book_model::{AnnotationStyle, RecurringScope};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, IntoElement, Window, px};
+use std::collections::HashSet;
 use ui_components as components;
 
-use crate::epub::{LoadState, ReaderView};
+use crate::epub::{LoadState, ReaderView, recurring};
 use crate::invalidation::Component;
 use crate::shell::annotation_editor::{AnnotationEditorTarget, BookmarkEditorTarget};
 use crate::shell::{annotation_editor, chrome};
@@ -24,20 +25,55 @@ impl BookmarkEditorTarget for ReaderView {
 }
 
 impl AnnotationEditorTarget for ReaderView {
-    fn set_annotation_scope(&mut self, scope: Option<RecurringScope>, cx: &mut Context<Self>) {
-        if self.marks.selected().is_none_or(|annotation| annotation.book_id != self.locator.book_id() || annotation.exact_text.trim().is_empty()) {
+    fn add_annotation_alias(&mut self, id: String, alias: String, cx: &mut Context<Self>) {
+        if self.marks.selected_id() != Some(id.as_str()) {
             return;
         }
         self.save_selected_annotation(None, None, cx);
-        self.marks.set_selected_scope(scope, "change recurring annotation scope");
+        self.marks.add_selected_alias(&alias, "add reader annotation alias");
         self.refresh_recurring_annotations(false, cx);
-        notify(cx, Component::ReaderShell, "annotation_scope_changed");
+        notify(cx, Component::ReaderShell, "annotation_alias_added");
+    }
+
+    fn remove_annotation_alias(&mut self, id: String, alias: String, cx: &mut Context<Self>) {
+        if self.marks.selected_id() != Some(id.as_str()) {
+            return;
+        }
+        self.save_selected_annotation(None, None, cx);
+        self.marks.remove_selected_alias(&alias, "remove reader annotation alias");
+        self.refresh_recurring_annotations(false, cx);
+        notify(cx, Component::ReaderShell, "annotation_alias_removed");
+    }
+
+    fn select_annotation_scope(&mut self, scope: Option<RecurringScope>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(passage) = self.recurring.editor_passage.clone().filter(|passage| !passage.text.trim().is_empty()) else { return };
+        if self.marks.selected().is_none_or(|annotation| annotation.is_bookmark()) {
+            return;
+        }
+        self.save_selected_annotation(None, None, cx);
+        let Some(mut annotation) = self.marks.selected().cloned() else { return };
+        if self.recurring.editor_overlay.is_none() {
+            self.recurring.editor_overlay = Some(annotation.id.clone());
+        }
+        annotation.book_id = self.locator.book_id();
+        annotation.anchor = self.book.annotation_anchor(passage.cfi_range.clone());
+        annotation.exact_text = passage.text;
+        annotation.toc_ordinal = self.toc.ordinal_for_cfi(&passage.cfi_range).map(|ordinal| ordinal as i64);
+        annotation.progress = Some(book_model::layout_fraction_progress(self.progress.fraction));
+        let note = self.marks.create_scoped_annotation(annotation, scope, "create reader annotation for scope");
+        self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
+        self.refresh_recurring_annotations(false, cx);
+        notify(cx, Component::ReaderShell, "annotation_scope_selected");
     }
 
     fn select_editor_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.save_selected_annotation(None, None, cx);
+        if self.recurring.editor_overlay.is_none() {
+            self.recurring.editor_overlay = self.marks.selected_id().map(str::to_owned);
+        }
         let note = self.marks.select(id);
         self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
+        self.project_annotations(cx);
         notify(cx, Component::ReaderShell, "annotation_source_selected");
     }
 
@@ -52,8 +88,18 @@ impl AnnotationEditorTarget for ReaderView {
 
     fn delete_edited_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.marks.selected_id().map(str::to_owned) {
+            let anchor = self.recurring.editor_overlay.as_deref().unwrap_or(&id);
+            let next = self.preferred_annotation_overlay(anchor, Some(&id), cx);
+            let popup_anchor = self.annotation_popup_anchor;
             self.delete_annotation(id, cx);
-            self.focus_document(window, cx);
+            if let Some(next) = next {
+                self.annotation_popup_anchor = popup_anchor;
+                self.select_annotation(next, window, cx);
+            } else {
+                self.recurring.editor_overlay = None;
+                self.recurring.editor_passage = None;
+                self.focus_document(window, cx);
+            }
         }
     }
 }
@@ -88,23 +134,27 @@ impl ReaderView {
         let mut insets = window.insets().effective();
         insets.bottom = (insets.bottom - px(dock_height)).max(px(0.0));
         let toolbar_height = if mobile { 0.0 } else { components::reader_toolbar_size_px(window) };
-        let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height) - dock_height, sidebar_width, toolbar_height, column_count.max(1), insets);
+        let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height) - dock_height, sidebar_width, toolbar_height, column_count.max(1), insets, f32::from(window.rem_size()) * components::ANNOTATION_EDITOR_WIDTH_REM);
         if annotation.is_bookmark() {
             return Some(annotation_editor::bookmark_editor(entity, geometry, &self.annotation_note_input, components::browser_theme(cx), cx));
         }
         let passage = self.recurring.editor_passage.as_ref();
         let text = passage.map_or(annotation.exact_text.as_str(), |passage| passage.text.as_str());
-        let local_ids = self
+        let matching_ids = self.marks.recurring_matches(text).map(|(annotation, _)| annotation.id.as_str()).collect::<HashSet<_>>();
+        let overlapping_ids = self.editor_annotation_ids(cx);
+        let mut local_ids = self
             .marks
             .annotations()
             .iter()
             .filter(|candidate| {
                 candidate.id == annotation.id
+                    || overlapping_ids.contains(&candidate.id)
                     || passage.is_some_and(|passage| self.book.annotation_cfi(&candidate.anchor).as_deref() == Some(passage.cfi_range.as_str()))
-                    || self.recurring.occurrences.iter().any(|occurrence| occurrence.annotation_id == candidate.id && passage.is_some_and(|passage| occurrence.overlay.cfi_range == passage.cfi_range))
+                    || (matching_ids.contains(candidate.id.as_str()) && passage.is_some_and(|passage| recurring::occurrence_applies(candidate, self.locator.book_id(), &self.book, &self.toc, &passage.cfi_range)))
             })
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
+        local_ids.extend(overlapping_ids);
         let context = self.marks.editor_context(self.locator.book_id(), text, &local_ids, !text.trim().is_empty());
         Some(annotation_editor::recurring_editor("reader-annotation-popup", entity, &annotation, context, geometry, &self.annotation_note_input, components::browser_theme(cx), window, cx))
     }
@@ -131,12 +181,10 @@ impl ReaderView {
     }
 
     pub(super) fn render_image_preview(&self, entity: &Entity<Self>, window: &Window, _cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (uri, image) = self.image_preview.clone()?;
-        let copy_image = entity.clone();
+        let (_, image) = self.image_preview.clone()?;
         let close_image = entity.clone();
         Some(
-            components::ReaderImagePopup::new(uri, image, window.viewport_size())
-                .on_copy(move |_, cx| copy_image.update(cx, |this, cx| this.copy_preview_image(cx)))
+            components::ReaderImagePopup::new(image, window.viewport_size(), self.image_canvas.clone())
                 .on_dismiss(move |_, cx| {
                     close_image.update(cx, |this, cx| {
                         this.image_preview = None;

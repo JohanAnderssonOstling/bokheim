@@ -27,7 +27,7 @@ static COVERS: OnceLock<CoverCache> = OnceLock::new();
 static COVER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Open an app-wide directory of cover files on native storage or browser OPFS.
-pub async fn configure_cover_cache(path: &Path, max_bytes: u64) -> Result<(), String> {
+pub async fn configure_cover_cache(path: &Path, max_bytes: u64) -> std::io::Result<()> {
     COVERS.get_or_init(Default::default).configure(path, max_bytes).await
 }
 
@@ -139,7 +139,7 @@ pub async fn external_cover(entry: CardKey, high_density: bool) -> Option<Vec<u8
 
 /// Fetch current catalog artwork for an explicit thumbnail replacement.
 /// Bypass the browsing cache without modifying the audiobook archive.
-pub async fn fresh_external_cover(entry: CardKey) -> Result<Option<Vec<u8>>, String> {
+pub async fn fresh_external_cover(entry: CardKey) -> Result<Option<Vec<u8>>, BackendError> {
     let generation = COVER_GENERATION.load(Ordering::SeqCst);
     let origin = origin();
     let cover = fetch_cover_asset_allowed(&origin, entry, "detail").await?;
@@ -152,7 +152,7 @@ async fn fetch_cover(key: CardKey, high_density: bool) -> Option<Vec<u8>> {
     fetch_cover_at(key, &suffix, COVER_GENERATION.load(Ordering::SeqCst)).await.ok().flatten()
 }
 
-async fn fetch_cover_at(key: CardKey, suffix: &str, generation: u64) -> Result<Option<Vec<u8>>, String> {
+async fn fetch_cover_at(key: CardKey, suffix: &str, generation: u64) -> Result<Option<Vec<u8>>, BackendError> {
     let address: Address = (origin(), key, suffix.to_owned());
     let cache = COVERS.get_or_init(Default::default);
     if let Some(cover) = cache.get(&address).await {
@@ -163,14 +163,14 @@ async fn fetch_cover_at(key: CardKey, suffix: &str, generation: u64) -> Result<O
     Ok(cover)
 }
 
-async fn fetch_cover_asset(origin: &str, key: CardKey, suffix: &str) -> Result<Option<Vec<u8>>, String> {
+async fn fetch_cover_asset(origin: &str, key: CardKey, suffix: &str) -> Result<Option<Vec<u8>>, BackendError> {
     // A paused cover must not occupy the library's bounded reader slots.
     // Failed fetches are not cached; the policy observer refreshes the view
     // when automatic transfers become available again.
-    transfers::try_run(fetch_cover_asset_allowed(origin, key, suffix)).await.map_err(|error| error.to_string())?
+    transfers::try_run(fetch_cover_asset_allowed(origin, key, suffix)).await.map_err(BackendError::operation)?
 }
 
-async fn fetch_cover_asset_allowed(origin: &str, key: CardKey, suffix: &str) -> Result<Option<Vec<u8>>, String> {
+async fn fetch_cover_asset_allowed(origin: &str, key: CardKey, suffix: &str) -> Result<Option<Vec<u8>>, BackendError> {
     let url = format!("{origin}/covers/{key}-{suffix}.jpg");
     let request = http_response::client().get(&url);
     // A manually supplied Cache-Control header triggers a CORS preflight.
@@ -179,10 +179,10 @@ async fn fetch_cover_asset_allowed(origin: &str, key: CardKey, suffix: &str) -> 
     let request = request.fetch_cache_no_cache();
     #[cfg(not(target_arch = "wasm32"))]
     let request = request.header(reqwest::header::CACHE_CONTROL, "no-cache");
-    let response = request.send().await.map_err(|error| format!("could not download the cover: {error}"))?;
+    let response = request.send().await.map_err(|error| BackendError::operation(error).context("could not download the cover"))?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
-    let response = response.error_for_status().map_err(|error| format!("could not download the cover: {error}"))?;
-    Ok(Some(response.bytes().await.map_err(|error| format!("could not download the cover: {error}"))?.to_vec()))
+    let response = response.error_for_status().map_err(|error| BackendError::operation(error).context("could not download the cover"))?;
+    Ok(Some(response.bytes().await.map_err(|error| BackendError::operation(error).context("could not download the cover"))?.to_vec()))
 }

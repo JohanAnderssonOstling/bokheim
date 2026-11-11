@@ -28,6 +28,10 @@ pub struct ScanBookIndex {
 }
 
 impl ScanBookIndex {
+    pub fn unchanged(&self, snapshot: &ScanSnapshot, file: &ScanFileObservation) -> bool {
+        self.get(snapshot, file.directory, &file.name).is_some_and(|book| book.fingerprint == file.fingerprint)
+    }
+
     pub fn new(snapshot: &ScanSnapshot) -> Self {
         let books = &snapshot.books;
         let mut by_placement: Vec<_> = (0..books.len()).collect();
@@ -288,14 +292,16 @@ pub async fn inspect_files(root: impl Into<PathBuf>, files: &[ScanFileObservatio
                             if excluded_audiobook_member(path.strip_prefix(&root).unwrap_or(&path), &snapshot.excluded_paths) {
                                 return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "audiobook contains a temporarily excluded file"));
                             }
-                            ingest_audiobook_folder(path.clone(), file.name.clone(), &*host).await?
+                            ingest_audiobook_folder(path.clone(), file.name.clone()).await?
                         } else {
                             crate::ingestion::ingest_file_with_pdf_reader(path.clone(), file.name.clone(), &*host, cached_pdf.as_deref().cloned()).await?
                         };
-                        let crate::ingestion::IngestedFile { source_identity, book_id, size_bytes, fingerprint, format, inspection } = ingested;
+                        let crate::ingestion::IngestedFile { source_identity, audiobook_content_hash, byte_checksum, book_id, size_bytes, fingerprint, format, inspection } = ingested;
                         let extension = format.canonical_extension().to_owned();
                         Ok(ScannedBook {
                             source_identity,
+                            audiobook_content_hash,
+                            byte_checksum,
                             directory: file.directory,
                             name: file.name.clone(),
                             path: file.path.clone(),
@@ -383,6 +389,8 @@ mod tests {
                 let hash = BookId::from(blake3::hash(b"book"));
                 let book = ScannedBook {
                     source_identity: None,
+                    audiobook_content_hash: None,
+                    byte_checksum: None,
                     directory: ROOT_DIR_ID,
                     name: name.into(),
                     path: name.into(),

@@ -1,5 +1,4 @@
 //! Logical sleep owns peripherals; the GPUI backend classifies physical wakes.
-use ui_text::text;
 
 use gpui_kobo::KoboPowerEvent;
 use kobo_device::{
@@ -7,6 +6,7 @@ use kobo_device::{
     power::{BatteryAction, SleepSession, battery_action},
 };
 use std::cell::RefCell;
+use std::io;
 use std::time::{Duration, Instant};
 
 const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -22,23 +22,23 @@ thread_local! {
     static STATE: RefCell<PowerState> = RefCell::new(PowerState::default());
 }
 
-pub fn prepare_sleep(auto_power_off: Option<Duration>) -> Result<(), String> {
+pub fn prepare_sleep(auto_power_off: Option<Duration>) -> io::Result<()> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if state.sleep.is_some() {
-            return Err("Sleep session already active".into());
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Sleep session already active"));
         }
-        state.sleep = Some(SleepSession::prepare(auto_power_off).map_err(|error| error.to_string())?);
+        state.sleep = Some(SleepSession::prepare(auto_power_off)?);
         Ok(())
     })
 }
 
-pub fn suspend_kernel() -> Result<(), String> {
-    kobo_device::suspend_kernel().map_err(|error| error.to_string())
+pub fn suspend_kernel() -> io::Result<()> {
+    kobo_device::suspend_kernel()
 }
 
-pub fn finish_sleep() -> Result<(), String> {
-    STATE.with(|state| state.borrow_mut().sleep.take().map_or(Ok(()), |sleep| sleep.finish().map_err(|error| error.to_string())))
+pub fn finish_sleep() -> io::Result<()> {
+    STATE.with(|state| state.borrow_mut().sleep.take().map_or(Ok(()), |sleep| sleep.finish()))
 }
 
 pub fn poll() -> KoboPowerEvent {
@@ -57,7 +57,7 @@ pub fn poll() -> KoboPowerEvent {
             BatteryAction::PowerOff => KoboPowerEvent::PowerOff,
             BatteryAction::Warn(percent) if !state.low_battery_warned => {
                 state.low_battery_warned = true;
-                KoboPowerEvent::Warning(format!(text!(startup::battery_low_connect_a_charger), percent = percent))
+                KoboPowerEvent::LowBattery(percent)
             }
             BatteryAction::Warn(_) => KoboPowerEvent::None,
             BatteryAction::None => {
@@ -68,9 +68,9 @@ pub fn poll() -> KoboPowerEvent {
     })
 }
 
-pub fn power_off() -> Result<(), String> {
-    let path = std::env::var_os("BOKHEIM_KOBO_EXIT_ACTION_FILE").ok_or_else(|| "Kobo launcher must be updated before powering off".to_owned())?;
-    std::fs::write(path, "poweroff").map_err(|error| error.to_string())?;
+pub fn power_off() -> io::Result<()> {
+    let path = std::env::var_os("BOKHEIM_KOBO_EXIT_ACTION_FILE").ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "Kobo launcher must be updated before powering off"))?;
+    std::fs::write(path, "poweroff")?;
     STATE.with(|state| {
         if let Some(sleep) = state.borrow_mut().sleep.take() {
             sleep.power_off();

@@ -5,6 +5,7 @@ use crate::services::updates::{PublishUpdate, UpdateAction, UpdateControls, Upda
 use gpui::{App, Entity};
 use kobo_device::wifi::{self, Phase as WifiPhase};
 use kobo_update::{Host, UpdateError};
+use update_client::UpdateError as OperationError;
 
 fn status(host: &Host) -> UpdateEvent {
     let view = host.view();
@@ -15,14 +16,16 @@ fn status(host: &Host) -> UpdateEvent {
     }
 }
 
-fn work(host: &mut Host, action: Option<UpdateAction>, publish: &PublishUpdate<'_>) -> Result<UpdateView, String> {
-    let view = host.work(action, |view| publish(UpdateEvent::View(view))).map_err(|error| match error {
+fn work(host: &mut Host, action: Option<UpdateAction>, publish: &PublishUpdate<'_>) -> Result<UpdateView, OperationError> {
+    let view = host.work(action, |view| publish(UpdateEvent::View(view)).map_err(Into::into)).map_err(|error| -> OperationError { match error {
         UpdateError::LauncherUpgradeRequired => text!(settings::use_the_latest_usb_installer_once_to_enable_updates_on_this_kobo).into(),
         UpdateError::CheckRequired => text!(settings::check_for_updates_before_downloading).into(),
         UpdateError::RestartRequired => text!(settings::restart_the_app_with_the_latest_kobo_launcher_then_download_the_update).into(),
         UpdateError::LauncherUnavailable => text!(settings::the_kobo_launcher_is_unavailable).into(),
-        UpdateError::Failed(error) => error,
-    })?;
+        UpdateError::Failed(error) => {
+            ui_components::user_facing_error(&error, text!(settings::update_failed)).to_owned().into()
+        }
+    } })?;
     publish(status(host))?;
     Ok(view)
 }
@@ -34,14 +37,15 @@ pub(super) fn bind(cx: &mut App) -> Entity<UpdateControls> {
     let view = host.as_ref().map(Host::view).unwrap_or(UpdateView::Current { version: String::new(), checked: false });
     let automatic_check = !matches!(view, UpdateView::Ready { .. });
     let initial = host.as_ref().map(status);
-    let controls = bind_worker(view, None, automatic_check, move || host, work, Host::view, |error| Some(error.to_owned()), cx);
+    let controls = bind_worker(view, None, automatic_check, move || host, work, Host::view, |error| Some(error.to_string()), cx);
     controls.update(cx, |controls, cx| {
         controls.action_labels(text!(settings::download_update), text!(settings::restart_and_install));
         if let Some(initial) = initial {
             controls.apply_event(initial, cx);
         }
         if let Some(error) = error {
-            controls.apply_event(UpdateEvent::Failed(Some(error)), cx);
+            log::warn!("Kobo updater unavailable: {error}");
+            controls.apply_event(UpdateEvent::Failed(Some(text!(settings::updates_unavailable).into())), cx);
         }
     });
     // An offline startup must not leave updates undiscoverable now that the

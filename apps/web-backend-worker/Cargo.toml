@@ -10,6 +10,8 @@ crate-type = ["cdylib"]
 [features]
 
 [dependencies]
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure" }
+blake3 = "1"
 book-model = { path = "../../shared/book-model" }
 app = { path = "../../client/app", default-features = false }
 library-backend = { path = "../../client/library-backend" }

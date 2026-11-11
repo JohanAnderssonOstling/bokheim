@@ -121,22 +121,20 @@ pub(crate) async fn stage_book(handle: &Handle, source: &mut (dyn std::io::Read 
 
 /// Copies a picked browser file into book storage, hashing it on the way.
 pub(crate) async fn stage_browser_file(handle: &Handle, file: &web_sys::File) -> Result<StagedBook, AssetStoreError> {
-    const CHUNK: u64 = 1024 * 1024;
-    let mut writer = StagingWriter::new(handle).await?;
-    let size = file.size() as u64;
-    let mut copied = 0_u64;
-    while copied < size {
-        let end = (copied + CHUNK).min(size);
-        let blob = file.slice_with_f64_and_f64(copied as f64, end as f64).map_err(|error| AssetStoreError::operation(format!("{error:?}")))?;
-        let buffer = wasm_bindgen_futures::JsFuture::from(blob.array_buffer()).await.map_err(|error| AssetStoreError::operation(format!("could not read the selected file: {error:?}")))?;
-        let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-        if bytes.is_empty() {
-            return Err(AssetStoreError::operation("the selected file ended unexpectedly"));
-        }
-        writer.write_all(&bytes).await?;
-        copied += bytes.len() as u64;
-    }
-    writer.finish(handle, None).await
+    let (writer, checksum) = web_storage::stage_selected_file(&name(handle, "book/staged".into()), file).await.map_err(AssetStoreError::operation)?;
+    Ok(staged_book(handle, writer, checksum))
+}
+
+pub(crate) async fn stage_verified_book(handle: &Handle, source: &web_storage::FileReader, checksum: ContentHash) -> Result<StagedBook, AssetStoreError> {
+    let (writer, checksum) = source.copy_verified_to(&name(handle, "book/staged".into()), checksum).await.map_err(AssetStoreError::operation)?;
+    Ok(staged_book(handle, writer, checksum))
+}
+
+fn staged_book(handle: &Handle, writer: FileWriter, checksum: ContentHash) -> StagedBook {
+    let book_id = BookId::from(checksum);
+    let size_bytes = writer.length();
+    let destination = name(handle, format!("book/{book_id}"));
+    StagedBook { byte_checksum: checksum, writer, book_id, size_bytes, destination }
 }
 
 pub(crate) async fn evict_book_files(handle: &Handle, book: BookId, _paths: Vec<RelativeBookPath>, lease: BookLease) -> Result<BookLease, AssetStoreError> {
@@ -144,7 +142,9 @@ pub(crate) async fn evict_book_files(handle: &Handle, book: BookId, _paths: Vec<
     client_platform_runtime::executor::run_blocking(move || {
         web_storage::remove_file(&name).map_err(AssetStoreError::operation)?;
         Ok(lease)
-    }).await.map_err(AssetStoreError::operation)?
+    })
+    .await
+    .map_err(AssetStoreError::operation)?
 }
 
 pub(crate) async fn evictable_book_bytes(handle: &Handle, book: BookId, paths: Vec<RelativeBookPath>) -> Result<u64, AssetStoreError> {
@@ -176,4 +176,8 @@ pub(crate) fn remove(handle: &Handle, asset_name: String) -> Result<bool, AssetS
 
 pub(crate) fn exists(handle: &Handle, asset_name: String) -> Result<bool, AssetStoreError> {
     client_platform_web::web_storage::file_exists(&name(handle, asset_name)).map_err(AssetStoreError::operation)
+}
+
+pub(crate) fn migrate_book_ids(handle: &Handle, ids: &[(BookId, BookId)]) -> Result<(), AssetStoreError> {
+    web_storage::migrate_book_ids(&handle.namespace, ids).map_err(AssetStoreError::operation)
 }

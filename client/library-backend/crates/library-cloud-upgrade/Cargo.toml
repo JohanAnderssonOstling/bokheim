@@ -10,6 +10,7 @@ publish = false
 resolver = "2"
 
 [dependencies]
+content-address = { path = "../../../../shared/content-address" }
 library-replica = { path = "../library-replica" }
 sync-common = { path = "../../../../shared/sync-common" }
 prost = "0.14.4"

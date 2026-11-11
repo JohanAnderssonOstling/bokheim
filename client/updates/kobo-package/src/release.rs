@@ -1,3 +1,4 @@
+use operation_failure::OperationError;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -49,21 +50,21 @@ struct GithubAsset {
 }
 
 /// HTTP clients stay in their platform adapters; parsing and limits are shared.
-pub fn newer_release(input: impl Read, installed: &Version) -> Result<Option<Release>, String> {
+pub fn newer_release(input: impl Read, installed: &Version) -> Result<Option<Release>, OperationError> {
     parse_release(input, installed)
 }
 
-pub fn newer_release_for_model(input: impl Read, installed: &Version, model_id: u16) -> Result<Option<Release>, String> {
+pub fn newer_release_for_model(input: impl Read, installed: &Version, model_id: u16) -> Result<Option<Release>, OperationError> {
     if kobo_profile::Profile::from_id(model_id).is_none() {
         return Err("This Kobo has no supported device profile".into());
     }
     parse_release(input, installed)
 }
 
-fn parse_release(input: impl Read, installed: &Version) -> Result<Option<Release>, String> {
-    let bytes = update_files::read_bounded(input, MAX_MANIFEST_BYTES).map_err(|error| format!("Could not read the release information: {error}"))?;
-    let release: GithubRelease = serde_json::from_slice(&bytes).map_err(|error| format!("Could not read the release information: {error}"))?;
-    let version = Version::parse(release.tag_name.trim_start_matches('v')).map_err(|error| error.to_string())?;
+fn parse_release(input: impl Read, installed: &Version) -> Result<Option<Release>, OperationError> {
+    let bytes = update_files::read_bounded(input, MAX_MANIFEST_BYTES).map_err(|error| OperationError::operation(error).context("Could not read the release information"))?;
+    let release: GithubRelease = serde_json::from_slice(&bytes).map_err(|error| OperationError::operation(error).context("Could not read the release information"))?;
+    let version = Version::parse(release.tag_name.trim_start_matches('v')).map_err(OperationError::operation)?;
     if version <= *installed {
         return Ok(None);
     }

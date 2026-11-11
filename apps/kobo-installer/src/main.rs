@@ -6,6 +6,7 @@ use bokheim_kobo_installer::{DeviceDetection, DeviceMonitor, EjectOutcome, KoboD
 use gpui::{App, Bounds, Context, FontWeight, SharedString, Task, Window, WindowBounds, WindowOptions, div, prelude::*, px, relative, rgb, size};
 use kobo_package::{RELEASE_API, newer_release};
 use semver::Version;
+use operation_failure::{Failure, OperationError};
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::sync::Arc;
@@ -29,10 +30,10 @@ const DETAIL_WINDOW_HEIGHT: f32 = 208.0;
 
 enum InstallerStatus {
     Monitoring,
-    MountFailed(String),
+    MountFailed,
     Ready,
     NickelMenuMissing,
-    Unsupported(String),
+    Unsupported,
     Installing,
     Installed(String),
     Failed(String),
@@ -40,7 +41,7 @@ enum InstallerStatus {
 
 struct Installer {
     devices: Vec<KoboDevice>,
-    mount_error: Option<String>,
+    mount_error: Option<OperationError>,
     status: InstallerStatus,
     _monitor: Task<()>,
     _update_check: Task<()>,
@@ -72,17 +73,27 @@ impl KoboPackage {
     }
 }
 
-fn fetch_newer_package() -> Result<Option<Vec<u8>>, String> {
+
+fn request_error(error: ureq::Error) -> OperationError {
+    if let ureq::Error::Status(status, _) = &error {
+        if let Some(failure) = Failure::from_http_status(*status) {
+            return OperationError::classified(failure, error);
+        }
+    }
+    OperationError::operation(error)
+}
+
+fn fetch_newer_package() -> Result<Option<Vec<u8>>, OperationError> {
     let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout_read(Duration::from_secs(30)).timeout_write(Duration::from_secs(30)).build();
-    let response = agent.get(RELEASE_API).set("Accept", "application/vnd.github+json").set("User-Agent", "Bokheim-Kobo-Installer").call().map_err(|error| error.to_string())?;
-    let installed = Version::parse(VERSION).map_err(|error| error.to_string())?;
+    let response = agent.get(RELEASE_API).set("Accept", "application/vnd.github+json").set("User-Agent", "Bokheim-Kobo-Installer").call().map_err(request_error)?;
+    let installed = Version::parse(VERSION).map_err(OperationError::operation)?;
     let Some(release) = newer_release(response.into_reader(), &installed)? else {
         return Ok(None);
     };
-    let response = agent.get(&release.url).set("Accept", "application/octet-stream").set("User-Agent", "Bokheim-Kobo-Installer").call().map_err(|error| error.to_string())?;
+    let response = agent.get(&release.url).set("Accept", "application/octet-stream").set("User-Agent", "Bokheim-Kobo-Installer").call().map_err(request_error)?;
     let mut bytes = Vec::new();
     copy_verified(response.into_reader(), &mut bytes, &release.artifact())?;
-    validate_archive(&bytes).map_err(|error| error.to_string())?;
+    validate_archive(&bytes).map_err(OperationError::operation)?;
     Ok(Some(bytes))
 }
 
@@ -168,14 +179,15 @@ impl Installer {
         if let Some(device) = self.devices.first() {
             let compatible = device.profile().and_then(|profile| kobo_package::validate_device(self.package.bytes(), kobo_package::Policy::Usb, profile));
             if let Err(error) = compatible {
-                return InstallerStatus::Unsupported(error.to_string());
+                eprintln!("Kobo compatibility check failed: {error}");
+                return InstallerStatus::Unsupported;
             }
         }
         match self.devices.first() {
             Some(device) if device.nickel_menu_detected() => InstallerStatus::Ready,
             Some(_) => InstallerStatus::NickelMenuMissing,
             None => match &self.mount_error {
-                Some(error) => InstallerStatus::MountFailed(error.clone()),
+                Some(_) => InstallerStatus::MountFailed,
                 None => InstallerStatus::Monitoring,
             },
         }
@@ -188,7 +200,7 @@ impl Installer {
         let Some(device) = self.devices.first().cloned() else {
             return;
         };
-        if matches!(self.detected_status(), InstallerStatus::Unsupported(_)) {
+        if matches!(self.detected_status(), InstallerStatus::Unsupported) {
             self.status = self.detected_status();
             cx.notify();
             return;
@@ -209,7 +221,7 @@ impl Installer {
             .map_err(|error| {
                 eprintln!("Kobo installation failed: {error}");
                 match error.kind() {
-                    ErrorKind::StorageFull => text!(installer::there_isn_t_enough_free_space_on_your_kobo_free_up_space),
+                    ErrorKind::StorageFull | ErrorKind::QuotaExceeded => text!(installer::there_isn_t_enough_free_space_on_your_kobo_free_up_space),
                     ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => text!(installer::the_installer_can_t_save_files_to_your_kobo_check_that_your),
                     ErrorKind::InvalidData => text!(installer::the_installation_package_couldn_t_be_read_download_the_installer_again_and),
                     _ => text!(installer::installation_couldn_t_finish_reconnect_your_kobo_via_usb_and_try_again),
@@ -242,7 +254,7 @@ impl Installer {
     fn status_text(&self) -> SharedString {
         match &self.status {
             InstallerStatus::Monitoring => text!(installer::connect_your_kobo_via_usb).into(),
-            InstallerStatus::MountFailed(_) => text!(installer::kobo_detected_mount_required).into(),
+            InstallerStatus::MountFailed => text!(installer::kobo_detected_mount_required).into(),
             InstallerStatus::Ready | InstallerStatus::NickelMenuMissing => text!(installer::kobo_ereader).into(),
             InstallerStatus::Installing => {
                 let total = self.progress.total_bytes.load(Ordering::Relaxed);
@@ -252,14 +264,14 @@ impl Installer {
             }
             InstallerStatus::Installed(_) => text!(installer::installed).into(),
             InstallerStatus::Failed(_) => text!(installer::installation_failed).into(),
-            InstallerStatus::Unsupported(_) => text!(installer::kobo_or_package_is_incompatible).into(),
+            InstallerStatus::Unsupported => text!(installer::kobo_or_package_is_incompatible).into(),
         }
     }
 
     fn status_detail(&self) -> Option<SharedString> {
         match &self.status {
-            InstallerStatus::MountFailed(_) => Some(text!(installer::couldn_t_open_the_kobo_automatically_open_it_in_your_file_manager).into()),
-            InstallerStatus::Installed(message) | InstallerStatus::Failed(message) | InstallerStatus::Unsupported(message) => Some(message.clone().into()),
+            InstallerStatus::MountFailed => Some(text!(installer::couldn_t_open_the_kobo_automatically_open_it_in_your_file_manager).into()),
+            InstallerStatus::Installed(message) | InstallerStatus::Failed(message) => Some(message.clone().into()),
             _ => None,
         }
     }
@@ -273,9 +285,9 @@ impl gpui::Render for Installer {
             let height = if self.showing_detail { DETAIL_WINDOW_HEIGHT } else { WINDOW_HEIGHT };
             window.resize(size(window.viewport_size().width, px(height)));
         }
-        let can_install = !PREVIEW_ONLY && !self.devices.is_empty() && !self.checking_for_update && !matches!(self.status, InstallerStatus::Installing | InstallerStatus::Unsupported(_));
+        let can_install = !PREVIEW_ONLY && !self.devices.is_empty() && !self.checking_for_update && !matches!(self.status, InstallerStatus::Installing | InstallerStatus::Unsupported);
         let status_color = match self.status {
-            InstallerStatus::Failed(_) | InstallerStatus::MountFailed(_) | InstallerStatus::Unsupported(_) => rgb(DANGER),
+            InstallerStatus::Failed(_) | InstallerStatus::MountFailed | InstallerStatus::Unsupported => rgb(DANGER),
             InstallerStatus::Ready | InstallerStatus::NickelMenuMissing | InstallerStatus::Installed(_) => rgb(ACCENT),
             InstallerStatus::Monitoring | InstallerStatus::Installing => rgb(MUTED),
         };

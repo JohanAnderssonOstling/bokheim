@@ -1,3 +1,4 @@
+use operation_failure::{Failure, OperationError};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 struct AbortUpload(web_sys::AbortController);
@@ -7,11 +8,11 @@ impl Drop for AbortUpload {
     }
 }
 
-pub async fn put_blob(file: &web_sys::Blob, url: &str, request_headers: &[(&str, &str)]) -> Result<u16, String> {
-    let abort = AbortUpload(web_sys::AbortController::new().map_err(|e| super::error_message(&e))?);
-    let headers = web_sys::Headers::new().map_err(|e| super::error_message(&e))?;
+pub async fn put_blob(file: &web_sys::Blob, url: &str, request_headers: &[(&str, &str)]) -> Result<u16, OperationError> {
+    let abort = AbortUpload(web_sys::AbortController::new().map_err(OperationError::from)?);
+    let headers = web_sys::Headers::new().map_err(OperationError::from)?;
     for (name, value) in request_headers {
-        headers.set(name, value).map_err(|e| super::error_message(&e))?;
+        headers.set(name, value).map_err(OperationError::from)?;
     }
     let options = web_sys::RequestInit::new();
     options.set_method("PUT");
@@ -20,6 +21,6 @@ pub async fn put_blob(file: &web_sys::Blob, url: &str, request_headers: &[(&str,
     options.set_signal(Some(&abort.0.signal()));
     // fetch may be the coordinator bridge; it must preserve the Blob body.
     let scope: web_sys::WorkerGlobalScope = js_sys::global().unchecked_into();
-    let response: web_sys::Response = JsFuture::from(scope.fetch_with_str_and_init(url, &options)).await.map_err(|e| super::error_message(&e))?.dyn_into().map_err(|e| super::error_message(&e))?;
+    let response: web_sys::Response = JsFuture::from(scope.fetch_with_str_and_init(url, &options)).await.map_err(|error| OperationError::classified(Failure::Offline, OperationError::from(error)))?.dyn_into().map_err(OperationError::from)?;
     Ok(response.status())
 }

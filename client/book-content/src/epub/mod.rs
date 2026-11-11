@@ -1,7 +1,7 @@
 use crate::profile::{PreparationProfile, ResourcePreparation};
 use crate::resource_path::resolve_resource_href;
 use crate::resource_path::{is_container_resource, normalize_path as normalize_epub_path};
-use crate::resources::{MAX_BINARY_RESOURCE_BYTES, MAX_PREPARED_TEXT_BYTES};
+use crate::resources::MAX_BINARY_RESOURCE_BYTES;
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
 use quick_xml::{XmlVersion, escape::resolve_xml_entity};
 use std::collections::{HashMap, HashSet};
@@ -55,6 +55,7 @@ pub(crate) struct EpubPackage {
     opf_path: String,
     opf_xml: String,
     manifest_cache: OnceLock<Arc<ParsedManifest>>,
+    documents_cache: OnceLock<Vec<String>>,
 }
 
 impl EpubPackage {
@@ -84,11 +85,11 @@ impl EpubPackage {
         }
         for opf_path in candidates {
             if let Ok(opf) = reader.read(&opf_path, MAX_PACKAGE_DOCUMENT_BYTES).await {
-                return Ok(Self { archive: reader.metadata.clone(), opf_path, opf_xml: decode_package_xml(&opf), manifest_cache: OnceLock::new() });
+                return Ok(Self { archive: reader.metadata.clone(), opf_path, opf_xml: decode_package_xml(&opf), manifest_cache: OnceLock::new(), documents_cache: OnceLock::new() });
             }
         }
         // Package metadata is useful, but readable HTML can stand on its own.
-        Ok(Self { archive: reader.metadata.clone(), opf_path: String::new(), opf_xml: String::new(), manifest_cache: OnceLock::new() })
+        Ok(Self { archive: reader.metadata.clone(), opf_path: String::new(), opf_xml: String::new(), manifest_cache: OnceLock::new(), documents_cache: OnceLock::new() })
     }
 
     /// Returns the package-declared media type for an archive resource.
@@ -261,18 +262,23 @@ impl EpubPackage {
         ParsedManifest { items, spine, nav_href, ncx_href }
     }
 
-    fn resolve_spine_entries(&self) -> io::Result<Option<Vec<String>>> {
+    fn resolve_spine_entries(&self) -> Option<Vec<String>> {
         let manifest = self.get_or_parse_manifest();
 
         if manifest.spine.is_empty() {
-            return Ok(None);
+            return None;
         }
 
         let mut out = Vec::new();
         let mut seen = HashSet::new();
+        let mut items = HashMap::with_capacity(manifest.items.len());
+        for item in &manifest.items {
+            // Preserve the first declared item when an exporter repeats an ID.
+            items.entry(item.id.as_str()).or_insert(item);
+        }
 
         for idref in &manifest.spine {
-            let Some(item) = manifest.items.iter().find(|item| &item.id == idref) else {
+            let Some(item) = items.get(idref.as_str()) else {
                 continue;
             };
             if !is_container_resource(&item.href) {
@@ -285,7 +291,7 @@ impl EpubPackage {
             }
         }
 
-        if out.is_empty() { Ok(None) } else { Ok(Some(out)) }
+        if out.is_empty() { None } else { Some(out) }
     }
 
     /// Package addresses stay tied to the original XML element positions,
@@ -327,11 +333,7 @@ impl EpubPackage {
     /// Returns the documents the reader can present, preferring the package
     /// spine and falling back to HTML archive entries in ZIP directory order.
     pub(crate) fn document_uris(&self) -> io::Result<Vec<String>> {
-        if let Some(spine) = self.resolve_spine_entries()? {
-            return Ok(spine);
-        }
-
-        Ok(self.fallback_documents())
+        Ok(self.documents_cache.get_or_init(|| self.resolve_spine_entries().unwrap_or_else(|| self.fallback_documents())).clone())
     }
 
     pub(crate) fn fallback_documents(&self) -> Vec<String> {
@@ -377,62 +379,55 @@ impl EpubProvider {
         self.archive.read(uri, MAX_BINARY_RESOURCE_BYTES).await
     }
 
-    pub(crate) async fn prepare_text_resources_async<const PROFILE: bool>(&self, documents: &[String], profile: &mut PreparationProfile) -> io::Result<HashMap<String, Vec<u8>>> {
+    pub(crate) async fn prepare_text_resources_async<const PROFILE: bool>(&self, documents: &[String], profile: &mut PreparationProfile) -> io::Result<(HashMap<String, Vec<u8>>, bool)> {
         let started = PROFILE.then(Instant::now);
         let mut paths = Vec::new();
         let mut seen = HashSet::new();
-        // Reserve the preparation budget for readable chapters first.
+        // Prepare readable chapters first, followed by the remaining text resources.
         for uri in documents {
             if is_container_resource(uri)
                 && let Some(path) = self.package.archive.resolve(uri)
                 && seen.insert(path.clone())
             {
-                paths.push((path, MAX_BINARY_RESOURCE_BYTES));
+                paths.push(path);
             }
         }
         for item in &self.package.get_or_parse_manifest().items {
             if !is_container_resource(&item.href) {
                 continue;
             }
-            let limit = match item.media_type.as_deref() {
-                Some(media_type) if media_type.eq_ignore_ascii_case("text/css") => MAX_MARKUP_RESOURCE_BYTES,
-                Some(media_type) if media_type.eq_ignore_ascii_case("application/xhtml+xml") || media_type.eq_ignore_ascii_case("text/html") => MAX_BINARY_RESOURCE_BYTES,
-                _ => continue,
-            };
+            if !item.media_type.as_deref().is_some_and(|media_type| ["text/css", "application/xhtml+xml", "text/html"].iter().any(|expected| media_type.eq_ignore_ascii_case(expected))) {
+                continue;
+            }
             if let Some(path) = self.package.archive.resolve(&resolve_resource_href(&self.package.opf_path, &item.href))
                 && seen.insert(path.clone())
             {
-                paths.push((path, limit));
+                paths.push(path);
             }
         }
         for name in self.package.archive.names() {
-            let limit = if name.to_ascii_lowercase().ends_with(".css") {
-                MAX_MARKUP_RESOURCE_BYTES
-            } else if EpubPackage::is_html_entry(name) {
-                MAX_BINARY_RESOURCE_BYTES
-            } else {
+            if !name.to_ascii_lowercase().ends_with(".css") && !EpubPackage::is_html_entry(name) {
                 continue;
-            };
+            }
             if seen.insert(name.clone()) {
-                paths.push((name.clone(), limit));
+                paths.push(name.clone());
             }
         }
         profile.record_sync("resource_plan", started);
         let mut resources = HashMap::new();
-        let mut total = 0;
+        let mut complete = true;
         let mut reader = self.archive.reader();
-        for (path, limit) in paths {
-            if total >= MAX_PREPARED_TEXT_BYTES {
-                break;
-            }
-            let Ok((bytes, timing)) = reader.read_measured::<PROFILE>(&path, limit.min(MAX_PREPARED_TEXT_BYTES - total)).await else { continue };
-            total += bytes.len() as u64;
+        for path in paths {
+            let Ok((bytes, timing)) = reader.read_measured::<PROFILE>(&path, u64::MAX).await else {
+                complete = false;
+                continue;
+            };
             if PROFILE {
                 profile.resources.push(ResourcePreparation { uri: path.clone(), timing });
             }
             resources.insert(path, bytes);
         }
-        Ok(resources)
+        Ok((resources, complete))
     }
 }
 

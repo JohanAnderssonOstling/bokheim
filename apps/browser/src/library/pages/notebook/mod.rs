@@ -8,6 +8,7 @@ use super::pagination::{compatible_pages, merge_page, page_request_for_slots};
 use crate::library::services::{LibraryAnnotationsChanged, LibraryContentsChanged, LibraryContext, LibraryDownloadChanged};
 use crate::library::widgets::{BookCardView, Paginator, PaginatorAxis, PaginatorChild, PaginatorChildren, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy};
 use crate::navigation::LibraryRoute;
+use futures_util::future::try_join_all;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, Font, Modifiers, Pixels, Render, SharedString, Subscription, Task, Window, div, px, rems};
 use gpui_component::{
@@ -15,7 +16,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenu},
 };
-use library_model::{BrowsePageRequest, BrowsePageState, CardKey, LibraryFileTypeFilter, NotebookQuery, NotebookRequest, NotebookSort, TextSearchRemoval};
+use library_model::{BookTextMatchPage, BrowsePageRequest, BrowsePageState, CardKey, LibraryFileTypeFilter, NotebookQuery, NotebookRequest, NotebookSort, TextSearchRemoval};
 use row::{NotebookRow, RowData};
 
 use std::{
@@ -29,6 +30,7 @@ const BOOK_PAGE_SIZE: usize = 8;
 
 struct ResultPage {
     books: Vec<RowData>,
+    previews: HashMap<CardKey, BookTextMatchPage>,
     page: BrowsePageState,
 }
 
@@ -193,15 +195,32 @@ impl NotebookPage {
                 cx.background_executor().timer(Duration::from_millis(60)).await;
             }
             let result = if content_search {
-                library.text_search(query.clone(), request).await.map(|page| page.map(|page| ResultPage { books: page.books.into_iter().map(RowData::Text).collect(), page: page.page }))
+                async {
+                    let Some(page) = library.text_search(query.clone(), request).await? else { return Ok(None) };
+                    // Install books and their first excerpts together, keeping the old
+                    // results visible while the new query is being prepared.
+                    let revision = page.page.result_revision.clone().unwrap_or_default();
+                    let previews = try_join_all(page.books.iter().filter_map(|entry| {
+                        let book = entry.book.library_file()?;
+                        let key = entry.book.key();
+                        let query = query.clone();
+                        let revision = revision.clone();
+                        let library = &library;
+                        Some(async move { library.text_search_matches(query, revision, book, 0, BOOK_PAGE_SIZE).await.map(|page| (key, page)) })
+                    }))
+                    .await?;
+                    let previews = previews.into_iter().filter_map(|(key, page)| page.map(|page| (key, page))).collect();
+                    Ok(Some(ResultPage { books: page.books.into_iter().map(RowData::Text).collect(), previews, page: page.page }))
+                }
+                .await
             } else {
-                library.notebook(query.clone(), request).await.map(|page| page.map(|page| ResultPage { books: page.books.into_iter().map(RowData::Note).collect(), page: page.page }))
+                library.notebook(query.clone(), request).await.map(|page| page.map(|page| ResultPage { books: page.books.into_iter().map(RowData::Note).collect(), previews: HashMap::new(), page: page.page }))
             };
             let _ = page.update(cx, |page, cx| {
                 page.request = None;
                 page.snapshot_loading = false;
                 match result {
-                    Ok(Some(contents)) => {
+                    Ok(Some(mut contents)) => {
                         if continuation.is_some() && !page.page.as_ref().is_some_and(|current| compatible_pages(current, &contents.page)) {
                             if content_search {
                                 // A trash update may have shortened the retained selection.
@@ -225,10 +244,18 @@ impl NotebookPage {
                         merge_page(&mut page.rows, contents.page.book_offset, contents.books, |data| {
                             let book = data.book().key();
                             if let Some((row, _)) = cached.get(&book) {
-                                row.update(cx, |row, cx| row.replace_data(data, query.clone(), &revision, cx));
+                                row.update(cx, |row, cx| {
+                                    row.replace_data(data, query.clone(), &revision, cx);
+                                    if let Some(previews) = contents.previews.remove(&book) {
+                                        row.install_text_previews(previews, cx);
+                                    }
+                                });
                                 row.clone()
                             } else {
                                 let row = cx.new(|cx| NotebookRow::from_data(data, query.clone(), &revision, library.clone(), cx));
+                                if let Some(previews) = contents.previews.remove(&book) {
+                                    row.update(cx, |row, cx| row.install_text_previews(previews, cx));
+                                }
                                 let book_card = row.read(cx).book_card().clone();
                                 let subscription = cx.observe(&book_card, |page: &mut Self, _, cx| {
                                     page.layout = None;

@@ -1,5 +1,6 @@
 //! Headless release metadata and isolated database migration entry points.
 
+use update_client::UpdateError;
 use std::ffi::OsStr;
 use std::path::Path;
 

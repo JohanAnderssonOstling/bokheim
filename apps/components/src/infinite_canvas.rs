@@ -6,7 +6,7 @@
 //! past a tap's slop, and a child's click checks [`InfiniteCanvas::panned`] so
 //! that a pan ending over it does not also open it.
 
-use gpui::{AnyElement, App, AvailableSpace, Bounds, ElementTransform, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, ScrollDelta, Styled, Window, canvas, div, point, px, size};
+use gpui::{AnyElement, App, AvailableSpace, Bounds, ElementTransform, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, ScrollDelta, Styled, TouchPhase, Window, canvas, div, point, px, size};
 
 use crate::browser_theme;
 
@@ -95,6 +95,13 @@ impl InfiniteCanvas {
         self.camera = self.camera.zoomed_about(self.local(window_position), zoom);
     }
 
+    /// Zoom around the viewport center for keyboard controls.
+    pub fn zoom_by(&mut self, factor: f32) {
+        if let Some(bounds) = self.bounds {
+            self.zoom_at(bounds.center(), self.camera.zoom * factor);
+        }
+    }
+
     /// Follows a press. Returns whether the camera moved and should repaint now;
     /// on e-ink the pan is applied only when the press ends.
     fn drag_to(&mut self, position: Point<Pixels>) -> bool {
@@ -124,7 +131,7 @@ impl InfiniteCanvas {
 /// A pannable, zoomable view of `state`'s world. Add children positioned in world
 /// coordinates.
 pub fn infinite_canvas(state: &Entity<InfiniteCanvas>) -> InfiniteCanvasView {
-    InfiniteCanvasView { state: state.clone(), children: Vec::new(), visible_content: None }
+    InfiniteCanvasView { state: state.clone(), children: Vec::new(), visible_content: None, control_wheel_zoom: false }
 }
 
 #[derive(IntoElement)]
@@ -132,9 +139,16 @@ pub struct InfiniteCanvasView {
     state: Entity<InfiniteCanvas>,
     children: Vec<AnyElement>,
     visible_content: Option<Box<dyn FnOnce(Bounds<f32>, CanvasCamera) -> AnyElement>>,
+    control_wheel_zoom: bool,
 }
 
 impl InfiniteCanvasView {
+    /// Require Ctrl for wheel zoom, leaving ordinary scrolling available to pan.
+    pub fn control_wheel_zoom(mut self) -> Self {
+        self.control_wheel_zoom = true;
+        self
+    }
+
     /// Build world content after layout, using this frame's visible world bounds.
     /// Offscreen elements can be omitted before they are constructed or measured.
     pub fn visible_content(mut self, build: impl FnOnce(Bounds<f32>, CanvasCamera) -> AnyElement + 'static) -> Self {
@@ -153,6 +167,7 @@ impl RenderOnce for InfiniteCanvasView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = browser_theme(cx);
         let state = self.state;
+        let control_wheel_zoom = self.control_wheel_zoom;
         let camera = state.read(cx).camera;
         let visible_content = self.visible_content.map(|build| {
             canvas(
@@ -218,19 +233,36 @@ impl RenderOnce for InfiniteCanvasView {
                 let state = state.clone();
                 move |event, window, cx| {
                     state.update(cx, |canvas, cx| {
-                        if window.is_page_scroll_swipe() {
-                            if event.touch_phase == gpui::TouchPhase::Started {
+                        if control_wheel_zoom && !event.modifiers.control && !event.modifiers.platform && !window.is_touch_scroll() {
+                            let delta = match event.delta {
+                                ScrollDelta::Pixels(delta) => delta,
+                                ScrollDelta::Lines(delta) => point(px(delta.x * 24.0), px(delta.y * 24.0)),
+                                ScrollDelta::Pages(delta) => canvas.bounds.map_or(point(px(0.0), px(0.0)), |bounds| point(bounds.size.width * delta.x, bounds.size.height * delta.y)),
+                            };
+                            canvas.camera.pan += delta;
+                            cx.notify();
+                            return;
+                        }
+                        if window.is_touch_scroll() {
+                            if event.touch_phase == TouchPhase::Started {
                                 canvas.touch_pan_origin = Some(canvas.camera.pan);
                             }
                             if let ScrollDelta::Pixels(delta) = event.delta {
                                 canvas.camera.pan += delta;
+                            }
+                            if matches!(event.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                                if let Some(origin) = canvas.touch_pan_origin.take() {
+                                    if event.touch_phase == TouchPhase::Cancelled {
+                                        canvas.camera.pan = origin;
+                                    }
+                                }
                             }
                             cx.notify();
                             return;
                         }
                         if matches!(event.delta, ScrollDelta::Pages(_)) {
                             if let Some(origin) = canvas.touch_pan_origin.take() {
-                                if event.touch_phase == gpui::TouchPhase::Cancelled {
+                                if event.touch_phase == TouchPhase::Cancelled {
                                     canvas.camera.pan = origin;
                                 }
                                 cx.notify();

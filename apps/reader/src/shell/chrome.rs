@@ -5,7 +5,6 @@
 //! themselves stay with each reader, because an EPUB annotation and a PDF
 //! annotation genuinely offer different actions.
 
-use ui_text::text;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, ClickEvent, Context, IntoElement, Window, div, px};
@@ -240,15 +239,9 @@ fn is_meaningful_resize(current: f32, next: f32) -> bool {
     (current - next).abs() >= RESIZE_EPSILON
 }
 
-/// Widen Settings for wider interface fonts without rewriting the user's
-/// preferred divider position or changing the other sidebar tabs.
+/// Every sidebar tab follows the same saved divider position.
 fn fitted_sidebar_width(window: &Window, cx: &App) -> f32 {
-    let preferences = ReaderSettings::preferences(cx);
-    let mut width = preferences.toc_width;
-    if preferences.active_sidebar_tab == SidebarTab::Settings {
-        let choices = ui_components::equal_choice_group_width(&[text!(reader::book), text!(common::serif), text!(common::sans_serif), text!(common::custom)], ui_components::TEXT_XS, 2.0, ui_components::SPACE_SM, window, cx);
-        width = width.max(f32::from(choices) + 2.0 * ui_components::SPACE_MD);
-    }
+    let width = ReaderSettings::preferences(cx).toc_width;
     clamp_reader_sidebar_width(width.min(f32::from(window.viewport_size().width)))
 }
 

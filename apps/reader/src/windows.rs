@@ -6,14 +6,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use book_content::comic::{ComicBook, ComicReader};
-use book_content::{Book, BookFormat as BookSourceFormat};
+use book_content::{Book, ReadingBook};
 use book_model::{AnnotationAnchor, PdfAnnotationAnchor, ReadingPosition};
 use client_protocol::Failure;
 use gpui::prelude::*;
 use gpui::{AnyView, App, AppContext, BackgroundExecutor, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, SharedString, Task, Window};
 use gpui_component::{WindowExt, notification::Notification};
 use html_view_gpui::ChapterPreparationWorker;
-use library_backend::{BackendError, BoxedBookReader, DocumentBook, DocumentFormat, DocumentSource, LibraryClient, PdfBook, ResolvedBook};
+use library_backend::{BackendError, BoxedBookReader, DocumentBook, DocumentFormat, DocumentSource, LibraryClient, PdfBook, ResolvedBook, TextCache};
 use library_model::BookLocator;
 use skrift_column_paginator::{RendererInitialConfig, RendererPreparation};
 
@@ -30,6 +30,34 @@ use crate::shell::tts::TtsReader;
 
 use crate::CloseReader;
 
+pub(crate) fn native_windows_available() -> bool {
+    !cfg!(any(target_arch = "wasm32", target_os = "android", target_os = "ios", feature = "mobile", feature = "kobo"))
+}
+
+pub(crate) fn open_reader_window<V: Render + 'static>(title: String, parent: &Window, cx: &mut App, build: impl FnOnce(&mut Window, &mut App) -> Entity<V> + 'static) -> Result<(), String> {
+    let bounds = gpui::Bounds::centered(None, parent.viewport_size(), cx);
+    cx.open_window(gpui::WindowOptions {
+        window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
+        titlebar: Some(gpui::TitlebarOptions { title: Some(title.into()), ..Default::default() }),
+        app_id: Some("se.bokheim.Bokheim".into()),
+        focus: true,
+        ..Default::default()
+    }, move |window, cx| {
+        let reader = build(window, cx);
+        cx.new(|cx| gpui_component::Root::new(reader, window, cx))
+    }).map(|_| ()).map_err(|error| error.to_string())
+}
+
+pub(crate) fn open_book_window(locator: BookLocator, title: String, target: String, library: Rc<LibraryClient>, parent: &Window, cx: &mut App) -> Result<(), String> {
+    open_reader_window(title.clone(), parent, cx, move |window, cx| {
+        cx.new(|cx| {
+            let reader = ReaderView::new(locator, title, Some(target), library, window, cx);
+            cx.subscribe_in(&cx.entity(), window, |_, _, _: &CloseRequested, window, _| window.remove_window()).detach();
+            reader
+        })
+    })
+}
+
 pub struct CloseRequested;
 /// Preserve the failure classification through both reader and shell events.
 pub struct BookOpenFailed(pub BackendError);
@@ -40,6 +68,11 @@ enum PreparedBook {
     Pdf { metadata: Option<pdf_reader_core::PdfReaderMetadata>, reader: BoxedBookReader, initial_page: usize, initial_full_page_position: f32, initial_annotation: Option<PdfAnnotationAnchor>, recovery: OpeningRecovery },
     Audiobook { resolved: ResolvedBook, initial_target: Option<String> },
     Comic { reader: ComicReader, initial_page: usize, offset: f32, recovery: OpeningRecovery },
+}
+
+enum TextBookSource {
+    Container(DocumentBook),
+    Cached(ReadingBook),
 }
 
 enum ReaderState {
@@ -88,25 +121,37 @@ async fn prepare_pdf(locator: &BookLocator, content: PdfBook, library: &LibraryC
 }
 
 async fn prepare_book(
-    locator: &BookLocator, content: DocumentBook, book_format: BookSourceFormat, library: &LibraryClient, executor: &BackgroundExecutor, chapter_preparation: &ChapterPreparationWorker, mut renderer_config: RendererInitialConfig,
+    locator: &BookLocator, content: TextBookSource, text_cache: Option<TextCache>, library: &LibraryClient, executor: &BackgroundExecutor, chapter_preparation: &ChapterPreparationWorker, mut renderer_config: RendererInitialConfig,
     preferences: &ReaderPreferences, initial_target: Option<String>,
 ) -> Result<PreparedBook, BackendError> {
     let text_target = initial_target.as_deref().and_then(book_model::BookTextTarget::from_open_target);
     let is_text_search = text_target.is_some();
-    let (book, cjk_font, text_cfi) = executor
+    let save_cache = text_cache.is_some() && matches!(&content, TextBookSource::Container(book) if book.is_remote());
+    let (book, cjk_font, text_cfi, cache_reading) = executor
         .spawn(async move {
-            let book = match content.source {
-                DocumentSource::Async(source) => Book::open(book_format, move || source.reader()).await,
-                DocumentSource::Reader(reader) => Book::open_reader(book_format, reader),
-            }
-            .map_err(|error| opening_error(BackendError::operation(error), "book_open", Failure::InvalidBookContainer))?;
-            let reading = book.prepare_reading().await.map_err(|error| opening_error(BackendError::operation(error), "content_prepare", Failure::InvalidBookContent))?;
-            let book = NativeBook::new(reading);
+            let reading = match content {
+                TextBookSource::Cached(reading) => reading,
+                TextBookSource::Container(content) => {
+                    let DocumentFormat::Text(book_format) = content.format else { return Err(BackendError::message("expected a text book")) };
+                    let book = match content.source {
+                        DocumentSource::Async(source) => Book::open(book_format, move || source.reader()).await,
+                        DocumentSource::Reader(reader) => Book::open_reader(book_format, reader),
+                    }
+                    .map_err(|error| opening_error(BackendError::operation(error), "book_open", Failure::InvalidBookContainer))?;
+                    book.prepare_reading().await.map_err(|error| opening_error(BackendError::operation(error), "content_prepare", Failure::InvalidBookContent))?
+                }
+            };
+            let reading = Arc::new(reading);
+            let cache_reading = save_cache.then(|| reading.clone());
+            let book = NativeBook::from_shared(reading);
             let cjk_font = CjkFont::for_book(&book);
             let text_cfi = text_target.as_ref().map(|target| book.text_search_cfi(target).ok_or_else(|| BackendError::message("text search location could not be resolved"))).transpose()?;
-            Ok::<_, BackendError>((Arc::new(book), cjk_font, text_cfi))
+            Ok::<_, BackendError>((Arc::new(book), cjk_font, text_cfi, cache_reading))
         })
         .await?;
+    if let (Some(cache), Some(reading)) = (text_cache, cache_reading) {
+        cache.store(reading).await;
+    }
     preferences.apply_cjk_font(&mut renderer_config.style_overrides, cjk_font);
     let book_id = locator.book_id();
     let mut recovery = OpeningRecovery::default();
@@ -126,23 +171,35 @@ async fn prepare_book(
             recovery
                 .prepare_document(prepare_book.provider.clone(), prepare_book.document_uris(), nav_state.as_deref(), initial_target.as_deref(), renderer_config)
                 .map(|prepared| (prepared.with_image_loader(image_loader), recovery))
-                .map_err(|error| opening_error(BackendError::message(error), "document_prepare", Failure::BookDocumentFailed))
+                .map_err(|error| opening_error(BackendError::operation(error), "document_prepare", Failure::BookDocumentFailed))
         })
         .recv()
         .await
-        .map_err(|error| opening_error(BackendError::message(error.to_string()), "document_prepare", Failure::BookDocumentFailed))??;
+        .map_err(|error| opening_error(BackendError::operation(error), "document_prepare", Failure::BookDocumentFailed))??;
     Ok(PreparedBook::Book { book, cjk_font, preparation: Box::new(preparation), recovery })
 }
 
 async fn load_book(
     locator: &BookLocator, library: &LibraryClient, executor: &BackgroundExecutor, chapter_preparation: &ChapterPreparationWorker, renderer_config: RendererInitialConfig, preferences: &ReaderPreferences, initial_target: Option<String>,
 ) -> Result<PreparedBook, BackendError> {
+    let text_cache = match library.text_cache(locator.book_id()).await {
+        Ok(cache) => cache,
+        Err(error) => {
+            log::warn!("could not look up prepared text cache: {error}");
+            None
+        }
+    };
+    if let Some(cache) = &text_cache {
+        if let Some(reading) = cache.load().await {
+            return prepare_book(locator, TextBookSource::Cached(reading), None, library, executor, chapter_preparation, renderer_config, preferences, initial_target).await;
+        }
+    }
     let content = library.resolve_book(locator.book_id()).await.map_err(|error| opening_error(error, "book_resolve", Failure::BookFileUnavailable))?;
     match content {
         ResolvedBook::Pdf(content) => prepare_pdf(locator, content, library, initial_target).await,
         ResolvedBook::Audiobook(book) => Ok(PreparedBook::Audiobook { resolved: ResolvedBook::Audiobook(book), initial_target }),
         ResolvedBook::Document(content) => match content.format {
-            DocumentFormat::Text(format) => prepare_book(locator, content, format, library, executor, chapter_preparation, renderer_config, preferences, initial_target).await,
+            DocumentFormat::Text(_) => prepare_book(locator, TextBookSource::Container(content), text_cache, library, executor, chapter_preparation, renderer_config, preferences, initial_target).await,
             DocumentFormat::Comic => {
                 let mut recovery = OpeningRecovery::default();
                 let stored = recovery.restore_position(library.reading_position(locator.book_id()).await, initial_target.as_deref().and_then(book_model::cbz_toc_page).is_some());
@@ -273,7 +330,7 @@ impl ReaderView {
         let reader_title = title.clone().into();
         let executor = cx.background_executor().clone();
         let chapter_preparation = ChapterPreparationWorker::for_app(cx);
-        let renderer_config = crate::epub::state::renderer_initial_config(cx);
+        let renderer_config = crate::epub::state::renderer_initial_config(window, cx);
         let preferences = ReaderSettings::preferences(cx).clone();
         let fonts_ready = cx.try_global::<crate::SystemFontsLoading>().map(|loading| loading.0.clone());
         let load_task = cx.spawn(async move |reader_view, cx| {

@@ -4,7 +4,7 @@
 //! https://github.com/zed-industries/zed/blob/main/crates/gpui/examples/input.rs
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, Styled as _, Subscription, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, Styled as _, Subscription, TouchPhase, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
 };
 use gpui::{Half, TextAlign};
 use ropey::{Rope, RopeSlice};
@@ -300,6 +300,7 @@ pub struct InputState {
     pub(super) focus_handle: FocusHandle,
     pub(super) mode: InputMode,
     pub(super) text: Rope,
+    pub(super) text_revision: u64,
     pub(super) display_map: DisplayMap,
     pub(super) history: History<Change>,
     pub(super) blink_cursor: Entity<BlinkCursor>,
@@ -432,6 +433,7 @@ impl InputState {
         Self {
             focus_handle: focus_handle.clone(),
             text: "".into(),
+            text_revision: 0,
             display_map: DisplayMap::new(text_style.font(), window.rem_size(), None),
             blink_cursor,
             history,
@@ -941,6 +943,7 @@ impl InputState {
     pub fn default_value(mut self, value: impl Into<SharedString>) -> Self {
         let text: SharedString = value.into();
         self.text = Rope::from(self.normalize_input(&text).as_ref());
+        self.text_revision = self.text_revision.wrapping_add(1);
 
         // Note: We can't call display_map.set_text here because it needs cx.
         // The text will be set during prepare_if_need in element.rs
@@ -1400,8 +1403,8 @@ impl InputState {
         let mut delta = event.delta.pixel_delta_for_viewport(line_height, self.input_bounds.size);
 
         let old_offset = self.scroll_handle.offset();
-        let swipe = window.is_page_scroll_swipe();
-        if swipe && event.touch_phase == gpui::TouchPhase::Started {
+        let touch = window.is_touch_scroll();
+        if touch && event.touch_phase == TouchPhase::Started {
             self.touch_scroll_origin = None;
         }
         let origin = if matches!(event.delta, gpui::ScrollDelta::Pages(_)) { self.touch_scroll_origin.take() } else { None };
@@ -1411,12 +1414,15 @@ impl InputState {
         self.update_scroll_offset(Some(origin.unwrap_or(old_offset) + delta), cx);
 
         let changed = self.scroll_handle.offset() != old_offset;
-        if swipe && changed {
+        if touch && changed {
             self.touch_scroll_origin.get_or_insert(old_offset);
         }
-        // A release settles relative to the original offset, and an owned
-        // drag must not also page the surrounding reader at its boundary.
-        if changed || origin.is_some() || (swipe && self.touch_scroll_origin.is_some()) {
+        let owned = touch && self.touch_scroll_origin.is_some();
+        if matches!(event.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.touch_scroll_origin = None;
+        }
+        // An owned drag must not also page the surrounding reader at its boundary.
+        if changed || origin.is_some() || owned {
             cx.stop_propagation();
         }
     }
@@ -2130,6 +2136,8 @@ impl EntityInputHandler for InputState {
         }
         self.history.end_grouping();
 
+        self.text_revision = self.text_revision.wrapping_add(1);
+
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map.adjust_folds_for_edit(&old_text, &range, new_text);
         self.display_map.on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
@@ -2179,6 +2187,8 @@ impl EntityInputHandler for InputState {
         }
 
         self.decorations.adjust_for_edit(&range, new_text.len());
+
+        self.text_revision = self.text_revision.wrapping_add(1);
 
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map.adjust_folds_for_edit(&old_text, &range, new_text);

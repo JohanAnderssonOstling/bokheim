@@ -1,5 +1,6 @@
 //! Revision-scoped exact byte intervals shared by independently seeking cursors.
 
+use operation_failure::OperationError;
 use std::{
     collections::VecDeque,
     future::Future,
@@ -22,15 +23,14 @@ use crate::{
 };
 
 const CACHE_BYTES: usize = 16 * 1024 * 1024;
-const PREFETCH_BYTES: usize = 8 * 1024 * 1024;
 const CACHE_INTERVALS: usize = 512;
-const PREFETCH_INTERVALS: usize = 256;
 const MISS_BYTES: usize = 64 * 1024;
 
 #[derive(Default)]
 struct Cache {
     intervals: VecDeque<(u64, Arc<[u8]>)>,
     bytes: usize,
+    retained: Vec<(u64, Arc<[u8]>)>,
 }
 
 impl Cache {
@@ -44,11 +44,20 @@ impl Cache {
     }
 
     fn at(&self, offset: u64) -> Option<(u64, Arc<[u8]>)> {
-        self.intervals.iter().find(|(start, bytes)| offset >= *start && offset - *start < bytes.len() as u64).cloned()
+        self.all_intervals().find(|(start, bytes)| offset >= *start && offset - *start < bytes.len() as u64).cloned()
+    }
+
+    fn all_intervals(&self) -> impl Iterator<Item = &(u64, Arc<[u8]>)> {
+        self.retained.iter().chain(self.intervals.iter())
+    }
+
+    fn retain_cached(&mut self) {
+        self.retained.extend(self.intervals.drain(..));
+        self.bytes = 0;
     }
 
     fn missing(&self, ranges: &[(u64, usize)]) -> Vec<(u64, usize)> {
-        let mut cached: Vec<_> = self.intervals.iter().map(|(offset, bytes)| (*offset, *offset + bytes.len() as u64)).collect();
+        let mut cached: Vec<_> = self.all_intervals().map(|(offset, bytes)| (*offset, *offset + bytes.len() as u64)).collect();
         cached.sort_unstable();
         let mut missing = Vec::new();
         for &(offset, count) in ranges {
@@ -77,6 +86,7 @@ pub struct SparseBookSource {
     cache: Arc<Mutex<Cache>>,
     fetch: RangeFetch,
     batch_fetch: Option<BatchFetch>,
+    retain_prefetched: bool,
 }
 
 impl SparseBookSource {
@@ -98,7 +108,7 @@ impl SparseBookSource {
     #[cfg(target_arch = "wasm32")]
     pub fn browser<F>(length: u64, seed_offset: u64, seed: Vec<u8>, mut fetch: F) -> io::Result<Self>
     where
-        F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
+        F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, OperationError>> + 'static,
     {
         Self::new(length, seed_offset, seed, fetch_dispatch::browser(move |(offset, count)| fetch(offset, count)))
     }
@@ -109,7 +119,13 @@ impl SparseBookSource {
         }
         let mut cache = Cache::default();
         cache.insert(seed_offset, seed);
-        Ok(Self { length, cache: Arc::new(Mutex::new(cache)), fetch, batch_fetch: None })
+        Ok(Self { length, cache: Arc::new(Mutex::new(cache)), fetch, batch_fetch: None, retain_prefetched: false })
+    }
+
+    /// Keep the complete EPUB text prefetch alongside bounded demand reads.
+    pub(crate) fn with_retained_prefetch(mut self) -> Self {
+        self.retain_prefetched = true;
+        self
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -124,7 +140,7 @@ impl SparseBookSource {
     #[cfg(target_arch = "wasm32")]
     pub fn with_browser_prefetch<F>(mut self, fetch: F) -> Self
     where
-        F: FnMut(Vec<(u64, usize)>) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
+        F: FnMut(Vec<(u64, usize)>) -> FetchFuture<'static, Result<Vec<u8>, OperationError>> + 'static,
     {
         self.batch_fetch = Some(fetch_dispatch::browser(fetch));
         self
@@ -134,7 +150,7 @@ impl SparseBookSource {
         let Some(fetch) = &self.batch_fetch else { return Ok(()) };
         self.prefetch(ranges, |ranges| {
             let fetch = fetch.clone();
-            Box::pin(async move { fetch(ranges).await.map_err(|error| RemoteFileError::Failed(error.to_string())) }) as BoxFuture<'static, _>
+            Box::pin(async move { fetch(ranges).await.map_err(|error| RemoteFileError::Failed(OperationError::operation(error))) }) as BoxFuture<'static, _>
         })
         .await
     }
@@ -143,8 +159,8 @@ impl SparseBookSource {
         Box::new(Reader { source: self.clone(), position: 0, buffer_offset: 0, buffer: Arc::from([]), pending: None, next_fetch: None, batch_bytes: MISS_BYTES })
     }
 
-    /// Optional warming stays bounded. Larger/unusual resources retain ordinary
-    /// demand reads and the same revision checks as any other range request.
+    /// Fetch every missing interval, splitting large spans into transport-sized
+    /// batches. Each batch keeps the same revision and response validation.
     pub async fn prefetch<F, Response>(&self, ranges: &[(u64, usize)], fetch: F) -> io::Result<()>
     where
         F: Fn(Vec<(u64, usize)>) -> Response,
@@ -157,26 +173,29 @@ impl SparseBookSource {
             }
             previous_end = offset + count as u64;
         }
-        let missing = self.cache.lock().map_err(|_| io::Error::other("book cache poisoned"))?.missing(ranges);
+        let missing = {
+            let mut cache = self.cache.lock().map_err(|_| io::Error::other("book cache poisoned"))?;
+            if self.retain_prefetched {
+                // Preserve the seed and discovery reads too: the missing-range
+                // calculation relies on these bytes remaining available.
+                cache.retain_cached();
+            }
+            cache.missing(ranges)
+        };
         let mut batch = Vec::new();
         let mut count = 0;
-        let mut total = 0;
-        let mut intervals = 0;
-        for range in missing {
-            if intervals == PREFETCH_INTERVALS {
-                break;
+        for (mut offset, mut remaining) in missing {
+            while remaining > 0 {
+                if batch.len() == 128 || count == MAX_BUNDLE_BYTES {
+                    self.fetch_batch(std::mem::take(&mut batch), &fetch).await?;
+                    count = 0;
+                }
+                let length = remaining.min(MAX_BUNDLE_BYTES - count);
+                batch.push((offset, length));
+                count += length;
+                offset += length as u64;
+                remaining -= length;
             }
-            if range.1 > MAX_BUNDLE_BYTES || total + range.1 > PREFETCH_BYTES {
-                continue;
-            }
-            if batch.len() == 128 || count + range.1 > MAX_BUNDLE_BYTES {
-                self.fetch_batch(std::mem::take(&mut batch), &fetch).await?;
-                count = 0;
-            }
-            count += range.1;
-            total += range.1;
-            intervals += 1;
-            batch.push(range);
         }
         if !batch.is_empty() {
             self.fetch_batch(batch, &fetch).await?;
@@ -197,7 +216,12 @@ impl SparseBookSource {
         let mut cache = self.cache.lock().map_err(|_| io::Error::other("book cache poisoned"))?;
         let mut consumed = 0;
         for (offset, count) in ranges {
-            cache.insert(offset, bytes[consumed..consumed + count].to_vec());
+            let bytes = bytes[consumed..consumed + count].to_vec();
+            if self.retain_prefetched {
+                cache.retained.push((offset, bytes.into()));
+            } else {
+                cache.insert(offset, bytes);
+            }
             consumed += count;
         }
         Ok(())
@@ -237,7 +261,7 @@ impl AsyncBufRead for Reader {
                 this.buffer_offset = offset;
                 this.buffer = bytes;
             } else {
-                let end = cache.intervals.iter().filter_map(|(offset, _)| (*offset > this.position).then_some(*offset)).min().unwrap_or(this.source.length);
+                let end = cache.all_intervals().filter_map(|(offset, _)| (*offset > this.position).then_some(*offset)).min().unwrap_or(this.source.length);
                 drop(cache);
                 let batch = if this.next_fetch == Some(this.position) { (this.batch_bytes * 2).min(crate::range_reader::MAX_RANGE_BYTES) } else { MISS_BYTES };
                 let count = (end - this.position).min(batch as u64) as usize;

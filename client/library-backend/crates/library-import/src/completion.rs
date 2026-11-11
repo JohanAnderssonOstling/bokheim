@@ -7,14 +7,15 @@ use client_protocol::BackendError;
 use content_address::ContentHash;
 use library_database::transfer::{BookTransferState, ImportedBook};
 use library_database::{ContributorNameMatcher, ImportCommit};
-use library_files::asset_store::BookLease;
+use library_files::asset_store::{BookLease, StagedBook};
 use library_model::PublishedStagedBook;
 use sync_common::BookId;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ImportContent {
     pub book_id: BookId,
-    pub byte_checksum: ContentHash,
+    pub byte_checksum: Option<ContentHash>,
+    pub audiobook_content_hash: Option<ContentHash>,
     pub size_bytes: u64,
     pub source_identity: Option<PdfSourceIdentity>,
 }
@@ -22,7 +23,26 @@ pub(crate) struct ImportContent {
 impl LibraryImport<'_> {
     pub(crate) async fn resolve_import_content(&self, byte_checksum: ContentHash, size_bytes: u64, source_identity: Option<PdfSourceIdentity>) -> Result<ImportContent, BackendError> {
         let book_id = self.storage.database().resolve_scanned_content(byte_checksum, source_identity).await.map_err(BackendError::operation)?;
-        Ok(ImportContent { book_id, byte_checksum, size_bytes, source_identity })
+        Ok(ImportContent { book_id, byte_checksum: Some(byte_checksum), audiobook_content_hash: None, size_bytes, source_identity })
+    }
+
+    pub(crate) async fn resolve_audiobook_import(&self, checksum: ContentHash, byte_checksum: Option<ContentHash>, size_bytes: u64, known: Option<BookId>) -> Result<ImportContent, BackendError> {
+        let known = match (known, byte_checksum) {
+            (Some(known), _) => Some(known),
+            (None, Some(bytes)) => Some(self.storage.database().resolve_scanned_content(bytes, None).await?),
+            (None, None) => None,
+        };
+        let book_id = self.storage.database().resolve_audiobook_content(checksum, known).await?;
+        Ok(ImportContent { book_id, byte_checksum, audiobook_content_hash: Some(checksum), size_bytes, source_identity: None })
+    }
+
+    pub(crate) async fn staged_audiobook_content(&self, staged: &StagedBook) -> Result<ContentHash, BackendError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let reader = staged.open_reader().map_err(BackendError::operation)?;
+        #[cfg(target_arch = "wasm32")]
+        let reader = staged.open_reader().await.map_err(BackendError::operation)?;
+        let checksum = cpu_host::submit_book(&*self.cpu, cpu_host::HashAudiobookContent {}, cpu_host::as_cpu_reader(reader)).await?;
+        checksum.content_hash().ok_or_else(|| BackendError::message("audiobook fingerprint is unavailable"))
     }
 
     /// Hold local bytes through publication and the durable metadata commit.
@@ -39,7 +59,8 @@ impl LibraryImport<'_> {
         let restore_paths = self.import_restore_paths(&content.book_id).await?;
         Ok(ImportCommit {
             source_identity: content.source_identity,
-            byte_checksum: Some(content.byte_checksum),
+            byte_checksum: content.byte_checksum,
+            audiobook_content_hash: content.audiobook_content_hash,
             parent_id: import.parent_id,
             file_name: import.file_name,
             format: import.format,
@@ -57,7 +78,10 @@ impl LibraryImport<'_> {
     pub(crate) async fn commit_import(&self, import: ValidatedImport, content: ImportContent, inspection: Option<InspectedBook>, published: PublishedStagedBook) -> Result<(), BackendError> {
         let version = book_inspection::inspection_version(import.format);
         let commit = self.prepare_import_commit(import, content, published, inspection, version).await?;
-        let catalog_record = self.storage.database().catalog_import_record(BookId::from(content.byte_checksum), commit.format).await.map_err(BackendError::operation)?;
+        let catalog_record = match content.byte_checksum {
+            Some(checksum) => self.storage.database().catalog_import_record(BookId::from(checksum), commit.format).await.map_err(BackendError::operation)?,
+            None => None,
+        };
         self.storage.database().commit_import_with_catalog_answer(commit, Some(ContributorNameMatcher::Normalized), catalog_record).await.map_err(BackendError::operation)?;
         self.events.notify_contents_changed();
         Ok(())

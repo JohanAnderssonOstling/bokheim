@@ -432,7 +432,7 @@ impl Render for ComicReaderView {
                     view.swipe.begin(false);
                     view.swipe.push(dx, dy);
                     view.finish_swipe(window, cx);
-                } else if window.is_page_scroll_swipe() {
+                } else if window.is_touch_scroll() {
                     if matches!(event.touch_phase, TouchPhase::Started) {
                         view.swipe.begin(components::in_bottom_gesture_edge(event.position, window));
                     }

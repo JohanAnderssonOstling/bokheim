@@ -4,9 +4,11 @@
 pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 use lopdf::xref::{Xref, XrefEntry, XrefType};
 use lopdf::{Dictionary, Document, Object, ObjectId, ObjectStream, Reader, Stream};
+use memchr::memmem;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
+    time::Instant,
 };
 
 const MAX_OBJECT: usize = 16 * 1024 * 1024;
@@ -14,6 +16,16 @@ const MAX_RETAINED: usize = 64 * 1024 * 1024;
 const MAX_OBJECTS: usize = 100_000;
 const OFFSET_RECOVERY_RADIUS: u64 = 65536;
 const MAX_OFFSET_SEARCHES: usize = 64;
+
+fn profile_start() -> Option<Instant> {
+    log::log_enabled!(target: "library_pdf_profile", log::Level::Debug).then(Instant::now)
+}
+
+fn profile_phase(stage: &str, started: Option<Instant>) {
+    if let Some(started) = started {
+        log::debug!(target: "library_pdf_profile", "{{\"event\":\"pdf_sparse_phase\",\"stage\":\"{stage}\",\"elapsed_ns\":{}}}", started.elapsed().as_nanos());
+    }
+}
 
 /// Materialize first-page resources for conservative embedded-cover extraction.
 /// Existing object and retained-byte limits also bound image streams.
@@ -48,7 +60,8 @@ fn cover_indexed(reader: &mut dyn ReadSeek) -> MetadataResult<Document> {
 // number in their header. Use those only when all inherited page properties are
 // already present on that first page; never guess missing objects.
 fn cover_linearized(reader: &mut dyn ReadSeek) -> MetadataResult<Document> {
-    let mut source = Source { reader, length: 0, base: 0, document: Document::new(), loading: HashSet::new(), walked: HashSet::new(), retained: 0, include_images: true, offset_hint: None, offset_searches: 0 };
+    let mut source =
+        Source { reader, length: 0, base: 0, document: Document::new(), loading: HashSet::new(), walked: HashSet::new(), retained: 0, include_images: true, offset_hint: None, offset_searches: 0, object_streams: HashMap::new() };
     source.length = source.reader.seek(SeekFrom::End(0))?;
     let header = source.range(0, 65536)?;
     if !header.starts_with(b"%PDF-") {
@@ -81,7 +94,7 @@ fn cover_linearized(reader: &mut dyn ReadSeek) -> MetadataResult<Document> {
 }
 
 fn xref_tables(bytes: &[u8]) -> impl Iterator<Item = usize> + '_ {
-    bytes.windows(5).enumerate().filter_map(|(index, w)| (w.starts_with(b"xref") && w[4].is_ascii_whitespace() && (index == 0 || bytes[index - 1].is_ascii_whitespace())).then_some(index))
+    memmem::find_iter(bytes, b"xref").filter(|&index| bytes.get(index + 4).is_some_and(u8::is_ascii_whitespace) && (index == 0 || bytes[index - 1].is_ascii_whitespace()))
 }
 
 /// Load only the trailer and document root. Book identity must not require
@@ -98,13 +111,14 @@ fn document_root_from_reader(reader: &mut dyn ReadSeek) -> MetadataResult<Docume
 }
 
 fn open(reader: &mut dyn ReadSeek) -> MetadataResult<Source<'_>> {
-    let mut source = Source { reader, length: 0, base: 0, document: Document::new(), loading: HashSet::new(), walked: HashSet::new(), retained: 0, include_images: false, offset_hint: None, offset_searches: 0 };
+    let mut source =
+        Source { reader, length: 0, base: 0, document: Document::new(), loading: HashSet::new(), walked: HashSet::new(), retained: 0, include_images: false, offset_hint: None, offset_searches: 0, object_streams: HashMap::new() };
     source.length = source.reader.seek(SeekFrom::End(0))?;
     let header = source.range(0, 1024)?;
-    source.base = header.windows(5).position(|bytes| bytes == b"%PDF-").ok_or("invalid PDF header")? as u64;
+    source.base = memmem::find(&header, b"%PDF-").ok_or("invalid PDF header")? as u64;
     source.length -= source.base;
     let tail = source.range(source.length.saturating_sub(65536), 65536)?;
-    let start = tail.windows(9).rposition(|bytes| bytes == b"startxref").ok_or("PDF has no cross-reference pointer")?;
+    let start = memmem::rfind(&tail, b"startxref").ok_or("PDF has no cross-reference pointer")?;
     let mut offset = std::str::from_utf8(tail[start + 9..].split(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_digit()).next().unwrap_or_default())?.trim().parse::<u64>()?;
     if let Err(original) = source.references(offset) {
         // Some producers leave a stale startxref after changing bytes. Search
@@ -157,7 +171,50 @@ struct Source<'a> {
     loading: HashSet<ObjectId>,
     retained: usize,
     walked: HashSet<ObjectId>,
+    object_streams: HashMap<u32, IndexedObjectStream>,
 }
+
+struct IndexedObjectStream {
+    stream: Stream,
+    offsets: HashMap<u32, usize>,
+}
+
+impl IndexedObjectStream {
+    fn index(stream: &Stream) -> MetadataResult<Option<HashMap<u32, usize>>> {
+        stream.dict.get(b"N")?.as_i64()?;
+        let first = usize::try_from(stream.dict.get(b"First")?.as_i64()?)?;
+        let index = std::str::from_utf8(stream.content.get(..first).ok_or("invalid PDF object stream index")?)?;
+        let mut words = index.split_whitespace();
+        let mut offsets = HashMap::new();
+        while let Some(id) = words.next() {
+            let Some(offset) = words.next() else { return Ok(None) };
+            let (Ok(id), Ok(offset)) = (id.parse::<u32>(), offset.parse::<u32>()) else { return Ok(None) };
+            let offset = first.checked_add(offset as usize).ok_or("PDF object stream offset overflow")?;
+            // Keep the existing tolerant parser for damaged or duplicate index
+            // entries, whose recovery can depend on parsing the whole stream.
+            if offset >= stream.content.len() || offsets.insert(id, offset).is_some() {
+                return Ok(None);
+            }
+            if offsets.len() > MAX_OBJECTS {
+                return Err("PDF object stream index exceeds inspection limit".into());
+            }
+        }
+        Ok(Some(offsets))
+    }
+
+    fn object(&self, id: ObjectId) -> MetadataResult<Object> {
+        if id.1 != 0 {
+            return Err("invalid compressed PDF object generation".into());
+        }
+        let offset = *self.offsets.get(&id.0).ok_or("PDF object stream omitted requested object")?;
+        // Reuse lopdf's bounded object parser with an indirect-object header.
+        // The remaining bytes preserve its handling of whitespace and comments.
+        let mut bytes = format!("{} 0 obj\n", id.0).into_bytes();
+        bytes.extend_from_slice(&self.stream.content[offset..]);
+        Ok(parse_object(&bytes, id)?)
+    }
+}
+
 impl Source<'_> {
     fn cover_aux(&mut self, page: &Dictionary) -> MetadataResult<()> {
         if let Ok(group) = page.get(b"Group") {
@@ -171,9 +228,15 @@ impl Source<'_> {
             return Err("PDF range exceeds inspection limit".into());
         }
         let count = (count as u64).min(self.length - offset) as usize;
-        self.reader.seek(SeekFrom::Start(self.base + offset))?;
+        let started = profile_start();
+        let result = self.reader.seek(SeekFrom::Start(self.base + offset));
+        profile_phase("seek", started);
+        result?;
         let mut bytes = vec![0; count];
-        self.reader.read_exact(&mut bytes)?;
+        let started = profile_start();
+        let result = self.reader.read_exact(&mut bytes);
+        profile_phase("read", started);
+        result?;
         Ok(bytes)
     }
     fn remember(&mut self, id: ObjectId, object: Object, cost: usize) -> MetadataResult<Object> {
@@ -214,12 +277,37 @@ impl Source<'_> {
                 self.remember(id, object, cost)
             }
             XrefEntry::Compressed { container, .. } => {
-                let mut stream = self.object((container, 0))?.as_stream()?.clone();
-                let objects = ObjectStream::new_with_limit(&mut stream, Some(MAX_OBJECT))?;
-                for (object_id, object) in objects.objects {
-                    self.remember(object_id, object, 256)?;
+                if !self.object_streams.contains_key(&container) {
+                    let Object::Stream(mut stream) = self.object((container, 0))? else {
+                        return Err("PDF object container is not a stream".into());
+                    };
+                    let started = profile_start();
+                    let result = stream.decompress_with_limit(MAX_OBJECT);
+                    profile_phase("object_stream_decompress", started);
+                    result?;
+                    let started = profile_start();
+                    let offsets = IndexedObjectStream::index(&stream)?;
+                    profile_phase("object_stream_index", started);
+                    if let Some(offsets) = offsets {
+                        let indexed = IndexedObjectStream { stream, offsets };
+                        let cost = indexed.stream.content.len().checked_add(indexed.offsets.len() * std::mem::size_of::<(u32, usize)>()).ok_or("PDF object stream size overflow")?;
+                        self.retained = self.retained.checked_add(cost).ok_or("PDF inspection size overflow")?;
+                        if self.retained > MAX_RETAINED {
+                            return Err("PDF metadata exceeds inspection limit".into());
+                        }
+                        self.object_streams.insert(container, indexed);
+                    } else {
+                        // Preserve support for malformed indexes through the
+                        // same parser used before selective object inspection.
+                        let objects = ObjectStream::new_with_limit(&mut stream, Some(MAX_OBJECT))?;
+                        for (object_id, object) in objects.objects {
+                            self.remember(object_id, object, 256)?;
+                        }
+                        return self.document.objects.get(&id).cloned().ok_or_else(|| "PDF object stream omitted requested object".into());
+                    }
                 }
-                self.document.objects.get(&id).cloned().ok_or_else(|| "PDF object stream omitted requested object".into())
+                let object = self.object_streams.get(&container).ok_or("missing PDF object stream")?.object(id)?;
+                self.remember(id, object, 256)
             }
             _ => Err("invalid PDF cross-reference entry".into()),
         }
@@ -329,11 +417,21 @@ impl Source<'_> {
                 return Err("PDF has too many incremental revisions".into());
             }
             let mut count = 4096;
-            let (xref, trailer) = loop {
-                let bytes = self.range(offset, count)?;
+            let mut bytes = self.range(offset, count)?;
+            let mut searched = 0;
+            let mut trailer_start = None;
+            let (mut xref, trailer) = loop {
                 if bytes.starts_with(b"xref") {
-                    if let Ok(parsed) = table(&bytes) {
-                        break parsed;
+                    if trailer_start.is_none() {
+                        trailer_start = memmem::find(&bytes[searched..], b"trailer").map(|index| searched + index);
+                        searched = bytes.len().saturating_sub(6);
+                    }
+                    // Parse entries only once the complete trailer dictionary
+                    // is present. Incomplete windows otherwise rebuild the index.
+                    if let Some(start) = trailer_start {
+                        if dictionary_end(&bytes[start + 7..]).is_some() {
+                            break table(&bytes)?;
+                        }
                     }
                 } else {
                     let mut words = bytes.split(|byte| byte.is_ascii_whitespace()).filter(|word| !word.is_empty());
@@ -345,6 +443,8 @@ impl Source<'_> {
                     return Err("invalid or oversized PDF cross-reference table".into());
                 }
                 count = (count * 2).min(MAX_OBJECT);
+                let additional = self.range(offset + bytes.len() as u64, count - bytes.len())?;
+                bytes.extend_from_slice(&additional);
             };
             if self.document.trailer.is_empty() {
                 self.document.trailer = trailer.clone();
@@ -354,7 +454,20 @@ impl Source<'_> {
                     self.document.trailer.set(key.clone(), value.clone());
                 }
             }
-            self.document.reference_table.merge(xref);
+            let started = profile_start();
+            if self.document.reference_table.entries.is_empty() {
+                // The newest revision has no entries to compete with yet.
+                self.document.reference_table.entries = xref.entries;
+            } else if xref.entries.len() >= self.document.reference_table.entries.len() {
+                // Merge whole indexes in bulk. Append the newest entries last
+                // so their values, including free entries, keep precedence.
+                xref.entries.append(&mut self.document.reference_table.entries);
+                self.document.reference_table.entries = xref.entries;
+            } else {
+                // Small older revisions only need to fill individual gaps.
+                self.document.reference_table.merge(xref);
+            }
+            profile_phase("xref_merge", started);
             if self.document.reference_table.entries.len() > MAX_OBJECTS {
                 return Err("PDF cross-reference table exceeds inspection limit".into());
             }
@@ -478,17 +591,38 @@ fn object_header(bytes: &[u8], id: ObjectId) -> bool {
 }
 
 fn parse_object(bytes: &[u8], id: ObjectId) -> lopdf::Result<Object> {
+    let started = profile_start();
     let mut document = Document::new();
     document.reference_table.insert(id.0, XrefEntry::Normal { offset: 0, generation: id.1 });
-    Reader { buffer: bytes, document, encryption_state: None, raw_objects: BTreeMap::new(), password: None, strict: false, max_decompressed_size: Some(MAX_OBJECT) }.get_object(id, &mut HashSet::new())
+    let result = Reader { buffer: bytes, document, encryption_state: None, raw_objects: BTreeMap::new(), password: None, strict: false, max_decompressed_size: Some(MAX_OBJECT) }.get_object(id, &mut HashSet::new());
+    profile_phase("indirect_object_parse", started);
+    result
 }
 fn number(word: Option<&[u8]>) -> MetadataResult<u64> {
     Ok(std::str::from_utf8(word.ok_or("missing PDF integer")?)?.parse()?)
 }
+
+fn reference_table(entries: Vec<(u32, XrefEntry)>, kind: XrefType) -> Xref {
+    let mut xref = Xref::new(0, kind);
+    if entries.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+        // Sorted, distinct keys allow BTreeMap to build its tree in bulk.
+        xref.size = entries.last().map_or(0, |(id, _)| id.saturating_add(1));
+        xref.entries = entries.into_iter().collect();
+    } else {
+        // Keep the parser's last-entry-wins behavior for duplicate keys and
+        // support producers that emit their subsections in a different order.
+        for (id, entry) in entries {
+            xref.insert(id, entry);
+        }
+    }
+    xref
+}
+
 fn table(bytes: &[u8]) -> MetadataResult<(Xref, Dictionary)> {
-    let trailer = bytes.windows(7).position(|word| word == b"trailer").ok_or("incomplete PDF trailer")?;
+    let trailer = memmem::find(bytes, b"trailer").ok_or("incomplete PDF trailer")?;
     let mut words = bytes[4..trailer].split(|byte| byte.is_ascii_whitespace()).filter(|word| !word.is_empty());
-    let mut xref = Xref::new(0, XrefType::CrossReferenceTable);
+    let mut entries = Vec::new();
+    let started = profile_start();
     while let Some(first) = words.next() {
         let first = u32::try_from(number(Some(first))?)?;
         let count = u32::try_from(number(words.next())?)?;
@@ -506,9 +640,11 @@ fn table(bytes: &[u8]) -> MetadataResult<(Xref, Dictionary)> {
                 Some(b"f") => XrefEntry::Free,
                 _ => return Err("invalid PDF cross-reference flag".into()),
             };
-            xref.insert(first.checked_add(index).ok_or("PDF object number overflow")?, entry);
+            entries.push((first.checked_add(index).ok_or("PDF object number overflow")?, entry));
         }
     }
+    let xref = reference_table(entries, XrefType::CrossReferenceTable);
+    profile_phase("xref_table_entries", started);
     let mut dictionary = b"1 0 obj\n".to_vec();
     dictionary.extend_from_slice(&bytes[trailer + 7..]);
     Ok((xref, parse_object(&dictionary, (1, 0))?.as_dict()?.clone()))
@@ -527,9 +663,13 @@ fn stream_references(stream: &Stream) -> MetadataResult<(Xref, Dictionary)> {
     if index.len() % 2 != 0 {
         return Err("invalid PDF cross-reference index".into());
     }
-    let bytes = stream.decompressed_content_with_limit(MAX_OBJECT)?;
+    let started = profile_start();
+    let bytes = stream.decompressed_content_with_limit(MAX_OBJECT);
+    profile_phase("xref_stream_decompress", started);
+    let bytes = bytes?;
     let mut position = 0;
-    let mut xref = Xref::new(0, XrefType::CrossReferenceStream);
+    let mut entries = Vec::new();
+    let started = profile_start();
     for pair in index.as_chunks::<2>().0 {
         let first = u32::try_from(pair[0].as_i64()?)?;
         let count = u32::try_from(pair[1].as_i64()?)?;
@@ -553,9 +693,11 @@ fn stream_references(stream: &Stream) -> MetadataResult<(Xref, Dictionary)> {
                 2 => XrefEntry::Compressed { container: u32::try_from(fields[1])?, index: u16::try_from(fields[2])? },
                 _ => continue,
             };
-            xref.insert(first.checked_add(index).ok_or("PDF object number overflow")?, entry);
+            entries.push((first.checked_add(index).ok_or("PDF object number overflow")?, entry));
         }
     }
+    let xref = reference_table(entries, XrefType::CrossReferenceStream);
+    profile_phase("xref_stream_entries", started);
     Ok((xref, stream.dict.clone()))
 }
 
@@ -635,16 +777,21 @@ fn stream_start(bytes: &[u8]) -> Option<usize> {
 }
 
 /// Read only Info/XMP and the page-tree root, never page streams or images.
-pub fn metadata(mut reader: impl Read + Seek) -> MetadataResult<Document> {
-    metadata_from_reader(&mut reader)
+pub fn metadata(reader: impl Read + Seek) -> MetadataResult<Document> {
+    metadata_with_root(reader, |_| {})
 }
 
-fn metadata_from_reader(reader: &mut dyn ReadSeek) -> MetadataResult<Document> {
-    let mut source = open(reader)?;
+/// Inspect the loaded catalog before continuing with Info/XMP and the page-tree
+/// root. The callback also runs when subsequent metadata validation fails, so
+/// callers can retain catalog provenance without rebuilding the object index.
+pub fn metadata_with_root(mut reader: impl Read + Seek, inspect_root: impl FnOnce(&Document)) -> MetadataResult<Document> {
+    let mut source = open(&mut reader)?;
+    let root = source.document.trailer.get(b"Root")?.as_reference()?;
+    source.object(root)?;
+    inspect_root(&source.document);
     if let Ok(info) = source.document.trailer.get(b"Info").cloned() {
         let _ = source.graph(info, 0);
     }
-    let root = source.document.trailer.get(b"Root")?.as_reference()?;
     let root_dict = source.object(root)?.as_dict()?.clone();
     if let Ok(metadata) = root_dict.get(b"Metadata").cloned() {
         let _ = source.graph(metadata, 0);

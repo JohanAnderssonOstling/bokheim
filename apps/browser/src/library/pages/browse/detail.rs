@@ -21,6 +21,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, AppContext, AvailableSpace, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Render, SharedString, Task, Window, canvas, div, px};
 use gpui_component::{IconName, Placement, WindowExt as _};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_image_eviction::track_image;
 use library_model::{BookCardRow, BookDetail, BookLocator, BookSource, BookTocEntry, CardKey, LibraryFileTypeFilter};
 use sync_common::{BookId, ROOT_DIR_ID};
@@ -96,6 +97,8 @@ pub(crate) struct BookDetailPage {
     /// Whether the contents and the description sections are open, where they
     /// can be folded: in two columns and narrower.
     contents_open: bool,
+    contents_filter: Option<Entity<InputState>>,
+    contents_query: String,
     description_open: bool,
     focus: FocusHandle,
     /// The load in flight. Replacing it drops the one before, which cancels it.
@@ -182,6 +185,8 @@ impl BookDetailPage {
                 _contents_updates: contents_updates,
                 expanded: HashSet::new(),
                 contents_open: true,
+                contents_filter: None,
+                contents_query: String::new(),
                 description_open: true,
                 focus: cx.focus_handle(),
                 request: None,
@@ -374,6 +379,18 @@ fn drawn_entries<'a>(entries: &'a [BookTocEntry], expanded: &HashSet<String>, de
     }
 }
 
+fn matching_entries<'a>(entries: &'a [BookTocEntry], query: &str, depth: usize) -> Vec<DrawnEntry<'a>> {
+    let mut matches = Vec::new();
+    for entry in entries {
+        let children = matching_entries(&entry.children, query, depth + 1);
+        if !children.is_empty() || book_model::normalize_search_text(&entry.title).contains(query) {
+            matches.push(DrawnEntry { entry, depth });
+            matches.extend(children);
+        }
+    }
+    matches
+}
+
 /// "12 h 41 min", for a fact read at a glance rather than a clock read against a
 /// playhead — the player's `0:41:05` answers a different question.
 pub(crate) fn spoken_duration(duration_ms: u64) -> String {
@@ -392,6 +409,17 @@ pub(crate) fn spoken_duration(duration_ms: u64) -> String {
 
 impl Render for BookDetailPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.contents_filter.is_none() {
+            let input = components::contents_filter_input(window, cx);
+            cx.subscribe_in(&input, window, |page, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    page.contents_query = book_model::normalize_search_text(&input.read(cx).value());
+                    cx.notify();
+                    window.refresh();
+                }
+            }).detach();
+            self.contents_filter = Some(input);
+        }
         self.cover_visibility.track(window);
         if matches!(self.cover, DetailCover::NeedsReload) {
             self.load_cover(cx);
@@ -431,9 +459,7 @@ impl BookDetailPage {
             let (title, content) = page.update(cx, |page, cx| {
                 let audiobook = page.book.format_category == LibraryFileTypeFilter::Audiobook;
                 let label = if contents { if audiobook { text!(browse::chapters) } else { text!(common::contents) } } else { text!(common::description) };
-                let title = components::row(components::SPACE_SM).flex_1().min_w_0().child(div().flex_1().min_w_0().child(label)).when(contents && page.book.library_file().is_some(), |header| {
-                    header.child(components::contents_read_reset_button("reset-chapter-read-status").on_click(cx.listener(|page, _, _, cx| page.reset_contents_read_status(None, cx))))
-                });
+                let title = div().flex_1().min_w_0().child(label);
                 let content = if contents {
                     page.detail.clone().filter(|detail| !detail.toc.is_empty()).map(|detail| {
                         let locator = page.locator();
@@ -495,6 +521,7 @@ impl BookDetailPage {
 
         let audiobook = book.format_category == LibraryFileTypeFilter::Audiobook;
         let mobile = compact && layout == DetailLayout::Stacked && !cfg!(feature = "kobo");
+        let left_aligned_actions = !mobile && layout != DetailLayout::Columns;
         let page_padding = if mobile && width < 360.0 { components::SPACE_MD } else { components::SPACE_LG };
         let back_size = components::topbar_action_height_rem() * rem_size;
         // The book that is playing: its controls, and where playback is now.
@@ -588,7 +615,7 @@ impl BookDetailPage {
         let position = book.library_file().and_then(|_| {
             let entry = detail.as_ref().and_then(|detail| detail.current_entry.clone()).filter(|entry| !entry.trim().is_empty()).map(SharedString::from);
             let percentage = (book.progress > 0.0).then(|| SharedString::from(format!("{}%", book.progress.round() as i32)));
-            (entry.is_some() || percentage.is_some()).then(|| components::book_detail_position(entry, percentage, theme))
+            (entry.is_some() || percentage.is_some()).then(|| components::book_detail_position(entry, percentage, left_aligned_actions, theme))
         });
 
         let download_state = book.library_file().and_then(|book_id| self.ui.updates().read(cx).download_state(book_id)).unwrap_or(DownloadState::Queued);
@@ -632,6 +659,7 @@ impl BookDetailPage {
                 );
             }
         }
+        actions = actions.when(left_aligned_actions, |actions| actions.justify_start());
         // The book that is playing is controlled here rather than offered: its
         // controls stand where Listen and the reading position would. Beside
         // the cover they would get half the row, so there they go under both.
@@ -753,7 +781,12 @@ impl BookDetailPage {
     /// list away. Sheets supply their own header and pass `None`.
     fn render_contents(&self, detail: &BookDetail, audiobook: bool, listening: Option<Duration>, collapsible: Option<bool>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
         let mut drawn = Vec::new();
-        drawn_entries(&detail.toc, &self.expanded, 0, &mut drawn);
+        if self.contents_query.is_empty() {
+            drawn_entries(&detail.toc, &self.expanded, 0, &mut drawn);
+        } else {
+            drawn = matching_entries(&detail.toc, &self.contents_query, 0);
+        }
+        let no_matches = drawn.is_empty();
         // Include entries hidden under collapsed parents when locating playback.
         let mut ordered = Vec::new();
         fn visit<'a>(entries: &'a [BookTocEntry], ordered: &mut Vec<&'a BookTocEntry>) {
@@ -790,7 +823,7 @@ impl BookDetailPage {
         let nested = detail.toc.iter().any(|entry| !entry.children.is_empty());
         let mut panel = components::contents_panel(theme).when(audiobook, |panel| panel.child(components::contents_timing_header(theme)));
         for (index, DrawnEntry { entry, depth }) in drawn.into_iter().enumerate() {
-            let expanded = self.expanded.contains(&entry.target);
+            let expanded = !self.contents_query.is_empty() || self.expanded.contains(&entry.target);
             let row = components::ContentsRow {
                 depth,
                 has_children: !entry.children.is_empty(),
@@ -807,7 +840,7 @@ impl BookDetailPage {
             // clicks have to be separable. Attach the toggle directly to the
             // disclosure, and leave leaf entries transparent to the row click.
             let disclosure = nested.then(|| {
-                components::contents_disclosure(format!("book-detail-disclosure-{index}"), row, theme).when(row.has_children, |disclosure| {
+                components::contents_disclosure(format!("book-detail-disclosure-{index}"), row, theme).when(row.has_children && self.contents_query.is_empty(), |disclosure| {
                     let page = page.clone();
                     let target = entry.target.clone();
                     disclosure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| page.update(cx, |page, cx| page.toggle_entry(&target, cx)))
@@ -836,6 +869,10 @@ impl BookDetailPage {
                     .when(!can_open, |row| row.cursor_default()),
             );
         }
+        let reset = can_open.then(|| components::contents_read_reset_button("reset-chapter-read-status").on_click(cx.listener(|page, _, _, cx| page.reset_contents_read_status(None, cx))));
+        let controls = self.contents_filter.as_ref().map(|input| components::contents_filter_bar(input, reset, theme));
+        let panel = div().w_full().min_w_0().flex().flex_col().children(controls).child(panel)
+            .when(no_matches, |panel| panel.child(components::reader_state_note(text!(reader::no_chapters_match_your_filter), theme).p(px(12.0))));
         let Some(collapsible) = collapsible else { return panel.into_any_element() };
         let open = !collapsible || self.contents_open;
         let heading = components::book_detail_section_heading(if audiobook { text!(browse::chapters) } else { text!(common::contents) }, None::<SharedString>, collapsible.then_some(open), theme).id("book-detail-contents-heading").when(
@@ -849,9 +886,6 @@ impl BookDetailPage {
                 }))
             },
         );
-        let heading = components::row(components::SPACE_SM)
-            .child(heading.flex_1())
-            .when(can_open, |heading| heading.child(components::contents_read_reset_button("reset-chapter-read-status").on_click(cx.listener(|page, _, _, cx| page.reset_contents_read_status(None, cx)))));
         components::book_detail_section().child(heading).when(open, |section| section.child(panel)).into_any_element()
     }
 }

@@ -177,7 +177,7 @@ fn imports_nested_zip_with_original_dictzip_and_rejects_corrupt_source_data() {
     let end = corrupt.len();
     corrupt[end - 8] ^= 1;
     let input = [("ifo", ifo), ("idx", index), ("dict.dz", corrupt), ("syn", aliases)].into_iter().map(|(suffix, bytes)| DictionaryFile { name: format!("example.{suffix}"), bytes }).collect();
-    assert!(prepare_import(input).unwrap_err().contains("Damaged dictzip"));
+    assert!(prepare_import(input).unwrap_err().to_string().contains("Damaged dictzip"));
 }
 
 #[test]
@@ -328,7 +328,7 @@ fn rejects_unsorted_headword_and_alias_indexes() {
             ifo = ifo.replace("synwordcount=1\n", "synwordcount=2\n");
         }
         metadata.bytes = ifo.into_bytes();
-        assert!(prepare_import(files).unwrap_err().contains("StarDict order"));
+        assert!(prepare_import(files).unwrap_err().to_string().contains("StarDict order"));
     }
 }
 

@@ -57,6 +57,10 @@ pub async fn run_file_jobs(state: &RwLock<LibraryState>) -> Result<(), BackendEr
             tokio::task::yield_now().await;
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Err(error) = native::purge_background_directories(state).await {
+        failure.get_or_insert(error);
+    }
     failure.map_or(Ok(()), Err)
 }
 

@@ -1,5 +1,6 @@
 //! Durable update lifecycle. Hosts own I/O, scheduling, and activation. Every
 //! transition is persisted before it is returned to a caller or shown in the UI.
+use crate::UpdateError;
 use crate::{Artifact, DiscoveryConfig, Installed, Manifest, verify};
 use ring::digest::{SHA256, digest};
 use semver::Version;
@@ -115,7 +116,7 @@ pub struct ApprovedPlan {
     pub ready_session: Option<String>,
     pub failures: u32,
     pub waiting: Option<WaitReason>,
-    pub last_error: Option<String>,
+    pub last_error: Option<UpdateError>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -126,15 +127,15 @@ pub struct Record {
     pub envelope_digest: String,
     pub discovered: Option<Vec<u8>>,
     pub discovery_failures: u32,
-    pub last_discovery_error: Option<String>,
+    pub last_discovery_error: Option<UpdateError>,
     pub approved: Option<ApprovedPlan>,
 }
 
 /// CAS prevents separate hosts or stale settings windows from overwriting a
 /// newer decision. A conflict must reload; it must not retry a stale write.
 pub trait Store {
-    fn load(&self) -> Result<Record, String>;
-    fn save(&mut self, expected_revision: u64, next: &Record) -> Result<(), String>;
+    fn load(&self) -> Result<Record, UpdateError>;
+    fn save(&mut self, expected_revision: u64, next: &Record) -> Result<(), UpdateError>;
 }
 
 pub struct Coordinator<S> {
@@ -162,7 +163,7 @@ fn trust_scope(config: &DiscoveryConfig) -> String {
 
 impl<S: Store> Coordinator<S> {
     /// Session ID must identify a process launch, not a window or activity resume.
-    pub fn open(store: S, config: DiscoveryConfig, device: DeviceVersion, session: String, application_activation: ApplicationActivation) -> Result<Self, String> {
+    pub fn open(store: S, config: DiscoveryConfig, device: DeviceVersion, session: String, application_activation: ApplicationActivation) -> Result<Self, UpdateError> {
         config.validate()?;
         if session.is_empty() {
             return Err("update coordinator requires a launch session ID".into());
@@ -203,12 +204,12 @@ impl<S: Store> Coordinator<S> {
     pub fn config(&self) -> &DiscoveryConfig {
         &self.config
     }
-    pub fn reload(&mut self) -> Result<(), String> {
+    pub fn reload(&mut self) -> Result<(), UpdateError> {
         self.record = self.store.load()?;
         Ok(())
     }
 
-    fn commit(&mut self, mut next: Record) -> Result<(), String> {
+    fn commit(&mut self, mut next: Record) -> Result<(), UpdateError> {
         let expected = self.record.revision;
         next.revision = expected.checked_add(1).ok_or("update state revision exhausted")?;
         self.store.save(expected, &next)?;
@@ -216,7 +217,7 @@ impl<S: Store> Coordinator<S> {
         Ok(())
     }
 
-    pub fn discovered(&mut self, envelope: Vec<u8>, now: u64) -> Result<(), String> {
+    pub fn discovered(&mut self, envelope: Vec<u8>, now: u64) -> Result<(), UpdateError> {
         let verified = verify(&envelope, &self.config, now, self.record.highest_sequence)?;
         let fingerprint = hash(&envelope);
         if verified.manifest().sequence == self.record.highest_sequence && fingerprint != self.record.envelope_digest {
@@ -244,7 +245,7 @@ impl<S: Store> Coordinator<S> {
         Ok(())
     }
 
-    pub fn discovery_failed(&mut self, diagnostic: String) -> Result<(), String> {
+    pub fn discovery_failed(&mut self, diagnostic: UpdateError) -> Result<(), UpdateError> {
         let mut next = self.record.clone();
         next.discovery_failures = next.discovery_failures.saturating_add(1);
 
@@ -280,7 +281,7 @@ impl<S: Store> Coordinator<S> {
     }
 
     /// Explicit user authorization, committed before downloads can begin.
-    pub fn approve(&mut self, now: u64) -> Result<(), String> {
+    pub fn approve(&mut self, now: u64) -> Result<(), UpdateError> {
         if self.record.approved.is_some() {
             return Ok(());
         }
@@ -317,7 +318,7 @@ impl<S: Store> Coordinator<S> {
 
     /// Revalidate the pinned signature using its approval time: feed expiry must
     /// not revoke an already-authorized plan during a long offline interval.
-    pub fn approved_manifest(&self) -> Result<Manifest, String> {
+    pub fn approved_manifest(&self) -> Result<Manifest, UpdateError> {
         let plan = self.record.approved.as_ref().ok_or("no approved update")?;
         let verified = verify(&plan.envelope, &self.config, plan.approved_at, 0)?;
         let offer = crate::offer(&verified, &plan.installed_at_approval.installed());
@@ -333,7 +334,7 @@ impl<S: Store> Coordinator<S> {
     }
 
     /// Call only after length/hash verification and durable file publication.
-    pub fn artifact_prepared(&mut self, kind: ArtifactKind) -> Result<(), String> {
+    pub fn artifact_prepared(&mut self, kind: ArtifactKind) -> Result<(), UpdateError> {
         self.approved_manifest()?;
         let mut next = self.record.clone();
         let plan = next.approved.as_mut().ok_or("no approved update")?;
@@ -355,7 +356,7 @@ impl<S: Store> Coordinator<S> {
 
     /// Temporary errors wait for an explicit retry or the next launch. A missing
     /// or corrupt prepared file returns to preparation, without activating here.
-    pub fn preparation_failed(&mut self, reason: WaitReason, diagnostic: String) -> Result<(), String> {
+    pub fn preparation_failed(&mut self, reason: WaitReason, diagnostic: UpdateError) -> Result<(), UpdateError> {
         let mut next = self.record.clone();
         let plan = next.approved.as_mut().ok_or("no approved update")?;
         if plan.phase != Phase::Preparing {
@@ -368,7 +369,7 @@ impl<S: Store> Coordinator<S> {
         self.commit(next)
     }
 
-    pub fn missing_artifact(&mut self, kind: ArtifactKind) -> Result<(), String> {
+    pub fn missing_artifact(&mut self, kind: ArtifactKind) -> Result<(), UpdateError> {
         let mut next = self.record.clone();
         let plan = next.approved.as_mut().ok_or("no approved update")?;
         if plan.phase == Phase::Activating {
@@ -394,7 +395,7 @@ impl<S: Store> Coordinator<S> {
     /// Application activation waits for a later launch. Reference-only work
     /// may publish its next-start snapshot from the current background worker.
     /// External installers must replace the application before data activation.
-    pub fn begin_activation(&mut self) -> Result<Manifest, String> {
+    pub fn begin_activation(&mut self) -> Result<Manifest, UpdateError> {
         let reference_ready = self.is_taxonomy_only() && self.record.approved.as_ref().is_some_and(|plan| matches!(plan.phase, Phase::Ready | Phase::Activating));
         if !self.activation_due() && !reference_ready {
             return Err("update activation must wait for a later launch".into());
@@ -414,7 +415,7 @@ impl<S: Store> Coordinator<S> {
     }
 
     /// Host must have validated every required installation and data migration.
-    pub fn activated(&mut self, installed: DeviceVersion) -> Result<(), String> {
+    pub fn activated(&mut self, installed: DeviceVersion) -> Result<(), UpdateError> {
         let manifest = self.approved_manifest()?;
         let plan = self.record.approved.as_ref().ok_or("no approved update")?;
         if plan.phase != Phase::Activating {
@@ -443,7 +444,7 @@ impl<S: Store> Coordinator<S> {
     }
 
     /// Retry only after the host restored every active file from its journal.
-    pub fn activation_recovered_for_retry(&mut self, reason: WaitReason, diagnostic: String) -> Result<(), String> {
+    pub fn activation_recovered_for_retry(&mut self, reason: WaitReason, diagnostic: UpdateError) -> Result<(), UpdateError> {
         let mut next = self.record.clone();
         let plan = next.approved.as_mut().ok_or("no approved update")?;
         plan.phase = Phase::Preparing;
@@ -455,7 +456,7 @@ impl<S: Store> Coordinator<S> {
 
     /// Call after restoring a usable previous generation. Do not quarantine
     /// transient transport failures or claim rollback succeeded on error.
-    pub fn quarantine_after_recovery(&mut self, diagnostic: String) -> Result<(), String> {
+    pub fn quarantine_after_recovery(&mut self, diagnostic: UpdateError) -> Result<(), UpdateError> {
         let mut next = self.record.clone();
         let plan = next.approved.as_mut().ok_or("no approved update")?;
         plan.phase = Phase::Quarantined;
@@ -468,9 +469,20 @@ impl<S: Store> Coordinator<S> {
 /// Calculate each filesystem independently. `required_remaining_bytes` includes
 /// host-estimated backup/workspace and unallocated download/staging bytes. Free
 /// space already excludes allocated files, so do not subtract those twice.
-pub fn additional_space(required_remaining_bytes: u64, safety_reserve_bytes: u64, usable_free_bytes: u64) -> Result<u64, String> {
+pub fn additional_space(required_remaining_bytes: u64, safety_reserve_bytes: u64, usable_free_bytes: u64) -> Result<u64, UpdateError> {
     Ok(required_remaining_bytes.checked_add(safety_reserve_bytes).ok_or("update space estimate overflow")?.saturating_sub(usable_free_bytes))
 }
 
 #[cfg(test)]
 mod tests;
+
+impl WaitReason {
+    pub fn from_error(error: &UpdateError) -> Self {
+        use operation_failure::{Classified, Failure};
+        match error.failure() {
+            Some(Failure::StorageFull) => Self::Space { additional_bytes: 0 },
+            Some(Failure::Offline) => Self::Connection,
+            _ => Self::Retry,
+        }
+    }
+}

@@ -12,6 +12,7 @@ fn empty_popup(anchor: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Dic
     focus.focus(window, cx);
     DictionaryPopup {
         translation: None,
+        show_translation: false,
         backend: None,
         settings: None,
         query: "Haus".into(),
@@ -25,13 +26,18 @@ fn empty_popup(anchor: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Dic
         downloading: false,
         selection_only: false,
         anchor: Some(anchor),
+        popup_area: None,
+        popup_height: None,
         element_click: WordClick::default(),
         focus,
         wikipedia_request: None,
         wikipedia_popup: None,
         wikipedia: None,
+        wikipedia_page: wikipedia::ArticlePage::default(),
+        wikipedia_equivalents: wikipedia::Equivalents::default(),
         languages: Vec::new(),
         wikipedia_attempted: false,
+        wikipedia_failed: false,
         wikipedia_hits: Vec::new(),
         wikipedia_index: 0,
         wikipedia_cache: BTreeMap::new(),
@@ -562,8 +568,8 @@ fn lookup_can_expand_and_dismiss_without_clicking_the_book(cx: &mut TestAppConte
             let paragraph = Bounds::new(point(px(100.0), px(220.0)), size(px(600.0), px(160.0)));
             fixture.update(visual, |fixture, cx| fixture.popup.as_ref().unwrap().update(cx, |popup, cx| popup.set_anchor(Some(paragraph), cx)));
             visual.run_until_parked();
-            let bounds = visual.debug_bounds("dictionary-popup").unwrap();
-            assert!(bounds.bottom() <= paragraph.top() - px(8.0) || bounds.top() >= paragraph.bottom() + px(8.0), "updated geometry must keep the popup clear of the paragraph");
+            let updated = visual.debug_bounds("dictionary-popup").unwrap();
+            assert_eq!(updated.origin, bounds.origin, "updated selection geometry must keep the popup position stable");
         }
         assert!(visual.debug_bounds("dictionary-highlight").is_none());
         if action != "outside" {
@@ -654,7 +660,7 @@ fn lookup_keyboard_focus_stays_inside_and_escape_closes_from_a_button(cx: &mut T
                                 let mut article = popup.wikipedia.clone().unwrap();
                                 article.title = title.into();
                                 popup.wikipedia_hits.push(WikipediaChoice { title: article.title.clone(), description: article.extract.clone(), language: article.language.clone(), url: article.url.clone() });
-                                popup.wikipedia_cache.insert(title.into(), Some(article));
+                                popup.wikipedia_cache.insert(title.into(), Ok(Some(article)));
                             }
                         }
                     }

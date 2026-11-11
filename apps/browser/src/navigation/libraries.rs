@@ -10,13 +10,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use app::{AppClient, LibraryEntry, LibraryFolderError, LibraryFolderStep};
-use gpui::{App, AppContext, Context, Entity, Task, Window};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, Window};
 use gpui_component::menu::PopupMenu;
 use sync_common::LibraryId;
 use ui_components::user_facing_error;
 
-use super::LibrarySession;
 use super::library_errors::folder_add_message;
+use super::{LibraryOperationDialog, LibrarySession};
 use crate::library::OpenBook;
 
 pub(crate) struct Libraries {
@@ -31,6 +31,12 @@ pub(crate) struct Libraries {
     selection_epoch: Rc<Cell<u64>>,
     _list_updates: Task<()>,
 }
+
+pub(super) struct LibraryDialogOpened {
+    pub library_id: LibraryId,
+    pub selection_epoch: u64,
+}
+impl EventEmitter<LibraryDialogOpened> for Libraries {}
 
 fn selected_library_id(libraries: &[LibraryEntry], current: Option<LibraryId>, preferred: Option<LibraryId>) -> Option<LibraryId> {
     preferred
@@ -93,17 +99,18 @@ impl Libraries {
         cfg!(not(target_arch = "wasm32"))
     }
 
-    pub(crate) fn annotation_export_menu(&self, library_id: LibraryId, menu: PopupMenu) -> PopupMenu {
+    pub(crate) fn annotation_export_menu(libraries: Entity<Self>, library_id: LibraryId, menu: PopupMenu, cx: &App) -> PopupMenu {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let Some(entry) = self.entries.iter().find(|entry| *entry.library_id() == library_id) else { return menu };
-            let backend = self.backend.clone();
+            let host = libraries.read(cx);
+            let Some(entry) = host.entries.iter().find(|entry| *entry.library_id() == library_id) else { return menu };
+            let backend = host.backend.clone();
             let name = entry.library_name().to_owned();
-            menu.item(ui_components::menu_item(text!(browse::export_annotations), move |_, window, cx| crate::universal::open_annotation_export(backend.management.clone(), library_id, name.clone(), window, cx)))
+            menu.item(ui_components::menu_item(text!(browse::export_annotations), move |_, window, cx| crate::universal::open_annotation_export(libraries.clone(), backend.management.clone(), library_id, name.clone(), window, cx)))
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = library_id;
+            let _ = (libraries, library_id, cx);
             menu
         }
     }
@@ -113,6 +120,9 @@ impl Libraries {
     pub(crate) fn selected_id(&self) -> Option<LibraryId> {
         self.selected_id
     }
+    pub(crate) fn selection_epoch(&self) -> u64 {
+        self.selection_epoch.get()
+    }
     pub(crate) fn contains(&self, library_id: &LibraryId) -> bool {
         self.entries.iter().any(|entry| entry.library_id() == library_id)
     }
@@ -120,15 +130,34 @@ impl Libraries {
         self.selected_id.and_then(|id| self.sessions.get(&id).cloned())
     }
 
-    pub(super) fn import_blocks_navigation(&self, cx: &App) -> bool {
-        self.selected_session().is_some_and(|session| session.read(cx).import_blocks_navigation(cx))
+    pub(super) fn selected_library_blocks_navigation(&self, cx: &App) -> bool {
+        self.selected_session().is_some_and(|session| session.read(cx).blocks_navigation(cx))
+    }
+
+    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, library_id: LibraryId, view: Entity<V>, width: f32, selection_epoch: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.contains(&library_id) {
+            return;
+        }
+        let session = match self.ensure_session(library_id, cx) {
+            Ok(session) => session,
+            Err(error) => {
+                self.notify_error(error, window, cx);
+                return;
+            }
+        };
+        // A deferred menu action must not undo a more recent library selection.
+        let activate = self.selection_epoch.get() == selection_epoch;
+        if activate {
+            self.select_library(library_id, cx);
+        }
+        session.update(cx, |session, cx| session.show_operation_dialog(view, width, activate, window, cx));
+        if activate {
+            cx.emit(LibraryDialogOpened { library_id, selection_epoch: self.selection_epoch.get() });
+        }
     }
 
     /// Selects a library, refreshing the authoritative list first when needed.
     pub(crate) fn select_library(&mut self, library_id: LibraryId, cx: &mut Context<Self>) {
-        if self.import_blocks_navigation(cx) {
-            return;
-        }
         // A list read started before this selection may not contain a newly
         // added folder. It must not switch us back to the default library.
         let epoch = self.selection_epoch.get().wrapping_add(1);
@@ -223,6 +252,7 @@ impl Libraries {
 
     pub(crate) fn create_selected_libraries(&mut self, directories: Vec<gpui::SelectedDirectory>, asset_storage_enabled: bool, cx: &mut Context<Self>) {
         self.creating_libraries += 1;
+        let selection_epoch = self.selection_epoch.get();
         cx.notify();
         let backend = self.backend.clone();
         cx.spawn(async move |sessions, cx| {
@@ -264,7 +294,7 @@ impl Libraries {
                 if !errors.is_empty() {
                     notify_warning("library-add-warning", folder_add_message(&errors), window, cx);
                 }
-                if let Some(library_id) = selected {
+                if let Some(library_id) = selected.filter(|_| sessions.selection_epoch.get() == selection_epoch) {
                     sessions.select_library(library_id, cx);
                 }
             });
@@ -279,7 +309,7 @@ impl Libraries {
                         let _ = sessions.update_in(cx, |_, window, cx| notify_warning("library-import-warning", import_failure_summary(&failures), window, cx));
                     }
                     Err(error) => {
-                        let message = format!(text!(browse::couldn_t_import_books_from), user_facing_error(&error, text!(browse::retry_the_import_if_it_fails_again_report_the_problem)), name = name);
+                        let message = format!(text!(browse::couldn_t_import_books_from), user_facing_error(&error, ""), name = name);
                         let _ = sessions.update_in(cx, |_, window, cx| notify_warning("library-import-warning", message, window, cx));
                     }
                     _ => {}
@@ -322,20 +352,24 @@ impl Libraries {
     }
 
     fn set_selected_library(&mut self, library_id: LibraryId, cx: &mut Context<Self>) {
-        let backend = self.backend.clone();
-        let open_book = self.open_book.clone();
         self.selected_error = None;
         if self.entries.iter().any(|entry| *entry.library_id() == library_id) && !self.sessions.contains_key(&library_id) {
-            match backend.management.library(library_id) {
-                Ok(library) => {
-                    let session = cx.new(|cx| LibrarySession::with_now_playing(backend.management.clone(), open_book, library, self.now_playing.clone(), cx));
-                    self.sessions.insert(library_id, session);
-                }
-                Err(error) => self.selected_error = Some(error),
+            if let Err(error) = self.ensure_session(library_id, cx) {
+                self.selected_error = Some(error);
             }
         }
         self.selected_id = Some(library_id);
         cx.notify();
+    }
+
+    fn ensure_session(&mut self, library_id: LibraryId, cx: &mut Context<Self>) -> Result<Entity<LibrarySession>, app::BackendError> {
+        if let Some(session) = self.sessions.get(&library_id) {
+            return Ok(session.clone());
+        }
+        let library = self.backend.management.library(library_id)?;
+        let session = cx.new(|cx| LibrarySession::with_now_playing(self.backend.management.clone(), self.open_book.clone(), library, self.now_playing.clone(), cx));
+        self.sessions.insert(library_id, session.clone());
+        Ok(session)
     }
 
     fn notify_error(&self, error: app::BackendError, window: &mut Window, cx: &mut App) {

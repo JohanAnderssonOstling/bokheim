@@ -17,7 +17,7 @@ use ui_components as components;
 
 use crate::invalidation::Component;
 use crate::pdf::search::renderer_query;
-use crate::pdf::state::stored_zoom_mode;
+use crate::pdf::state::{store_zoom_mode, stored_zoom_mode};
 use crate::pdf::toc::PdfTocState;
 use crate::settings::{ReaderSettings, library_interaction_style};
 use crate::shell::marks::MarkSession;
@@ -60,7 +60,14 @@ impl PdfReaderView {
         let bookmark_filter_input = crate::shell::bookmarks::filter_input(window, cx);
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let toc_tree = cx.new(|cx| TreeState::new(cx));
-        let toc_filter = cx.new(|cx| crate::shell::toc_filter::TocFilter::new(toc_tree.clone(), window, cx));
+        let reset_reader = cx.weak_entity();
+        let toc_filter = cx.new(|cx| crate::shell::toc_filter::TocFilter::new(toc_tree.clone(), window, cx).on_reset(Rc::new(move |_, _, cx| {
+            let _ = reset_reader.update(cx, |reader, cx| {
+                reader.positions.reset_read_status();
+                reader.toc.read_status.reset();
+                cx.notify();
+            });
+        })));
         let annotation_note_input = cx.new(|cx| crate::shell::annotation_editor::note_input(window, cx));
         crate::shell::bookmarks::watch_name_validity(&annotation_note_input, cx, |this| this.marks.selected().is_some_and(library_backend::Annotation::is_bookmark));
         let pdf_subscription = cx.subscribe_in(&pdf, window, |this, pdf, event, window, cx| this.handle_pdf_event(pdf, event, window, cx));
@@ -154,6 +161,10 @@ impl PdfReaderView {
 
     fn handle_pdf_event(&mut self, pdf: &Entity<PdfView>, event: &PdfViewEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            PdfViewEvent::ZoomChanged { mode } => {
+                ReaderSettings::update(cx, |preferences| store_zoom_mode(*mode, preferences));
+                notify(cx, Component::PdfShell, "zoom_changed");
+            }
             PdfViewEvent::TextLayersChanged => self.refresh_annotation_overlays(cx),
             PdfViewEvent::EmbeddedAnnotations(annotations) => {
                 let book_id = self.locator.book_id();
@@ -214,14 +225,15 @@ impl PdfReaderView {
             }
             PdfViewEvent::AnnotationActivated { id, position } => {
                 self.annotation_popup_anchor = Some(*position);
-                self.select_annotation(id.clone(), window, cx);
+                let preferred = self.preferred_annotation_overlay(id, None, cx).unwrap_or_else(|| id.clone());
+                self.select_annotation(preferred, window, cx);
                 if self.marks.selected().is_some_and(|annotation| annotation.book_id == self.locator.book_id()) {
                     crate::shell::state_panel::select_tab(&mut self.sidebar, SidebarTab::Notes, cx);
                 }
             }
             PdfViewEvent::LoadFailed(error) => {
                 log::error!("failed to load PDF reader for book {}: {error}", self.title);
-                cx.emit(crate::BookOpenFailed(opening_error(BackendError::message(error.clone()), "pdf_renderer", Failure::BookRendererFailed)));
+                cx.emit(crate::BookOpenFailed(opening_error(BackendError::operation(error.clone()), "pdf_renderer", Failure::BookRendererFailed)));
             }
         }
     }

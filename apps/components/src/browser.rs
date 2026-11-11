@@ -36,13 +36,6 @@ pub(crate) fn navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement,
     crate::selectable_button(button, selected, theme)
 }
 
-/// Keep the standard rail width until its actual interface labels need more.
-pub fn navigation_rail_width<'a>(labels: impl IntoIterator<Item = &'a str>, window: &gpui::Window, cx: &gpui::App) -> Pixels {
-    let normal = window.rem_size() * crate::NAV_RAIL_SIZE_REM;
-    let required = labels.into_iter().map(|label| crate::interface_label_width(label, NAV_RAIL_LABEL_SIZE, window, cx) + px(2.0 * SPACE_XS)).max().unwrap_or(normal);
-    normal.max(required).min((window.viewport_size().width * 0.35).max(normal))
-}
-
 /// A rail destination using the shared selected-button treatment.
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
     navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, selected, theme).w_full().h(gpui::rems(crate::NAV_RAIL_SIZE_REM)).flex_none().px(px(SPACE_XS)).text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
@@ -420,14 +413,16 @@ pub fn browser_settings_content() -> Div {
 pub fn browser_settings_row(title: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, theme: BrowserTheme) -> Div {
     div()
         .w_full()
+        .min_w_0()
         .min_h(px(76.0))
         .py(px(12.0))
         .flex()
+        .flex_wrap()
         .items_center()
         .gap(px(20.0))
         .border_t_1()
         .border_color(theme.rule)
-        .child(div().flex_1().min_w_0().flex().flex_col().gap(px(SPACE_XS)).child(div().text_size(gpui::rems(TEXT_MD)).child(title.into())).child(div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(description.into())))
+        .child(div().flex_grow(1.0).flex_basis(gpui::rems(12.0)).min_w_0().flex().flex_col().gap(px(SPACE_XS)).child(div().text_size(gpui::rems(TEXT_MD)).child(title.into())).child(div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(description.into())))
         .child(control)
 }
 

@@ -7,7 +7,7 @@ use std::{collections::HashMap, rc::Rc};
 use book_model::normalize_search_text;
 use gpui::prelude::*;
 use gpui::{Context, Entity, Render, SharedString, Window, div, px};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::tree::{TreeItem, TreeState};
 use ui_components as components;
 
@@ -42,6 +42,7 @@ impl TocIndex {
 
 pub(crate) struct TocFilter {
     input: Entity<InputState>,
+    reset: Option<components::ContentsReadReset>,
     tree: Entity<TreeState>,
     roots: Vec<TreeItem>,
     query: String,
@@ -51,14 +52,19 @@ pub(crate) struct TocFilter {
 
 impl TocFilter {
     pub(crate) fn new(tree: Entity<TreeState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(reader::filter_contents)));
+        let input = components::contents_filter_input(window, cx);
         cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| match event {
             InputEvent::Change => this.set_query(&input.read(cx).value(), cx),
             InputEvent::PressEnter { .. } => this.tree.update(cx, |tree, cx| tree.focus(window, cx)),
             _ => {}
         })
         .detach();
-        Self { input, tree, roots: Vec::new(), query: String::new(), index: Rc::default(), unfiltered_selection: None }
+        Self { input, reset: None, tree, roots: Vec::new(), query: String::new(), index: Rc::default(), unfiltered_selection: None }
+    }
+
+    pub(crate) fn on_reset(mut self, reset: components::ContentsReadReset) -> Self {
+        self.reset = Some(reset);
+        self
     }
 
     pub(crate) fn index(&self) -> Rc<TocIndex> {
@@ -118,7 +124,8 @@ fn filtered_items(items: &[TreeItem], query: &str, index: &TocIndex) -> Vec<Tree
 impl Render for TocFilter {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let filter = components::reader_search_bar(theme).child(components::reader_search_box(theme).debug_selector(|| "reader-toc-filter".into()).child(Input::new(&self.input).appearance(false).cleanable(true).size_full()));
+        let reset = self.reset.clone().map(|reset| components::contents_read_reset_button("reset-chapter-read-status").on_click(move |event, window, cx| reset(event, window, cx)));
+        let filter = components::contents_filter_bar(&self.input, reset, theme);
         div().flex_none().w_full().child(filter).when(!self.query.is_empty() && self.tree.read(cx).entries().is_empty(), |panel| {
             panel.child(components::reader_state_note(text!(reader::no_chapters_match_your_filter), theme).debug_selector(|| "reader-toc-filter-empty".into()).p(px(12.0)))
         })

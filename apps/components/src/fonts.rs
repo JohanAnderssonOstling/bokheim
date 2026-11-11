@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::{cell::RefCell, rc::Rc};
 
 use bundled::FAMILIES;
+use operation_failure::OperationError;
 
 use app_preferences::{BrowsingPreferences, UiFontFamily};
 use gpui::{App, AsyncApp, Global, Pixels, Result, TextRun, TextSystem, Window, WindowTextSystem, px};
@@ -75,7 +76,7 @@ pub fn equal_choice_group_width(labels: &[&str], size_rem: f32, inset: f32, gap:
     (widest + px(inset)) * labels.len() as f32 + px(gap * labels.len().saturating_sub(1) as f32)
 }
 
-type FontSource = Rc<dyn Fn(&str, &TextSystem) -> Result<(), String>>;
+type FontSource = Rc<dyn Fn(&str, &TextSystem) -> Result<(), OperationError>>;
 
 struct BundledFonts {
     loaded: [bool; FAMILIES.len()],
@@ -91,6 +92,9 @@ impl BundledFonts {
         }
         for name in FAMILIES[index].files {
             (self.source)(name, text_system).map_err(std::io::Error::other)?;
+        }
+        if FAMILIES[index].name == CJK_FONT_FAMILY {
+            text_system.set_fallback_font(CJK_FONT_FAMILY)?;
         }
         self.loaded[index] = true;
         Ok(true)
@@ -112,8 +116,8 @@ fn bundled_fonts(cx: &mut App) -> Rc<RefCell<BundledFonts>> {
 
 /// Android reads a requested face directly from APK assets; no eager extraction.
 #[cfg(target_os = "android")]
-pub fn configure_bundled_font_source(source: impl Fn(&str) -> Result<Cow<'static, [u8]>, String> + 'static, cx: &mut App) {
-    bundled_fonts(cx).borrow_mut().source = Rc::new(move |name, text_system| text_system.add_fonts(vec![source(name)?]).map_err(|error| error.to_string()));
+pub fn configure_bundled_font_source(source: impl Fn(&str) -> Result<Cow<'static, [u8]>, OperationError> + 'static, cx: &mut App) {
+    bundled_fonts(cx).borrow_mut().source = Rc::new(move |name, text_system| text_system.add_fonts(vec![source(name)?]).map_err(OperationError::operation));
 }
 
 /// A host-provided catalog of installed families, without GPUI's synthetic
@@ -234,7 +238,7 @@ pub const CJK_FONT_FAMILY: &str = "Droid Sans Fallback";
 
 /// Explicit preload for hosts that cannot synchronously read a font at shaping
 /// time (the web). Native readers use the content-triggered loader instead.
-pub async fn ensure_cjk_fonts(cx: &mut AsyncApp) -> Result<(), String> {
+pub async fn ensure_cjk_fonts(cx: &mut AsyncApp) -> Result<(), OperationError> {
     cx.wait_for_update_slot().await;
     let loaded = cx.update(|cx| bundled_fonts(cx).borrow().loaded[3]);
     if loaded {
@@ -244,7 +248,7 @@ pub async fn ensure_cjk_fonts(cx: &mut AsyncApp) -> Result<(), String> {
     {
         cx.update(|cx| {
             let fonts = bundled_fonts(cx);
-            fonts.borrow_mut().register(CJK_FONT_FAMILY, cx.text_system()).map(|_| ()).map_err(|error| error.to_string())
+            fonts.borrow_mut().register(CJK_FONT_FAMILY, cx.text_system()).map(|_| ()).map_err(OperationError::operation)
         })
     }
     #[cfg(target_arch = "wasm32")]
@@ -255,7 +259,8 @@ pub async fn ensure_cjk_fonts(cx: &mut AsyncApp) -> Result<(), String> {
             let fonts = bundled_fonts(cx);
             let mut fonts = fonts.borrow_mut();
             if !fonts.loaded[3] {
-                cx.text_system().add_fonts(vec![bytes]).map_err(|error| error.to_string())?;
+                cx.text_system().add_fonts(vec![bytes]).map_err(OperationError::operation)?;
+                cx.text_system().set_fallback_font(CJK_FONT_FAMILY).map_err(OperationError::operation)?;
                 fonts.loaded[3] = true;
             }
             Ok(())
@@ -264,26 +269,26 @@ pub async fn ensure_cjk_fonts(cx: &mut AsyncApp) -> Result<(), String> {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-fn register_bundled_font(name: &str, text_system: &TextSystem) -> Result<(), String> {
-    let executable = std::env::current_exe().map_err(|error| format!("locate bundled fonts: {error}"))?;
+fn register_bundled_font(name: &str, text_system: &TextSystem) -> Result<(), OperationError> {
+    let executable = std::env::current_exe().map_err(|error| OperationError::operation(error).context("locate bundled fonts"))?;
     let directory = executable.parent().ok_or("executable has no parent directory")?;
     let directory = if matches!(directory.file_name().and_then(|name| name.to_str()), Some("deps" | "examples")) { directory.parent().unwrap_or(directory) } else { directory };
     let path = directory.join("fonts").join(name);
-    text_system.add_font_file(&path).map_err(|error| format!("register bundled font {}: {error}", crate::path_label(&path)))
+    text_system.add_font_file(&path).map_err(|error| OperationError::operation(error).context(format!("register bundled font {}", crate::path_label(&path))))
 }
 
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]
-fn register_bundled_font(name: &str, text_system: &TextSystem) -> Result<(), String> {
-    text_system.add_fonts(vec![load_bundled_font(name)?]).map_err(|error| error.to_string())
+fn register_bundled_font(name: &str, text_system: &TextSystem) -> Result<(), OperationError> {
+    text_system.add_fonts(vec![load_bundled_font(name)?]).map_err(OperationError::operation)
 }
 
 #[cfg(target_os = "android")]
-fn load_bundled_font(_name: &str) -> Result<Cow<'static, [u8]>, String> {
+fn load_bundled_font(_name: &str) -> Result<Cow<'static, [u8]>, OperationError> {
     Err("Android bundled font source is not configured".into())
 }
 
 #[cfg(target_arch = "wasm32")]
-fn load_bundled_font(name: &str) -> Result<Cow<'static, [u8]>, String> {
+fn load_bundled_font(name: &str) -> Result<Cow<'static, [u8]>, OperationError> {
     for (family, files) in [(UiFontFamily::Serif, FAMILIES[0].files), (UiFontFamily::SansSerif, FAMILIES[1].files)] {
         if let Some(index) = files.iter().position(|file| *file == name) {
             return Ok(Cow::Borrowed(interface_font_faces(family)[index].data));
@@ -292,17 +297,17 @@ fn load_bundled_font(name: &str) -> Result<Cow<'static, [u8]>, String> {
     match name {
         "BodoniModa-Regular.ttf" => Ok(Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf"))),
         "BodoniModa-SemiBold.ttf" => Ok(Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-SemiBold.ttf"))),
-        _ => Err(format!("unknown bundled font: {name}")),
+        _ => Err(format!("unknown bundled font: {name}").into()),
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn load_cjk_font() -> Result<Cow<'static, [u8]>, String> {
+async fn load_cjk_font() -> Result<Cow<'static, [u8]>, OperationError> {
     use js_sys::{Reflect, global};
     use wasm_bindgen::JsValue;
 
     let url = Reflect::get(&global(), &JsValue::from_str("__BOKHEIM_CJK_FONT_URL__")).ok().and_then(|value| value.as_string()).ok_or("bundled CJK font URL is unavailable")?;
-    html_gpui::backend::load_remote_font(&url).await.map(Cow::Owned)
+    html_gpui::backend::load_remote_font(&url).await.map(Cow::Owned).map_err(Into::into)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

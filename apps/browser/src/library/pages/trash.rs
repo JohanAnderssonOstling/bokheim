@@ -320,7 +320,7 @@ impl TrashPage {
         cx.spawn(async move |page, cx| {
             if let Err(error) = operation.await {
                 cx.defer_update(page, move |page, cx| {
-                    page.error = Some(format!(text!(browse::could_not), user_facing_error(&error, text!(common::please_try_again)), action = action).into());
+                    page.error = Some(format!(text!(browse::could_not), user_facing_error(&error, ""), action = action).into());
                     cx.notify();
                 });
             }

@@ -20,6 +20,7 @@ pub(crate) struct EpubSession {
     pub(super) archive: ArchiveReader,
     pub(crate) package: Arc<EpubPackage>,
     toc_cache: Option<Option<Vec<BookTocEntry>>>,
+    navigation_complete: bool,
 }
 impl EpubSession {
     #[cfg(test)]
@@ -33,7 +34,11 @@ impl EpubSession {
         if package.document_uris()?.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "EPUB book contains no readable documents"));
         }
-        Ok(Self { archive, package, toc_cache: None })
+        Ok(Self { archive, package, toc_cache: None, navigation_complete: true })
+    }
+
+    pub(crate) fn navigation_complete(&self) -> bool {
+        self.navigation_complete
     }
 
     pub(crate) async fn into_provider(self) -> io::Result<EpubProvider> {
@@ -142,21 +147,27 @@ impl EpubSession {
 
         if let Some(ref nav_href) = manifest.nav_href {
             let nav_path = resolve_resource_href(&self.package.opf_path, nav_href);
-            if let Ok(nav_bytes) = self.archive.read(&nav_path, MAX_MARKUP_RESOURCE_BYTES).await
-                && let Some(mut entries) = EpubPackage::parse_nav_toc(&String::from_utf8_lossy(&nav_bytes))
-            {
-                resolve_toc_links(&nav_path, &mut entries);
-                return Ok(Some(entries));
+            match self.archive.read(&nav_path, MAX_MARKUP_RESOURCE_BYTES).await {
+                Ok(nav_bytes) => {
+                    if let Some(mut entries) = EpubPackage::parse_nav_toc(&String::from_utf8_lossy(&nav_bytes)) {
+                        resolve_toc_links(&nav_path, &mut entries);
+                        return Ok(Some(entries));
+                    }
+                }
+                Err(_) => self.navigation_complete = false,
             }
         }
 
         if let Some(ref ncx_href) = manifest.ncx_href {
             let ncx_path = resolve_resource_href(&self.package.opf_path, ncx_href);
-            if let Ok(ncx_bytes) = self.archive.read(&ncx_path, MAX_MARKUP_RESOURCE_BYTES).await
-                && let Some(mut entries) = EpubPackage::parse_ncx_toc(&String::from_utf8_lossy(&ncx_bytes))
-            {
-                resolve_toc_links(&ncx_path, &mut entries);
-                return Ok(Some(entries));
+            match self.archive.read(&ncx_path, MAX_MARKUP_RESOURCE_BYTES).await {
+                Ok(ncx_bytes) => {
+                    if let Some(mut entries) = EpubPackage::parse_ncx_toc(&String::from_utf8_lossy(&ncx_bytes)) {
+                        resolve_toc_links(&ncx_path, &mut entries);
+                        return Ok(Some(entries));
+                    }
+                }
+                Err(_) => self.navigation_complete = false,
             }
         }
 

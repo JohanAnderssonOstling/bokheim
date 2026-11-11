@@ -5,13 +5,42 @@ SELECT COALESCE(SUM(seq), 0)
 FROM sqlite_sequence
 WHERE name IN ('local_directory_work', 'local_book_work', 'local_file_work');
 
+-- name: scanner_pending_book_work?
+SELECT content_hash FROM local_book_work;
+
+-- name: scanner_acknowledge_observed_book!
+-- param: content_hash: &BookId
+-- The caller preserves work that predates this scan transaction. New generic
+-- work is satisfied only after every live placement has a verified file and
+-- no explicit materialization or cleanup remains for the book.
+DELETE FROM local_book_work
+WHERE content_hash=:content_hash
+  AND NOT EXISTS(SELECT 1 FROM local_file_work WHERE content_hash=:content_hash)
+  AND NOT EXISTS(
+      SELECT 1 FROM book b JOIN book_dir bd ON bd.book_row_id=b.row_id
+      LEFT JOIN local_file_projection p ON p.content_hash=b.content_hash AND p.dir_id=bd.dir_id
+      WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL
+        AND (p.relative_path IS NULL OR bd.is_downloaded=0 OR bd.local_hash='')
+  )
+  AND NOT EXISTS(
+      SELECT 1 FROM local_file_projection p
+      LEFT JOIN book b ON b.content_hash=p.content_hash
+      LEFT JOIN book_dir bd ON bd.book_row_id=b.row_id AND bd.dir_id=p.dir_id
+      WHERE p.content_hash=:content_hash
+        AND (bd.book_row_id IS NULL OR bd.deleted_at IS NOT NULL OR b.deleted_at IS NOT NULL)
+  );
+
 -- name: scanner_pending_directories?
 -- param: directories: &str
 -- Folders with queued work and everything below them, with where each was
 -- last materialized; Rust adds each folder's live path.
 SELECT pending.value, projection.relative_path
 FROM json_each(:directories) pending
-LEFT JOIN local_directory_projection projection ON projection.dir_id = pending.value;
+LEFT JOIN local_directory_projection projection ON projection.dir_id = pending.value
+UNION
+SELECT projection.dir_id,projection.relative_path
+FROM local_directory_projection projection LEFT JOIN dir d ON d.id=projection.dir_id
+WHERE d.id IS NULL;
 
 -- name: scanner_pending_files?
 WITH pending(content_hash) AS (
@@ -39,6 +68,10 @@ JOIN book_dir bd ON bd.book_row_id = b.row_id
 WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL;
 
 -- Scanner inventory and apply operations.
+
+-- name: scanner_directory_exists ->
+-- param: dir_id: &str
+SELECT EXISTS(SELECT 1 FROM dir WHERE id=:dir_id);
 
 -- name: scanner_directory_projection_retained ->
 -- param: dir_id: &str

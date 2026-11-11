@@ -106,7 +106,7 @@ public final class MainActivity extends GameActivity {
             BookBrowserSurface browser = bookBrowsers.remove(id);
             if (browser != null) browser.close();
             try {
-                nativeBookBrowserEvent(id, new org.json.JSONObject().put("kind", "error").put("message", "Could not open the book browser: " + error.getMessage()).toString());
+                nativeBookBrowserEvent(id, FailureDetails.put(new org.json.JSONObject().put("kind", "error"), "message", error).toString());
             } catch (org.json.JSONException ignored) { }
         }
     }
@@ -501,9 +501,9 @@ public final class MainActivity extends GameActivity {
                 }
             } catch (Exception error) {
                 if (prompt.returnDirectoryTree) {
-                    nativeDirectoryPromptResult(prompt.id, error.toString(), false);
+                    nativeDirectoryPromptResult(prompt.id, FailureDetails.encode(error), false);
                 } else if (prompt.returnFileDescriptors) {
-                    nativeFilePromptResult(prompt.id, error.toString(), false);
+                    nativeFilePromptResult(prompt.id, FailureDetails.encode(error), false);
                 }
             }
         });

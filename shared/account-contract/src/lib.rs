@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod billing;
+pub use billing::{AccountEntitlementsResponse, AccountSubscription, ScheduledStoragePlanChange, StoragePlan, SubscriptionStatus};
+
 pub const PASSWORD_MIN_CHARACTERS: usize = 12;
 pub const PASSWORD_MAX_BYTES: usize = 1024;
 pub const EMAIL_MAX_BYTES: usize = 254;

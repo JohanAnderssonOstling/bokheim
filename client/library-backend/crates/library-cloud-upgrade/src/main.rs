@@ -6,6 +6,8 @@ use std::{collections::BTreeMap, error::Error, io};
 use sync_common::{ConflictRank, transport};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+mod book_id_files;
+mod book_ids;
 
 // Retain the raw protobuf Value until the current domain decoder validates it.
 #[derive(Clone, PartialEq, Message)]
@@ -46,10 +48,15 @@ async fn counts(connection: &mut PgConnection) -> Result<(i64, i64, i64, i64)> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if let [command] = arguments.as_slice() {
+        if matches!(command.as_str(), "check-book-ids" | "apply-book-ids") {
+            return book_ids::run(command == "apply-book-ids").await;
+        }
+    }
     let apply = match arguments.as_slice() {
         [command] if command == "check" => false,
         [command] if command == "apply" => true,
-        _ => return Err(invalid("usage: library-cloud-upgrade check|apply (DATABASE_URL required)")),
+        _ => return Err(invalid("usage: library-cloud-upgrade check|apply|check-book-ids|apply-book-ids (DATABASE_URL required)")),
     };
     let url = std::env::var("DATABASE_URL")?;
     let pool = PgPoolOptions::new().max_connections(1).connect(&url).await?;
@@ -61,8 +68,8 @@ async fn main() -> Result<()> {
         sqlx::query("LOCK TABLE libraries,sync_state,bokheim_schema_version IN ACCESS EXCLUSIVE MODE").execute(&mut *tx).await?;
     }
     let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(&mut *tx).await?;
-    if !matches!(version, 14 | 17) {
-        return Err(invalid(format!("unsupported database schema {version}; expected 14 or 17")));
+    if !matches!(version, 14 | 17 | 18 | 19 | 20) {
+        return Err(invalid(format!("unsupported database schema {version}; expected 14, 17, 18, 19 or 20")));
     }
     let before = counts(&mut tx).await?;
     let records = sqlx::query("SELECT library_id,kind,entity_key,entity_subkey,content_hash,version_rank,value FROM sync_state ORDER BY library_id,kind,entity_key,entity_subkey").fetch_all(&mut *tx).await?;
@@ -136,8 +143,10 @@ async fn main() -> Result<()> {
         tx.commit().await?;
         println!("Committed schema 14 → 17; accounts, libraries, state versions and assets preserved. Original payloads and storage policies remain in bokheim_upgrade_archive; legacy feeds remain in opds_feeds.");
     } else {
-        if apply && (!updates.is_empty() || !external.is_empty()) {
-            return Err(invalid("schema 17 still contains unmigrated data"));
+        // The book-ID upgrade rewrites supported earlier envelopes together
+        // with their addresses after the billing schema reaches version 19.
+        if apply && ((!updates.is_empty() && version == 20) || !external.is_empty()) {
+            return Err(invalid(format!("schema {version} still contains unmigrated data")));
         }
         tx.rollback().await?;
         println!("{} completed without changes.", if apply { "Already-current migration" } else { "Read-only preflight" });

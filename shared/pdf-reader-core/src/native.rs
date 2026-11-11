@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::sync::mpsc::{self, Sender};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
-static WORKER: OnceLock<Result<Sender<Job>, String>> = OnceLock::new();
+static WORKER: OnceLock<Result<Sender<Job>, PdfError>> = OnceLock::new();
 thread_local! {
     static ON_WORKER: Cell<bool> = const { Cell::new(false) };
     static DOCUMENTS: RefCell<HashMap<u64, LocalDocumentSession>> = RefCell::new(HashMap::new());
@@ -27,10 +27,10 @@ fn enqueue(job: Job) -> PdfResult<()> {
                     job();
                 }
             })
-            .map_err(|error| format!("starting PDFium worker: {error}"))?;
+            .map_err(|error| PdfError::from(error).context("starting PDFium worker"))?;
         Ok(sender)
     });
-    worker.as_ref().map_err(|error| PdfError::new(error.clone()))?.send(job).map_err(|_| PdfError::new("PDFium worker stopped"))
+    worker.as_ref().map_err(Clone::clone)?.send(job).map_err(|_| PdfError::new("PDFium worker stopped"))
 }
 
 pub(super) fn run<T: Send + 'static>(work: impl FnOnce() -> PdfResult<T> + Send + 'static) -> PdfResult<T> {
@@ -185,7 +185,7 @@ impl PdfDocumentSession {
         run(self.work(move |document| {
             let Some(index) = number.checked_sub(1).and_then(|index| i32::try_from(index).ok()) else { return Ok(None) };
             let Ok(page) = document.document.pages().get(index) else { return Ok(None) };
-            let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(2200).set_maximum_width(2600).set_maximum_height(3200)).map_err(|error| PdfError::new(format!("rendering inspection page {number}: {error}")))?;
+            let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(2200).set_maximum_width(2600).set_maximum_height(3200)).map_err(|error| PdfError::from_error(&error).context(format!("rendering inspection page {number}")))?;
             Ok(Some(RenderedPdfImage { rgba: bitmap.as_rgba_bytes(), pixel_width: bitmap.width() as u32, pixel_height: bitmap.height() as u32, source: RenderedPdfImageSource::RenderedPage }))
         }))
     }

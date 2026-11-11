@@ -1,6 +1,6 @@
 //! Dictionary lifecycle and lookup, independent of application sessions.
 use crate::{
-    Body, DICT_FILE, DICTZIP_FILE, Definition, Dictionary, DictionaryFile, DictionaryInfo, DictionaryLookup, DictionaryMatches, DictionarySnapshot, IDX_FILE, IFO_FILE, MAX_INDEX_BYTES, ReadAt, Result, SYN_FILE, can_lookup, prepare_import,
+    Body, DICT_FILE, DICTZIP_FILE, Definition, Dictionary, DictionaryFile, DictionaryInfo, DictionaryLookup, DictionaryMatches, DictionarySnapshot, IDX_FILE, IFO_FILE, MAX_INDEX_BYTES, OperationResult as Result, ReadAt, SYN_FILE, can_lookup, prepare_import,
 };
 use client_platform_runtime::executor::{BackendSend, run_blocking};
 use std::collections::{HashMap, hash_map::Entry};
@@ -51,15 +51,15 @@ impl<S: Storage> DictionaryStore<S> {
         self.wake.send_replace(());
     }
     async fn save_catalog(&self, catalog: &[DictionaryInfo]) -> Result<()> {
-        self.storage_context.write_value(CATALOG, &serde_json::to_vec_pretty(catalog).map_err(|error| error.to_string())?).await
+        self.storage_context.write_value(CATALOG, &serde_json::to_vec_pretty(catalog).map_err(crate::OperationError::operation)?).await
     }
     async fn catalog(&self) -> Result<Vec<DictionaryInfo>> {
-        let items: Vec<DictionaryInfo> = self.storage_context.read_value(CATALOG).await?.map(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string())).transpose()?.unwrap_or_default();
+        let items: Vec<DictionaryInfo> = self.storage_context.read_value(CATALOG).await?.map(|bytes| serde_json::from_slice(&bytes).map_err(crate::OperationError::operation)).transpose()?.unwrap_or_default();
         // Validate persisted locators before allowing filesystem access.
         for item in &items {
             uuid::Uuid::parse_str(&item.id).map_err(|_| String::from("Invalid dictionary identifier"))?;
             if !item.files.iter().all(|name| COMPONENTS.contains(&name.as_str())) {
-                return Err(String::from("Invalid dictionary component name"));
+                return Err("Invalid dictionary component name".into());
             }
         }
         Ok(items)
@@ -81,7 +81,7 @@ impl<S: Storage> DictionaryStore<S> {
     }
 
     async fn install(&self, input: Vec<DictionaryFile>, curated: Option<&dictionary_catalog::CuratedDictionary>) -> Result<Vec<DictionaryInfo>> {
-        let (mut metadata, components) = run_blocking(move || prepare_import(input)).await.map_err(|error| error.to_string())??;
+        let (mut metadata, components) = run_blocking(move || prepare_import(input)).await.map_err(crate::OperationError::operation)??;
         let _guard = self.storage.lock().await;
         let mut catalog = self.catalog().await?;
         if let Some(spec) = curated {
@@ -132,7 +132,7 @@ impl<S: Storage> DictionaryStore<S> {
         let mut indexes = self.storage.lock().await;
         let mut catalog = self.catalog().await?;
         if !catalog.iter().any(|item| item.id == id) {
-            return Err(String::from("Dictionary was already removed"));
+            return Err("Dictionary was already removed".into());
         }
         catalog.retain(|item| item.id != id);
         self.save_catalog(&catalog).await?;
@@ -149,7 +149,7 @@ impl<S: Storage> DictionaryStore<S> {
     async fn lookup_inner(&self, query: String, languages: Vec<String>) -> Result<DictionaryLookup> {
         let query = query.trim();
         if !can_lookup(query) {
-            return Err(String::from("Select a word or short phrase to look up"));
+            return Err("Select a word or short phrase to look up".into());
         }
         let languages: Vec<_> = languages.iter().filter_map(|tag| dictionary_catalog::language(tag)).collect();
         let mut indexes = self.storage.lock().await;
@@ -171,7 +171,7 @@ impl<S: Storage> DictionaryStore<S> {
                 match lookup {
                     Ok(definitions) if !definitions.is_empty() => result.dictionaries.push(DictionaryMatches { dictionary: item.metadata.name.clone(), definitions }),
                     Ok(_) => {}
-                    Err(error) => result.errors.push(format!("{}: {error}", item.metadata.name)),
+                    Err(error) => result.errors.push(error.context(&item.metadata.name)),
                 }
             }
         }
@@ -184,7 +184,7 @@ impl<S: Storage + Send + Sync> DictionaryStore<S> {
     pub async fn lookup(self: &Arc<Self>, query: String, languages: Vec<String>) -> Result<DictionaryLookup> {
         let store = self.clone();
         let runtime = tokio::runtime::Handle::current();
-        run_blocking(move || runtime.block_on(store.lookup_inner(query, languages))).await.map_err(|error| error.to_string())?
+        run_blocking(move || runtime.block_on(store.lookup_inner(query, languages))).await.map_err(crate::OperationError::operation)?
     }
 }
 #[cfg(target_arch = "wasm32")]
@@ -213,7 +213,7 @@ async fn lookup_installed<S: Storage>(store: &DictionaryStore<S>, item: &Diction
             entry.insert(Dictionary::open(&ifo, &index_bytes, synonym_bytes.as_deref(), body.len())?)
         }
     };
-    dictionary.lookup(query, &mut index, synonyms.as_mut(), &mut body).await
+    Ok(dictionary.lookup(query, &mut index, synonyms.as_mut(), &mut body).await?)
 }
 
 async fn read_source(reader: &mut impl ReadAt, limit: u64) -> Result<Vec<u8>> {
@@ -221,7 +221,7 @@ async fn read_source(reader: &mut impl ReadAt, limit: u64) -> Result<Vec<u8>> {
     if size > limit {
         return Err("Dictionary file exceeds the size limit".into());
     }
-    reader.read_at(0, size as usize).await
+    Ok(reader.read_at(0, size as usize).await?)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

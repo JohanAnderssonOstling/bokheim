@@ -1,6 +1,7 @@
 //! Transaction boundaries and temporary sync state, private to the database owner.
 use crate::sync::SyncApplySql;
 use crate::{Database, DatabaseError};
+use client_platform_runtime::profiling::ProfileSpan;
 
 pub(crate) enum WriteOutcome<T> {
     Commit(T),
@@ -34,7 +35,10 @@ impl Database {
 /// Commit an already-open transaction through the same projection boundary.
 /// Callers opening their own transaction must reserve its writer before reads.
 pub fn commit(tx: rusqlite::Transaction<'_>) -> Result<(), DatabaseError> {
+    let projection = ProfileSpan::new("commit_projection", "transaction");
     crate::projection::project_dirty(&tx)?;
+    drop(projection);
+    let _commit = ProfileSpan::new("sqlite_commit", "transaction");
     tx.commit()?;
     Ok(())
 }

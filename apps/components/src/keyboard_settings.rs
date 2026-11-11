@@ -88,9 +88,9 @@ pub fn has_shortcut_modifier(key: &Keystroke) -> bool {
 
 pub fn configured_shortcuts(setting: &ShortcutSetting, overrides: &KeyboardShortcuts) -> Vec<String> {
     let mut keys = overrides.get(setting.id).unwrap_or(&setting.defaults).clone();
-    // Older profiles can contain alternatives. Every editable action now has
-    // one assignment; ordinary document navigation keeps its fixed keys.
-    if setting.defaults.iter().any(|key| Keystroke::parse(key).is_ok_and(|key| has_shortcut_modifier(&key))) {
+    // Customized actions have one assignment. Defaults may include equivalent
+    // keys (such as Ctrl++ and Ctrl+=) for different keyboard layouts.
+    if overrides.contains_key(setting.id) && setting.defaults.iter().any(|key| Keystroke::parse(key).is_ok_and(|key| has_shortcut_modifier(&key))) {
         keys.truncate(1);
     }
     keys

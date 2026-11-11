@@ -1,6 +1,7 @@
 //! Playback owners with separate ordered restoration writers.
 
 use app::AppClient;
+use operation_failure::OperationError;
 use browser_ui::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService};
 use futures_util::{
     FutureExt,
@@ -15,7 +16,7 @@ use std::time::Duration;
 use sync_common::LibraryId;
 use web_time::Instant;
 
-type PositionFlush = Shared<LocalBoxFuture<'static, Result<(), String>>>;
+type PositionFlush = Shared<LocalBoxFuture<'static, Result<(), OperationError>>>;
 
 #[cfg(target_arch = "wasm32")]
 const WEB_RESTORE_KEY: &str = "bokheim.active-audiobook.v1";
@@ -37,14 +38,14 @@ impl RestoreStore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn load(&self) -> Result<Option<ActiveAudiobook>, String> {
+    fn load(&self) -> Result<Option<ActiveAudiobook>, OperationError> {
         let Some(path) = &self.path else { return Ok(None) };
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(OperationError::from(error)),
         };
-        let record = serde_json::from_slice::<Option<ActiveAudiobook>>(&bytes).map_err(|error| error.to_string())?;
+        let record = serde_json::from_slice::<Option<ActiveAudiobook>>(&bytes).map_err(OperationError::operation)?;
         if let Some(record) = &record {
             record.validate()?;
         }
@@ -52,21 +53,21 @@ impl RestoreStore {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn load(&self) -> Result<Option<ActiveAudiobook>, String> {
+    fn load(&self) -> Result<Option<ActiveAudiobook>, OperationError> {
         let storage = web_sys::window()
             .ok_or_else(|| "browser window is unavailable".to_owned())?
             .local_storage()
-            .map_err(|error| format!("could not access browser storage: {error:?}"))?
+            .map_err(OperationError::from)?
             .ok_or_else(|| "browser local storage is unavailable".to_owned())?;
-        let Some(value) = storage.get_item(WEB_RESTORE_KEY).map_err(|error| format!("could not read browser storage: {error:?}"))? else {
+        let Some(value) = storage.get_item(WEB_RESTORE_KEY).map_err(OperationError::from)? else {
             return Ok(None);
         };
-        let record = serde_json::from_str::<ActiveAudiobook>(&value).map_err(|error| error.to_string())?;
+        let record = serde_json::from_str::<ActiveAudiobook>(&value).map_err(OperationError::operation)?;
         record.validate()?;
         Ok(Some(record))
     }
 
-    fn save(&self, expected: Option<uuid::Uuid>, record: Option<ActiveAudiobook>) -> Result<bool, String> {
+    fn save(&self, expected: Option<uuid::Uuid>, record: Option<ActiveAudiobook>) -> Result<bool, OperationError> {
         if let Some(record) = &record {
             record.validate()?;
         }
@@ -80,20 +81,20 @@ impl RestoreStore {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = &self.path {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                std::fs::create_dir_all(parent).map_err(OperationError::operation)?;
             }
-            std::fs::write(path, serde_json::to_vec(&record).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+            std::fs::write(path, serde_json::to_vec(&record).map_err(OperationError::operation)?).map_err(OperationError::operation)?;
         }
         #[cfg(target_arch = "wasm32")]
         {
             let storage = web_sys::window()
                 .ok_or_else(|| "browser window is unavailable".to_owned())?
                 .local_storage()
-                .map_err(|error| format!("could not access browser storage: {error:?}"))?
+                .map_err(OperationError::from)?
                 .ok_or_else(|| "browser local storage is unavailable".to_owned())?;
             match record {
-                Some(record) => storage.set_item(WEB_RESTORE_KEY, &serde_json::to_string(&record).map_err(|error| error.to_string())?).map_err(|error| format!("could not write browser storage: {error:?}"))?,
-                None => storage.remove_item(WEB_RESTORE_KEY).map_err(|error| format!("could not clear browser storage: {error:?}"))?,
+                Some(record) => storage.set_item(WEB_RESTORE_KEY, &serde_json::to_string(&record).map_err(OperationError::operation)?).map_err(OperationError::from)?,
+                None => storage.remove_item(WEB_RESTORE_KEY).map_err(OperationError::from)?,
             }
         }
         Ok(true)
@@ -114,7 +115,7 @@ pub(super) struct ActivePlayback {
 enum Save {
     Replace(Option<ActiveAudiobook>),
     Update(ActiveAudiobook),
-    Flush(async_channel::Sender<Result<(), String>>),
+    Flush(async_channel::Sender<Result<(), OperationError>>),
 }
 
 /// User selection advances even when a disk write fails. CAS expectations only
@@ -302,7 +303,7 @@ impl PlaybackController {
                         write_error = None;
                     }
                     Ok(false) => {
-                        let error = "Audiobook restore record changed outside this playback controller".to_owned();
+                        let error = OperationError::from("Audiobook restore record changed outside this playback controller");
                         log::warn!("{error}");
                         write_error = Some(error);
                     }
@@ -581,9 +582,9 @@ impl PlaybackController {
                     .update(cx, |controller, cx| {
                         controller.check_removal_generation(generation)?;
                         controller.save_current(true, cx);
-                        Ok::<_, String>(controller.flush_saves())
+                        Ok::<_, OperationError>(controller.flush_saves())
                     })
-                    .map_err(|error| error.to_string())??;
+                    .map_err(OperationError::operation)??;
                 saved.await?;
                 let cleared = this
                     .update(cx, |controller, _| {
@@ -594,18 +595,18 @@ impl PlaybackController {
                         if let Some(active) = &mut controller.current {
                             active.persisted = false;
                         }
-                        Ok::<_, String>(controller.flush_saves())
+                        Ok::<_, OperationError>(controller.flush_saves())
                     })
-                    .map_err(|error| error.to_string())??;
+                    .map_err(OperationError::operation)??;
                 cleared.await?;
                 this.update(cx, |controller, cx| {
                     controller.check_removal_generation(generation)?;
                     controller.current = None;
                     controller.generation = controller.generation.wrapping_add(1);
                     cx.notify();
-                    Ok::<_, String>(())
+                    Ok::<_, OperationError>(())
                 })
-                .map_err(|error| error.to_string())?
+                .map_err(OperationError::operation)?
             }
             .await;
             if result.is_err() {
@@ -615,7 +616,7 @@ impl PlaybackController {
         }))
     }
 
-    fn check_removal_generation(&self, generation: u64) -> Result<(), String> {
+    fn check_removal_generation(&self, generation: u64) -> Result<(), OperationError> {
         if self.quitting || self.generation != generation { Err("Playback changed while preparing library removal; try again".into()) } else { Ok(()) }
     }
 

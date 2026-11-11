@@ -4,9 +4,9 @@ use ui_text::text;
 
 use ui_components::user_facing_error;
 
-use app_preferences::{ApplicationTheme, BrowsingPreferencePatch, ResolvedAppearance};
+use app_preferences::{ApplicationTheme, BrowsingPreferencePatch, ResolvedAppearance, UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN};
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, px};
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, PinchEvent, Render, Subscription, TouchPhase, Window, px};
 use gpui_component::{Root, WindowExt, dialog::DialogButtonProps};
 use library_model::BookLocator;
 use std::rc::Rc;
@@ -63,6 +63,7 @@ pub struct BrowserRoot {
     preferences: Entity<Preferences>,
     shell: Entity<BrowserShell>,
     split_enabled: bool,
+    pinch_scale: Option<f32>,
     focus: FocusHandle,
     _shell_subscription: Subscription,
     _preference_subscription: Subscription,
@@ -145,7 +146,7 @@ impl BrowserRoot {
 
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self { preferences, shell, split_enabled: false, focus, _shell_subscription: shell_subscription, _preference_subscription: preference_subscription, updates, _update_subscription: update_subscription }
+        Self { preferences, shell, split_enabled: false, pinch_scale: None, focus, _shell_subscription: shell_subscription, _preference_subscription: preference_subscription, updates, _update_subscription: update_subscription }
     }
 
     fn prompt_for_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -222,13 +223,49 @@ impl BrowserRoot {
     /// Adjusts and persists the window's interface font size.
     fn adjust_ui_font_size(&mut self, delta: i16, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.preferences.read(cx).ui_font_size_px();
-        let next = (i16::from(current) + delta).clamp(i16::from(app_preferences::UI_FONT_SIZE_MIN), i16::from(app_preferences::UI_FONT_SIZE_MAX)) as u8;
+        let next = (i16::from(current) + delta).clamp(i16::from(UI_FONT_SIZE_MIN), i16::from(UI_FONT_SIZE_MAX)) as u8;
         if next == current {
             return;
         }
-        if let Err(error) = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(app_preferences::BrowsingPreferencePatch::UiFontSizePx(next), cx)) {
-            crate::services::notify_error("browser-error", format!(text!(browse::could_not_save_interface_font_size), user_facing_error(&error, text!(common::please_try_again))), window, cx);
+        if let Err(error) = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(BrowsingPreferencePatch::UiFontSizePx(next), cx)) {
+            crate::services::notify_error("browser-error", format!(text!(browse::could_not_save_interface_font_size), user_facing_error(&error, "")), window, cx);
         }
+    }
+
+    /// Fallback for pinches outside content views that handle their own zoom.
+    pub fn pinch_ui(&mut self, event: &PinchEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !cfg!(feature = "mobile") && !cx.supports_touch_input() {
+            return;
+        }
+        if event.phase == TouchPhase::Cancelled {
+            self.pinch_scale = None;
+            cx.stop_propagation();
+            return;
+        }
+        if event.phase == TouchPhase::Started {
+            self.pinch_scale = Some(1.0);
+        }
+        let factor = 1.0 + event.delta;
+        if factor.is_finite()
+            && factor > 0.0
+            && let Some(scale) = &mut self.pinch_scale
+        {
+            *scale = (*scale * factor).clamp(0.01, 100.0);
+        }
+        if event.phase == TouchPhase::Ended
+            && let Some(scale) = self.pinch_scale.take()
+        {
+            // Ignore finger jitter; a completed gesture changes at most one size.
+            let delta = if scale >= 1.05 {
+                1
+            } else if scale <= 1.0 / 1.05 {
+                -1
+            } else {
+                0
+            };
+            self.adjust_ui_font_size(delta, window, cx);
+        }
+        cx.stop_propagation();
     }
 }
 
@@ -243,7 +280,6 @@ impl Focusable for BrowserRoot {
 
 impl Render for BrowserRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.set_page_scroll_on_swipe(cfg!(feature = "mobile") || cx.supports_touch_input());
         let theme = ui_components::browser_theme(cx);
         let preferences = self.preferences.read(cx);
         let ui_font_size = preferences.ui_font_size_px();
@@ -252,6 +288,7 @@ impl Render for BrowserRoot {
         ui_components::app_page(preferences.interface_font_name(cx), ui_font_size, theme)
             .key_context("Browser")
             .track_focus(&self.focus)
+            .on_pinch(cx.listener(Self::pinch_ui))
             .capture_action(cx.listener(Self::capture_dismiss))
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(|root, _: &DecreaseUiFontSize, window, cx| root.adjust_ui_font_size(-1, window, cx)))

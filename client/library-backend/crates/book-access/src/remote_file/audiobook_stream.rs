@@ -1,6 +1,7 @@
 //! One async worker owns audiobook fetches and retry state. Decoder reads use
 //! the shared range reader; control requests wake the worker through a channel.
 
+use operation_failure::OperationError;
 use super::{native::blocking_reader, RemoteFileError, REQUEST_TIMEOUT};
 use crate::range_reader::{validate_prefix, RangeFetcher, RangeReader};
 use crate::{BoxedBookReader, FetchFuture};
@@ -29,7 +30,7 @@ struct ControlRequest {
 pub struct AudioStreamControl {
     requests: watch::Sender<ControlRequest>,
     reader_generation: Arc<AtomicU64>,
-    failure: watch::Receiver<Option<String>>,
+    failure: watch::Receiver<Option<OperationError>>,
 }
 
 /// A control with no byte worker attached: requests are still recorded, and
@@ -68,7 +69,7 @@ impl AudioStreamControl {
     pub fn is_paused(&self) -> bool {
         self.requests.borrow().paused
     }
-    pub fn failure(&self) -> Option<String> {
+    pub fn failure(&self) -> Option<OperationError> {
         self.failure.borrow().clone()
     }
 
@@ -141,7 +142,7 @@ where
         tokio::pin!(response);
         let response = loop {
             tokio::select! {
-                result = &mut response => break result.unwrap_or_else(|_| Err(RemoteFileError::Retryable("remote file read timed out".into()))),
+                result = &mut response => break result.unwrap_or_else(|_| Err(RemoteFileError::Retryable(OperationError::classified(operation_failure::Failure::TimedOut, "remote file read timed out")))),
                 changed = control.changed() => {
                     changed.map_err(|_| io::Error::other("audiobook control closed"))?;
                     check_request(*control.borrow_and_update(), request.generation)?;
@@ -187,7 +188,7 @@ where
             let result = fetch_with_retry(&mut fetch, &request, &mut control_updates).await;
             if let Err(error) = &result {
                 if !matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::ConnectionAborted) {
-                    failure_sender.send_replace(Some(error.to_string()));
+                    failure_sender.send_replace(Some(OperationError::from_error(error)));
                 }
             }
             let _ = request.reply.send(result);

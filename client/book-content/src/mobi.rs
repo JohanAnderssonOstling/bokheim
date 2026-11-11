@@ -2,7 +2,7 @@
 
 use crate::book::{PreparedText, ResourceSource};
 use crate::metadata::{CreatorRole, IdentifierScheme, MetadataCredit, MetadataDate, MetadataIdentifier, MetadataProperty, MetadataSubject};
-use crate::resources::{MAX_BINARY_RESOURCE_BYTES, MAX_PREPARED_TEXT_BYTES, PreparedResources};
+use crate::resources::{MAX_BINARY_RESOURCE_BYTES, PreparedResources};
 use crate::source::{ReaderFactory, Source};
 use crate::{BookReader, DeclaredMetadata, ReadingBook};
 use futures_lite::io::{AsyncReadExt, AsyncSeekExt};
@@ -11,15 +11,48 @@ use ::mobi::HuffmanDecoder;
 use ::mobi::headers::{Compression, Encryption, TextEncoding};
 pub use ::mobi::{MobiMetadata, headers::ExthRecord};
 
-use std::io::{self, Read, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
+
+fn profile_start() -> Option<Instant> {
+    log::log_enabled!(target: "library_mobi_profile", log::Level::Debug).then(Instant::now)
+}
+
+fn profile_phase(stage: &str, started: Option<Instant>) {
+    if let Some(started) = started {
+        log::debug!(target: "library_mobi_profile", "{{\"event\":\"mobi_phase\",\"stage\":\"{stage}\",\"elapsed_ns\":{}}}", started.elapsed().as_nanos());
+    }
+}
 
 pub(crate) struct MobiContainer {
     metadata: MobiMetadata,
     source: Source,
     length: u64,
     extra_data_flags: u32,
+    navigation_complete: bool,
+}
+
+/// Declared metadata, navigation, and bounded frontmatter from one text decode.
+pub struct MobiInspection {
+    pub metadata: DeclaredMetadata,
+    pub toc: Option<Vec<crate::BookTocEntry>>,
+    pub frontmatter: Option<String>,
+}
+
+pub fn inspect_reader(reader: impl Read + Seek + Send + 'static) -> io::Result<MobiInspection> {
+    futures_lite::future::block_on(async move {
+        let started = profile_start();
+        let mut container = MobiContainer::open(Source::from_reader(reader)).await?;
+        profile_phase("container_open", started);
+        let metadata = container.metadata();
+        let started = profile_start();
+        let (text, frontmatter) = container.decoded_text(true).await?;
+        profile_phase("text_decode", started);
+        let toc = container.navigation(text, true).await?.toc();
+        Ok(MobiInspection { metadata, toc, frontmatter })
+    })
 }
 
 /// Read only the headers and EXTH fields, including for non-seekable imports.
@@ -108,7 +141,7 @@ impl MobiContainer {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "MOBI record exceeds the source"));
         }
         let extra_data_flags = mobi_extra_record_data_flags(&metadata, &prefix).map_err(io::Error::other)?;
-        Ok(Self { metadata, source, length, extra_data_flags })
+        Ok(Self { metadata, source, length, extra_data_flags, navigation_complete: true })
     }
 
     pub(crate) fn metadata(&self) -> DeclaredMetadata {
@@ -147,11 +180,8 @@ impl MobiContainer {
         read_record(self.source.reader.as_mut(), range).await
     }
 
-    async fn reading_text(&mut self) -> io::Result<navigation::ReadingText> {
-        if u64::from(self.metadata.palmdoc.text_length) > MAX_PREPARED_TEXT_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "MOBI text exceeds the prepared text limit"));
-        }
-        let mut decoder = TextDecoder::new(&self.metadata, self.extra_data_flags, MAX_PREPARED_TEXT_BYTES as usize).map_err(io::Error::other)?;
+    async fn decoded_text(&mut self, frontmatter: bool) -> io::Result<(String, Option<String>)> {
+        let mut decoder = TextDecoder::new(&self.metadata, self.extra_data_flags, usize::MAX).map_err(io::Error::other)?;
         if self.metadata.compression() == Compression::Huff {
             let range = huff_record_bounds(&self.metadata).map_err(io::Error::other)?;
             let mut records = Vec::new();
@@ -164,9 +194,13 @@ impl MobiContainer {
             decoder.load_huff(&records).map_err(io::Error::other)?;
         }
         let (start, end) = mobi_text_record_bounds(self.metadata.mobi.first_content_record, self.metadata.palmdoc.record_count, self.metadata.records.records.len()).map_err(io::Error::other)?;
+        let mut prefix_length = None;
         for index in start..end {
             let record = self.record(index, 64 * 1024).await?;
             decoder.decode_record(&record).map_err(io::Error::other)?;
+            if frontmatter && prefix_length.is_none() && (index - start + 1 >= 32 || decoder.decoded.len() >= 128 * 1024 || decoder.complete()) {
+                prefix_length = Some(decoder.decoded.len().min(128 * 1024));
+            }
             if decoder.complete() {
                 break;
             }
@@ -174,9 +208,32 @@ impl MobiContainer {
         if !decoder.complete() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "MOBI text is shorter than its declared length"));
         }
+        // Match the independent evidence reader's input/record/byte limits,
+        // including lossy decoding of a UTF-8 character cut by the prefix bound.
+        let frontmatter = (frontmatter && self.length <= 16 * 1024 * 1024).then(|| decoder.prefix(prefix_length.unwrap_or(0)));
         let text = decoder.finish(true).map_err(io::Error::other)?;
-        let entries = navigation::index::read(self).await.ok().flatten();
-        navigation::ReadingText::new(&self.metadata, text, entries)
+        Ok((text, frontmatter))
+    }
+
+    async fn navigation(&mut self, text: String, inspection: bool) -> io::Result<navigation::ReadingText> {
+        let started = profile_start();
+        let entries = match navigation::index::read(self).await {
+            Ok(entries) => entries,
+            Err(_) => {
+                self.navigation_complete = false;
+                None
+            }
+        };
+        profile_phase("navigation_index", started);
+        let started = profile_start();
+        let result = if inspection { navigation::ReadingText::for_inspection(&self.metadata, text, entries) } else { navigation::ReadingText::new(&self.metadata, text, entries) };
+        profile_phase("navigation_build", started);
+        result
+    }
+
+    async fn reading_text(&mut self) -> io::Result<navigation::ReadingText> {
+        let (text, _) = self.decoded_text(false).await?;
+        self.navigation(text, false).await
     }
 
     pub(crate) async fn toc(&mut self) -> io::Result<Option<Vec<crate::BookTocEntry>>> {
@@ -189,8 +246,17 @@ impl MobiContainer {
 
     pub(crate) async fn prepare_reading(mut self) -> io::Result<ReadingBook> {
         let text = self.prepare_text().await?;
-        let source = ResourceSource::Mobi(Arc::new(MobiResources { metadata: self.metadata, length: self.length, factory: self.source.into_factory().await? }));
-        Ok(text.into_reading(source))
+        let navigation_complete = self.navigation_complete;
+        let source = ResourceSource::Mobi(Arc::new(self.into_resources().await?));
+        let mut reading = text.into_reading(source);
+        if !navigation_complete {
+            reading.prevent_caching();
+        }
+        Ok(reading)
+    }
+
+    pub(crate) async fn into_resources(self) -> io::Result<MobiResources> {
+        Ok(MobiResources { metadata: self.metadata, length: self.length, factory: self.source.into_factory().await? })
     }
 }
 
@@ -276,11 +342,8 @@ struct TextDecoder {
 impl TextDecoder {
     fn new(metadata: &MobiMetadata, flags: u32, byte_limit: usize) -> Result<Self, String> {
         let length = metadata.palmdoc.text_length as usize;
-        if length > 512 * 1024 * 1024 {
-            return Err("MOBI declares an excessive uncompressed text size".to_owned());
-        }
         let limit = length.min(byte_limit);
-        Ok(Self { compression: metadata.compression(), encoding: metadata.text_encoding(), flags, limit, decoded: Vec::with_capacity(limit), huff: None })
+        Ok(Self { compression: metadata.compression(), encoding: metadata.text_encoding(), flags, limit, decoded: Vec::with_capacity(limit.min(256 * 1024)), huff: None })
     }
 
     fn load_huff(&mut self, records: &[Vec<u8>]) -> Result<(), String> {
@@ -304,6 +367,14 @@ impl TextDecoder {
 
     fn complete(&self) -> bool {
         self.decoded.len() == self.limit
+    }
+
+    fn prefix(&self, length: usize) -> String {
+        let bytes = &self.decoded[..length];
+        match self.encoding {
+            TextEncoding::CP1252 => encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes).0.into_owned(),
+            _ => String::from_utf8_lossy(bytes).into_owned(),
+        }
     }
 
     fn finish(self, strict_utf8: bool) -> Result<String, String> {

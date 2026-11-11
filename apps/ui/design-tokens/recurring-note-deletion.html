@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bokheim · Note scope states</title>
+<style>
+@font-face{font-family:Raleway;src:url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf')}
+@font-face{font-family:Raleway;src:url('../../desktop-gpui/assets/fonts/Raleway-Bold.ttf');font-weight:600}
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Bodoni;src:url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf')}
+:root{color-scheme:light;--canvas:#eae5dc;--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--rule:#c5bdac;--accent:#466853;--accent-ink:#f6f2eb;--wash:#e2e9df;--hover:#ebe7de;--danger:#9a4c43;--danger-wash:#9a4c4310;--shadow:0 7px 25px #29221918}
+[data-theme=dark]{color-scheme:dark;--canvas:#25221d;--paper:#191712;--ink:#efe6d0;--muted:#b3a891;--rule:#4e4639;--accent:#d3b271;--accent-ink:#191712;--wash:#3c3423;--hover:#2c2821;--danger:#dc9990;--danger-wash:#dc999015;--shadow:0 7px 25px #0005}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 Raleway,system-ui,sans-serif}
+button,textarea,input{font:inherit;color:inherit}button{cursor:pointer;border:0;background:transparent}button:hover{background:var(--hover)}button:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}button:disabled{cursor:default;opacity:.4}
+.preview-header,.guide,.preview-footer{max-width:1100px;margin:auto}
+.preview-header{padding:24px 0 18px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font:30px Bodoni,Georgia,serif}.brand small{font:12px Raleway,sans-serif;color:var(--muted);margin-left:18px;padding-left:18px;border-left:1px solid var(--rule)}
+.preview-actions{display:flex;gap:9px}.quiet{border:1px solid var(--rule);border-radius:3px;padding:7px 12px;font-size:12px}
+.guide{font-size:12px;color:var(--muted);padding-bottom:18px}.guide p{margin:0}
+.reader{max-width:1100px;margin:auto;display:flex;background:var(--paper);border:1px solid var(--rule);min-height:730px}
+.rail{width:64px;flex:none;border-right:1px solid var(--rule);display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:16px;color:var(--muted)}.rail span{width:36px;height:36px;display:grid;place-items:center}.rail .active{background:var(--wash);color:var(--accent);border-radius:4px}.rail svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.5}.rail .brand-mark{font:24px Bodoni,serif;color:var(--ink);margin-bottom:15px}
+.book{flex:1;min-width:0}.book-header{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:20px 34px 0;font-size:11px;color:var(--muted)}
+.spread{display:grid;grid-template-columns:1fr 1fr;gap:56px;padding:28px 42px 32px}.page{min-width:0}.running{font-size:10px;color:var(--muted);text-align:center;text-transform:uppercase;letter-spacing:.12em;margin:0 0 24px}.chapter-title{font:28px Bodoni,Georgia,serif;font-weight:400;text-align:center;margin:0 0 22px}
+.prose{font:23px/1.55 Garamond,Georgia,serif;margin:0 0 18px}.prose.indent{text-indent:1.2em}.term{border-radius:2px;padding:1px 2px;box-decoration-break:clone;-webkit-box-decoration-break:clone}.term.marked{background:#e0bb4b55}.term[data-primary]{font:inherit;cursor:pointer}.term[data-primary]:hover{background:#e0bb4b88}.term.selected{outline:1px solid var(--accent);outline-offset:3px}.page-number{font-size:11px;text-align:center;color:var(--muted);padding-top:25px}
+.editor{width:360px;max-width:100%;margin:20px auto 0;background:var(--paper);border:1px solid var(--rule);border-radius:6px;box-shadow:var(--shadow);overflow:hidden;font:13px/1.5 Raleway,sans-serif}.editor-body{padding:16px;display:flex;flex-direction:column;gap:12px;max-height:360px;overflow:auto;scrollbar-width:thin}
+.choices{display:flex;border:1px solid var(--rule);border-radius:3px;overflow:hidden;flex:none}.choice{flex:1;min-width:0;padding:7px 6px;background:var(--paper);font-size:12px;border-right:1px solid var(--rule);min-height:34px}.choice:last-child{border-right:0}.choice:hover{background:var(--hover)}.choice.has-note{background:var(--wash);color:var(--accent)}.choice.has-note:hover{background:color-mix(in srgb,var(--wash),var(--accent) 9%)}.choice[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);font-weight:600}.choice[aria-pressed=true]:hover{background:var(--accent)}
+.note{display:block;width:100%;resize:vertical;min-height:78px;padding:9px;border:1px solid var(--rule);border-radius:3px;background:var(--paper);line-height:1.6}
+.alias-heading{font-size:10px;color:var(--muted);margin-bottom:5px}.alias-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.alias{display:inline-flex;align-items:center;gap:4px;padding:2px 3px 2px 8px;border:1px solid var(--rule);border-radius:4px;font-size:11px}.alias button{width:24px;height:24px;font-size:17px;color:var(--muted)}.add-alias{font-size:11px;color:var(--accent);padding:5px 0}.alias-form{display:flex;gap:6px;margin-top:8px}.alias-form input{width:0;flex:1;min-width:0;border:1px solid var(--rule);border-radius:3px;padding:7px;background:var(--paper)}.alias-form button{padding:5px 9px;border:1px solid var(--rule);border-radius:3px}.alias-error{font-size:11px;color:var(--danger);margin:6px 0 0}
+.styles{display:flex;gap:2px}.styles button{flex:1;min-width:0;padding:6px 1px;font-size:11px;min-height:30px;border-radius:3px}.styles button[aria-pressed=true]{color:var(--accent);background:var(--wash)}
+.colors{display:flex;justify-content:space-between;align-items:center;gap:5px;min-height:28px}.swatch{width:26px;height:26px;display:grid;place-items:center;padding:0;border-radius:3px}.swatch span{display:block;width:16px;height:16px;border:1px solid #0002;border-radius:50%;background:var(--color)}.swatch[aria-pressed=true]{background:var(--wash);outline:1px solid var(--rule)}
+.delete-note{display:grid;place-items:center;width:28px;height:28px;padding:5px;color:var(--muted);border-radius:3px;flex:none;margin-left:5px}.delete-note:hover{color:var(--danger);background:var(--danger-wash)}.delete-note svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5}
+.preview-footer{display:flex;justify-content:space-between;gap:20px;padding:15px 0 30px;font-size:11px;color:var(--muted)}.preview-footer p{margin:0}.reopen{color:var(--accent);padding:0;text-decoration:underline;text-underline-offset:3px;font-size:11px}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:4;max-width:calc(100% - 28px);display:flex;align-items:center;gap:28px;padding:12px 16px;border:1px solid var(--rule);background:var(--paper);border-radius:5px;box-shadow:var(--shadow);font-size:13px}.toast button{font-weight:600;color:var(--accent);padding:4px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+@media(max-width:1150px){.preview-header,.guide,.reader,.preview-footer{margin-left:20px;margin-right:20px}.spread{padding-inline:28px;gap:32px}}
+@media(max-width:760px){.preview-header{align-items:flex-start;padding-top:18px}.brand small{display:block;border:0;padding:0;margin:3px 0 0}.preview-actions{flex-direction:column;gap:6px}.rail{display:none}.spread{grid-template-columns:1fr;padding:25px 20px 32px}.page:last-child{border-top:1px solid var(--rule);padding-top:25px}.book-header{padding-inline:20px}.reader{min-height:0}.preview-footer{flex-direction:column;gap:8px}.guide{max-width:100%;font-size:11px}.toast{gap:18px;bottom:14px}.editor{margin-bottom:5px}}
+</style>
+</head>
+<body>
+<header class="preview-header">
+  <div class="brand">Bokheim <small>Note scope states · Interactive preview</small></div>
+  <div class="preview-actions"><button class="quiet" id="reset">Reset example</button><button class="quiet" id="theme">Dark appearance</button></div>
+</header>
+<div class="guide"><p>Plain: no note · Light accent: note exists · Strong accent: selected note</p></div>
+<main class="reader">
+  <aside class="rail" aria-hidden="true">
+    <span class="brand-mark">B</span>
+    <span><svg viewBox="0 0 24 24"><path d="m14 5-7 7 7 7"/></svg></span>
+    <span><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h11"/></svg></span>
+    <span class="active"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></span>
+    <span><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 5 5"/></svg></span>
+  </aside>
+  <div class="book">
+    <header class="book-header"><span>Pride and Prejudice · Jane Austen</span><span>Chapter III</span></header>
+    <div class="spread">
+      <article class="page">
+        <p class="running">Pride and Prejudice</p>
+        <h1 class="chapter-title">Chapter III</h1>
+        <p class="prose">The evening passed pleasantly enough. <button class="term marked selected" data-primary data-name="Elizabeth" aria-expanded="true" aria-controls="editor">Elizabeth</button> listened with amusement as the conversation turned once more to the new arrivals.</p>
+        <section class="editor" id="editor" aria-label="Edit annotation">
+          <div class="editor-body">
+            <div class="choices" id="scopes" role="group" aria-label="Note scope"></div>
+            <div id="note-content">
+              <textarea class="note" id="note" rows="2" aria-label="Note text"></textarea>
+              <div id="aliases" style="margin-top:12px"></div>
+            </div>
+            <div class="styles" id="styles" role="group" aria-label="Annotation style"></div>
+            <div class="colors" id="colors" role="group" aria-label="Annotation colour"></div>
+          </div>
+        </section>
+        <p class="page-number">42</p>
+      </article>
+      <article class="page">
+        <p class="running">Jane Austen</p>
+        <p class="prose">“Come, <span class="term" data-name="Lizzy">Lizzy</span>,” said her sister, “you must tell us what you think of him.”</p>
+        <p class="prose indent"><span class="term" data-name="Elizabeth">Elizabeth</span> smiled. She had observed enough to form an opinion, but had no wish to share it so readily.</p>
+        <p class="prose indent">The company had been in excellent spirits, and every new acquaintance supplied a fresh subject for conversation.</p>
+        <p class="prose indent">“<span class="term" data-name="Miss Bennet">Miss Bennet</span> has a great deal to say,” someone remarked, “when she chooses to say it.”</p>
+        <p class="prose indent">She returned to her book, content to let the others settle the matter among themselves.</p>
+        <p class="page-number">43</p>
+      </article>
+    </div>
+  </div>
+</main>
+<footer class="preview-footer"><p id="note-count"></p><p><button class="reopen" id="reopen">Open note editor</button> · This preview changes example notes only.</p></footer>
+<div class="toast" id="toast" role="status" hidden><span id="toast-message"></span><button id="undo">Undo</button></div>
+<div class="sr-only" id="announcement" aria-live="polite"></div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const scopes=['Selection','Chapter','Book','Library'];
+const palette=[['Yellow','#e0bb4b'],['Orange','#e09a57'],['Red','#d57868'],['Pink','#c880b2'],['Purple','#9d80c9'],['Blue','#6e9dcb'],['Teal','#57aaa1'],['Green','#94ad65']];
+const initialNotes=[
+  {id:'chapter',scope:'Chapter',text:'Her wit stands out in this first encounter.',aliases:['Lizzy'],style:'Highlight',color:'#e0bb4b'},
+  {id:'book',scope:'Book',text:'Elizabeth Bennet — the second Bennet daughter.',aliases:['Miss Bennet'],style:'Highlight',color:'#6e9dcb'},
+  {id:'library',scope:'Library',text:'An Austen character whose judgments change with experience.',aliases:['Eliza'],style:'Underline',color:'#94ad65'}
+];
+let notes=structuredClone(initialNotes),selectedScope='Book',open=true,lastDeletion=null,adding=false;
+function selected(){return notes.find(note=>note.scope===selectedScope);}
+function announce(message){$('announcement').textContent=message;}
+function makeButton(label,className,handler){const button=document.createElement('button');button.type='button';button.className=className;button.textContent=label;button.onclick=handler;return button;}
+function selectScope(scope){
+  if(!notes.some(note=>note.scope===scope))notes.push({id:crypto.randomUUID(),scope,text:'',aliases:[],style:'Highlight',color:'#e0bb4b'});
+  selectedScope=scope;adding=false;render();
+}
+function renderAliases(note){
+  const root=$('aliases');root.replaceChildren();root.hidden=note.scope==='Selection';if(root.hidden)return;
+  if(note.aliases.length){const heading=document.createElement('div');heading.className='alias-heading';heading.textContent='Also match';root.append(heading);}
+  const chips=document.createElement('div');chips.className='alias-chips';
+  note.aliases.forEach(alias=>{const chip=document.createElement('span');chip.className='alias';chip.append(document.createTextNode(alias));const remove=makeButton('×','',()=>{note.aliases=note.aliases.filter(value=>value!==alias);render();});remove.setAttribute('aria-label',`Remove alias ${alias}`);chip.append(remove);chips.append(chip);});
+  chips.append(makeButton('+ Add alias','add-alias',()=>{adding=true;render();$('alias-input').focus();}));root.append(chips);
+  if(adding){
+    const form=document.createElement('form');form.className='alias-form';const input=document.createElement('input');input.id='alias-input';input.placeholder='Name or phrase';input.setAttribute('aria-label','New alias');
+    const add=document.createElement('button');add.type='submit';add.textContent='Add';form.append(input,add);root.append(form);
+    form.onsubmit=event=>{event.preventDefault();const value=input.value.trim().replace(/\s+/g,' ');if(!value)return;if(['Elizabeth',...note.aliases].some(alias=>alias.toLowerCase()===value.toLowerCase())){input.setCustomValidity('This name already matches the note.');input.reportValidity();return;}note.aliases.push(value);adding=false;render();};input.oninput=()=>input.setCustomValidity('');
+  }
+}
+function renderHighlights(){
+  document.querySelectorAll('[data-name]').forEach(term=>{
+    const applicable=notes.filter(note=>(term.hasAttribute('data-primary')||note.scope!=='Selection')&&['Elizabeth',...note.aliases].some(name=>name.toLowerCase()===term.dataset.name.toLowerCase()));
+    const highlight=applicable.find(note=>note.style==='Highlight'),underline=applicable.find(note=>note.style==='Underline'),strike=applicable.find(note=>note.style==='Strike'),squiggly=applicable.find(note=>note.style==='Squiggly');
+    term.style.background=highlight?`${highlight.color}55`:'transparent';term.style.textDecorationLine=[underline||squiggly?'underline':'',strike?'line-through':''].filter(Boolean).join(' ')||'none';term.style.textDecorationStyle=squiggly?'wavy':'solid';term.style.textDecorationColor=(squiggly||underline||strike)?.color||'currentColor';term.classList.toggle('selected',term.hasAttribute('data-primary')&&open);
+  });
+}
+function render(){
+  const note=selected();$('editor').hidden=!open;document.querySelector('[data-primary]').setAttribute('aria-expanded',String(open));
+  $('scopes').replaceChildren(...scopes.map(scope=>{const exists=notes.some(note=>note.scope===scope);const button=makeButton(scope,`choice${exists?' has-note':''}`,()=>selectScope(scope));button.setAttribute('aria-pressed',String(!!note&&scope===selectedScope));button.setAttribute('aria-label',`${scope}: ${exists?'note exists':'no note'}`);button.title=exists?`Open existing ${scope.toLowerCase()} note`:`Create ${scope.toLowerCase()} note`;return button;}));
+  $('note-content').hidden=!note;$('styles').hidden=!note;$('colors').hidden=!note;
+  if(note){
+    $('note').value=note.text;$('note').setAttribute('aria-label',`${note.scope} note text`);renderAliases(note);
+    $('styles').replaceChildren(...['Highlight','Underline','Squiggly','Strike'].map(style=>{const button=makeButton(style,'',()=>{note.style=style;render();});button.setAttribute('aria-pressed',String(note.style===style));return button;}));
+    $('colors').replaceChildren(...palette.map(([name,color])=>{const button=makeButton('','swatch',()=>{note.color=color;render();});button.style.setProperty('--color',color);button.setAttribute('aria-label',name);button.setAttribute('aria-pressed',String(note.color===color));button.title=name;button.append(document.createElement('span'));return button;}));
+    const remove=makeButton('','delete-note',deleteSelectedNote);remove.id='delete-note';remove.title=`Delete ${note.scope.toLowerCase()} note`;remove.setAttribute('aria-label',remove.title);remove.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7M14 10v7"/></svg>';$('colors').append(remove);
+  }
+  $('note-count').textContent=`${notes.length} ${notes.length===1?'note':'notes'} for Elizabeth · ${notes.map(note=>note.scope).join(', ')||'No notes remaining'}`;renderHighlights();
+}
+$('note').oninput=()=>{const note=selected();if(note)note.text=$('note').value;};
+function deleteSelectedNote(){
+  const note=selected();if(!note)return;lastDeletion={note:structuredClone(note),index:notes.indexOf(note)};notes=notes.filter(value=>value.id!==note.id);selectedScope=notes[0]?.scope||note.scope;open=notes.length>0;adding=false;
+  $('toast-message').textContent=`${note.scope} note deleted`;$('toast').hidden=false;render();$('undo').focus();
+}
+$('undo').onclick=()=>{if(!lastDeletion)return;const {note,index}=lastDeletion;notes.splice(index,0,note);selectedScope=note.scope;open=true;adding=false;lastDeletion=null;$('toast').hidden=true;render();$('note').focus();announce(`${note.scope} note restored.`);};
+function reopen(){open=true;selectScope(selected()?selectedScope:notes[0]?.scope||'Selection');}
+document.querySelector('[data-primary]').onclick=reopen;$('reopen').onclick=reopen;
+$('reset').onclick=()=>{notes=structuredClone(initialNotes);selectedScope='Book';open=true;adding=false;lastDeletion=null;$('toast').hidden=true;render();announce('Example reset.');};
+$('theme').onclick=()=>{const dark=document.documentElement.dataset.theme!=='dark';document.documentElement.dataset.theme=dark?'dark':'light';$('theme').textContent=dark?'Light appearance':'Dark appearance';};
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&open){open=false;adding=false;render();document.querySelector('[data-primary]').focus();event.preventDefault();}});
+render();
+</script>
+</body>
+</html>

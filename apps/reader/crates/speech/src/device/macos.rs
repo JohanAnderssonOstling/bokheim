@@ -1,4 +1,5 @@
 //! Apple's installed on-device voices, rendered to buffers for our existing audio queue.
+use crate::SpeechError;
 use super::{Audio, DeviceVoice, pcm::MAX_AUDIO_BYTES};
 use block2::RcBlock;
 use objc2::rc::autoreleasepool;
@@ -9,14 +10,14 @@ use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub(super) fn voices() -> Result<Vec<DeviceVoice>, String> {
+pub(super) fn voices() -> Result<Vec<DeviceVoice>, SpeechError> {
     autoreleasepool(|_| unsafe {
         // Custom speech providers have no offline metadata. Only expose Apple's local engines.
         Ok(AVSpeechSynthesisVoice::speechVoices()
             .iter()
             .filter_map(|voice| {
                 let id = voice.identifier().to_string();
-                id.starts_with("com.apple.").then(|| DeviceVoice { id, name: voice.name().to_string(), language: voice.language().to_string() })
+                id.starts_with("com.apple.").then(|| DeviceVoice { id, name: voice.name().to_string(), language: voice.language().to_string(), engine: None })
             })
             .collect())
     })
@@ -27,10 +28,10 @@ struct Capture {
     samples: Vec<f32>,
     rate: u32,
     done: bool,
-    error: Option<String>,
+    error: Option<SpeechError>,
 }
 impl Capture {
-    unsafe fn append(&mut self, buffer: &AVAudioPCMBuffer) -> Result<(), String> {
+    unsafe fn append(&mut self, buffer: &AVAudioPCMBuffer) -> Result<(), SpeechError> {
         let frames = unsafe { buffer.frameLength() } as usize;
         if frames == 0 {
             self.done = true;
@@ -90,7 +91,7 @@ impl Capture {
     }
 }
 
-pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -> bool, mut emit: impl FnMut(Audio) -> bool) -> Result<(), String> {
+pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -> bool, mut emit: impl FnMut(Audio) -> bool) -> Result<(), SpeechError> {
     autoreleasepool(|_| unsafe {
         if !voices()?.iter().any(|voice| voice.id == id) {
             return Err("The selected installed local voice is unavailable. Choose another local voice.".into());

@@ -12,32 +12,33 @@ use gpui_component::menu::DropdownMenu;
 use gpui_component::{Disableable, Icon, IconName};
 #[cfg(not(target_arch = "wasm32"))]
 use reader_speech::Voice;
-use reader_speech::{DesktopSpeech, DeviceVoice, Pauses, SpeechChunk, SpeechControl, SpeechEvent, SpeechFailure, SpeechPassage, supports_languages};
+use reader_speech::{DesktopSpeech, DeviceVoice, Pauses, SpeechChunk, SpeechControl, SpeechEvent, SpeechError, SpeechFailure, SpeechPassage, supports_languages};
 use std::{collections::BTreeMap, time::Duration};
 use ui_components::{self as components, PlaybackTransportAction};
 use web_time::Instant;
 
-pub(crate) fn speech_error_message(failure: SpeechFailure, diagnostic: &str) -> &'static str {
+pub(crate) fn speech_error_message(failure: SpeechFailure, diagnostic: &SpeechError) -> &'static str {
     log::warn!("Read aloud failed ({failure:?}): {diagnostic}");
-    match failure {
+    let fallback = match failure {
         SpeechFailure::Interrupted => text!(reader::read_aloud_stopped_unexpectedly_start_it_again_if_it_persists_restart_the),
         SpeechFailure::VoiceUnavailable => text!(reader::couldn_t_load_the_selected_voice_try_another_voice_if_it_persists),
         SpeechFailure::AudioOutput => text!(reader::couldn_t_play_read_aloud_audio_check_your_speakers_headphones_or_bluetooth),
         SpeechFailure::Synthesis => text!(reader::couldn_t_generate_speech_for_this_passage_try_another_voice_or_passage),
         SpeechFailure::Blocked => text!(reader::the_browser_refused_read_aloud_start_it_again_from_the_read_aloud),
         SpeechFailure::ServiceUnavailable => text!(reader::couldn_t_start_the_speech_service_retry_if_it_persists_restart_the),
-    }
+    };
+    components::user_facing_error(diagnostic, fallback)
 }
 
 #[derive(Debug)]
 pub(crate) struct SpeechStartError {
     failure: SpeechFailure,
-    diagnostic: String,
+    diagnostic: SpeechError,
     explanation: Option<String>,
 }
 
 impl SpeechStartError {
-    fn new(failure: SpeechFailure, diagnostic: String) -> Self {
+    fn new(failure: SpeechFailure, diagnostic: SpeechError) -> Self {
         Self { failure, diagnostic, explanation: None }
     }
 
@@ -316,7 +317,7 @@ impl Narration {
         self
     }
 
-    fn apply_voices(&mut self, result: Result<Vec<DeviceVoice>, String>) {
+    fn apply_voices(&mut self, result: Result<Vec<DeviceVoice>, SpeechError>) {
         self.voices_loading = false;
         match result {
             Ok(voices) => {
@@ -336,7 +337,7 @@ impl Narration {
             }
             Err(error) => {
                 self.device_voices.clear();
-                self.voices_error = Some(error);
+                self.voices_error = Some(components::user_facing_error(&error, text!(reader::couldn_t_load_the_selected_voice_try_another_voice_if_it_persists)).into());
             }
         }
         self.refresh_availability();
@@ -405,7 +406,22 @@ impl Narration {
         }
     }
 
+    #[cfg(target_os = "android")]
+    fn normalize_voice_preferences(&mut self) {
+        // Older preferences can name George, while Android bundles only Alba.
+        if self.voice == NarrationVoice::George {
+            self.voice = NarrationVoice::Alba;
+        }
+        for preference in self.voice_preferences.values_mut() {
+            if preference.voice == NarrationVoice::George {
+                preference.voice = NarrationVoice::Alba;
+            }
+        }
+    }
+
     fn refresh_availability(&mut self) {
+        #[cfg(target_os = "android")]
+        self.normalize_voice_preferences();
         if let Some(preference) = self.preferred_voice().cloned() {
             self.voice = preference.voice;
             self.device_voice = preference.device_voice;
@@ -452,7 +468,7 @@ impl Narration {
     fn begin(&mut self, index: usize, start: impl FnOnce(&DesktopSpeech) -> u64) -> Result<Option<async_channel::Receiver<SpeechEvent>>, SpeechStartError> {
         self.refresh_availability();
         if let Some(reason) = &self.unavailable_reason {
-            return Err(SpeechStartError { failure: SpeechFailure::VoiceUnavailable, diagnostic: reason.clone(), explanation: Some(reason.clone()) });
+            return Err(SpeechStartError { failure: SpeechFailure::VoiceUnavailable, diagnostic: reason.clone().into(), explanation: Some(reason.clone()) });
         }
         if self.service.is_none() {
             let service = DesktopSpeech::new().map_err(|diagnostic| SpeechStartError::new(SpeechFailure::ServiceUnavailable, diagnostic))?;
@@ -600,8 +616,6 @@ impl Narration {
     pub fn with_voice(mut self, voice: NarrationVoice) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            #[cfg(target_os = "android")]
-            let voice = if voice == NarrationVoice::George { NarrationVoice::Alba } else { voice };
             self.voice = voice;
         }
         #[cfg(target_arch = "wasm32")]
@@ -651,7 +665,7 @@ impl Narration {
                 }
                 Err(error) => {
                     self.stop();
-                    self.unavailable_reason = Some(error);
+                    self.unavailable_reason = Some(error.to_string());
                 }
             }
         }
@@ -987,8 +1001,8 @@ mod tests {
 
     #[test]
     fn voices_are_remembered_per_language_and_regional_variants_share_a_choice() {
-        let english = DeviceVoice { id: "english".into(), name: "English".into(), language: "en-GB".into() };
-        let swedish = DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into() };
+        let english = DeviceVoice { id: "english".into(), name: "English".into(), language: "en-GB".into(), engine: None };
+        let swedish = DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into(), engine: None };
         let mut state = Narration::for_languages(&["en".into()]).with_voice(NarrationVoice::Device).with_device_voice(Some(english.id.clone()));
         state.apply_voices(Ok(vec![english.clone(), swedish.clone()]));
         state.current = Some(12);
@@ -1016,7 +1030,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn bundled_voice_replaces_only_its_own_language_selection() {
         let mut state = Narration::for_languages(&["sv".into()]).with_voice(NarrationVoice::Device);
-        state.apply_voices(Ok(vec![DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into() }]));
+        state.apply_voices(Ok(vec![DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into(), engine: None }]));
         state.remember_voice("sv", NarrationVoice::Device, Some("swedish".into()));
         state.remember_voice("en-GB", NarrationVoice::Alba, None);
         assert_eq!(state.voice, NarrationVoice::Device);
@@ -1032,7 +1046,7 @@ mod tests {
     #[test]
     fn missing_saved_local_voice_requires_explicit_replacement() {
         let mut state = Narration::for_languages(&["sv".into()]).with_voice(NarrationVoice::Device).with_device_voice(Some("removed".into()));
-        state.apply_voices(Ok(vec![DeviceVoice { id: "installed".into(), name: "Swedish".into(), language: "sv-SE".into() }]));
+        state.apply_voices(Ok(vec![DeviceVoice { id: "installed".into(), name: "Swedish".into(), language: "sv-SE".into(), engine: None }]));
         assert_eq!(state.device_voice.as_deref(), Some("removed"));
         assert!(state.unavailable_reason.is_some());
         assert!(state.start(vec![], 0).is_err());
@@ -1045,7 +1059,7 @@ mod tests {
     #[test]
     fn catalogue_failure_and_language_mismatch_never_enable_a_fallback() {
         let mut state = Narration::for_languages(&["sv".into()]).with_voice(NarrationVoice::Device);
-        state.apply_voices(Ok(vec![DeviceVoice { id: "english".into(), name: "English".into(), language: "en-US".into() }]));
+        state.apply_voices(Ok(vec![DeviceVoice { id: "english".into(), name: "English".into(), language: "en-US".into(), engine: None }]));
         assert!(state.matching_voices().is_empty());
         assert!(state.device_voice.is_none());
         assert!(state.start(vec![], 0).is_err());
@@ -1056,7 +1070,7 @@ mod tests {
 
     #[test]
     fn highlighting_changes_once_per_item_and_restarts_for_new_generations() {
-        let mut state = Narration { generation: 7, current: Some(2), status: "Preparing text to speech…".into(), ..Default::default() };
+        let mut state = Narration { generation: 7, current: Some(2), status: "Preparing text to speech".into(), ..Default::default() };
         assert!(state.started_item(2), "the first chunk must highlight even though start already selected this item");
         assert_eq!(state.status, "Reading");
         assert!(!state.started_item(2), "later chunks must not repeat whole-item highlighting");

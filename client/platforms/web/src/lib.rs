@@ -4,6 +4,8 @@
 mod asset_index;
 #[cfg(target_arch = "wasm32")]
 pub mod cpu_host;
+#[cfg(target_arch = "wasm32")]
+pub mod import_worker;
 #[cfg(test)]
 #[path = "../../../../vendor/sqlite-wasm-vfs/src/open_files.rs"]
 mod opfs_open_files;

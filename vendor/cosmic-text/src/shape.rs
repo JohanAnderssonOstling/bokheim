@@ -363,6 +363,29 @@ fn shape_run(
     end_run: usize,
     span_rtl: bool,
 ) {
+    let attrs = attrs_list.get_span(start_run);
+    if let Some(id) = attrs.font_id {
+        if let Some(font) =
+            font_system.get_font_with_variations(id, attrs.weight, attrs.font_variations)
+        {
+            // The caller has already selected the face, including any fallback.
+            // Keep missing glyphs instead of searching unrelated system fonts.
+            shape_fallback(
+                &mut font_system.shape_buffer,
+                glyphs,
+                &font,
+                line,
+                attrs_list,
+                start_run,
+                end_run,
+                span_rtl,
+            );
+        } else {
+            log::warn!("explicit font face {id:?} could not be loaded");
+        }
+        return;
+    }
+
     // Re-use the previous script buffer if possible.
     let mut scripts = {
         let mut scripts = mem::take(&mut font_system.shape_buffer.scripts);
@@ -381,8 +404,6 @@ fn shape_run(
     }
 
     log::trace!("      Run {:?}: '{}'", &scripts, &line[start_run..end_run],);
-
-    let attrs = attrs_list.get_span(start_run);
 
     let fonts = font_system.get_family_matches(&attrs);
 
@@ -526,6 +547,7 @@ fn shape_run_cached(
     let run_range = start_run..end_run;
     let mut key = ShapeRunKey {
         text: line[run_range.clone()].to_string(),
+        rtl: span_rtl,
         default_attrs: AttrsOwned::new(&attrs_list.defaults()),
         attrs_spans: Vec::new(),
     };
@@ -581,6 +603,16 @@ fn shape_skip(
     end_run: usize,
 ) {
     let attrs = attrs_list.get_span(start_run);
+    if let Some(id) = attrs.font_id {
+        if let Some(font) =
+            font_system.get_font_with_variations(id, attrs.weight, attrs.font_variations)
+        {
+            shape_skip_glyphs(glyphs, &font, line, attrs_list, start_run, end_run);
+        } else {
+            log::warn!("explicit font face {id:?} could not be loaded");
+        }
+        return;
+    }
     let fonts = font_system.get_family_matches(&attrs);
 
     let default_families = [&attrs.family];

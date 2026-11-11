@@ -10,7 +10,7 @@ use book_model::Annotation;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FontWeight, HighlightStyle, Modifiers, Pixels, Render, ScrollHandle, StyledText, Subscription, Task, Window, div, px, rems};
 use gpui_component::IconName;
-use library_model::{BookCardRow, BookTextMatch, BookTextSearchBook, NOTEBOOK_ANNOTATION_PAGE_SIZE, NotebookAnnotationPage, NotebookBook, NotebookQuery};
+use library_model::{BookCardRow, BookTextMatch, BookTextMatchPage, BookTextSearchBook, NOTEBOOK_ANNOTATION_PAGE_SIZE, NotebookAnnotationPage, NotebookBook, NotebookQuery};
 use std::{collections::BTreeMap, rc::Rc};
 use ui_components as components;
 
@@ -219,6 +219,15 @@ impl NotebookRow {
             });
         }));
         cx.notify();
+    }
+
+    pub(super) fn install_text_previews(&mut self, page: BookTextMatchPage, cx: &mut Context<Self>) {
+        if let Some(matches) = &mut self.text_matches {
+            matches.total = page.total;
+            merge_page(&mut matches.previews, page.offset, page.matches, Rc::new);
+            self.layout = None;
+            cx.notify();
+        }
     }
 
     fn load_visible_matches(&mut self, cx: &mut Context<Self>) {

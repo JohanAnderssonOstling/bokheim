@@ -268,6 +268,6 @@ impl PdfReaderView {
             )
             .child(components::reader_settings_group(theme).children(spacing))
             .into_any_element();
-        crate::shell::keyboard_settings::with_keyboard_settings(general, window, cx)
+        general
     }
 }

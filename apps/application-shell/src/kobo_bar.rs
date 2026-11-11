@@ -66,11 +66,12 @@ impl KoboDeviceBar {
                             cx.notify();
                         }
                         if let Some(message) = gpui_kobo::take_power_message() {
-                            bar.power_error = Some(if message.starts_with("Battery low (") {
-                                message
-                            } else {
-                                log::warn!("Kobo power action failed: {message}");
-                                text!(device::couldn_t_complete_the_power_action_retry_or_restart_the_app).into()
+                            bar.power_error = Some(match message {
+                                gpui_kobo::KoboPowerMessage::LowBattery(percent) => format!(text!(startup::battery_low_connect_a_charger), percent = percent),
+                                gpui_kobo::KoboPowerMessage::Failed(error) => {
+                                    let error = operation_failure::OperationError::from_error(error.as_ref());
+                                    components::user_facing_error(&error, text!(device::couldn_t_complete_the_power_action_retry_or_restart_the_app)).into()
+                                }
                             });
                             bar.power_menu_open = true;
                             cx.notify();

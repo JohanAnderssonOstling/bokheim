@@ -17,7 +17,7 @@ kobo-profile = { path = "../../client/platforms/kobo/crates/profile", optional =
 log = "0.4"
 web-time = "1"
 library-model = { path = "../../client/library-model", default-features = false }
-operation-failure = { path = "../../client/client-protocol/crates/operation-failure" }
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure", features = ["web"] }
 path-label = { path = "../../client/ui/path-label" }
 app-preferences = { path = "../../client/preferences" }
 gpui.workspace = true

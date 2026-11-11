@@ -3,8 +3,8 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) fn read_bundled_unified_taxonomy() -> Result<Vec<UnifiedConceptDefinition>, String> {
-    read_unified_taxonomy_sqlite(&crate::bundled::path()?)
+pub(crate) fn read_bundled_unified_taxonomy() -> Result<Vec<UnifiedConceptDefinition>, operation_failure::OperationError> {
+    read_unified_taxonomy_sqlite(&crate::bundled::path()?).map_err(Into::into)
 }
 
 pub fn read_unified_taxonomy_sqlite(path: &Path) -> Result<Vec<UnifiedConceptDefinition>, String> {

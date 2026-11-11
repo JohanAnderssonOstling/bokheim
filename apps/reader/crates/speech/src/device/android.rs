@@ -1,4 +1,5 @@
 //! Android synthesizes installed offline voices; Rust retains ownership of playback.
+use crate::SpeechError;
 use super::{Audio, DeviceVoice, pcm};
 use serde_json::json;
 use std::collections::HashMap;
@@ -8,7 +9,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-type Bridge = dyn Fn(&str) -> Result<String, String> + Send + Sync;
+type Bridge = dyn Fn(&str) -> Result<String, SpeechError> + Send + Sync;
 static BRIDGE: OnceLock<Box<Bridge>> = OnceLock::new();
 static JOBS: OnceLock<Mutex<HashMap<u64, Arc<Job>>>> = OnceLock::new();
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -19,7 +20,7 @@ struct State {
     channels: u16,
     rate: u32,
     done: bool,
-    error: Option<String>,
+    error: Option<SpeechError>,
 }
 #[derive(Default)]
 struct Job {
@@ -32,24 +33,24 @@ fn jobs() -> &'static Mutex<HashMap<u64, Arc<Job>>> {
 fn job(id: u64) -> Option<Arc<Job>> {
     jobs().lock().ok()?.get(&id).cloned()
 }
-fn dispatch(value: serde_json::Value) -> Result<String, String> {
+fn dispatch(value: serde_json::Value) -> Result<String, SpeechError> {
     let response = BRIDGE.get().ok_or("Android local voice integration is unavailable.")?(&value.to_string())?;
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) {
         if let Some(error) = value.get("error").and_then(|value| value.as_str()) {
-            return Err(error.into());
+            return Err(serde_json::from_value(json!({"message":error,"failure":value.get("failure")})).unwrap_or_else(|_| SpeechError::from(error)));
         }
     }
     Ok(response)
 }
-pub fn initialize(bridge: impl Fn(&str) -> Result<String, String> + Send + Sync + 'static) {
+pub fn initialize(bridge: impl Fn(&str) -> Result<String, SpeechError> + Send + Sync + 'static) {
     let _ = BRIDGE.set(Box::new(bridge));
 }
 
-pub(super) fn voices() -> Result<Vec<DeviceVoice>, String> {
+pub(super) fn voices() -> Result<Vec<DeviceVoice>, SpeechError> {
     let encoded = dispatch(json!({"command":"voices"}))?;
     let value: serde_json::Value = serde_json::from_str(&encoded).map_err(|_| "Android returned an invalid local voice catalogue.")?;
     if let Some(error) = value.get("error").and_then(|value| value.as_str()) {
-        return Err(error.into());
+        return Err(serde_json::from_value(json!({"message":error,"failure":value.get("failure")})).unwrap_or_else(|_| SpeechError::from(error)));
     }
     serde_json::from_value(value).map_err(|_| "Could not read installed local Android voices.".into())
 }
@@ -98,7 +99,7 @@ pub fn audio(id: u64, bytes: &[u8]) -> bool {
     state.bytes.extend_from_slice(bytes);
     true
 }
-pub fn complete(id: u64, error: Option<String>) {
+pub fn complete(id: u64, error: Option<SpeechError>) {
     let Some(job) = job(id) else {
         return;
     };
@@ -121,7 +122,7 @@ impl Drop for Pending {
     }
 }
 
-pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -> bool, mut emit: impl FnMut(Audio) -> bool) -> Result<(), String> {
+pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -> bool, mut emit: impl FnMut(Audio) -> bool) -> Result<(), SpeechError> {
     let request = NEXT.fetch_add(1, Ordering::Relaxed);
     let job = Arc::new(Job::default());
     jobs().lock().map_err(|_| "Local voice requests were interrupted.")?.insert(request, job.clone());

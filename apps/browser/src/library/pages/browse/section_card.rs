@@ -276,7 +276,7 @@ impl SectionCard {
             if let Some(error) = failure {
                 let _ = card.update_in(cx, |card, window, cx| {
                     if card.revision == revision && card.request_failed {
-                        crate::services::notify_error("section-books-error", format!(text!(browse::could_not_load_books), user_facing_error(&error, text!(common::please_try_again))), window, cx);
+                        crate::services::notify_error("section-books-error", format!(text!(browse::could_not_load_books), user_facing_error(&error, "")), window, cx);
                     }
                 });
             }

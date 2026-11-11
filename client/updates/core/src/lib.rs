@@ -1,5 +1,6 @@
 //! Update discovery, offer selection, and client update lifecycle.
 
+pub use operation_failure::{Classified, Failure, OperationError as UpdateError};
 use semver::Version;
 use std::collections::BTreeMap;
 pub use update_protocol::{decode_hex, validate_https_url, ApplicationRelease, Artifact, CatalogRelease, Manifest, SignedManifest, TaxonomyRelease, VerifiedManifest, MAX_MANIFEST_BYTES, SIGNATURE_CONTEXT};
@@ -33,7 +34,7 @@ pub struct DiscoveryConfig {
 }
 
 impl DiscoveryConfig {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), UpdateError> {
         validate_https_url(&self.endpoint)?;
         if self.channel.is_empty() || self.trusted_keys.is_empty() {
             return Err("update discovery requires a channel and trusted signing key".into());
@@ -43,7 +44,7 @@ impl DiscoveryConfig {
 
     /// Production builds inject a public key; no test or generated key is trusted
     /// by default. Only the endpoint may be overridden at runtime.
-    pub fn bundled() -> Result<Self, String> {
+    pub fn bundled() -> Result<Self, UpdateError> {
         let key = option_env!("BOKHEIM_UPDATE_PUBLIC_KEY_HEX").ok_or("no update signing public key was bundled")?;
         let key_id = option_env!("BOKHEIM_UPDATE_KEY_ID").unwrap_or("release-1");
         let endpoint = option_env!("BOKHEIM_UPDATE_ENDPOINT").unwrap_or(DEFAULT_ENDPOINT).to_owned();
@@ -83,7 +84,7 @@ pub fn offer<'a>(verified: &'a VerifiedManifest, installed: &Installed<'_>) -> U
 }
 
 /// Verify fetched metadata using the client's configured endpoint, channel, and trust keys.
-pub fn verify(bytes: &[u8], config: &DiscoveryConfig, now_unix: u64, minimum_sequence: u64) -> Result<VerifiedManifest, String> {
+pub fn verify(bytes: &[u8], config: &DiscoveryConfig, now_unix: u64, minimum_sequence: u64) -> Result<VerifiedManifest, UpdateError> {
     config.validate()?;
-    update_protocol::verify(bytes, &config.channel, &config.trusted_keys, now_unix, minimum_sequence)
+    update_protocol::verify(bytes, &config.channel, &config.trusted_keys, now_unix, minimum_sequence).map_err(Into::into)
 }

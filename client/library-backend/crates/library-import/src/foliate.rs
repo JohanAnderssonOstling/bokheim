@@ -42,7 +42,7 @@ struct FoliateData {
 pub(crate) struct FoliateBook {
     identifier: String,
     path: PathBuf,
-    data: Result<FoliateData, String>,
+    data: Result<FoliateData, BackendError>,
     format: BookFormat,
     reference_error: Option<String>,
     title: String,
@@ -92,7 +92,7 @@ impl FoliateLibrary {
             if !json_path.is_file() {
                 continue;
             } // Removed from Foliate's book list.
-            let data = fs::read(json_path).map_err(|error| error.to_string()).and_then(|bytes| serde_json::from_slice::<FoliateData>(&bytes).map_err(|error| error.to_string()));
+            let data = fs::read(json_path).map_err(BackendError::operation).and_then(|bytes| serde_json::from_slice::<FoliateData>(&bytes).map_err(BackendError::operation));
             let title = data.as_ref().ok().and_then(|data| metadata_values(&data.metadata["title"]).into_iter().next()).unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into_owned());
             books.push(FoliateBook { identifier, path, data, format, reference_error, title });
         }
@@ -136,7 +136,7 @@ impl ReaderImportBook for FoliateBook {
         if let Some(error) = &self.reference_error {
             return Err(BackendError::message(error.clone()));
         }
-        let data = self.data.as_ref().map_err(|error| BackendError::message(format!("invalid Foliate book data: {error}")))?;
+        let data = self.data.as_ref().map_err(|error| error.clone().context("invalid Foliate book data"))?;
         // Missing and relocated sources are errors, never guessed by title.
         fs::metadata(&self.path)?;
         let skipped_pdf_annotations = if self.format == BookFormat::Pdf { data.annotations.len() } else { 0 };
@@ -149,7 +149,7 @@ impl ReaderImportBook for FoliateBook {
 
 impl FoliateBook {
     pub(crate) fn prepare_state(&self, ingested: &IngestedFile, path: &Path, warnings: &mut Vec<String>) -> Result<BookTransferState, BackendError> {
-        let data = self.data.as_ref().map_err(|error| BackendError::message(format!("invalid Foliate book data: {error}")))?;
+        let data = self.data.as_ref().map_err(|error| error.clone().context("invalid Foliate book data"))?;
         verify_identity(&self.identifier, path, ingested)?;
         prepare_state(self, data, ingested, path, warnings)
     }

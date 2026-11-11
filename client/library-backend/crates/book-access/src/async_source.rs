@@ -1,5 +1,7 @@
 //! Independent async cursors over one immutable book revision.
 
+#[cfg(target_arch = "wasm32")]
+use operation_failure::OperationError;
 use std::io;
 use std::sync::Arc;
 
@@ -140,7 +142,7 @@ mod browser {
         /// workers await channel replies; they never block or poll a JS future.
         pub fn browser<F>(length: u64, prefix: Vec<u8>, mut fetch: F) -> io::Result<Self>
         where
-            F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
+            F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, OperationError>> + 'static,
         {
             Self::from_fetch(length, prefix, fetch_dispatch::browser(move |(offset, count)| fetch(offset, count)))
         }

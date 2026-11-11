@@ -19,7 +19,7 @@ fn downloading_workers_prepare_published_source_snapshots_before_matching() {
     db.execute_batch("DROP VIEW unified_concept_paths; DROP TABLE unified_concept_route; DELETE FROM taxonomy_meta WHERE key IN ('client_revision','client_matcher_version')").unwrap();
     let snapshot = db.serialize("main").unwrap().to_vec();
 
-    assert!(installed::install_snapshot(&snapshot).unwrap_err().contains("must be prepared"));
+    assert!(installed::install_snapshot(&snapshot).unwrap_err().to_string().contains("must be prepared"));
     assert!(loaded_unified_taxonomy_revision_id().is_none());
     installed::install_published_snapshot(&snapshot).unwrap();
     assert_eq!(loaded_unified_taxonomy_revision_id().as_deref(), Some(expected.revision_id()));

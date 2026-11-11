@@ -2,7 +2,7 @@
 
 use ui_text::text;
 
-use app::{AccountSnapshot, BackendError, Failure};
+use app::{AccountSnapshot, BackendError};
 use gpui::Context;
 use ui_components::user_facing_error;
 
@@ -177,30 +177,19 @@ impl SyncPage {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn start_snapshot_operation(
-        &mut self, progress: &'static str, success: Option<&'static str>, reveal_password_reset_on_error: bool, operation: impl Future<Output = Result<AccountSnapshot, BackendError>> + 'static, cx: &mut Context<Self>,
-    ) {
+    pub(super) fn start_snapshot_operation(&mut self, progress: &'static str, success: Option<&'static str>, operation: impl Future<Output = Result<AccountSnapshot, BackendError>> + 'static, cx: &mut Context<Self>) {
         if self.is_busy() {
             return;
         }
         self.activity = super::AccountActivity::AccountRequest;
-        if reveal_password_reset_on_error {
-            self.login_failed = false;
-        }
         self.error = None;
         self.message = Some(progress.into());
         cx.notify();
         self.task = Some(cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
-                Ok(snapshot) => {
-                    page.login_failed = false;
-                    page.apply_snapshot(snapshot, success, cx);
-                }
-                Err(error) => {
-                    page.login_failed = reveal_password_reset_on_error && matches!(error.failure(), Some(Failure::Unauthorized | Failure::Rejected));
-                    page.apply_error(error, cx);
-                }
+                Ok(snapshot) => page.apply_snapshot(snapshot, success, cx),
+                Err(error) => page.apply_error(error, cx),
             });
         }));
     }
@@ -221,7 +210,7 @@ impl SyncPage {
         {
             let backend = self.services.backend.clone();
             let operation = async move { backend.account.logout().await };
-            self.start_snapshot_operation(text!(account::signing_out), Some(text!(account::signed_out)), false, operation, cx);
+            self.start_snapshot_operation(text!(account::signing_out), Some(text!(account::signed_out)), operation, cx);
         }
     }
 }

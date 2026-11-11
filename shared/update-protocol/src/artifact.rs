@@ -1,27 +1,28 @@
 //! Streaming size and SHA-256 verification for release artifacts.
 
+use operation_failure::OperationError as UpdateError;
 use crate::{Artifact, decode_hex};
 use ring::digest::{Context, SHA256};
 use std::io::{self, Read, Write};
 use std::{fs::File, path::Path};
 use update_files::copy_observed;
 
-pub fn copy_verified(input: impl Read, output: &mut impl Write, artifact: &Artifact) -> Result<(), String> {
+pub fn copy_verified(input: impl Read, output: &mut impl Write, artifact: &Artifact) -> Result<(), UpdateError> {
     copy_verified_with_progress(input, output, artifact, |_, _| {})
 }
 
-pub fn verify_file(path: &Path, artifact: &Artifact) -> Result<(), String> {
-    copy_verified(File::open(path).map_err(|e| e.to_string())?, &mut io::sink(), artifact)
+pub fn verify_file(path: &Path, artifact: &Artifact) -> Result<(), UpdateError> {
+    copy_verified(File::open(path).map_err(UpdateError::operation)?, &mut io::sink(), artifact)
 }
 
 /// Only publish a staging file after its complete authenticated contents are
 /// flushed; all hosts use the same cleanup and atomic replacement behavior.
-pub fn stage_verified(input: impl Read, destination: &Path, partial: &Path, artifact: &Artifact, progress: impl FnMut(u64, u64)) -> Result<(), String> {
+pub fn stage_verified(input: impl Read, destination: &Path, partial: &Path, artifact: &Artifact, progress: impl FnMut(u64, u64)) -> Result<(), UpdateError> {
     artifact.validate()?;
-    update_files::with_atomic_file(destination, partial, None, |output| copy_verified_with_progress(input, output, artifact, progress).map_err(io::Error::other)).map_err(|e| e.to_string())
+    update_files::with_atomic_file(destination, partial, None, |output| copy_verified_with_progress(input, output, artifact, progress).map_err(io::Error::other)).map_err(UpdateError::operation)
 }
 
-pub fn copy_verified_with_progress(input: impl Read, output: &mut impl Write, artifact: &Artifact, mut progress: impl FnMut(u64, u64)) -> Result<(), String> {
+pub fn copy_verified_with_progress(input: impl Read, output: &mut impl Write, artifact: &Artifact, mut progress: impl FnMut(u64, u64)) -> Result<(), UpdateError> {
     let mut digest = Context::new(&SHA256);
     let total = copy_observed(
         input,
@@ -35,7 +36,7 @@ pub fn copy_verified_with_progress(input: impl Read, output: &mut impl Write, ar
         },
         |_, total| progress(total, artifact.bytes),
     )
-    .map_err(|e| format!("cannot copy update: {e}"))?;
+    .map_err(|e| UpdateError::operation(e).context("cannot copy update"))?;
     if total != artifact.bytes {
         return Err("update is shorter than published size".into());
     }

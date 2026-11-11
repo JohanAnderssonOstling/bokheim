@@ -131,7 +131,7 @@ impl Autofill {
         }
     }
 
-    pub(super) fn apply(&self, page: Option<&WebView>, nonce: &str, result: Result<Reply, String>) {
+    pub(super) fn apply(&self, page: Option<&WebView>, nonce: &str, result: Result<Reply, operation_failure::OperationError>) {
         match result {
             Ok(Reply::Match(Some(login))) => {
                 if self.guard.borrow().as_ref().is_some_and(|(current, origin)| current == nonce && *origin == login.site.origin)

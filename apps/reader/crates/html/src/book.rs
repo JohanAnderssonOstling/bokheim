@@ -1,19 +1,19 @@
 //! The reader's HTML-engine adapter for renderer-independent book content.
 
-use html_dom as dom_values;
-#[cfg(test)]
-use html_resources::resources::images as image_resources;
 use book_content::{Book, BookFormat as BookSourceFormat, ReadingBook};
 use book_model::{AnnotationAnchor, BookTocEntry, PUBLICATION_CFI_PREFIX};
 use futures_lite::future::block_on;
-use html_dom::ImageSource;
-use html_resources::ImageLoadCompletion;
 use html::resources::ImageLoader;
-use html_resources::ImageResourceContext;
 use html::resources::ResourceMetadata;
 use html::resources::ResourceProvider;
-use html_resources::load_image_bytes_async;
 use html::search::SearchIndex;
+use html_dom as dom_values;
+use html_dom::ImageSource;
+use html_resources::ImageLoadCompletion;
+use html_resources::ImageResourceContext;
+use html_resources::load_image_bytes_async;
+#[cfg(test)]
+use html_resources::resources::images as image_resources;
 use skrift_column_paginator::cfi::PublicationCfi;
 use std::future::Future;
 use std::io::{self, Read, Seek};
@@ -24,7 +24,12 @@ pub struct BookSource {
     pub provider: Arc<dyn ResourceProvider>,
     pub cfi: PublicationCfi,
     pub publication_cfi_bases: Option<Vec<Option<String>>>,
-    content: Arc<ReadingBook>,
+    source: Source,
+}
+
+enum Source {
+    Book(Arc<ReadingBook>),
+    Document { documents: Vec<String>, languages: Vec<String>, toc: Vec<BookTocEntry>, weights: Vec<u64> },
 }
 
 struct Provider {
@@ -59,28 +64,32 @@ impl ResourceProvider for Provider {
 
 type ImageTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-struct BookImageContext(Arc<ReadingBook>);
+struct BookImageContext(Arc<dyn ResourceProvider>);
 
 impl ImageResourceContext for BookImageContext {
     fn resolve(&self, base: &str, href: &str) -> String {
-        self.0.resources.resolve(base, href)
+        self.0.resolve(base, href)
     }
 
     fn metadata(&self, uri: &str) -> io::Result<ResourceMetadata> {
-        Ok(ResourceMetadata { media_type: self.0.resources.media_type(uri)?, charset: None })
+        self.0.metadata(uri)
     }
 }
 
 struct BookImageLoader {
-    content: Arc<ReadingBook>,
+    provider: Arc<dyn ResourceProvider>,
     spawn: Arc<dyn Fn(ImageTask) + Send + Sync>,
 }
 impl ImageLoader for BookImageLoader {
     fn load(&self, source: ImageSource, complete: ImageLoadCompletion) {
-        let content = self.content.clone();
+        let provider = self.provider.clone();
         (self.spawn)(Box::pin(async move {
-            let context = BookImageContext(content.clone());
-            let bytes = load_image_bytes_async(&context, &source, |uri| content.read_resource(uri)).await;
+            let context = BookImageContext(provider.clone());
+            let bytes = load_image_bytes_async(&context, &source, |uri| {
+                let provider = provider.clone();
+                async move { provider.read_bytes_async(&uri).await }
+            })
+            .await;
             complete(bytes);
         }));
     }
@@ -88,11 +97,24 @@ impl ImageLoader for BookImageLoader {
 
 impl BookSource {
     pub fn new(content: ReadingBook) -> Self {
+        Self::from_shared(Arc::new(content))
+    }
+
+    pub fn from_shared(content: Arc<ReadingBook>) -> Self {
         let publication_cfi_bases = content.publication_cfi_bases();
         let cfi = PublicationCfi::new(publication_cfi_bases.clone());
-        let content = Arc::new(content);
         let language = content.languages().into_iter().map(|language| language.trim().to_owned()).find(|language| !language.is_empty());
-        Self { provider: Arc::new(Provider { content: content.clone(), language }), content, cfi, publication_cfi_bases }
+        Self { source: Source::Book(content.clone()), provider: Arc::new(Provider { content, language }), cfi, publication_cfi_bases }
+    }
+
+    /// A standalone document shares the reader without library persistence.
+    pub fn from_document(provider: Arc<dyn ResourceProvider>, uri: String, toc: Vec<BookTocEntry>, weight: u64) -> Self {
+        let languages = provider.primary_language().into_iter().collect();
+        Self { provider, cfi: PublicationCfi::new(None), publication_cfi_bases: None, source: Source::Document { documents: vec![uri], languages, toc, weights: vec![weight] } }
+    }
+
+    pub fn is_transient(&self) -> bool {
+        matches!(self.source, Source::Document { .. })
     }
 
     /// Decode the stored publication address for an EPUB reading position.
@@ -129,23 +151,35 @@ impl BookSource {
         anchor.epub_cfi_value().map(str::to_owned)
     }
     pub fn languages(&self) -> Vec<String> {
-        self.content.languages()
+        match &self.source {
+            Source::Book(content) => content.languages(),
+            Source::Document { languages, .. } => languages.clone(),
+        }
     }
     pub fn document_uris(&self) -> &[String] {
-        self.content.document_uris()
+        match &self.source {
+            Source::Book(content) => content.document_uris(),
+            Source::Document { documents, .. } => documents,
+        }
     }
     pub fn toc(&self) -> &[BookTocEntry] {
-        &self.content.toc
+        match &self.source {
+            Source::Book(content) => &content.toc,
+            Source::Document { toc, .. } => toc,
+        }
     }
     pub fn document_weights(&self) -> &[u64] {
-        &self.content.document_weights
+        match &self.source {
+            Source::Book(content) => &content.document_weights,
+            Source::Document { weights, .. } => weights,
+        }
     }
     pub fn from_reader<R: Read + Seek + Send + 'static>(format: BookSourceFormat, reader: R) -> io::Result<Self> {
         let book = Book::open_reader(format, reader)?;
         block_on(book.prepare_reading()).map(Self::new)
     }
     pub fn image_loader(&self, spawn: impl Fn(ImageTask) + Send + Sync + 'static) -> Arc<dyn ImageLoader> {
-        Arc::new(BookImageLoader { content: self.content.clone(), spawn: Arc::new(spawn) })
+        Arc::new(BookImageLoader { provider: self.provider.clone(), spawn: Arc::new(spawn) })
     }
 }
 
@@ -153,8 +187,8 @@ impl BookSource {
 mod tests {
     use super::*;
     use html::resources::{ImageService, InlineJobSpawner};
-    use html_resources::ImagePipeline;
     use html_pipeline::{DocumentFactory, ResourceContext};
+    use html_resources::ImagePipeline;
     use std::collections::HashSet;
     use std::io::{Cursor, Write};
     use std::time::{Duration, Instant};

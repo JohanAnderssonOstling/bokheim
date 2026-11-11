@@ -1,5 +1,5 @@
 //! Dictionary ownership and direct async access, shared by clients using one root.
-use crate::{Client, ClientFuture, DictionaryDownloads, DictionaryImport, DictionaryInfo, DictionaryLookup, DictionarySnapshot, DictionaryStore, Result};
+use crate::{Client, ClientFuture, DictionaryDownloads, DictionaryImport, DictionaryInfo, DictionaryLookup, DictionarySnapshot, DictionaryStore, OperationResult as Result};
 use client_platform_runtime::executor::BackendExecutor;
 #[cfg(target_arch = "wasm32")]
 use client_platform_runtime::file_storage::StorageLock;

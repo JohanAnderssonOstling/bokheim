@@ -251,7 +251,7 @@ fn separator(theme: BrowserTheme) -> Div {
 /// The folded run, saying what it hides when the pointer rests on it.
 fn fold(hidden: SharedString, theme: BrowserTheme) -> Stateful<Div> {
     let tooltip = hidden.clone();
-    crumb_text(text!(common::ellipsis).into(), theme)
+    crumb_text(text!(common::more).into(), theme)
         .id(SharedString::from(format!("subject-fold-{hidden}")))
         .flex_none()
         .text_color(theme.text_muted)

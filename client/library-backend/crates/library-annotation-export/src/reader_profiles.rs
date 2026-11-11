@@ -405,13 +405,14 @@ mod tests {
         fs::write(&readest_path, json!({"schemaVersion":3,"updatedAt":1,"progress":[7,20],"location":"readest position","viewSettings":{"fontSize":19},"booknotes":notes}).to_string()).unwrap();
         let library = LibraryId::new_v4();
         let checksum = ContentHash::from(blake3::hash(bytes));
-        let book = BookId::for_local_content(library.as_bytes(), checksum);
+        let book = BookId::for_local_content(checksum);
         let database = Database::open(temp.path().join("library.sqlite3")).unwrap();
         database.initialize_library_for(library).await.unwrap();
         database
             .commit_import(ImportCommit {
                 source_identity: None,
                 byte_checksum: Some(checksum),
+                audiobook_content_hash: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: "Book.epub".into(),
                 format: BookFormat::Epub,

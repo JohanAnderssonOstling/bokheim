@@ -2,13 +2,14 @@
 
 use ui_text::text;
 
+use crate::navigation::{Libraries, LibraryOperationDialog};
 use book_model::BookFormat;
 use futures_util::FutureExt;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, SharedString, Subscription, Task, Window, div, px, rems};
+use gpui::{AnyWindowHandle, App, Context, DismissEvent, Entity, FocusHandle, Focusable, KeyDownEvent, SharedString, Subscription, Task, Window, div, px, rems};
+use gpui_component::Disableable;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::{Disableable, WindowExt};
 use library_backend::{BackendError, LibraryClient};
 use library_management::management::ManagementClient;
 use library_model::{AnnotationExportBook, AnnotationExportConflict, AnnotationExportFailureKind, AnnotationExportFormat, AnnotationExportOptions, AnnotationExportOutcome, AnnotationExportReport};
@@ -30,7 +31,8 @@ fn export_failure_message(kind: AnnotationExportFailureKind) -> &'static str {
     }
 }
 
-pub(crate) fn open_annotation_export(management: ManagementClient, id: LibraryId, name: String, window: &mut Window, cx: &mut App) {
+pub(crate) fn open_annotation_export(libraries: Entity<Libraries>, management: ManagementClient, id: LibraryId, name: String, window: &mut Window, cx: &mut App) {
+    let selection_epoch = libraries.read(cx).selection_epoch();
     window.defer(cx, move |window, cx| {
         window.defer(cx, move |window, cx| {
             let library = match management.library(id) {
@@ -41,30 +43,14 @@ pub(crate) fn open_annotation_export(management: ManagementClient, id: LibraryId
                 }
             };
             let view = cx.new(|cx| AnnotationExportDialog::new(library, name, window, cx));
-            window.open_dialog(cx, move |dialog, window, _| {
-                let confirm = view.clone();
-                dialog
-                    .w(px((f32::from(window.viewport_size().width) - 2.0 * components::SPACE_MD).clamp(1.0, 650.0)))
-                    .p_0()
-                    .close_button(false)
-                    .overlay_closable(false)
-                    .on_ok(move |_, _, cx| {
-                        confirm.update(cx, |view, cx| {
-                            if view.report.is_some() {
-                                true
-                            } else {
-                                view.start_export(cx);
-                                false
-                            }
-                        })
-                    })
-                    .child(view.clone())
-            });
+            libraries.update(cx, |libraries, cx| libraries.show_operation_dialog(id, view, 650.0, selection_epoch, window, cx));
         });
     });
 }
 
 struct AnnotationExportDialog {
+    focus: FocusHandle,
+    window: AnyWindowHandle,
     library: LibraryClient,
     name: String,
     folder: Entity<InputState>,
@@ -77,6 +63,14 @@ struct AnnotationExportDialog {
     error: Option<SharedString>,
     _input: Subscription,
     _load: Task<()>,
+}
+
+impl gpui::EventEmitter<DismissEvent> for AnnotationExportDialog {}
+impl LibraryOperationDialog for AnnotationExportDialog {}
+impl Focusable for AnnotationExportDialog {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
 impl AnnotationExportDialog {
@@ -109,7 +103,22 @@ impl AnnotationExportDialog {
                 cx.notify();
             });
         });
-        Self { library, name, folder, books: vec![], loading: true, formats: [true, false, false, false], exporting: false, report: None, destination: None, error: None, _input: input, _load: load }
+        Self {
+            focus: cx.focus_handle(),
+            window: window.window_handle(),
+            library,
+            name,
+            folder,
+            books: vec![],
+            loading: true,
+            formats: [true, false, false, false],
+            exporting: false,
+            report: None,
+            destination: None,
+            error: None,
+            _input: input,
+            _load: load,
+        }
     }
 
     fn format_count(&self, format: AnnotationExportFormat) -> usize {
@@ -158,6 +167,7 @@ impl AnnotationExportDialog {
         self.exporting = true;
         self.error = None;
         let library = self.library.clone();
+        let handle = self.window;
         // An accepted export finishes even when the dialog is closed.
         cx.spawn(async move |view, cx| {
             let result = library.export_annotations(options).await;
@@ -168,14 +178,32 @@ impl AnnotationExportDialog {
                     }
                 }
             }
-            let _ = view.update(cx, |view, cx| {
+            let failed = result.is_err();
+            let partial = result.as_ref().is_ok_and(|report| report.results.iter().any(|result| matches!(result.outcome, AnnotationExportOutcome::Failed(_))));
+            let message = match &result {
+                Err(error) => user_facing_error(error, text!(browse::export_failed)),
+                Ok(_) if partial => text!(browse::export_finished_with_errors),
+                Ok(_) => text!(browse::annotations_exported),
+            };
+            let updated = view.update(cx, |view, cx| {
                 view.exporting = false;
                 match result {
                     Ok(report) => view.report = Some(report),
-                    Err(error) => view.error = Some(user_facing_error(&error, text!(browse::could_not_export_annotations_check_the_destination_and_try_again)).into()),
+                    Err(_) => view.error = Some(message.into()),
                 }
                 cx.notify();
             });
+            if updated.is_err() {
+                let _ = handle.update(cx, |_, window, cx| {
+                    if failed {
+                        crate::services::notify_error("annotation-export", message, window, cx);
+                    } else if partial {
+                        crate::services::notify_warning("annotation-export", message, window, cx);
+                    } else {
+                        crate::services::notify_info("annotation-export", message, window, cx);
+                    }
+                });
+            }
         })
         .detach();
         cx.notify();
@@ -217,6 +245,9 @@ impl AnnotationExportDialog {
                 ),
             );
         }
+        if self.formats[0] && !self.loading && !PathBuf::from(self.folder.read(cx).value().trim()).is_absolute() {
+            body = body.child(components::form_hint(text!(browse::export_folder_invalid), theme));
+        }
         if !self.loading && self.books.is_empty() {
             body = body.child(components::form_hint(text!(browse::no_annotations_to_export), theme));
         }
@@ -245,7 +276,7 @@ impl AnnotationExportDialog {
                 let message = if result.failure.is_some_and(|failure| failure.file_written) {
                     format!(text!(browse::file_saved_finishing_export_failed), components::path_label(&result.destination.path))
                 } else {
-                    format!("{}: {}", components::path_label(&result.destination.path), export_failure_message(result.failure.map_or(AnnotationExportFailureKind::Io, |failure| failure.kind)))
+                    format!("{}: {}", components::path_label(&result.destination.path), result.failure.map_or_else(|| export_failure_message(AnnotationExportFailureKind::Io), |failure| user_facing_error(&failure, export_failure_message(failure.kind))))
                 };
                 body = body.child(components::error_text(theme).child(SharedString::from(message)));
             }
@@ -426,7 +457,7 @@ impl Render for AnnotationExportDialog {
                     .child(div().text_size(rems(1.5)).child(text!(browse::export_annotations)))
                     .child(components::form_hint(SharedString::from(if self.loading { self.name.clone() } else { format!(text!(browse::annotations_in_books), self.name, self.books.len(), annotation_count = annotation_count) }), theme)),
             )
-            .child(components::outlined_icon_button("annotation-export-close", text!(common::close), gpui_component::IconName::Close).on_click(|_, window, cx| window.close_dialog(cx)));
+            .child(components::outlined_icon_button("annotation-export-close", text!(common::close), gpui_component::IconName::Close).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))));
         let body = if self.exporting {
             div().child(components::form_hint(text!(browse::exporting_annotations), theme))
         } else if let Some(report) = &self.report {
@@ -444,9 +475,9 @@ impl Render for AnnotationExportDialog {
                     }
                 }));
             }
-            buttons = buttons.child(components::base_button("annotation-export-done").primary().label(text!(browse::done)).on_click(|_, window, cx| window.close_dialog(cx)));
+            buttons = buttons.child(components::base_button("annotation-export-done").primary().label(text!(browse::done)).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))));
         } else {
-            buttons = buttons.child(components::dialog_cancel_button("annotation-export-close-dialog", text!(common::close)).on_click(|_, window, cx| window.close_dialog(cx)));
+            buttons = buttons.child(components::dialog_cancel_button("annotation-export-close-dialog", text!(common::close)).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))));
             buttons = buttons.child(
                 components::base_button("annotation-export-submit")
                     .primary()
@@ -456,6 +487,22 @@ impl Render for AnnotationExportDialog {
             );
         }
         div()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| match event.keystroke.key.as_str() {
+                "enter" if view.report.is_some() => {
+                    cx.emit(DismissEvent);
+                    cx.stop_propagation();
+                }
+                "enter" => {
+                    view.start_export(cx);
+                    cx.stop_propagation();
+                }
+                "escape" => {
+                    cx.emit(DismissEvent);
+                    cx.stop_propagation();
+                }
+                _ => {}
+            }))
             .w_full()
             .min_w_0()
             .max_h(window.viewport_size().height - px(2.0 * components::SPACE_MD))

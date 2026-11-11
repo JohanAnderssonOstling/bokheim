@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-operation-failure = { path = "../../client-protocol/crates/operation-failure" }
+operation-failure = { path = "../../client-protocol/crates/operation-failure", features = ["sqlite", "web"] }
 futures-channel = "0.3"
 futures-util = { version = "0.3", features = ["io"] }
 async-channel = "2"
 client-platform-runtime = { path = "../runtime" }
 book-model = { path = "../../../shared/book-model" }
 content-address = { path = "../../../shared/content-address", features = ["sqlite"] }
+blake3 = "1"
 sync-common = { path = "../../../shared/sync-common" }
 sqlite-wasm-vfs = "0.2.0"
 rusqlite = { version = "0.40.0", features = ["bundled"] }

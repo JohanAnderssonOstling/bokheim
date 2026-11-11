@@ -1,11 +1,12 @@
 //! Native library-file access and adjacent transfer staging.
 
-use crate::filesystem::{copy_entry, rename_entry};
 use crate::APP_HIDDEN_DIR;
+use crate::filesystem::{copy_entry, rename_entry};
 use client_platform_native::filesystem::parent_directory;
 use client_platform_runtime::executor::run_blocking;
-use content_address::{hash_file, ContentHash, HashingReader};
-use fs2::{lock_contended_error, FileExt};
+use client_platform_runtime::profiling::ProfileSpan;
+use content_address::{ContentHash, HashingReader, hash_file};
+use fs2::{FileExt, lock_contended_error};
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -165,27 +166,30 @@ pub(crate) fn m4b_sidecar_cover(handle: &Handle, paths: &[RelativeBookPath]) -> 
 }
 
 pub(crate) fn content_matches(path: &Path, hash: &BookId) -> Result<bool, AssetStoreError> {
-    let actual: ContentHash = if path.is_dir() {
+    let mut proofs = Vec::new();
+    for ancestor in path.ancestors().skip(1) {
+        let metadata = ancestor.join(APP_HIDDEN_DIR);
+        if metadata.join("storage-identity").is_file() {
+            let proof = metadata.join("assets").join("local-proofs").join(hash.to_hex());
+            proofs = read_local_proof(&proof)?.lines().take(64).filter_map(|line| line.parse::<ContentHash>().ok()).collect();
+            break;
+        }
+    }
+    let matches = |actual: ContentHash| hash.content_hash() == Some(actual) || proofs.contains(&actual);
+    if path.is_dir() {
         let tracks = audiobook_folder::discover(path)?;
         if tracks.is_empty() {
             return Ok(false);
         }
-        audiobook_folder::folder_hash(path)?.into()
-    } else {
-        hash_file(&mut File::open(path)?)?
-    };
-    if hash.content_hash() == Some(actual) {
-        return Ok(true);
-    }
-    for ancestor in path.ancestors().skip(1) {
-        let metadata = ancestor.join(APP_HIDDEN_DIR);
-        if metadata.join("storage-identity").is_file() {
-            let kind = "local-proofs";
-            let proof = metadata.join("assets").join(kind).join(hash.to_hex());
-            return Ok(read_local_proof(&proof)?.lines().take(64).any(|line| line.parse::<ContentHash>().ok() == Some(actual)));
+        let content = audiobook_folder::folder_content_with_reader(path, &tracks, |path| File::open(path))?;
+        if matches(content.checksum.into()) {
+            return Ok(true);
         }
+        // Older downloads have only a transport-byte proof. Keep them usable
+        // until scanning associates their recording fingerprint with the ID.
+        return Ok(matches(audiobook_folder::folder_hash(path)?.into()));
     }
-    Ok(false)
+    Ok(matches(hash_file(&mut File::open(path)?)?))
 }
 
 fn read_local_proof(path: &Path) -> Result<String, AssetStoreError> {
@@ -206,23 +210,41 @@ fn read_local_proof(path: &Path) -> Result<String, AssetStoreError> {
 pub(crate) fn remember_local_checksum(handle: &Handle, id: &BookId, checksum: ContentHash) -> Result<(), AssetStoreError> {
     use std::io::Write;
 
+    let _call = ProfileSpan::new("checksum_proof_persistence", "book");
+    let validation = ProfileSpan::new("checksum_proof_root_validation", "book");
     if !root_available(handle) {
         return Err(AssetStoreError::operation("library folder is unavailable"));
     }
+    drop(validation);
     let directory = handle.assets_root.join("local-proofs");
+    let creation = ProfileSpan::new("checksum_proof_directory_creation", "book");
     std::fs::create_dir_all(&directory)?;
+    drop(creation);
     let path = directory.join(id.to_hex());
-    let mut known = read_local_proof(&path)?.lines().filter_map(|line| line.parse::<ContentHash>().ok()).take(63).collect::<Vec<_>>();
+    let read = ProfileSpan::new("checksum_proof_read", "book");
+    let proof = read_local_proof(&path)?;
+    drop(read);
+    let parsing = ProfileSpan::new("checksum_proof_parse", "book");
+    let mut known = proof.lines().filter_map(|line| line.parse::<ContentHash>().ok()).take(63).collect::<Vec<_>>();
     known.retain(|known| *known != checksum);
     known.insert(0, checksum);
+    drop(parsing);
+    let creation = ProfileSpan::new("checksum_proof_tempfile", "book");
     let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    drop(creation);
+    let write = ProfileSpan::new("checksum_proof_write", "book");
     for digest in known {
         writeln!(temporary, "{digest}")?;
     }
+    drop(write);
     if handle.import_batch.is_none() {
+        let _sync = ProfileSpan::new("checksum_proof_file_sync", "book");
         temporary.as_file().sync_all()?;
     }
+    let rename = ProfileSpan::new("checksum_proof_rename", "book");
     temporary.persist(&path).map_err(|error| AssetStoreError::operation(error.error))?;
+    drop(rename);
+    let _sync = ProfileSpan::new("checksum_proof_directory_sync", "book");
     sync_import_file(handle, &path)
 }
 
@@ -295,11 +317,7 @@ impl VerifiedPath {
 /// Uses the same revision observations as scanning, including track contents'
 /// metadata and file identities. It never reads all book bytes.
 fn placement_revision(path: &Path, directory: bool) -> Result<u64, AssetStoreError> {
-    if directory {
-        Ok(crate::filesystem::audiobook_fingerprint(path, &audiobook_folder::discover(path)?)?)
-    } else {
-        Ok(crate::filesystem::fingerprint(path)?)
-    }
+    if directory { Ok(crate::filesystem::audiobook_fingerprint(path, &audiobook_folder::discover(path)?)?) } else { Ok(crate::filesystem::fingerprint(path)?) }
 }
 
 pub(crate) enum PreparedPlacement {
@@ -687,13 +705,11 @@ pub(crate) fn open_book_at_path(handle: &Handle, relative_path: &RelativeBookPat
     }
     let path = placement_path(handle, relative_path);
     if path.is_dir() {
-        use std::io::Seek as _;
         let tracks = audiobook_folder::discover(&path)?;
         if tracks.is_empty() {
             return Ok(None);
         }
-        let mut archive = audiobook_folder::write_folder_archive(&path, tempfile::tempfile()?, &tracks)?;
-        archive.rewind()?;
+        let archive = audiobook_folder::folder_archive_reader(&path, &tracks, |path| File::open(path))?;
         return Ok(Some(Box::new(archive)));
     }
     let result = open_file_reader(&path);
@@ -1001,4 +1017,35 @@ pub(crate) fn create_child_directory(path: &Path) -> Result<(), Error> {
         Err(error) if error.kind() == ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// Files in library folders keep their names. Only identity-keyed proof and
+/// thumbnail sidecars move; this is safe to repeat after a partial migration.
+pub(crate) fn migrate_book_ids(handle: &Handle, ids: &[(BookId, BookId)]) -> Result<(), AssetStoreError> {
+    for &(old, new) in ids {
+        let proof = handle.assets_root.join("local-proofs").join(old.to_hex());
+        for checksum in read_local_proof(&proof)?.lines() {
+            let checksum = checksum.parse::<ContentHash>().map_err(AssetStoreError::operation)?;
+            remember_local_checksum(handle, &new, checksum)?;
+        }
+        match std::fs::remove_file(&proof) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let directory = handle.assets_root.join("thumbnail");
+        let old = old.to_hex();
+        for file in std::fs::read_dir(&directory)? {
+            let file = file?;
+            let name = file.file_name();
+            let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(&old)).filter(|suffix| suffix.is_empty() || suffix.starts_with('.')) else { continue };
+            let destination = directory.join(format!("{new}{suffix}"));
+            if destination.try_exists()? {
+                std::fs::remove_file(file.path())?;
+            } else {
+                std::fs::rename(file.path(), destination)?;
+            }
+        }
+    }
+    Ok(())
 }

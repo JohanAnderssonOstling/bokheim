@@ -21,7 +21,10 @@ CREATE TABLE IF NOT EXISTS local_file_content(
 
 CREATE TABLE IF NOT EXISTS local_identity_scope(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    scope BLOB NOT NULL CHECK(length(scope)=16)
+    scope BLOB NOT NULL CHECK(length(scope)=16),
+    -- Legacy reader links and embedded PDF markers remain resolvable after rekeying.
+    book_ids BLOB,
+    assets_pending INTEGER NOT NULL DEFAULT 0 CHECK(assets_pending IN (0,1))
 ) STRICT;
 
 -- Unverified provenance is device-local and never freezes a server revision.

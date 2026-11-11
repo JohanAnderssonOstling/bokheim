@@ -1,0 +1,114 @@
+/*
+ * Table defaults adapted from MediaWiki's content.tables.less:
+ * https://github.com/wikimedia/mediawiki/blob/master/resources/src/mediawiki.skinning/content.tables.less
+ * Reader theme adaptation recolors these neutral backgrounds and borders at paint time.
+ * The layer lets article styles override the defaults.
+ */
+@layer wikipedia-content {
+    /* The REST HTML omits mediawiki.skins.legacy, which supplies these rules
+     * on the full Wikipedia page. Keep template float classes functional. */
+    div.tright,
+    div.floatright,
+    table.floatright {
+        clear: right;
+        float: right;
+    }
+
+    div.tleft,
+    div.floatleft,
+    table.floatleft {
+        clear: left;
+        float: left;
+    }
+
+    @media (max-width: calc(640px - 1px)) {
+        body.skin--responsive div.tright,
+        body.skin--responsive div.floatright,
+        body.skin--responsive table.floatright,
+        body.skin--responsive div.tleft,
+        body.skin--responsive div.floatleft,
+        body.skin--responsive table.floatleft {
+            clear: both;
+            float: none;
+        }
+    }
+
+    .wikitable {
+        background-color: #f8f9fa;
+        color: inherit;
+        margin: 1em 0;
+        border: 1px solid #a2a9b1;
+        border-collapse: collapse;
+    }
+
+    .wikitable > tr > th,
+    .wikitable > tr > td,
+    .wikitable > * > tr > th,
+    .wikitable > * > tr > td {
+        border: 1px solid #a2a9b1;
+        padding: 0.2em 0.4em;
+    }
+
+    .wikitable > tr > th,
+    .wikitable > * > tr > th {
+        background-color: #eaecf0;
+        text-align: center;
+    }
+
+    .wikitable > caption {
+        font-weight: bold;
+    }
+}
+
+/* Fit website content to the reader's columns. */
+html,
+body {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+table,
+.infobox {
+    max-width: 100% !important;
+}
+
+/* Responsive infobox layout from https://en.wikipedia.org/wiki/MediaWiki:Common.css */
+@media (max-width: 640px) {
+    .infobox {
+        width: 100%;
+    }
+
+    .infobox .nowrap {
+        white-space: normal;
+    }
+}
+
+@media (min-width: 640px) {
+    .infobox {
+        margin-left: 1em;
+        float: right;
+        clear: right;
+        width: 22em;
+    }
+}
+
+/* Formula templates default to nowrap on Wikipedia. Let table cells reflow. */
+table th,
+table td {
+    overflow-wrap: anywhere;
+}
+
+table .texhtml {
+    white-space: normal !important;
+}
+
+img,
+svg {
+    max-width: 100% !important;
+    height: auto !important;
+}
+
+pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}

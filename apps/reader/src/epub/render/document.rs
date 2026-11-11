@@ -65,9 +65,16 @@ impl ReaderView {
                     reader.toggle_mobile_controls(window, cx);
                 }
             }))
-            // With no selection, resolve word lookup before the context-menu
-            // wrapper. Existing selections and non-text content keep their menu.
+            // Resolve the clicked word before the context-menu wrapper. A click
+            // within the selection keeps it; another word retargets the menu.
             .capture_any_mouse_down(cx.listener(|reader, event: &MouseDownEvent, window, cx| {
+                if event.button == MouseButton::Left && (event.modifiers.control || event.modifiers.platform) && crate::windows::native_windows_available() && !window.supports_region_capture() {
+                    if reader.open_link_at_in_new_window(event.position, window, cx) {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 reader.begin_word_click(event);
                 if event.button == MouseButton::Left {
                     reader.dismiss_selection(cx);
@@ -80,11 +87,8 @@ impl ReaderView {
                     return;
                 }
                 if let LoadState::Ready(renderer) = &reader.load_state {
-                    let selected = !renderer.read(cx).has_text_selection() && renderer.update(cx, |view, cx| view.select_word_at(event.position, cx));
-                    if selected {
-                        reader.lookup_selection(window, cx);
-                        cx.stop_propagation();
-                        return;
+                    if !renderer.read(cx).selection_contains(event.position) {
+                        renderer.update(cx, |view, cx| view.select_word_at(event.position, cx));
                     }
                 }
                 if reader.open_passage_context(event.position, window, cx) {
@@ -121,6 +125,26 @@ impl ReaderView {
         }
     }
 
+    pub(crate) fn open_link_at_in_new_window(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !crate::windows::native_windows_available() { return false; }
+        let LoadState::Ready(renderer) = &self.load_state else { return false };
+        let Some(href) = renderer.read(cx).link_href_at(position) else { return false };
+        self.open_link_in_new_window(href, window, cx);
+        true
+    }
+
+    pub(crate) fn open_link_in_new_window(&mut self, href: String, window: &mut Window, cx: &mut Context<Self>) {
+        let result = if let Some((article, fragment)) = crate::shell::dictionary::wikipedia::article_link(&href) {
+            crate::shell::dictionary::DictionaryPopup::open_article_window(article, fragment, self.library.clone(), self.locator.clone(), window, cx)
+        } else if url::Url::parse(&href).is_ok_and(|url| matches!(url.scheme(), "https" | "http" | "mailto" | "tel")) {
+            cx.open_url(&href);
+            return;
+        } else if !self.book.is_transient() {
+            crate::windows::open_book_window(self.locator.clone(), self.book_title.clone(), href, self.library.clone(), window, cx)
+        } else { return; };
+        if let Err(error) = result { log::error!("could not open link in new window: {error}"); }
+    }
+
     fn context_actions_at(&self, position: Point<Pixels>, cx: &App) -> ContextActions<EpubContextCommand> {
         self.context_actions(position, cx)
     }
@@ -138,12 +162,17 @@ impl ReaderView {
         let LoadState::Ready(renderer) = &self.load_state else { return actions };
         if renderer.read(cx).has_text_selection() {
             actions = ContextActions::selection(SelectionCommands {
-                annotate: EpubContextCommand::AnnotateSelection,
+                annotate: (!self.book.is_transient()).then_some(EpubContextCommand::AnnotateSelection),
                 lookup: renderer.read(cx).selected_passage().is_some_and(|(_, text)| can_lookup(&text)).then_some(EpubContextCommand::LookupSelection),
                 translate: EpubContextCommand::TranslateSelection,
                 copy: EpubContextCommand::CopySelectionMarkdown,
-                copy_link: EpubContextCommand::CopySelectionWithSource,
+                copy_link: (!self.book.is_transient()).then_some(EpubContextCommand::CopySelectionWithSource),
             });
+        }
+        if crate::windows::native_windows_available() {
+            if let Some(href) = renderer.read(cx).link_href_at(position) {
+                actions.add_section(vec![ContextAction { label: text!(browse::open_in_new_window), icon: "icons/arrow-square-out.svg", command: EpubContextCommand::OpenLinkInNewWindow(href) }]);
+            }
         }
         let hit = renderer.read(cx).content_at(position);
         if hit.table {
@@ -154,7 +183,14 @@ impl ReaderView {
             ]);
         }
         if hit.image {
-            actions.add_section(vec![ContextAction { label: text!(common::copy_image), icon: "icons/image.svg", command: EpubContextCommand::CopyImage { view: renderer.clone(), position } }]);
+            let mut image_actions = vec![
+                ContextAction { label: text!(common::open_image), icon: "icons/image.svg", command: EpubContextCommand::OpenImage { view: renderer.clone(), position } },
+                ContextAction { label: text!(common::copy_image), icon: "icons/copy.svg", command: EpubContextCommand::CopyImage { view: renderer.clone(), position } },
+            ];
+            if components::image_saving_available() {
+                image_actions.push(ContextAction { label: text!(common::save_image), icon: "icons/arrow-down.svg", command: EpubContextCommand::SaveImage { view: renderer.clone(), position } });
+            }
+            actions.add_section(image_actions);
         }
         if hit.equation {
             actions.add_section(vec![ContextAction { label: text!(reader::copy_as_latex), icon: "icons/function.svg", command: EpubContextCommand::CopyEquationLatex { view: renderer.clone(), position } }]);
@@ -167,7 +203,7 @@ impl ReaderView {
         self.show_context_sheet(actions, cx);
     }
 
-    fn open_context_sheet(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub(super) fn open_context_sheet(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let actions = self.context_actions_at(position, cx);
         self.show_context_sheet(actions, cx);
     }
@@ -186,6 +222,7 @@ impl ContextActionTarget for ReaderView {
 
     fn run_context_action(&mut self, command: Self::Command, window: &mut Window, cx: &mut Context<Self>) {
         match command {
+            EpubContextCommand::OpenLinkInNewWindow(href) => self.open_link_in_new_window(href, window, cx),
             EpubContextCommand::CopySelectionMarkdown => self.copy_selection(cx),
             EpubContextCommand::CopySelectionWithSource => self.copy_selection_with_source(cx),
             EpubContextCommand::AnnotateSelection => {
@@ -202,6 +239,15 @@ impl ContextActionTarget for ReaderView {
                 format,
             } => {
                 view.update(cx, |view, cx| view.copy_table_at(position, format, cx));
+            }
+            EpubContextCommand::SaveImage { view, position } => {
+                self.save_opened_image = true;
+                if !view.update(cx, |view, cx| view.open_image_at(position, cx)) {
+                    self.save_opened_image = false;
+                }
+            }
+            EpubContextCommand::OpenImage { view, position } => {
+                view.update(cx, |view, cx| view.open_image_at(position, cx));
             }
             EpubContextCommand::CopyImage { view, position } => {
                 view.update(cx, |view, cx| view.copy_image_at(position, cx));

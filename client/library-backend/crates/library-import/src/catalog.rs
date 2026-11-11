@@ -30,7 +30,7 @@ impl LibraryImport<'_> {
     }
 
     async fn fetch_external_catalog_audiobook_cover(cpu: &dyn cpu_host::CpuHost, entry: CardKey) -> Result<Option<cpu_host::ThumbnailBytes>, BackendError> {
-        let Some(bytes) = library_catalog::fresh_external_cover(entry).await.map_err(BackendError::message)? else { return Ok(None) };
+        let Some(bytes) = library_catalog::fresh_external_cover(entry).await? else { return Ok(None) };
         cpu_host::cover(cpu, bytes).await.map(Some)
     }
 
@@ -106,6 +106,7 @@ mod tests {
             .commit_import(ImportCommit {
                 source_identity: None,
                 byte_checksum: None,
+                audiobook_content_hash: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: "Story".into(),
                 format: BookFormat::Mp3Folder,
@@ -172,6 +173,8 @@ mod tests {
             readable: true,
             books: vec![ScannedBook {
                 source_identity: None,
+                audiobook_content_hash: None,
+                byte_checksum: None,
                 directory: ROOT_DIR_ID,
                 name: "discovered.epub".into(),
                 path: "discovered.epub".into(),

@@ -190,7 +190,7 @@ fn open_existing_catalog(path: &Path) -> Result<Option<Connection>, DatabaseErro
         }
         make_private(path)?;
     }
-    crate::sqlite::open_existing_writable(path).map_err(DatabaseError::message)
+    crate::sqlite::open_existing_writable(path).map_err(DatabaseError::operation)
 }
 
 /// Published snapshots can be hard-linked into the app-data directory. Detach

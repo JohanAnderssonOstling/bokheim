@@ -145,7 +145,7 @@ impl ApplicationPane {
                 let sender = self.sync_sender.clone();
                 cx.spawn(async move |_, _| {
                     let result = backend.account.logout().await;
-                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: text!(account::signed_out), reveal_password_reset_on_error: false });
+                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: text!(account::signed_out) });
                 })
                 .detach();
             }
@@ -156,7 +156,7 @@ impl ApplicationPane {
                 let sender = self.sync_sender.clone();
                 cx.spawn(async move |_, _| {
                     let result = backend.account.delete_account(email, password).await;
-                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: text!(account::your_account_has_been_deleted_books_saved_on_this_device_have_been), reveal_password_reset_on_error: false });
+                    let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: text!(account::your_account_has_been_deleted_books_saved_on_this_device_have_been) });
                 })
                 .detach();
             }
@@ -195,11 +195,11 @@ impl ApplicationPane {
                 Ok(usage) => self.sync_state.update(cx, |state, cx| state.apply_local_storage_usage(usage, cx)),
                 Err(error) => log::warn!("could not read local storage usage: {error}"),
             },
-            SyncEvent::AccountOperation { generation, result, success, reveal_password_reset_on_error } => {
+            SyncEvent::AccountOperation { generation, result, success } => {
                 if let Ok(snapshot) = &result {
                     self.sync_state.update(cx, |state, cx| state.apply_account_snapshot(snapshot, cx));
                 }
-                self.browser.update(cx, |browser, cx| browser.apply_sync_event(SyncEvent::AccountOperation { generation, result, success, reveal_password_reset_on_error }, cx));
+                self.browser.update(cx, |browser, cx| browser.apply_sync_event(SyncEvent::AccountOperation { generation, result, success }, cx));
             }
             SyncEvent::AssetStorageChanged { library_id, enabled, result } => {
                 if result.is_ok() {
@@ -767,7 +767,6 @@ impl gpui::EventEmitter<browser_ui::PaneRequest> for ApplicationPane {}
 impl Render for ApplicationPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.install_playback_keys(window, cx);
-        window.set_page_scroll_on_swipe(cfg!(feature = "mobile") || cx.supports_touch_input());
         let footer = {
             // No dock while the book is open in the reader, or while its detail
             // page, which then holds the controls, is on screen.
@@ -808,6 +807,7 @@ impl Render for ApplicationPane {
             .flex_col()
             .key_context("Application")
             .track_focus(&self.opening_focus)
+            .on_pinch(cx.listener(|pane, event, window, cx| pane.browser.update(cx, |browser, cx| browser.pinch_ui(event, window, cx))))
             .capture_key_down(cx.listener(Self::cancel_opening_on_key))
             .capture_action(cx.listener(Self::cancel_opening_on_back))
             .on_action(cx.listener(|root, _: &ui_components::CloseBookPlayer, window, cx| root.close_audiobook(window, cx)))
@@ -1487,7 +1487,7 @@ mod navigation_tests {
         window
             .update(cx, |_, window, cx| {
                 root.update(cx, |root, cx| {
-                    root.pending_audiobook = Some("Opening audiobook…".into());
+                    root.pending_audiobook = Some("Opening audiobook".into());
                     root.open_task = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
                     root.open_reader_link(link, window, cx);
                     assert!(root.pending_audiobook.is_none(), "cancelled audiobook state must clear before the link lookup completes");

@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn local_and_legacy_books_with_the_same_initial_digest_have_distinct_card_keys() {
         let digest = content_address::ContentHash::from_bytes([9; 32]);
-        assert_ne!(CardKey::from(BookId::from(digest)), CardKey::from(BookId::for_local_content(&[4; 16], digest)));
+        assert_ne!(CardKey::from(BookId::from(digest)), CardKey::from(BookId::for_local_content(digest)));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use crate::BookId;
 use http_response::BodyReadError;
-use operation_failure::Failure;
+use operation_failure::{Failure, OperationError};
 use std::error::Error;
 use std::fmt::Formatter;
 use std::time::Duration;
@@ -44,14 +44,14 @@ impl std::fmt::Debug for RemoteFile {
 #[derive(Debug)]
 pub enum RemoteFileError {
     Unauthorized,
-    Retryable(String),
-    Failed(String),
+    Retryable(OperationError),
+    Failed(OperationError),
 }
 impl std::fmt::Display for RemoteFileError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unauthorized => f.write_str("unauthorized"),
-            Self::Retryable(error) | Self::Failed(error) => f.write_str(error),
+            Self::Retryable(error) | Self::Failed(error) => std::fmt::Display::fmt(error, f),
         }
     }
 }
@@ -60,15 +60,14 @@ impl Error for RemoteFileError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Unauthorized => Some(&Failure::SignInRequired),
-            Self::Retryable(_) => Some(&Failure::ServiceUnavailable),
-            Self::Failed(_) => None,
+            Self::Retryable(error) | Self::Failed(error) => Some(error),
         }
     }
 }
 
 impl From<String> for RemoteFileError {
     fn from(error: String) -> Self {
-        Self::Failed(error)
+        Self::Failed(error.into())
     }
 }
 impl From<&str> for RemoteFileError {
@@ -80,7 +79,7 @@ impl From<&str> for RemoteFileError {
 impl RemoteFileError {
     pub fn transport(error: reqwest::Error) -> Self {
         // URL removal also prevents signed URLs or access tokens reaching logs.
-        Self::Retryable(error.without_url().to_string())
+        Self::Retryable(OperationError::from(error.without_url()))
     }
 
     pub fn status(status: reqwest::StatusCode) -> Self {
@@ -88,9 +87,9 @@ impl RemoteFileError {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             Self::Unauthorized
         } else if status.is_server_error() || status == reqwest::StatusCode::REQUEST_TIMEOUT || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            Self::Retryable(message)
+            Self::Retryable(Failure::from_http_status(status.as_u16()).map_or_else(|| OperationError::from(message.clone()), |failure| OperationError::classified(failure, &message)))
         } else {
-            Self::Failed(message)
+            Self::Failed(Failure::from_http_status(status.as_u16()).map_or_else(|| OperationError::from(message.clone()), |failure| OperationError::classified(failure, &message)))
         }
     }
 }
@@ -157,7 +156,7 @@ async fn describe_window(client: &reqwest::Client, url: reqwest::Url, token: &st
         let bytes = read_range_response(response, &source, offset, count).await?;
         Ok((source, bytes))
     };
-    crate::time::timeout(REQUEST_TIMEOUT, request).await.map_err(|_| RemoteFileError::Retryable("remote file opening request timed out".into()))?
+    crate::time::timeout(REQUEST_TIMEOUT, request).await.map_err(|_| RemoteFileError::Retryable(OperationError::classified(operation_failure::Failure::TimedOut, "remote file opening request timed out")))?
 }
 
 /// Read a bounded batch, concatenating the requested intervals in order.
@@ -184,7 +183,7 @@ pub async fn fetch_ranges(client: &reqwest::Client, url: reqwest::Url, source: &
         let response = validate_response(response, source.hash)?;
         multipart::read(response, source.length, ranges, length).await
     };
-    crate::time::timeout(REQUEST_TIMEOUT, request).await.map_err(|_| RemoteFileError::Retryable("remote file ranges timed out".into()))?
+    crate::time::timeout(REQUEST_TIMEOUT, request).await.map_err(|_| RemoteFileError::Retryable(OperationError::classified(operation_failure::Failure::TimedOut, "remote file ranges timed out")))?
 }
 
 pub async fn fetch_range(client: &reqwest::Client, url: reqwest::Url, source: &RemoteFile, token: &str, offset: u64, length: usize) -> Result<Vec<u8>, RemoteFileError> {
@@ -286,4 +285,8 @@ pub async fn fetch_bundle(client: &reqwest::Client, url: reqwest::Url, source: &
         bytes.extend(chunk);
     }
     Ok(bytes)
+}
+
+impl From<OperationError> for RemoteFileError {
+    fn from(error: OperationError) -> Self { Self::Failed(error) }
 }

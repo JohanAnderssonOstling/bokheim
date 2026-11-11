@@ -68,7 +68,7 @@ export function requiredCapabilities(env = globalThis) {
     if (typeof env.Atomics?.waitAsync !== 'function') issues.push(text('web.missing_async_wait'));
     if (typeof env.Worker !== 'function') issues.push(text('web.missing_workers'));
     if (typeof env.navigator?.storage?.getDirectory !== 'function') issues.push(text('web.missing_private_storage'));
-    if (typeof env.navigator?.locks?.request !== 'function') issues.push(text('web.missing_locks'));
+    if (typeof env.navigator?.locks?.request !== 'function' || typeof env.navigator?.locks?.query !== 'function') issues.push(text('web.missing_locks'));
     return issues;
 }
 

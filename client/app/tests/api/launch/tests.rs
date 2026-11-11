@@ -29,7 +29,7 @@ fn launch_reports_app_data_directory_creation_failures() {
     let file = root.path().join("not-a-directory");
     fs::write(&file, b"keep").unwrap();
     let error = BackendLaunch::initialize(AppDataLocation::native_path(file.join("bokheim"))).unwrap_err();
-    assert!(error.contains("failed to create app-data directory"), "{error}");
+    assert!(error.to_string().contains("failed to create app-data directory"), "{error}");
     assert_eq!(fs::read(file).unwrap(), b"keep");
 }
 

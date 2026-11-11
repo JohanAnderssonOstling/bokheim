@@ -1,5 +1,6 @@
 //! Android notification controls act on the speech worker directly, then notify
 //! the reader so its dock and highlighting follow the same playback state.
+use crate::SpeechError;
 use super::{Command, Shared, SpeechControl, SpeechEvent, SpeechEvents, SpeechFailure, recover_lock};
 use serde_json::json;
 use std::collections::HashMap;
@@ -9,7 +10,7 @@ use std::sync::{
     mpsc,
 };
 
-type Bridge = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+type Bridge = dyn Fn(&str) -> Result<(), SpeechError> + Send + Sync;
 static BRIDGE: OnceLock<Box<Bridge>> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Session>>>> = OnceLock::new();
@@ -60,7 +61,7 @@ fn session(id: u64) -> Option<Arc<Session>> {
     recover_lock(sessions()).get(&id).cloned()
 }
 
-pub fn initialize(dispatch: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) {
+pub fn initialize(dispatch: impl Fn(&str) -> Result<(), SpeechError> + Send + Sync + 'static) {
     let _ = BRIDGE.set(Box::new(dispatch));
 }
 
@@ -87,7 +88,7 @@ pub(super) fn set_metadata(id: u64, metadata: MediaMetadata) {
     }
 }
 
-pub(super) fn start(id: u64) -> Result<(), String> {
+pub(super) fn start(id: u64) -> Result<(), SpeechError> {
     let session = session(id).ok_or("Speech session has ended")?;
     if session.active.swap(true, Ordering::AcqRel) {
         changed(id);
@@ -117,7 +118,7 @@ pub(super) fn remove(id: u64) {
     recover_lock(sessions()).remove(&id);
 }
 
-pub fn failed(id: u64, generation: u64, message: String) {
+pub fn failed(id: u64, generation: u64, message: SpeechError) {
     if let Some(session) = session(id) {
         let _ = session.events.try_send(SpeechEvent::Failed { generation, failure: SpeechFailure::AudioOutput, message });
     }

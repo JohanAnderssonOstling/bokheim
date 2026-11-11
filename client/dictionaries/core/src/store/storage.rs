@@ -1,6 +1,8 @@
 //! Dictionary-owned catalog and component files using shared platform storage.
 use super::Storage;
-use crate::Result;
+use crate::OperationResult as Result;
+#[cfg(target_arch = "wasm32")]
+use crate::Result as ReadResult;
 use client_platform_runtime::file_storage as files;
 use std::path::PathBuf;
 
@@ -23,11 +25,11 @@ impl Storage for LocalStorage {
     type Source = Source;
 
     async fn read_value(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        files::read(&self.root.join(key)).await
+        Ok(files::read(&self.root.join(key)).await?)
     }
 
     async fn write_value(&self, key: &str, bytes: &[u8]) -> Result<()> {
-        files::write_atomic(&self.root.join(key), bytes.to_vec()).await
+        Ok(files::write_atomic(&self.root.join(key), bytes.to_vec()).await?)
     }
 
     async fn open(&self, id: &str, name: &str) -> Result<Self::Source> {
@@ -46,7 +48,7 @@ impl Storage for LocalStorage {
     }
 
     async fn remove(&self, id: &str) -> Result<()> {
-        files::remove_directory(&self.directory(id)).await
+        Ok(files::remove_directory(&self.directory(id)).await?)
     }
 }
 
@@ -57,10 +59,10 @@ pub struct Source(files::Source);
 
 #[cfg(target_arch = "wasm32")]
 impl crate::ReadAt for Source {
-    async fn size(&mut self) -> Result<u64> {
+    async fn size(&mut self) -> ReadResult<u64> {
         Ok(self.0.len())
     }
-    async fn read_at(&mut self, offset: u64, length: usize) -> Result<Vec<u8>> {
-        self.0.read_at(offset, length).await
+    async fn read_at(&mut self, offset: u64, length: usize) -> ReadResult<Vec<u8>> {
+        self.0.read_at(offset, length).await.map_err(Into::into)
     }
 }

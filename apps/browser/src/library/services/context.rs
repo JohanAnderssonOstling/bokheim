@@ -139,7 +139,7 @@ impl LibraryContext {
                     // Import failures already carry their own wording.
                     Ok(failures) if !failures.is_empty() => notify_error("add-book-error", failures, window, cx),
                     Ok(_) => {}
-                    Err(error) => notify_error("add-book-error", format!(text!(browse::could_not_add_book_generic), user_facing_error(&error, text!(common::please_try_again))), window, cx),
+                    Err(error) => notify_error("add-book-error", format!(text!(browse::could_not_add_book_generic), user_facing_error(&error, "")), window, cx),
                 }
             });
         });
@@ -183,7 +183,7 @@ impl LibraryContext {
                 updates.set_import_task(None, cx);
                 match result {
                     Ok(failures) if !failures.is_empty() => notify_warning("add-folder-warning", failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),
-                    Err(error) => notify_error("add-folder-error", format!(text!(browse::could_not_add_folder), user_facing_error(&error, text!(common::please_try_again))), window, cx),
+                    Err(error) => notify_error("add-folder-error", format!(text!(browse::could_not_add_folder), user_facing_error(&error, "")), window, cx),
                     _ => {}
                 }
             });

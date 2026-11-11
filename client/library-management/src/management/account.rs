@@ -34,7 +34,7 @@ impl LibraryService {
             return Err(BackendError::message("library is still open during local cleanup"));
         }
         #[cfg(target_arch = "wasm32")]
-        client_platform_web::web_storage::purge_library(library_id).await.map_err(BackendError::message)?;
+        client_platform_web::web_storage::purge_library(library_id).await.map_err(BackendError::operation)?;
         self.config.registry.access(move |registry| registry.complete_local_purge(&library_id)).await.map_err(BackendError::operation)
     }
 
@@ -145,7 +145,7 @@ impl LibraryService {
         // deletion instead of resurrecting them from the remote snapshot.
         let pending_deletions = self.config.registry.access(move |registry| registry.pending_server_deletions()).await.map_err(BackendError::operation)?.into_iter().collect::<HashSet<_>>();
         let libraries = snapshot.libraries.into_iter().filter(|library| !pending_deletions.contains(&library.library_id)).collect::<Vec<_>>();
-        reserve_database_capacity(libraries.len()).await.map_err(BackendError::message)?;
+        reserve_database_capacity(libraries.len()).await.map_err(BackendError::operation)?;
         let mut library_storage_usage = snapshot
             .library_storage
             .into_iter()
@@ -213,7 +213,10 @@ impl LibraryService {
                 .request(|session| {
                     Box::pin(async move {
                         self.check_library_account(&library_id, &session).await?;
-                        account_client::delete_library(&session, &library_id).await
+                        match account_client::delete_library(&session, &library_id).await.map(|_| ()) {
+                            Err(error) if error.is_not_found() => Ok(()),
+                            result => result,
+                        }
                     })
                 })
                 .await
@@ -461,10 +464,10 @@ impl LibraryService {
         let session = session.clone();
         let registry = self.config.registry.clone();
         storage_queue::run(move || {
-            if registry.device_only(&id).map_err(|error| AuthError::InvalidData(error.to_string()))? {
+            if registry.device_only(&id).map_err(|error| AuthError::from(std::io::Error::other(error)))? {
                 return Err(AuthError::SignInRequired("this library is kept only on this device"));
             }
-            if registry.accessible_to_account(&id, Some(&session.identity())).map_err(|error| AuthError::InvalidData(error.to_string()))? { Ok(()) } else { Err(AuthError::SignInRequired("sign in to the account that owns this library")) }
+            if registry.accessible_to_account(&id, Some(&session.identity())).map_err(|error| AuthError::from(std::io::Error::other(error)))? { Ok(()) } else { Err(AuthError::SignInRequired("sign in to the account that owns this library")) }
         })
         .await
         .map_err(AuthError::InvalidData)?

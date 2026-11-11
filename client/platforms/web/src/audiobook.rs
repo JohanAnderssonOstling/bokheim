@@ -1,4 +1,5 @@
 //! Browser audiobook presentation state and lifetime leases.
+use operation_failure::OperationError;
 use crate::transport::resources::{AsyncCallback, LocalMediaLease};
 use wasm_bindgen::prelude::*;
 
@@ -32,9 +33,9 @@ where
     pub fn renewal(&self) -> JsValue {
         self.renew.as_ref().map(|renew| renew.value()).unwrap_or(JsValue::UNDEFINED)
     }
-    pub fn direct_config(&self) -> Result<JsValue, String> {
+    pub fn direct_config(&self) -> Result<JsValue, OperationError> {
         let Some(config) = &self.direct else { return Ok(JsValue::UNDEFINED) };
-        let json = serde_json::to_string(config).map_err(|error| format!("Invalid playback configuration: {error}"))?;
-        js_sys::JSON::parse(&json).map_err(|_| "Invalid playback configuration".into())
+        let json = serde_json::to_string(config).map_err(OperationError::operation)?;
+        js_sys::JSON::parse(&json).map_err(OperationError::from)
     }
 }

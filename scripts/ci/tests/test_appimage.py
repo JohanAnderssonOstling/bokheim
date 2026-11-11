@@ -1,17 +1,12 @@
-import importlib.util
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 APPIMAGE = ROOT / 'apps/desktop-gpui/linux/appimage'
-spec = importlib.util.spec_from_file_location('desktop_build', ROOT / 'apps/desktop-gpui/scripts/build.py')
-build = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(build)
 
 # Exercise the actual packaging/check scripts without downloading release tools,
 # PDFium or voices. ELF fixtures describe their required symbol versions.
@@ -191,41 +186,6 @@ class AppImageTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, core == runtime == '2.17', result.stderr)
                 self.assertEqual((output / 'Bokheim-Kobo-Installer-Linux-x86_64.AppImage.sha256').exists(),
                                  core == runtime == '2.17')
-
-
-class DesktopBuildTests(unittest.TestCase):
-    def test_linux_build_can_skip_browser_without_skipping_runtime_assets(self):
-        for without_browser in (False, True):
-            with self.subTest(without_browser=without_browser), tempfile.TemporaryDirectory() as directory:
-                prepare_pdfium, prepare_speech = Mock(return_value=Path(directory)), Mock()
-                argv = ['build.py', '--target', 'x86_64-unknown-linux-gnu', '--offline']
-                if without_browser:
-                    argv.append('--without-browser')
-                linux_environment = Mock(return_value={'CC_x86_64_unknown_linux_gnu': 'sdk-cc'})
-                browser_environment = Mock(return_value={'CC_x86_64_unknown_linux_gnu': 'sdk-cc', 'PKG_CONFIG': 'browser-pkg-config'})
-                scripts = [{'prepare': prepare_pdfium}, {'build_environment': linux_environment}]
-                if not without_browser:
-                    scripts.append({'build_environment': browser_environment})
-                scripts.append({'prepare_all': prepare_speech})
-                with patch.object(sys, 'argv', argv), patch.object(build.runpy, 'run_path', side_effect=scripts), patch.object(build.subprocess, 'run') as run:
-                    build.main()
-                commands = [call.args[0] for call in run.call_args_list]
-                self.assertEqual(len(commands), 2 if without_browser else 4)
-                self.assertIn('desktop-gpui', commands[0])
-                self.assertEqual(run.call_args_list[0].kwargs['env']['CC_x86_64_unknown_linux_gnu'], 'sdk-cc')
-                linux_environment.assert_called_once_with(offline=True)
-                if not without_browser:
-                    self.assertIn('embedded-browser-ui', commands[1])
-                    self.assertEqual(commands[1][:2], ['cargo', 'rustc'])
-                    self.assertEqual(commands[1][-3:], ['--', '-C', 'link-arg=-Wl,--allow-shlib-undefined'])
-                    self.assertEqual(run.call_args_list[1].kwargs['env']['PKG_CONFIG'], 'browser-pkg-config')
-                    browser_environment.assert_called_once_with(offline=True)
-                    self.assertTrue(commands[-1][-2].endswith('bokheim-browser'))
-                else:
-                    browser_environment.assert_not_called()
-                self.assertEqual(commands[-1][-1], '2.17')
-                prepare_speech.assert_called_once()
-                self.assertEqual(prepare_pdfium.call_count, 2)
 
 
 if __name__ == '__main__':

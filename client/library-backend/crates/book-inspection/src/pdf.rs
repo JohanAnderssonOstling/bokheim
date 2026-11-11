@@ -1,6 +1,10 @@
-use crate::{MetadataResult, author_from_field, author_names, fallback_metadata};
-use book_model::{BookMetadata, BookRecord, BookSubject, CONTRIBUTOR_MARC_RELATOR_CODE, Contributor, Identifier, LanguageTag, Scheme, Scope, canonical_doi, canonical_uuid, unique_book_year};
+use crate::{author_from_field, author_names, fallback_metadata, CachedPdfReader, MetadataResult, PdfSourceIdentity};
+use crate::evidence::{EvidenceProgress, SectionEvidence, MAX_SECTION_BYTES};
+use book_model::{canonical_doi, canonical_uuid, unique_book_year, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, Scheme, Scope, CONTRIBUTOR_MARC_RELATOR_CODE};
+use content_address::BookId;
 use lopdf::{Dictionary, Document};
+use pdf_view_common::PdfReaderMetadata;
+use pdf_reader_core::{PdfPageTextVisitor, PdfResult};
 use roxmltree::{Document as XmlDocument, Node};
 use std::collections::HashSet;
 use std::error::Error;
@@ -8,6 +12,7 @@ use std::fs::File;
 use std::io::SeekFrom;
 use std::io::{Read, Seek};
 use std::path::Path;
+use std::time::Instant;
 
 const DC: &str = "http://purl.org/dc/elements/1.1/";
 const XMP: &str = "http://ns.adobe.com/xap/1.0/";
@@ -17,7 +22,9 @@ const MAX_VALUES: usize = 256;
 const MAX_TEXT_BYTES: usize = 4_096;
 const MAX_DESCRIPTION_BYTES: usize = 64 * 1_024;
 const MAX_XMP_BYTES: usize = 8 * 1_024 * 1_024;
-const EARLY_TEXT_PAGES: usize = 20;
+// Prioritize pages with complementary ISBN/CIP hits in the library profile.
+// Every opening page remains eligible when evidence is still incomplete.
+const EARLY_TEXT_PAGES: [usize; 9] = [7, 5, 9, 6, 3, 4, 2, 8, 1];
 
 pub struct InspectedPdf {
     pub metadata: BookRecord,
@@ -29,8 +36,7 @@ pub fn inspect_pdf(path: &Path) -> MetadataResult<InspectedPdf> {
     inspect_pdf_reader(path, File::open(path)?)
 }
 
-/// Page evidence is always read: it joins the file facts the metadata server
-/// is asked about.
+/// Opening page evidence joins the file facts used for metadata lookup.
 pub fn inspect_pdf_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
     inspect_pdf_pages_mode(source_name, reader)
 }
@@ -40,18 +46,112 @@ pub fn inspect_pdf_pages_reader<R: Read + Seek + Send + 'static>(source_name: &P
 }
 
 fn inspect_pdf_pages_mode<R: Read + Seek + Send + 'static>(source_name: &Path, mut reader: R) -> MetadataResult<InspectedPdf> {
-    let mut inspected = super::pdf_ranges::metadata(&mut reader).and_then(|document| inspect_pdf_document(source_name, document));
-    let original_ids = inspected.as_mut().map(|i| std::mem::take(&mut i.metadata.book.identifiers)).unwrap_or_default();
-    {
-        // A PDFium-readable book must not lose its page evidence just because
-        // the metadata-only parser cannot handle its cross-reference variant.
-        let mut inspected = inspected.unwrap_or_else(|_| InspectedPdf { metadata: fallback_metadata(source_name) });
-        reader.seek(SeekFrom::Start(0))?;
-        let (_, pages) = pdf_reader_core::inspect_page_text_with_count(reader, EARLY_TEXT_PAGES, crate::evidence::MAX_SECTION_BYTES)?;
-        let evidence = pages.into_iter().map(|(page, text)| crate::evidence::try_inspect_section(&inspected.metadata, &format!("pdf:page:{page}"), &text)).collect::<std::io::Result<Vec<_>>>()?;
-        crate::evidence::apply_evidence(&mut inspected.metadata, &evidence, "pdf");
-        inspected.metadata.book.identifiers.extend(original_ids);
-        Ok(inspected)
+    let inspected = declared_metadata(source_name, &mut reader);
+    reader.seek(SeekFrom::Start(0))?;
+    let visitor = PdfPageEvidence::new(inspected);
+    let (_, visitor) = pdf_reader_core::visit_page_text(reader, visitor.pages(), MAX_SECTION_BYTES, visitor)?;
+    Ok(visitor.finish())
+}
+
+pub(super) fn inspect_pdf_with_reader_facts<R: Read + Seek + Send + 'static>(
+    source_name: &Path, mut reader: R, book_id: Option<BookId>, cached: Option<CachedPdfReader>, declared: Option<BookRecord>,
+) -> MetadataResult<(InspectedPdf, PdfReaderMetadata, Vec<BookTocEntry>)> {
+    reader.rewind()?;
+    let inspected = match declared {
+        Some(metadata) => InspectedPdf { metadata },
+        None => declared_metadata(source_name, &mut reader),
+    };
+    let visitor = PdfPageEvidence::new(inspected);
+    let pages = visitor.pages();
+    let (metadata, outline, visitor) = match cached.filter(|cached| book_id.is_some_and(|identity| cached.metadata.valid_for(&identity.to_hex()))) {
+        Some(mut cached) => {
+            cached.metadata.annotations.clear();
+            reader.rewind()?;
+            let (_, visitor) = pdf_reader_core::visit_page_text(reader, pages, MAX_SECTION_BYTES, visitor)?;
+            (cached.metadata, cached.toc, visitor)
+        }
+        None => {
+            let (_, metadata, outline, visitor) = pdf_reader_core::inspect_reader_with_text_visitor(reader, book_id.map(|identity| identity.to_hex()), pages, MAX_SECTION_BYTES, visitor)?;
+            (metadata, outline, visitor)
+        }
+    };
+    Ok((visitor.finish(), metadata, outline))
+}
+
+fn declared_metadata(source_name: &Path, reader: &mut (impl Read + Seek)) -> InspectedPdf {
+    let (_, metadata) = prepare_pdf_metadata(source_name, reader);
+    InspectedPdf { metadata }
+}
+
+/// Read provenance and declared metadata together, sharing a bounded sparse
+/// object index. Catalog provenance survives failures in later metadata reads.
+pub fn prepare_pdf_metadata(source_name: &Path, reader: impl Read + Seek) -> (Option<PdfSourceIdentity>, BookRecord) {
+    // Preserve page evidence even when the metadata-only parser cannot handle
+    // the document's cross-reference variant.
+    let started = pdf_profile_start();
+    let mut identity = None;
+    let document = pdf_range_reader::metadata_with_root(reader, |document| identity = PdfSourceIdentity::from_document(document));
+    profile_pdf_phase("declared_document_read", 0, started);
+    let started = pdf_profile_start();
+    let inspected = document.and_then(|document| inspect_pdf_document(source_name, document)).unwrap_or_else(|_| InspectedPdf { metadata: fallback_metadata(source_name) });
+    profile_pdf_phase("declared_metadata_parse", 0, started);
+    (identity, inspected.metadata)
+}
+
+struct PdfPageEvidence {
+    inspected: InspectedPdf,
+    original_ids: Vec<Identifier>,
+    evidence: Vec<(usize, SectionEvidence)>,
+    progress: EvidenceProgress,
+}
+
+impl PdfPageEvidence {
+    fn new(mut inspected: InspectedPdf) -> Self {
+        let progress = EvidenceProgress::from_book(&inspected.metadata);
+        let original_ids = std::mem::take(&mut inspected.metadata.book.identifiers);
+        Self { inspected, original_ids, evidence: Vec::with_capacity(EARLY_TEXT_PAGES.len()), progress }
+    }
+
+    fn pages(&self) -> Vec<usize> {
+        if self.progress.complete() {
+            Vec::new()
+        } else {
+            EARLY_TEXT_PAGES.to_vec()
+        }
+    }
+
+    fn finish(mut self) -> InspectedPdf {
+        // Apply evidence in physical page order even when likely pages were
+        // visited first, preserving identifier and classification precedence.
+        self.evidence.sort_by_key(|(page, _)| *page);
+        let evidence: Vec<_> = self.evidence.into_iter().map(|(_, section)| section).collect();
+        let started = pdf_profile_start();
+        crate::evidence::apply_evidence(&mut self.inspected.metadata, &evidence, "pdf");
+        self.inspected.metadata.book.identifiers.extend(self.original_ids);
+        profile_pdf_phase("evidence_apply", 0, started);
+        self.inspected
+    }
+}
+
+impl PdfPageTextVisitor for PdfPageEvidence {
+    fn visit(&mut self, page: usize, text: String) -> PdfResult<bool> {
+        let started = pdf_profile_start();
+        let section = crate::evidence::try_inspect_section(&self.inspected.metadata, &format!("pdf:page:{page}"), &text)?;
+        profile_pdf_phase("page_evidence_parse", page, started);
+        log::debug!(target: "library_pdf_profile", "{}", serde_json::json!({"event":"pdf_page_evidence", "page":page, "text_bytes":text.len(), "evidence":section}));
+        self.progress.observe(&section);
+        self.evidence.push((page, section));
+        Ok(!self.progress.complete())
+    }
+}
+
+fn pdf_profile_start() -> Option<Instant> {
+    log::log_enabled!(target: "library_pdf_profile", log::Level::Debug).then(Instant::now)
+}
+
+fn profile_pdf_phase(stage: &str, page: usize, started: Option<Instant>) {
+    if let Some(started) = started {
+        log::debug!(target: "library_pdf_profile", "{}", serde_json::json!({"event":"pdf_phase", "stage":stage, "page":page, "elapsed_ns":started.elapsed().as_nanos()}));
     }
 }
 
@@ -265,7 +365,7 @@ fn bounded_text(value: &str, max_bytes: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Object, Stream, dictionary, text_string};
+    use lopdf::{dictionary, text_string, Object, Stream};
     use tempfile::tempdir;
 
     #[test]

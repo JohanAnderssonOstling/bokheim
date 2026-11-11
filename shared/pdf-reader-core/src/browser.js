@@ -3,13 +3,14 @@ let failure;
 let rejectWorker;
 
 export function wake_pdf_worker(module, memory, failed, completed) {
-    if (failure) throw new Error(failure);
+    if (failure) throw failure;
     if (!worker) {
         const base = new URL(`${globalThis.__BOKHEIM_ASSET_BASE__ ?? './pkg'}/`, location.href);
         worker = new Worker(new URL('pdf_worker.js', base), { type: 'module', name: 'pdfium' });
         const current = worker;
         let retryable = true;
-        const reject = message => {
+        const reject = error => {
+            const message = error instanceof Error ? error : Object.assign(new Error(error?.message || String(error)), {name: error?.name || "Error", failure: error?.failure});
             if (worker !== current) return;
             failure = retryable ? undefined : message;
             current.terminate();
@@ -28,14 +29,14 @@ export function wake_pdf_worker(module, memory, failed, completed) {
         try {
             worker.postMessage({ module, memory });
         } catch (error) {
-            reject(String(error));
+            reject(error);
             return;
         }
     }
     try {
         worker.postMessage({ run: true });
     } catch (error) {
-        rejectWorker(String(error));
+        rejectWorker(error);
     }
 }
 

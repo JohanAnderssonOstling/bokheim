@@ -119,12 +119,25 @@ The script builds `sync-server` and the separate `library-cloud-upgrade`
 maintenance tool, transfers their artifacts and the systemd unit over SSH,
 and invokes the fixed root-owned sync activation helper. It validates every
 stored client payload before stopping the service, then takes a full PostgreSQL
-backup and upgrades schema 14 to 17 in one transaction. Existing payloads and
+backup and starts the installed candidate behind a private socket. Startup
+upgrades cloud schema 14 to 17 when needed, applies billing schema 19, and
+migrates book IDs to schema 20 before opening the listener. Existing payloads and
 retired storage configuration are retained in `bokheim_upgrade_archive`;
 legacy feed records remain in `opds_feeds`. External-storage configuration is
 retained in the archive while its library uses the current local storage policy.
 Authored versions, asset references, accounts, and libraries are preserved.
-The synchronization generation changes so clients fetch the converted values.
+Cloud payload conversion changes the synchronization generation so clients
+fetch the converted values. Billing-only upgrades retain that generation;
+the book-ID migration rotates it.
+The identity step rekeys synchronized payloads and asset/quota references without
+copying book bytes. Its `library-cloud-upgrade check-book-ids` command validates
+the migration read-only on schema 19; `apply-book-ids` performs it transactionally.
+Both commands use the server's `BOKHEIM_ASSETS_DIR` and optional
+`BOKHEIM_CATALOG_PINS_DIR` configuration. Startup inherits these paths from
+the service configuration; the activation helper supplies the same paths to
+its read-only preflight. New book and thumbnail names use hard links before
+the database commit;
+old names remain available for rollback and are retired by normal asset cleanup.
 
 During activation Caddy cannot reach the candidate socket until private
 readiness and protocol checks pass. Failure before publication restores the
@@ -450,6 +463,10 @@ all clients cannot be recovered by this protocol.
 
 ### Database initialization
 
-Run `sync-server migrate` only against an empty database. Existing databases
-must already use the current schema. Deployment and startup verify that schema;
-historical schema upgrades are not supported.
+Run `sync-server migrate` only against an empty database. Existing schemas 14,
+17, 18 and 19 migrate automatically on startup, before accepting requests.
+A current database skips the migration after reading its version marker.
+`sync-server upgrade` remains available to perform the same steps explicitly
+while the service is stopped. Deployment retains its backup and private
+readiness checks around startup migration. See
+[`../BILLING.md`](../BILLING.md) for the provider-neutral billing boundary.

@@ -14,6 +14,7 @@ crate-type = ["cdylib"]
 [features]
 
 [dependencies]
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure", features = ["web"] }
 app-preferences = { path = "../../client/preferences", features = ["store"] }
 ui-text = { path = "../ui-text" }
 app = { path = "../../client/app", default-features = false }

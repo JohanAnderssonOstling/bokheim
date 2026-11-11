@@ -133,6 +133,7 @@ sqlite-wasm-vfs = { path = "vendor/sqlite-wasm-vfs" }
 wgpu = { path = "vendor/wgpu" }
 indexed_db_futures = { path = "vendor/indexed_db_futures" }
 wasm-streams = { path = "vendor/wasm-streams" }
+wasm-streams-05 = { package = "wasm-streams", path = "vendor/wasm-streams-0.5" }
 mobi = { path = "vendor/mobi" }
 async_zip = { path = "vendor/async_zip" }
 zip = { path = "vendor/zip" }

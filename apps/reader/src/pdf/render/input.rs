@@ -101,10 +101,20 @@ impl PdfReaderView {
     }
 
     pub(crate) fn native_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dictionary.take().is_some() {
-            self.pdf.update(cx, |pdf, cx| pdf.clear_text_selection(cx));
-            self.focus_document(window, cx);
-            cx.notify();
+        if let Some(popup) = self.dictionary.clone() {
+            let reader = cx.weak_entity();
+            window.defer(cx, move |window, cx| {
+                if !popup.update(cx, |popup, cx| popup.native_back(window, cx)) {
+                    let _ = reader.update(cx, |reader, cx| {
+                        if reader.dictionary.as_ref().is_some_and(|current| current.entity_id() == popup.entity_id()) {
+                            reader.dictionary = None;
+                            reader.pdf.update(cx, |pdf, cx| pdf.clear_text_selection(cx));
+                            reader.focus_document(window, cx);
+                            cx.notify();
+                        }
+                    });
+                }
+            });
             return;
         }
         if self.context_sheet.take().is_some() {

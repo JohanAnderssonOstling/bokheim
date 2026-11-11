@@ -1,12 +1,14 @@
 //! Catalog lifecycle shared by the interface and book font pickers.
 use super::SystemFontFamilies;
 use gpui::{App, Context, ScrollStrategy, SharedString, Subscription, Task, TextSystem, UniformListScrollHandle};
+use html_gpui::backend::is_private_font_family;
 use std::sync::Arc;
 
 #[derive(Default)]
 pub struct FontCatalog {
     pub families: Vec<String>,
     pub filtered: Vec<usize>,
+    pub cursor: usize,
     pub loaded: bool,
     pub loading: bool,
     waiting_for_registration: bool,
@@ -22,7 +24,7 @@ impl Drop for FontCatalog {
 
 impl FontCatalog {
     pub fn replace(&mut self, mut families: Vec<String>) {
-        families.retain(|family| !family.starts_with('.'));
+        families.retain(|family| !family.starts_with('.') && !is_private_font_family(family));
         families.sort_by_cached_key(|family| family.to_lowercase());
         families.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
         self.families = families;
@@ -31,6 +33,7 @@ impl FontCatalog {
         self.waiting_for_registration = false;
     }
     pub fn filter(&mut self, query: &str) {
+        self.cursor = 0;
         let query = query.to_lowercase();
         self.filtered = self.families.iter().enumerate().filter_map(|(index, family)| family.to_lowercase().contains(&query).then_some(index)).collect();
     }
@@ -47,6 +50,22 @@ pub trait FontCatalogTarget: Sized + 'static {
         let query = self.font_query(cx);
         self.font_catalog().filter(&query);
         self.font_scroll().scroll_to_item(0, ScrollStrategy::Top);
+    }
+    fn navigate_font_catalog(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        if event.keystroke.modifiers.control || event.keystroke.modifiers.alt || event.keystroke.modifiers.platform || event.keystroke.modifiers.shift {
+            return;
+        }
+        let delta = match event.keystroke.key.as_str() {
+            "up" => -1,
+            "down" => 1,
+            _ => return,
+        };
+        let catalog = self.font_catalog();
+        catalog.cursor = catalog.cursor.saturating_add_signed(delta).min(catalog.filtered.len().saturating_sub(1));
+        let cursor = catalog.cursor;
+        self.font_scroll().scroll_to_item(cursor, ScrollStrategy::Nearest);
+        cx.stop_propagation();
+        cx.notify();
     }
     fn install_font_catalog(&mut self, families: Vec<String>, cx: &mut Context<Self>) {
         self.font_catalog().replace(families);

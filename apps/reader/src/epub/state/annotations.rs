@@ -27,6 +27,9 @@ impl ReaderView {
     }
 
     pub(super) fn load_reader_state(&mut self, cx: &mut Context<Self>) {
+        if self.book.is_transient() {
+            return;
+        }
         let book_id = self.locator.book_id();
         let revision = self.marks.revision();
         self.annotation_load_generation = self.annotation_load_generation.wrapping_add(1);
@@ -45,10 +48,16 @@ impl ReaderView {
     }
 
     pub(super) fn watch_annotation_updates(&mut self, cx: &mut Context<Self>) {
+        if self.book.is_transient() {
+            return;
+        }
         self._annotation_updates = Some(crate::shell::marks::watch_updates(self.library.clone(), Self::load_reader_state, cx));
     }
 
     pub(in crate::epub) fn create_annotation(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.book.is_transient() {
+            return;
+        }
         let Selection { cfi_range, text: exact_text } = selection;
         self.selection = None;
         if self.marks.selected().is_some() {
@@ -83,7 +92,7 @@ impl ReaderView {
         self.recurring.editor_passage = Some(Selection { cfi_range: overlay.cfi_range.clone(), text: overlay.exact_text.clone() });
         self.marks.append(annotation, "save reader annotation");
         self.marks.select(annotation_id);
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
+        self.project_annotations(cx);
         notify(cx, Component::ReaderShell, "annotation_created");
     }
 
@@ -113,6 +122,7 @@ impl ReaderView {
                 input.focus(window, cx);
             }
         });
+        self.project_annotations(cx);
         notify(cx, Component::ReaderShell, "annotation_selected");
     }
 
@@ -121,6 +131,7 @@ impl ReaderView {
             self.annotation_popup_anchor = None;
             self.recurring.editor_overlay = None;
             self.recurring.editor_passage = None;
+            self.project_annotations(cx);
             notify(cx, Component::ReaderShell, "annotation_closed");
         }
     }

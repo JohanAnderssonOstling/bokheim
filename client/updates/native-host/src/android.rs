@@ -1,6 +1,7 @@
 //! Android owns APK replacement. This host owns the approved data transaction.
 //! The migration callback must run prepare_candidate in a fresh private process;
 //! it must return only after that process has exited and all SQLite handles close.
+use update_client::UpdateError;
 use super::*;
 
 #[derive(Clone, Serialize)]
@@ -18,7 +19,7 @@ pub struct Android {
 }
 
 impl Android {
-    fn new(target: &str) -> Result<Self, String> {
+    fn new(target: &str) -> Result<Self, UpdateError> {
         if !target.starts_with("android-") || !target.ends_with("-apk") {
             return Err("invalid Android package target".into());
         }
@@ -33,19 +34,19 @@ impl Platform for Android {
     fn application_activation(&self) -> ApplicationActivation {
         ApplicationActivation::Installer
     }
-    fn workspace(&self, host: &AndroidHost) -> Result<u64, String> {
+    fn workspace(&self, host: &AndroidHost) -> Result<u64, UpdateError> {
         host.data_workspace()
     }
 }
 
 impl AndroidHost {
-    pub fn open(data: &Path, version: &str, config: DiscoveryConfig, target: &str) -> Result<Self, String> {
+    pub fn open(data: &Path, version: &str, config: DiscoveryConfig, target: &str) -> Result<Self, UpdateError> {
         Self::open_platform(data, version, config, Android::new(target)?)
     }
 
     /// Keep one lock across construction and recovery so the initial state and
     /// taxonomy can be reused before any library connections open.
-    pub fn open_and_startup(data: &Path, version: &str, config: DiscoveryConfig, target: &str, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<(Self, bool), String> {
+    pub fn open_and_startup(data: &Path, version: &str, config: DiscoveryConfig, target: &str, prepare: impl FnOnce(&Path) -> Result<(), UpdateError>) -> Result<(Self, bool), UpdateError> {
         let (mut host, lock, taxonomy) = Self::open_for_startup(data, version, config, Android::new(target)?)?;
         let trial = host.startup_locked(&lock, taxonomy, prepare)?;
         Ok((host, trial))
@@ -53,7 +54,7 @@ impl AndroidHost {
 
     /// Package identity/version validation failed before the installer opened.
     /// Live code and data are untouched; await a corrected signed publication.
-    pub fn reject_package(&mut self) -> Result<(), String> {
+    pub fn reject_package(&mut self) -> Result<(), UpdateError> {
         let _lock = self.reload_locked()?;
         if !self.coordinator.record().approved.as_ref().is_some_and(|p| p.phase == Phase::Ready) {
             return Err("no ready package to reject".into());
@@ -63,7 +64,7 @@ impl AndroidHost {
 
     /// An explicit Install click obtains a reverified pinned APK. Returning from
     /// Android's installer never calls activated; only a later startup can do so.
-    pub fn install_request(&mut self) -> Result<InstallRequest, String> {
+    pub fn install_request(&mut self) -> Result<InstallRequest, UpdateError> {
         let lock = self.reload_locked()?;
         let plan = self.coordinator.record().approved.as_ref().ok_or("no approved update")?.clone();
         if plan.phase != Phase::Ready {
@@ -79,13 +80,13 @@ impl AndroidHost {
 
     /// Called before the registry/backend opens. Returns whether startup is a
     /// trial: its background tasks must remain gated until healthy is called.
-    pub fn startup(&mut self, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<bool, String> {
+    pub fn startup(&mut self, prepare: impl FnOnce(&Path) -> Result<(), UpdateError>) -> Result<bool, UpdateError> {
         let lock = self.reload_locked()?;
         let taxonomy = active(&self.root)?;
         self.startup_locked(&lock, taxonomy, prepare)
     }
 
-    fn startup_locked(&mut self, lock: &UpdateLock, mut taxonomy: Option<ActiveTaxonomy>, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<bool, String> {
+    fn startup_locked(&mut self, lock: &UpdateLock, mut taxonomy: Option<ActiveTaxonomy>, prepare: impl FnOnce(&Path) -> Result<(), UpdateError>) -> Result<bool, UpdateError> {
         if let Some(journal) = Journal::load(&self.root)? {
             if journal.state == State::Committed {
                 self.finish_committed(&journal)?;
@@ -115,9 +116,9 @@ impl AndroidHost {
         Ok(self.trial)
     }
 
-    fn promote(&mut self, lock: &UpdateLock, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
+    fn promote(&mut self, lock: &UpdateLock, prepare: impl FnOnce(&Path) -> Result<(), UpdateError>) -> Result<(), UpdateError> {
         let paths = self.coordinator.staged_paths(&self.root, lock)?;
-        let deficit = self.workspace_bytes()?.saturating_sub(fs2::available_space(&self.root).map_err(|e| e.to_string())?);
+        let deficit = self.workspace_bytes()?.saturating_sub(fs2::available_space(&self.root).map_err(UpdateError::operation)?);
         if deficit > 0 {
             self.coordinator.activation_recovered_for_retry(WaitReason::Space { additional_bytes: deficit }, "insufficient migration workspace".into())?;
             return Err("waiting for migration workspace".into());
@@ -301,7 +302,7 @@ mod tests {
         let mut other = f.host("1.0.0");
         other.coordinator.discovery_failed("changed in another session".into()).unwrap();
         assert!(!host.startup(|_| panic!("ordinary startup must not migrate")).unwrap());
-        assert_eq!(host.coordinator.record().last_discovery_error.as_deref(), Some("changed in another session"));
+        assert_eq!(host.coordinator.record().last_discovery_error.as_ref().map(ToString::to_string).as_deref(), Some("changed in another session"));
     }
 
     #[test]

@@ -1,12 +1,47 @@
 use ui_text::text;
 
 use gpui::prelude::*;
-use gpui::{Anchored, App, Div, ElementId, FontWeight, KeyDownEvent, MouseButton, SharedString, Stateful, Window, div, px, rems};
+use gpui::{Anchored, App, Div, ElementId, FocusHandle, FontWeight, Global, InteractiveElement, KeyBinding, KeyDownEvent, MouseButton, SharedString, Stateful, Window, div, px, rems};
 
 use gpui_component::menu::{ChoiceRowColors, choice_row, choice_row_checkmark};
 use gpui_component::{Icon, IconName, tooltip::Tooltip};
 
 use crate::{BrowserTheme, RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XXS, TEXT_MD, TEXT_XS};
+
+gpui::actions!(modal, [FocusNextControl, FocusPreviousControl]);
+
+struct ModalFocusBindings;
+impl Global for ModalFocusBindings {}
+
+/// Cycle within this overlay even when another focus scope surrounds it.
+pub fn contain_modal_focus<E: InteractiveElement>(content: E, focus: &FocusHandle, context: &str, cx: &mut App) -> E {
+    if cx.try_global::<ModalFocusBindings>().is_none() {
+        cx.bind_keys([KeyBinding::new("tab", FocusNextControl, Some("ModalFocus")), KeyBinding::new("shift-tab", FocusPreviousControl, Some("ModalFocus"))]);
+        cx.set_global(ModalFocusBindings);
+    }
+    let next = focus.clone();
+    let previous = focus.clone();
+    content
+        .track_focus(focus)
+        .key_context(context)
+        .on_action(move |_: &FocusNextControl, window, cx| cycle_modal_focus(&next, false, window, cx))
+        .on_action(move |_: &FocusPreviousControl, window, cx| cycle_modal_focus(&previous, true, window, cx))
+}
+
+fn cycle_modal_focus(focus: &FocusHandle, reverse: bool, window: &mut Window, cx: &mut App) {
+    let advance = |window: &mut Window, cx: &mut App| {
+        if reverse { window.focus_prev(cx) } else { window.focus_next(cx) }
+    };
+    advance(window, cx);
+    let first = window.focused(cx);
+    while !focus.contains_focused(window, cx) {
+        advance(window, cx);
+        if window.focused(cx) == first {
+            focus.focus(window, cx);
+            break;
+        }
+    }
+}
 
 /// The shared full-window layer for a centered modal. The caller supplies the
 /// scrim and surface so it can retain its own identity and dismissal behavior.
@@ -69,7 +104,7 @@ pub fn font_picker_surface(window: &Window, theme: BrowserTheme) -> Div {
     #[cfg(feature = "kobo")]
     let viewport = gpui::size(viewport.width, viewport.height - gpui_kobo::keyboard_height(window));
     let insets = window.insets().effective();
-    let width = (f32::from(viewport.width - insets.left - insets.right) - 2.0 * SPACE_MD).clamp(1.0, 640.0);
+    let width = (f32::from(viewport.width - insets.left - insets.right) - 2.0 * SPACE_MD).clamp(1.0, f32::from(window.rem_size()) * 40.0);
     let height = ((f32::from(viewport.height - insets.top - insets.bottom) - 2.0 * SPACE_MD) * 0.9).clamp(1.0, 720.0);
     modal_surface(theme).w(px(width)).h(px(height)).p(px(SPACE_MD)).flex().flex_col().gap(px(SPACE_SM)).overflow_hidden()
 }
@@ -119,22 +154,20 @@ pub fn confirmation_dialog(dialog: gpui_component::dialog::AlertDialog, window: 
     dialog.width(px((f32::from(window.viewport_size().width) - 2.0 * SPACE_MD).clamp(1.0, CONFIRMATION_DIALOG_MAX_WIDTH)))
 }
 
-/// A confirmation that is a single line: the question, then its two answers.
+/// A wrapping confirmation question above its two answers.
 ///
 /// Passed to the dialog as its footer, with nothing above it. The dialog's own
 /// minimum height and the gap it keeps between a header and a footer would
-/// otherwise leave an empty band over the row, so both are cleared.
+/// otherwise leave an empty band over the content, so both are cleared.
 pub fn confirmation_dialog_row(dialog: gpui_component::dialog::AlertDialog, question: impl Into<SharedString>, cancel: crate::Button, confirm: crate::Button, theme: BrowserTheme) -> gpui_component::dialog::AlertDialog {
     dialog.min_h_0().gap_0().footer(
         div()
             .w_full()
             .flex()
-            .flex_row()
-            .items_center()
+            .flex_col()
             .gap(px(SPACE_SM))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(rems(TEXT_MD)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(question.into()))
-            .child(cancel)
-            .child(confirm),
+            .child(div().w_full().min_w_0().whitespace_normal().text_size(rems(TEXT_MD)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(question.into()))
+            .child(div().w_full().flex().justify_end().gap(px(SPACE_SM)).child(cancel).child(confirm)),
     )
 }
 

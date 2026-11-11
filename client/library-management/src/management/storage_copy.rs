@@ -2,7 +2,6 @@
 use super::{LibraryService, StorageCopyJournal};
 use crate::BackendError;
 use crate::LibraryHandle;
-use crate::account::account_error;
 use client_protocol::Failure;
 use library_model::CloudQuotaBook;
 use library_registry::LibraryEntry;
@@ -14,10 +13,10 @@ impl LibraryService {
         // Requests from different windows must resume the same pending copy.
         let _copy = self.config.storage_copy_lock.lock().await;
         let original = self.handle(&source)?;
-        self.copy_library_storage_inner(&original, bokheim, false).await
+        self.copy_library_storage_inner(&original, bokheim).await
     }
 
-    async fn copy_library_storage_inner(self: &Arc<Self>, original: &LibraryHandle, bokheim: bool, keep_journal: bool) -> Result<LibraryEntry, BackendError> {
+    async fn copy_library_storage_inner(self: &Arc<Self>, original: &LibraryHandle, bokheim: bool) -> Result<LibraryEntry, BackendError> {
         let source = *original.id();
         self.entry(&source).await?;
         if bokheim && self.current_account().await?.is_none() {
@@ -77,57 +76,7 @@ impl LibraryService {
                 }
             })
             .await?;
-        if !keep_journal {
-            self.config.registry.access(move |registry| registry.remove_value(&key)).await.map_err(BackendError::operation)?;
-        }
-        self.config.account_wake.send_replace(());
-        self.send_library_list_changed();
-        Ok(entry)
-    }
-
-    pub(super) async fn make_library_local_only(self: &Arc<Self>, source: LibraryId) -> Result<LibraryEntry, BackendError> {
-        let _copy = self.config.storage_copy_lock.lock().await;
-        let name = self.entry(&source).await?.library_name().to_owned();
-        let account = self.config.account.require_session().await.map_err(account_error)?;
-        let identity = account.identity();
-        let original = self.handle(&source)?;
-        self.ensure_remote_library(source).await?;
-        original.refresh_storage_copy().await?;
-        let entry = self.copy_library_storage_inner(&original, false, true).await?;
-        // Only a complete verified copy permits cloud removal. Re-check the
-        // captured account on every attempt, including token-refresh retries.
-        self.config
-            .account
-            .request(|session| {
-                let matches = session.identity() == identity;
-                Box::pin(async move {
-                    if !matches {
-                        return Err(account_client::AuthError::SignInRequired("sign in to the account that owns this library"));
-                    }
-                    match account_client::delete_library(&session, &source).await.map(|_| ()) {
-                        Err(error) if error.is_not_found() => Ok(()),
-                        result => result,
-                    }
-                })
-            })
-            .await
-            .map_err(account_error)?;
-        let destination_id = *entry.library_id();
-        let entry = self
-            .run(move |this| {
-                if this.config.registry.entry(&source).map_err(BackendError::operation)?.is_some() {
-                    this.config.registry.begin_local_removal(&source).map_err(BackendError::operation)?;
-                    this.retire(&source);
-                }
-                this.config.registry.complete_server_deletion(&source).map_err(BackendError::operation)?;
-                this.config.registry.remove_value(&format!("storage-copy:v1:{source}:0")).map_err(BackendError::operation)?;
-                let entry = this.config.registry.attach_remote(&destination_id, &name, &this.effective_library_root()?).map_err(BackendError::operation)?;
-                Ok(entry)
-            })
-            .await?;
-        if let Err(error) = self.finish_local_purge(source).await {
-            log::warn!("cloud library was saved locally; old cache cleanup will retry: {error}");
-        }
+        self.config.registry.access(move |registry| registry.remove_value(&key)).await.map_err(BackendError::operation)?;
         self.config.account_wake.send_replace(());
         self.send_library_list_changed();
         Ok(entry)

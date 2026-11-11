@@ -3,6 +3,7 @@ use client_platform_runtime::executor::spawn_detached;
 use client_platform_runtime::file_storage::{self as files, DirectoryEntry};
 use library_model::CardKey;
 use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::Ordering, Mutex, PoisonError};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
@@ -23,7 +24,7 @@ pub(super) struct CoverCache {
 }
 
 impl CoverCache {
-    pub(super) async fn configure(&self, path: &Path, max_bytes: u64) -> Result<(), String> {
+    pub(super) async fn configure(&self, path: &Path, max_bytes: u64) -> Result<(), io::Error> {
         let mut disk = self.disk.lock().await;
         let opened = DiskCache::open(path, max_bytes).await?;
         self.clear();
@@ -129,9 +130,9 @@ struct DiskCache {
 }
 
 impl DiskCache {
-    async fn open(path: &Path, max_bytes: u64) -> Result<Self, String> {
+    async fn open(path: &Path, max_bytes: u64) -> Result<Self, io::Error> {
         if max_bytes == 0 {
-            return Err("cover cache limit must be greater than zero".into());
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "cover cache limit must be greater than zero"));
         }
         let accounting = files::read(&path.join("size")).await?.and_then(|bytes| {
             let text = std::str::from_utf8(&bytes).ok()?;
@@ -159,7 +160,7 @@ impl DiskCache {
         format!("{}{}.jpg", Self::book_prefix(&address.0, address.1), address.2)
     }
 
-    async fn entries(&self) -> Result<Vec<DirectoryEntry>, String> {
+    async fn entries(&self) -> Result<Vec<DirectoryEntry>, io::Error> {
         Ok(files::list_directory(&self.directory).await?.into_iter().filter(|entry| entry.name.ends_with(".jpg")).collect())
     }
 
@@ -169,7 +170,7 @@ impl DiskCache {
 
     // Invalidate the persisted total before touching covers. Cancellation or IO
     // failure leaves both copies invalid, so the next writer rebuilds them.
-    async fn begin(&mut self) -> Result<Accounting, String> {
+    async fn begin(&mut self) -> Result<Accounting, io::Error> {
         let accounting = match self.accounting.take() {
             Some(accounting) => accounting,
             None => Self::count(&self.entries().await?),
@@ -178,18 +179,18 @@ impl DiskCache {
         Ok(accounting)
     }
 
-    async fn finish(&mut self, accounting: Accounting) -> Result<(), String> {
+    async fn finish(&mut self, accounting: Accounting) -> Result<(), io::Error> {
         files::write_atomic(&self.directory.join("size"), format!("{} {}\n", accounting.bytes, accounting.entries).into_bytes()).await?;
         self.accounting = Some(accounting);
         Ok(())
     }
 
-    async fn get(&self, address: &Address) -> Result<Option<Vec<u8>>, String> {
+    async fn get(&self, address: &Address) -> Result<Option<Vec<u8>>, io::Error> {
         // Reads leave the download timestamp and accounting file untouched.
         files::read(&self.directory.join(Self::name(address))).await
     }
 
-    async fn prune(&self, accounting: &mut Accounting, available: u64, max_entries: u64, replacing: Option<&str>) -> Result<(), String> {
+    async fn prune(&self, accounting: &mut Accounting, available: u64, max_entries: u64, replacing: Option<&str>) -> Result<(), io::Error> {
         if accounting.bytes <= available && accounting.entries <= max_entries {
             return Ok(());
         }
@@ -209,7 +210,7 @@ impl DiskCache {
         Ok(())
     }
 
-    async fn insert(&mut self, address: &Address, bytes: &[u8]) -> Result<(), String> {
+    async fn insert(&mut self, address: &Address, bytes: &[u8]) -> Result<(), io::Error> {
         let size = bytes.len() as u64;
         if size > self.max_bytes {
             return Ok(());
@@ -229,7 +230,7 @@ impl DiskCache {
         self.finish(accounting).await
     }
 
-    async fn remove_book(&mut self, origin: &str, key: CardKey) -> Result<(), String> {
+    async fn remove_book(&mut self, origin: &str, key: CardKey) -> Result<(), io::Error> {
         let prefix = Self::book_prefix(origin, key);
         let entries = self.entries().await?;
         let mut accounting = self.begin().await?;

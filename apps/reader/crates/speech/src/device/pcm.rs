@@ -1,8 +1,9 @@
 //! Validate and downmix provider audio before it enters the playback queue.
+use crate::SpeechError;
 use super::Audio;
 pub(crate) const MAX_AUDIO_BYTES: usize = 32 * 1024 * 1024;
 
-pub(crate) fn decode(bytes: &[u8], format: u16, channels: u16, sample_rate: u32) -> Result<Audio, String> {
+pub(crate) fn decode(bytes: &[u8], format: u16, channels: u16, sample_rate: u32) -> Result<Audio, SpeechError> {
     let width = match format {
         8 => 1,
         16 => 2,
@@ -34,8 +35,8 @@ pub(crate) fn decode(bytes: &[u8], format: u16, channels: u16, sample_rate: u32)
 }
 
 #[cfg(any(test, target_os = "windows"))]
-pub(crate) fn wave(bytes: &[u8]) -> Result<Audio, String> {
-    let invalid = || "The local voice returned an invalid WAV audio stream.".to_owned();
+pub(crate) fn wave(bytes: &[u8]) -> Result<Audio, SpeechError> {
+    let invalid = || SpeechError::from("The local voice returned an invalid WAV audio stream.");
     if bytes.len() < 12 || bytes.len() > MAX_AUDIO_BYTES || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(invalid());
     }

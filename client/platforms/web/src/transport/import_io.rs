@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use wasm_bindgen::prelude::*;
+use operation_failure::OperationError;
 
 #[wasm_bindgen(module = "/src/transport/selected_files.js")]
 extern "C" {
@@ -12,8 +13,8 @@ extern "C" {
     #[wasm_bindgen(catch, js_name = sendSelectedFiles)]
     async fn send_files(token: &str, files: &js_sys::Array, signal: &web_sys::AbortSignal) -> Result<(), JsValue>;
 }
-pub fn initialize() -> Result<(), String> {
-    initialize_selected_files().map_err(|error| super::error_message(&error))
+pub fn initialize() -> Result<(), OperationError> {
+    initialize_selected_files().map_err(OperationError::from)
 }
 
 /// A Rust lease can cross workers; browser files stay on the storage owner.
@@ -33,7 +34,7 @@ impl Drop for SelectedFiles {
         }
     }
 }
-pub async fn send_selected_files(files: &js_sys::Array, release: impl FnOnce(String) + Send + 'static) -> Result<SelectedFiles, String> {
+pub async fn send_selected_files(files: &js_sys::Array, release: impl FnOnce(String) + Send + 'static) -> Result<SelectedFiles, OperationError> {
     let lease = SelectedFiles { id: uuid::Uuid::new_v4().to_string(), release: Some(Box::new(release)) };
     struct Sending(web_sys::AbortController);
     impl Drop for Sending {
@@ -41,8 +42,8 @@ pub async fn send_selected_files(files: &js_sys::Array, release: impl FnOnce(Str
             self.0.abort();
         }
     }
-    let sending = Sending(web_sys::AbortController::new().map_err(|error| super::error_message(&error))?);
-    send_files(lease.id(), files, &sending.0.signal()).await.map_err(|error| super::error_message(&error))?;
+    let sending = Sending(web_sys::AbortController::new().map_err(OperationError::from)?);
+    send_files(lease.id(), files, &sending.0.signal()).await.map_err(OperationError::from)?;
     Ok(lease)
 }
 

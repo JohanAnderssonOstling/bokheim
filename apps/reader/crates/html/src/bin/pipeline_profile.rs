@@ -7,10 +7,7 @@ use std::time::{Duration, Instant};
 use html_pipeline::PipelineSession;
 use html_pipeline::engine::{LayoutConstraints, LayoutTimings};
 use html::{
-    text::{
-        GlyphHandle, GlyphRequest, GlyphResourceGeneration, GlyphShaper, ShapeError, FontMetrics,
-        ShapedGlyph,
-    },
+    text::{GlyphHandle, GlyphResourceGeneration, GlyphShaper, FontMetrics, ShapedRun, TextRunShapeRequest, ShapedGlyph},
 };
 use html_pipeline::{
     BookStylesheetCache, BuildPipelineTimings, DocumentFactory, PipelineInputs, StyleEnvironment,
@@ -33,22 +30,16 @@ impl GlyphShaper for ProfileShaper {
         self.generation
     }
 
-    fn reset(&mut self) {
-        self.glyphs.clear();
-        self.generation = GlyphResourceGeneration::default();
-    }
-
-    fn shape_glyph(&mut self, request: GlyphRequest<'_>) -> Result<ShapedGlyph, ShapeError> {
-        let key = (request.character, request.style.font_size.to_bits());
-        let next = GlyphHandle(self.glyphs.len() as u32);
-        let handle = *self.glyphs.entry(key).or_insert(next);
-        let size = request.style.font_size;
-        let advance = size * 0.5;
-        let metrics = FontMetrics {
-            ascent: size * 0.75,
-            descent: size * 0.25,
-        };
-        Ok(ShapedGlyph::new(handle, advance, metrics))
+    fn shape_run(&mut self, request: TextRunShapeRequest<'_>) -> ShapedRun {
+        ShapedRun::characters(request, |character, style| {
+            let key = (character, style.font_size.to_bits());
+            let next = GlyphHandle(self.glyphs.len() as u32);
+            let handle = *self.glyphs.entry(key).or_insert(next);
+            let size = style.font_size;
+            let advance = size * 0.5;
+            let metrics = FontMetrics { ascent: size * 0.75, descent: size * 0.25 };
+            ShapedGlyph::new(handle, advance, metrics)
+        })
     }
 }
 

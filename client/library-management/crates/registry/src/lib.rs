@@ -93,8 +93,9 @@ impl LocalRegistry {
         let app_data_locator = app_data_locator.into();
         let default_library_root = default_library_root.into();
         let database_locator = LibraryRegistry::database_locator(&app_data_locator);
-        let connection = device_sqlite::open(database_locator, device_sqlite::OpenOptions::new().busy_timeout(std::time::Duration::from_secs(5)))?;
+        let mut connection = device_sqlite::open(database_locator, device_sqlite::OpenOptions::new().busy_timeout(std::time::Duration::from_secs(5)))?;
         connection.execute_batch(SCHEMA)?;
+        configuration::migrate(&mut connection)?;
         Ok(Self {
             #[cfg(not(target_arch = "wasm32"))]
             app_data_locator,

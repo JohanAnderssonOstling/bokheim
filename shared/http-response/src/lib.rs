@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use reqwest::{Client, ClientBuilder, Error, IntoUrl, Response};
+use std::{error::Error as StdError, fmt};
 #[cfg(not(target_arch = "wasm32"))]
 use rustls::crypto::{ring, CryptoProvider};
 #[cfg(not(target_arch = "wasm32"))]
@@ -65,6 +66,24 @@ pub fn blocking_client_builder() -> BlockingClientBuilder {
 pub enum BodyReadError {
     Http(Error),
     TooLarge { limit: usize },
+}
+
+impl fmt::Display for BodyReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http(error) => error.fmt(formatter),
+            Self::TooLarge { limit } => write!(formatter, "response body exceeds {limit} bytes"),
+        }
+    }
+}
+
+impl StdError for BodyReadError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Http(error) => Some(error),
+            Self::TooLarge { .. } => None,
+        }
+    }
 }
 
 pub async fn read(response: Response, limit: usize) -> Result<Vec<u8>, BodyReadError> {

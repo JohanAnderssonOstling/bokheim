@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use ui_components as components;
 pub use update_client::coordinator::{UpdateAction, UpdateView};
+use update_client::UpdateError;
 
 pub type UpdateActionHandler = Rc<dyn Fn(UpdateAction, &mut App)>;
 
@@ -86,12 +87,12 @@ pub enum UpdateEvent {
     Failed(Option<String>),
 }
 
-pub type PublishUpdate<'a> = dyn Fn(UpdateEvent) -> Result<(), String> + 'a;
+pub type PublishUpdate<'a> = dyn Fn(UpdateEvent) -> Result<(), UpdateError> + 'a;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn bind_worker<H: Send + 'static>(
     initial: UpdateView, restart: Option<PathBuf>, automatic_check: bool, take_host: impl FnOnce() -> Option<H> + 'static,
-    mut work: impl FnMut(&mut H, Option<UpdateAction>, &PublishUpdate<'_>) -> Result<UpdateView, String> + Send + 'static, view: impl Fn(&H) -> UpdateView + Send + 'static, user_error: impl Fn(&str) -> Option<String> + Send + 'static,
+    mut work: impl FnMut(&mut H, Option<UpdateAction>, &PublishUpdate<'_>) -> Result<UpdateView, UpdateError> + Send + 'static, view: impl Fn(&H) -> UpdateView + Send + 'static, user_error: impl Fn(&UpdateError) -> Option<String> + Send + 'static,
     cx: &mut App,
 ) -> Entity<UpdateControls> {
     let (actions, requests) = async_channel::unbounded();
@@ -116,7 +117,7 @@ pub fn bind_worker<H: Send + 'static>(
         let Some(mut host) = take_host() else { return };
         executor
             .spawn(async move {
-                let publish = |event| events.try_send(event).map_err(|_| "update UI closed".to_owned());
+                let publish = |event| events.try_send(event).map_err(|_| UpdateError::from("update UI closed"));
                 let mut automatic = automatic_check;
                 loop {
                     let action = if std::mem::take(&mut automatic) {
@@ -143,7 +144,9 @@ pub fn bind_worker<H: Send + 'static>(
                         }
                         Err(error) => {
                             log::warn!("update work failed: {error}");
-                            if publish(UpdateEvent::View(view(&host))).is_err() || publish(UpdateEvent::Failed(user_error(&error))).is_err() {
+                            let current = view(&host);
+                            let explained = matches!(current, UpdateView::NeedsSpace { .. } | UpdateView::NeedsPermission | UpdateView::WaitingForConnection);
+                            if publish(UpdateEvent::View(current)).is_err() || (!explained && publish(UpdateEvent::Failed(user_error(&error))).is_err()) {
                                 break;
                             }
                         }
@@ -169,14 +172,18 @@ pub fn bind_worker<H: Send + 'static>(
 pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<ElementId>, theme: components::BrowserTheme, cx: &App) -> Option<Div> {
     let controls = controls.read(cx);
     let (message, button) = match &controls.view {
-        UpdateView::Hidden => return None,
+        UpdateView::Hidden if !controls.worker_failed => return None,
+        UpdateView::Hidden => (text!(browse::could_not_continue_update_try_again).into(), Some((text!(browse::check_for_updates), UpdateAction::Check, false))),
         UpdateView::Available => (text!(browse::update_available).to_owned(), Some((controls.update_label, UpdateAction::Update, false))),
         UpdateView::Preparing => (text!(browse::preparing_update).into(), Some((text!(browse::update), UpdateAction::Update, true))),
         UpdateView::WaitingForConnection => (text!(browse::check_your_internet_connection_then_retry_the_update).into(), Some((text!(common::retry), UpdateAction::Update, false))),
         UpdateView::Ready { action } => (text!(browse::update_ready).into(), Some((if *action == UpdateAction::Install { controls.install_label } else { text!(common::restart) }, action.clone(), false))),
-        UpdateView::NeedsSpace { additional_bytes } => (format!(text!(browse::free_up_to_continue), needed_space(*additional_bytes)), Some((text!(common::retry), UpdateAction::Update, false))),
+        UpdateView::NeedsSpace { additional_bytes } => (if *additional_bytes == 0 { text!(dictionary::disk_full).into() } else { format!(text!(browse::free_up_to_continue), needed_space(*additional_bytes)) }, Some((text!(common::retry), UpdateAction::Update, false))),
+        #[cfg(target_os = "android")]
         UpdateView::NeedsPermission => (text!(browse::allow_the_app_to_install_the_update).into(), Some((text!(browse::continue), UpdateAction::GrantPermission, false))),
-        UpdateView::Activating => (text!(browse::updating_your_library).into(), None),
+        #[cfg(not(target_os = "android"))]
+        UpdateView::NeedsPermission => (text!(common::access_denied_check_that_you_have_permission_to_use_the_folder).into(), Some((text!(common::retry), UpdateAction::Update, false))),
+        UpdateView::Activating => (text!(browse::installing_update).into(), None),
         UpdateView::Current { version, checked } => {
             (if *checked { format!(text!(browse::bokheim_is_up_to_date), version = version) } else { format!(text!(browse::bokheim), version = version) }, Some((text!(browse::check_for_updates), UpdateAction::Check, false)))
         }
@@ -193,7 +200,7 @@ pub(crate) fn render_row(controls: &Entity<UpdateControls>, id: impl Into<Elemen
         ),
     };
     let message = controls.message.clone().unwrap_or(message);
-    let message = if controls.worker_failed && controls.error.is_none() { text!(browse::could_not_continue_update_try_again).to_owned() } else { message };
+    let message = if controls.worker_failed { text!(browse::could_not_continue_update_try_again).to_owned() } else { message };
     let mut row = div().w_full().flex().flex_col().child({
         let mut content = div().w_full().px(px(components::SPACE_MD)).py(px(components::SPACE_SM)).min_h(px(56.)).flex().flex_wrap().items_center().justify_between().gap(px(components::SPACE_SM)).child(message);
         if let Some((label, action, busy)) = button {

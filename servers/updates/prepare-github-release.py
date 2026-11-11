@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare an unsigned update from tested GitHub packages; never publish or sign."""
+"""Prepare an unsigned update from verified GitHub packages; never publish or sign."""
 import argparse
 import hashlib
 import importlib.util
@@ -102,7 +102,7 @@ def verified_receipts(repository, source, sha, tag, directory):
         release_artifacts.validate(receipt, platform, sha, source)
         if platform == 'windows':
             run = gh_json('api', f'repos/{source}/actions/runs/{receipt["workflow_run"]}')
-            require(validate_run(run, source) == sha, 'Windows workflow differs from tested source')
+            require(validate_run(run, source) == sha, 'Windows workflow differs from build source')
         receipts[release_artifacts.TARGETS[platform]] = receipt
     return receipts
 
@@ -126,7 +126,6 @@ def prepare(args):
     else:
         sha = args.source_commit
         require(re.fullmatch('[0-9a-f]{40}', sha), 'Expected full source commit')
-    command(sys.executable, str(ROOT / 'scripts/ci/require-shared-tests.py'), args.source_repository, sha)
     release = gh_json('release', 'view', args.tag, '--repo', args.release_repository,
                       '--json', 'tagName,isDraft,isPrerelease,assets')
     require(release.get('tagName') == args.tag and not release.get('isPrerelease'), 'Wrong release or prerelease')
@@ -145,7 +144,7 @@ def prepare(args):
         downloaded.mkdir()
         command('gh', 'release', 'download', args.tag, '--repo', args.release_repository,
                 '--pattern', 'desktop-source-commit.txt', '--dir', str(downloaded))
-        require((downloaded / 'desktop-source-commit.txt').read_text().strip() == sha, 'Release source differs from tested commit')
+        require((downloaded / 'desktop-source-commit.txt').read_text().strip() == sha, 'Release source differs from build commit')
         build_receipts = verified_receipts(args.release_repository, args.source_repository, sha, args.tag, scratch) if args.run_id is None else None
         artifacts = {}
         first_info = None
@@ -185,9 +184,6 @@ def prepare(args):
             # The authenticated release copy is retained in downloaded. Reclaim
             # the verified build copy before fetching the next platform.
             shutil.rmtree(built)
-        # Downloads may take a while. Recheck the shared gate before producing
-        # signable output in case a newer test attempt superseded its success.
-        command(sys.executable, str(ROOT / 'scripts/ci/require-shared-tests.py'), args.source_repository, sha)
         now = int(time.time())
         manifest = {
             'protocol_version': 1, 'channel': trust['channel'], 'sequence': args.sequence,

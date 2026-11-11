@@ -1,3 +1,4 @@
+use crate::PlaybackError;
 use ui_text::text;
 
 use crate::{OpeningTiming, lock_state};
@@ -85,7 +86,7 @@ struct SharedState {
     confirmed_position: Mutex<PositionState>,
     decoder_end_generation: AtomicU64,
     playback_finished_generation: AtomicU64,
-    error: Mutex<Option<String>>,
+    error: Mutex<Option<PlaybackError>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,7 +120,7 @@ impl SharedState {
         *lock_state(&self.confirmed_position) = PositionState { generation, micros: position.as_micros() as u64 };
     }
 
-    fn reject_seek_if_current(&self, generation: u64, error: String) -> bool {
+    fn reject_seek_if_current(&self, generation: u64, error: PlaybackError) -> bool {
         let mut position = lock_state(&self.position);
         let confirmed = *lock_state(&self.confirmed_position);
         if self.generation.compare_exchange(generation, confirmed.generation, Ordering::AcqRel, Ordering::Acquire).is_err() {
@@ -157,7 +158,7 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn open(reader: Box<dyn ReadSeek>, duration: Duration, stream_control: Option<AudioStreamControl>) -> Result<Self, String> {
+    pub fn open(reader: Box<dyn ReadSeek>, duration: Duration, stream_control: Option<AudioStreamControl>) -> Result<Self, PlaybackError> {
         let _opening = OpeningTiming::new("audio_engine_open");
         let decoder_timing = OpeningTiming::new("decoder_init");
         let decoder = open_decoder(reader)?;
@@ -166,7 +167,7 @@ impl AudioEngine {
         let sample_rate = decoder.sample_rate();
 
         #[cfg(not(feature = "kobo"))]
-        let output = DeviceSinkBuilder::open_default_sink().map_err(|error| error.to_string())?;
+        let output = DeviceSinkBuilder::open_default_sink().map_err(PlaybackError::operation)?;
         #[cfg(not(feature = "kobo"))]
         let player = Player::connect_new(output.mixer());
         #[cfg(not(feature = "kobo"))]
@@ -200,7 +201,7 @@ impl AudioEngine {
                 }
                 worker_state.decoder_stopped.store(true, Ordering::Release);
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(PlaybackError::operation)?;
 
         #[cfg(not(feature = "kobo"))]
         player.append(WorkerSource::new(audio_rx, state.clone(), channels, sample_rate, duration));
@@ -310,7 +311,7 @@ impl AudioEngine {
         self.state.playback_finished()
     }
 
-    pub fn toggle(&mut self) -> Result<(), String> {
+    pub fn toggle(&mut self) -> Result<(), PlaybackError> {
         #[cfg(feature = "kobo")]
         if self.state.playback_finished() || self.output.stop.load(Ordering::Acquire) || self.output.thread.as_ref().is_some_and(|thread| thread.is_finished()) {
             self.begin_output_recovery()?;
@@ -339,7 +340,7 @@ impl AudioEngine {
     }
 
     #[cfg(feature = "kobo")]
-    fn begin_output_recovery(&self) -> Result<(), String> {
+    fn begin_output_recovery(&self) -> Result<(), PlaybackError> {
         let (receiver, channels, sample_rate) = &self.retry_output;
         let (receiver, state, channels, sample_rate, duration) = (receiver.clone(), self.state.clone(), *channels, *sample_rate, self.duration);
         let recovery = OutputRecovery::start(move |cancelled| KoboOutput::spawn_cancellable(receiver, state, channels, sample_rate, duration, || cancelled.load(Ordering::Acquire)))?;
@@ -352,7 +353,7 @@ impl AudioEngine {
     }
 
     #[cfg(feature = "kobo")]
-    fn restart_output(&mut self, output: KoboOutput) -> Result<(), String> {
+    fn restart_output(&mut self, output: KoboOutput) -> Result<(), PlaybackError> {
         // The failed output dropped its partially consumed chunk. Reusing the
         // remaining queue would skip that audio while reporting an unbroken clock.
         // Invalidate old chunks and regenerate from the last confirmed position.
@@ -382,7 +383,7 @@ impl AudioEngine {
                     Err(TryRecvError::Empty) => return,
                     Err(TryRecvError::Disconnected) => {
                         recovery.take();
-                        Err("Audio output recovery stopped".to_owned())
+                        Err(PlaybackError::from("Audio output recovery stopped"))
                     }
                 }
             };
@@ -392,14 +393,14 @@ impl AudioEngine {
         }
     }
 
-    pub fn seek_to(&self, position: Duration) -> Result<(), String> {
+    pub fn seek_to(&self, position: Duration) -> Result<(), PlaybackError> {
         let position = position.min(self.duration);
         request_seek(&self.state, &self.request_tx, position)
     }
 
-    pub fn set_tempo(&mut self, tempo: f32) -> Result<(), String> {
+    pub fn set_tempo(&mut self, tempo: f32) -> Result<(), PlaybackError> {
         let tempo = normalized_tempo(tempo)?;
-        self.request_tx.send(DecoderRequest::Tempo(tempo)).map_err(|_| "audio decoder stopped".to_string())
+        self.request_tx.send(DecoderRequest::Tempo(tempo)).map_err(|_| PlaybackError::from("audio decoder stopped"))
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -409,26 +410,26 @@ impl AudioEngine {
         self.output.set_volume(volume);
     }
 
-    pub fn take_error(&self) -> Option<String> {
+    pub fn take_error(&self) -> Option<PlaybackError> {
         self.state.error.lock().ok()?.take()
     }
 }
 
-fn open_decoder(mut reader: Box<dyn ReadSeek>) -> Result<AudioDecoder, String> {
+fn open_decoder(mut reader: Box<dyn ReadSeek>) -> Result<AudioDecoder, PlaybackError> {
     let length_timing = OpeningTiming::new("source_length_probe");
     let byte_len = stream_byte_len(&mut *reader)?;
     drop(length_timing);
-    Decoder::builder().with_data(BufReader::new(reader)).with_byte_len(byte_len).with_seekable(true).build().map_err(|error| error.to_string())
+    Decoder::builder().with_data(BufReader::new(reader)).with_byte_len(byte_len).with_seekable(true).build().map_err(PlaybackError::operation)
 }
 
-fn stream_byte_len(reader: &mut dyn ReadSeek) -> Result<u64, String> {
-    let original_position = reader.stream_position().map_err(|error| error.to_string())?;
-    let byte_len = reader.seek(SeekFrom::End(0)).map_err(|error| error.to_string())?;
-    reader.seek(SeekFrom::Start(original_position)).map_err(|error| error.to_string())?;
+fn stream_byte_len(reader: &mut dyn ReadSeek) -> Result<u64, PlaybackError> {
+    let original_position = reader.stream_position().map_err(PlaybackError::operation)?;
+    let byte_len = reader.seek(SeekFrom::End(0)).map_err(PlaybackError::operation)?;
+    reader.seek(SeekFrom::Start(original_position)).map_err(PlaybackError::operation)?;
     Ok(byte_len)
 }
 
-fn request_seek(state: &SharedState, request_tx: &Sender<DecoderRequest>, position: Duration) -> Result<(), String> {
+fn request_seek(state: &SharedState, request_tx: &Sender<DecoderRequest>, position: Duration) -> Result<(), PlaybackError> {
     let mut current_position = lock_state(&state.position);
     let previous_generation = state.generation.load(Ordering::Acquire);
     let generation = previous_generation.checked_add(1).filter(|generation| *generation != NO_GENERATION).ok_or_else(|| "audio seek generation exhausted".to_owned())?;
@@ -450,12 +451,12 @@ fn request_seek(state: &SharedState, request_tx: &Sender<DecoderRequest>, positi
             *current = previous_position;
         }
     }
-    Err("audio decoder stopped".to_string())
+    Err(PlaybackError::from("audio decoder stopped"))
 }
 
-fn normalized_tempo(tempo: f32) -> Result<f32, String> {
+fn normalized_tempo(tempo: f32) -> Result<f32, PlaybackError> {
     if !tempo.is_finite() {
-        return Err("playback rate must be finite".to_owned());
+        return Err(PlaybackError::from("playback rate must be finite"));
     }
     Ok(tempo.clamp(wsola::MIN_TEMPO, wsola::MAX_TEMPO))
 }
@@ -515,8 +516,8 @@ struct DecoderWorker {
     stream: Option<AudioStreamControl>,
 }
 
-fn decode_worker(decoder: AudioDecoder, channels: NonZeroU16, sample_rate: NonZeroU32, request_rx: Receiver<DecoderRequest>, audio_tx: Sender<AudioChunk>, state: Arc<SharedState>, stream: Option<AudioStreamControl>) -> Result<(), String> {
-    let stretch = TimeStretch::new(sample_rate.get(), channels.get()).map_err(|error| error.to_string())?;
+fn decode_worker(decoder: AudioDecoder, channels: NonZeroU16, sample_rate: NonZeroU32, request_rx: Receiver<DecoderRequest>, audio_tx: Sender<AudioChunk>, state: Arc<SharedState>, stream: Option<AudioStreamControl>) -> Result<(), PlaybackError> {
+    let stretch = TimeStretch::new(sample_rate.get(), channels.get()).map_err(PlaybackError::operation)?;
     let aligned_block = BLOCK_SAMPLES / channels.get() as usize * channels.get() as usize;
     DecoderWorker { decoder, stretch, tempo: 1.0, generation: 0, channels, aligned_block, request_rx, audio_tx, state, stream }.run()
 }
@@ -542,7 +543,7 @@ impl DecoderWorker {
             let _seek_timing = OpeningTiming::new("decoder_seek");
             eprintln!("AUDIOBOOK_TIMING phase=decoder_seek generation={next} target_ms={}", position.as_millis());
             if let Err(error) = self.decoder.try_seek(position) {
-                self.state.reject_seek_if_current(next, format!("Could not seek audiobook: {error}"));
+                self.state.reject_seek_if_current(next, PlaybackError::operation(error).context("Could not seek audiobook"));
                 return DecoderRequestOutcome::Continue;
             }
             self.stretch.reset();
@@ -554,7 +555,7 @@ impl DecoderWorker {
         DecoderRequestOutcome::Continue
     }
 
-    fn run(mut self) -> Result<(), String> {
+    fn run(mut self) -> Result<(), PlaybackError> {
         loop {
             // A seek can invalidate I/O just before its command is enqueued. Wait
             // for that command rather than spinning the decoder on WouldBlock.
@@ -583,7 +584,7 @@ impl DecoderWorker {
                     continue;
                 }
                 if let Some(error) = control.failure() {
-                    return Err(format!("Audiobook stream unavailable: {error}"));
+                    return Err(error.context("Audiobook stream unavailable"));
                 }
             }
             let at_end = input.is_empty();
@@ -766,12 +767,12 @@ impl Source for WorkerSource {
 #[cfg(feature = "kobo")]
 struct OutputRecovery {
     cancelled: Arc<AtomicBool>,
-    result: Receiver<Result<KoboOutput, String>>,
+    result: Receiver<Result<KoboOutput, PlaybackError>>,
 }
 
 #[cfg(feature = "kobo")]
 impl OutputRecovery {
-    fn start(work: impl FnOnce(Arc<AtomicBool>) -> Result<KoboOutput, String> + Send + 'static) -> Result<Self, String> {
+    fn start(work: impl FnOnce(Arc<AtomicBool>) -> Result<KoboOutput, PlaybackError> + Send + 'static) -> Result<Self, PlaybackError> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let token = cancelled.clone();
         let (result, receiver) = bounded(1);
@@ -783,7 +784,7 @@ impl OutputRecovery {
                     let _ = result.send(output);
                 }
             })
-            .map_err(|error| format!("Could not start audio recovery: {error}"))?;
+            .map_err(|error| PlaybackError::operation(error).context("Could not start audio recovery"))?;
         Ok(Self { cancelled, result: receiver })
     }
 }
@@ -807,12 +808,12 @@ struct KoboOutput {
 
 #[cfg(feature = "kobo")]
 impl KoboOutput {
-    fn spawn(audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration) -> Result<Self, String> {
+    fn spawn(audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration) -> Result<Self, PlaybackError> {
         let control = state.stream_control.clone();
         Self::spawn_cancellable(audio_rx, state, channels, sample_rate, duration, || control.as_ref().is_some_and(|control| control.is_cancelled()))
     }
 
-    fn spawn_cancellable(audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration, cancelled: impl Fn() -> bool) -> Result<Self, String> {
+    fn spawn_cancellable(audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration, cancelled: impl Fn() -> bool) -> Result<Self, PlaybackError> {
         let channel_count = channels.get().to_string();
         let sample_rate_value = sample_rate.get();
         let sample_rate_arg = sample_rate_value.to_string();
@@ -830,12 +831,12 @@ impl KoboOutput {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("Could not start Kobo Bluetooth audio (aplay): {error}"))?;
+            .map_err(|error| PlaybackError::operation(error).context("Could not start Kobo Bluetooth audio (aplay)"))?;
         drop(spawn_timing);
         Self::from_child(child, audio_rx, state, channels, sample_rate, duration)
     }
 
-    fn from_child(mut child: Child, audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration) -> Result<Self, String> {
+    fn from_child(mut child: Child, audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration) -> Result<Self, PlaybackError> {
         let mut input = child.stdin.take().ok_or_else(|| "Kobo audio player has no input pipe".to_owned())?;
         let stderr = child.stderr.take().map(|mut pipe| {
             thread::spawn(move || {
@@ -922,12 +923,10 @@ impl KoboOutput {
                     }
                     let detail = if stderr.is_empty() { "aplay exited without a diagnostic".to_owned() } else { stderr };
                     log::warn!("Kobo audio output stopped: {detail}");
-                    if let Some(message) = kobo_output_message(&detail) {
-                        *lock_state(&state.error) = Some(message.to_owned());
-                    }
+                    *lock_state(&state.error) = Some(PlaybackError::new(detail));
                 }
             })
-            .map_err(|error| format!("Could not start Kobo audio output thread: {error}"))?;
+            .map_err(|error| PlaybackError::operation(error).context("Could not start Kobo audio output thread"))?;
         Ok(Self { playing, stop, wake, volume_bits, child, thread: Some(thread) })
     }
 
@@ -997,13 +996,7 @@ fn wait_for_output_exit(child: &Mutex<Child>, stop: &AtomicBool, wake: &(Mutex<(
 }
 
 #[cfg(feature = "kobo")]
-fn kobo_output_message(detail: &str) -> Option<&'static str> {
-    let detail = detail.to_ascii_lowercase();
-    if detail.contains("no such device") || detail.contains("disconnected") || detail.contains("broken pipe") { None } else { Some(text!(audiobook::audio_output_stopped_check_your_headphone_connection_then_press_play_to_retry)) }
-}
-
-#[cfg(feature = "kobo")]
-fn connected_audio_device(cancelled: &impl Fn() -> bool) -> Result<String, String> {
+fn connected_audio_device(cancelled: &impl Fn() -> bool) -> Result<String, PlaybackError> {
     // One budget for the complete discovery, not one budget per paired device.
     let deadline = Instant::now() + Duration::from_secs(8);
     let output = bluetooth_output(Command::new("bluetoothctl").args(["devices"]), deadline, cancelled)?;
@@ -1028,11 +1021,11 @@ fn connected_audio_device(cancelled: &impl Fn() -> bool) -> Result<String, Strin
             return Ok(address.to_owned());
         }
     }
-    Err("No connected Bluetooth audio device found".to_owned())
+    Err(PlaybackError::from("No connected Bluetooth audio device found"))
 }
 
 #[cfg(feature = "kobo")]
-fn bluetooth_output(command: &mut Command, deadline: Instant, cancelled: &impl Fn() -> bool) -> Result<Vec<u8>, String> {
+fn bluetooth_output(command: &mut Command, deadline: Instant, cancelled: &impl Fn() -> bool) -> Result<Vec<u8>, PlaybackError> {
     let interrupted = || {
         if cancelled() {
             Some("Audio output recovery cancelled")
@@ -1045,7 +1038,7 @@ fn bluetooth_output(command: &mut Command, deadline: Instant, cancelled: &impl F
     if let Some(error) = interrupted() {
         return Err(error.into());
     }
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|error| format!("Could not query Bluetooth audio: {error}"))?;
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|error| PlaybackError::operation(error).context("Could not query Bluetooth audio"))?;
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -1059,19 +1052,19 @@ fn bluetooth_output(command: &mut Command, deadline: Instant, cancelled: &impl F
     });
     let status = loop {
         if let Some(error) = interrupted() {
-            break Err(error.to_owned());
+            break Err(PlaybackError::from(error));
         }
         match child.try_wait() {
-            Ok(Some(status)) => break if status.success() { Ok(()) } else { Err("Bluetooth audio query failed".to_owned()) },
+            Ok(Some(status)) => break if status.success() { Ok(()) } else { Err(PlaybackError::from("Bluetooth audio query failed")) },
             Ok(None) => thread::sleep(Duration::from_millis(10)),
-            Err(error) => break Err(format!("Could not wait for Bluetooth audio query: {error}")),
+            Err(error) => break Err(PlaybackError::operation(error).context("Could not wait for Bluetooth audio query")),
         }
     };
     if status.is_err() {
         let _ = child.kill();
     }
     let _ = child.wait();
-    let bytes = reader.join().map_err(|_| "Bluetooth audio query reader stopped".to_owned())?.map_err(|error| format!("Could not read Bluetooth audio query: {error}"))?;
+    let bytes = reader.join().map_err(|_| "Bluetooth audio query reader stopped".to_owned())?.map_err(|error| PlaybackError::operation(error).context("Could not read Bluetooth audio query"))?;
     status?;
     if bytes.len() > 65_536 {
         return Err("Bluetooth audio query output exceeded limit".into());
@@ -1174,7 +1167,7 @@ mod tests {
     fn bluetooth_query_is_bounded_and_cancellable() {
         let started = Instant::now();
         let result = bluetooth_output(Command::new("/bin/sh").args(["-c", "exec sleep 30"]), started + Duration::from_millis(100), &|| false);
-        assert!(result.unwrap_err().contains("timed out"));
+        assert!(result.unwrap_err().to_string().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(2));
 
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1186,7 +1179,7 @@ mod tests {
         let started = Instant::now();
         let result = bluetooth_output(Command::new("/bin/sh").args(["-c", "exec sleep 30"]), started + Duration::from_secs(8), &|| cancelled.load(Ordering::Acquire));
         cancel.join().unwrap();
-        assert!(result.unwrap_err().contains("cancelled"));
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
@@ -1196,7 +1189,7 @@ mod tests {
         let result = bluetooth_output(Command::new("/bin/sh").args(["-c", "head -c 60000 /dev/zero"]), Instant::now() + Duration::from_secs(2), &|| false).unwrap();
         assert_eq!(result.len(), 60_000);
         let result = bluetooth_output(&mut Command::new("/this-command-must-not-be-spawned"), Instant::now(), &|| false);
-        assert!(result.unwrap_err().contains("timed out"));
+        assert!(result.unwrap_err().to_string().contains("timed out"));
     }
 
     #[cfg(all(feature = "kobo", unix))]
@@ -1526,7 +1519,7 @@ mod tests {
         let (request_tx, _request_rx) = unbounded();
         let state = test_state(NO_GENERATION - 1, 17_000_000);
 
-        assert_eq!(request_seek(&state, &request_tx, Duration::from_secs(80)), Err("audio seek generation exhausted".to_owned()));
+        assert_eq!(request_seek(&state, &request_tx, Duration::from_secs(80)), Err(PlaybackError::from("audio seek generation exhausted")));
         assert_eq!(state.generation.load(Ordering::Acquire), NO_GENERATION - 1);
         assert_eq!(state.position_micros(), 17_000_000);
     }

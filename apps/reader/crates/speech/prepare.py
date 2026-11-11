@@ -174,7 +174,8 @@ def prepare_all(destination, offline=False):
     # produced for a different, reduced runtime.
     for name in ORT_MODELS:
         (destination / name).unlink(missing_ok=True)
-    (destination / ORT_MARKER).unlink(missing_ok=True)
+    for name in (ORT_MARKER, "RUNTIME-LICENSE.txt", "RUNTIME-SOURCE.json"):
+        (destination / name).unlink(missing_ok=True)
     return destination
 
 
@@ -250,10 +251,18 @@ if __name__ == "__main__":
     parser.add_argument("--dest", type=Path)
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--from-bundle", type=Path, help="Preserve an existing executable's minimal-runtime voice format")
+    parser.add_argument("--runtime", type=Path, help="Stage voices paired with a prepared minimal native runtime")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--voice", choices=("alba", "george", "all"), default="alba")
     args = parser.parse_args()
-    if args.from_bundle is not None:
+    if args.runtime is not None:
+        if args.voice != "all" or args.dest is None or args.archive is not None or args.from_bundle is not None:
+            parser.error('--runtime requires --voice all and --dest, without --archive or --from-bundle')
+        destination = prepare_ort(args.dest, args.runtime, args.offline)
+        shutil.copy2(args.runtime / 'LICENSE', destination / 'RUNTIME-LICENSE.txt')
+        shutil.copy2(args.runtime / 'receipt.json', destination / 'RUNTIME-SOURCE.json')
+        print(destination)
+    elif args.from_bundle is not None:
         if args.voice != "all" or args.dest is None or args.archive is not None:
             parser.error("--from-bundle requires --voice all and --dest, without --archive")
         print(prepare_from_bundle(args.dest, args.from_bundle, args.offline))

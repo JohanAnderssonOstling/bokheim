@@ -1,5 +1,6 @@
 //! Typed transport envelopes. Application payloads and scheduling remain opaque.
-use super::{error_message, field};
+use super::field;
+use operation_failure::OperationError;
 use wasm_bindgen::{JsCast, JsValue};
 
 pub(super) fn request_id(message: &JsValue) -> Result<u32, String> {
@@ -7,12 +8,12 @@ pub(super) fn request_id(message: &JsValue) -> Result<u32, String> {
     client_platform_runtime::protocol::request_id(id)
 }
 
-pub(super) fn byte_result(message: &JsValue) -> Result<Result<Vec<u8>, String>, String> {
+pub(super) fn byte_result(message: &JsValue) -> Result<Result<Vec<u8>, OperationError>, String> {
     byte_payload(message).map(|result| result.map(|bytes| bytes.to_vec()))
 }
 
 // Inspect the envelope without copying buffers for callers that only forward it.
-fn byte_payload(message: &JsValue) -> Result<Result<js_sys::Uint8Array, String>, String> {
+fn byte_payload(message: &JsValue) -> Result<Result<js_sys::Uint8Array, OperationError>, String> {
     let error = field(message, "error");
     let payload = field(message, "bytes");
     let payload = if payload.is_undefined() { None } else { Some(payload.dyn_into::<js_sys::Uint8Array>().map_err(|_| "Expected Uint8Array payload".to_owned())?) };
@@ -22,7 +23,7 @@ fn byte_payload(message: &JsValue) -> Result<Result<js_sys::Uint8Array, String>,
         if error.as_string().is_none() && field(&error, "message").as_string().is_none() {
             return Err("Expected error message".into());
         }
-        Some(error_message(&error))
+        Some(OperationError::from(error))
     };
     client_platform_runtime::protocol::reply(payload, error)
 }
@@ -48,13 +49,13 @@ impl CpuRequest {
 
 pub enum CpuEvent {
     Ready,
-    Failed(String),
-    Reply { id: u32, result: Result<Vec<u8>, String> },
+    Failed(OperationError),
+    Reply { id: u32, result: Result<Vec<u8>, OperationError> },
 }
 impl CpuEvent {
     pub fn decode(message: &JsValue) -> Result<Self, String> {
         if field(message, "transport").as_string().as_deref() == Some("endpoint_failed") {
-            return Ok(Self::Failed(field(message, "error").as_string().ok_or("Missing endpoint error")?));
+            return Ok(Self::Failed(OperationError::from(field(message, "error"))));
         }
         if field(message, "ready").as_bool() == Some(true) {
             return Ok(Self::Ready);

@@ -7,8 +7,8 @@ GitHub is optional build/artifact storage.
 
 ## Release flow
 
-1. Build optimized application packages for each supported target. Run release
-   tests and platform package signing. Schema migrations ship in the application.
+1. Build optimized application packages for each supported target. Perform platform package signing and compatibility verification.
+   Release publication does not run tests or require test-status gates. Schema migrations ship in the application.
 2. If publishing taxonomy, prepare and validate the snapshot with its final
    release ID. Include the compatible application/schema/format requirements.
 3. Prepare a manifest using the types in `shared/update-protocol/src/lib.rs`.
@@ -196,9 +196,8 @@ enforces signatures and increasing publication sequence. Validity defaults to
 Use `--key-id` when signing with a key other than `release-1`. Every new package
 must trust that signing key; the publisher may retain older keys for history.
 
-Preparation requires the newest successful shared-suite status for the exact
-source SHA, matching per-platform build receipts and a successful Windows
-release workflow. It downloads release packages, compares their fingerprints
+Preparation requires matching per-platform build receipts for the exact
+source SHA and a successful Windows release workflow. It downloads release packages, compares their fingerprints
 with the verified-build receipts, checks Android signing and package
 compatibility/trust, then writes `manifest.json`, `provenance.json` and packages
 under `artifacts/`. It never runs downloaded executables, changes a GitHub release,
@@ -231,9 +230,8 @@ python3 servers/updates/publish-github-release.py \
 Publish the reviewed GitHub release after checking its packages; the repository
 can remain private. Publishing
 assets does not change the Bokheim update feed. The following command rechecks
-the successful source workflow, exact-commit shared test result, published release
-and source receipt, signs the exact reviewed bytes, checks the shared gate again,
-then invokes the publisher. Package hashes and sizes are checked again before
+the successful source workflow, published release and source receipt, signs the
+exact reviewed bytes, then invokes the publisher. Package hashes and sizes are checked again before
 signing. The publisher verifies the signature and staged artifact bytes before
 atomically promoting the feed.
 

@@ -117,7 +117,7 @@ fn observe_frame(document: Entity<HtmlView>, sample: Sample, done: async_channel
                 "frame_observed_ms": milliseconds(sample.started),
                 "glyph_shapes": shapes.glyph_shapes, "line_shapes": shapes.line_shapes,
                 "font_setup_hits": shapes.font_setup_hits, "font_setup_misses": shapes.font_setup_misses, "retained_font_setups": shapes.retained_font_setups,
-                "registered_glyphs": shapes.registered_glyphs, "backend_glyph_records": shapes.backend_glyph_records,
+                "backend_glyph_records": shapes.backend_glyph_records,
                 "trailing_whitespace_probes": shapes.trailing_whitespace_probes,
                 "trailing_whitespace_probe_characters": shapes.trailing_whitespace_probe_characters,
                 "trailing_whitespace_probe_ms": shapes.trailing_whitespace_probe_time.as_secs_f64() * 1000.0,
@@ -205,9 +205,9 @@ fn profile_whitespace() {
                 for family in ["serif", "sans-serif", "monospace"] {
                     for text in [" ", "   ", "word ", "word  ", "office ", "a\u{301} ", "אבג ", "سلام ", "word\u{a0}", "word\u{2003}", "word\u{2009}", "word\u{3000}", "word\t", "word\n", "word\u{2028}"] {
                         let before = shaper.shape_cache_stats();
-                        let mut style = shaping::style(font_size, weight, slant, 0x000000ff, Some(family));
+                        let mut style = shaping::style(font_size, weight, slant, Some(family));
                         style.font_features = &resolved_features;
-                        let request = shaping::run(text, style, None);
+                        let request = shaping::run(text, style);
                         let mut glyphs = vec![GlyphId(0); text.chars().count()];
                         let shaped = resources.shape_run(&mut shaper, request, &mut glyphs).expect("native whitespace shaping").expect("native run");
                         let after = shaper.shape_cache_stats();

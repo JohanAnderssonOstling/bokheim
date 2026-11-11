@@ -1,4 +1,5 @@
 //! Kobo update actions and the handoff to the firmware launcher.
+use update_client::UpdateError as OperationError;
 use crate::{Installation, Release};
 use semver::Version;
 use std::time::{Duration, Instant};
@@ -10,11 +11,11 @@ pub enum UpdateError {
     CheckRequired,
     RestartRequired,
     LauncherUnavailable,
-    Failed(String),
+    Failed(OperationError),
 }
 
-impl From<String> for UpdateError {
-    fn from(error: String) -> Self {
+impl From<OperationError> for UpdateError {
+    fn from(error: OperationError) -> Self {
         Self::Failed(error)
     }
 }
@@ -41,7 +42,7 @@ impl Host {
     }
 
     /// Publish intermediate progress; the returned view is the completed action.
-    pub fn work(&mut self, action: Option<UpdateAction>, mut publish: impl FnMut(UpdateView) -> Result<(), String>) -> Result<UpdateView, UpdateError> {
+    pub fn work(&mut self, action: Option<UpdateAction>, mut publish: impl FnMut(UpdateView) -> Result<(), UpdateError>) -> Result<UpdateView, UpdateError> {
         match action {
             None | Some(UpdateAction::Check) => {
                 publish(UpdateView::Checking)?;
@@ -68,7 +69,7 @@ impl Host {
                     return Err(UpdateError::RestartRequired);
                 }
                 let path = std::env::var_os("BOKHEIM_KOBO_EXIT_ACTION_FILE").ok_or(UpdateError::LauncherUnavailable)?;
-                std::fs::write(path, "update").map_err(|error| UpdateError::Failed(error.to_string()))?;
+                std::fs::write(path, "update").map_err(|error| UpdateError::Failed(OperationError::operation(error)))?;
                 self.view = UpdateView::Activating;
             }
             _ => {}

@@ -1,10 +1,11 @@
 //! Browser worker transport. Payloads are opaque; callers own application policy.
+use operation_failure::OperationError;
 pub mod cpu;
 pub mod cpu_client;
 pub mod endpoint;
 pub mod port;
 pub use port::Port;
-pub type BytesFuture = futures_util::future::LocalBoxFuture<'static, Result<Vec<u8>, String>>;
+pub type BytesFuture = futures_util::future::LocalBoxFuture<'static, Result<Vec<u8>, OperationError>>;
 
 use js_sys::{Array, ArrayBuffer, Object, Reflect};
 use wasm_bindgen::{JsCast, JsValue};
@@ -41,11 +42,11 @@ pub fn object(fields: &[(&str, JsValue)]) -> JsValue {
 }
 
 /// The common byte/error envelope used by CPU and sync storage replies.
-pub fn read_byte_reply(message: &JsValue) -> Result<Vec<u8>, String> {
-    protocol::byte_result(message).unwrap_or_else(Err)
+pub fn read_byte_reply(message: &JsValue) -> Result<Vec<u8>, OperationError> {
+    protocol::byte_result(message).unwrap_or_else(|error| Err(error.into()))
 }
 
-pub fn byte_reply(fields: &[(&str, JsValue)], result: Result<Vec<u8>, String>) -> (JsValue, Array) {
+pub fn byte_reply(fields: &[(&str, JsValue)], result: Result<Vec<u8>, OperationError>) -> (JsValue, Array) {
     let message = object(fields);
     let transfer = Array::new();
     let (key, value) = match result {
@@ -54,7 +55,11 @@ pub fn byte_reply(fields: &[(&str, JsValue)], result: Result<Vec<u8>, String>) -
             transfer.push(&bytes.buffer());
             ("bytes", bytes.into())
         }
-        Err(error) => ("error", error.into()),
+        Err(error) => {
+            // Structured cloning Error objects drops their custom properties.
+            let error = error.into_js();
+            ("error", object(&[("message", field(&error, "message")), ("failure", field(&error, "failure"))]))
+        },
     };
     Reflect::set(&message, &key.into(), &value).expect("plain object field");
     (message, transfer)

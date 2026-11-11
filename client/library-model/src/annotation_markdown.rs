@@ -63,14 +63,15 @@ impl ReaderLink {
 }
 
 pub fn annotation_source_label(title: &str, section: Option<&str>, anchor: &AnnotationAnchor) -> String {
-    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    if let Some(pdf) = anchor.pdf_anchor() {
-        format!("{title} — p. {}", u64::from(pdf.page_index) + 1)
-    } else if let Some(section) = section.filter(|section| !section.trim().is_empty()) {
-        format!("{title} — {}", section.split_whitespace().collect::<Vec<_>>().join(" "))
-    } else {
-        title
+    let mut label = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(section) = section.filter(|section| !section.trim().is_empty()) {
+        label.push_str(": ");
+        label.push_str(&section.split_whitespace().collect::<Vec<_>>().join(" "));
     }
+    if let Some(pdf) = anchor.pdf_anchor() {
+        label.push_str(&format!(", p. {}", u64::from(pdf.page_index) + 1));
+    }
+    label
 }
 
 /// The passage is literal text in an italic blockquote. Notes remain authored

@@ -1,4 +1,5 @@
 use ui_text::text;
+use operation_failure::OperationError;
 
 use app::{AppDataLocation, host::BackendLaunch};
 use gpui::Platform;
@@ -87,7 +88,7 @@ fn android_main(app: AndroidApp) {
     }
 }
 
-fn run_android(app: AndroidApp) -> Result<(), String> {
+fn run_android(app: AndroidApp) -> Result<(), app::BackendError> {
     let data_dir = app.internal_data_path().ok_or("Android did not provide a private application data directory")?;
     let (back_sender, back_receiver) = async_channel::unbounded();
     NATIVE_BACK.set(back_sender).ok();
@@ -128,8 +129,8 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
             let path = env.call_static_method(&audio_class, jni::jni_str!("taxonomyFile"), jni::jni_sig!("(Landroid/content/Context;)Ljava/lang/String;"), &[jni::objects::JValue::Object(audio_context.as_ref())])?.l()?;
             env.cast_local::<JString>(path)?.try_to_string(env)
         })
-        .map_err(|error| format!("could not extract bundled taxonomy: {error}"))?;
-    subject_projection::bundled::set_path(Path::new(&taxonomy)).map_err(|error| format!("could not configure bundled taxonomy: {error}"))?;
+        .map_err(|error| app::BackendError::operation(error).context("could not extract bundled taxonomy"))?;
+    subject_projection::bundled::set_path(Path::new(&taxonomy)).map_err(|error| app::BackendError::operation(error).context("could not configure bundled taxonomy"))?;
     let speech_vm = audio_vm.clone();
     let (speech_class, speech_context) = audio_vm.attach_current_thread(|env| Ok::<_, jni::errors::Error>((env.new_global_ref(&audio_class)?, env.new_global_ref(&audio_context)?))).map_err(|error| {
         log::error!("could_not_retain_android_speech_context: {error}");
@@ -153,7 +154,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                 env.cast_local::<JString>(directory)?.try_to_string(env)
             })
             .map(Into::into)
-            .map_err(|error| error.to_string())
+            .map_err(OperationError::operation)
     });
     let device_vm = speech_vm.clone();
     let device_refs = speech_refs.clone();
@@ -171,7 +172,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                     .l()?;
                 env.cast_local::<JString>(response)?.try_to_string(env)
             })
-            .map_err(|error| error.to_string())
+            .map_err(OperationError::operation)
     });
     reader_speech::android::initialize(move |command| {
         speech_vm
@@ -185,7 +186,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                 )?;
                 Ok::<_, jni::errors::Error>(())
             })
-            .map_err(|error| error.to_string())
+            .map_err(OperationError::operation)
     });
     audiobook_player::android::initialize(data_dir.join("audio-playback"), move |command| {
         audio_vm
@@ -199,7 +200,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                 )?;
                 Ok::<_, jni::errors::Error>(())
             })
-            .map_err(|error| error.to_string())
+            .map_err(OperationError::operation)
     });
     let auth_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
     let auth_class = auth_vm
@@ -209,7 +210,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
             let class = env.get_object_class(activity.as_ref())?;
             env.new_global_ref(class)
         })
-        .map_err(|error| format!("could not initialize Android account bridge: {error}"))?;
+        .map_err(|error| app::BackendError::operation(error).context("could not initialize Android account bridge"))?;
     browser_ui::android_authentication::initialize(move |command| {
         auth_vm
             .attach_current_thread(|env| {
@@ -217,7 +218,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                 env.call_static_method(&auth_class, jni::jni_str!("authenticationCommand"), jni::jni_sig!("(Ljava/lang/String;)V"), &[jni::objects::JValue::Object(command.as_ref())])?;
                 Ok::<_, jni::errors::Error>(())
             })
-            .map_err(|error| error.to_string())
+            .map_err(OperationError::operation)
     });
     let browser_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
     let browser_class = browser_vm
@@ -230,7 +231,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
             rustls_platform_verifier::android::init_with_env(env, context)?;
             env.new_global_ref(class)
         })
-        .map_err(|error| format!("could not initialize Android book browser bridge: {error}"))?;
+        .map_err(|error| app::BackendError::operation(error).context("could not initialize Android book browser bridge"))?;
     embedded_browser_ui::android::initialize(
         move |command| {
             browser_vm
@@ -239,7 +240,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                     env.call_static_method(&browser_class, jni::jni_str!("bookBrowserCommand"), jni::jni_sig!("(Ljava/lang/String;)V"), &[jni::objects::JValue::Object(command.as_ref())])?;
                     Ok::<_, jni::errors::Error>(())
                 })
-                .map_err(|error| error.to_string())
+                .map_err(OperationError::operation)
         },
         embedded_browser::android::receive,
     );
@@ -293,13 +294,13 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                     let value = result?.l()?;
                     env.cast_local::<JString>(value)?.try_to_string(env)
                 })
-                .map_err(|e| e.to_string())
+                .map_err(OperationError::operation)
         })
-        .map_err(|error| format!("failed to recover Android update: {error}"))?
+        .map_err(|error| app::BackendError::operation(error).context("failed to recover Android update"))?
     };
     let startup_permit = update_trial.then(app::host::defer_background_work);
     let incoming_directory = data_dir.join("incoming");
-    std::fs::create_dir_all(&incoming_directory).map_err(|error| format!("failed to create Android incoming book directory: {error}"))?;
+    std::fs::create_dir_all(&incoming_directory).map_err(|error| app::BackendError::operation(error).context("failed to create Android incoming book directory"))?;
     let (staging_sender, staging_receiver) = std::sync::mpsc::sync_channel::<StagingRequest>(2);
     STAGING_QUEUE.set(staging_sender).ok();
     std::thread::Builder::new()
@@ -317,7 +318,7 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
                 }
             }
         })
-        .map_err(|error| format!("failed to start incoming book worker: {error}"))?;
+        .map_err(|error| app::BackendError::operation(error).context("failed to start incoming book worker"))?;
     log::info!("initializing backend in {}", data_dir.display());
     let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).map_err(|error| {
         log::error!("failed_to_initialize_android_app_data_directory: {error}");
@@ -340,10 +341,10 @@ fn run_android(app: AndroidApp) -> Result<(), String> {
     application.run(move |cx| {
         ui_components::configure_bundled_font_source(
             move |name| {
-                let path = CString::new(format!("fonts/{name}")).map_err(|error| error.to_string())?;
+                let path = CString::new(format!("fonts/{name}")).map_err(OperationError::operation)?;
                 let mut asset = font_assets.open(&path).ok_or_else(|| format!("bundled font asset is missing: {name}"))?;
                 let mut bytes = Vec::with_capacity(asset.length());
-                asset.read_to_end(&mut bytes).map_err(|error| format!("read bundled font {name}: {error}"))?;
+                asset.read_to_end(&mut bytes).map_err(|error| OperationError::operation(error).context(format!("read bundled font {name}")))?;
                 Ok(Cow::Owned(bytes))
             },
             cx,
@@ -564,7 +565,10 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeSelectedFileDe
 extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeFilePromptResult<'caller>(mut unowned_env: EnvUnowned<'caller>, _activity: JObject<'caller>, request_id: jlong, error: JString<'caller>, cancelled: jboolean) {
     unowned_env
         .with_env(|env| -> jni::errors::Result<()> {
-            let error = if error.is_null() { None } else { Some(anyhow::anyhow!(error.try_to_string(env)?)) };
+            let error = if error.is_null() { None } else {
+                let message = error.try_to_string(env)?;
+                Some(anyhow::Error::new(serde_json::from_str::<OperationError>(&message).unwrap_or_else(|_| OperationError::from(message))))
+            };
             gpui_android::complete_file_prompt(request_id as u64, error, cancelled);
             Ok(())
         })
@@ -638,7 +642,10 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeSelectedDirect
 extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeDirectoryPromptResult<'caller>(mut unowned_env: EnvUnowned<'caller>, _activity: JObject<'caller>, request_id: jlong, error: JString<'caller>, cancelled: jboolean) {
     unowned_env
         .with_env(|env| -> jni::errors::Result<()> {
-            let error = if error.is_null() { None } else { Some(anyhow::anyhow!(error.try_to_string(env)?)) };
+            let error = if error.is_null() { None } else {
+                let message = error.try_to_string(env)?;
+                Some(anyhow::Error::new(serde_json::from_str::<OperationError>(&message).unwrap_or_else(|_| OperationError::from(message))))
+            };
             gpui_android::complete_directory_prompt(request_id as u64, error, cancelled);
             Ok(())
         })
@@ -700,7 +707,7 @@ extern "system" fn Java_se_bokheim_reader_gpui_DeviceSpeech_nativeComplete<'call
         .with_env(|env| -> jni::errors::Result<()> {
             let error = if error.is_null() { None } else { Some(error.try_to_string(env)?) };
             if id > 0 {
-                reader_speech::device::complete(id as u64, error);
+                reader_speech::device::complete(id as u64, error.map(|error| serde_json::from_str(&error).unwrap_or_else(|_| reader_speech::SpeechError::from(error))));
             }
             Ok(())
         })

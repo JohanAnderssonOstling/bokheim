@@ -9,6 +9,19 @@ for scanning, import, thumbnails, and tools. For EPUB and MOBI, synchronous open
 container headers; asynchronous opening reads the ZIP directory and package or
 the MOBI record directory and header record without buffering the whole source.
 `prepare_reading()` consumes the container and prepares an immutable `ReadingBook`.
+`ReadingBook::write_cache()` streams complete prepared text, styles, navigation,
+document weights, publication CFI bases and languages in a versioned binary file
+with a checksum. Preparation that skipped a failed text or navigation read does not produce a
+cache. `ReadingBook::read_cache()` restores the file without opening the source;
+its supplied resource fetcher is only used for resources absent from prepared text.
+Serialization uses a 64 KiB buffer and hashes the payload incrementally, then
+seeks back to finish the header before publication. The cache writer shares the
+reader's existing prepared resources instead of allocating a full encoded copy.
+Loading reuses one 64 KiB buffer to verify the checksum before seeking back and
+decoding from the same open file, without retaining the complete encoded cache.
+`Book::into_resource_fetch()` retains the original independent-cursor resource
+loading path without preparing text again, allowing cached books to load images
+concurrently when the source is available.
 Declared metadata extraction runs only when requested by scanning/import.
 `metadata()` returns one owned `DeclaredMetadata` structure for text formats.
 The parsers retain declared fields, roles, refinements, and textual source
@@ -19,8 +32,8 @@ EPUB preparation eagerly reads container-local manifest CSS and XHTML/HTML,
 including navigation and notes. The reader's synchronous resource provider serves
 these bytes from memory. Undeclared media types become application/octet-stream,
 external URLs are rejected, and embedded/obfuscated fonts are unsupported.
-Images and SVG dependencies remain asynchronous. Preparation permits 4 MiB per
-stylesheet, 24 MiB per document, and 64 MiB total prepared text.
+Images and SVG dependencies remain asynchronous. Prepared documents and stylesheets
+have no per-resource or total byte limit.
 
 EPUB uses async_zip with immutable directory metadata. Preparation reuses one
 owned cursor; lazy resource reads use independent cursors. Synchronous inspection
@@ -36,8 +49,8 @@ loads the code tables and phrase dictionary once, then decodes text records usin
 the vendored `mobi::HuffmanDecoder`; the local patch is documented in
 vendor/mobi/LOCAL-PATCHES.md. Reopenable sources never buffer the whole file.
 Images use independent source cursors with the same 24 MiB limit as EPUB.
-Cover and reading access share record mapping and bounds. Both formats permit 24 MiB per prepared document and
-64 MiB total prepared text. Frontmatter inspection uses the same bounded text
+Cover and reading access share record mapping and bounds. Prepared MOBI documents
+and decoded reading text have no byte limit. Frontmatter inspection uses the same text
 decoder and trailer handling as reading.
 
 `inspect_documents()` exposes a synchronous `DocumentInspection` view for both
@@ -64,8 +77,9 @@ decoding, and engine image caching stay outside book-content.
 FB2 accepts plain XML and ZIP containers (`.fb2`, `.fbz`, `.fb2.zip`). Its bounded
 XML parser handles declared encodings, maps sections and notes to stable HTML
 documents and anchors, and decodes embedded base64 images on demand. The XML
-input is limited to 96 MiB; prepared text and individual images retain the common
-limits above. Source-print ISBNs remain distinct from ebook identifiers.
+input is limited to 96 MiB; generated documents have no per-document or total
+prepared-text byte limit. Individual images retain the common 24 MiB limit.
+Source-print ISBNs remain distinct from ebook identifiers.
 
 `comic::ComicBook` inspects CBZ directories and optional ComicInfo metadata without
 decoding page images. Natural filename ordering defines page indices, including

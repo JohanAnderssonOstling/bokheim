@@ -19,6 +19,7 @@ path = "src/main.rs"
 required-features = ["gui"]
 
 [dependencies]
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure" }
 ui-text = { path = "../ui-text" }
 client-platform-kobo = { path = "../../client/platforms/kobo" }
 flate2 = "1"

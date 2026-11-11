@@ -110,10 +110,10 @@ impl BrowserShell {
     }
 
     pub(crate) fn open_book_detail(&mut self, library_id: LibraryId, book_id: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
-        if self.libraries.read(cx).import_blocks_navigation(cx) {
+        self.libraries.update(cx, |libraries, cx| libraries.select_library(library_id, cx));
+        if self.libraries.read(cx).selected_library_blocks_navigation(cx) {
             return;
         }
-        self.libraries.update(cx, |libraries, cx| libraries.select_library(library_id, cx));
         self.navigate(Route::Library(super::LibraryRoute::Folders), window, cx);
         let Some(session) = self.libraries.read(cx).selected_session() else { return };
         session.update(cx, |session, cx| session.open_book_detail(book_id, window, cx));
@@ -159,6 +159,16 @@ impl BrowserShell {
         cx.subscribe(&navigation, |shell, _, _: &SplitPane, cx| {
             let session = shell.navigation_session(cx);
             cx.emit(PaneRequest::Open { session, side: components::SplitSide::Right });
+        })
+        .detach();
+        cx.subscribe_in(&libraries, window, |shell, libraries, event: &super::libraries::LibraryDialogOpened, window, cx| {
+            let libraries = libraries.read(cx);
+            if libraries.selected_id() != Some(event.library_id) || libraries.selection_epoch() != event.selection_epoch {
+                return;
+            }
+            shell.close_reader_surface(cx);
+            shell.navigation.update(cx, |navigation, cx| navigation.finish_library_switcher(cx));
+            shell.return_to_library_page(window, cx);
         })
         .detach();
         let library_subscription = cx.observe_in(&libraries, window, |shell, libraries, window, cx| {
@@ -262,10 +272,10 @@ impl BrowserShell {
     }
 
     fn request_navigation(&mut self, request: PendingNavigation, window: &mut Window, cx: &mut Context<Self>) {
-        if self.libraries.read(cx).import_blocks_navigation(cx) {
+        let library_id = request.library_id();
+        if library_id == self.libraries.read(cx).selected_id() && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
             return;
         }
-        let library_id = request.library_id();
         self.pending_navigation = Some(request);
         if let Some(id) = library_id {
             self.libraries.update(cx, |libraries, cx| libraries.select_library(id, cx));
@@ -277,6 +287,9 @@ impl BrowserShell {
         let libraries = self.libraries.read(cx);
         let session = libraries.selected_session();
         let Some(request) = self.pending_navigation.take_if(|request| request.library_id() == libraries.selected_id() && (session.is_some() || matches!(request, PendingNavigation::Restore(_)))) else { return };
+        if session.as_ref().is_some_and(|session| session.read(cx).blocks_navigation(cx)) {
+            return;
+        }
         match request {
             PendingNavigation::Restore(saved) => {
                 self.route = saved.route;
@@ -341,7 +354,7 @@ impl BrowserShell {
 
     /// Reports a failure that occurred before an incoming file reached the library.
     pub fn incoming_import_failed(&mut self, error: app::BackendError, window: &mut Window, cx: &mut Context<Self>) {
-        notify_error("incoming-book-stage-error", format!(text!(browse::could_not_prepare_this_book_for_import), user_facing_error(&error, text!(common::please_try_again))), window, cx);
+        notify_error("incoming-book-stage-error", format!(text!(browse::could_not_prepare_this_book_for_import), user_facing_error(&error, "")), window, cx);
     }
 
     /// Replaces the current page with the view represented by `route`.
@@ -376,7 +389,7 @@ impl BrowserShell {
     /// Selecting the active destination returns it to its root. Switching
     /// destinations keeps the cached page, as ordinary navigation does.
     fn select_destination(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
-        if self.libraries.read(cx).import_blocks_navigation(cx) {
+        if matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
             return;
         }
         self.close_reader_surface(cx);
@@ -398,7 +411,7 @@ impl BrowserShell {
     }
 
     pub(crate) fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
-        if self.libraries.read(cx).import_blocks_navigation(cx) {
+        if matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
             return;
         }
         let route = if route == Route::Library(super::LibraryRoute::Search) && !crate::stores::preferences::text_search_enabled(cx) { Route::Library(super::LibraryRoute::Home) } else { route };
@@ -442,9 +455,6 @@ impl BrowserShell {
     /// Reveals the library switcher, for the pages that can be navigated out of
     /// at their top edge.
     pub(crate) fn open_library_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.libraries.read(cx).import_blocks_navigation(cx) {
-            return;
-        }
         self.navigation.update(cx, |navigation, cx| navigation.open_library_switcher(window, cx));
     }
 
@@ -454,11 +464,14 @@ impl BrowserShell {
 
     /// Closes shell overlays or returns a universal page to the library.
     pub(crate) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.libraries.read(cx).import_blocks_navigation(cx) {
-            return true;
-        }
         if self.navigation.read(cx).is_library_switcher_open(cx) {
             self.navigation.update(cx, |navigation, cx| navigation.close_library_switcher(window, cx));
+            return true;
+        }
+        if matches!(self.route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
+            if let Some(session) = self.libraries.read(cx).selected_session() {
+                session.update(cx, |session, cx| session.dismiss_operation_dialog(window, cx));
+            }
             return true;
         }
         if matches!(self.route, Route::Global(_)) {
@@ -489,16 +502,11 @@ impl BrowserShell {
 
 impl Render for BrowserShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Keep the import surface visible without navigation or playback
-        // controls until its caller has handled completion.
-        if let Some(session) = self.libraries.read(cx).selected_session()
-            && session.read(cx).import_blocks_navigation(cx)
-        {
-            let insets = window.insets().effective();
-            return gpui::div().size_full().flex().flex_col().pt(insets.top).pb(insets.bottom).pl(insets.left).pr(insets.right).child(session).into_any_element();
-        }
         let route = self.route;
-        let content = if let Some(reader) = &self.reader_surface {
+        let blocked_session = self.libraries.read(cx).selected_session().filter(|session| matches!(route, Route::Library(_)) && session.read(cx).blocks_navigation(cx));
+        let content = if let Some(session) = blocked_session {
+            session.into_any_element()
+        } else if let Some(reader) = &self.reader_surface {
             reader.clone().into_any_element()
         } else {
             match route {

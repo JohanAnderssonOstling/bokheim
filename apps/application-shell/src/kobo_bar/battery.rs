@@ -39,7 +39,7 @@ impl BatteryPanel {
             Err(error) => {
                 self.status = None;
                 log::warn!("Device control failed: {error}");
-                self.error = Some(text!(device::could_not_read_the_battery_level_try_reopening_this_panel).into());
+                self.error = Some(ui_components::user_facing_error(&error, text!(device::could_not_read_the_battery_level_try_reopening_this_panel)).into());
             }
         }
         if previous != (self.status.clone(), self.error.clone()) {

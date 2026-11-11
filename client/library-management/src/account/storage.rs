@@ -19,13 +19,13 @@ impl SessionPersistence for SessionStorage {
         Box::pin(async move { storage_queue::run(operation).await.map_err(Error::other) })
     }
     fn load_account_session(&self) -> io::Result<Option<Session>> {
-        self.0.read_value("account_session").map_err(|error| Error::other(error.to_string()))?.map(|bytes| serde_json::from_slice(&bytes).map_err(|error| Error::new(io::ErrorKind::InvalidData, error))).transpose()
+        self.0.read_value("account_session").map_err(|error| Error::other(error))?.map(|bytes| serde_json::from_slice(&bytes).map_err(|error| Error::new(io::ErrorKind::InvalidData, error))).transpose()
     }
     fn save_account_session(&self, session: &Session) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(session).map_err(|error| Error::new(io::ErrorKind::InvalidData, error))?;
-        self.0.write_value("account_session", &bytes).map_err(|error| Error::other(error.to_string()))
+        self.0.write_value("account_session", &bytes).map_err(|error| Error::other(error))
     }
     fn clear_account_session(&self) -> io::Result<()> {
-        self.0.remove_value("account_session").map_err(|error| Error::other(error.to_string()))
+        self.0.remove_value("account_session").map_err(|error| Error::other(error))
     }
 }

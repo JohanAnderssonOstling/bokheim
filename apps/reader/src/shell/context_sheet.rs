@@ -15,11 +15,11 @@ pub(crate) struct ContextAction<A> {
 }
 
 pub(crate) struct SelectionCommands<A> {
-    pub(crate) annotate: A,
+    pub(crate) annotate: Option<A>,
     pub(crate) lookup: Option<A>,
     pub(crate) translate: A,
     pub(crate) copy: A,
-    pub(crate) copy_link: A,
+    pub(crate) copy_link: Option<A>,
 }
 
 pub(crate) trait ContextActionTarget: Sized + 'static {
@@ -42,15 +42,20 @@ impl<A> Default for ContextActions<A> {
 impl<A: Clone + 'static> ContextActions<A> {
     pub(crate) fn selection(commands: SelectionCommands<A>) -> Self {
         let mut actions = Self::default();
-        let mut selection = vec![ContextAction { label: text!(reader::annotate), icon: "icons/replace.svg", command: commands.annotate }];
+        let mut selection = Vec::new();
+        if let Some(command) = commands.annotate {
+            selection.push(ContextAction { label: text!(reader::annotate), icon: "icons/replace.svg", command });
+        }
         if let Some(command) = commands.lookup {
             selection.push(ContextAction { label: text!(reader::lookup), icon: "icons/search.svg", command });
         }
         selection.extend([
             ContextAction { label: text!(reader::translate), icon: "icons/translate.svg", command: commands.translate },
-            ContextAction { label: text!(common::copy), icon: "icons/copy.svg", command: commands.copy },
-            ContextAction { label: text!(reader::copy_link), icon: "icons/link-simple.svg", command: commands.copy_link },
+            ContextAction { label: text!(reader::copy_markdown), icon: "icons/copy.svg", command: commands.copy },
         ]);
+        if let Some(command) = commands.copy_link {
+            selection.push(ContextAction { label: text!(reader::copy_link), icon: "icons/link-simple.svg", command });
+        }
         actions.add_section(selection);
         actions
     }

@@ -1,4 +1,5 @@
 //! Text and events shared by native and browser narration.
+use crate::SpeechError;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ pub enum SpeechEvent {
     Requested { generation: u64, index: usize, glyph_start: u32, max_chars: usize },
     Started { generation: u64, index: usize, glyph_ranges: Vec<Range<u32>> },
     Finished { generation: u64 },
-    Failed { generation: u64, failure: SpeechFailure, message: String },
+    Failed { generation: u64, failure: SpeechFailure, message: SpeechError },
     Remote { generation: u64, command: SpeechControl },
 }
 

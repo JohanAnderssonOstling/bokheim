@@ -67,7 +67,7 @@ impl KeyboardShortcutEditor {
             let result = saved.await;
             let _ = editor.update(cx, |editor, cx| {
                 editor.saving = None;
-                editor.warning = result.err().map(|error| format!(text!(common::keyboard_shortcuts_were_not_saved), components::user_facing_error(&*error, text!(common::please_try_again))).into());
+                editor.warning = result.err().map(|error| format!(text!(common::keyboard_shortcuts_were_not_saved), components::user_facing_error(&*error, "")).into());
                 cx.notify();
             });
         })

@@ -48,7 +48,6 @@ def main():
         if env['CARGO_BUILD_TARGET'] != TARGET:
             parser.error(f'CARGO_BUILD_TARGET must be unset or {TARGET}')
         binary_directory /= TARGET
-    env.setdefault('CARGO_BUILD_JOBS', '1')
     env.setdefault('RUSTC_BOOTSTRAP', '1')
     with (ROOT / 'apps/desktop-gpui/Cargo.toml').open('rb') as source:
         version = tomllib.load(source)['package']['version']

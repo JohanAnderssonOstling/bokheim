@@ -1,20 +1,38 @@
 use library_database::DatabaseError;
 use std::error::Error;
-use std::fmt::Display;
+use std::fmt;
+use client_protocol::{BackendError, Classified, Failure};
 
 pub type SyncResult<T> = Result<T, SyncError>;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum SyncError {
-    #[error("synchronization authentication is required")]
     AuthenticationRequired,
-    #[error("{0}")]
-    Failed(String),
+    Failed(BackendError),
+}
+
+
+impl fmt::Display for SyncError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
+            Self::Failed(error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for SyncError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::AuthenticationRequired => Some(&Failure::SignInRequired),
+            Self::Failed(error) => Some(error),
+        }
+    }
 }
 
 impl SyncError {
-    pub fn failed(error: impl Display) -> Self {
-        Self::Failed(error.to_string())
+    pub fn failed(error: impl Into<Box<dyn Error + Send + Sync>>) -> Self {
+        Self::Failed(BackendError::operation(error))
     }
 }
 
@@ -34,7 +52,7 @@ macro_rules! failed_from {
     )+};
 }
 
-failed_from!(Box<dyn Error>, &'static str, DatabaseError, rusqlite::Error, std::io::Error, web_time::SystemTimeError, std::num::TryFromIntError,);
+failed_from!( &'static str, DatabaseError, rusqlite::Error, std::io::Error, web_time::SystemTimeError, std::num::TryFromIntError,);
 
 impl From<crate::engine::SyncError> for SyncError {
     fn from(error: crate::engine::SyncError) -> Self {
@@ -43,5 +61,20 @@ impl From<crate::engine::SyncError> for SyncError {
             error @ crate::engine::SyncError::CursorRejected => Self::failed(error),
             crate::engine::SyncError::Failed(message) => Self::Failed(message),
         }
+    }
+}
+
+impl Classified for SyncError {
+    fn failure(&self) -> Option<Failure> {
+        match self {
+            Self::AuthenticationRequired => Some(Failure::SignInRequired),
+            Self::Failed(error) => error.failure(),
+        }
+    }
+}
+
+impl From<Box<dyn Error>> for SyncError {
+    fn from(error: Box<dyn Error>) -> Self {
+        Self::failed(client_protocol::OperationError::from_error(error.as_ref()))
     }
 }

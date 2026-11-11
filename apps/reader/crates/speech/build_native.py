@@ -69,7 +69,9 @@ def strip_debug(archive):
     run([strip, "--strip-debug", archive])
 
 
-def prepare_native(work=None, jobs=1, offline=False):
+def prepare_native(work=None, jobs=None, offline=False):
+    if jobs is None:
+        jobs = os.cpu_count() or 1
     if sys.platform != "linux" or platform.machine() not in ("x86_64", "AMD64"):
         raise RuntimeError("Reduced speech source builds currently support x86-64 Linux only")
     if jobs < 1:
@@ -227,7 +229,12 @@ def prepare_native(work=None, jobs=1, offline=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path)
-    parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--env-file", type=Path, help="Write the prepared speech library path for Cargo")
     args = parser.parse_args()
-    print(prepare_native(args.work, args.jobs, args.offline))
+    libraries = prepare_native(args.work, args.jobs, args.offline)
+    if args.env_file:
+        args.env_file.parent.mkdir(parents=True, exist_ok=True)
+        args.env_file.write_text(f'export SHERPA_ONNX_LIB_DIR={shlex.quote(str(libraries))}\n')
+    print(libraries)

@@ -1,5 +1,6 @@
 //! Windows transaction host. Replacement/recovery runs in a copied helper executable
 //! after the application process releases ownership, never in the installed EXE.
+use update_client::UpdateError;
 use super::*;
 
 pub enum WindowsStartup {
@@ -20,15 +21,15 @@ impl Platform for Windows {
 }
 
 impl WindowsHost {
-    pub fn open(data: &Path, installation: &Path, version: &str, config: DiscoveryConfig) -> Result<Self, String> {
-        Self::open_platform(data, version, config, Windows { installation: installation.canonicalize().map_err(|e| e.to_string())? })
+    pub fn open(data: &Path, installation: &Path, version: &str, config: DiscoveryConfig) -> Result<Self, UpdateError> {
+        Self::open_platform(data, version, config, Windows { installation: installation.canonicalize().map_err(UpdateError::operation)? })
     }
 
-    pub fn startup(&mut self, trial: Option<&str>) -> Result<WindowsStartup, String> {
+    pub fn startup(&mut self, trial: Option<&str>) -> Result<WindowsStartup, UpdateError> {
         let _lock = self.reload_locked()?;
         if let Some(journal) = Journal::load(&self.root)? {
             if journal.state == State::Committed {
-                if self.installed()?.application < journal.next_version.parse().map_err(|e| format!("{e}"))? {
+                if self.installed()?.application < journal.next_version.parse().map_err(UpdateError::operation)? {
                     return Ok(WindowsStartup::Helper);
                 }
                 self.acknowledge(&journal)?;
@@ -52,7 +53,7 @@ impl WindowsHost {
 
     /// A helper that never started has not changed live files. Preserve approval
     /// and resume preparation while allowing this application session to run.
-    pub fn helper_unavailable(&mut self, reason: WaitReason, diagnostic: String) -> Result<(), String> {
+    pub fn helper_unavailable(&mut self, reason: WaitReason, diagnostic: UpdateError) -> Result<(), UpdateError> {
         let _lock = UpdateLock::acquire(&self.root)?;
         if Journal::load(&self.root)?.is_some() {
             return Err(diagnostic);
@@ -64,7 +65,7 @@ impl WindowsHost {
     /// The caller must hold exclusive desktop ownership and execute from a copy
     /// outside installation. Returns the plan ID for the trial process, or None
     /// when the restored/committed application should run normally.
-    pub fn prepare_or_recover(&mut self, prepare: impl FnOnce(&Path, &Path) -> Result<(), String>) -> Result<Option<String>, String> {
+    pub fn prepare_or_recover(&mut self, prepare: impl FnOnce(&Path, &Path) -> Result<(), UpdateError>) -> Result<Option<String>, UpdateError> {
         let lock = self.reload_locked()?;
         if let Some(journal) = Journal::load(&self.root)? {
             if journal.state != State::Committed {
@@ -86,11 +87,11 @@ impl WindowsHost {
 
     /// Run from the external helper while it holds desktop ownership. The
     /// candidate runs against private copies and must exit before promotion.
-    pub fn prepare_or_recover_in_process(&mut self) -> Result<Option<String>, String> {
+    pub fn prepare_or_recover_in_process(&mut self) -> Result<Option<String>, UpdateError> {
         self.prepare_or_recover(run_candidate)
     }
 
-    pub fn recover_stopped_trial(&mut self, reason: String) -> Result<(), String> {
+    pub fn recover_stopped_trial(&mut self, reason: UpdateError) -> Result<(), UpdateError> {
         let _lock = self.reload_locked()?;
         if let Some(journal) = Journal::load(&self.root)? {
             self.recover(&journal, reason)?;
@@ -98,7 +99,7 @@ impl WindowsHost {
         Ok(())
     }
 
-    fn promote(&mut self, lock: &UpdateLock, prepare: impl FnOnce(&Path, &Path) -> Result<(), String>) -> Result<String, String> {
+    fn promote(&mut self, lock: &UpdateLock, prepare: impl FnOnce(&Path, &Path) -> Result<(), UpdateError>) -> Result<String, UpdateError> {
         let paths = self.coordinator.staged_paths(&self.root, lock)?;
         let app = paths.iter().find(|(kind, _)| *kind == ArtifactKind::Application).map(|(_, path)| path);
         let package = app.map(|path| update_client::windows_package::inspect(path)).transpose()?;
@@ -114,7 +115,7 @@ impl WindowsHost {
                     parent = parent.parent().ok_or("invalid installation directory")?;
                 }
                 for ancestor in parent.ancestors().take_while(|p| p.starts_with(&self.installation)) {
-                    let metadata = fs::symlink_metadata(ancestor).map_err(|e| e.to_string())?;
+                    let metadata = fs::symlink_metadata(ancestor).map_err(UpdateError::operation)?;
                     if metadata.file_type().is_symlink() {
                         return Err("installation contains a linked directory".into());
                     }
@@ -132,16 +133,16 @@ impl WindowsHost {
                         self.coordinator.activation_recovered_for_retry(WaitReason::Permission, "installation directory is not writable".into())?;
                         return Err("waiting for installation permission".into());
                     }
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(UpdateError::operation(error)),
                 }
-                if destination.try_exists().map_err(|e| e.to_string())? {
-                    required = required.checked_add(fs::metadata(destination).map_err(|e| e.to_string())?.len()).ok_or("backup workspace overflow")?;
+                if destination.try_exists().map_err(UpdateError::operation)? {
+                    required = required.checked_add(fs::metadata(destination).map_err(UpdateError::operation)?.len()).ok_or("backup workspace overflow")?;
                 }
             }
-            if same_volume(&self.root, &self.installation).map_err(|e| e.to_string())? {
+            if same_volume(&self.root, &self.installation).map_err(UpdateError::operation)? {
                 required = required.checked_add(package.expanded_bytes).ok_or("replacement workspace overflow")?;
             } else {
-                let deficit = package.expanded_bytes.saturating_sub(fs2::available_space(&self.installation).map_err(|e| e.to_string())?);
+                let deficit = package.expanded_bytes.saturating_sub(fs2::available_space(&self.installation).map_err(UpdateError::operation)?);
                 if deficit > 0 {
                     self.coordinator.activation_recovered_for_retry(WaitReason::Space { additional_bytes: deficit }, "insufficient installation volume space".into())?;
                     return Err("waiting for installation storage".into());
@@ -149,9 +150,9 @@ impl WindowsHost {
             }
         }
         if let Some((_, taxonomy)) = paths.iter().find(|(kind, _)| *kind == ArtifactKind::Taxonomy) {
-            required = required.checked_add(fs::metadata(taxonomy).map_err(|e| e.to_string())?.len()).ok_or("taxonomy workspace overflow")?;
+            required = required.checked_add(fs::metadata(taxonomy).map_err(UpdateError::operation)?.len()).ok_or("taxonomy workspace overflow")?;
         }
-        let deficit = required.saturating_sub(fs2::available_space(&self.root).map_err(|e| e.to_string())?);
+        let deficit = required.saturating_sub(fs2::available_space(&self.root).map_err(UpdateError::operation)?);
         if deficit > 0 {
             self.coordinator.activation_recovered_for_retry(WaitReason::Space { additional_bytes: deficit }, "insufficient Windows update workspace".into())?;
             return Err("waiting for storage".into());
@@ -162,9 +163,9 @@ impl WindowsHost {
         let candidate_dir = migration.work.join("application");
         let candidate = if let Some(source) = app {
             if candidate_dir.exists() {
-                fs::remove_dir_all(&candidate_dir).map_err(|e| e.to_string())?;
+                fs::remove_dir_all(&candidate_dir).map_err(UpdateError::operation)?;
             }
-            update_client::windows_package::unpack(source, &candidate_dir, fs2::available_space(&migration.work).map_err(|e| e.to_string())?)?;
+            update_client::windows_package::unpack(source, &candidate_dir, fs2::available_space(&migration.work).map_err(UpdateError::operation)?)?;
             candidate_dir.join("Bokheim.exe")
         } else {
             self.installation.join("Bokheim.exe")

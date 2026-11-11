@@ -2,6 +2,7 @@
 //! Native update lifecycle and platform installation policies. Application
 //! activation precedes workers; reference-only preparation runs in the background.
 
+pub use update_client::UpdateError;
 use serde::{Deserialize, Serialize};
 use std::env::consts::ARCH;
 use std::{
@@ -52,9 +53,9 @@ struct Prepared {
     taxonomy: Option<ActiveTaxonomy>,
 }
 
-pub fn device(version: &str, taxonomy: Option<&ActiveTaxonomy>) -> Result<DeviceVersion, String> {
+pub fn device(version: &str, taxonomy: Option<&ActiveTaxonomy>) -> Result<DeviceVersion, UpdateError> {
     Ok(DeviceVersion {
-        application: version.parse().map_err(|e| format!("{e}"))?,
+        application: version.parse().map_err(UpdateError::operation)?,
         schema: library_database::LIBRARY_SCHEMA_VERSION as u32,
         taxonomy_formats: vec![1],
         taxonomy_release: taxonomy.map(|t| t.release).unwrap_or(subject_projection::bundled::RELEASE_ID),
@@ -69,7 +70,7 @@ pub fn device(version: &str, taxonomy: Option<&ActiveTaxonomy>) -> Result<Device
 }
 
 /// Candidate subprocess entry point. It only opens the isolated files in its job.
-pub fn prepare_candidate(job_path: &Path, version: &str) -> Result<(), String> {
+pub fn prepare_candidate(job_path: &Path, version: &str) -> Result<(), UpdateError> {
     let job: PrepareJob = activation::read_json(job_path)?;
     let taxonomy = if let Some(path) = job.taxonomy {
         let actual = subject_projection::installed::metadata(&path)?;
@@ -88,7 +89,7 @@ pub fn prepare_candidate(job_path: &Path, version: &str) -> Result<(), String> {
             db.initialize_library()?;
             db.check_migrated()
         })()
-        .map_err(|e| e.to_string())?;
+        .map_err(UpdateError::operation)?;
     }
     activation::write_json(&job.result, &Prepared { device: device(version, taxonomy.as_ref())?, taxonomy })
 }
@@ -109,23 +110,23 @@ impl Platform for Linux {
     fn target(&self) -> String {
         if self.appimage.is_some() { format!("linux-{ARCH}-appimage") } else { "linux-taxonomy-only".into() }
     }
-    fn workspace(&self, host: &Host) -> Result<u64, String> {
+    fn workspace(&self, host: &Host) -> Result<u64, UpdateError> {
         host.linux_workspace()
     }
-    fn preparation_wait(&self, host: &Host, workspace: u64) -> Result<Option<WaitReason>, String> {
+    fn preparation_wait(&self, host: &Host, workspace: u64) -> Result<Option<WaitReason>, UpdateError> {
         host.preflight(workspace)
     }
 }
 #[cfg(any(target_os = "linux", target_os = "android"))]
 impl Host {
-    pub fn open(data: &Path, version: &str, config: DiscoveryConfig, appimage: Option<PathBuf>, executable: PathBuf) -> Result<Self, String> {
+    pub fn open(data: &Path, version: &str, config: DiscoveryConfig, appimage: Option<PathBuf>, executable: PathBuf) -> Result<Self, UpdateError> {
         Self::open_platform(data, version, config, Linux { executable, appimage })
     }
-    pub fn startup(&mut self, trial: Option<&str>) -> Result<Startup, String> {
+    pub fn startup(&mut self, trial: Option<&str>) -> Result<Startup, UpdateError> {
         let lock = self.reload_locked()?;
         if let Some(journal) = Journal::load(&self.root)? {
             if journal.state == State::Committed {
-                if self.installed()?.application < journal.next_version.parse().map_err(|e| format!("{e}"))? {
+                if self.installed()?.application < journal.next_version.parse().map_err(UpdateError::operation)? {
                     return Ok(Startup::Relaunch { executable: journal.appimage.ok_or("committed application path missing")?, trial: None });
                 }
                 if let Err(error) = self.finish_committed(&journal) {
@@ -154,7 +155,7 @@ impl Host {
         Ok(Startup::Run)
     }
 
-    fn preflight(&self, mut required: u64) -> Result<Option<WaitReason>, String> {
+    fn preflight(&self, mut required: u64) -> Result<Option<WaitReason>, UpdateError> {
         if let Some(plan) = &self.coordinator.record().approved {
             for entry in &plan.artifacts {
                 if !plan.completed.contains(&entry.kind) {
@@ -167,31 +168,31 @@ impl Host {
                 match probe_write(parent) {
                     Ok(()) => {}
                     Err(error) if matches!(error.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem) => return Ok(Some(WaitReason::Permission)),
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(UpdateError::operation(error)),
                 }
-                if same_volume(parent, &self.root).map_err(|e| e.to_string())? {
+                if same_volume(parent, &self.root).map_err(UpdateError::operation)? {
                     required = required.checked_add(artifact.artifact.bytes).ok_or("workspace overflow")?;
                 } else {
-                    let deficit = artifact.artifact.bytes.saturating_sub(fs2::available_space(parent).map_err(|e| e.to_string())?);
+                    let deficit = artifact.artifact.bytes.saturating_sub(fs2::available_space(parent).map_err(UpdateError::operation)?);
                     if deficit > 0 {
                         return Ok(Some(WaitReason::Space { additional_bytes: deficit }));
                     }
                 }
             }
         }
-        let deficit = required.saturating_sub(fs2::available_space(&self.root).map_err(|e| e.to_string())?);
+        let deficit = required.saturating_sub(fs2::available_space(&self.root).map_err(UpdateError::operation)?);
         Ok((deficit > 0).then_some(WaitReason::Space { additional_bytes: deficit }))
     }
-    fn linux_workspace(&self) -> Result<u64, String> {
+    fn linux_workspace(&self) -> Result<u64, UpdateError> {
         let mut bytes = self.data_workspace()?;
         if self.coordinator.record().approved.as_ref().is_some_and(|p| p.artifacts.iter().any(|a| a.kind == ArtifactKind::Application)) {
             if let Some(path) = &self.appimage {
-                bytes = bytes.checked_add(fs::metadata(path).map_err(|e| e.to_string())?.len()).ok_or("workspace overflow")?;
+                bytes = bytes.checked_add(fs::metadata(path).map_err(UpdateError::operation)?.len()).ok_or("workspace overflow")?;
             }
         }
         Ok(bytes)
     }
-    fn prepare_and_promote(&mut self, lock: &UpdateLock) -> Result<String, String> {
+    fn prepare_and_promote(&mut self, lock: &UpdateLock) -> Result<String, UpdateError> {
         let paths = self.coordinator.staged_paths(&self.root, lock)?;
         if let Some(reason) = self.preflight(self.workspace_bytes()?)? {
             self.coordinator.activation_recovered_for_retry(reason, "update needs storage or installation permission".into())?;
@@ -205,7 +206,7 @@ impl Host {
             let path = migration.work.join("candidate.AppImage");
             activation::copy_file(source, &path)?;
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(UpdateError::operation)?;
             path
         } else {
             self.executable.clone()
@@ -214,10 +215,10 @@ impl Host {
         migration.finish(&prepared)?;
         if application.is_some() {
             let destination = self.appimage.clone().ok_or("application update requires an AppImage installation")?;
-            let required = fs::metadata(&candidate).map_err(|e| e.to_string())?.len();
-            let free = fs2::available_space(parent_directory(&destination)?).map_err(|e| e.to_string())?;
+            let required = fs::metadata(&candidate).map_err(UpdateError::operation)?.len();
+            let free = fs2::available_space(parent_directory(&destination)?).map_err(UpdateError::operation)?;
             if free < required {
-                return Err(format!("AppImage volume needs {} additional bytes", required - free));
+                return Err(format!("AppImage volume needs {} additional bytes", required - free).into());
             }
             let backup = migration.work.join("previous.AppImage");
             migration.add_file(destination, candidate, backup)?;
@@ -225,9 +226,9 @@ impl Host {
         migration.promote(self.version.clone(), prepared.device.application.to_string(), self.appimage.clone())
     }
 }
-fn active(root: &Path) -> Result<Option<ActiveTaxonomy>, String> {
+fn active(root: &Path) -> Result<Option<ActiveTaxonomy>, UpdateError> {
     let path = root.join("active-taxonomy.json");
-    if path.try_exists().map_err(|e| e.to_string())? { activation::read_json(&path) } else { Ok(None) }
+    if path.try_exists().map_err(UpdateError::operation)? { activation::read_json(&path) } else { Ok(None) }
 }
 
 #[cfg(all(test, target_os = "linux"))]

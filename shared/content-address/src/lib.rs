@@ -163,9 +163,12 @@ impl<R: Read> Read for HashingReader<R> {
 
 /// Hash bytes and count their length in one pass.
 pub fn hash_reader_with_size(reader: &mut impl Read) -> io::Result<(ContentHash, u64)> {
-    let mut reader = HashingReader::new(reader);
-    io::copy(&mut reader, &mut io::sink())?;
-    Ok((reader.checksum(), reader.size_bytes()))
+    // BLAKE3's reader uses a buffer wide enough for every supported SIMD
+    // implementation. A generic io::copy buffer can be too small for those
+    // paths, especially when hashing multi-gigabyte audiobook files.
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(reader)?;
+    Ok((hasher.finalize().into(), hasher.count()))
 }
 
 /// Hash the complete file, regardless of the reader's current position.

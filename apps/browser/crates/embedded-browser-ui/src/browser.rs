@@ -56,7 +56,7 @@ static FEEDBACK: LazyLock<Mutex<Vec<Sender<Action>>>> = LazyLock::new(Mutex::def
 enum Action {
     PasswordResult {
         nonce: String,
-        result: Result<crate::passwords::Reply, String>,
+        result: Result<crate::passwords::Reply, operation_failure::OperationError>,
     },
     PasswordMessage(passwords::Message),
     PageLoaded(String),
@@ -294,7 +294,7 @@ impl Browser {
             }
             Err(error) => {
                 eprintln!("Could not embed the browser: {error}");
-                (None, Some(user_facing_error(&error.to_string(), text!(browser::could_not_open_the_webpage_try_reopening_the_browser)).to_owned()))
+                (None, Some(user_facing_error(&operation_failure::OperationError::from_error(error.as_ref()), text!(browser::could_not_open_the_webpage_try_reopening_the_browser)).to_owned()))
             }
         };
         #[cfg(target_os = "linux")]
@@ -437,7 +437,7 @@ impl Browser {
                             let _ = webview.focus();
                             self.set_address(window, cx);
                         }
-                        Err(error) => self.error = Some(user_facing_error(&error.to_string(), text!(browser::could_not_open_this_address_check_the_address_and_try_again)).to_owned()),
+                        Err(error) => self.error = Some(user_facing_error(&operation_failure::OperationError::from_error(&error), text!(browser::could_not_open_this_address_check_the_address_and_try_again)).to_owned()),
                     }
                 }
             }
@@ -499,7 +499,7 @@ impl Browser {
                     request.url = url;
                     let opened = crate::profile::context(&request.data_directory).and_then(|context| open_browser_window(request, context, self.app_closed.clone(), cx));
                     if let Err(error) = opened {
-                        window.push_notification(Notification::error(user_facing_error(&error.to_string(), text!(browser::could_not_open_a_new_browser_window_please_try_again))).autohide(false), cx);
+                        window.push_notification(Notification::error(user_facing_error(&operation_failure::OperationError::from_error(error.as_ref()), text!(browser::could_not_open_a_new_browser_window_please_try_again))).autohide(false), cx);
                     }
                 }
                 Action::Refused(path) => {

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bokheim · Recurring note switcher</title>
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Raleway;src:url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf')}
+@font-face{font-family:Bodoni;src:url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf')}
+:root{color-scheme:light;--canvas:#eae5dc;--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--rule:#c5bdac;--accent:#466853;--wash:#e2e9df;--hover:#ebe7de;--shadow:0 8px 28px #2922191a}
+[data-theme=dark]{color-scheme:dark;--canvas:#1c1a16;--paper:#171510;--ink:#efe6d0;--muted:#a69c86;--rule:#4e4334;--accent:#d3b271;--wash:#3c3423;--hover:#242119;--shadow:0 8px 28px #0005}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 Raleway,system-ui,sans-serif}
+button,textarea{font:inherit;color:inherit}button{cursor:pointer;background:transparent;border:0}button:hover{background:var(--hover)}button:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.preview-header{max-width:1120px;margin:auto;min-height:88px;padding:20px 26px;display:flex;align-items:center;justify-content:space-between;gap:20px}
+.brand{font:29px Bodoni,Georgia,serif}.brand small{font:12px Raleway,sans-serif;color:var(--muted);padding-left:18px;margin-left:18px;border-left:1px solid var(--rule)}
+.quiet-button{border:1px solid var(--rule);padding:7px 12px;font-size:12px;border-radius:3px}
+.guide{max-width:1068px;margin:0 auto 18px;display:flex;align-items:center;justify-content:space-between;gap:20px;color:var(--muted);font-size:12px}
+.guide p{margin:0}.guide label{display:flex;align-items:center;gap:8px;white-space:nowrap}.guide input{accent-color:var(--accent)}
+.reader{max-width:1068px;margin:0 auto;background:var(--paper);border:1px solid var(--rule);min-height:720px;position:relative}
+.toolbar{display:flex;justify-content:space-between;align-items:center;gap:15px;padding:15px 24px;border-bottom:1px solid var(--rule);font-size:12px;color:var(--muted)}
+.chapter-controls{display:flex;align-items:center;gap:12px}.chapter-controls button{width:28px;height:28px;font-size:18px;border-radius:3px}.chapter-controls button:disabled{opacity:.3;cursor:default}
+.spread{display:grid;grid-template-columns:1fr 1fr;gap:64px;padding:42px 58px 62px;min-height:625px}
+.page{font:22px/1.65 Garamond,Georgia,serif;min-width:0}.running{font:10px Raleway,sans-serif;text-align:center;text-transform:uppercase;letter-spacing:.15em;color:var(--muted);margin:0 0 34px}
+h1{font:29px Bodoni,Georgia,serif;text-align:center;font-weight:400;margin:0 0 28px}.page p{margin:0 0 15px}.page p+p{text-indent:1.2em}
+.word{font:inherit;line-height:inherit;padding:0 3px;border-radius:2px;background:#e0bb4b66;box-shadow:inset 0 -2px #6e9dcb;position:relative}.word:hover{background:#e0bb4b99}.word[aria-expanded=true]{outline:1px solid var(--accent);outline-offset:3px}
+.reader-footer{display:flex;justify-content:space-between;gap:20px;padding:14px 24px;font-size:11px;color:var(--muted);border-top:1px solid var(--rule)}
+.editor{position:absolute;z-index:2;width:360px;max-width:calc(100% - 24px);max-height:420px;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:10px;border:1px solid var(--rule);border-radius:6px;background:var(--paper);box-shadow:var(--shadow);scrollbar-width:thin}
+.choices{display:flex;flex-wrap:wrap;gap:1px;border:1px solid var(--rule);border-radius:3px;background:var(--rule);overflow:hidden;flex:none}
+.choice{flex:1 1 0;min-width:0;min-height:33px;background:var(--paper);padding:7px 9px;font-size:12px;line-height:1.4;overflow-wrap:anywhere}.choice[aria-pressed=true]{background:var(--wash);color:var(--accent);font-weight:600}
+.note{display:block;resize:vertical;width:100%;min-height:90px;max-height:180px;padding:9px;border:1px solid var(--rule);border-radius:3px;background:var(--paper);font:14px/1.6 Raleway,sans-serif}
+.alias-section{display:flex;flex-direction:column;gap:6px}.alias-heading{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}.alias-chips{display:flex;align-items:center;flex-wrap:wrap;gap:6px}.alias-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--rule);border-radius:4px;padding:2px 4px 2px 8px;font-size:11px;background:var(--hover);max-width:100%;overflow-wrap:anywhere}.alias-chip button{width:20px;height:23px;color:var(--muted);font-size:16px;padding:0;flex:none}.alias-add{color:var(--accent);font-size:11px;padding:4px 0}.alias-form{display:flex;gap:6px}.alias-form input{font:inherit;font-size:12px;background:var(--paper);color:var(--ink);border:1px solid var(--rule);border-radius:3px;padding:7px;min-width:0;flex:1}.alias-form button{border:1px solid var(--rule);border-radius:3px;font-size:11px;padding:7px 10px}.alias-error{font-size:11px;color:var(--muted);margin:0}.alias-highlight{background:#e0bb4b55;border-radius:2px}
+.shared-hint{font-size:11px;color:var(--muted);margin:0}.styles{display:flex;gap:3px}.styles button{flex:1;min-width:0;font-size:11px;min-height:29px;padding:5px 2px;border-radius:3px}.styles button[aria-pressed=true]{background:var(--wash);color:var(--accent)}
+.colors{display:flex;align-items:center;gap:8px;min-height:27px;flex:none}.swatch{width:19px;height:19px;border-radius:50%;background:var(--swatch);border:2px solid var(--paper);outline:1px solid transparent;flex:none;padding:0}.swatch:hover{background:var(--swatch)}.swatch[aria-pressed=true]{outline-color:var(--ink)}.delete{margin-left:auto;width:26px;height:26px;display:grid;place-items:center;color:var(--muted)}.delete svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.4}
+.preview-footer{max-width:1068px;margin:15px auto 24px;display:flex;justify-content:space-between;gap:20px;font-size:11px;color:var(--muted)}.preview-footer button{font-size:11px;padding:0;text-decoration:underline;text-underline-offset:3px}.preview-footer kbd{font:10px ui-monospace,monospace;border:1px solid var(--rule);padding:1px 4px;border-radius:3px}
+@media(max-width:1120px){.reader,.guide,.preview-footer{margin-left:20px;margin-right:20px}.spread{gap:40px;padding-inline:40px}}
+@media(max-width:760px){.preview-header{padding:18px 16px;min-height:75px}.brand{font-size:25px}.brand small{display:block;border:0;padding:0;margin:2px 0 0;font-size:11px}.guide{align-items:flex-start;flex-direction:column;gap:10px}.reader,.guide,.preview-footer{margin-left:12px;margin-right:12px}.toolbar{padding:10px 14px}.toolbar>span{max-width:135px}.spread{grid-template-columns:1fr;padding:30px 25px 60px;min-height:680px}.page:last-child{display:none}.page{font-size:22px}.reader-footer{padding-inline:14px}.preview-footer{flex-direction:column;gap:8px}.editor{max-height:420px}}
+</style>
+</head>
+<body>
+<header class="preview-header">
+  <div class="brand">Bokheim <small>Recurring note switcher · HTML preview</small></div>
+  <button class="quiet-button" id="theme">Dark appearance</button>
+</header>
+<div class="guide">
+  <p>Switch <strong>Chapter</strong> and <strong>Book</strong>: each note keeps its own text and alias chips.</p>
+  <label><input type="checkbox" id="include-library"> Include a note from another book</label>
+</div>
+<main class="reader" id="reader">
+  <header class="toolbar">
+    <span>Pride and Prejudice · Jane Austen</span>
+    <div class="chapter-controls"><button id="previous" aria-label="Previous chapter">‹</button><span id="chapter-label">Chapter III</span><button id="next" aria-label="Next chapter">›</button></div>
+  </header>
+  <div class="spread">
+    <article class="page">
+      <div class="running">Pride and Prejudice</div>
+      <h1 id="chapter-heading">Chapter III</h1>
+      <p id="opening">The evening had brought the neighbourhood together, and every conversation seemed to return to the newcomers.</p>
+      <p><button class="word" id="word" aria-haspopup="dialog" aria-expanded="true" aria-controls="editor">Elizabeth</button> listened with amusement. She had already formed an opinion of her own, though she was in no hurry to share it.</p>
+      <p>“<span data-alias="Lizzy">Lizzy</span>,” her sister called from across the room, speaking with a warmth that made the introductions seem quite unnecessary.</p>
+      <p><span data-alias="Eliza">Eliza</span> turned towards the window, still smiling at something she had heard.</p>
+    </article>
+    <article class="page" aria-label="Facing page">
+      <div class="running">Jane Austen</div>
+      <p>There was much to observe in a room full of people who were each so certain of what everybody else must be thinking.</p>
+      <p>A passing remark could become an entire story by the time it reached the other side of the hall. To listen carefully was often more entertaining than to speak.</p>
+      <p>The company continued its conversation, scarcely noticing how quickly the evening was passing.</p>
+    </article>
+  </div>
+  <section class="editor" id="editor" role="dialog" aria-label="Notes for Elizabeth">
+    <div class="choices" id="scope-choices" role="group" aria-label="Recurring note switcher"></div>
+    <p class="shared-hint" id="shared-hint" hidden>Library recurring note · edits apply everywhere</p>
+    <textarea class="note" id="note" aria-label="Selected note" placeholder="Add a note"></textarea>
+    <div class="alias-section" id="aliases" aria-label="Aliases for the selected note"></div>
+    <div class="styles" id="style-choices" role="group" aria-label="Annotation style"></div>
+    <div class="colors" id="color-choices" role="group" aria-label="Annotation color"></div>
+  </section>
+  <footer class="reader-footer"><span id="match-status" aria-live="polite">2 recurring notes for Elizabeth</span><span id="page-number">42 / 312</span></footer>
+</main>
+<footer class="preview-footer"><span>Inline aliases · Enter adds a name or phrase · Each scope keeps its own aliases</span><span><kbd>Esc</kbd> closes the popup · <button id="reset">Reset preview</button></span></footer>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const palette = [['Yellow','#e0bb4b'],['Orange','#e09a57'],['Red','#d57868'],['Pink','#c880b2'],['Purple','#9d80c9'],['Blue','#6e9dcb'],['Teal','#57aaa1'],['Green','#94ad65']];
+const initialNotes = [
+  {id:'chapter',book:'this',title:'This book',scope:'Chapter',chapter:3,text:'Her wit stands out in this first encounter.',style:'Highlight',color:'#e0bb4b',aliases:['Lizzy','Eliza']},
+  {id:'book',book:'this',title:'This book',scope:'Book',chapter:3,text:'Elizabeth Bennet — the second Bennet daughter.',style:'Underline',color:'#6e9dcb',aliases:['Miss Bennet']},
+  {id:'library',book:'companion',title:'Austen Companion',scope:'Library',chapter:1,text:'A character whose judgments evolve with experience.',style:'Highlight',color:'#94ad65',aliases:[]}
+];
+let notes = initialNotes.map(note => ({...note,aliases:[...note.aliases]}));
+let aliasAdding = false;
+let aliasError = '';
+const aliasDrafts = new Map();
+let chapter = 3;
+let selectedId = 'chapter';
+let popupOpen = true;
+let lastTrigger = $('word');
+function matchingNotes(){
+  return notes.filter(note => note.book === 'this'
+    ? !['Selection','Chapter'].includes(note.scope) || note.chapter === chapter
+    : $('include-library').checked && note.scope === 'Library');
+}
+function button(label,selected,action){
+  const element = document.createElement('button');
+  element.type = 'button';
+  element.className = 'choice';
+  element.textContent = label;
+  element.setAttribute('aria-pressed',String(selected));
+  element.onclick = action;
+  return element;
+}
+function selectNote(id){selectedId=id;aliasAdding=false;aliasError='';render();}
+function selectScope(scope){
+  const existing=matchingNotes().find(note=>note.scope===scope);
+  if(existing){selectNote(existing.id);return;}
+  const note={id:`new-${Date.now()}-${notes.length}`,book:'this',title:'This book',scope,chapter,text:'',style:'Highlight',color:'#e0bb4b',aliases:[]};
+  notes.push(note);
+  selectedId=note.id;aliasAdding=false;aliasError='';
+  popupOpen=true;
+  render();
+}
+function positionEditor(){
+  if(!popupOpen || $('editor').hidden)return;
+  const reader = $('reader').getBoundingClientRect();
+  const word = $('word').getBoundingClientRect();
+  const editor = $('editor');
+  const column = $('word').closest('.page').getBoundingClientRect();
+  const left = column.left-reader.left+(column.width-editor.offsetWidth)/2;
+  editor.style.left = `${Math.max(12,Math.min(left,reader.width-editor.offsetWidth-14))}px`;
+  const below = word.bottom-reader.top+14;
+  editor.style.top = `${Math.min(below,reader.height-editor.offsetHeight-16)}px`;
+}
+function renderAliases(selected){
+  const section=$('aliases');section.replaceChildren();section.hidden=selected.scope==='Selection';
+  if(section.hidden)return;
+  if(selected.aliases.length||aliasAdding){const heading=document.createElement('div');heading.className='alias-heading';heading.textContent='Also match';section.append(heading);}
+  const chips=document.createElement('div');chips.className='alias-chips';
+  selected.aliases.forEach(alias=>{
+    const chip=document.createElement('span');chip.className='alias-chip';
+    const label=document.createElement('span');label.textContent=alias;
+    const remove=document.createElement('button');remove.textContent='×';remove.setAttribute('aria-label',`Remove alias ${alias}`);
+    remove.onclick=()=>{selected.aliases=selected.aliases.filter(name=>name!==alias);aliasError='';render();};chip.append(label,remove);chips.append(chip);
+  });
+  const add=document.createElement('button');add.className='alias-add';add.textContent=selected.aliases.length||aliasAdding?'+ Add alias':'+ Add aliases';
+  add.onclick=()=>{aliasAdding=true;aliasError='';render();$('alias-name').focus();};chips.append(add);section.append(chips);
+  if(aliasAdding){
+    const form=document.createElement('form');form.className='alias-form';
+    const input=document.createElement('input');input.id='alias-name';input.placeholder='Name or phrase';input.setAttribute('aria-label','Add alias');input.value=aliasDrafts.get(selected.id)||'';
+    input.oninput=()=>aliasDrafts.set(selected.id,input.value);
+    input.onkeydown=event=>{if(event.key==='Escape'){aliasAdding=false;aliasError='';render();event.stopPropagation();}};
+    const submit=document.createElement('button');submit.type='submit';submit.textContent='Add';form.append(input,submit);
+    form.onsubmit=event=>{
+      event.preventDefault();const alias=input.value.trim().replace(/\s+/g,' ');
+      if(!alias)aliasError='Enter a name or phrase.';
+      else if(['Elizabeth',...selected.aliases].some(name=>name.toLowerCase()===alias.toLowerCase()))aliasError='This name already matches the note.';
+      else{selected.aliases.push(alias);aliasDrafts.delete(selected.id);aliasError='';}
+      render();$('alias-name').focus();
+    };
+    section.append(form);
+  }
+  if(aliasError){const error=document.createElement('p');error.className='alias-error';error.setAttribute('role','alert');error.textContent=aliasError;section.append(error);}
+}
+function render(){
+  const matches = matchingNotes();
+  if(!matches.some(note => note.id === selectedId))selectedId=matches[0]?.id ?? null;
+  const selected = matches.find(note => note.id === selectedId);
+  document.querySelectorAll('[data-alias]').forEach(word=>word.classList.toggle('alias-highlight',matches.some(note=>note.aliases.some(alias=>alias.toLowerCase()===word.dataset.alias.toLowerCase()))));
+  $('chapter-label').textContent = $('chapter-heading').textContent = chapter === 3 ? 'Chapter III' : 'Chapter IV';
+  $('previous').disabled=chapter===3;
+  $('next').disabled=chapter===4;
+  $('page-number').textContent=chapter===3?'42 / 312':'57 / 312';
+  const recurring=matches.filter(note=>note.scope!=='Selection');
+  $('match-status').textContent=`${recurring.length} recurring ${recurring.length===1?'note':'notes'} for Elizabeth`;
+  $('word').setAttribute('aria-expanded',String(popupOpen && !!selected));
+  $('word').style.backgroundColor='transparent';
+  $('word').style.backgroundImage=matches.filter(note=>note.style==='Highlight').map(note=>`linear-gradient(${note.color}55,${note.color}55)`).join(',')||'none';
+  const underline=matches.find(note=>note.style==='Underline');
+  $('word').style.boxShadow=underline?`inset 0 -2px ${underline.color}`:'none';
+  const squiggly=matches.find(note=>note.style==='Squiggly');
+  const strike=matches.find(note=>note.style==='Strike');
+  $('word').style.textDecorationLine=[squiggly?'underline':'',strike?'line-through':''].filter(Boolean).join(' ')||'none';
+  $('word').style.textDecorationStyle=squiggly?'wavy':'solid';
+  $('word').style.textDecorationColor=(squiggly||strike)?.color||'currentColor';
+  $('editor').hidden=!popupOpen || !selected;
+  if(!selected)return;
+  $('shared-hint').hidden=selected.book==='this';
+  $('scope-choices').replaceChildren(...['Selection','Chapter','Book','Library'].flatMap(scope=>{
+    const candidates=matches.filter(note=>note.scope===scope);
+    if(!candidates.length)return [button(scope,false,()=>selectScope(scope))];
+    return candidates.map((note,index)=>{
+      const origin=scope==='Library' && (note.book!=='this'||candidates.length>1)?` · ${note.title}`:'';
+      const number=candidates.length>1?` ${index+1}`:'';
+      return button(`${scope}${origin}${number}`,note.id===selectedId,()=>selectNote(note.id));
+    });
+  }));
+  $('note').value=selected.text;
+  $('note').placeholder=`Add a ${selected.scope.toLowerCase()} note`;
+  renderAliases(selected);
+  $('style-choices').replaceChildren(...['Highlight','Underline','Squiggly','Strike'].map(style=>button(style,selected.style===style,()=>{selected.style=style;render();})));
+  $('color-choices').replaceChildren(...palette.map(([name,color])=>{
+    const swatch=button('',selected.color===color,()=>{selected.color=color;render();});
+    swatch.className='swatch';swatch.style.setProperty('--swatch',color);swatch.setAttribute('aria-label',name);swatch.title=name;return swatch;
+  }));
+  const remove=document.createElement('button');
+  remove.className='delete';remove.setAttribute('aria-label','Delete annotation');remove.title='Delete annotation';
+  remove.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7M14 10v7"/></svg>';
+  remove.onclick=()=>{notes=notes.filter(note=>note.id!==selectedId);render();};
+  $('color-choices').append(remove);
+  positionEditor();
+}
+$('note').addEventListener('input',()=>{
+  const note=notes.find(note=>note.id===selectedId);
+  if(note)note.text=$('note').value;
+});
+$('word').onclick=()=>{popupOpen=true;lastTrigger=$('word');if(!matchingNotes().length)selectScope('Selection');else render();};
+$('previous').onclick=()=>{chapter=3;render();};
+$('next').onclick=()=>{chapter=4;render();};
+$('include-library').onchange=render;
+$('theme').onclick=()=>{
+  const dark=document.documentElement.dataset.theme!=='dark';
+  document.documentElement.dataset.theme=dark?'dark':'light';
+  $('theme').textContent=dark?'Light appearance':'Dark appearance';
+};
+$('reset').onclick=()=>{notes=initialNotes.map(note=>({...note,aliases:[...note.aliases]}));chapter=3;selectedId='chapter';aliasAdding=false;aliasError='';aliasDrafts.clear();popupOpen=true;$('include-library').checked=false;render();};
+document.addEventListener('pointerdown',event=>{
+  if(event.target.closest('.editor,.word,.chapter-controls,.guide,.preview-header,.preview-footer'))return;
+  popupOpen=false;render();
+});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape' && popupOpen){popupOpen=false;render();lastTrigger.focus();}
+});
+window.addEventListener('resize',positionEditor);
+document.fonts.ready.then(positionEditor);
+render();
+</script>
+</body>
+</html>

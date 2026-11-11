@@ -6,6 +6,7 @@ publish = false
 
 # Explicit dependencies also allow use from the standalone USB installer.
 [dependencies]
+operation-failure = { path = "../../client-protocol/crates/operation-failure" }
 kobo-profile = { path = "../../platforms/kobo/crates/profile" }
 flate2 = "1"
 semver = { version = "1", features = ["serde"] }

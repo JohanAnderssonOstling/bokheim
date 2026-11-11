@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bokheim · Recurring note aliases</title>
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}
+@font-face{font-family:Raleway;src:url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf')}
+@font-face{font-family:Bodoni;src:url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf')}
+:root{color-scheme:light;--canvas:#eae5dc;--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--rule:#c5bdac;--accent:#466853;--wash:#e2e9df;--hover:#ebe7de;--shadow:0 8px 28px #29221917}
+[data-theme=dark]{color-scheme:dark;--canvas:#1c1a16;--paper:#171510;--ink:#efe6d0;--muted:#a69c86;--rule:#4e4334;--accent:#d3b271;--wash:#3c3423;--hover:#242119;--shadow:0 8px 28px #0005}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--canvas);color:var(--ink);font:13px/1.5 Raleway,system-ui,sans-serif}button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;background:transparent;border:0}button:hover{background:var(--hover)}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:3px}input,textarea{min-width:0;background:var(--paper)}
+main{max-width:1256px;margin:auto;padding:25px 32px 35px}.header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding-bottom:22px;border-bottom:1px solid var(--rule)}.brand{font:30px Bodoni,Georgia,serif}.brand small{font:12px Raleway,sans-serif;color:var(--muted);border-left:1px solid var(--rule);padding-left:18px;margin-left:18px}.controls{display:flex;gap:10px;align-items:center}.quiet{border:1px solid var(--rule);border-radius:3px;padding:7px 11px;font-size:11px}.reset{font-size:11px;padding:7px;color:var(--muted)}
+.intro{margin:30px 0 25px;display:flex;align-items:flex-end;justify-content:space-between;gap:30px}h1{font:38px/1.15 Bodoni,Georgia,serif;margin:0 0 10px;font-weight:400}.intro p{margin:0;font-size:12px;color:var(--muted)}.intro label{display:flex;align-items:center;gap:8px;white-space:nowrap;font-size:12px;color:var(--muted)}input[type=checkbox]{accent-color:var(--accent)}
+.board{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px}.option{min-width:0}.option-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 7px}.option-heading h2{font-size:14px;font-weight:500;margin:0}.index{color:var(--muted);margin-right:8px;font-size:11px}.recommended{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);border:1px solid var(--rule);border-radius:3px;padding:3px 6px}.description{font-size:11px;color:var(--muted);margin:0 0 17px;min-height:34px}
+.stage{min-height:505px;background:var(--paper);border:1px solid var(--rule);padding:26px 12px 20px;position:relative}.running{font-size:9px;text-align:center;color:var(--muted);text-transform:uppercase;letter-spacing:.11em;margin-bottom:24px}.passage{font:22px/1.5 Garamond,Georgia,serif;margin:0 10px 20px}.highlight{background:#e0bb4b55;box-shadow:inset 0 -1px #6e9dcb;border-radius:2px;padding:1px 2px}.editor{position:relative;background:var(--paper);border:1px solid var(--rule);border-radius:6px;box-shadow:var(--shadow);padding:15px;display:flex;flex-direction:column;gap:13px;max-width:360px;margin:auto;min-height:272px}
+.scopes{display:flex;gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:3px;overflow:hidden}.scopes button{flex:1;min-width:0;background:var(--paper);font-size:11px;min-height:33px;padding:6px 4px}.scopes button[aria-pressed=true]{background:var(--wash);color:var(--accent);font-weight:600}.note{width:100%;height:86px;resize:vertical;border:1px solid var(--rule);border-radius:3px;padding:8px;font-size:12px;line-height:1.6}.also-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--muted);font-size:10px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:7px}.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.chip{display:inline-flex;align-items:center;gap:7px;padding:3px 5px 3px 9px;border:1px solid var(--rule);border-radius:4px;background:var(--hover);font-size:11px;max-width:100%;overflow-wrap:anywhere}.chip button{width:18px;height:20px;border-radius:2px;padding:0;color:var(--muted);font-size:16px;line-height:1;flex:none}.add-alias{font-size:11px;padding:5px 4px;color:var(--accent);white-space:nowrap}.empty-add{padding:0;font-size:11px;color:var(--accent);text-align:left}.add-form{display:flex;gap:6px;margin-top:8px;align-items:center}.add-form input{border:1px solid var(--rule);border-radius:3px;padding:7px 8px;width:100%;font-size:11px}.add-form button{border:1px solid var(--rule);border-radius:3px;padding:7px 9px;font-size:11px}.error{font-size:10px;color:var(--muted);margin:5px 0 0}.error:empty{display:none}.helper{font-size:10px;line-height:1.6;color:var(--muted);margin:7px 0 0}.alias-section{min-width:0}.disclosure{width:100%;display:flex;align-items:center;justify-content:space-between;padding:0;font-size:11px;color:var(--muted);text-align:left}.disclosure .count{color:var(--ink);margin-left:auto;padding:0 9px}.disclosure-content{padding-top:10px}.manage-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted)}.manage-row button{font-size:11px;color:var(--accent);padding:3px 0 3px 7px}.manage-row strong{font-weight:400;color:var(--ink)}
+.appearance{border-top:1px solid var(--rule);padding-top:10px;display:flex;align-items:center;gap:8px}.style-label{color:var(--muted);font-size:10px;margin-right:auto}.swatch{width:15px;height:15px;border-radius:50%;background:var(--color);border:2px solid var(--paper);outline:1px solid transparent}.swatch.selected{outline-color:var(--muted)}.matches{margin:21px 10px 0;font:20px/1.5 Garamond,Georgia,serif}.match-caption{font:9px Raleway,sans-serif;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.07em}.scope-foot{font-size:10px;color:var(--muted);margin:10px 0 0;text-align:center}
+.manager{position:absolute;z-index:2;inset:0;background:var(--paper);padding:15px;border-radius:6px;display:flex;flex-direction:column;gap:10px;overflow:auto}.manager-header{display:flex;align-items:center;justify-content:space-between;gap:10px}.manager-header h3{margin:0;font-size:13px;font-weight:500}.done{font-size:11px;color:var(--accent);padding:4px 0 4px 10px}.manager-context{font-size:10px;color:var(--muted);margin:0}.primary-term{display:flex;justify-content:space-between;gap:10px;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);padding:9px 0;font-size:12px}.primary-term span{color:var(--muted);font-size:10px}.alias-list{display:flex;flex-direction:column;max-height:140px;overflow:auto;flex:none}.alias-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;padding:5px 0}.alias-row button{font-size:17px;color:var(--muted);width:25px;height:25px;padding:0}.manager .add-form{margin-top:0}.manager .helper{margin:0}.manager .alias-list:empty{display:none}.manager .error{margin:0}
+.footer{display:flex;justify-content:space-between;gap:25px;margin-top:24px;padding-top:17px;border-top:1px solid var(--rule);font-size:11px;color:var(--muted)}.footer strong{font-weight:500;color:var(--ink)}kbd{font:10px ui-monospace,monospace;border:1px solid var(--rule);border-radius:3px;padding:1px 4px}.notice{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+@media(min-width:1150px){.stage{padding-inline:14px}.editor{padding:15px}}
+@media(max-width:1020px){main{padding:22px}.board{grid-template-columns:repeat(2,minmax(0,1fr))}.option:last-child{grid-column:1/-1;max-width:460px;width:100%;margin:15px auto 0}.intro{align-items:flex-start;flex-direction:column;gap:15px}}
+@media(max-width:650px){main{padding:18px 14px}.header{align-items:flex-start}.brand small{display:block;padding:0;margin:4px 0 0;border:0;font-size:11px}.controls{gap:4px;flex-direction:column;align-items:flex-end}.brand{font-size:26px}h1{font-size:32px}.board{grid-template-columns:1fr;gap:28px}.option:last-child{grid-column:auto;max-width:none;margin:0}.stage{min-height:0;padding:22px 14px}.description{min-height:0}.footer{flex-direction:column;gap:10px}.intro{margin-top:25px}.editor{padding:15px}.matches{margin-bottom:8px}}
+</style>
+</head>
+<body>
+<main>
+  <header class="header">
+    <div class="brand">Bokheim <small>Alias UI · Interactive suggestions</small></div>
+    <div class="controls"><button class="reset" id="reset">Reset examples</button><button class="quiet" id="theme">Dark appearance</button></div>
+  </header>
+  <section class="intro">
+    <div><h1>More names. The same note.</h1><p>Three ways to add aliases to a recurring note. Switch Chapter and Book to explore.</p></div>
+    <label><input type="checkbox" id="empty"> Show without aliases</label>
+  </section>
+  <div class="board" id="board"></div>
+  <footer class="footer"><span><strong>My pick: inline chips.</strong> Existing aliases are visible and easy to remove.</span><span><kbd>Enter</kbd> adds a name · Phrases work too · Each scope keeps its own aliases</span></footer>
+  <div class="notice" role="status" id="announcement"></div>
+</main>
+<script>
+'use strict';
+const variants=[
+  {id:'inline',title:'Inline chips',description:'Names stay visible directly beneath the note.',recommended:true},
+  {id:'disclosure',title:'Expandable section',description:'A quieter editor; expand aliases when needed.'},
+  {id:'panel',title:'Manage panel',description:'A separate view with more room for many names.'}
+];
+const scopes=['Selection','Chapter','Book','Library'];
+const seeds={
+  Selection:{text:'A wry observation in this passage.',aliases:[]},
+  Chapter:{text:'Her wit stands out in this first encounter.',aliases:['Lizzy','Eliza']},
+  Book:{text:'Elizabeth Bennet — the second Bennet daughter.',aliases:['Miss Bennet','Elizabeth Bennet']},
+  Library:{text:'A character whose judgments evolve with experience.',aliases:[]}
+};
+const makeNotes=()=>Object.fromEntries(scopes.map(scope=>[scope,{text:seeds[scope].text,aliases:document.getElementById('empty').checked?[]:[...seeds[scope].aliases]}]));
+const states=Object.fromEntries(variants.map(variant=>[variant.id,{scope:'Chapter',notes:makeNotes(),expanded:false,adding:false,managerOpen:variant.id==='panel',drafts:{},error:''}]));
+const nodes={};
+function element(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
+function action(label,className,handler){const node=element('button',className,label);node.type='button';node.onclick=handler;return node;}
+function announce(text){document.getElementById('announcement').textContent=text;}
+function removeAlias(variant,index){
+  const state=states[variant.id];
+  const removed=state.notes[state.scope].aliases.splice(index,1)[0];
+  state.error='';renderCard(variant);announce(`${removed} removed from the ${state.scope.toLowerCase()} note.`);
+}
+function addAlias(variant){
+  const state=states[variant.id],note=state.notes[state.scope];
+  const alias=(state.drafts[state.scope]||'').trim().replace(/\s+/g,' ');
+  if(!alias){state.error='Enter a name or phrase.';renderCard(variant);focusInput(variant);return;}
+  if(['Elizabeth',...note.aliases].some(name=>name.toLocaleLowerCase()===alias.toLocaleLowerCase())){
+    state.error='This name already matches the note.';renderCard(variant);focusInput(variant);return;
+  }
+  note.aliases.push(alias);state.drafts[state.scope]='';state.error='';state.adding=false;
+  renderCard(variant);announce(`${alias} added to the ${state.scope.toLowerCase()} note.`);
+  if(variant.id!=='inline')focusInput(variant);
+}
+function focusInput(variant){nodes[variant.id].editor.querySelector('input')?.focus();}
+function aliasForm(variant){
+  const state=states[variant.id];
+  const form=element('form','add-form');
+  const input=element('input');input.type='text';input.placeholder='Name or phrase';input.value=state.drafts[state.scope]||'';
+  input.setAttribute('aria-label',`Add an alias to the ${state.scope.toLowerCase()} note`);
+  input.addEventListener('input',()=>{state.drafts[state.scope]=input.value;});
+  input.addEventListener('keydown',event=>{
+    if(event.key==='Escape'){state.adding=false;state.error='';renderCard(variant);event.stopPropagation();}
+  });
+  const add=element('button','','Add');add.type='submit';form.append(input,add);
+  form.onsubmit=event=>{event.preventDefault();addAlias(variant);};return form;
+}
+function chips(variant){
+  const state=states[variant.id],list=element('div','chips');
+  state.notes[state.scope].aliases.forEach((alias,index)=>{
+    const chip=element('span','chip');chip.append(element('span','',alias));
+    const remove=action('×','',()=>removeAlias(variant,index));remove.setAttribute('aria-label',`Remove alias ${alias}`);chip.append(remove);list.append(chip);
+  });
+  if(variant.id==='inline'){
+    list.append(action('+ Add alias','add-alias',()=>{state.adding=true;state.error='';renderCard(variant);focusInput(variant);}));
+  }
+  return list;
+}
+function aliasSection(variant){
+  const state=states[variant.id],note=state.notes[state.scope],section=element('div','alias-section');
+  if(state.scope==='Selection')return section;
+  if(variant.id==='inline'){
+    if(note.aliases.length || state.adding){
+      section.append(element('div','also-heading','Also match'),chips(variant));
+      if(state.adding)section.append(aliasForm(variant));
+    }else section.append(action('+ Add aliases','empty-add',()=>{state.adding=true;renderCard(variant);focusInput(variant);}));
+  }else if(variant.id==='disclosure'){
+    const toggle=action('','disclosure',()=>{state.expanded=!state.expanded;state.error='';renderCard(variant);});
+    toggle.setAttribute('aria-expanded',String(state.expanded));
+    toggle.append(element('span','',note.aliases.length?'Also match':'+ Add aliases'),element('span','count',note.aliases.length?`${note.aliases.length} aliases`:''),element('span','',state.expanded?'⌃':'⌄'));
+    section.append(toggle);
+    if(state.expanded){const content=element('div','disclosure-content');content.append(chips(variant),aliasForm(variant),element('p','helper','Other names that open this same note.'));section.append(content);}
+  }else{
+    const row=element('div','manage-row');row.append(element('span','',`Aliases · ${note.aliases.length}`),action(note.aliases.length?'Manage →':'+ Add aliases','',()=>{state.managerOpen=true;state.error='';renderCard(variant);focusInput(variant);}));section.append(row);
+  }
+  if(state.error && !state.managerOpen){const error=element('p','error',state.error);error.setAttribute('role','alert');section.append(error);}
+  return section;
+}
+function manager(variant){
+  const state=states[variant.id],note=state.notes[state.scope],panel=element('section','manager');
+  panel.setAttribute('aria-label',`Aliases for the ${state.scope.toLowerCase()} note`);
+  const header=element('div','manager-header');header.append(element('h3','','Also match'),action('Done','done',()=>{state.managerOpen=false;state.error='';renderCard(variant);}));
+  panel.append(header,element('p','manager-context',`${state.scope} note · Pride and Prejudice`));
+  const primary=element('div','primary-term');primary.append(element('strong','','Elizabeth'),element('span','','Original text'));panel.append(primary);
+  const list=element('div','alias-list');
+  note.aliases.forEach((alias,index)=>{const row=element('div','alias-row');row.append(element('span','',alias));const remove=action('×','',()=>removeAlias(variant,index));remove.setAttribute('aria-label',`Remove alias ${alias}`);row.append(remove);list.append(row);});
+  panel.append(list,aliasForm(variant));
+  const error=element('p','error',state.error);if(state.error)error.setAttribute('role','alert');panel.append(error);
+  return panel;
+}
+function renderCard(variant){
+  const state=states[variant.id],refs=nodes[variant.id],note=state.notes[state.scope];
+  const switches=element('div','scopes');switches.setAttribute('role','group');switches.setAttribute('aria-label',`${variant.title}: recurring note switcher`);
+  scopes.forEach(scope=>{const button=action(scope,'',()=>{state.scope=scope;state.error='';state.adding=false;state.managerOpen=false;renderCard(variant);});button.setAttribute('aria-pressed',String(state.scope===scope));switches.append(button);});
+  const textarea=element('textarea','note');textarea.value=note.text;textarea.setAttribute('aria-label',`${state.scope} note`);textarea.placeholder=`Add a ${state.scope.toLowerCase()} note`;textarea.oninput=()=>{note.text=textarea.value;};
+  const appearance=element('div','appearance');appearance.setAttribute('aria-label','Example annotation appearance');appearance.append(element('span','style-label','Highlight'));
+  ['#e0bb4b','#e09a57','#c880b2','#6e9dcb','#94ad65'].forEach((color,index)=>{const swatch=element('span',`swatch${index===0?' selected':''}`);swatch.style.setProperty('--color',color);swatch.setAttribute('aria-hidden','true');appearance.append(swatch);});
+  refs.editor.replaceChildren(switches,textarea,aliasSection(variant),appearance);
+  if(variant.id==='panel' && state.managerOpen && state.scope!=='Selection')refs.editor.append(manager(variant));
+  refs.matches.replaceChildren(element('div','match-caption','Matching in this scope'));
+  const sentence=element('div');
+  sentence.append(element('span',note.aliases.some(alias=>alias.toLocaleLowerCase()==='lizzy')?'highlight':'','Lizzy'),document.createTextNode(' laughed at the remark. “'),element('span',note.aliases.some(alias=>alias.toLocaleLowerCase()==='eliza')?'highlight':'','Eliza'),document.createTextNode(',” her sister called.'));
+  refs.matches.append(sentence);refs.foot.textContent=`${state.scope} note · ${note.aliases.length} ${note.aliases.length===1?'alias':'aliases'}`;
+}
+variants.forEach((variant,index)=>{
+  const card=element('article','option');
+  const heading=element('div','option-heading'),title=element('h2');title.append(element('span','index',String.fromCharCode(65+index)),document.createTextNode(variant.title));heading.append(title);
+  if(variant.recommended)heading.append(element('span','recommended','Recommended'));
+  const stage=element('div','stage');stage.append(element('div','running','Pride and Prejudice · Chapter III'));
+  const passage=element('p','passage');passage.append(element('span','highlight','Elizabeth'),document.createTextNode(' listened with amusement.'));stage.append(passage);
+  const editor=element('div','editor'),matches=element('div','matches'),foot=element('p','scope-foot');stage.append(editor,matches);card.append(heading,element('p','description',variant.description),stage,foot);
+  nodes[variant.id]={editor,matches,foot};document.getElementById('board').append(card);renderCard(variant);
+});
+document.getElementById('theme').onclick=()=>{const dark=document.documentElement.dataset.theme!=='dark';document.documentElement.dataset.theme=dark?'dark':'light';document.getElementById('theme').textContent=dark?'Light appearance':'Dark appearance';};
+document.getElementById('empty').onchange=()=>{variants.forEach(variant=>{const state=states[variant.id];state.notes=makeNotes();state.error='';state.drafts={};state.adding=false;renderCard(variant);});};
+document.getElementById('reset').onclick=()=>{document.getElementById('empty').checked=false;variants.forEach(variant=>{states[variant.id]={scope:'Chapter',notes:makeNotes(),expanded:false,adding:false,managerOpen:variant.id==='panel',drafts:{},error:''};renderCard(variant);});};
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){variants.forEach(variant=>{const state=states[variant.id];state.managerOpen=false;state.adding=false;state.error='';renderCard(variant);});}});
+</script>
+</body>
+</html>

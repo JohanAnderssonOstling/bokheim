@@ -160,7 +160,7 @@ pub enum SyncEvent {
     LocalStorageUsage { generation: u64, result: Result<Vec<LocalLibraryStorageUsage>, app::BackendError> },
     LogoutRequested,
     DeleteAccountRequested { email: String, password: String },
-    AccountOperation { generation: u64, result: Result<app::AccountSnapshot, app::BackendError>, success: &'static str, reveal_password_reset_on_error: bool },
+    AccountOperation { generation: u64, result: Result<app::AccountSnapshot, app::BackendError>, success: &'static str },
     AssetStorageRequested { library_id: sync_common::LibraryId, enabled: bool },
     AssetStorageChanged { library_id: sync_common::LibraryId, enabled: bool, result: Result<(), app::BackendError> },
     Authenticate { request: AuthenticationRequest, reply: async_channel::Sender<Result<(), &'static str>> },
@@ -211,7 +211,6 @@ pub(crate) struct SyncPage {
     activity: AccountActivity,
     /// Password recovery is offered only after an actual sign-in request has
     /// failed, rather than as a permanent third authentication mode.
-    login_failed: bool,
     message: Option<SharedString>,
     error: Option<SharedString>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -296,7 +295,6 @@ impl SyncPage {
             #[cfg(feature = "kobo")]
             access_overlay: kobo_authentication::AccountOverlay::new(cx),
             activity: AccountActivity::Idle,
-            login_failed: false,
             message: None,
             error: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -404,15 +402,9 @@ impl SyncPage {
                 Ok(snapshot) => self.apply_snapshot(snapshot, None, cx),
                 Err(error) => self.apply_error(error, cx),
             },
-            SyncEvent::AccountOperation { result, success, reveal_password_reset_on_error, .. } => match result {
-                Ok(snapshot) => {
-                    self.login_failed = false;
-                    self.apply_snapshot(snapshot, Some(success), cx);
-                }
-                Err(error) => {
-                    self.login_failed = reveal_password_reset_on_error && matches!(error.failure(), Some(app::Failure::Unauthorized | app::Failure::Rejected));
-                    self.apply_error(error, cx);
-                }
+            SyncEvent::AccountOperation { result, success, .. } => match result {
+                Ok(snapshot) => self.apply_snapshot(snapshot, Some(success), cx),
+                Err(error) => self.apply_error(error, cx),
             },
             SyncEvent::AssetStorageChanged { library_id, enabled, result } => {
                 self.asset_storage_pending.remove(&library_id);

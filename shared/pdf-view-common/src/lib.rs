@@ -610,6 +610,17 @@ impl FitWidthColumn {
         self.display_height
     }
 
+    /// Extend the painted source slice at the same scale, up to the page end.
+    /// Retain the original column for pagination and continuation anchors.
+    pub fn extended_to_display_height(self, height: f32) -> Self {
+        if !height.is_finite() || height <= self.display_height || self.page_rect.bottom() >= 1.0 {
+            return self;
+        }
+        let scale = self.display_height / self.page_rect.height().max(f32::EPSILON);
+        let page_rect = NormalizedRect::new(self.page_rect.left(), self.page_rect.top(), self.page_rect.width(), height / scale);
+        Self { page_rect, display_height: page_rect.height() * scale, ..self }
+    }
+
     /// Vertical space before this fragment caused by a real PDF page boundary.
     /// Internal fit-width slice boundaries always return zero.
     pub const fn leading_page_gap(self) -> f32 {

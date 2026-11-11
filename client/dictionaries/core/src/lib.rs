@@ -2,6 +2,8 @@
 //! Definitions are read directly from the original plain or dictzip body.
 #[cfg(feature = "client")]
 mod client;
+mod operation_error;
+pub use operation_error::{OperationError, OperationResult};
 #[cfg(feature = "client")]
 mod import_source;
 #[cfg(feature = "client")]
@@ -31,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 pub use stardict::{Body, DICT_FILE, DICTZIP_FILE, Dictionary, DictionaryFile, IDX_FILE, IFO_FILE, SYN_FILE, prepare_import};
 
-pub type Result<T> = std::result::Result<T, String>;
+pub type Result<T> = OperationResult<T>;
 
 /// Random reads work with native readers and asynchronous browser file slices.
 pub trait ReadAt {
@@ -41,13 +43,13 @@ pub trait ReadAt {
 
 impl<R: Read + Seek> ReadAt for R {
     async fn size(&mut self) -> Result<u64> {
-        self.seek(SeekFrom::End(0)).map_err(|error| error.to_string())
+        self.seek(SeekFrom::End(0)).map_err(OperationError::from)
     }
 
     async fn read_at(&mut self, offset: u64, length: usize) -> Result<Vec<u8>> {
-        self.seek(SeekFrom::Start(offset)).map_err(|error| error.to_string())?;
+        self.seek(SeekFrom::Start(offset)).map_err(OperationError::from)?;
         let mut bytes = vec![0; length];
-        self.read_exact(&mut bytes).map_err(|error| error.to_string())?;
+        self.read_exact(&mut bytes).map_err(OperationError::from)?;
         Ok(bytes)
     }
 }
@@ -82,7 +84,7 @@ pub struct Definition {
 
 fn bounded_read(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    reader.take(limit + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    reader.take(limit + 1).read_to_end(&mut bytes).map_err(OperationError::from)?;
     if bytes.len() as u64 > limit {
         return Err("Dictionary file exceeds the size limit".into());
     }

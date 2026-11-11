@@ -162,7 +162,7 @@ pub fn bind_keys(cx: &mut App) {
     use ui_components::{ShortcutPage::Browse, bind_shortcut};
     bind_shortcut(cx, Browse, "browse.dismiss", text!(browse::close_settings), &["escape"], DismissSettings, "Browser");
     bind_shortcut(cx, Browse, "browse.font_decrease", text!(common::decrease_interface_font_size), &["secondary--"], DecreaseUiFontSize, "Browser");
-    bind_shortcut(cx, Browse, "browse.font_increase", text!(common::increase_interface_font_size), &["secondary-="], IncreaseUiFontSize, "Browser");
+    bind_shortcut(cx, Browse, "browse.font_increase", text!(common::increase_interface_font_size), &["secondary-+", "secondary-=", "secondary-shift-="], IncreaseUiFontSize, "Browser");
     bind_shortcut(cx, Browse, "browse.previous_destination", text!(browse::previous_destination), &["secondary-up"], PreviousDestination, "Browser");
     bind_shortcut(cx, Browse, "browse.next_destination", text!(browse::next_destination), &["secondary-down"], NextDestination, "Browser");
     // Selection contexts retain precedence over destination navigation.
@@ -180,9 +180,9 @@ pub fn bind_keys(cx: &mut App) {
         // Tab retains control-by-control form navigation. Embedded editors
         // keep their own keys; ordinary settings use the reader's row model.
         KeyBinding::new("tab", FocusNextSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
-        KeyBinding::new("down", FocusNextSetting, Some("BrowserSettings && (ShortcutSettings || BrowserSettingsHeader || BrowserFontPicker)")),
+        KeyBinding::new("down", FocusNextSetting, Some("BrowserSettings && (ShortcutSettings || BrowserSettingsHeader)")),
         KeyBinding::new("shift-tab", FocusPreviousSetting, Some(universal::SETTINGS_KEY_CONTEXT)),
-        KeyBinding::new("up", FocusPreviousSetting, Some("BrowserSettings && (ShortcutSettings || BrowserSettingsHeader || BrowserFontPicker)")),
+        KeyBinding::new("up", FocusPreviousSetting, Some("BrowserSettings && (ShortcutSettings || BrowserSettingsHeader)")),
         KeyBinding::new("down", MoveSettingRow(1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
         KeyBinding::new("up", MoveSettingRow(-1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),
         KeyBinding::new("left", AdjustSettingValue(-1), Some(universal::settings::SETTINGS_ROW_KEY_CONTEXT)),

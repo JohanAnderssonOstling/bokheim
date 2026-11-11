@@ -7,6 +7,13 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+mod error;
+pub use error::OperationError;
+
+impl Classified for std::io::Error {
+    fn failure(&self) -> Option<Failure> { Failure::from_error(self) }
+}
+
 /// An error that may know why it happened. The UI words it from
 /// [`Classified::failure`] and logs its `Display` text as the diagnostic.
 pub trait Classified: fmt::Display {
@@ -90,6 +97,22 @@ impl fmt::Display for Failure {
 impl std::error::Error for Failure {}
 
 impl Failure {
+    pub fn from_error(mut error: &(dyn std::error::Error + 'static)) -> Option<Self> {
+        loop {
+            let failure = if let Some(error) = error.downcast_ref::<OperationError>() {
+                error.failure()
+            } else if let Some(failure) = error.downcast_ref::<Self>() {
+                Some(*failure)
+            } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                Self::from_io(error.kind())
+            } else {
+                platform_failure(error)
+            };
+            if failure.is_some() { return failure; }
+            error = error.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref).map(|error| error as &(dyn std::error::Error + 'static)).or_else(|| error.source())?;
+        }
+    }
+
     /// The classification a service's HTTP status implies, if any.
     pub fn from_http_status(status: u16) -> Option<Self> {
         match status {
@@ -97,6 +120,7 @@ impl Failure {
             403 => Some(Self::Forbidden),
             404 | 410 => Some(Self::NotFound),
             400 | 409 | 422 => Some(Self::Rejected),
+            408 => Some(Self::TimedOut),
             429 => Some(Self::RateLimited),
             500..=599 => Some(Self::ServiceUnavailable),
             _ => None,
@@ -132,4 +156,42 @@ pub enum WifiFailure {
     ConnectTimedOut,
     Sleeping,
     PowerControlUnavailable,
+}
+
+fn platform_failure(error: &(dyn std::error::Error + 'static)) -> Option<Failure> {
+    #[cfg(feature = "sqlite")]
+    if let Some(rusqlite::Error::SqliteFailure(code, _)) = error.downcast_ref::<rusqlite::Error>() {
+        return match code.code {
+            rusqlite::ErrorCode::DiskFull => Some(Failure::StorageFull),
+            rusqlite::ErrorCode::ReadOnly => Some(Failure::ReadOnlyStorage),
+            rusqlite::ErrorCode::PermissionDenied => Some(Failure::PermissionDenied),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "http")]
+    if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+        #[cfg(not(target_arch = "wasm32"))]
+        let offline = error.is_connect();
+        #[cfg(target_arch = "wasm32")]
+        let offline = error.is_request();
+        return if error.is_timeout() { Some(Failure::TimedOut) }
+            else if offline { Some(Failure::Offline) }
+            else { error.status().and_then(|status| Failure::from_http_status(status.as_u16())) };
+    }
+    let _ = error;
+    None
+}
+
+impl Failure {
+    /// Standard DOMException identifiers, never diagnostic message text.
+    pub fn from_dom_name(name: &str) -> Option<Self> {
+        match name {
+            "QuotaExceededError" => Some(Self::StorageFull),
+            "NotAllowedError" | "SecurityError" => Some(Self::PermissionDenied),
+            "NoModificationAllowedError" => Some(Self::StorageBusy),
+            "NotFoundError" => Some(Self::NotFound),
+            "TimeoutError" => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
 }

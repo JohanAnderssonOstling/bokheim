@@ -17,7 +17,7 @@ use crate::shell::page::ReaderSurface;
 use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent};
 use crate::{DecreaseColumnWidth, DecreaseFont, IncreaseColumnWidth, IncreaseFont, NextLine, NextPage, NextSection, PreviousLine, PreviousPage, PreviousSection, ToggleFullscreen};
 use gpui::prelude::*;
-use gpui::{App, Context, Div, FocusHandle, Focusable, IntoElement, Pixels, Point, Render, ScrollDelta, Window};
+use gpui::{App, Context, Div, FocusHandle, Focusable, IntoElement, KeyDownEvent, Pixels, Point, Render, ScrollDelta, Window, px};
 use skrift_column_paginator::RendererCommand;
 use ui_components as components;
 
@@ -37,6 +37,9 @@ impl Focusable for ReaderView {
 
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.image_preview.is_none() {
+            self.image_backdrop = None;
+        }
         components::ensure_text_fonts(&self.book_title, cx);
         #[cfg(all(target_os = "android", feature = "native-tts", not(feature = "kobo")))]
         self.tts.sync_volume_buttons(ReaderSettings::preferences(cx).reading_ruler != html_view_gpui::ReadingRulerStyle::Off, cx);
@@ -92,8 +95,7 @@ impl Render for ReaderView {
         let ruler_lines = preferences.reading_ruler_lines;
         let (split_sidebar_width, horizontal_margin, available_width) = Self::horizontal_layout(window, cx, sidebar_visible);
         let vertical_margin = preferences.synchronized.vertical_margin_px().min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
-        let max_columns = self.max_columns_for_gap(f64::from(available_width), cx);
-        let fitted_column_width = self.fitted_column_width(f64::from(available_width), cx);
+        let (max_columns, fitted_column_width) = Self::column_layout(f64::from(available_width), self.desired_column_count, cx);
         let column_gap = f64::from(preferences.synchronized.min_column_gap_px()) / preferences.synchronized.zoom().max(0.1);
         if let LoadState::Ready(renderer) = &self.load_state {
             renderer.update(cx, |view, cx| {
@@ -101,7 +103,7 @@ impl Render for ReaderView {
                 view.set_reading_ruler(ruler_style, ruler_lines, cx);
             });
             let plan = (renderer.entity_id(), f64::from(available_width), fitted_column_width, max_columns, column_gap);
-            if self.last_column_viewport_plan != Some(plan) {
+            if self.image_preview.is_none() && self.last_column_viewport_plan != Some(plan) {
                 renderer.update(cx, |renderer, cx| {
                     renderer.queue_appearance(RendererCommand::SetColumnViewportPlan { available_width: plan.1, column_width: plan.2, column_count: plan.3, column_gap: plan.4 }, cx);
                 });
@@ -113,10 +115,20 @@ impl Render for ReaderView {
         let turn_frame = self.page_turn.as_mut().and_then(|turn| turn.frame(page_size, page_ready, window, cx));
         if turn_frame.is_none() {
             self.page_turn = None;
+            if let Some(forward) = self.pending_wheel_turn.take() {
+                let reader = cx.weak_entity();
+                window.defer(cx, move |window, cx| {
+                    let _ = reader.update(cx, |reader, cx| reader.advance_from_gesture(forward, true, window, cx));
+                });
+            }
         }
         let drag_offset = turn_frame.as_ref().map_or_else(|| self.swipe_preview.offset(window, cx), |frame| frame.incoming);
-        let document =
-            swipe_document(self.render_document(entity.clone(), horizontal_margin, vertical_margin, mobile, cx), drag_offset).bg(theme.page_bg).when(turn_frame.as_ref().is_some_and(|frame| !frame.ready), |document| document.invisible());
+        let content = if let Some(backdrop) = &self.image_backdrop {
+            components::reader_content().px(px(horizontal_margin)).py(px(vertical_margin)).overflow_hidden().child(backdrop.clone()).into_any_element()
+        } else {
+            self.render_document(entity.clone(), horizontal_margin, vertical_margin, mobile, cx)
+        };
+        let document = swipe_document(content, drag_offset).bg(theme.page_bg).when(turn_frame.as_ref().is_some_and(|frame| !frame.ready), |document| document.invisible());
 
         let mut document_body = components::reader_document_body().id("epub-reader-document-surface");
         if let Some(frame) = &turn_frame
@@ -146,7 +158,7 @@ impl Render for ReaderView {
                 .size_full(),
             )
             .on_scroll_wheel(cx.listener(Self::handle_mouse_wheel));
-        document_body = document_body.children(self.render_selection_actions(window, cx));
+        document_body = document_body.children(self.render_selection_handles(window, cx));
         document_body = document_body.children(self.dictionary.clone());
         if let Some(annotation) = self.render_annotation_popup(&entity, sidebar_visible, window, cx) {
             document_body = document_body.child(annotation);
@@ -196,6 +208,35 @@ impl Render for ReaderView {
         };
         let page = crate::shell::page::reader_surface(self, surface, theme, window, cx)
             .id("epub-reader-page")
+            .capture_key_down(cx.listener(|reader, event: &KeyDownEvent, window, cx| {
+                if reader.image_preview.is_none() {
+                    return;
+                }
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "c" && (modifiers.control || modifiers.platform) && !modifiers.alt && !modifiers.shift {
+                    reader.copy_preview_image(cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                } else if (modifiers.control || modifiers.platform) && !modifiers.alt && matches!(event.keystroke.key.as_str(), "+" | "=" | "-" | "0") {
+                    reader.image_canvas.update(cx, |canvas, cx| {
+                        match event.keystroke.key.as_str() {
+                            "+" | "=" => canvas.zoom_by(1.2),
+                            "-" => canvas.zoom_by(1.0 / 1.2),
+                            "0" => canvas.camera = Default::default(),
+                            _ => unreachable!(),
+                        }
+                        cx.notify();
+                    });
+                    window.prevent_default();
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "escape" {
+                    reader.image_preview = None;
+                    reader.focus_document(window, cx);
+                    cx.notify();
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
             // Reading is pointer-first: merely returning to this window should
             // make its page keys available again. Activate at the platform
             // level as well as restoring the document's GPUI focus, so this
@@ -300,8 +341,9 @@ impl ReaderView {
     /// Vertical scrolling advances the ruler when enabled. Horizontal gestures
     /// and scrolling with the ruler disabled turn whole pages.
     ///
-    /// Android touch swipes commit on their end event. Physical wheel bursts
-    /// use a quiet period; touchpads advance once per gesture after sufficient movement.
+    /// Android touch swipes commit on their end event. Physical wheel events
+    /// turn immediately or queue behind the active animation; touchpads advance
+    /// after sufficient movement.
     /// Scrolling down goes forward, the same direction as vertical touch swipes.
     fn handle_mouse_wheel(&mut self, event: &gpui::ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.touch_selection.active {
@@ -310,8 +352,6 @@ impl ReaderView {
         }
         if let ScrollDelta::Pages(delta) = event.delta {
             let direction = if delta.y != 0.0 { delta.y } else { delta.x };
-            self.wheel_delta = 0.0;
-            self.wheel_debounce.take();
             self.touch_swipe = None;
             self.touch_swipe_from_edge = false;
             if direction == 0.0 {
@@ -336,7 +376,7 @@ impl ReaderView {
             }
         };
 
-        if cfg!(target_os = "android") || window.is_page_scroll_swipe() || self.touch_swipe.is_some() {
+        if window.is_touch_scroll() || self.touch_swipe.is_some() {
             let travel = match event.delta {
                 ScrollDelta::Pixels(delta) => gpui::point(f32::from(delta.x), f32::from(delta.y)),
                 ScrollDelta::Lines(delta) | ScrollDelta::Pages(delta) => gpui::point(delta.x, delta.y),
@@ -345,7 +385,6 @@ impl ReaderView {
             match event.touch_phase {
                 gpui::TouchPhase::Started => {
                     self.page_turn = None;
-                    self.wheel_debounce.take();
                     self.touch_swipe = Some(travel);
                     self.touch_swipe_from_edge = components::in_bottom_gesture_edge(event.position, window);
                     if !self.touch_swipe_from_edge && (!self.reading_ruler_enabled(cx) || travel.x.abs() > travel.y.abs()) {
@@ -372,6 +411,7 @@ impl ReaderView {
                 }
                 gpui::TouchPhase::Ended if self.touch_swipe.is_some() => {
                     let Some(swipe) = self.touch_swipe.take() else { return };
+                    let swipe = gpui::point(swipe.x + travel.x, swipe.y + travel.y);
                     // A swipe from the bottom edge is the system's.
                     let from_edge = std::mem::take(&mut self.touch_swipe_from_edge);
                     match components::swipe_turns_forward(swipe, window).filter(|_| !from_edge) {
@@ -397,8 +437,6 @@ impl ReaderView {
         }
 
         if matches!(event.delta, ScrollDelta::Pixels(_)) || self.touchpad.is_active() || matches!(event.delta, ScrollDelta::Lines(delta) if delta.x.abs() > delta.y.abs()) {
-            self.wheel_delta = 0.0;
-            self.wheel_debounce.take();
             if let Some(travel) = self.touchpad.update(event) {
                 let forward = if travel.y != 0.0 { travel.y < 0.0 } else { travel.x < 0.0 };
                 self.advance_from_gesture(forward, travel.y != 0.0, window, cx);
@@ -410,14 +448,12 @@ impl ReaderView {
         if !delta.is_finite() || delta == 0.0 {
             return;
         }
-        self.wheel_delta += delta;
-        shell_input::debounce_wheel(&mut self.wheel_debounce, window, cx, |reader, window, cx| {
-            reader.wheel_debounce.take();
-            let delta = std::mem::take(&mut reader.wheel_delta);
-            if delta != 0.0 {
-                reader.advance_from_gesture(delta < 0.0, true, window, cx);
-            }
-        });
+        if self.page_turn.is_some() && !self.reading_ruler_enabled(cx) {
+            // Coalesce wheel events into one turn after the current animation.
+            self.pending_wheel_turn = Some(delta < 0.0);
+        } else {
+            self.advance_from_gesture(delta < 0.0, true, window, cx);
+        }
         cx.stop_propagation();
     }
 }
@@ -437,8 +473,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
     bind_shortcut(cx, Reader, "reader.fullscreen", text!(reader::toggle_fullscreen), &["f11"], ToggleFullscreen, "Reader");
     #[cfg(target_os = "macos")]
     bind_shortcut(cx, Reader, "reader.fullscreen", text!(reader::toggle_fullscreen), &["ctrl-cmd-f"], ToggleFullscreen, "Reader");
-    bind_shortcut(cx, Reader, "reader.font_increase", text!(reader::increase_book_font_size), &["alt-="], IncreaseFont, DOCUMENT_CONTEXT);
-    bind_shortcut(cx, Reader, "reader.font_decrease", text!(reader::decrease_book_font_size), &["alt--"], DecreaseFont, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.font_decrease", text!(reader::decrease_book_font_size), &["secondary--"], DecreaseFont, DOCUMENT_CONTEXT);
+    bind_shortcut(cx, Reader, "reader.font_increase", text!(reader::increase_book_font_size), &["secondary-+", "secondary-=", "secondary-shift-="], IncreaseFont, DOCUMENT_CONTEXT);
 }
 
 #[cfg(test)]

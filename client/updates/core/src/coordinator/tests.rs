@@ -6,10 +6,10 @@ use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 #[derive(Clone, Default)]
 struct Memory(Rc<RefCell<Record>>);
 impl Store for Memory {
-    fn load(&self) -> Result<Record, String> {
+    fn load(&self) -> Result<Record, UpdateError> {
         Ok(self.0.borrow().clone())
     }
-    fn save(&mut self, expected: u64, next: &Record) -> Result<(), String> {
+    fn save(&mut self, expected: u64, next: &Record) -> Result<(), UpdateError> {
         if self.0.borrow().revision != expected {
             return Err("conflict".into());
         }

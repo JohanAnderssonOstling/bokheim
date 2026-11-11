@@ -56,7 +56,7 @@ impl PaginatorDragPreview {
                         .top(bounds.top() - self.bounds.top())
                         .w(bounds.size.width)
                         .h(bounds.size.height)
-                        .when(shadow, |cell| cell.bg(theme.page_bg).shadow(components::section_card_shadow(theme)))
+                        .when(shadow, |cell| cell.shadow(components::section_card_shadow(theme)))
                         .child(content)
                 })
                 .collect::<Vec<_>>(),

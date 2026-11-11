@@ -3,7 +3,7 @@ use ui_text::text;
 
 use super::*;
 use gpui::{Anchor, Entity, FocusHandle, Focusable, Render, Subscription, WeakEntity, Window, px};
-use gpui_component::{Selectable, WindowExt, popover::Popover};
+use gpui_component::{Disableable, Selectable, WindowExt, popover::Popover};
 use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +69,7 @@ impl Snapshot {
     }
 
     fn new(state: &Narration) -> Self {
-        let mut device = state.matching_voices().into_iter().map(|voice| Item { choice: Choice::Device(voice.id), name: voice.name, language: voice.language, detail: None }).collect::<Vec<_>>();
+        let mut device = state.matching_voices().into_iter().map(|voice| Item { choice: Choice::Device(voice.id), name: voice.name, language: voice.language, detail: voice.engine }).collect::<Vec<_>>();
         device.sort_by_cached_key(Item::sort_key);
         let mut bundled = Vec::new();
         #[cfg(not(target_arch = "wasm32"))]
@@ -98,9 +98,10 @@ struct Picker<C: TtsReader> {
     focus: FocusHandle,
     _observe: Subscription,
     close: Close,
+    show_close: bool,
 }
 impl<C: TtsReader> Picker<C> {
-    fn new(owner: &Entity<C>, snapshot: Snapshot, close: Close, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(owner: &Entity<C>, snapshot: Snapshot, close: Close, show_close: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let device = matches!(snapshot.selected, Choice::Device(_));
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -111,7 +112,7 @@ impl<C: TtsReader> Picker<C> {
                 cx.notify();
             }
         });
-        Self { owner: owner.downgrade(), snapshot, device, focus, _observe: observe, close }
+        Self { owner: owner.downgrade(), snapshot, device, focus, _observe: observe, close, show_close }
     }
     fn select(&mut self, item: &Item, cx: &mut Context<Self>) {
         let saved = crate::settings::ReaderSettings::preferences(cx).narration_voices.clone();
@@ -119,6 +120,8 @@ impl<C: TtsReader> Picker<C> {
             let state = reader.narration_mut();
             let was_active = state.is_active();
             state.voice_preferences.extend(saved);
+            #[cfg(target_os = "android")]
+            state.normalize_voice_preferences();
             let snapshot = Snapshot::new(state);
             if !snapshot.toggle(item, state) {
                 return;
@@ -176,16 +179,20 @@ impl<C: TtsReader> Render for Picker<C> {
                         cx.notify();
                     })),
             )
-            .child(components::outlined_icon_button("tts-voice-picker-close", text!(reader::close_voice_choices), IconName::Close).debug_selector(|| "tts-voice-picker-close".into()).on_click(cx.listener(|picker, _, window, cx| {
-                (picker.close)(window, cx);
-            })));
+            .when(self.show_close, |tabs| {
+                tabs.child(components::outlined_icon_button("tts-voice-picker-close", text!(reader::close_voice_choices), IconName::Close).debug_selector(|| "tts-voice-picker-close".into()).on_click(cx.listener(|picker, _, window, cx| {
+                    (picker.close)(window, cx);
+                })))
+            });
         let choices = if self.device { &self.snapshot.device } else { &self.snapshot.bundled };
+        let selected_count = self.snapshot.device.iter().chain(&self.snapshot.bundled).filter(|item| self.snapshot.is_selected(item)).count();
         let rows = choices
             .iter()
             .enumerate()
             .map(|(index, item)| {
                 let choice = item.clone();
                 let checked = self.snapshot.is_selected(item);
+                let required = checked && selected_count == 1;
                 components::row(0.0).w_full().child(
                     components::base_button(("tts-voice-choice", index))
                         .debug_selector(move || format!("tts-voice-choice-{index}"))
@@ -195,7 +202,11 @@ impl<C: TtsReader> Render for Picker<C> {
                         .min_w_0()
                         .h_auto()
                         .py(px(10.0))
-                        .tooltip(if checked { format!(text!(reader::unload), item.name) } else { item.name.clone() })
+                        .tooltip(if checked && !required {
+                            format!(text!(reader::deselect_voice), item.name)
+                        } else {
+                            item.name.clone()
+                        })
                         .child(
                             components::column(0.0)
                                 .items_start()
@@ -241,23 +252,36 @@ impl<C: TtsReader> Render for Picker<C> {
             }))
             .child(tabs)
             .child(div().id("tts-voice-list").flex_1().min_h_0().overflow_y_scroll().children(message.map(|text| components::caption_line(text, theme).p(px(12.0)))).children(rows))
-            .child(components::base_button("tts-refresh-voices").ghost().label(text!(reader::refresh_local_voices)).on_click(cx.listener(|picker, _, _, cx| {
-                let _ = picker.owner.update(cx, |reader, cx| {
-                    reader.narration_mut().reload_voices(cx);
-                    cx.notify();
-                });
-            })))
+            .when(self.device, |view| {
+                view.child(components::base_button("tts-refresh-voices").ghost().label(text!(reader::refresh_local_voices)).disabled(self.snapshot.loading).on_click(cx.listener(|picker, _, _, cx| {
+                    let _ = picker.owner.update(cx, |reader, cx| {
+                        reader.narration_mut().reload_voices(cx);
+                        cx.notify();
+                    });
+                })))
+            })
     }
 }
 
 pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Context<C>) -> AnyElement {
     let snapshot = Snapshot::new(state);
     let label = if state.voice == NarrationVoice::Device {
-        state.device_voices.iter().find(|voice| Some(&voice.id) == state.device_voice.as_ref()).map_or(text!(reader::device_voice), |voice| voice.name.as_str())
+        state.device_voices.iter().find(|voice| Some(&voice.id) == state.device_voice.as_ref()).map_or_else(
+            || text!(reader::device_voice).to_owned(),
+            |voice| {
+                if let Some(engine) = &voice.engine
+                    && state.device_voices.iter().any(|other| other.name == voice.name && other.engine != voice.engine)
+                {
+                    format!("{} · {engine}", voice.name)
+                } else {
+                    voice.name.clone()
+                }
+            },
+        )
     } else if state.voice == NarrationVoice::George {
-        text!(reader::george)
+        text!(reader::george).to_owned()
     } else {
-        text!(reader::alba)
+        text!(reader::alba).to_owned()
     };
     let trigger = if compact {
         components::outlined_icon_button("tts-voice", format!(text!(reader::narration_voice), label = label), Icon::new(IconName::User).size(px(20.0))).p_0().size(px(32.0))
@@ -276,7 +300,7 @@ pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Co
                     let Some(owner) = owner.upgrade() else {
                         return sheet;
                     };
-                    let picker = window.use_keyed_state(("tts-voice-sheet", owner.entity_id()), cx, |window, cx| Picker::new(&owner, snapshot.clone(), Rc::new(|window, cx| window.close_sheet(cx)), window, cx));
+                    let picker = window.use_keyed_state(("tts-voice-sheet", owner.entity_id()), cx, |window, cx| Picker::new(&owner, snapshot.clone(), Rc::new(|window, cx| window.close_sheet(cx)), false, window, cx));
                     sheet.title(text!(reader::narration_voice_label)).size(px(420.0)).resizable(false).p_0().child(picker)
                 });
             })
@@ -293,7 +317,7 @@ pub(super) fn button<C: TtsReader>(state: &Narration, compact: bool, cx: &mut Co
                 let close: Close = Rc::new(move |window, cx| {
                     let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
                 });
-                let picker = window.use_keyed_state(("tts-voice-popup", owner.entity_id()), cx, |window, cx| Picker::new(&owner, snapshot.clone(), close.clone(), window, cx));
+                let picker = window.use_keyed_state(("tts-voice-popup", owner.entity_id()), cx, |window, cx| Picker::new(&owner, snapshot.clone(), close.clone(), true, window, cx));
                 picker.update(cx, |picker, cx| {
                     picker.close = close;
                     if picker.snapshot != snapshot {
@@ -316,9 +340,9 @@ mod tests {
     #[test]
     fn choices_match_declared_book_languages_and_show_all_when_unspecified() {
         let voices = vec![
-            DeviceVoice { id: "uk".into(), name: "British English".into(), language: "en-GB".into() },
-            DeviceVoice { id: "us".into(), name: "American English".into(), language: "en-US".into() },
-            DeviceVoice { id: "sv".into(), name: "Swedish".into(), language: "sv-SE".into() },
+            DeviceVoice { id: "uk".into(), name: "British English".into(), language: "en-GB".into(), engine: None },
+            DeviceVoice { id: "us".into(), name: "American English".into(), language: "en-US".into(), engine: None },
+            DeviceVoice { id: "sv".into(), name: "Swedish".into(), language: "sv-SE".into(), engine: None },
         ];
         for (languages, expected) in [
             (vec!["en"], vec!["us", "uk"]),
@@ -351,11 +375,11 @@ mod tests {
     #[test]
     fn voice_order_is_grouped_by_language_then_name_and_independent_of_inventory_order() {
         let mut voices = vec![
-            DeviceVoice { id: "sv".into(), name: "Alice".into(), language: "sv-SE".into() },
-            DeviceVoice { id: "z".into(), name: "Zoe".into(), language: "en-GB".into() },
-            DeviceVoice { id: "b".into(), name: "bob".into(), language: "en-US".into() },
-            DeviceVoice { id: "a2".into(), name: "Alice".into(), language: "eng".into() },
-            DeviceVoice { id: "a1".into(), name: "Alice".into(), language: "en-GB".into() },
+            DeviceVoice { id: "sv".into(), name: "Alice".into(), language: "sv-SE".into(), engine: None },
+            DeviceVoice { id: "z".into(), name: "Zoe".into(), language: "en-GB".into(), engine: None },
+            DeviceVoice { id: "b".into(), name: "bob".into(), language: "en-US".into(), engine: None },
+            DeviceVoice { id: "a2".into(), name: "Alice".into(), language: "eng".into(), engine: None },
+            DeviceVoice { id: "a1".into(), name: "Alice".into(), language: "en-GB".into(), engine: None },
         ];
         for _ in 0..2 {
             let mut state = Narration::for_languages(&[]);
@@ -377,7 +401,8 @@ mod tests {
     #[test]
     fn selected_voice_can_be_unloaded_but_the_last_matching_voice_is_kept() {
         let mut state = Narration::for_languages(&[]).with_voice(NarrationVoice::Device).with_device_voice(Some("english".into()));
-        state.apply_voices(Ok(vec![DeviceVoice { id: "english".into(), name: "English".into(), language: "en-GB".into() }, DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into() }]));
+        state
+            .apply_voices(Ok(vec![DeviceVoice { id: "english".into(), name: "English".into(), language: "en-GB".into(), engine: None }, DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into(), engine: None }]));
         state.current = Some(12);
         state.remember_voice("sv", NarrationVoice::Device, Some("swedish".into()));
         let snapshot = Snapshot::new(&state);
@@ -403,7 +428,8 @@ mod tests {
     #[test]
     fn a_saved_voice_for_another_book_language_does_not_allow_unloading_the_last_match() {
         let mut state = Narration::for_languages(&["en".into()]).with_voice(NarrationVoice::Device).with_device_voice(Some("english".into()));
-        state.apply_voices(Ok(vec![DeviceVoice { id: "english".into(), name: "English".into(), language: "en-GB".into() }, DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into() }]));
+        state
+            .apply_voices(Ok(vec![DeviceVoice { id: "english".into(), name: "English".into(), language: "en-GB".into(), engine: None }, DeviceVoice { id: "swedish".into(), name: "Swedish".into(), language: "sv-SE".into(), engine: None }]));
         state.remember_voice("sv", NarrationVoice::Device, Some("swedish".into()));
         let snapshot = Snapshot::new(&state);
         assert_eq!(snapshot.device.len(), 1);
@@ -457,9 +483,9 @@ mod tests {
                 state.rate = Some(1.75);
                 state.sleep = Some(SleepPlan::EndOfChapter(0));
                 state.apply_voices(Ok(vec![
-                    DeviceVoice { id: "first".into(), name: "An installed Swedish narrator with a long descriptive name".into(), language: "sv-SE".into() },
-                    DeviceVoice { id: "second".into(), name: "Second local voice".into(), language: "sv-SE".into() },
-                    DeviceVoice { id: "english".into(), name: "English voice".into(), language: "en-GB".into() },
+                    DeviceVoice { id: "first".into(), name: "An installed Swedish narrator with a long descriptive name".into(), language: "sv-SE".into(), engine: None },
+                    DeviceVoice { id: "second".into(), name: "Second local voice".into(), language: "sv-SE".into(), engine: None },
+                    DeviceVoice { id: "english".into(), name: "English voice".into(), language: "en-GB".into(), engine: None },
                 ]));
                 Reader { state, compact }
             });
@@ -529,8 +555,12 @@ mod tests {
         visual.simulate_click(embedded.center(), Modifiers::default());
         visual.run_until_parked();
         assert!(visual.debug_bounds("tts-add-voices").is_none());
-        let close = visual.debug_bounds("tts-voice-picker-close").unwrap();
-        visual.simulate_click(close.center(), Modifiers::default());
+        if compact {
+            visual.simulate_keystrokes("escape");
+        } else {
+            let close = visual.debug_bounds("tts-voice-picker-close").unwrap();
+            visual.simulate_click(close.center(), Modifiers::default());
+        }
         visual.run_until_parked();
         assert!(visual.debug_bounds("tts-device-tab").is_none());
     }

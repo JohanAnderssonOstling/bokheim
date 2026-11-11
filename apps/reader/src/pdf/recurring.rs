@@ -19,16 +19,14 @@ pub(super) struct Occurrence {
 
 pub(super) fn matched_page_occurrences<'a>(matches: impl Iterator<Item = (&'a Annotation, TextPatternMatch)>, current_book: BookId, page: usize, characters: &[(char, Option<NormalizedRect>)], chapter: impl Fn(usize) -> usize) -> Vec<Occurrence> {
     let mut result = Vec::new();
-    for (annotation, found) in matches {
+    let matches = matches.filter(|(_, found)| characters[found.range.clone()].iter().all(|(_, bounds)| bounds.is_some()));
+    for (annotation, found) in crate::shell::recurring::distinct_matches(matches, |found| found.range.clone()) {
         let origin_page = annotation.anchor.pdf_anchor().map(|anchor| anchor.page_index as usize);
         if !crate::shell::recurring::applies_at(annotation, current_book, origin_page.map(&chapter), Some(chapter(page)), origin_page == Some(page)) {
             continue;
         }
         let start = found.range.start;
         let matched = &characters[found.range];
-        if matched.iter().any(|(_, bounds)| bounds.is_none()) {
-            continue;
-        }
         let mut rects: Vec<NormalizedRect> = Vec::new();
         for bounds in matched.iter().filter(|(character, _)| !character.is_whitespace()).filter_map(|(_, bounds)| *bounds) {
             if let Some(last) = rects.last_mut().filter(|last| {

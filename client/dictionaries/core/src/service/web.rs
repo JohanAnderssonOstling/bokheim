@@ -17,7 +17,7 @@ impl Notifications {
     pub fn new(root: &Path, store: Arc<DictionaryStore>) -> Result<Self> {
         // This callback only signals observers; it does not edit catalog state.
         let changed = Closure::own_assert_unwind_safe(move || store.notify_changed());
-        let channel = observe(&root.to_string_lossy(), changed.as_ref().unchecked_ref()).map_err(|error| format!("Dictionary notifications: {error:?}"))?;
+        let channel = observe(&root.to_string_lossy(), changed.as_ref().unchecked_ref()).map_err(crate::OperationError::from)?;
         Ok(Self { channel, _changed: changed })
     }
     pub fn publish(&self) {

@@ -8,6 +8,6 @@ pub mod filesystem;
 pub mod socket;
 
 /// Native databases do not require browser VFS capacity reservations.
-pub async fn reserve_database_capacity(_additional: usize) -> Result<(), String> {
+pub async fn reserve_database_capacity(_additional: usize) -> std::io::Result<()> {
     Ok(())
 }

@@ -6,20 +6,13 @@ use app_preferences::{
     FIRST_LINE_INDENT_MAX_EM, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, PARAGRAPH_SPACING_MAX_EM, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFirstLineIndent, ReaderFontFamily,
     ReaderHyphenation, ReaderTextAlignment, WORD_SPACING_MAX_PERCENT, WORD_SPACING_MIN_PERCENT,
 };
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use html_view_gpui::ReadingRulerStyle;
-use skrift_column_paginator::RendererCommand;
 
 use crate::epub::ReaderView;
 use crate::invalidation::Component;
 use crate::settings::{CjkFontChoice, ReaderFontRole, ReaderPreferences, ReaderSettings, SidebarTab};
 use crate::shell::chrome;
-
-/// The layout engine's fallback `ch` metric is half an em. Keeping this
-/// conversion here makes the preference typographic rather than tied to a
-/// particular screen's pixels, while the layout itself continues to receive
-/// its required pixel width.
-const CH_ADVANCE_EM: f64 = 0.5;
 
 /// Keeps glyph ink and logical-to-framebuffer rounding inside the Kobo panel.
 /// Include this guard in both the column plan and the document's padding.
@@ -31,29 +24,21 @@ fn horizontal_insets(document_width: f32, requested_margin: f32, edge_inset: f32
     (inset, (document_width - inset * 2.0).max(1.0))
 }
 
-fn line_width_range_px(preferences: &ReaderPreferences) -> (f64, f64) {
-    let ch = f64::from(preferences.synchronized.font_size_px()) * CH_ADVANCE_EM;
-    let minimum = (preferences.synchronized.min_line_width_ch() * ch).clamp(LINE_WIDTH_MIN, LINE_WIDTH_MAX);
-    let maximum = (preferences.synchronized.max_line_width_ch() * ch).clamp(minimum, LINE_WIDTH_MAX);
-    (minimum, maximum)
-}
-
-/// The renderer puts unused width between columns after applying the explicit
-/// outer margin. A single column has no gap to constrain.
+/// The renderer shares extra width between columns and both outer edges after
+/// applying the explicit margins and minimum gaps. A single column has no gap to constrain.
 fn column_count_for_gap(viewport_width: f64, column_width: f64, minimum_gap: f64, desired: u8) -> u8 {
     let count = ((viewport_width + minimum_gap) / (column_width + minimum_gap)).floor();
     (count.max(1.0) as u8).min(desired.max(1))
 }
 
-/// Use the integer width the renderer will actually keep. Reserve one layout
-/// pixel for split and framebuffer rounding so an exact fit cannot become one
-/// column when the final GPUI document area is fractionally narrower.
-fn fitted_columns_and_width(viewport_width: f64, minimum_gap: f64, desired: u8, minimum_width: f64, maximum_width: f64) -> (u8, f64) {
-    let count = column_count_for_gap(viewport_width, minimum_width, minimum_gap, desired);
-    let fit = ((viewport_width - f64::from(count.saturating_sub(1)) * minimum_gap) / f64::from(count) - 1.0).floor().max(1.0);
-    // The preferred minimum cannot make a column wider than its actual slot.
-    // Otherwise a narrow reader clips the ends of lines at the viewport edge.
-    (count, fit.min(maximum_width))
+/// Keep the requested width as columns are added or removed. Reserve one
+/// layout pixel for split and framebuffer rounding, shrinking only when the
+/// viewport cannot hold a single column at the requested width.
+fn fitted_columns_and_width(viewport_width: f64, minimum_gap: f64, desired: u8, column_width: f64) -> (u8, f64) {
+    let viewport_width = (viewport_width - 1.0).floor().max(1.0);
+    let width = column_width.round().min(viewport_width);
+    let count = column_count_for_gap(viewport_width, width, minimum_gap, desired);
+    (count, width)
 }
 
 impl ReaderView {
@@ -97,7 +82,7 @@ impl ReaderView {
 
     /// The same horizontal geometry is used when painting and when the user
     /// asks to fit columns, including the sidebar's actual clamped width.
-    pub(in crate::epub) fn horizontal_layout(window: &Window, cx: &Context<Self>, sidebar_visible: bool) -> (f32, f32, f32) {
+    pub(in crate::epub) fn horizontal_layout(window: &Window, cx: &App, sidebar_visible: bool) -> (f32, f32, f32) {
         let sidebar_width = chrome::sidebar_width(sidebar_visible, window, cx);
         // GPUI's client-side window frame reserves space on both sides of the
         // window before laying out the reader. viewport_size includes that
@@ -109,20 +94,12 @@ impl ReaderView {
         (sidebar_width, inset, available_width)
     }
 
-    pub(in crate::epub) fn fitted_column_width(&self, available_width: f64, cx: &Context<Self>) -> f64 {
+    pub(in crate::epub) fn column_layout(available_width: f64, desired_column_count: u8, cx: &App) -> (u8, f64) {
         let preferences = ReaderSettings::preferences(cx);
         let scale = preferences.synchronized.zoom().max(0.1);
         let viewport_width = available_width.max(1.0) / scale;
         let gap = f64::from(preferences.synchronized.min_column_gap_px()) / scale;
-        let (minimum, maximum) = line_width_range_px(preferences);
-        fitted_columns_and_width(viewport_width, gap, self.desired_column_count, minimum, maximum).1
-    }
-
-    pub(in crate::epub) fn max_columns_for_gap(&self, available_width: f64, cx: &Context<Self>) -> u8 {
-        let preferences = ReaderSettings::preferences(cx);
-        let scale = preferences.synchronized.zoom().max(0.1);
-        let (minimum, maximum) = line_width_range_px(preferences);
-        fitted_columns_and_width(available_width / scale, f64::from(preferences.synchronized.min_column_gap_px()) / scale, self.desired_column_count, minimum, maximum).0
+        fitted_columns_and_width(viewport_width, gap, desired_column_count, preferences.synchronized.max_line_width_px())
     }
 
     /// Shared preferences are reconciled by each renderer when it next paints.
@@ -229,38 +206,11 @@ impl ReaderView {
         self.apply_style_override(cx, |preferences| preferences.apply_preference(ReaderPreferencePatch::FontWeight(weight)));
     }
 
-    pub(in crate::epub) fn adjust_column_width(&self, delta: f64, window: &Window, cx: &mut Context<Self>) {
-        // Keep the existing keyboard shortcuts useful: they shift both ends
-        // of the typographic range by five characters.
-        self.apply_line_width_range(window, cx, |minimum, maximum| {
-            *minimum = (*minimum + delta.signum() * 5.0).clamp(20.0, 100.0);
-            *maximum = (*maximum + delta.signum() * 5.0).clamp(20.0, 100.0);
+    pub(in crate::epub) fn adjust_column_width(&self, delta: f64, cx: &mut Context<Self>) {
+        let width = (ReaderSettings::preferences(cx).synchronized.max_line_width_px() + delta).clamp(LINE_WIDTH_MIN, LINE_WIDTH_MAX);
+        self.apply_style_override(cx, |preferences| {
+            preferences.apply_preference(ReaderPreferencePatch::MaxLineWidthPx(width));
         });
-    }
-
-    pub(in crate::epub) fn set_line_width_range(&self, range: (f64, f64), window: &Window, cx: &mut Context<Self>) {
-        self.apply_line_width_range(window, cx, |minimum, maximum| {
-            *minimum = range.0.clamp(20.0, 100.0);
-            *maximum = range.1.clamp(*minimum, 100.0);
-        });
-    }
-
-    fn apply_line_width_range(&self, window: &Window, cx: &mut Context<Self>, change: impl FnOnce(&mut f64, &mut f64)) {
-        let current = ReaderSettings::preferences(cx).clone();
-        let mut minimum = current.synchronized.min_line_width_ch();
-        let mut maximum = current.synchronized.max_line_width_ch();
-        change(&mut minimum, &mut maximum);
-        if !ReaderSettings::update(cx, |preferences| {
-            preferences.apply_preference(ReaderPreferencePatch::MinLineWidthCh(minimum));
-            preferences.apply_preference(ReaderPreferencePatch::MaxLineWidthCh(maximum));
-        }) {
-            return;
-        }
-        let sidebar_visible = (self.chrome.is_visible() || self.search.query.is_some()) && self.active_sidebar_tab(window).is_some();
-        let (_, _, available_width) = Self::horizontal_layout(window, cx, sidebar_visible);
-        let width = self.fitted_column_width(f64::from(available_width), cx);
-        self.with_renderer(cx, |renderer, cx| renderer.queue_appearance(RendererCommand::SetColumnWidth(width), cx));
-        notify(cx, Component::ReaderShell, "line_width_range_changed");
     }
 
     pub(in crate::epub) fn set_horizontal_margin(&self, value: f32, cx: &mut Context<Self>) {
@@ -290,7 +240,7 @@ mod tests {
     use super::*;
     use gpui::{Entity, IntoElement, Render, TestAppContext, prelude::*, px, size};
     use html_view_gpui::HtmlView;
-    use skrift_column_paginator::{RendererInitialConfig, ResourceProvider};
+    use skrift_column_paginator::{RendererCommand, RendererInitialConfig, ResourceProvider};
     use std::{io, sync::Arc};
     use ui_components as components;
 
@@ -318,17 +268,14 @@ mod tests {
 
     #[test]
     fn line_length_and_gap_choose_columns_that_fit_kobo_orientations() {
-        let mut preferences = ReaderPreferences::default();
-        preferences.apply_preference(ReaderPreferencePatch::MinLineWidthCh(35.0));
-        preferences.apply_preference(ReaderPreferencePatch::MaxLineWidthCh(50.0));
-        let (minimum, maximum) = line_width_range_px(&preferences);
-        let portrait = fitted_columns_and_width(628.0, 32.0, u8::MAX, minimum, maximum);
-        let landscape = fitted_columns_and_width(836.0, 32.0, u8::MAX, minimum, maximum);
-        let wider_gap = fitted_columns_and_width(836.0, 64.0, u8::MAX, minimum, maximum);
-        assert_eq!(portrait, (1, 500.0));
-        assert_eq!(landscape, (2, 401.0));
-        assert_eq!(wider_gap, (2, 385.0));
-        assert_eq!(fitted_columns_and_width(836.0, 160.0, u8::MAX, minimum, maximum), (1, 500.0));
+        let width = 400.0;
+        let portrait = fitted_columns_and_width(628.0, 32.0, u8::MAX, width);
+        let landscape = fitted_columns_and_width(836.0, 32.0, u8::MAX, width);
+        let wider_gap = fitted_columns_and_width(836.0, 64.0, u8::MAX, width);
+        assert_eq!(portrait, (1, 400.0));
+        assert_eq!(landscape, (2, 400.0));
+        assert_eq!(wider_gap, (1, 400.0));
+        assert_eq!(fitted_columns_and_width(836.0, 160.0, u8::MAX, width), (1, 400.0));
     }
 
     impl Render for ReadingPage {
@@ -344,7 +291,7 @@ mod tests {
         // Previously the plan used 584px while the guarded view was only 580px.
         for (margin, edge, expected_width) in [(24.0, KOBO_READER_EDGE_INSET, 580.0), (0.0, KOBO_READER_EDGE_INSET, 628.0), (24.0, 0.0, 584.0)] {
             let (inset, available_width) = horizontal_insets(632.0, margin, edge);
-            let (columns, column_width) = fitted_columns_and_width(f64::from(available_width), 32.0, 1, 600.0, 1200.0);
+            let (columns, column_width) = fitted_columns_and_width(f64::from(available_width), 32.0, 1, 600.0);
             let (page, visual) = cx.add_window_view(|window, cx| {
                 let config = RendererInitialConfig { column_width, max_column_count: Some(columns), ..Default::default() };
                 let document = cx.new(|cx| HtmlView::from_provider(Arc::new(TextBook), vec!["chapter.html".into()], 0, None, config, window, cx).expect("fixture document must load"));

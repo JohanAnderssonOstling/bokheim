@@ -15,32 +15,53 @@ use gpui_component::tree::TreeState;
 use html_view_gpui::{DocumentTap, HtmlView};
 use library_backend::LibraryClient;
 use library_model::BookLocator;
-use skrift_column_paginator::{RendererCommand, RendererEvent, RendererInitialConfig};
+use skrift_column_paginator::{RendererCommand, RendererEvent, RendererInitialConfig, RendererPreparation};
 
 use crate::epub::toc::TocState;
 use crate::epub::{LoadState, ProgressState, ReaderView, SearchState};
+use crate::book::NativeBook;
 use crate::invalidation::{Component, notify};
 use crate::opening_error::opening_error;
 use crate::settings::{ReaderSettings, library_interaction_palette, library_link_foreground, library_paint_palette, library_theme_adaptation};
+use crate::shell::chrome::ChromeState;
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::ReadingPositionWriter;
 use crate::shell::search::SearchBarTarget;
 use crate::shell::settings_navigation::SettingsNavigation;
 use crate::shell::state_panel::SidebarState;
-use app_preferences::LINE_WIDTH_MAX;
+#[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
+use crate::shell::tts::Narration;
 use client_protocol::{BackendError, Failure};
 
-pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
-    let preferences = ReaderSettings::preferences(cx).clone();
-    // A phone owns its physical reading width. Start with one column and let
-    // the reader derive its width from the live viewport rather than carrying
-    // a desktop line-width preference into a narrow screen.
-    let column_width = if cfg!(any(feature = "kobo", target_os = "android")) { LINE_WIDTH_MAX } else { preferences.synchronized.max_line_width_px() };
+#[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
+fn document_narration(title: &str, book: &NativeBook, cx: &mut Context<ReaderView>) -> Narration {
+    let preferences = ReaderSettings::preferences(cx);
+    Narration::for_languages(&book.languages())
+        .with_title(title)
+        .with_rate(preferences.synchronized.audiobook_speed())
+        .with_pauses(preferences.narration_pauses)
+        .with_voice(preferences.narration_voice)
+        .with_device_voice(preferences.narration_device_voice.clone())
+        .with_voice_preferences(preferences)
+        .with_availability(cx)
+}
+
+pub(crate) fn renderer_initial_config(window: &Window, cx: &App) -> RendererInitialConfig {
+    let chrome = ChromeState::from_preferences(Component::ReaderShell, ui_components::uses_mobile_reader_controls(window), cx);
+    renderer_config(window, chrome.is_visible(), u8::MAX, cx)
+}
+
+fn renderer_config(window: &Window, sidebar_visible: bool, desired_column_count: u8, cx: &App) -> RendererInitialConfig {
+    let preferences = ReaderSettings::preferences(cx);
+    let (_, _, available_width) = ReaderView::horizontal_layout(window, cx, sidebar_visible);
+    // Prepare at the width the first render will use, so installing the
+    // document does not immediately lay it out a second time.
+    let (column_count, column_width) = ReaderView::column_layout(f64::from(available_width), desired_column_count, cx);
     RendererInitialConfig {
         font_size: preferences.synchronized.font_size_px(),
         column_width,
         scale: preferences.synchronized.zoom(),
-        max_column_count: Some(if cfg!(any(feature = "kobo", target_os = "android")) { 1 } else { preferences.synchronized.max_column_count() }),
+        max_column_count: Some(column_count),
         style_overrides: preferences.style_overrides(Some(library_theme_adaptation(cx)), library_link_foreground(cx)),
         paint_palette: library_paint_palette(cx),
         interaction_palette: library_interaction_palette(cx),
@@ -49,9 +70,16 @@ pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
 }
 
 impl ReaderView {
+    pub(crate) fn document_config(&self, window: &Window, cx: &App) -> RendererInitialConfig {
+        let sidebar_visible = self.chrome.is_visible() && self.active_sidebar_tab(window).is_some();
+        let mut config = renderer_config(window, sidebar_visible, self.desired_column_count, cx);
+        ReaderSettings::preferences(cx).apply_cjk_font(&mut config.style_overrides, self.cjk_font);
+        config
+    }
+
     pub(crate) fn new(
-        locator: BookLocator, title: String, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, cjk_font: Option<crate::cjk::CjkFont>, preparation: skrift_column_paginator::RendererPreparation, save_progress: bool,
-        close_reader: crate::CloseReader, #[cfg(feature = "kobo")] device_controls: Option<gpui::AnyView>, window: &mut Window, cx: &mut Context<Self>,
+        locator: BookLocator, title: String, library: Rc<LibraryClient>, book: Arc<NativeBook>, cjk_font: Option<crate::cjk::CjkFont>, preparation: RendererPreparation, save_progress: bool, close_reader: crate::CloseReader,
+        #[cfg(feature = "kobo")] device_controls: Option<gpui::AnyView>, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         // Every open book observes changes made in other reader windows and
         // changes received through preference synchronization.
@@ -95,25 +123,27 @@ impl ReaderView {
         });
         let focus = cx.focus_handle();
         let toc_tree = cx.new(|cx| TreeState::new(cx));
-        let toc_filter = cx.new(|cx| crate::shell::toc_filter::TocFilter::new(toc_tree.clone(), window, cx));
+        let reset_reader = cx.weak_entity();
+        let toc_filter = cx.new(|cx| crate::shell::toc_filter::TocFilter::new(toc_tree.clone(), window, cx).on_reset(Rc::new(move |_, _, cx| {
+            let _ = reset_reader.update(cx, |reader, cx| {
+                reader.reading_positions.reset_read_status();
+                reader.toc.read_status.reset();
+                cx.notify();
+            });
+        })));
         focus.focus(window, cx);
-        let reading_positions = ReadingPositionWriter::new(cx, locator.book_id(), library.clone()).with_saving_enabled(save_progress);
+        let reading_positions = ReadingPositionWriter::new(cx, locator.book_id(), library.clone()).with_saving_enabled(save_progress && !book.is_transient());
         reading_positions.watch(cx);
         let marks = MarkSession::new(cx, library.clone());
-        let bookmark_updates = marks.watch_bookmarks(cx, Self::update_bookmarks);
+        let bookmark_updates = if book.is_transient() { gpui::Task::ready(()) } else { marks.watch_bookmarks(cx, Self::update_bookmarks) };
 
         #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
-        let tts = crate::shell::tts::Narration::for_languages(&book.languages())
-            .with_title(title.clone())
-            .with_rate(ReaderSettings::preferences(cx).synchronized.audiobook_speed())
-            .with_pauses(ReaderSettings::preferences(cx).narration_pauses)
-            .with_voice(ReaderSettings::preferences(cx).narration_voice)
-            .with_device_voice(ReaderSettings::preferences(cx).narration_device_voice.clone())
-            .with_voice_preferences(ReaderSettings::preferences(cx))
-            .with_availability(cx);
+        let tts = document_narration(&title, &book, cx);
 
         let mut toc = TocState::default();
         toc.cfi = book.cfi.clone();
+        let image_canvas = cx.new(|_| ui_components::InfiniteCanvas::new(0.1, 16.0));
+        cx.observe(&image_canvas, |_, _, cx| cx.notify()).detach();
         let mut reader = Self {
             dictionary: None,
             #[cfg(feature = "kobo")]
@@ -135,13 +165,12 @@ impl ReaderView {
             annotation_tree: Default::default(),
             bookmark_tree: Default::default(),
             sidebar: SidebarState::from_preferences(cx),
-            chrome: crate::shell::chrome::ChromeState::from_preferences(Component::ReaderShell, ui_components::uses_mobile_reader_controls(window), cx),
-            wheel_delta: 0.0,
-            wheel_debounce: None,
+            chrome: ChromeState::from_preferences(Component::ReaderShell, ui_components::uses_mobile_reader_controls(window), cx),
             touchpad: ui_components::TouchpadNavigation::default(),
             touch_swipe: None,
             swipe_preview: ui_components::SwipePreview::default(),
             page_turn: None,
+            pending_wheel_turn: None,
             page_size: None,
             touch_swipe_from_edge: false,
             search_input,
@@ -152,6 +181,7 @@ impl ReaderView {
             cjk_font,
             reading_position: None,
             history: Default::default(),
+            document_history: None,
             #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
             tts,
             #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
@@ -174,6 +204,9 @@ impl ReaderView {
             annotation_popup_anchor: None,
             footnote: None,
             image_preview: None,
+            image_backdrop: None,
+            save_opened_image: false,
+            image_canvas,
             context_sheet: None,
             focus,
             sidebar_focus: cx.focus_handle().tab_index(0).tab_stop(true),
@@ -187,18 +220,71 @@ impl ReaderView {
             _annotation_filter_subscription: annotation_filter_subscription,
         };
         #[cfg(all(feature = "native-tts", target_os = "android"))]
-        crate::shell::tts::load_media_metadata(reader.library.clone(), reader.locator.clone(), cx);
+        if !reader.book.is_transient() {
+            crate::shell::tts::load_media_metadata(reader.library.clone(), reader.locator.clone(), cx);
+        }
         reader.refresh_bookmark_rows(cx);
         reader.finish_load(preparation, window, cx);
         reader
     }
 
-    fn finish_load(&mut self, preparation: skrift_column_paginator::RendererPreparation, window: &mut Window, cx: &mut Context<Self>) {
+    fn clear_navigation_overlays(&mut self) {
+        self.context_sheet = None;
+        self.page_turn = None;
+        self.pending_wheel_turn = None;
+        self.swipe_preview.clear();
+        self.footnote = None;
+        self.image_preview = None;
+    }
+
+    /// Standalone articles share the reader and native caches across navigation.
+    pub(crate) fn replace_document(&mut self, locator: BookLocator, title: String, book: Arc<NativeBook>, preparation: RendererPreparation, window: &mut Window, cx: &mut Context<Self>) -> Result<RendererPreparation, html::Error> {
+        if !self.book.is_transient() || !book.is_transient() {
+            return Err("document replacement requires a standalone reader".into());
+        }
+        let LoadState::Ready(renderer) = &self.load_state else { return Err("document reader unavailable".into()) };
+        let previous = renderer.update(cx, |view, cx| view.replace_document(preparation, cx))?;
+        #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
+        {
+            self.tts.close();
+            self.tts = document_narration(&title, &book, cx);
+            self.tts_fragments.clear();
+            self.tts_doc = 0;
+            self.tts_navigation_revision = 0;
+        }
+        self.locator = locator;
+        self.book_title = title.clone();
+        self.title = title;
+        self.book = book;
+        self.dictionary = None;
+        self.selection = None;
+        self.touch_selection = Default::default();
+        self.clear_navigation_overlays();
+        self.annotation_popup_anchor = None;
+        self.reading_position = None;
+        self.progress = ProgressState::default();
+        self.recurring = Default::default();
+        self.search.clear();
+        self.search_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        self.touchpad = Default::default();
+        self.touch_swipe = None;
+        self.touch_swipe_from_edge = false;
+        self.toc = TocState::default();
+        self.toc.cfi = self.book.cfi.clone();
+        self.toc_filter.update(cx, |filter, cx| filter.set_items(Vec::new(), cx));
+        self.install_document_progress_weights(cx);
+        self.load_database_toc(cx);
+        self.focus_document(window, cx);
+        cx.notify();
+        Ok(previous)
+    }
+
+    fn finish_load(&mut self, preparation: RendererPreparation, window: &mut Window, cx: &mut Context<Self>) {
         let renderer = match HtmlView::create_from_preparation(preparation, window, cx) {
             Ok(renderer) => renderer,
             Err(error) => {
                 log::error!("could not initialize EPUB renderer: {error}");
-                let failure = opening_error(BackendError::message(error), "renderer_initialize", Failure::BookRendererFailed);
+                let failure = opening_error(BackendError::operation(error), "renderer_initialize", Failure::BookRendererFailed);
                 let message = ui_components::user_facing_error(&failure, text!(reader::couldn_t_display_this_book_reopen_the_app_and_retry)).to_owned();
                 // The parent installs its failure subscription after this
                 // constructor returns, before deferred events are delivered.

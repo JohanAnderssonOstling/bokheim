@@ -19,6 +19,15 @@ for credential in database-url resend-api-key test-user-password account-token-k
     [[ -s /etc/bokheim/${credential} ]] || { echo "missing credential: ${credential}" >&2; exit 2; }
 done
 database_url=$(</etc/bokheim/database-url)
+migration_environment=(BOKHEIM_ASSETS_DIR=/var/lib/bokheim/assets)
+if [[ -f /srv/bokheim-updates/sync-catalog.env ]]; then
+    while IFS='=' read -r name value; do
+        case ${name} in
+            BOKHEIM_CATALOG_BOOKS_DIR|BOKHEIM_CATALOG_PINS_DIR)
+                migration_environment+=("${name}=${value}") ;;
+        esac
+    done </srv/bokheim-updates/sync-catalog.env
+fi
 [[ ${database_url} =~ ^postgresql://bokheim_app:[[:xdigit:]]{64}@127\.0\.0\.1/bokheim$ ]] || { echo "unexpected database credential" >&2; exit 2; }
 
 candidate=$(mktemp -d /var/tmp/bokheim-sync-candidate.XXXXXX)
@@ -71,7 +80,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Reject unreadable client records while the existing release is still serving.
-runuser -u bokheim -- env DATABASE_URL="${database_url}" "${candidate}/sync-server" check-upgrade
+runuser -u bokheim -- env DATABASE_URL="${database_url}" "${migration_environment[@]}" "${candidate}/sync-server" check-upgrade
 media_type=$(python3 - "${candidate}/protocol.json" "${candidate}/protocol-probe.bin" <<'PYTHON'
 import json,pathlib,sys
 p=json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -98,22 +107,21 @@ service_stopped=true
 systemctl stop bokheim-sync.service
 runuser -u postgres -- pg_dump --format=custom --dbname=bokheim >"${backup}/database.dump"
 pg_restore --list "${backup}/database.dump" >/dev/null
-migration_started=true
-runuser -u bokheim -- env DATABASE_URL="${database_url}" "${candidate}/sync-server" upgrade
-runuser -u bokheim -- env DATABASE_URL="${database_url}" "${candidate}/sync-server" verify-schema
-runuser -u bokheim -- env DATABASE_URL="${database_url}" "${candidate}/sync-server" check-upgrade
 install -o root -g root -m 0755 "${candidate}/sync-server" /usr/local/bin/sync-server
 install -o root -g root -m 0755 "${candidate}/library-cloud-upgrade" /usr/local/bin/library-cloud-upgrade
 install -o root -g root -m 0644 "${candidate}/bokheim-sync.service" /etc/systemd/system/bokheim-sync.service
 systemctl daemon-reload
 systemctl reset-failed bokheim-sync.service || true
+migration_started=true
 systemctl start bokheim-sync.service
 ready=false
-for _ in $(seq 1 30); do
+startup_deadline=$((SECONDS + 300))
+while (( SECONDS < startup_deadline )); do
     if curl --fail --silent --unix-socket /run/bokheim/sync.sock http://localhost/api/ready | grep -Fqx ok; then ready=true; break; fi
     sleep 1
 done
 [[ ${ready} == true ]] || { echo "candidate did not become ready" >&2; exit 1; }
+runuser -u bokheim -- env DATABASE_URL="${database_url}" /usr/local/bin/sync-server verify-schema
 # Caddy cannot enter the private runtime directory until these checks pass.
 [[ $(stat -c %a /run/bokheim) == 700 ]] || { echo "candidate runtime directory is not private" >&2; exit 1; }
 protocol_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 --unix-socket /run/bokheim/sync.sock -H "Content-Type: ${media_type}" -H "Accept: ${media_type}" --data-binary "@${candidate}/protocol-probe.bin" http://localhost/api/auth/login)

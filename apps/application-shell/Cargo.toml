@@ -10,6 +10,7 @@ mobile = ["browser-ui/mobile", "reader-ui/mobile"]
 packaged-pdfium = ["reader-ui/packaged-pdfium"]
 
 [dependencies]
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure", features = ["web"] }
 ui-text = { path = "../ui-text" }
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"

@@ -10,7 +10,10 @@ import android.speech.tts.Voice;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -146,28 +149,64 @@ final class DeviceSpeech {
         if (request.output != null) request.output.delete();
     }
 
+    private static boolean codedVoiceName(Voice voice) {
+        String name = voice.getName().replace('_', '-').toLowerCase(Locale.ROOT);
+        String language = voice.getLocale().getLanguage().toLowerCase(Locale.ROOT);
+        return name.isEmpty() || (!language.isEmpty()
+            && (name.equals(language) || name.startsWith(language + "-")));
+    }
+
     private static String list(Context context) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(18);
         Engine bootstrap = engine(context, "").get(15, TimeUnit.SECONDS);
         List<TextToSpeech.EngineInfo> installed = bootstrap.tts.getEngines();
         JSONArray catalogue = new JSONArray();
-        if (installed == null) return catalogue.toString();
+        if (installed == null) throw new IllegalStateException(UiText.ANDROID_LOCAL_VOICE_DISCOVERY_FAILED_TRY_AGAIN);
+        boolean discoveryFailed = false;
         for (TextToSpeech.EngineInfo info : installed) {
             long remaining = deadline - System.nanoTime();
-            if (remaining <= 0) break;
+            if (remaining <= 0) {
+                discoveryFailed = true;
+                break;
+            }
             try {
                 Engine engine = engine(context, info.name).get(Math.min(remaining, TimeUnit.SECONDS.toNanos(3)), TimeUnit.NANOSECONDS);
                 engine.used = android.os.SystemClock.uptimeMillis();
                 Set<Voice> voices = engine.tts.getVoices();
-                if (voices == null) continue;
-                List<Voice> sorted = new ArrayList<>(voices);
-                sorted.sort(Comparator.comparing(Voice::getName));
-                for (Voice voice : sorted) {
-                    if (!localInstalled(voice)) continue;
-                    catalogue.put(new JSONObject().put("id", new JSONArray().put(info.name).put(voice.getName()).toString())
-                        .put("name", voice.getName()).put("language", voice.getLocale().toLanguageTag()));
+                if (voices == null) {
+                    discoveryFailed = true;
+                    continue;
                 }
-            } catch (Exception unavailable) { /* Another installed engine can still provide local voices. */ }
+                List<Voice> sorted = new ArrayList<>(voices);
+                sorted.removeIf(voice -> !localInstalled(voice));
+                sorted.sort(Comparator.comparing(Voice::getName));
+                Map<Locale, Integer> counts = new HashMap<>(), ordinals = new HashMap<>();
+                for (Voice voice : sorted) counts.merge(voice.getLocale().stripExtensions(), 1, Integer::sum);
+                String provider = info.label == null || info.label.trim().isEmpty() ? info.name : info.label;
+                for (Voice voice : sorted) {
+                    Locale locale = voice.getLocale().stripExtensions();
+                    int ordinal = ordinals.merge(locale, 1, Integer::sum);
+                    String name = voice.getName();
+                    if (codedVoiceName(voice)) {
+                        // The app's copy is English; don't mix it with the device UI locale.
+                        name = locale.getDisplayName(Locale.ENGLISH);
+                        if (name.isEmpty()) name = UiText.READER_DEVICE_VOICE;
+                        if (counts.get(locale) > 1) {
+                            name = UiText.format(UiText.READER_DEVICE_VOICE_VARIANT,
+                                "language", name, "number", Integer.toString(ordinal));
+                        }
+                    }
+                    catalogue.put(new JSONObject().put("id", new JSONArray().put(info.name).put(voice.getName()).toString())
+                        .put("name", name).put("language", voice.getLocale().toLanguageTag()).put("engine", provider));
+                }
+            } catch (Exception unavailable) {
+                discoveryFailed = true;
+                android.util.Log.w("Bokheim", "Could not discover voices from " + info.name, unavailable);
+            }
+        }
+        // Keep usable results from other engines, but don't report failed discovery as no voices.
+        if (catalogue.length() == 0 && discoveryFailed) {
+            throw new IllegalStateException(UiText.ANDROID_LOCAL_VOICE_DISCOVERY_FAILED_TRY_AGAIN);
         }
         return catalogue.toString();
     }
@@ -201,7 +240,7 @@ final class DeviceSpeech {
                 options.putString(TextToSpeech.Engine.KEY_FEATURE_EMBEDDED_SYNTHESIS, "true");
                 // Never set the network-synthesis feature, even to a false string.
                 if (engine.tts.synthesizeToFile(text, options, request.output, Long.toString(id)) != TextToSpeech.SUCCESS) throw new IllegalStateException(UiText.ANDROID_THE_INSTALLED_LOCAL_VOICE_REJECTED_THE_READING_SAMPLE);
-            } catch (Exception failure) { finish(Long.toString(id), failure.getMessage()); }
+            } catch (Exception failure) { finish(Long.toString(id), FailureDetails.encode(failure)); }
         }));
     }
 
@@ -229,8 +268,7 @@ final class DeviceSpeech {
                 default: throw new IllegalArgumentException(UiText.ANDROID_UNKNOWN_LOCAL_SPEECH_COMMAND);
             }
         } catch (Exception error) {
-            String message = error.getMessage();
-            try { return new JSONObject().put("error", message == null ? UiText.ANDROID_LOCAL_VOICE_DISCOVERY_FAILED_TRY_AGAIN : message).toString(); }
+            try { return FailureDetails.put(new JSONObject(), "error", error).toString(); }
             catch (Exception ignored) { return "{\"error\":\"Local speech is unavailable.\"}"; }
         }
     }

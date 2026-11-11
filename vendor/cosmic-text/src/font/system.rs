@@ -327,6 +327,11 @@ impl FontSystem {
 
     /// Get a mutable reference to the database.
     pub fn db_mut(&mut self) -> &mut fontdb::Database {
+        // New faces can change both font selection and missing-glyph results.
+        #[cfg(feature = "shape-run-cache")]
+        {
+            self.shape_run_cache = crate::ShapeRunCache::default();
+        }
         self.font_matches_cache.clear();
         self.family_matches_cache.clear();
         self.font_weight_axes.clear();

@@ -190,6 +190,17 @@ impl Element for ScrollableMask {
                         return;
                     }
 
+                    let axis = if is_horizontal { Axis::Horizontal } else { Axis::Vertical };
+                    if let Some(owned) = scroll_handle.scroll_by_touch(axis, window, cx) {
+                        let delta = event.delta.pixel_delta_for_viewport(line_height, bounds.size);
+                        // Retain the mask's horizontal edge policy: a sideways
+                        // drag must not become vertical scrolling in a parent.
+                        if owned || (is_horizontal && delta.x.abs() > delta.y.abs()) {
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
+
                     let mut offset = scroll_handle.offset();
                     let mut delta = event.delta.pixel_delta_for_viewport(line_height, bounds.size);
 

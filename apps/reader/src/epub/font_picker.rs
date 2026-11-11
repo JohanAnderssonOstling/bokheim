@@ -18,6 +18,7 @@ pub(super) struct FontSelected {
 
 pub(super) struct FontPicker {
     input: Entity<InputState>,
+    panel_focus: FocusHandle,
     catalog: FontCatalog,
     catalog_task: Option<Task<()>>,
     scroll: UniformListScrollHandle,
@@ -58,7 +59,7 @@ impl FontPicker {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(common::search_fonts)));
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
-                if let Some(family) = this.catalog.filtered.first().and_then(|index| this.catalog.families.get(*index)).cloned() {
+                if let Some(family) = this.catalog.filtered.get(this.catalog.cursor).and_then(|index| this.catalog.families.get(*index)).cloned() {
                     this.choose(family, window, cx);
                 }
             } else if matches!(event, InputEvent::Change) {
@@ -71,6 +72,7 @@ impl FontPicker {
         components::observe_font_catalog(cx, |this: &mut Self, cx| this.load_catalog(cx)).detach();
         Self {
             input,
+            panel_focus: cx.focus_handle(),
             catalog: FontCatalog::default(),
             catalog_task: None,
             scroll: UniformListScrollHandle::new(),
@@ -217,8 +219,12 @@ impl FontPicker {
                         let index = this.catalog.filtered[row];
                         let family = this.catalog.families[index].clone();
                         components::font_picker_row(("system-font", index), family.clone(), selected == Some(family.as_str()), theme)
+                            .when(this.catalog.cursor == row && selected != Some(family.as_str()), |row| row.bg(theme.hover))
                             .debug_selector(move || format!("custom-font-row-{row}"))
-                            .on_click(cx.listener(move |this, _, window, cx| this.choose(family.clone(), window, cx)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.catalog.cursor = row;
+                                this.choose(family.clone(), window, cx);
+                            }))
                     })
                     .collect()
             }),
@@ -241,12 +247,11 @@ impl FontPicker {
         } else {
             list.into_any_element()
         };
-        components::font_picker_surface(window, theme)
+        let panel = components::font_picker_surface(window, theme)
             .id("reader-font-overlay")
             .debug_selector(|| "reader-font-overlay".into())
             .tab_group()
-            .key_context("ReaderFontPicker")
-            .track_focus(&self.input.read(cx).focus_handle(cx))
+            .capture_key_down(cx.listener(|this, event, _, cx| this.navigate_font_catalog(event, cx)))
             .when(self.catalog.loaded && selected.is_some_and(|family| !self.catalog.families.iter().any(|available| available == family)), |panel| {
                 panel.child(div().debug_selector(|| "reader-font-unavailable".into()).text_color(theme.text_muted).child(text!(common::saved_font_unavailable_on_this_device)))
             })
@@ -259,8 +264,8 @@ impl FontPicker {
                     .child(div().flex_1().min_w_0().child(Input::new(&self.input)))
                     .child(components::bottom_sheet_close_button("font-overlay-close", theme).on_click(cx.listener(|this, _, window, cx| this.back(window, cx)))),
             )
-            .child(body)
-            .into_any_element()
+            .child(body);
+        components::contain_modal_focus(panel, &self.panel_focus, "ReaderFontPicker ModalFocus", cx).into_any_element()
     }
 }
 

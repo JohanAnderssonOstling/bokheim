@@ -95,7 +95,7 @@ mod tests {
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).unwrap();
         let byte_hash = BookId::from(blake3::hash(&bytes));
-        let identity = BookId::for_local_content(&[9; 16], blake3::hash(b"separate book").into());
+        let identity = BookId::for_local_content(blake3::hash(b"separate book").into());
         let read = Arc::new(AtomicUsize::new(0));
         let reader = Counted { inner: Cursor::new(bytes), read: read.clone() };
         let inspected = crate::inspect_book_reader_with_hash(Path::new("Book.pdf"), BookFormat::Pdf, reader, Some(identity)).unwrap();

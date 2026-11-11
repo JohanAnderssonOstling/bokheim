@@ -39,7 +39,7 @@ impl OpeningRecovery {
         Some(format!(text!(reader::your_previous_progress_has_been_kept_reading_progress_won_t_be_saved), reason = reason))
     }
 
-    pub(crate) fn prepare_document(&mut self, provider: Arc<dyn ResourceProvider>, documents: &[String], nav_state: Option<&str>, initial_target: Option<&str>, mut config: RendererInitialConfig) -> Result<RendererPreparation, String> {
+    pub(crate) fn prepare_document(&mut self, provider: Arc<dyn ResourceProvider>, documents: &[String], nav_state: Option<&str>, initial_target: Option<&str>, mut config: RendererInitialConfig) -> Result<RendererPreparation, html::Error> {
         let defaults = RendererInitialConfig::default();
         if !config.font_size.is_finite() {
             config.font_size = defaults.font_size;
@@ -141,7 +141,7 @@ mod tests {
         let provider = Arc::new(Chapters { reads: Mutex::default(), unavailable: documents.clone() });
         let mut recovery = OpeningRecovery::default();
         let error = recovery.prepare_document(provider.clone(), &documents, Some("90:0"), None, RendererInitialConfig::default()).err().unwrap();
-        assert!(error.contains("90.html"));
+        assert!(error.to_string().contains("90.html"));
         assert_eq!(provider.reads.lock().unwrap().len(), 4);
         assert!(recovery.notice().is_none());
     }

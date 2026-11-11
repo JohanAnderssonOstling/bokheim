@@ -1,4 +1,5 @@
 //! Isolated database preparation and journal assembly shared by every host.
+use update_client::UpdateError;
 use super::*;
 use std::process::Command;
 use std::time::Duration;
@@ -22,9 +23,9 @@ pub(crate) struct Migration {
 }
 
 impl Migration {
-    pub fn new(root: &Path, data: &Path, id: &str, paths: &[(ArtifactKind, PathBuf)], manifest: Manifest) -> Result<Self, String> {
+    pub fn new(root: &Path, data: &Path, id: &str, paths: &[(ArtifactKind, PathBuf)], manifest: Manifest) -> Result<Self, UpdateError> {
         let work = root.join("generations").join(id);
-        fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&work).map_err(UpdateError::operation)?;
         let mut replacements = Vec::new();
         let mut databases = Vec::new();
         for (index, destination) in databases::paths(data)?.into_iter().enumerate() {
@@ -43,19 +44,19 @@ impl Migration {
             .map(|(_, source)| {
                 let path = work.join("taxonomy.sqlite3");
                 activation::copy_file(source, &path)?;
-                Ok::<_, String>(path)
+                Ok::<_, UpdateError>(path)
             })
             .transpose()?;
         let expected_taxonomy = manifest.taxonomy.as_ref().filter(|_| taxonomy.is_some()).map(|t| (t.release_id, t.format_version));
         let result = work.join("prepared.json");
-        if result.try_exists().map_err(|e| e.to_string())? {
-            fs::remove_file(&result).map_err(|e| e.to_string())?;
+        if result.try_exists().map_err(UpdateError::operation)? {
+            fs::remove_file(&result).map_err(UpdateError::operation)?;
         }
         let job = PrepareJob { databases, taxonomy, previous_taxonomy: active(root)?, expected_taxonomy, result };
         Ok(Self { root: root.into(), id: id.into(), work, replacements, job, manifest, application: paths.iter().any(|(kind, _)| *kind == ArtifactKind::Application) })
     }
 
-    pub fn run(&self, policy: CandidatePolicy, version: &str, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<Prepared, String> {
+    pub fn run(&self, policy: CandidatePolicy, version: &str, prepare: impl FnOnce(&Path) -> Result<(), UpdateError>) -> Result<Prepared, UpdateError> {
         let job_path = self.work.join("prepare-job.json");
         activation::write_json(&job_path, &self.job)?;
         prepare(&job_path)?;
@@ -76,15 +77,15 @@ impl Migration {
         Ok(prepared)
     }
 
-    pub fn finish(&mut self, prepared: &Prepared) -> Result<(), String> {
+    pub fn finish(&mut self, prepared: &Prepared) -> Result<(), UpdateError> {
         let next = self.work.join("active-taxonomy.json");
         activation::write_json(&next, &prepared.taxonomy)?;
         self.add_file(self.root.join("active-taxonomy.json"), next, self.work.join("prior-taxonomy.json"))
     }
 
-    pub fn add_file(&mut self, destination: PathBuf, prepared: PathBuf, backup: PathBuf) -> Result<(), String> {
-        fs::create_dir_all(parent_directory(&destination)?).map_err(|e| e.to_string())?;
-        let previous = if destination.try_exists().map_err(|e| e.to_string())? {
+    pub fn add_file(&mut self, destination: PathBuf, prepared: PathBuf, backup: PathBuf) -> Result<(), UpdateError> {
+        fs::create_dir_all(parent_directory(&destination)?).map_err(UpdateError::operation)?;
+        let previous = if destination.try_exists().map_err(UpdateError::operation)? {
             activation::copy_file(&destination, &backup)?;
             Some(backup)
         } else {
@@ -94,7 +95,7 @@ impl Migration {
         Ok(())
     }
 
-    pub fn promote(self, previous_version: String, next_version: String, appimage: Option<PathBuf>) -> Result<String, String> {
+    pub fn promote(self, previous_version: String, next_version: String, appimage: Option<PathBuf>) -> Result<String, UpdateError> {
         activation::sync_dir(&self.work)?;
         activation::sync_dir(parent_directory(&self.work)?)?;
         activation::sync_dir(&self.root)?;
@@ -104,14 +105,14 @@ impl Migration {
 }
 
 /// The candidate must exit before any prepared SQLite files are promoted.
-pub(crate) fn run_candidate(executable: &Path, job: &Path) -> Result<(), String> {
+pub(crate) fn run_candidate(executable: &Path, job: &Path) -> Result<(), UpdateError> {
     let mut command = Command::new(executable);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let mut child = command.arg("--bokheim-prepare-update").arg(job).env_remove("APPIMAGE").env_remove("APPDIR").spawn().map_err(|e| e.to_string())?;
+    let mut child = command.arg("--bokheim-prepare-update").arg(job).env_remove("APPIMAGE").env_remove("APPDIR").spawn().map_err(UpdateError::operation)?;
     let status = update_client::supervisor::wait_for_preparation(&mut child, Duration::from_secs(30 * 60))?;
-    if status.success() { Ok(()) } else { Err(format!("candidate migration failed: {status}")) }
+    if status.success() { Ok(()) } else { Err(format!("candidate migration failed: {status}").into()) }
 }

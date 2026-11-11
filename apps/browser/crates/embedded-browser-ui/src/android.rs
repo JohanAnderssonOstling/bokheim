@@ -1,6 +1,7 @@
 //! GPUI browser chrome around the Android webpage. Native code only owns the
 //! WebView and file transfers; layout, controls and feedback belong to GPUI.
 use ui_text::text;
+use operation_failure::OperationError;
 
 use async_channel::{Receiver, Sender};
 use embedded_browser::BrowserRequest;
@@ -16,7 +17,7 @@ use serde_json::{Value, from_str, json};
 use std::sync::{Arc, Mutex, OnceLock};
 use ui_components::{self as components, BrowserDownloadPhase, BrowserDownloadUpdate, BrowserDownloads};
 
-type Transport = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+type Transport = dyn Fn(&str) -> Result<(), OperationError> + Send + Sync;
 type Feedback = dyn Fn(u64, &str) + Send + Sync;
 static BRIDGE: OnceLock<Bridge> = OnceLock::new();
 
@@ -79,6 +80,8 @@ enum NativeEvent {
     },
     Error {
         message: String,
+        #[serde(default)]
+        failure: Option<operation_failure::Failure>,
     },
     Focused,
     BackPressed,
@@ -88,14 +91,14 @@ enum NativeEvent {
     Other,
 }
 
-pub fn initialize(native: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static, feedback: impl Fn(u64, &str) + Send + Sync + 'static) {
+pub fn initialize(native: impl Fn(&str) -> Result<(), OperationError> + Send + Sync + 'static, feedback: impl Fn(u64, &str) + Send + Sync + 'static) {
     let (messages, receiver) = async_channel::unbounded();
     let _ = BRIDGE.set(Bridge { native: Arc::new(native), feedback: Arc::new(feedback), messages, receiver: Mutex::new(Some(receiver)) });
 }
 
 /// Backend requests enter the GPUI thread before a native page is attached.
-pub fn command(message: &str) -> Result<(), String> {
-    let command = from_str(message).map_err(|error| format!("invalid browser command: {error}"))?;
+pub fn command(message: &str) -> Result<(), OperationError> {
+    let command = from_str(message).map_err(|error| OperationError::operation(error).context("invalid browser command"))?;
     BRIDGE.get().ok_or("the browser UI is unavailable")?.messages.try_send(Message::Command(command)).map_err(|_| "the browser UI has closed".into())
 }
 
@@ -108,7 +111,7 @@ pub fn receive(id: u64, message: &str) {
     }
 }
 
-pub fn wrap<V: Render + 'static>(content: Entity<V>, window: &mut Window, cx: &mut App) -> Result<Entity<BrowserRoot<V>>, String> {
+pub fn wrap<V: Render + 'static>(content: Entity<V>, window: &mut Window, cx: &mut App) -> Result<Entity<BrowserRoot<V>>, OperationError> {
     let bridge = BRIDGE.get().ok_or("Android browser bridge was not initialized")?;
     let receiver = bridge.receiver.lock().map_err(|_| "Android browser bridge state is unavailable")?.take().ok_or("Android browser already has a GPUI host")?;
     Ok(cx.new(|cx| BrowserRoot::new(content, receiver, bridge.native.clone(), window, cx)))
@@ -507,8 +510,9 @@ impl Browser {
                 }
             }
             NativeEvent::PageProgress { percent } => self.page_progress = percent,
-            NativeEvent::Error { message } => {
-                self.error = Some(components::user_facing_error(&message, text!(startup::could_not_open_this_page_check_the_address_and_try_again)).to_owned());
+            NativeEvent::Error { message, failure } => {
+                let error = failure.map_or_else(|| OperationError::from(message.clone()), |failure| OperationError::classified(failure, &message));
+                self.error = Some(components::user_facing_error(&error, text!(startup::could_not_open_this_page_check_the_address_and_try_again)).to_owned());
                 if !self.opened {
                     cx.emit(Closed);
                 }

@@ -1,4 +1,5 @@
 use sherpa_onnx::{OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig, OfflineTtsModelConfig, OfflineTtsVitsModelConfig};
+use crate::SpeechError;
 use std::env;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use std::fs;
@@ -45,12 +46,12 @@ impl Voice {
     }
 }
 
-type ModelPreparer = dyn Fn(Voice) -> Result<PathBuf, String> + Send + Sync;
+type ModelPreparer = dyn Fn(Voice) -> Result<PathBuf, SpeechError> + Send + Sync;
 static MODEL_PREPARER: OnceLock<Box<ModelPreparer>> = OnceLock::new();
 
 /// Resolve platform assets on the synthesis worker when narration starts.
 /// Android waits for its background extraction here without blocking the UI.
-pub fn set_model_preparer(prepare: impl Fn(Voice) -> Result<PathBuf, String> + Send + Sync + 'static) {
+pub fn set_model_preparer(prepare: impl Fn(Voice) -> Result<PathBuf, SpeechError> + Send + Sync + 'static) {
     let _ = MODEL_PREPARER.set(Box::new(prepare));
 }
 
@@ -80,16 +81,16 @@ pub fn voice_directory(voice: Voice) -> PathBuf {
 }
 
 /// Load Alba with its default inference thread count.
-pub fn load_model() -> Result<OfflineTts, String> {
+pub fn load_model() -> Result<OfflineTts, SpeechError> {
     load_voice(Voice::Alba)
 }
 
 /// Load the installed voice with an explicit synthesis thread count for profiling.
-pub fn load_model_with_threads(threads: i32) -> Result<OfflineTts, String> {
+pub fn load_model_with_threads(threads: i32) -> Result<OfflineTts, SpeechError> {
     load_voice_with_threads(Voice::Alba, threads)
 }
 
-pub fn load_voice(voice: Voice) -> Result<OfflineTts, String> {
+pub fn load_voice(voice: Voice) -> Result<OfflineTts, SpeechError> {
     // George needs more parallel synthesis work; Android's scheduler chooses
     // the CPU cores. Keep Alba's lighter inference at two threads.
     let threads = match voice {
@@ -99,7 +100,7 @@ pub fn load_voice(voice: Voice) -> Result<OfflineTts, String> {
     load_voice_with_threads(voice, threads)
 }
 
-pub fn load_voice_with_threads(voice: Voice, threads: i32) -> Result<OfflineTts, String> {
+pub fn load_voice_with_threads(voice: Voice, threads: i32) -> Result<OfflineTts, SpeechError> {
     if threads < 1 {
         return Err("Speech thread count must be positive".into());
     }
@@ -126,9 +127,9 @@ pub fn load_voice_with_threads(voice: Voice, threads: i32) -> Result<OfflineTts,
         // Packaged voices can be read-only (AppImage/Flatpak). Keep these tiny
         // options in the user cache, and alive until session creation returns.
         let cache = env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))).ok_or("Could not locate the speech runtime cache.")?.join("bokheim/tts");
-        fs::create_dir_all(&cache).map_err(|error| format!("Could not create the speech runtime cache: {error}"))?;
-        let mut options = NamedTempFile::new_in(cache).map_err(|error| format!("Could not configure offline speech memory: {error}"))?;
-        options.write_all(b"EnableCpuMemArena=0\n").map_err(|error| format!("Could not configure offline speech memory: {error}"))?;
+        fs::create_dir_all(&cache).map_err(|error| SpeechError::operation(error).context("Could not create the speech runtime cache"))?;
+        let mut options = NamedTempFile::new_in(cache).map_err(|error| SpeechError::operation(error).context("Could not configure offline speech memory"))?;
+        options.write_all(b"EnableCpuMemArena=0\n").map_err(|error| SpeechError::operation(error).context("Could not configure offline speech memory"))?;
         options
     };
     #[cfg(target_os = "linux")]
@@ -139,7 +140,7 @@ pub fn load_voice_with_threads(voice: Voice, threads: i32) -> Result<OfflineTts,
         // is destroyed. Normal allocations return these between chunks rather
         // than allowing a long Android narration session to keep growing.
         let options = root.join("onnxruntime-cpu.conf");
-        fs::write(&options, "EnableCpuMemArena=0\n").map_err(|error| format!("Could not configure offline speech memory: {error}"))?;
+        fs::write(&options, "EnableCpuMemArena=0\n").map_err(|error| SpeechError::operation(error).context("Could not configure offline speech memory"))?;
         format!("cpu:{}", options.display())
     };
     let mut model_config = OfflineTtsModelConfig { num_threads: threads, provider: Some(provider), ..Default::default() };

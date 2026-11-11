@@ -36,7 +36,7 @@ impl BrowserActions {
         let preferences = crate::stores::preferences::current_browsing_preferences(cx);
         cx.spawn_in(window, async move |actions, cx| {
             if let Err(error) = crate::services::browser::open(&executor, library, preferences).await {
-                let _ = actions.update_in(cx, |_, window, cx| notify_error("browser-open-error", format!(text!(browse::could_not_open_the_browser), user_facing_error(&error, text!(common::please_try_again))), window, cx));
+                let _ = actions.update_in(cx, |_, window, cx| notify_error("browser-open-error", format!(text!(browse::could_not_open_the_browser), user_facing_error(&error, "")), window, cx));
             }
         })
         .detach();

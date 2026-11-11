@@ -30,6 +30,11 @@ case "$KOBO_CPU_PROFILE" in
         ;;
 esac
 
+# Use every available core for Rust and native dependency builds unless the
+# caller explicitly chooses a different job limit.
+CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(nproc)}
+export CARGO_BUILD_JOBS
+
 CROSS=$(KOBO_CFLAGS="$KOBO_CFLAGS" sh "$SCRIPT_DIR/prepare-kobo-toolchain.sh")
 SYSROOT=$("$CROSS-gcc" -print-sysroot)
 python3 "$REPO_ROOT/shared/pdfium/prepare.py" --target armv7-unknown-linux-gnueabihf >&2
@@ -38,10 +43,6 @@ python3 "$REPO_ROOT/shared/pdfium/prepare.py" --target armv7-unknown-linux-gnuea
 # loader and libraries only for this executable; Nickel keeps its own runtime.
 KOBO_RUSTFLAGS="$KOBO_RUSTFLAGS -C link-arg=-Wl,--dynamic-linker=/mnt/onboard/.adds/bokheim/runtime/ld-linux-armhf.so.3 -C link-arg=-Wl,-rpath,\$ORIGIN/runtime"
 
-# Keep the cross-build within a desktop machine's memory budget. Large UI
-# crates also use smaller code-generation units below. Maintainers with more
-# available memory can raise CARGO_BUILD_JOBS explicitly.
-CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1}
 
 cd "$REPO_ROOT"
 FBINK_LIB_DIR="$FBINK_RELEASE" \

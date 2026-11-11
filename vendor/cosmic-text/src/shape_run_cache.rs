@@ -8,6 +8,7 @@ use crate::{AttrsOwned, HashMap, ShapeGlyph};
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct ShapeRunKey {
     pub text: String,
+    pub rtl: bool,
     pub default_attrs: AttrsOwned,
     pub attrs_spans: Vec<(Range<usize>, AttrsOwned)>,
 }

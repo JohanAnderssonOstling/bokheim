@@ -15,7 +15,7 @@ const authenticationMessages = {
     "account.hide_password": "Hide password",
     "account.new_password": "New password",
     "account.password_updated_sign_in_with_your_new_password": "Password updated. Sign in with your new password.",
-    "account.please_wait": "Please wait…",
+    "account.please_wait": "Please wait",
     "account.resend_pin": "Resend PIN",
     "account.resend_pin_s": "Resend PIN ({seconds}s)",
     "account.reset_code_from_your_email": "Reset code from your email",

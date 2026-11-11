@@ -48,12 +48,13 @@ impl Fixture {
         document.save(root.join("Original.pdf")).unwrap();
         let canonical = hash_file(&mut File::open(root.join("Original.pdf")).unwrap()).unwrap();
         let size = fs::metadata(root.join("Original.pdf")).unwrap().len();
-        let book = BookId::for_local_content(library.as_bytes(), canonical);
+        let book = BookId::for_local_content(canonical);
         let db = DatabaseClient::open(temp.path().join("metadata.sqlite")).unwrap();
         db.initialize_library_for(library).await.unwrap();
         db.commit_import(ImportCommit {
             source_identity: None,
             byte_checksum: Some(canonical),
+            audiobook_content_hash: None,
             parent_id: ROOT_DIR_ID,
             file_name: "Original.pdf".into(),
             format: BookFormat::Pdf,
@@ -228,10 +229,11 @@ async fn assert_foliate_export(bytes: &[u8], identifier: &str) {
     let f = Fixture::new(true).await;
     fs::write(f.root.join("Book.epub"), bytes).unwrap();
     let checksum = ContentHash::from(blake3::hash(bytes));
-    let book = BookId::for_local_content(f.library.as_bytes(), checksum);
+    let book = BookId::for_local_content(checksum);
     f.db.commit_import(ImportCommit {
         source_identity: None,
         byte_checksum: Some(checksum),
+        audiobook_content_hash: None,
         parent_id: ROOT_DIR_ID,
         file_name: "Book.epub".into(),
         format: BookFormat::Epub,
@@ -318,10 +320,11 @@ async fn add_epub(f: &Fixture) -> (BookId, Annotation) {
     let bytes = include_bytes!("../../../tests/fixtures/cloud-cover.epub");
     fs::write(f.root.join("Book.epub"), bytes).unwrap();
     let checksum = ContentHash::from(blake3::hash(bytes));
-    let book = BookId::for_local_content(f.library.as_bytes(), checksum);
+    let book = BookId::for_local_content(checksum);
     f.db.commit_import(ImportCommit {
         source_identity: None,
         byte_checksum: Some(checksum),
+        audiobook_content_hash: None,
         parent_id: ROOT_DIR_ID,
         file_name: "Book.epub".into(),
         format: BookFormat::Epub,
@@ -633,7 +636,7 @@ async fn malformed_epub_requires_attention_without_blocking_other_outputs() {
     let report = replace(&f, vec![AnnotationExportFormat::Foliate, AnnotationExportFormat::Readest, AnnotationExportFormat::Markdown]).await;
     let foliate = report.results.iter().find(|result| result.destination.book_id == book && result.destination.format == AnnotationExportFormat::Foliate).unwrap();
     assert!(matches!(foliate.outcome, AnnotationExportOutcome::Failed(_)), "{report:?}");
-    assert_eq!(foliate.failure, Some(AnnotationExportFailure { kind: AnnotationExportFailureKind::InvalidData, file_written: false }));
+    assert_eq!(foliate.failure, Some(AnnotationExportFailure { kind: AnnotationExportFailureKind::InvalidData, file_written: false, cause: None }));
     for format in [AnnotationExportFormat::Markdown, AnnotationExportFormat::Readest] {
         assert!(report.results.iter().any(|result| result.destination.book_id == book && result.destination.format == format && matches!(result.outcome, AnnotationExportOutcome::Written)), "{report:?}");
     }

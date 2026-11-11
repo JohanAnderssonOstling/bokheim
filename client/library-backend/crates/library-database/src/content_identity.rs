@@ -13,16 +13,11 @@ include_sql!("src/content_identity_operations.sql");
 pub(crate) fn initialize_scope(connection: &Connection, library: Option<LibraryId>, replica: ReplicaId) -> Result<(), DatabaseError> {
     let existing: Option<Vec<u8>> = connection.query_row("SELECT scope FROM local_identity_scope WHERE singleton=1", [], |row| row.get(0)).optional()?;
     let wanted = library.unwrap_or(replica);
-    if existing.as_deref() == Some(wanted.as_bytes().as_slice()) || (library.is_none() && existing.is_some()) {
+    if existing.is_some() {
         return Ok(());
     }
     connection.execute("INSERT INTO local_identity_scope(singleton,scope) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET scope=excluded.scope", [wanted.as_bytes().as_slice()])?;
     Ok(())
-}
-
-fn identity_scope(connection: &Connection) -> Result<[u8; 16], DatabaseError> {
-    let scope: Vec<u8> = connection.query_row("SELECT scope FROM local_identity_scope WHERE singleton=1", [], |row| row.get(0))?;
-    scope.try_into().map_err(|_| DatabaseError::message("invalid local identity scope"))
 }
 
 pub(crate) fn record_alias(connection: &Connection, book: BookId, checksum: ContentHash) -> Result<(), DatabaseError> {
@@ -44,6 +39,12 @@ pub(crate) fn expected_hash(connection: &Connection, book: BookId) -> Result<Opt
 }
 
 pub(crate) fn record_origin(connection: &Connection, book: BookId, source: Option<book_inspection::PdfSourceIdentity>) -> Result<(), DatabaseError> {
+    let source = source.map(|mut source| {
+        if source.book_id.is_library_scoped() {
+            source.book_id = source.canonical_hash.map(BookId::for_local_content).unwrap_or(source.book_id);
+        }
+        source
+    });
     if let Some(source) = source.filter(|source| source.book_id == book) {
         if let Some(checksum) = source.canonical_hash {
             if canonical_hash(connection, book)?.is_none() {
@@ -117,6 +118,46 @@ pub(crate) fn observe_content(connection: &Connection, book: BookId, directory: 
 }
 
 impl Database {
+    /// Asset paths are migrated after the database commits. Retain this work
+    /// until every rename succeeds so opening can safely resume it.
+    pub fn pending_book_id_migration(&self) -> Result<Vec<(BookId, BookId)>, DatabaseError> {
+        let pending: bool = self.connection.query_row("SELECT assets_pending FROM local_identity_scope WHERE singleton=1", [], |row| row.get(0))?;
+        if pending { Ok(crate::migration::book_ids::mapping(&self.connection)?.into_iter().collect()) } else { Ok(Vec::new()) }
+    }
+
+    pub fn finish_book_id_migration(&self) -> Result<(), DatabaseError> {
+        self.connection.execute("UPDATE local_identity_scope SET assets_pending=0 WHERE singleton=1", [])?;
+        Ok(())
+    }
+
+    pub fn audiobook_at_revision(&self, directory: DirId, name: &str, fingerprint: u64) -> Result<Option<BookId>, DatabaseError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT b.content_hash FROM book b JOIN book_dir d ON d.book_row_id=b.row_id WHERE d.dir_id=?1 AND d.file_name=?2 AND d.local_hash=?3 AND d.is_downloaded=1 AND d.deleted_at IS NULL AND b.deleted_at IS NULL AND b.format=?4",
+                params![directory.to_string(), name, fingerprint.to_string(), BookFormat::Mp3Folder as i64],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// A recording fingerprint is not a checksum of its ZIP packaging. A
+    /// byte-verified archive or unchanged placement can retain its stable ID.
+    pub fn resolve_audiobook_content(&self, checksum: ContentHash, known: Option<BookId>) -> Result<BookId, DatabaseError> {
+        if let Some(known) = known {
+            let live = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1 AND format=?2 AND deleted_at IS NULL)", params![known, BookFormat::Mp3Folder as i64], |row| row.get::<_, bool>(0))?;
+            if live {
+                return Ok(known);
+            }
+        }
+        let mut query = self.connection.prepare_cached("SELECT a.book_id FROM local_audiobook_content a JOIN book b ON b.content_hash=a.book_id WHERE a.content_hash=?1 AND b.deleted_at IS NULL LIMIT 2")?;
+        let books = query.query_map([checksum], |row| row.get::<_, BookId>(0))?.collect::<Result<Vec<_>, _>>()?;
+        if books.len() == 1 {
+            return Ok(books[0]);
+        }
+        Ok(BookId::for_local_content(checksum))
+    }
+
     /// Reuse only the exact device-observed file revision from a prior commit.
     pub fn cached_import_source(&self, path: &str, fingerprint: u64) -> Result<Option<ContentHash>, DatabaseError> {
         Ok(self.connection.query_row("SELECT byte_hash FROM local_import_source WHERE path=?1 AND fingerprint=?2", params![path, fingerprint.to_string()], |row| row.get(0)).optional()?)
@@ -129,6 +170,7 @@ impl Database {
     /// Resolve a byte-hash reference once at the reader boundary. All reader
     /// state remains keyed by the returned stable identity.
     pub fn resolve_book_identity(&self, reference: BookId) -> Result<BookId, DatabaseError> {
+        let reference = crate::migration::book_ids::mapping(&self.connection)?.get(&reference).copied().unwrap_or(reference);
         let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)", [reference], |row| row.get(0))?;
         if exists {
             return Ok(reference);
@@ -139,11 +181,19 @@ impl Database {
         }
     }
 
+    /// A verified copy carries its global identity even when its bytes are a
+    /// later local revision. Deriving from those bytes would create a new book.
+    pub fn resolve_transferred_content(&self, reference: BookId, checksum: ContentHash) -> Result<BookId, DatabaseError> {
+        let reference = self.resolve_book_identity(reference)?;
+        if reference.is_local() && !reference.is_library_scoped() { Ok(reference) } else { self.resolve_scanned_content(checksum, None) }
+    }
+
     pub fn resolve_scanned_content(&self, checksum: ContentHash, source: Option<book_inspection::PdfSourceIdentity>) -> Result<BookId, DatabaseError> {
         if let Some(book) = self.book_for_local_content(checksum)? {
             return Ok(book);
         }
-        if let Some(source) = source {
+        if let Some(mut source) = source {
+            source.book_id = self.resolve_book_identity(source.book_id)?;
             let known: Option<(Option<i64>, Option<i64>)> = self.connection.query_row("SELECT format,deleted_at FROM book WHERE content_hash=?1", [source.book_id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
             if let Some((format, None)) = known {
                 let canonical = canonical_hash(&self.connection, source.book_id)?;
@@ -153,6 +203,9 @@ impl Database {
             } else if known.is_none() {
                 // A recovered marker supplies only the stable key. Its claimed
                 // canonical hash is confirmed separately by sync or download.
+                if source.book_id.is_library_scoped() {
+                    return Ok(BookId::for_local_content(source.canonical_hash.unwrap_or(checksum)));
+                }
                 return Ok(source.book_id);
             }
         }
@@ -161,7 +214,7 @@ impl Database {
         if known {
             return Ok(legacy);
         }
-        Ok(BookId::for_local_content(&identity_scope(&self.connection)?, checksum))
+        Ok(BookId::for_local_content(checksum))
     }
 
     pub fn confirm_uploaded_content_with_pdf(&self, book: BookId, checksum: ContentHash, size_bytes: Option<u64>, pdf: Option<pdf_view_common::PdfReaderMetadata>) -> Result<(), DatabaseError> {
@@ -356,7 +409,7 @@ mod tests {
     fn recovered_pdf_provenance_constrains_upload_without_freezing_unverified_bytes() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let book = BookId::for_local_content(&[9; 16], hash(b"initial PDF"));
+        let book = BookId::for_local_content(hash(b"initial PDF"));
         let original = hash(b"original server revision");
         let edited = hash(b"edited local PDF");
         let source = book_inspection::PdfSourceIdentity { book_id: book, canonical_hash: Some(original) };
@@ -364,6 +417,7 @@ mod tests {
         db.commit_import(crate::ImportCommit {
             source_identity: Some(source),
             byte_checksum: Some(edited),
+            audiobook_content_hash: None,
             parent_id: ROOT_DIR_ID,
             file_name: "Book.pdf".into(),
             format: BookFormat::Pdf,
@@ -397,7 +451,7 @@ mod tests {
         let (db, book) = library();
         let shared = hash(b"same bytes, two identities");
         record_alias(&db.connection, book, shared).unwrap();
-        let other = BookId::for_local_content(&[9; 16], blake3::hash(b"separate book").into());
+        let other = BookId::for_local_content(blake3::hash(b"separate book").into());
         db.connection.execute("INSERT INTO book(content_hash) VALUES(?1)", [other]).unwrap();
         record_alias(&db.connection, other, shared).unwrap();
         assert_eq!(db.book_for_local_content(shared).unwrap(), None);
@@ -405,7 +459,7 @@ mod tests {
         db.confirm_uploaded_content_with_pdf(book, canonical, Some(100), None).unwrap();
         let source = book_inspection::PdfSourceIdentity { book_id: book, canonical_hash: Some(hash(b"wrong source")) };
         let modified = hash(b"a different PDF");
-        assert_eq!(db.resolve_scanned_content(modified, Some(source)).unwrap(), BookId::for_local_content(&identity_scope(&db.connection).unwrap(), modified));
+        assert_eq!(db.resolve_scanned_content(modified, Some(source)).unwrap(), BookId::for_local_content(modified));
         let source = book_inspection::PdfSourceIdentity { canonical_hash: Some(canonical), ..source };
         assert_eq!(db.resolve_scanned_content(modified, Some(source)).unwrap(), book);
     }
@@ -413,6 +467,26 @@ mod tests {
 
 // Async access owns its arguments until the synchronous database call completes.
 database_methods! {
+    fn resolve_transferred_content(reference: BookId, checksum: ContentHash) -> BookId;
+    arguments (BookId, ContentHash,) = (reference, checksum,);
+    execute database, arguments => database.resolve_transferred_content(arguments.0, arguments.1);
+
+    fn pending_book_id_migration() -> Vec<(BookId, BookId)>;
+    arguments () = ();
+    execute database, _arguments => database.pending_book_id_migration();
+
+    fn finish_book_id_migration() -> ();
+    arguments () = ();
+    execute database, _arguments => database.finish_book_id_migration();
+
+    fn audiobook_at_revision(directory: DirId, name: &str, fingerprint: u64) -> Option<BookId>;
+    arguments (DirId, String, u64,) = (directory, name.to_owned(), fingerprint,);
+    execute database, arguments => database.audiobook_at_revision(arguments.0, &arguments.1, arguments.2);
+
+    fn resolve_audiobook_content(checksum: ContentHash, known: Option<BookId>) -> BookId;
+    arguments (ContentHash, Option<BookId>,) = (checksum, known,);
+    execute database, arguments => database.resolve_audiobook_content(arguments.0, arguments.1);
+
     fn cached_import_source(path: &str, fingerprint: u64) -> Option<ContentHash>;
     arguments (String, u64,) = (path.to_owned(), fingerprint,);
     execute database, arguments => database.cached_import_source(&arguments.0, arguments.1);

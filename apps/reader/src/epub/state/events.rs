@@ -3,27 +3,48 @@
 use crate::invalidation::notify;
 use std::sync::Arc;
 
-use dictionary::can_lookup;
 use gpui::{App, Context, Window};
-use skrift_column_paginator::RendererEvent;
+use image::RgbaImage;
+use skrift_column_paginator::{OpenedImage, RendererEvent};
 
 use crate::epub::marks;
-use crate::epub::{LoadState, ReaderView};
+use crate::epub::{DocumentNavigation, LoadState, ReaderView};
 use crate::invalidation::Component;
 use crate::shell::persistence::StoredPosition;
 
 impl ReaderView {
     pub(super) fn handle_renderer_event(&mut self, event: &RendererEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            RendererEvent::ExternalLink(href) => {
+                if self.document_history.is_some() {
+                    cx.emit(DocumentNavigation::Link(href.clone()));
+                } else if crate::windows::native_windows_available() && crate::shell::dictionary::wikipedia::article_link(href).is_some() {
+                    self.open_link_in_new_window(href.clone(), window, cx);
+                } else if let Ok(url) = url::Url::parse(href) {
+                    if matches!(url.scheme(), "https" | "http" | "mailto" | "tel") {
+                        cx.open_url(url.as_str());
+                    }
+                }
+            }
             RendererEvent::VisiblePageChanged => {
                 if self.marks.recurring_annotations().next().is_some() {
                     self.refresh_recurring_annotations(false, cx);
                 }
             }
-            RendererEvent::NavigationJump { from } => self.history.begin_jump(from.clone()),
+            RendererEvent::NavigationJump { from } => {
+                if self.document_history.is_some() {
+                    cx.emit(DocumentNavigation::BeginJump(from.clone()));
+                } else {
+                    self.history.begin_jump(from.clone());
+                }
+            }
             RendererEvent::ReadingPositionChanged(position) => {
-                if self.book.cfi.source_position_cfi(&position.source).is_some_and(|cfi| self.history.settle(&cfi)) {
-                    cx.notify();
+                if let Some(cfi) = self.book.cfi.source_position_cfi(&position.source) {
+                    if self.document_history.is_some() {
+                        cx.emit(DocumentNavigation::Settled(cfi));
+                    } else if self.history.settle(&cfi) {
+                        cx.notify();
+                    }
                 }
                 if self.reading_position.as_ref() == Some(position) {
                     return;
@@ -74,17 +95,14 @@ impl ReaderView {
                     }
                 }
                 if marks::set_selection(&mut self.selection, cfi_range.clone()) {
-                    self.touch_selection.lookup_available = match &self.load_state {
-                        LoadState::Ready(renderer) => renderer.read(cx).selected_passage().is_some_and(|(_, text)| can_lookup(&text)),
-                        LoadState::Loading | LoadState::Error(_) => false,
-                    };
                     self.annotation_popup_anchor = Some(window.mouse_position());
                     notify(cx, Component::ReaderShell, "selection_finished");
                 }
             }
             RendererEvent::AnnotationActivated { id } => {
                 self.annotation_popup_anchor = Some(window.mouse_position());
-                self.select_annotation(id.clone(), window, cx);
+                let preferred = self.preferred_annotation_overlay(id, None, cx).unwrap_or_else(|| id.clone());
+                self.select_annotation(preferred, window, cx);
             }
             RendererEvent::FootnoteOpened(preview) => {
                 let prepared = match &self.load_state {
@@ -94,20 +112,41 @@ impl ReaderView {
                 self.footnote = prepared.map(|prepared| (preview.clone(), prepared));
                 notify(cx, Component::ReaderShell, "footnote_opened");
             }
-            RendererEvent::ImageOpened { uri, bytes } => {
-                let extension = uri.rsplit('.').next().unwrap_or_default().split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
-                let format = match extension.as_str() {
-                    "jpg" | "jpeg" => gpui::ImageFormat::Jpeg,
-                    "webp" => gpui::ImageFormat::Webp,
-                    "gif" => gpui::ImageFormat::Gif,
-                    "svg" | "svgz" => gpui::ImageFormat::Svg,
-                    "bmp" => gpui::ImageFormat::Bmp,
-                    "tif" | "tiff" => gpui::ImageFormat::Tiff,
-                    "ico" => gpui::ImageFormat::Ico,
-                    "pnm" | "ppm" | "pgm" | "pbm" => gpui::ImageFormat::Pnm,
-                    _ => gpui::ImageFormat::Png,
+            RendererEvent::ImageOpened { uri, image } => {
+                let save_image = std::mem::take(&mut self.save_opened_image);
+                let image = match image {
+                    OpenedImage::Raster { width, height, rgba } => {
+                        let Some(buffer) = RgbaImage::from_raw(*width as u32, *height as u32, rgba.clone()) else { return };
+                        let Ok(image) = gpui::Image::from_rgba(&buffer) else { return };
+                        image
+                    }
+                    OpenedImage::Svg { bytes } => gpui::Image::from_bytes(gpui::ImageFormat::Svg, bytes.clone()),
+                    OpenedImage::Encoded { bytes } => {
+                        let extension = uri.rsplit('.').next().unwrap_or_default().split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+                        let format = match extension.as_str() {
+                            "jpg" | "jpeg" => gpui::ImageFormat::Jpeg,
+                            "webp" => gpui::ImageFormat::Webp,
+                            "gif" => gpui::ImageFormat::Gif,
+                            "svg" | "svgz" => gpui::ImageFormat::Svg,
+                            "bmp" => gpui::ImageFormat::Bmp,
+                            "tif" | "tiff" => gpui::ImageFormat::Tiff,
+                            "ico" => gpui::ImageFormat::Ico,
+                            "pnm" | "ppm" | "pgm" | "pbm" => gpui::ImageFormat::Pnm,
+                            _ => gpui::ImageFormat::Png,
+                        };
+                        gpui::Image::from_bytes(format, bytes.clone())
+                    }
                 };
-                self.image_preview = Some((uri.clone(), Arc::new(gpui::Image::from_bytes(format, bytes.clone()))));
+                if save_image {
+                    ui_components::save_image(Arc::new(image), window, cx);
+                    return;
+                }
+                self.image_backdrop = match &self.load_state {
+                    LoadState::Ready(renderer) => renderer.update(cx, |view, _| view.page_snapshot()),
+                    _ => None,
+                };
+                self.image_canvas.update(cx, |canvas, _| canvas.camera = Default::default());
+                self.image_preview = Some((uri.clone(), Arc::new(image)));
                 notify(cx, Component::ReaderShell, "image_preview_opened");
             }
             RendererEvent::MatchInfo { current, total } => {
@@ -136,7 +175,7 @@ impl ReaderView {
                 }
                 #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
                 if *operation == skrift_column_paginator::RendererOperation::UpdateDocument {
-                    self.tts_document_failed(message, cx);
+                    self.tts_document_failed(&client_protocol::BackendError::operation(message.clone()), cx);
                 }
             }
             _ => {}

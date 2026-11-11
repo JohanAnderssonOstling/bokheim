@@ -1,4 +1,5 @@
 //! Narration through native offline voices or the browser's speech service.
+pub use operation_failure::OperationError as SpeechError;
 mod chunks;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod device;

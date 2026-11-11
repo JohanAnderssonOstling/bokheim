@@ -72,12 +72,13 @@ mod linux {
         for index in 0..count {
             let bytes = epub(index, annotations)?;
             let checksum = ContentHash::from(blake3::hash(&bytes));
-            let book = BookId::for_local_content(library.as_bytes(), checksum);
+            let book = BookId::for_local_content(checksum);
             let file_name = format!("Book {index:05}.epub");
             fs::write(root.join(&file_name), &bytes)?;
             db.commit_import(ImportCommit {
                 source_identity: None,
                 byte_checksum: Some(checksum),
+                audiobook_content_hash: None,
                 parent_id: ROOT_DIR_ID,
                 file_name: file_name.clone(),
                 format: BookFormat::Epub,

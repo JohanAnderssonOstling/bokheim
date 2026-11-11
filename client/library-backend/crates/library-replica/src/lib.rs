@@ -15,7 +15,7 @@ mod library_state;
 pub use enrichment::EnrichmentResult;
 
 pub use folder_management::{file_name_candidates, folder_name_candidates, numbered_file_name, numbered_folder_name, unique_file_name, unique_folder_name};
-pub use library_state::{portable_name_key, BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState};
+pub use library_state::{BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState, portable_name_key};
 
 use serde::{Deserialize, Serialize};
 use serde_variant::to_variant_name;
@@ -27,7 +27,7 @@ use sync_common::{ConflictRank, DirId, FileName, OpaqueStateEntry, Publication, 
 
 mod directory_projection;
 pub(crate) mod serde_enum;
-pub use directory_projection::{project_directories, DirectoryIntent, DirectoryProjection};
+pub use directory_projection::{DirectoryIntent, DirectoryProjection, project_directories};
 
 /// The complete, immutable facts admitted when a file is added to a library.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -117,6 +117,37 @@ pub enum LibraryStateEntry {
 pub type StatePublication = Publication<LibraryStateEntry>;
 
 impl LibraryStateEntry {
+    /// Rekey a stored entry and the reader documents bound to its book.
+    /// Publication versions and annotation identities remain unchanged.
+    pub fn remap_books(&mut self, map: impl Fn(BookId) -> BookId) {
+        match self {
+            Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } => {}
+            Self::Annotation { value } => value.book_id = map(value.book_id),
+            Self::BookAdd { book_id, value } => {
+                *book_id = map(*book_id);
+                if let Some(pdf) = &mut value.pdf {
+                    if let Ok(id) = pdf.book_id.parse() {
+                        pdf.book_id = map(id).to_hex();
+                    }
+                }
+                if let Some(tracks) = value.navigation.as_mut().and_then(|navigation| navigation.tracks.as_mut()) {
+                    for track in tracks {
+                        track.archive_hash = track.archive_hash.map(&map);
+                    }
+                }
+            }
+            Self::BookContent { book_id, pdf, .. } => {
+                *book_id = map(*book_id);
+                if let Some(pdf) = pdf {
+                    if let Ok(id) = pdf.book_id.parse() {
+                        pdf.book_id = map(id).to_hex();
+                    }
+                }
+            }
+            Self::BookLifecycle { book_id, .. } | Self::Placement { book_id, .. } | Self::ReadingPosition { book_id, .. } | Self::ChapterReadStatus { book_id, .. } => *book_id = map(*book_id),
+        }
+    }
+
     /// Book bytes that must be uploaded before this state can be shared.
     /// Removals must remain possible even when a local import never uploaded.
     pub fn upload_dependency(&self) -> Option<sync_common::BookId> {

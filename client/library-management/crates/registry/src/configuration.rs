@@ -3,12 +3,18 @@
 use super::{LocalRegistry, RegistryResult};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use sync_common::{LibraryId, storage::LibraryStorage};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum LibraryConfiguration {
     DeviceOnly,
+    /// Preserve unsupported cloud-folder settings without blocking other libraries.
+    LegacyExternal {
+        storage: serde_json::Value,
+        owner: Option<String>,
+    },
     Unbound {
         storage: LibraryStorage,
     },
@@ -25,17 +31,17 @@ pub enum LibraryConfiguration {
 impl LibraryConfiguration {
     pub fn storage(&self) -> LibraryStorage {
         match self {
-            Self::DeviceOnly => LibraryStorage::Local,
+            Self::DeviceOnly | Self::LegacyExternal { .. } => LibraryStorage::Local,
             Self::Unbound { storage } | Self::Account { storage, .. } | Self::Undiscovered { storage } => storage.clone(),
         }
     }
 
     pub fn device_only(&self) -> bool {
-        matches!(self, Self::DeviceOnly)
+        matches!(self, Self::DeviceOnly | Self::LegacyExternal { .. })
     }
 
     pub fn has_account(&self) -> bool {
-        matches!(self, Self::Account { .. })
+        matches!(self, Self::Account { .. } | Self::LegacyExternal { owner: Some(_), .. })
     }
 
     pub fn accessible_to_account(&self, account: Option<&str>) -> bool {
@@ -43,6 +49,7 @@ impl LibraryConfiguration {
             Self::DeviceOnly | Self::Unbound { .. } => true,
             Self::Account { owner, .. } => account.is_none_or(|account| account == owner),
             Self::Undiscovered { .. } => account.is_none(),
+            Self::LegacyExternal { owner, .. } => account.is_none() || owner.as_deref().is_some_and(|owner| Some(owner) == account),
         }
     }
 
@@ -52,6 +59,7 @@ impl LibraryConfiguration {
         }
         match self {
             Self::DeviceOnly => Err("this library is kept only on this device".into()),
+            Self::LegacyExternal { .. } => Err("this library uses cloud-folder storage that this app version cannot open".into()),
             Self::Account { owner: existing, .. } if existing != owner => Err("library belongs to another account".into()),
             configuration => Ok(Self::Account { owner: owner.to_owned(), storage: configuration.storage() }),
         }
@@ -59,6 +67,7 @@ impl LibraryConfiguration {
 
     fn with_storage(self, storage: LibraryStorage) -> RegistryResult<Self> {
         Ok(match self {
+            Self::LegacyExternal { .. } => return Err("this library uses cloud-folder storage that this app version cannot open".into()),
             Self::DeviceOnly if storage == LibraryStorage::Local => Self::DeviceOnly,
             Self::DeviceOnly => return Err("choose an account before enabling cloud storage".into()),
             Self::Unbound { .. } => Self::Unbound { storage },
@@ -127,6 +136,9 @@ impl LocalRegistry {
     pub(super) fn make_device_only(&mut self, id: &LibraryId) -> RegistryResult<()> {
         self.entry(id)?.ok_or("library not found")?;
         let tx = self.connection.transaction()?;
+        if matches!(read(&tx, id)?, LibraryConfiguration::LegacyExternal { .. }) {
+            return Err("this library uses cloud-folder storage that this app version cannot open".into());
+        }
         if read(&tx, id)?.has_account() {
             return Err("account libraries must retain their owner; change cloud book storage instead".into());
         }
@@ -200,6 +212,9 @@ impl LocalRegistry {
         self.entry(id)?.ok_or("library not found")?;
         let tx = self.connection.transaction()?;
         let current = read(&tx, id)?;
+        if matches!(current, LibraryConfiguration::LegacyExternal { .. }) {
+            return Err("this library uses cloud-folder storage that this app version cannot open".into());
+        }
         let configuration = if current.device_only() {
             if enabled {
                 LibraryConfiguration::Account { owner: account.filter(|account| !account.is_empty()).ok_or("sign in before enabling cloud storage")?.to_owned(), storage: LibraryStorage::Bokheim }
@@ -234,4 +249,65 @@ impl LocalRegistry {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Import old flags once, retaining ownership and outstanding deletion intents.
+/// An explicit device-only choice wins over a conflicting cached server policy.
+pub(super) fn migrate(connection: &mut Connection) -> RegistryResult<()> {
+    let tx = connection.transaction()?;
+    let old_accounts: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_account')", [], |row| row.get(0))?;
+    let keys =
+        tx.prepare("SELECT key FROM app_value WHERE key GLOB 'library-storage:*' OR key GLOB 'library_sync_disabled:*' OR key GLOB 'device-only-library:*'")?.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    let mut ids = tx
+        .prepare("SELECT library_id FROM library_registry UNION SELECT library_id FROM detached_library UNION SELECT library_id FROM pending_local_purge")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if old_accounts {
+        ids.extend(tx.prepare("SELECT library_id FROM library_account")?.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
+    }
+    ids.extend(keys.iter().filter_map(|key| key.split_once(':').map(|(_, id)| id.to_owned())));
+    for id in ids {
+        let parsed = LibraryId::parse_str(&id)?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM library_configuration WHERE library_id=?1)", [&id], |row| row.get(0))?;
+        if exists {
+            continue;
+        }
+        let value = |key: String| -> rusqlite::Result<Option<Vec<u8>>> { tx.query_row("SELECT value FROM app_value WHERE key=?1", [key], |row| row.get(0)).optional() };
+        let configuration = if value(format!("device-only-library:{id}"))?.is_some() {
+            tx.execute("DELETE FROM app_value WHERE key=?1 OR key=?2", params![format!("pending-cloud-storage:{id}"), format!("pending-library-rename/{id}")])?;
+            LibraryConfiguration::DeviceOnly
+        } else {
+            let storage = match value(format!("library-storage:{id}"))? {
+                Some(bytes) => {
+                    let legacy: serde_json::Value = serde_json::from_slice(&bytes)?;
+                    if legacy.as_object().is_some_and(|value| value.len() == 1 && value.contains_key("external")) {
+                        let owner: Option<Option<String>> = if old_accounts { tx.query_row("SELECT account FROM library_account WHERE library_id=?1", [&id], |row| row.get(0)).optional()? } else { None };
+                        write(&tx, &parsed, &LibraryConfiguration::LegacyExternal { storage: legacy, owner: owner.flatten() })?;
+                        continue;
+                    }
+                    serde_json::from_value(legacy)?
+                }
+                None => {
+                    if value(format!("library_sync_disabled:{id}"))?.as_deref() == Some(b"1") {
+                        LibraryStorage::Local
+                    } else {
+                        LibraryStorage::Bokheim
+                    }
+                }
+            };
+            let owner: Option<Option<String>> = if old_accounts { tx.query_row("SELECT account FROM library_account WHERE library_id=?1", [&id], |row| row.get(0)).optional()? } else { None };
+            match owner {
+                Some(Some(owner)) => LibraryConfiguration::Account { owner, storage },
+                Some(None) => LibraryConfiguration::Unbound { storage },
+                None => LibraryConfiguration::Undiscovered { storage },
+            }
+        };
+        write(&tx, &parsed, &configuration)?;
+    }
+    tx.execute("DELETE FROM app_value WHERE key GLOB 'library-storage:*' OR key GLOB 'library_sync_disabled:*' OR key GLOB 'device-only-library:*'", [])?;
+    if old_accounts {
+        tx.execute_batch("DROP TABLE library_account;")?;
+    }
+    tx.commit()?;
+    Ok(())
 }

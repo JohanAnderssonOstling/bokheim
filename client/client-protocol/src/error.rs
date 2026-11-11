@@ -1,6 +1,6 @@
 //! Errors retain their concrete source while they travel inside the backend.
 
-pub use operation_failure::{Classified, Failure, WifiFailure};
+pub use operation_failure::{Classified, Failure, OperationError, WifiFailure};
 use std::{error::Error, fmt, sync::Arc};
 
 #[derive(Clone, Debug)]
@@ -69,7 +69,7 @@ impl BackendError {
                 Some(Self::Remote(report)) if report.causes.contains(&ErrorCause::Transport) => return true,
                 _ => {}
             }
-            source = error.source();
+            source = error.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref).map(|error| error as &(dyn Error + 'static)).or_else(|| error.source());
         }
         false
     }
@@ -93,6 +93,9 @@ impl BackendError {
             } else if let Some(Self::Classified { failure: classified, message }) = error.downcast_ref::<Self>() {
                 failure = failure.or(Some(*classified));
                 causes.push(ErrorCause::Diagnostic { message: message.clone() });
+            } else if let Some(classified) = error.downcast_ref::<OperationError>() {
+                failure = failure.or(classified.failure());
+                causes.push(ErrorCause::Diagnostic { message: classified.to_string() });
             } else if let Some(classified) = error.downcast_ref::<Failure>() {
                 failure = failure.or(Some(*classified));
                 causes.push(ErrorCause::Diagnostic { message: classified.to_string() });
@@ -112,7 +115,7 @@ impl BackendError {
             } else {
                 causes.push(ErrorCause::Diagnostic { message: error.to_string() });
             }
-            source = error.source();
+            source = error.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref).map(|error| error as &(dyn Error + 'static)).or_else(|| error.source());
         }
         ErrorReport { message: self.to_string(), causes, failure }
     }
@@ -122,11 +125,7 @@ impl BackendError {
 impl BackendError {
     /// A failed HTTP request, classified by what reqwest knows about it.
     pub fn http(context: impl fmt::Display, error: reqwest::Error) -> Self {
-        let message = format!("{context}: {error}");
-        match request_failure(&error) {
-            Some(failure) => Self::classified(failure, message),
-            None => Self::message(message),
-        }
+        Self::operation(error).context(context.to_string())
     }
 }
 
@@ -196,7 +195,9 @@ impl Error for BackendError {
             Self::Operation(error) => Some(error.as_ref()),
             Self::TransportFailure(error) => Some(error.as_ref()),
             Self::Context { source, .. } => Some(source.as_ref()),
-            Self::Message(_) | Self::Classified { .. } | Self::Transport(_) | Self::Remote(_) => None,
+            Self::Classified { failure, .. } => Some(failure),
+            Self::Remote(report) => report.failure.as_ref().map(|failure| failure as _),
+            Self::Message(_) | Self::Transport(_) => None,
         }
     }
 }
@@ -240,4 +241,8 @@ mod classified_cause_tests {
             assert_eq!(received.failure(), Some(failure));
         }
     }
+}
+
+impl From<OperationError> for BackendError {
+    fn from(error: OperationError) -> Self { Self::operation(error) }
 }

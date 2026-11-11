@@ -1,14 +1,15 @@
 //! Native SQLite connection mechanisms; callers own schema and transaction policy.
 use rusqlite::{Connection, OpenFlags};
+use crate::OpenError;
 use std::path::Path;
 
 /// Open existing writable storage so SQLite can recover an interrupted transaction.
 /// Unlike `Connection::open`, this never creates a missing database.
-pub fn open_existing_writable(path: &Path) -> Result<Option<Connection>, String> {
-    if !path.try_exists().map_err(|error| error.to_string())? {
+pub fn open_existing_writable(path: &Path) -> Result<Option<Connection>, OpenError> {
+    if !path.try_exists()? {
         return Ok(None);
     }
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).map(Some).map_err(|error| error.to_string())
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).map(Some).map_err(OpenError::from)
 }
 
 #[cfg(test)]

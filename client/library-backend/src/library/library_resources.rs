@@ -6,10 +6,10 @@
 use super::activity::LibraryActivity;
 use super::events::{LibraryEventRouter, LibraryEventState};
 #[cfg(not(target_arch = "wasm32"))]
+use crate::DownloadState;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::asset_store::AssetStore;
 use crate::executor::BackendExecutor;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::DownloadState;
 use crate::{BackendError, LibraryId};
 use account_client::Url;
 use asset_transfer::transfer::AssetExecutor;
@@ -126,6 +126,11 @@ impl LibraryResources {
         // `DatabaseClient::open` already configured the connection (pragmas, sync
         // functions) internally.
         database.initialize_library_for_deferred_taxonomy(options.id).await?;
+        let migrated_ids = database.pending_book_id_migration().await?;
+        if !migrated_ids.is_empty() {
+            assets.migrate_book_ids(migrated_ids).await.map_err(BackendError::operation)?;
+            database.finish_book_id_migration().await?;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         database.apply_native_root_move(&options.root).await?;
         let (events, event_state) = LibraryEventRouter::new();

@@ -11,7 +11,7 @@ pub mod client;
 pub use book_model::{AgentId, Annotation, AnnotationAnchor, AnnotationStyle, AuthorId, BookFormat, EpubCfi, ReadProgress};
 pub use client::LibraryClient;
 pub use library::LibraryBookStorage;
-pub use library::{AudiobookBook, DocumentBook, DocumentFormat, DocumentSource, PdfBook, ResolvedBook};
+pub use library::{AudiobookBook, DocumentBook, DocumentFormat, DocumentSource, PdfBook, ResolvedBook, TextCache};
 pub mod library;
 
 pub use account_client::Url;

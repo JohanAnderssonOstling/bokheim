@@ -1,6 +1,6 @@
 [package]
 name = "desktop-gpui"
-version = "0.1.13"
+version = "0.1.15"
 edition = "2024"
 license.workspace = true
 
@@ -44,6 +44,7 @@ path = "src/bin/desktop-gpui-kobo.rs"
 required-features = ["kobo"]
 
 [dependencies]
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure" }
 app-preferences = { path = "../../client/preferences", features = ["store"] }
 ui-text = { path = "../ui-text" }
 async-channel = "2"

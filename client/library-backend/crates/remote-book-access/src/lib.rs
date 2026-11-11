@@ -1,5 +1,6 @@
 //! Account-backed book reads and playback authorization shared by native and web.
 //! Callers retain ownership of library admission and resource lifetimes.
+use operation_failure::OperationError;
 use account_client::{authenticated_request, AuthenticatedRequestError, RefreshPolicy};
 use book_access::{AsyncBookSource, FetchFuture, RemoteFile, RemoteFileError};
 use library_services::account::LibraryAccount;
@@ -58,7 +59,7 @@ impl RemoteBookAccess {
         #[cfg(target_arch = "wasm32")]
         let source = AsyncBookSource::browser(length, prefix, move |offset, length| {
             let response = fetch(offset, length);
-            Box::pin(async move { response.await.map_err(|error| error.to_string()) })
+            Box::pin(async move { response.await.map_err(OperationError::operation) })
         });
         source
     }
@@ -69,7 +70,7 @@ impl RemoteBookAccess {
 
         let ranges = ranges.as_slice();
         authenticated_file_request(account, |session| async move {
-            let url = sync_transport::blob_endpoint(session.server_url(), library, &source.hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
+            let url = sync_transport::blob_endpoint(session.server_url(), library, &source.hash).map_err(|error| RemoteFileError::Failed(OperationError::operation(error)))?;
             book_access::remote_file::fetch_ranges(client, url, source, session.token(), ranges).await
         })
         .await
@@ -78,7 +79,7 @@ impl RemoteBookAccess {
     pub async fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, RemoteFileError> {
         let Self { client, account, library, source } = self;
         authenticated_file_request(account, |session| async move {
-            let url = sync_transport::blob_endpoint(session.server_url(), library, &source.hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
+            let url = sync_transport::blob_endpoint(session.server_url(), library, &source.hash).map_err(|error| RemoteFileError::Failed(OperationError::operation(error)))?;
             book_access::remote_file::fetch_range(client, url, source, session.token(), offset, length).await
         })
         .await
@@ -89,7 +90,7 @@ pub async fn direct_audio_source(client: &Client, account: &LibraryAccount, libr
     client_platform_runtime::executor::timeout(
         std::time::Duration::from_secs(30),
         authenticated_file_request(account, |session| async move {
-            let mut endpoint = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
+            let mut endpoint = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(OperationError::operation(error)))?;
             endpoint.set_path(&format!("{}/playback", endpoint.path()));
             let response = client.post(endpoint).bearer_auth(session.token()).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).send().await.map_err(RemoteFileError::transport)?;
             if !response.status().is_success() {
@@ -106,7 +107,7 @@ pub async fn direct_audio_source(client: &Client, account: &LibraryAccount, libr
         }),
     )
     .await
-    .map_err(|_| RemoteFileError::Retryable("Playback authorization timed out".into()))?
+    .map_err(|_| RemoteFileError::Retryable(OperationError::classified(operation_failure::Failure::TimedOut, "Playback authorization timed out")))?
 }
 
 fn file_auth_error(error: library_services::account::AccountSessionError) -> RemoteFileError {
@@ -117,7 +118,7 @@ fn file_auth_error(error: library_services::account::AccountSessionError) -> Rem
             Some(status) => RemoteFileError::status(status),
             None => RemoteFileError::transport(error),
         },
-        error => RemoteFileError::Failed(error.to_string()),
+        error => RemoteFileError::Failed(OperationError::operation(error)),
     }
 }
 
@@ -133,7 +134,7 @@ async fn authenticated_file_request<T, F: Future<Output = Result<T, RemoteFileEr
 
 pub async fn describe_remote_file(client: &Client, account: &LibraryAccount, library: LibraryId, hash: BookId) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
     authenticated_file_request(account, |session| async move {
-        let url = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
+        let url = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(OperationError::operation(error)))?;
         book_access::remote_file::describe(client, url, session.token(), hash).await
     })
     .await
@@ -142,7 +143,7 @@ pub async fn describe_remote_file(client: &Client, account: &LibraryAccount, lib
 /// Start ZIP-based books with their directory tail on every host.
 pub async fn describe_archive(client: &Client, account: &LibraryAccount, library: LibraryId, hash: BookId) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
     authenticated_file_request(account, |session| async move {
-        let url = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(error.to_string()))?;
+        let url = sync_transport::blob_endpoint(session.server_url(), &library, &hash).map_err(|error| RemoteFileError::Failed(OperationError::operation(error)))?;
         book_access::remote_file::describe_tail(client, url, session.token(), hash).await
     })
     .await

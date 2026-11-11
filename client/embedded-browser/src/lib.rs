@@ -70,12 +70,12 @@ pub struct BrowserFeedbackSender(Arc<Mutex<ChildStdin>>);
 
 #[cfg(not(target_os = "android"))]
 impl BrowserFeedbackSender {
-    pub async fn send(&self, feedback: BrowserFeedback) -> Result<(), String> {
-        let mut bytes = serde_json::to_vec(&feedback).map_err(|error| error.to_string())?;
+    pub async fn send(&self, feedback: BrowserFeedback) -> Result<(), BackendError> {
+        let mut bytes = serde_json::to_vec(&feedback).map_err(BackendError::operation)?;
         bytes.push(b'\n');
         let mut input = self.0.lock().await;
-        input.write_all(&bytes).await.map_err(|error| error.to_string())?;
-        input.flush().await.map_err(|error| error.to_string())
+        input.write_all(&bytes).await.map_err(BackendError::operation)?;
+        input.flush().await.map_err(BackendError::operation)
     }
 }
 
@@ -106,11 +106,11 @@ impl BrowserWindow {
 }
 
 #[cfg(not(target_os = "android"))]
-fn helper() -> Result<PathBuf, String> {
+fn helper() -> Result<PathBuf, BackendError> {
     // Released installers and launchers use this executable name and override.
     match std::env::var_os("BOKHEIM_BROWSER_HELPER") {
         Some(path) => Ok(PathBuf::from(path)),
-        None => Ok(std::env::current_exe().map_err(|error| error.to_string())?.with_file_name(format!("bokheim-browser{}", std::env::consts::EXE_SUFFIX))),
+        None => Ok(std::env::current_exe().map_err(BackendError::operation)?.with_file_name(format!("bokheim-browser{}", std::env::consts::EXE_SUFFIX))),
     }
 }
 
@@ -148,25 +148,25 @@ pub fn available() -> bool {
 
 #[cfg(not(target_os = "android"))]
 async fn open_desktop(request: BrowserRequest) -> Result<BrowserWindow, BackendError> {
-    let mut input = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+    let mut input = serde_json::to_vec(&request).map_err(BackendError::operation)?;
     input.push(b'\n');
     // Dropped when the window has closed, or when it failed to open.
     let mut command = Command::from(availability::command(&helper()?));
     // Wry embeds into GPUI's native window on X11, including XWayland.
     #[cfg(target_os = "linux")]
     command.env_remove("WAYLAND_DISPLAY").env("GDK_BACKEND", "x11");
-    let mut child = command.arg("browser").stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().map_err(|error| error.to_string())?;
+    let mut child = command.arg("browser").stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().map_err(BackendError::operation)?;
     let stdin = child.stdin.as_mut().ok_or("could not send the browser request to its window")?;
-    stdin.write_all(&input).await.map_err(|error| error.to_string())?;
-    stdin.flush().await.map_err(|error| error.to_string())?;
+    stdin.write_all(&input).await.map_err(BackendError::operation)?;
+    stdin.flush().await.map_err(BackendError::operation)?;
     let feedback = BrowserFeedbackSender(Arc::new(Mutex::new(child.stdin.take().ok_or("browser input closed")?)));
     let mut events = BufReader::new(child.stdout.take().ok_or("could not read from the browser window")?).lines();
-    let opened = tokio::time::timeout(Duration::from_secs(30), events.next_line()).await.map_err(|_| "the browser window did not open".to_owned())?.map_err(|error| error.to_string())?;
+    let opened = tokio::time::timeout(Duration::from_secs(30), events.next_line()).await.map_err(|_| "the browser window did not open".to_owned())?.map_err(BackendError::operation)?;
     if opened.as_deref().and_then(|line| serde_json::from_str::<BrowserEvent>(line).ok()).is_some_and(|event| matches!(event, BrowserEvent::Opened)) {
         return Ok(BrowserWindow { _child: child, events, feedback });
     }
     // Its stdout ended without the window opening, so it has exited.
-    let status = child.wait().await.map_err(|error| error.to_string())?;
+    let status = child.wait().await.map_err(BackendError::operation)?;
     if webkit_missing(status) {
         return Err(BackendError::classified(client_protocol::Failure::WebViewMissing, "the browser helper could not load WebKitGTK 4.1 (libwebkit2gtk-4.1)"));
     }

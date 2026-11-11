@@ -1,5 +1,6 @@
 //! Optional application-owned preparation before removing a configured library.
 use gpui::{App, Global};
+use operation_failure::OperationError;
 use std::{
     collections::HashMap,
     future::Future,
@@ -8,7 +9,7 @@ use std::{
 };
 use sync_common::LibraryId;
 
-pub type LibraryRemovalPreparation = Pin<Box<dyn Future<Output = Result<(), String>>>>;
+pub type LibraryRemovalPreparation = Pin<Box<dyn Future<Output = Result<(), OperationError>>>>;
 
 /// Prepares application state before the browser deletes a library.
 pub trait LibraryRemovalService {
@@ -68,7 +69,7 @@ pub(crate) fn prepare_library_removal(library: LibraryId, cx: &mut App) -> Libra
 
 pub(crate) async fn prepared_removal<T>(preparation: LibraryRemovalPreparation, remove: impl Future<Output = Result<T, app::BackendError>>) -> Result<T, app::BackendError> {
     // Preparation fails only for application state, such as playback saves.
-    preparation.await.map_err(app::BackendError::message)?;
+    preparation.await.map_err(app::BackendError::operation)?;
     remove.await
 }
 

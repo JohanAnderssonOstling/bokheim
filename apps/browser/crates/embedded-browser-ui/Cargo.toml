@@ -16,6 +16,7 @@ path = "src/main.rs"
 required-features = ["desktop-helper"]
 
 [dependencies]
+operation-failure = { path = "../../../../client/client-protocol/crates/operation-failure" }
 ui-text = { path = "../../../ui-text" }
 async-channel = "2"
 log = "0.4"

@@ -169,16 +169,16 @@ mod tests {
         assert!(authentication_error(&refused, AccountAction::Login).contains("Check your email and password"));
         assert!(authentication_error(&refused, AccountAction::Verify).contains("request a new PIN"));
         assert!(authentication_error(&refused, AccountAction::Reset).contains("new reset code"));
-        assert!(authentication_error(&Failed(Some(Failure::RateLimited)), AccountAction::Login).contains("wait a few minutes"));
+        assert!(authentication_error(&Failed(Some(Failure::RateLimited)), AccountAction::Login).contains("Too many requests"));
         assert!(authentication_error(&Failed(Some(Failure::ServiceUnavailable)), AccountAction::Register).contains("try again later"));
     }
 
     #[test]
     fn wifi_recovery_does_not_require_an_existing_internet_connection() {
         assert!(wifi_error_message(&Failed(Some(Failure::Wifi(WifiFailure::AuthenticationFailed)))).contains("Check the network password"));
-        assert!(wifi_error_message(&Failed(Some(Failure::Wifi(WifiFailure::ScanTimedOut)))).contains("Tap Refresh"));
+        assert!(wifi_error_message(&Failed(Some(Failure::Wifi(WifiFailure::ScanTimedOut)))).contains("Wi-Fi scan timed out"));
         let message = wifi_error_message(&Failed(None));
         assert!(!message.contains("private"));
-        assert!(message.contains("restart the app"));
+        assert!(message.contains("Couldn't update Wi-Fi"));
     }
 }

@@ -15,6 +15,7 @@ packaged-pdfium = ["pdf-reader-core/packaged-pdfium"]
 html-parse = { package = "skrift-parse", path = "../../../HtmlEngine/crates/02-html-parse" }
 html-resources = { package = "skrift-resources", path = "../../../HtmlEngine/crates/html-resources" }
 html-style-model = { package = "skrift-style-model", path = "../../../HtmlEngine/crates/html-style-model" }
+html-style = { package = "skrift-style", path = "../../../HtmlEngine/crates/03-html-style" }
 html-dom = { package = "skrift-dom", path = "../../../HtmlEngine/crates/html-dom" }
 html-pipeline = { package = "skrift-pipeline", path = "../../../HtmlEngine/crates/html-pipeline" }
 language-tags = { version = "0.3.2", features = ["serde"] }
@@ -31,17 +32,20 @@ client-protocol = { path = "../../client/client-protocol" }
 async-channel = "2"
 ui-components = { path = "../components" }
 audiobook-player = { path = "../audiobook-player", default-features = false }
-gpui = { workspace = true, features = ["snapshot"] }
+gpui.workspace = true
 gpui-component.workspace = true
 gpui_kobo = { workspace = true, optional = true }
 kobo-device = { path = "../kobo-device", optional = true }
 skrift-column-paginator.workspace = true
 html-view-gpui = { path = "../../../HtmlViewCore/adapters/html-view-gpui" }
+html-gpui.workspace = true
 html.workspace = true
 book-content = { path = "../../client/book-content" }
 library-model = { path = "../../client/library-model" }
 book-model = { path = "../../shared/book-model", default-features = false }
 log = "0.4"
+url = "2"
+percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "js"] }
 web-time = "1"
@@ -61,8 +65,7 @@ html-engine-model = { package = "skrift-engine-model", path = "../../../HtmlEngi
 base64 = "0.22"
 book-access = { path = "../../client/library-backend/crates/book-access" }
 gpui = { workspace = true, features = ["test-support"] }
-gpui_platform = { workspace = true, features = ["snapshot"] }
-html-gpui.workspace = true
+gpui_platform.workspace = true
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 zip.workspace = true

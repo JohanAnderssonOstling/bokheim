@@ -45,10 +45,13 @@ use crate::pdf::matrix::{PdfMatrix, PdfMatrixValue};
 use crate::pdf::points::PdfPoints;
 use crate::pdf::rect::PdfRect;
 use crate::pdfium::PdfiumLibraryBindingsAccessor;
+use crate::utils::mem::create_byte_buffer;
+use crate::utils::utf16le::get_string_from_pdfium_utf16le_bytes;
+use once_cell::sync::OnceCell;
 use std::collections::{hash_map::Entry, HashMap};
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::marker::PhantomData;
-use std::os::raw::{c_double, c_int};
+use std::os::raw::{c_double, c_int, c_void};
 
 #[cfg(doc)]
 use crate::pdf::document::{PdfDocument, PdfPages};
@@ -178,7 +181,7 @@ pub struct PdfPage<'a> {
     document_handle: FPDF_DOCUMENT,
     page_handle: FPDF_PAGE,
     form_handle: Option<FPDF_FORMHANDLE>,
-    label: Option<String>,
+    label: OnceCell<Option<String>>,
     regeneration_strategy: PdfPageContentRegenerationStrategy,
     is_content_regeneration_required: bool,
     annotations: PdfPageAnnotations<'a>,
@@ -200,13 +203,12 @@ impl<'a> PdfPage<'a> {
         document_handle: FPDF_DOCUMENT,
         page_handle: FPDF_PAGE,
         form_handle: Option<FPDF_FORMHANDLE>,
-        label: Option<String>,
     ) -> Self {
         let mut result = PdfPage {
             document_handle,
             page_handle,
             form_handle,
-            label,
+            label: OnceCell::new(),
             regeneration_strategy: PdfPageContentRegenerationStrategy::Manual,
             is_content_regeneration_required: false,
             annotations: PdfPageAnnotations::from_pdfium(document_handle, page_handle, form_handle),
@@ -237,9 +239,39 @@ impl<'a> PdfPage<'a> {
     }
 
     /// Returns the label assigned to this [PdfPage], if any.
+    /// The label is loaded and cached on first access.
     #[inline]
     pub fn label(&self) -> Option<&str> {
-        self.label.as_deref()
+        self.label
+            .get_or_init(|| {
+                // Insertion or deletion can move the page before its label is
+                // requested. Resolve its current index from the handle cache.
+                let index =
+                    PdfPageIndexCache::get_index_for_page(self.document_handle, self.page_handle)?;
+                let buffer_length = unsafe {
+                    self.bindings().FPDF_GetPageLabel(
+                        self.document_handle,
+                        index as c_int,
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                };
+                if buffer_length == 0 {
+                    return None;
+                }
+                let mut buffer = create_byte_buffer(buffer_length as usize);
+                let result = unsafe {
+                    self.bindings().FPDF_GetPageLabel(
+                        self.document_handle,
+                        index as c_int,
+                        buffer.as_mut_ptr() as *mut c_void,
+                        buffer_length,
+                    )
+                };
+                debug_assert_eq!(result, buffer_length);
+                get_string_from_pdfium_utf16le_bytes(buffer)
+            })
+            .as_deref()
     }
 
     /// Returns the width of this [PdfPage] in device-independent points.
@@ -431,7 +463,9 @@ impl<'a> PdfPage<'a> {
     }
 
     /// Returns an immutable reference to the structure tree of this [PdfPage].
+    /// The structure tree is opened on first access.
     pub fn structure_tree(&self) -> &PdfPageStructureTree<'_> {
+        self.structure_tree.handle();
         &self.structure_tree
     }
 
@@ -982,6 +1016,7 @@ impl<'a> PdfPage<'a> {
                 self.bindings()
                     .FPDF_LoadPage(self.document_handle, page_index as c_int)
             };
+            self.structure_tree = PdfPageStructureTree::from_pdfium(self.page_handle);
 
             PdfPageIndexCache::cache_props_for_page(
                 self.document_handle,
@@ -1004,6 +1039,9 @@ impl<'a> PdfPage<'a> {
 
             debug_assert!(result.is_ok());
         }
+
+        // A structure tree borrows its page handle and must close first.
+        self.structure_tree.close();
 
         unsafe {
             self.bindings().FPDF_ClosePage(self.page_handle);

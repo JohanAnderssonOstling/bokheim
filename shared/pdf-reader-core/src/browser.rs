@@ -16,18 +16,22 @@ extern "C" {
 }
 
 type Job = Box<dyn FnOnce() + Send>;
-type Completion = Box<dyn FnOnce(Option<String>)>;
+type Completion = Box<dyn FnOnce(Option<PdfError>)>;
 static JOBS: OnceLock<concurrent_queue::ConcurrentQueue<Job>> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 thread_local! {
     static DOCUMENTS: RefCell<HashMap<u64, PdfDocumentSession>> = RefCell::new(HashMap::new());
     static PENDING: RefCell<HashMap<u64, Completion>> = RefCell::new(HashMap::new());
-    static FAILED: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
-    static FAILURE_CALLBACK: Closure<dyn FnMut(String, bool)> = Closure::own_aborting(fail);
+    static FAILED: RefCell<Option<(PdfError, bool)>> = const { RefCell::new(None) };
+    static FAILURE_CALLBACK: Closure<dyn FnMut(JsValue, bool)> = Closure::own_aborting(fail);
     static COMPLETION_CALLBACK: Closure<dyn FnMut(String)> = Closure::own_aborting(complete);
 }
 
-fn fail(message: String, retryable: bool) {
+fn fail(error: JsValue, retryable: bool) {
+    fail_error(PdfError::from_error(&OperationError::from(error)), retryable);
+}
+
+fn fail_error(message: PdfError, retryable: bool) {
     FAILED.with(|state| *state.borrow_mut() = Some((message.clone(), retryable)));
     let pending = PENDING.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
     for (_, reject) in pending {
@@ -50,14 +54,14 @@ pub fn run_pdf_worker_job() {
 
 fn enqueue(job: Job) -> PdfResult<()> {
     if let Some((error, _)) = FAILED.with(|state| state.borrow().clone()) {
-        return Err(PdfError::new(error));
+        return Err(error);
     }
     JOBS.get_or_init(concurrent_queue::ConcurrentQueue::unbounded).push(job).map_err(|error| PdfError::new(error.to_string()))?;
     let result = FAILURE_CALLBACK.with(|failed| COMPLETION_CALLBACK.with(|completed| wake_pdf_worker(wasm_bindgen::module(), wasm_bindgen::memory(), failed.as_ref().unchecked_ref(), completed.as_ref().unchecked_ref())));
     if let Err(error) = result {
-        let message = format!("starting PDF worker: {error:?}");
-        fail(message.clone(), true);
-        return Err(PdfError::new(message));
+        let error = PdfError::from_error(&OperationError::from(error)).context("starting PDF worker");
+        fail_error(error.clone(), true);
+        return Err(error);
     }
     Ok(())
 }
@@ -87,7 +91,7 @@ async fn request<T: Send + 'static>(work: impl FnOnce() -> PdfResult<T> + Send +
             id,
             Box::new(move |error| {
                 let value = match error {
-                    Some(error) => Err(PdfError::new(error)),
+                    Some(error) => Err(error),
                     None => result.pop().unwrap_or_else(|_| Err(PdfError::new("PDF worker completed without a result"))),
                 };
                 let _ = sender.send(value);

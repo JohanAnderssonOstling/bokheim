@@ -1,9 +1,9 @@
 //! Build-source compatibility metadata for APK verification without a device.
-fn main() -> Result<(), String> {
+fn main() -> Result<(), update_client::UpdateError> {
     let version = std::env::args().nth(1).ok_or("expected application version")?;
     let device = linux_update_host::device(&version, None)?;
     let config = update_client::DiscoveryConfig::bundled()?;
-    let mut info = serde_json::to_value(device).map_err(|error| error.to_string())?;
+    let mut info = serde_json::to_value(device).map_err(update_client::UpdateError::operation)?;
     info["update_trust"] = serde_json::json!({
         "endpoint": config.endpoint,
         "channel": config.channel,
@@ -11,6 +11,6 @@ fn main() -> Result<(), String> {
             (id.clone(), key.iter().map(|b| format!("{b:02x}")).collect::<String>())
         ).collect::<std::collections::BTreeMap<_, _>>()
     });
-    println!("{}", serde_json::to_string(&info).map_err(|error| error.to_string())?);
+    println!("{}", serde_json::to_string(&info).map_err(update_client::UpdateError::operation)?);
     Ok(())
 }

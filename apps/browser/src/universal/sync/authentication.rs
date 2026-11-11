@@ -53,7 +53,6 @@ impl SyncPage {
             state.update(cx, |state, cx| state.set_masked(true, cx));
         }
         self.flow = flow;
-        self.login_failed = false;
         self.error = None;
         self.message = None;
         cx.notify();
@@ -99,7 +98,7 @@ impl SyncPage {
         }
         let backend = self.services.backend.clone();
         let operation = async move { backend.account.login(email, password).await };
-        self.start_snapshot_operation(text!(account::signing_in), None, true, operation, cx);
+        self.start_snapshot_operation(text!(account::signing_in), None, operation, cx);
     }
 
     pub(super) fn start_registration(&mut self, cx: &mut Context<Self>) {
@@ -168,7 +167,7 @@ impl SyncPage {
         }
         let backend = self.services.backend.clone();
         let operation = async move { backend.account.verify_email(email, pin, password).await };
-        self.start_snapshot_operation(text!(account::verifying_email), Some(text!(account::email_verified)), false, operation, cx);
+        self.start_snapshot_operation(text!(account::verifying_email), Some(text!(account::email_verified)), operation, cx);
     }
 
     pub(super) fn start_password_reset_request(&mut self, cx: &mut Context<Self>) {

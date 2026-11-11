@@ -1,5 +1,6 @@
 //! Read the kernel's battery gauge without depending on a Kobo model name.
 use std::sync::OnceLock;
+use operation_failure::OperationError;
 use std::{fs, io, path::Path};
 use tokio::sync::watch;
 
@@ -9,7 +10,7 @@ pub struct BatteryStatus {
     pub status: String,
 }
 
-pub type BatteryReading = Result<BatteryStatus, String>;
+pub type BatteryReading = Result<BatteryStatus, OperationError>;
 static READINGS: OnceLock<watch::Sender<Option<BatteryReading>>> = OnceLock::new();
 
 fn readings() -> &'static watch::Sender<Option<BatteryReading>> {
@@ -33,7 +34,7 @@ fn publish(sender: &watch::Sender<Option<BatteryReading>>, reading: BatteryReadi
 
 pub fn read() -> io::Result<BatteryStatus> {
     let reading = read_from(Path::new("/sys/class/power_supply"));
-    publish(readings(), reading.as_ref().cloned().map_err(ToString::to_string));
+    publish(readings(), reading.as_ref().cloned().map_err(|error| OperationError::from_error(error)));
     reading
 }
 

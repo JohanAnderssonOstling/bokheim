@@ -1,5 +1,6 @@
 //! One file-backed, bounded-cache reference connection per process/worker.
 #[cfg(not(target_arch = "wasm32"))]
+use operation_failure::OperationError;
 use flate2::read::GzDecoder;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -45,10 +46,10 @@ fn database_path() -> PathBuf {
     }
 }
 
-fn open_file(path: &Path) -> Result<Connection, String> {
+fn open_file(path: &Path) -> Result<Connection, OperationError> {
     let db = crate::installed::open_read_only(path)?;
     db.set_prepared_statement_cache_capacity(8);
-    db.execute_batch("PRAGMA cache_size=-128; PRAGMA mmap_size=0;").map_err(|e| e.to_string())?;
+    db.execute_batch("PRAGMA cache_size=-128; PRAGMA mmap_size=0;").map_err(|error| OperationError::from_error(&error))?;
     Ok(db)
 }
 
@@ -62,7 +63,7 @@ fn matches_revision(db: &Connection) -> rusqlite::Result<bool> {
 
 /// Install a prepared application asset through the platform's bulk writer.
 /// Cache identity, connection policy and reuse are common to every host.
-pub fn install_bisac_reference(image: &[u8], write: impl FnOnce(&Path, &[u8]) -> Result<(), String>) -> Result<(), String> {
+pub fn install_bisac_reference(image: &[u8], write: impl FnOnce(&Path, &[u8]) -> Result<(), OperationError>) -> Result<(), OperationError> {
     let mut reference = reference();
     if reference.is_none() {
         *reference = Some(ensure_file(|path| write(path, image))?);
@@ -75,7 +76,7 @@ fn cached_file(path: &Path) -> Option<Connection> {
     matches_revision(&db).ok()?.then_some(db)
 }
 
-fn ensure_file(install: impl FnOnce(&Path) -> Result<(), String>) -> Result<Connection, String> {
+fn ensure_file(install: impl FnOnce(&Path) -> Result<(), OperationError>) -> Result<Connection, OperationError> {
     let path = database_path();
     if let Some(db) = cached_file(&path) {
         return Ok(db);
@@ -84,7 +85,7 @@ fn ensure_file(install: impl FnOnce(&Path) -> Result<(), String>) -> Result<Conn
     cached_file(&path).ok_or_else(|| "installed BISAC reference does not match this application".into())
 }
 
-pub fn open_bisac_reference() -> Result<bool, String> {
+pub fn open_bisac_reference() -> Result<bool, OperationError> {
     let mut reference = reference();
     if reference.is_none() {
         *reference = cached_file(&database_path());
@@ -93,19 +94,19 @@ pub fn open_bisac_reference() -> Result<bool, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn install_bundled_file(path: &Path) -> Result<(), String> {
+fn install_bundled_file(path: &Path) -> Result<(), OperationError> {
     let mut image = Vec::with_capacity(IMAGE_SIZE);
-    GzDecoder::new(IMAGE).read_to_end(&mut image).map_err(|e| e.to_string())?;
+    GzDecoder::new(IMAGE).read_to_end(&mut image).map_err(|error| OperationError::from_error(&error))?;
     write_native_file(path, &image)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn install_bundled_file(_: &Path) -> Result<(), String> {
+fn install_bundled_file(_: &Path) -> Result<(), OperationError> {
     Err("the browser host must download the BISAC application asset".into())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_native_file(path: &Path, image: &[u8]) -> Result<(), String> {
+fn write_native_file(path: &Path, image: &[u8]) -> Result<(), OperationError> {
     // A completed file becomes visible in one rename. Separate processes can
     // prepare the same cache without exposing a partial image to readers.
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -114,7 +115,7 @@ fn write_native_file(path: &Path, image: &[u8]) -> Result<(), String> {
         match OpenOptions::new().write(true).create_new(true).open(&staging) {
             Ok(file) => break (staging, file),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.into()),
         }
     };
     let result = (|| {
@@ -128,7 +129,7 @@ fn write_native_file(path: &Path, image: &[u8]) -> Result<(), String> {
         // Another process may have published the same immutable cache first.
         return Ok(());
     }
-    result.map_err(|e| e.to_string())
+    result.map_err(|error| OperationError::from_error(&error))
 }
 
 pub(super) fn with_reference<T>(read: impl FnOnce(Option<&Connection>) -> T) -> T {

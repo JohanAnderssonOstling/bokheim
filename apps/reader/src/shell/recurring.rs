@@ -1,11 +1,22 @@
 //! Text matching and scope policy shared by every annotation reader.
-use html_pipeline::engine::search_queries;
 use book_model::{Annotation, RecurringScope};
 use content_address::BookId;
 use html_pipeline::engine::TextPatternMatch;
 use html::search::TextPatternMatcher;
 use html::text::TextSearchOptions;
 use std::collections::HashMap;
+use std::{cmp::Reverse, ops::Range};
+
+/// Prefer a local passage over recurring scopes; narrower passages break ties.
+pub(crate) fn annotation_specificity(annotation: &Annotation) -> (u8, usize) {
+    let scope = match annotation.anchor.recurring_scope() {
+        None => 0,
+        Some(RecurringScope::Chapter) => 1,
+        Some(RecurringScope::Book) => 2,
+        Some(RecurringScope::Library) => 3,
+    };
+    (scope, annotation.exact_text.chars().count())
+}
 
 /// Owned by the shared mark session. Page changes and note/formatting edits
 /// reuse the compiled phrases; only phrase membership or text rebuilds it.
@@ -17,8 +28,8 @@ pub(crate) struct RecurringMatcher {
 
 impl RecurringMatcher {
     pub(crate) fn update<'a>(&mut self, annotations: impl Iterator<Item = &'a Annotation>) -> bool {
-        let mut inputs = annotations.map(|annotation| (annotation.id.as_str(), annotation.exact_text.as_str())).collect::<Vec<_>>();
-        inputs.sort_unstable_by_key(|(id, _)| *id);
+        let mut inputs = annotations.flat_map(|annotation| annotation.recurring_phrases().map(move |text| (annotation.id.as_str(), text))).collect::<Vec<_>>();
+        inputs.sort_unstable();
         if inputs.iter().copied().eq(self.inputs.iter().map(|(id, text)| (id.as_str(), text.as_str()))) {
             return false;
         }
@@ -46,9 +57,7 @@ impl RecurringMatcher {
     }
 
     pub(crate) fn matches(&self, text: &str) -> Vec<TextPatternMatch> {
-        self.matcher.as_ref().map_or_else(Vec::new, |matcher| {
-            search_queries::text_pattern_matcher_find_matches(&matcher, text)
-        })
+        self.matcher.as_ref().map_or_else(Vec::new, |matcher| matcher.find_matches(text))
     }
 
     pub(crate) fn matching_ids<'a>(&'a self, text: &str) -> impl Iterator<Item = &'a str> {
@@ -59,6 +68,25 @@ impl RecurringMatcher {
         let annotations = annotations.map(|annotation| (annotation.id.as_str(), annotation)).collect::<HashMap<_, _>>();
         self.matches(text).into_iter().filter_map(move |found| annotations.get(self.inputs[found.pattern].0.as_str()).map(|annotation| (*annotation, found)))
     }
+}
+
+/// Keep the longest overlapping phrase for each note, retaining other notes.
+pub(crate) fn distinct_matches<'a, M>(matches: impl Iterator<Item = (&'a Annotation, M)>, range: impl Fn(&M) -> Range<usize>) -> Vec<(&'a Annotation, M)> {
+    let mut matches = matches.collect::<Vec<_>>();
+    matches.sort_by_key(|(_, found)| {
+        let range = range(found);
+        (range.start, Reverse(range.end))
+    });
+    let mut ends = HashMap::new();
+    matches.retain(|(annotation, found)| {
+        let range = range(found);
+        if ends.get(annotation.id.as_str()).is_some_and(|end| *end > range.start) {
+            return false;
+        }
+        ends.insert(annotation.id.as_str(), range.end);
+        true
+    });
+    matches
 }
 
 /// Readers resolve their own chapter boundaries; scope decisions are shared.

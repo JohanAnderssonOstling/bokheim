@@ -1,5 +1,6 @@
 //! Android's in-app browser. Each session owns its download directory until
 //! the WebView closes and all of its transfers have finished.
+use client_protocol::{BackendError, Failure, OperationError};
 use super::{BrowserEvent, BrowserFeedback, BrowserRequest};
 use serde::Deserialize;
 use serde_json::{from_str, json};
@@ -12,7 +13,7 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-type Transport = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+type Transport = dyn Fn(&str) -> Result<(), OperationError> + Send + Sync;
 static TRANSPORT: OnceLock<Arc<Transport>> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static SESSIONS: LazyLock<Mutex<HashMap<u64, UnboundedSender<Event>>>> = LazyLock::new(Mutex::default);
@@ -23,11 +24,11 @@ enum Event {
     Opened,
     Downloaded { path: PathBuf, download: String },
     CancelDownload { download: String },
-    Error { message: String },
+    Error { message: String, #[serde(default)] failure: Option<Failure> },
     Closed,
 }
 
-pub fn initialize(transport: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) {
+pub fn initialize(transport: impl Fn(&str) -> Result<(), OperationError> + Send + Sync + 'static) {
     let _ = TRANSPORT.set(Arc::new(transport));
 }
 
@@ -55,8 +56,8 @@ pub struct BrowserWindow {
 pub struct BrowserFeedbackSender(u64);
 
 impl BrowserFeedbackSender {
-    pub async fn send(&self, feedback: BrowserFeedback) -> Result<(), String> {
-        TRANSPORT.get().ok_or("Android browser unavailable")?(&json!({ "command": "feedback", "id": self.0, "feedback": feedback }).to_string())
+    pub async fn send(&self, feedback: BrowserFeedback) -> Result<(), BackendError> {
+        TRANSPORT.get().ok_or("Android browser unavailable")?(&json!({ "command": "feedback", "id": self.0, "feedback": feedback }).to_string()).map_err(Into::into)
     }
 }
 
@@ -95,9 +96,9 @@ impl Drop for BrowserWindow {
     }
 }
 
-pub(super) async fn open(request: BrowserRequest) -> Result<BrowserWindow, String> {
+pub(super) async fn open(request: BrowserRequest) -> Result<BrowserWindow, BackendError> {
     let transport = TRANSPORT.get().ok_or("the Android browser is unavailable")?;
-    let downloads = request.downloads.canonicalize().map_err(|error| error.to_string())?;
+    let downloads = request.downloads.canonicalize().map_err(BackendError::operation)?;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (sender, events) = unbounded_channel();
     SESSIONS.lock().unwrap_or_else(PoisonError::into_inner).insert(id, sender);
@@ -105,7 +106,7 @@ pub(super) async fn open(request: BrowserRequest) -> Result<BrowserWindow, Strin
     transport(&json!({ "command": "open", "id": id, "request": request }).to_string())?;
     match tokio::time::timeout(Duration::from_secs(30), window.events.recv()).await {
         Ok(Some(Event::Opened)) => Ok(window),
-        Ok(Some(Event::Error { message })) => Err(message),
+        Ok(Some(Event::Error { message, failure })) => Err(failure.map_or_else(|| BackendError::message(message.clone()), |failure| BackendError::classified(failure, message.clone()))),
         _ => Err("the Android browser did not open".into()),
     }
 }

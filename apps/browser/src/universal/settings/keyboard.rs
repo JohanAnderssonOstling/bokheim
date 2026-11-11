@@ -11,13 +11,13 @@ impl SettingsPage {
         self.focus.focus(window, cx);
     }
 
-    pub(super) fn settings_container(&self, content: impl IntoElement, desktop: bool, cx: &Context<Self>) -> components::Scrollable<Div> {
+    pub(super) fn settings_container(&self, content: impl IntoElement, desktop: bool, cx: &Context<Self>) -> Div {
         let theme = components::browser_theme(cx);
-        let tabs = components::browser_settings_button_group(theme)
+        let tabs = components::row(0.0).w_full().max_w(px(640.0))
             .key_context("BrowserSettingsHeader")
-            .child(components::settings_choice_button("settings-general-tab", text!(common::general), !self.keyboard_tab, theme).on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(false, cx))))
-            .child(components::settings_choice_button("settings-keyboard-tab", text!(common::keyboard), self.keyboard_tab, theme).on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(true, cx))));
-        components::browser_settings_page_with_scroll(&self.scroll)
+            .child(components::base_button("settings-general-tab").label(text!(common::general)).ghost().no_fill().flex_1().border_b_2().border_color(if !self.keyboard_tab { theme.accent } else { theme.rule }).on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(false, cx))))
+            .child(components::base_button("settings-keyboard-tab").label(text!(common::keyboard)).ghost().no_fill().flex_1().border_b_2().border_color(if self.keyboard_tab { theme.accent } else { theme.rule }).on_click(cx.listener(|page, _, _, cx| page.select_settings_tab(true, cx))));
+        div().size_full().min_h_0().min_w_0().flex().flex_col()
             .key_context(SETTINGS_KEY_CONTEXT)
             .track_focus(&self.focus)
             .tab_group()
@@ -26,8 +26,8 @@ impl SettingsPage {
             .on_action(cx.listener(Self::move_setting_row))
             .on_action(cx.listener(Self::adjust_setting_value))
             .on_key_down(cx.listener(Self::on_setting_row_key))
-            .when(desktop, |page| page.child(components::browser_settings_content().child(tabs)))
-            .child(content)
+            .when(desktop, |page| page.child(div().flex_none().w_full().flex().justify_center().border_b_1().border_color(theme.rule).child(tabs)))
+            .child(div().flex_1().min_h_0().child(components::browser_settings_page_with_scroll(&self.scroll).child(content)))
     }
 
     fn select_settings_tab(&mut self, keyboard: bool, cx: &mut Context<Self>) {

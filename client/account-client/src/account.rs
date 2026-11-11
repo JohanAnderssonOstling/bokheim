@@ -1,10 +1,10 @@
 use crate::http::{authenticated_request, decode_response, with_body};
-use crate::session::{AuthError, Session, validate_email, validate_identity};
-use account_contract::{AccountSnapshotResponse, BookStorageUsage, MAX_ACCOUNT_STORAGE_BOOKS, MeResponse, OtherSessionsRevocationResponse, SessionRevocationResponse, SessionSummary};
+use crate::session::{validate_email, validate_identity, AuthError, Session};
+use account_contract::{AccountEntitlementsResponse, AccountSnapshotResponse, BookStorageUsage, MeResponse, OtherSessionsRevocationResponse, SessionRevocationResponse, SessionSummary, MAX_ACCOUNT_STORAGE_BOOKS};
 use reqwest::Method;
-use sync_common::LibraryId;
 use sync_common::api::libraries::{CloudStorageChange, DeleteLibraryResponse, LibraryCloudStorage, LibraryNameRequest, LibrarySummary};
 use sync_common::storage::LibraryStorage;
+use sync_common::LibraryId;
 
 pub async fn current_account(session: &Session) -> Result<MeResponse, AuthError> {
     let account: MeResponse = decode_response(authenticated_request(session, Method::GET, "api/auth/me")?).await?;
@@ -18,6 +18,16 @@ pub async fn current_account(session: &Session) -> Result<MeResponse, AuthError>
 
 pub async fn account_snapshot(session: &Session) -> Result<AccountSnapshotResponse, AuthError> {
     decode_response(authenticated_request(session, Method::GET, "api/account/snapshot")?).await
+}
+
+/// Older servers may not expose billing yet. Missing data is not proof of a
+/// free account; callers should keep using the existing storage snapshot.
+pub async fn account_entitlements(session: &Session) -> Result<Option<AccountEntitlementsResponse>, AuthError> {
+    match decode_response(authenticated_request(session, Method::GET, "api/account/entitlements")?).await {
+        Ok(entitlements) => Ok(Some(entitlements)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn book_storage_usage(session: &Session) -> Result<Vec<BookStorageUsage>, AuthError> {

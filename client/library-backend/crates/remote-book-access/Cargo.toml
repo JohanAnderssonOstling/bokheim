@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+operation-failure = { path = "../../../client-protocol/crates/operation-failure" }
 account-client = { path = "../../../account-client" }
 book-access = { path = "../book-access" }
 client-platform-runtime = { path = "../../../platforms/runtime" }

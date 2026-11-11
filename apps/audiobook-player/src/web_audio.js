@@ -77,7 +77,7 @@ export class BrowserAudio {
                 this.recoverDirect();
                 return;
             }
-            this.error = `Could not play this audiobook (media error ${this.audio.error?.code ?? 'unknown'}).`;
+            this.error = Object.assign(new Error(`Could not play this audiobook (media error ${this.audio.error?.code ?? "unknown"}).`), {failure: this.audio.error?.code === 2 ? "Offline" : this.audio.error?.code >= 3 ? "UnreadableBook" : undefined});
 
             this.update(true);
         });
@@ -168,8 +168,7 @@ export class BrowserAudio {
             }
             this.wantsPlay = false;
 
-            this.error = error.name === 'NotAllowedError'
-                ? 'Tap Play to allow audiobook playback in this browser.' : `Could not start playback: ${error.message}`;
+            this.error = error;
         });
     }
     revokeDirect(url) {
@@ -216,7 +215,7 @@ export class BrowserAudio {
             }
             if (!recovery.signal.aborted) throw Error('Playback connection was lost. Tap Play to retry.');
         } catch (error) {
-            if (!recovery.signal.aborted && !this.disposed) { this.wantsPlay = false; this.error = error.message; this.waiting = false; }
+            if (!recovery.signal.aborted && !this.disposed) { this.wantsPlay = false; this.error = error; this.waiting = false; }
         } finally { if (this.recovery === recovery) this.recovery = null; }
     }
     toggle() { if (this.playing()) this.pause(); else this.play(); }

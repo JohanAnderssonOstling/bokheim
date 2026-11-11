@@ -379,14 +379,43 @@ impl MarkSession {
         self.recurring.matching_annotations(text, self.recurring_annotations())
     }
 
-    pub(crate) fn set_selected_scope(&mut self, scope: Option<RecurringScope>, what: &'static str) {
-        let Some(mut annotation) = self.selected().cloned() else { return };
-        if annotation.anchor.recurring_scope() == scope {
+    pub(crate) fn add_selected_alias(&mut self, alias: &str, what: &'static str) {
+        let Some(mut annotation) = self.selected().filter(|annotation| annotation.anchor.recurring_scope().is_some()).cloned() else { return };
+        let alias = alias.split_whitespace().collect::<Vec<_>>().join(" ");
+        if alias.is_empty() || alias.contains('\0') || annotation.recurring_phrases().any(|phrase| phrase.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase() == alias.to_lowercase()) {
             return;
         }
-        annotation.anchor = annotation.anchor.with_recurring_scope(scope);
+        let mut aliases = annotation.anchor.recurring_aliases().to_vec();
+        aliases.push(alias);
+        annotation.anchor = annotation.anchor.with_recurring_aliases(aliases);
         annotation.modified_at = now_millis();
         self.update(annotation, what);
+    }
+
+    pub(crate) fn remove_selected_alias(&mut self, alias: &str, what: &'static str) {
+        let Some(mut annotation) = self.selected().cloned() else { return };
+        let mut aliases = annotation.anchor.recurring_aliases().to_vec();
+        let previous = aliases.len();
+        aliases.retain(|candidate| candidate != alias);
+        if aliases.len() == previous {
+            return;
+        }
+        annotation.anchor = annotation.anchor.with_recurring_aliases(aliases);
+        annotation.modified_at = now_millis();
+        self.update(annotation, what);
+    }
+
+    /// A missing scope gets its own empty note; existing notes keep their scopes.
+    pub(crate) fn create_scoped_annotation(&mut self, mut annotation: Annotation, scope: Option<RecurringScope>, what: &'static str) -> String {
+        annotation.id = uuid::Uuid::new_v4().to_string();
+        annotation.anchor = annotation.anchor.with_recurring_scope(scope);
+        annotation.note.clear();
+        annotation.created_at = now_millis();
+        annotation.modified_at = annotation.created_at;
+        annotation.deleted = false;
+        let id = annotation.id.clone();
+        self.append(annotation, what);
+        self.select(id)
     }
 
     pub(crate) fn editor_context(&self, book: BookId, passage: &str, local_ids: &[String], chapter_available: bool) -> super::annotation_editor::RecurringEditorContext {
@@ -412,19 +441,19 @@ fn build_editor_context(
     use super::annotation_editor::{EditorBook, RecurringEditorContext};
     let matching_ids = recurring.matching_ids(passage).collect::<HashSet<_>>();
     let mut books = Vec::new();
-    let local = annotations.iter().filter(|annotation| local_ids.contains(&annotation.id)).map(|annotation| (annotation.id.clone(), annotation.note.clone())).collect::<Vec<_>>();
+    let local = annotations.iter().filter(|annotation| local_ids.contains(&annotation.id)).cloned().collect::<Vec<_>>();
     if !local.is_empty() {
         books.push(EditorBook { id: book, title: text!(reader::this_book).into(), annotations: local });
     }
     for item in inherited {
-        if item.annotation.anchor.recurring_scope() != Some(RecurringScope::Library) || !matching_ids.contains(item.annotation.id.as_str()) {
+        if item.annotation.anchor.recurring_scope() != Some(RecurringScope::Library) || (!matching_ids.contains(item.annotation.id.as_str()) && !local_ids.contains(&item.annotation.id)) {
             continue;
         }
         let index = books.iter().position(|entry| entry.id == item.annotation.book_id).unwrap_or_else(|| {
             books.push(EditorBook { id: item.annotation.book_id, title: item.book_title.clone(), annotations: Vec::new() });
             books.len() - 1
         });
-        books[index].annotations.push((item.annotation.id.clone(), item.annotation.note.clone()));
+        books[index].annotations.push(item.annotation.clone());
     }
     RecurringEditorContext { books, chapter_available, scope_editable: selected.is_some_and(|annotation| annotation.book_id == book) }
 }

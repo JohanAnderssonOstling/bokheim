@@ -11,6 +11,19 @@ The crate does not classify books or persist library state. The
 database-backed scanner, watcher policy, and thumbnail job scheduler live in
 `library-backend`; they call this crate for physical access.
 
+Prepared remote-book text is an expendable cache addressed by the immutable byte
+checksum. Native entries live in `.bokheim/assets/text-cache-v1/`: a temporary file
+in that directory is written and synced before atomic replacement and directory
+sync. Browser entries use the same logical directory under the library's OPFS
+namespace, with a staged physical file published through the durable asset index.
+These entries do not change the book's downloaded status or placement.
+Native writers hold a separate per-checksum OS lease and remove that book's
+abandoned staging files before writing, without interfering with active writers.
+Both native and browser cache writers support streamed serialization and header
+updates within the private staging file, without a complete encoded buffer in RAM.
+Cache loading decodes through one open native file or pinned OPFS generation on
+the storage executor, so validation and decoding can stream without a full-file buffer.
+
 ## Host interfaces
 
 On the browser, `hashing::HashService` provides incremental hashing sessions.

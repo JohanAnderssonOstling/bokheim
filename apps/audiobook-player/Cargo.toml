@@ -12,6 +12,7 @@ native-rodio = ["dep:rodio", "rodio/playback"]
 path = "src/lib.rs"
 
 [dependencies]
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure", features = ["web"] }
 base64 = "0.22"
 ui-text = { path = "../ui-text" }
 library-backend = { path = "../../client/library-backend" }

@@ -1,5 +1,6 @@
 //! Browser-style history of deliberate jumps, independent of page turning.
 
+#[derive(Clone)]
 pub(crate) struct NavigationHistory<T> {
     back: Vec<T>,
     forward: Vec<T>,

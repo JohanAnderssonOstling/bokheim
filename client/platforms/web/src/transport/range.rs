@@ -1,6 +1,7 @@
 //! Shared-memory range transport between dedicated browser workers.
 
-use super::{error_message, field};
+use super::field;
+use operation_failure::OperationError;
 use js_sys::{Function, Uint8Array};
 use std::cell::Cell;
 use wasm_bindgen::prelude::*;
@@ -16,7 +17,7 @@ export function serveBook(read, length) {
         if (Atomics.load(state, 0) === -2) return;
         if (data.connect === true) {
             try { channel.port1.postMessage({buffer}); }
-            catch (error) { channel.port1.postMessage({error: String(error)}); }
+            catch (error) { channel.port1.postMessage({error: {message: error.message || String(error), failure: error.failure}}); }
             return;
         }
         try {
@@ -28,7 +29,12 @@ export function serveBook(read, length) {
             bytes.set(chunk);
             Atomics.store(state, 1, chunk.length);
             Atomics.store(state, 0, 1);
-        } catch (_) { if (Atomics.load(state, 0) === -2) return; Atomics.store(state, 0, -1); }
+        } catch (error) {
+            if (Atomics.load(state, 0) === -2) return;
+            const failures = ['StorageFull', 'PermissionDenied', 'StorageBusy', 'Offline', 'TimedOut', 'SignInRequired', 'NotFound', 'ReadOnlyStorage'];
+            Atomics.store(state, 1, failures.indexOf(error.failure) + 1);
+            Atomics.store(state, 0, -1);
+        }
         Atomics.notify(state, 0);
     };
     return {source: {port: channel.port2, length}, close() {
@@ -43,13 +49,13 @@ export function closeBook(server) { server.close(); }
 // Both dedicated workers belong to the same page and agent cluster.
 export function connectBook(source) {
     return new Promise((resolve, reject) => {
-        const finish = error => {
+        const finish = (error, failure) => {
             clearTimeout(timeout);
             source.port.onmessage = null;
             source.port.onmessageerror = null;
-            if (error) reject(new Error(error)); else resolve();
+            if (error) reject(Object.assign(new Error(error.message || String(error)), {failure: error.failure || failure})); else resolve();
         };
-        const timeout = setTimeout(() => finish('book source connection timed out'), 30000);
+        const timeout = setTimeout(() => finish('book source connection timed out', 'TimedOut'), 30000);
         source.port.onmessage = ({data}) => {
             if (data.error) { finish(data.error); return; }
             source.buffer = data.buffer;
@@ -67,9 +73,13 @@ function readBookRange(source, offset, length) {
     const deadline = Date.now() + 30000;
     while (Atomics.load(state, 0) === 0) {
         if (Atomics.wait(state, 0, 0, Math.max(0, deadline - Date.now())) === 'timed-out')
-            throw new Error('book range read timed out');
+            throw Object.assign(new Error('book range read timed out'), {name: 'TimeoutError'});
     }
-    if (Atomics.load(state, 0) !== 1) throw new Error('book range read failed');
+    if (Atomics.load(state, 0) !== 1) {
+        const error = new Error('book range read failed');
+        error.failure = ['StorageFull', 'PermissionDenied', 'StorageBusy', 'Offline', 'TimedOut', 'SignInRequired', 'NotFound', 'ReadOnlyStorage'][Atomics.load(state, 1) - 1];
+        throw error;
+    }
     return new Uint8Array(source.buffer, 8, Atomics.load(state, 1));
 }
 export function checkBook(source) {
@@ -103,26 +113,26 @@ pub struct Server {
     _read: Box<dyn std::any::Any>,
 }
 impl Server {
-    pub fn sync(length: u64, mut fetch: impl FnMut(u64, usize) -> Result<Vec<u8>, String> + 'static) -> Result<Self, String> {
-        let read = Closure::<dyn FnMut(f64, u32) -> Result<Uint8Array, JsValue>>::own_aborting(move |offset, length| fetch(offset as u64, length as usize).map(|bytes| Uint8Array::from(bytes.as_slice())).map_err(|e| JsValue::from_str(&e)));
+    pub fn sync(length: u64, mut fetch: impl FnMut(u64, usize) -> Result<Vec<u8>, OperationError> + 'static) -> Result<Self, OperationError> {
+        let read = Closure::<dyn FnMut(f64, u32) -> Result<Uint8Array, JsValue>>::own_aborting(move |offset, length| fetch(offset as u64, length as usize).map(|bytes| Uint8Array::from(bytes.as_slice())).map_err(OperationError::into_js));
         Self::attach(length, read)
     }
-    pub fn asynchronous<F, Fut>(length: u64, mut fetch: F) -> Result<Self, String>
+    pub fn asynchronous<F, Fut>(length: u64, mut fetch: F) -> Result<Self, OperationError>
     where
         F: FnMut(u64, usize) -> Fut + 'static,
-        Fut: std::future::Future<Output = Result<Vec<u8>, String>> + 'static,
+        Fut: std::future::Future<Output = Result<Vec<u8>, OperationError>> + 'static,
     {
         let read = Closure::<dyn FnMut(f64, u32) -> js_sys::Promise>::own_aborting(move |offset, length| {
             let future = fetch(offset as u64, length as usize);
-            future_to_promise_aborting(async move { future.await.map(|bytes| Uint8Array::from(bytes.as_slice()).into()).map_err(|e| JsValue::from_str(&e)) })
+            future_to_promise_aborting(async move { future.await.map(|bytes| Uint8Array::from(bytes.as_slice()).into()).map_err(OperationError::into_js) })
         });
         Self::attach(length, read)
     }
-    fn attach<T: ?Sized + wasm_bindgen::closure::WasmClosure + 'static>(length: u64, read: Closure<T>) -> Result<Self, String> {
+    fn attach<T: ?Sized + wasm_bindgen::closure::WasmClosure + 'static>(length: u64, read: Closure<T>) -> Result<Self, OperationError> {
         if length > 9_007_199_254_740_991 {
             return Err("book exceeds browser offset precision".into());
         }
-        let server = serve(read.as_ref().unchecked_ref(), length as f64).map_err(|e| error_message(&e))?;
+        let server = serve(read.as_ref().unchecked_ref(), length as f64).map_err(OperationError::from)?;
         Ok(Self { server, _read: Box::new(read) })
     }
     pub fn source(&self) -> JsValue {
@@ -146,7 +156,7 @@ pub struct Source {
     length: u64,
 }
 impl Source {
-    pub fn new(source: JsValue) -> Result<Self, String> {
+    pub fn new(source: JsValue) -> Result<Self, OperationError> {
         let length = field(&source, "length").as_f64().filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= 9_007_199_254_740_991.0).ok_or("invalid book length")? as u64;
         let id = NEXT.with(|next| {
             let id = next.get().wrapping_add(1);
@@ -163,7 +173,7 @@ impl Source {
         SOURCES.with(|sources| {
             let sources = sources.borrow();
             let source = sources.get(&self.id).ok_or_else(|| std::io::Error::other("book reader unavailable on this worker"))?;
-            operation(source).map_err(|e| std::io::Error::other(error_message(&e)))
+            operation(source).map_err(|e| std::io::Error::other(OperationError::from(e)))
         })
     }
     pub fn check(&self) -> std::io::Result<()> {

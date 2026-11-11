@@ -152,7 +152,7 @@ public final class AudiobookService extends MediaSessionService {
                     reportFailure(data.optLong("id"), "The audiobook service has stopped");
                 }
             } catch (Exception error) {
-                try { reportFailure(new JSONObject(command).optLong("id"), error.toString()); }
+                try { reportFailure(new JSONObject(command).optLong("id"), error); }
                 catch (Exception ignored) { Log.e("Bokheim", "Invalid audiobook command", error); }
             }
         });
@@ -223,7 +223,7 @@ public final class AudiobookService extends MediaSessionService {
             @Override public void onEvents(Player ignored, Player.Events events) {
                 publish(false, null, events.contains(Player.EVENT_POSITION_DISCONTINUITY));
             }
-            @Override public void onPlayerError(PlaybackException error) { publish(false, error.getErrorCodeName() + ": " + error.getMessage()); }
+            @Override public void onPlayerError(PlaybackException error) { publishFailure(false, error); }
         });
         MAIN.post(tick);
     }
@@ -238,7 +238,7 @@ public final class AudiobookService extends MediaSessionService {
             JSONObject command = pendingCommands.removeFirst();
             try { execute(command); }
             catch (Exception error) {
-                reportFailure(command.optLong("id"), error.toString());
+                reportFailure(command.optLong("id"), error);
                 stopSelf();
             }
         }
@@ -399,7 +399,15 @@ public final class AudiobookService extends MediaSessionService {
 
     private void publish(boolean released, String error) { publish(released, error, false); }
 
+    private void publishFailure(boolean released, Throwable error) {
+        publish(released, error.toString(), false, FailureDetails.classify(error));
+    }
+
     private void publish(boolean released, String error, boolean force) {
+        publish(released, error, force, null);
+    }
+
+    private void publish(boolean released, String error, boolean force, String failure) {
         if (bookId == 0 || releasing) return;
         try {
             // The 250 ms position update contains primitive fields. Reuse its writer rather
@@ -419,11 +427,17 @@ public final class AudiobookService extends MediaSessionService {
                 .append(",\"force\":").append(force).append(",\"sleepFinished\":").append(sleepFinished);
             if (sleepReset != null) playbackState.append(",\"sleepReset\":").append(sleepReset);
             if (error != null) playbackState.append(",\"error\":").append(JSONObject.quote(error));
+            if (failure != null) playbackState.append(",\"failure\":").append(JSONObject.quote(failure));
             playbackState.append('}');
             stateListener.accept(playbackState.toString());
             sleepFinished = false;
             sleepReset = null;
         } catch (Exception errorReporting) { Log.e("Bokheim", "Could not report playback state", errorReporting); }
+    }
+
+    private static void reportFailure(long id, Throwable error) {
+        try { stateListener.accept(FailureDetails.put(new JSONObject().put("id", id).put("released", true), "error", error).toString()); }
+        catch (org.json.JSONException reporting) { Log.e("Bokheim", "Could not report audio error", reporting); }
     }
 
     private static void reportFailure(long id, String error) {

@@ -10,6 +10,7 @@ use client_platform_runtime::executor::{run_blocking, BackendExecutor, BackendSe
 use client_platform_web::reserve_database_capacity;
 use std::path::{Path, PathBuf};
 use update_client::DiscoveryConfig;
+use client_protocol::BackendError;
 
 /// Snapshot formats this build reads.
 const FORMATS: [u32; 1] = [library_database::catalog::FORMAT_VERSION];
@@ -31,7 +32,7 @@ pub fn start(app_data_dir: &Path, executor: &BackendExecutor, changed: impl Fn()
             log::warn!("Catalog cover disk cache is unavailable: {error}");
         }
         let stored_path = path.clone();
-        let installed = run_blocking(move || activate_stored(&stored_path)).await.map_err(|error| error.to_string()).and_then(|result| result).unwrap_or_else(|error| {
+        let installed = run_blocking(move || activate_stored(&stored_path)).await.map_err(BackendError::operation).and_then(|result| result).unwrap_or_else(|error| {
             log::warn!("Stored catalog is unreadable; fetching it again: {error}");
             0
         });
@@ -51,15 +52,15 @@ pub fn start(app_data_dir: &Path, executor: &BackendExecutor, changed: impl Fn()
 
 /// Opens the stored snapshot for catalog queries and returns its release,
 /// or 0 when none is stored.
-fn activate_stored(path: &Path) -> Result<u64, String> {
-    Ok(library_database::catalog::activate_path(path).map_err(|e| e.to_string())?.unwrap_or(0))
+fn activate_stored(path: &Path) -> Result<u64, BackendError> {
+    Ok(library_database::catalog::activate_path(path).map_err(BackendError::operation)?.unwrap_or(0))
 }
 
 /// Stores a published snapshot newer than `installed`. A first one is also
 /// activated at once, for libraries opened from then on.
-async fn refresh(path: PathBuf, installed: u64) -> Result<bool, String> {
+async fn refresh(path: PathBuf, installed: u64) -> Result<bool, BackendError> {
     let config = DiscoveryConfig::bundled()?;
-    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(BackendError::operation)?.as_secs();
     let manifest = update_client::fetch::discover(&config, now, 0).await?;
     let Some(release) = manifest.manifest().catalog.as_ref().filter(|release| release.release_id > installed && FORMATS.contains(&release.format_version)) else {
         return Ok(false);
@@ -68,12 +69,12 @@ async fn refresh(path: PathBuf, installed: u64) -> Result<bool, String> {
     reserve_database_capacity(1).await?;
     let expected = (release.release_id, release.format_version);
     run_blocking(move || {
-        library_database::catalog::store(&image, &path, expected).map_err(|e| e.to_string())?;
+        library_database::catalog::store(&image, &path, expected).map_err(BackendError::operation)?;
         if installed == 0 {
-            library_database::catalog::activate_path(&path).map_err(|e| e.to_string())?;
+            library_database::catalog::activate_path(&path).map_err(BackendError::operation)?;
         }
         Ok(true)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(BackendError::operation)?
 }

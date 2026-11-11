@@ -8,7 +8,7 @@ use std::rc::Rc;
 #[cfg(test)]
 use app::AppClient;
 use gpui::prelude::*;
-use gpui::{App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, div, px};
+use gpui::{AnyView, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, div, px};
 use gpui_component::IconName;
 use library_backend::LibraryClient;
 use library_management::management::ManagementClient;
@@ -25,6 +25,7 @@ use crate::{BrowsePageSession, PaneRequest};
 mod reader_import;
 
 pub(crate) struct LibrarySession {
+    operation_dialog: Option<LibraryDialog>,
     #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     reader_import: Option<(Entity<reader_import::ReaderImportDialog>, Subscription)>,
     busy_focus: FocusHandle,
@@ -36,6 +37,21 @@ pub(crate) struct LibrarySession {
     text_search: Option<Entity<NotebookPage>>,
     browse_pages: HashMap<BrowseKind, (Entity<BrowsePage>, [Subscription; 2])>,
     _library_updates_subscription: Subscription,
+}
+
+struct LibraryDialog {
+    view: AnyView,
+    width: f32,
+    focus: FocusHandle,
+    dismiss: Box<dyn Fn(&mut Window, &mut App)>,
+    _dismiss: Subscription,
+}
+
+/// Library dialogs decide when pending writes allow them to close.
+pub(crate) trait LibraryOperationDialog: Render + Focusable + EventEmitter<DismissEvent> {
+    fn dismiss(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
 }
 
 impl gpui::EventEmitter<PaneRequest> for LibrarySession {}
@@ -65,6 +81,7 @@ impl LibrarySession {
         let library_updates = library.updates();
         let library_updates_subscription = cx.observe(&library_updates, |_, _, cx| cx.notify());
         let mut session = Self {
+            operation_dialog: None,
             #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             reader_import: None,
             busy_focus: cx.focus_handle(),
@@ -81,15 +98,55 @@ impl LibrarySession {
         session
     }
 
-    /// Only the dedicated reader-import screen reserves navigation. Other
-    /// imports use the update bridge to prevent duplicate import actions.
-    pub(super) fn import_blocks_navigation(&self, cx: &App) -> bool {
+    /// Reservations apply only to pages in this library, never its switcher.
+    pub(super) fn blocks_navigation(&self, cx: &App) -> bool {
+        if self.operation_dialog.is_some() || self.library.updates().read(cx).busy_reason().is_some() {
+            return true;
+        }
         #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         if self.reader_import.as_ref().is_some_and(|(dialog, _)| dialog.read(cx).importing) {
             return true;
         }
-        let _ = cx;
         false
+    }
+
+    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, view: Entity<V>, width: f32, activate: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Preserve an existing draft when another command opens a dialog.
+        if self.operation_dialog.is_some() {
+            if activate {
+                self.focus_page(window, cx);
+            }
+            return;
+        }
+        let focus = view.read(cx).focus_handle(cx);
+        let dismiss = cx.subscribe_in(&view, window, |session, view, _: &DismissEvent, window, cx| {
+            if session.operation_dialog.as_ref().is_none_or(|dialog| dialog.view.entity_id() != view.entity_id()) {
+                return;
+            }
+            let restore_focus = session.operation_dialog.as_ref().is_some_and(|dialog| dialog.focus.contains_focused(window, cx));
+            session.operation_dialog = None;
+            if restore_focus {
+                session.focus_page(window, cx);
+            }
+            cx.notify();
+        });
+        let target = view.downgrade();
+        let request_dismiss = Box::new(move |window: &mut Window, cx: &mut App| {
+            let _ = target.update(cx, |view, cx| view.dismiss(window, cx));
+        });
+        self.operation_dialog = Some(LibraryDialog { view: view.into(), width, focus: focus.clone(), dismiss: request_dismiss, _dismiss: dismiss });
+        if activate {
+            focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn dismiss_operation_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.library.updates().read(cx).busy_reason().is_none()
+            && let Some(dialog) = &self.operation_dialog
+        {
+            (dialog.dismiss)(window, cx);
+        }
     }
 
     pub(crate) fn push_undo(&mut self, entry: UndoEntry) {
@@ -223,6 +280,9 @@ impl LibrarySession {
         if self.library.updates().read(cx).busy_reason().is_some() {
             return Some(self.busy_focus.clone());
         }
+        if let Some(dialog) = &self.operation_dialog {
+            return Some(dialog.focus.clone());
+        }
         #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         if let Some((dialog, _)) = &self.reader_import {
             return Some(dialog.read(cx).focus_handle(cx));
@@ -236,6 +296,12 @@ impl LibrarySession {
     }
 
     pub(super) fn focus_page(&self, window: &mut Window, cx: &mut App) {
+        if self.blocks_navigation(cx) {
+            if let Some(handle) = self.focus_handle(cx) {
+                handle.focus(window, cx);
+            }
+            return;
+        }
         if self.route == LibraryRoute::Search {
             if let Some(page) = &self.text_search {
                 page.update(cx, |page, cx| page.refresh(cx));
@@ -336,6 +402,17 @@ impl Render for LibrarySession {
                 .justify_center()
                 .occlude()
                 .child(ui_components::browser_loading_message(label, ui_components::browser_theme(cx)))
+                .into_any_element();
+        }
+        if let Some(dialog) = &self.operation_dialog {
+            let theme = ui_components::browser_theme(cx);
+            return ui_components::library_section_content()
+                .bg(theme.overlay_scrim)
+                .p(px(ui_components::SPACE_MD))
+                .items_center()
+                .justify_center()
+                .occlude()
+                .child(ui_components::modal_surface(theme).id("library-operation-dialog").role(gpui::Role::Dialog).w(px(dialog.width)).max_w_full().max_h_full().flex().flex_col().child(dialog.view.clone()))
                 .into_any_element();
         }
         #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]

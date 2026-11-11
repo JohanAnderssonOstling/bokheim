@@ -1,7 +1,7 @@
 //! Portable book identity, independent of who stores its bytes.
 //!
 //! Existing content-addressed books retain their exact 32-byte representation.
-//! Local books retain a tagged digest of their library and first byte checksum.
+//! Local books retain a tagged initial content identity, shared across libraries.
 
 use crate::ContentHash;
 use serde::{Deserialize, Serialize};
@@ -45,10 +45,18 @@ impl BookId {
         if self.0[0] == 0 { Some(ContentHash::try_from(&self.0[1..]).expect("fixed digest length")) } else { None }
     }
 
-    /// Assigned from the library scope and first bytes, then retained across edits.
+    /// Assigned from the initial content, then retained across edits.
     /// A distinct tag prevents this identity from being used as a checksum or
     /// colliding with a catalog blob addressed by that original digest.
-    pub fn for_local_content(library: &[u8; 16], initial: ContentHash) -> Self {
+    pub fn for_local_content(initial: ContentHash) -> Self {
+        let mut id = Self::from_content_hash(initial);
+        id.0[0] = 3;
+        id
+    }
+
+    /// Decode the identity rule used before global local-book identities.
+    /// Migration matches this against retained initial-content proofs.
+    pub fn legacy_scoped(library: &[u8; 16], initial: ContentHash) -> Self {
         let mut hasher = blake3::Hasher::new_derive_key("se.bokheim.local-book-identity.v1");
         hasher.update(library);
         hasher.update(initial.as_bytes());
@@ -58,6 +66,11 @@ impl BookId {
     }
 
     pub const fn is_local(self) -> bool {
+        matches!(self.0[0], 2 | 3)
+    }
+
+    /// Historical IDs need a retained checksum to remove their library scope.
+    pub const fn is_library_scoped(self) -> bool {
         self.0[0] == 2
     }
 
@@ -103,7 +116,7 @@ impl TryFrom<&[u8]> for BookId {
     type Error = InvalidBookId;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         match value {
-            [2, digest @ ..] if digest.len() == 32 => Ok(Self(value.try_into().map_err(|_| InvalidBookId)?)),
+            [2 | 3, digest @ ..] if digest.len() == 32 => Ok(Self(value.try_into().map_err(|_| InvalidBookId)?)),
             digest if digest.len() == 32 => Ok(Self::from_content_hash(ContentHash::try_from(digest).map_err(|_| InvalidBookId)?)),
             _ => Err(InvalidBookId),
         }
@@ -115,10 +128,10 @@ impl FromStr for BookId {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.len() {
             64 => Ok(Self::from_content_hash(value.parse().map_err(|_| InvalidBookId)?)),
-            66 if value.starts_with("02") => {
+            66 if value.starts_with("02") || value.starts_with("03") => {
                 let hash: ContentHash = value[2..].parse().map_err(|_| InvalidBookId)?;
                 let mut id = Self::from_content_hash(hash);
-                id.0[0] = 2;
+                id.0[0] = if value.starts_with("02") { 2 } else { 3 };
                 Ok(id)
             }
             _ => Err(InvalidBookId),
@@ -216,9 +229,8 @@ mod tests {
     #[test]
     fn local_identity_is_stable_and_separate_from_verification() {
         let checksum = ContentHash::from(blake3::hash(b"initial bytes"));
-        let id = BookId::for_local_content(&[3; 16], checksum);
-        assert_eq!(id, BookId::for_local_content(&[3; 16], checksum));
-        assert_ne!(id, BookId::for_local_content(&[4; 16], checksum));
+        let id = BookId::for_local_content(checksum);
+        assert_eq!(id, BookId::for_local_content(checksum));
         assert!(id.is_local());
         assert_eq!(id.content_hash(), None);
         assert_ne!(id, BookId::from(checksum));

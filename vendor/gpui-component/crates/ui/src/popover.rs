@@ -41,6 +41,7 @@ pub struct Popover {
     id: ElementId,
     style: StyleRefinement,
     anchor: Anchor,
+    position: Option<Point<Pixels>>,
     default_open: bool,
     open: Option<bool>,
     tracked_focus_handle: Option<FocusHandle>,
@@ -68,6 +69,7 @@ impl Popover {
             id: id.into(),
             style: StyleRefinement::default(),
             anchor: Anchor::TopLeft,
+            position: None,
             trigger: None,
             trigger_style: None,
             content: None,
@@ -90,6 +92,13 @@ impl Popover {
     /// bottom-right, and so on. The popover then hangs off that point.
     pub fn anchor(mut self, anchor: impl Into<Anchor>) -> Self {
         self.anchor = anchor.into();
+        self
+    }
+
+    /// Attach to an explicit window position without trigger spacing or automatic repositioning.
+    /// The caller must fit the content inside the window.
+    pub fn position(mut self, position: Point<Pixels>) -> Self {
+        self.position = Some(position);
         self
     }
 
@@ -419,10 +428,11 @@ impl RenderOnce for Popover {
 
         // Shared cell so the deferred Anchored element can read the real trigger bounds at
         // prepaint time (after trigger's on_prepaint has already fired with the correct bounds).
-        let position = Rc::new(Cell::new(Self::resolved_corner(
+        let explicit_position = self.position;
+        let position = Rc::new(Cell::new(explicit_position.unwrap_or_else(|| Self::resolved_corner(
             self.anchor,
             trigger_bounds,
-        )));
+        ))));
 
         let el = div()
             .id(self.id)
@@ -445,7 +455,7 @@ impl RenderOnce for Popover {
                 let position = position.clone();
                 let anchor = self.anchor;
                 move |bounds, window, cx| {
-                    position.set(Self::resolved_corner(anchor, bounds));
+                    position.set(explicit_position.unwrap_or_else(|| Self::resolved_corner(anchor, bounds)));
                     let first_capture = state.update(cx, |state, _| {
                         let first = !state.trigger_bounds_captured;
                         state.trigger_bounds = bounds;
@@ -469,6 +479,14 @@ impl RenderOnce for Popover {
                 .track_focus(&focus_handle)
                 .key_context(CONTEXT)
                 .on_action(window.listener_for(&state, PopoverState::on_action_cancel))
+                .on_mouse_down(MouseButton::Right, {
+                    let state = state.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        state.update(cx, |state, cx| state.dismiss(window, cx));
+                        cx.notify(parent_view_id);
+                    }
+                })
                 .when_some(self.content, |this, content| {
                     this.child(state.update(cx, |state, cx| (content)(state, window, cx)))
                 })
@@ -487,7 +505,14 @@ impl RenderOnce for Popover {
                 .refine_style(&self.style)
                 .when(cx.supports_touch_input(), |this| {
                     this.top_0().bottom_auto().left_0().right_auto()
+                })
+                .when(explicit_position.is_some(), |this| {
+                    this.top_0().bottom_auto().left_0().right_auto()
                 });
+
+        if explicit_position.is_some() {
+            return el.child(deferred(anchored().anchor(self.anchor).position(position.get()).child(popover_content)).with_priority(1));
+        }
 
         el.child(Self::render_popover(
             self.anchor,

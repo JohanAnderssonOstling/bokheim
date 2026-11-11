@@ -52,7 +52,7 @@ impl LibraryHandle {
                 let sources = SOURCES.lock().expect("browser book sources");
                 let (owner, _) = sources.get(&capability).ok_or("book source closed; reopen the book")?;
                 if *owner != library {
-                    return Err("book belongs to another library".to_owned());
+                    return Err(client_platform_web::web_storage::StorageError::from("book belongs to another library"));
                 }
                 client_platform_web::range_reader::read_range(&capability, offset, length)
             })

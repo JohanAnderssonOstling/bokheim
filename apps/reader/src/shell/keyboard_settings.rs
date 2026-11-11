@@ -3,7 +3,7 @@
 use ui_text::text;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, Focusable, IntoElement, Window, div, px};
+use gpui::{AnyElement, Context, Entity, Focusable, IntoElement, Window, div};
 use ui_components::{self as components, KeyboardShortcutEditor, ShortcutPage};
 
 struct SettingsTabs {
@@ -15,7 +15,18 @@ pub(crate) fn with_keyboard_settings<C: 'static>(general: AnyElement, window: &m
     if components::uses_mobile_reader_controls(window) {
         return general;
     }
-    let state = window
+    let state = settings_state(window, cx);
+    let keyboard = state.read(cx).keyboard;
+    let editor = state.read(cx).editor.clone();
+    let theme = components::browser_theme(cx);
+    div().size_full().min_h_0().min_w_0().flex().flex_col()
+        .when(keyboard, |panel| panel.key_context("ShortcutSettings"))
+        .child(if keyboard { components::reader_settings_tab_body(theme).child(components::reader_settings_group(theme).child(editor)).into_any_element() } else { general })
+        .into_any_element()
+}
+
+fn settings_state<C: 'static>(window: &mut Window, cx: &mut Context<C>) -> Entity<SettingsTabs> {
+    window
         .use_keyed_state(("reader-settings-tabs", cx.entity_id()), cx, |_, cx| {
             let editor = cx.new(|cx| KeyboardShortcutEditor::new(ShortcutPage::Reader, cx));
             let state = cx.new(|_| SettingsTabs { keyboard: false, editor });
@@ -24,15 +35,17 @@ pub(crate) fn with_keyboard_settings<C: 'static>(general: AnyElement, window: &m
         })
         .read(cx)
         .0
-        .clone();
+        .clone()
+}
+
+pub(crate) fn header<C: 'static>(window: &mut Window, cx: &mut Context<C>) -> AnyElement {
+    let state = settings_state(window, cx);
     let keyboard = state.read(cx).keyboard;
-    let editor = state.read(cx).editor.clone();
     let theme = components::browser_theme(cx);
     let general_target = state.clone();
     let keyboard_target = state;
-    let tabs = components::settings_choice_button_group(theme)
-        .w_full()
-        .child(components::settings_choice_button("reader-settings-general-tab", text!(common::general), !keyboard, theme).on_click(move |_, window, cx| {
+    components::row(0.0).flex_1().min_w_0().h_full()
+        .child(components::base_button("reader-settings-general-tab").label(text!(common::general)).ghost().no_fill().flex_1().h_full().border_b_2().border_color(if !keyboard { theme.accent } else { theme.rule }).on_click(move |_, window, cx| {
             general_target.update(cx, |state, cx| {
                 state.keyboard = false;
                 state.editor.update(cx, |editor, cx| editor.cancel_capture(cx));
@@ -40,22 +53,13 @@ pub(crate) fn with_keyboard_settings<C: 'static>(general: AnyElement, window: &m
             });
             window.focus_next(cx);
         }))
-        .child(components::settings_choice_button("reader-settings-keyboard-tab", text!(common::keyboard), keyboard, theme).on_click(move |_, window, cx| {
+        .child(components::base_button("reader-settings-keyboard-tab").label(text!(common::keyboard)).ghost().no_fill().flex_1().h_full().border_b_2().border_color(if keyboard { theme.accent } else { theme.rule }).on_click(move |_, window, cx| {
             keyboard_target.update(cx, |state, cx| {
                 state.keyboard = true;
                 state.editor.update(cx, |editor, cx| editor.cancel_capture(cx));
                 state.editor.read(cx).focus_handle(cx).focus(window, cx);
                 cx.notify();
             });
-        }));
-    div()
-        .size_full()
-        .min_h_0()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .when(keyboard, |panel| panel.key_context("ShortcutSettings"))
-        .child(div().flex_none().px(px(components::SPACE_MD)).py(px(components::SPACE_SM)).child(tabs))
-        .child(if keyboard { components::reader_settings_tab_body(theme).child(components::reader_settings_group(theme).child(editor)).into_any_element() } else { general })
+        }))
         .into_any_element()
 }

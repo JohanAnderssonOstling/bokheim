@@ -1,6 +1,6 @@
 //! Capability-based byte-range access to browser-backed readers.
 
-use crate::web_storage::FileReader;
+use crate::web_storage::{FileReader, StorageError};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -32,22 +32,22 @@ impl Drop for ReaderLease {
     }
 }
 
-pub fn register(mut reader: FileReader) -> Result<(ReaderSource, ReaderLease), String> {
-    let length = reader.seek(SeekFrom::End(0)).map_err(|error| error.to_string())?;
-    reader.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+pub fn register(mut reader: FileReader) -> Result<(ReaderSource, ReaderLease), StorageError> {
+    let length = reader.seek(SeekFrom::End(0)).map_err(StorageError::from)?;
+    reader.seek(SeekFrom::Start(0)).map_err(StorageError::from)?;
     let capability = uuid::Uuid::new_v4().to_string();
     let lease = ReaderLease { capability: capability.clone() };
     READERS.with(|readers| readers.borrow_mut().insert(capability.clone(), reader));
     Ok((ReaderSource { capability, length }, lease))
 }
 
-pub fn read_range(capability: &str, offset: u64, length: usize) -> Result<Vec<u8>, String> {
+pub fn read_range(capability: &str, offset: u64, length: usize) -> Result<Vec<u8>, StorageError> {
     if length > 256 * 1024 {
         return Err("book range exceeds limit".into());
     }
     READERS.with(|readers| {
         let mut readers = readers.borrow_mut();
         let reader = readers.get_mut(capability).ok_or("book source closed; reopen the book")?;
-        crate::reader::read_range(reader, offset, length).map_err(|error| error.to_string())
+        crate::reader::read_range(reader, offset, length).map_err(StorageError::from)
     })
 }

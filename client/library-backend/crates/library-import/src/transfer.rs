@@ -1,16 +1,16 @@
 //! Verified imports preserve reader state across storage identities.
+use crate::LibraryImport;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::completion::ImportContent;
-use crate::import::{validate_import_destination, ValidatedImport};
-use crate::LibraryImport;
+use crate::import::{ValidatedImport, validate_import_destination};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{reader_batch::ReaderImportBatch, reader_transfer::reader_inspection_version};
 use book_model::BookFormat;
 use client_protocol::BackendError;
 use library_database::transfer::{BookTransferState, ImportedBook};
-use library_files::asset_store::StagedBook;
 #[cfg(not(target_arch = "wasm32"))]
 use library_files::BoxedBookReader;
+use library_files::asset_store::StagedBook;
 #[cfg(not(target_arch = "wasm32"))]
 use library_placement::stage_import;
 use sync_common::DirId;
@@ -90,7 +90,7 @@ impl LibraryImport<'_> {
             return Ok(None);
         }
         let Some(checksum) = state.expected_checksum() else { return Ok(None) };
-        let identity = self.storage.database().resolve_scanned_content(checksum, None).await?;
+        let identity = self.storage.database().resolve_transferred_content(state.book_id, checksum).await?;
         let Some(name) = self.storage.database().transfer_destination_name(&identity, &import.parent_id).await? else { return Ok(None) };
         let _lease = self.storage.assets().lease_book(&identity).await?;
         let destination = if let Some(batch) = batch.as_deref_mut() {
@@ -126,7 +126,7 @@ impl LibraryImport<'_> {
         if PathBuf::from(&self.root).canonicalize()?.join(relative.as_str().trim_start_matches('/')) != path || fingerprint(&path)? != revision {
             return Err(BackendError::message("destination changed during transfer verification; retry the import"));
         }
-        let content = ImportContent { book_id: identity, byte_checksum: checksum, size_bytes, source_identity: None };
+        let content = ImportContent { book_id: identity, byte_checksum: Some(checksum), audiobook_content_hash: None, size_bytes, source_identity: None };
         let import = ValidatedImport { parent_id: import.parent_id, file_name: name.clone(), format: state.addition.facts.format };
         let published = PublishedStagedBook { name, relative_path: relative.to_string(), published: true, fingerprint: Some(revision.to_string()) };
         let version = reader_inspection_version(import.format);
@@ -152,7 +152,15 @@ impl LibraryImport<'_> {
         let format = state.addition.facts.format;
         let byte_checksum = staged.byte_checksum();
         state.byte_checksum = Some(byte_checksum);
-        let content = self.resolve_import_content(byte_checksum, staged.size_bytes(), None).await?;
+        let mut content = if format == BookFormat::Mp3Folder {
+            let checksum = self.staged_audiobook_content(&staged).await?;
+            self.resolve_audiobook_import(checksum, Some(byte_checksum), staged.size_bytes(), None).await?
+        } else {
+            self.resolve_import_content(byte_checksum, staged.size_bytes(), None).await?
+        };
+        if state.book_id.is_local() && !state.book_id.is_library_scoped() {
+            content.book_id = self.storage.database().resolve_transferred_content(state.book_id, byte_checksum).await?;
+        }
         let book_id = content.book_id;
         #[cfg(not(target_arch = "wasm32"))]
         let assets = batch.as_ref().map_or(self.storage.assets(), |batch| &batch.assets);

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bokheim · Floating content actions</title>
+<style>
+@font-face{font-family:Garamond;src:url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf')}@font-face{font-family:Jost;src:url('../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf')}
+*{box-sizing:border-box} [hidden]{display:none!important}
+:root{--paper:#f6f2eb;--ink:#22201d;--muted:#6b675f;--border:#8c7f64;--rule:#c5bdac;--accent:#466853;--hover:#46685314}
+body{margin:0;background:#e7e3dc;color:var(--ink);font:16px/1.45 Jost,sans-serif}header{padding:1.4em 2em .5em;max-width:1250px;margin:auto}h1{font:normal 2rem Garamond,serif;margin:0}p{margin:.5em 0;color:var(--muted)}button,select{font:inherit;color:inherit;border:1px solid var(--border);border-radius:0;background:var(--paper);padding:.35em .7em;cursor:pointer}button:hover{background:var(--hover)}button:focus-visible,select:focus-visible{outline:2px solid var(--accent)}.controls{display:flex;gap:1em;align-items:center;flex-wrap:wrap;margin:1em 0}.grid{display:flex;justify-content:center;gap:2em;flex-wrap:wrap;padding:1em 1em 2em}figure{margin:0;width:360px}figcaption{margin-bottom:.5em}.phone{position:relative;width:360px;height:640px;max-width:100%;background:var(--paper);border:1px solid var(--border);overflow:hidden;font:20px/1.5 Garamond,serif;user-select:none;-webkit-user-select:none}.bar{height:48px;border-bottom:1px solid var(--rule);display:flex;align-items:center;justify-content:space-between;padding:0 16px;font-size:18px}.line{position:absolute;left:22px;right:22px;height:28px;white-space:nowrap;touch-action:none}.line.selected{background:#d7e4d6}.handle{position:absolute;width:44px;height:44px;padding:0;border:0;background:transparent!important;z-index:5;touch-action:none;cursor:ns-resize}.handle:after{content:'';position:absolute;width:18px;height:18px;background:var(--accent);left:13px;top:20px;border-radius:50%}.handle:before{content:'';position:absolute;width:2px;height:22px;background:var(--accent);left:21px;top:4px}.scrim{position:absolute;inset:48px 0 0;z-index:2;background:#00000008}.menu{position:absolute;left:0;right:0;bottom:0;background:var(--paper);border-top:1px solid var(--border);z-index:3;overflow:auto;box-shadow:0 -.3em 1.5em #0002;overscroll-behavior:contain}.menu.top{bottom:auto;top:48px;border-top:0;border-bottom:1px solid var(--border);box-shadow:0 .3em 1.5em #0002}.action{width:100%;height:48px;display:flex;align-items:center;gap:12px;padding:0 18px;background:transparent;border:0;text-align:left;white-space:nowrap}.action img{width:20px;height:20px}.status{min-height:3em;font-size:.85em;color:var(--muted);margin-top:.5em}.hint{font-size:.85em} @media(max-width:450px){header{padding:1em}.grid{padding:.5em}figure{max-width:100%}}
+
+/* Compact selection toolbar; full lookup results still belong in sheets. */
+.scrim{display:none}
+.menu,.menu.top{left:50%;right:auto;bottom:auto;transform:translateX(-50%);width:310px;max-width:calc(100% - 16px);border:1px solid var(--border);box-shadow:0 .25em .8em #0002;overflow:hidden;display:flex;flex-direction:column}
+.toolbar{display:flex;flex:none;height:48px}.toolbar .action{width:auto;flex:1;padding:0 12px;justify-content:center;gap:6px}.toolbar .more{flex:0 0 44px;padding:0;font-size:24px}.toolbar .action img{width:18px;height:18px}
+.overflow{border-top:1px solid var(--rule);overflow-y:auto;min-height:0}.overflow .action{font-size:18px}
+
+/* Four direct actions, with comfortable touch targets on narrow phones. */
+.menu,.menu.top{width:calc(100% - 16px);max-width:calc(100% - 16px)}
+.toolbar{height:56px}
+.toolbar .action{min-width:0;min-height:48px;padding:4px;gap:0;font-size:16px;line-height:1.15;white-space:normal;text-align:center}
+.toolbar .action img{display:none}
+.toolbar .more{flex:0 0 40px;font-size:24px}
+
+/* All actions stay visible; rows wrap instead of opening an overflow menu. */
+.menu,.menu.top{overflow-y:auto}
+.toolbar{height:auto;display:flex;flex-wrap:wrap;flex:none;padding:2px}
+.toolbar .action{flex:1 0 auto;width:auto;min-width:44px;height:48px;min-height:48px;padding:0 12px;white-space:nowrap;font-size:16px}
+
+/* Shared menu order and icons, aligned in two equal columns. */
+.toolbar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:0;gap:0}
+.toolbar .action{width:100%;height:auto;min-height:52px;padding:8px;display:flex;justify-content:flex-start;align-items:center;gap:8px;white-space:normal;text-align:left;font-size:16px;line-height:1.2}
+.toolbar .action img{display:block;flex:none;width:20px;height:20px}
+.toolbar .action span{min-width:0;overflow-wrap:anywhere}
+
+/* Four compact columns; exceptionally narrow surfaces retain two columns. */
+.phone{container-type:inline-size}
+.toolbar{grid-template-columns:repeat(var(--action-count,4),minmax(0,1fr))}
+.toolbar .action{flex-direction:column;justify-content:center;text-align:center;gap:4px;min-height:64px;padding:6px 2px}
+@container(max-width:319px){.toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.toolbar .action{flex-direction:row;justify-content:flex-start;text-align:left;padding:8px;min-height:52px}}
+
+.content-examples{max-width:1200px;margin:0 auto;padding:0 1em}
+.content-examples h2{font:normal 1.7rem Garamond,serif;margin:0}
+.object-phone .prose{padding:20px 22px;color:var(--ink);font:20px/1.6 Garamond,serif}
+.object-target{position:absolute;top:260px;left:22px;right:22px;touch-action:none;cursor:context-menu}
+.object-target:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.object-target svg{width:100%;height:auto;display:block;border:1px solid var(--rule)}
+.object-target a{color:var(--accent);text-decoration:underline}
+.object-target table{border-collapse:collapse;width:100%;font-size:18px}
+.object-target th,.object-target td{border-bottom:1px solid var(--rule);padding:6px;text-align:left;font-weight:400}
+.object-target th{background:var(--hover)}
+
+.image-viewer{position:absolute;inset:0;z-index:8;background:#0003;display:flex;align-items:center;justify-content:center;padding:24px}
+.image-viewer-panel{background:var(--paper);border:1px solid var(--border);width:100%;padding:12px;display:flex;flex-direction:column;gap:8px;box-shadow:0 .4em 1em #0002}
+.image-viewer-picture{width:100%;min-height:0;display:flex;align-items:center;justify-content:center;flex:1}
+.image-viewer-picture svg{width:100%;height:100%;object-fit:contain}
+.image-viewer-actions{display:flex;justify-content:flex-end;gap:8px;flex:none}
+.image-viewer-actions button{display:flex;align-items:center;gap:6px;min-height:40px;font-size:16px}
+.image-viewer-actions img{width:18px;height:18px}
+
+.image-viewer-picture{overflow:hidden;position:relative;touch-action:none;cursor:grab}
+.image-viewer-picture:active{cursor:grabbing}
+.image-viewer-picture svg{flex:none;transform-origin:0 0;pointer-events:none}
+</style>
+<header><h1>Selection actions · mobile</h1><p>Long-press a line and release to open the menu. Drag either handle: the menu hides while you adjust, then returns clear of the selection.</p><p class="hint">Interactive mock only. The toolbar prefers above the selection, then below. Four touch actions: Annotate, Lookup, Translate, and plain-text Copy. No Copy link or Markdown action. Tap outside to dismiss. Our square borders and colors are retained.</p><div class="controls"><button id="reset">Reset examples</button><label>Content <select id="kind"><option value="book">Book · four actions</option><option value="article">Article · three actions</option></select></label></div></header>
+<div class="grid"></div>
+<script>
+const words=['Vägen gick över ett öppet fält,','där vinden rörde gräset i vågor.','Vid skogens kant stannade hon','och såg tillbaka mot vägen.','Solen hade ännu inte gått ned.','Det var stilla här, långt från','stadens ljud och alla dess röster.','Hon följde stigen längs vattnet.','På andra sidan låg en liten gård.','Ett fönster stod öppet mot sjön.','Någon hade lämnat en bok där.','Bladen rörde sig sakta i vinden.','Hon stannade för att läsa raden:','Det finns alltid en annan väg.','Sedan fortsatte hon genom fältet.','Kvällen var ännu ljus och varm.'];
+const examples=[];
+for(const [label,initial] of [['Selection near the top',1],['Selection in the middle',7],['Selection near the bottom',14]]){
+ const figure=document.createElement('figure');const caption=document.createElement('figcaption');caption.textContent=label;
+ const phone=document.createElement('section');phone.className='phone';phone.innerHTML='<div class="bar">‹ <span>The open country</span>☰</div>';
+ const status=document.createElement('div');status.className='status';status.setAttribute('aria-live','polite');figure.append(caption,phone,status);document.querySelector('.grid').append(figure);
+ let start=initial,end=initial,selected=true,opened=true,dragging=false;
+ const lines=words.map((text,i)=>{const line=document.createElement('div');line.className='line';line.textContent=text;line.style.top=(68+i*32)+'px';phone.append(line);return line});
+ const scrim=document.createElement('div');scrim.className='scrim';phone.append(scrim);
+ const menu=document.createElement('div');menu.className='menu';menu.setAttribute('role','menu');menu.setAttribute('aria-label','Selection actions');phone.append(menu);
+ const handles=['Start of selection','End of selection'].map(label=>{const b=document.createElement('button');b.className='handle';b.setAttribute('aria-label',label);phone.append(b);return b});
+ function paint(){
+  lines.forEach((line,i)=>line.classList.toggle('selected',selected&&i>=start&&i<=end));
+  handles.forEach(h=>h.hidden=!selected);
+  handles[0].style.left='0px';handles[0].style.top=(68+start*32+9)+'px';handles[1].style.right='0px';handles[1].style.top=(68+end*32+9)+'px';
+  const selectionTop=68+start*32,selectionBottom=68+end*32+28;
+  const below=phone.clientHeight-selectionBottom-40-8;
+  const above=selectionTop-48-12;
+  // Measure wrapped rows even when the toolbar was hidden during a drag.
+  menu.hidden=false;
+  menu.style.height='auto';menu.style.maxHeight='none';
+  const wanted=toolbar.getBoundingClientRect().height+2;
+  const top=above>=wanted||(below<wanted&&above>=below);
+  const room=Math.max(0,top?above:below);
+  const fallback=room<58;
+  const height=fallback?Math.min(wanted,phone.clientHeight-64):Math.min(wanted,room);
+  menu.style.height=height+'px';menu.style.maxHeight=height+'px';
+  menu.style.top=(fallback?56:top?selectionTop-12-height:selectionBottom+40)+'px';
+  menu.hidden=!opened||dragging||!selected;scrim.hidden=true;
+  status.textContent=dragging?'Adjusting selection — release to show actions.':!selected?'Long-press a line to select it.':!opened?'Menu dismissed. Tap the selection to reopen.':fallback?'Selection spans the page · toolbar stays within the viewport.':`${top?'Above':'Below'} the selection · handles remain accessible.`;
+ }
+ const toolbar=document.createElement('div');toolbar.className='toolbar';
+ function action(label,icon){const b=document.createElement('button');b.className='action';b.setAttribute('role','menuitem');const img=document.createElement('img');img.src='assets/phosphor-light/'+icon+'.svg';img.alt='';const caption=document.createElement('span');caption.textContent=label;b.append(img,caption);b.onclick=async()=>{opened=false;paint();if(label==='Copy'){try{await navigator.clipboard.writeText(words.slice(start,end+1).join('\n'));status.textContent='Selected text copied as plain text.'}catch{status.textContent='Clipboard unavailable in this preview.'}}else{status.textContent=label+' selected · preview only.'}};return b}
+ function fill(){
+  menu.replaceChildren();toolbar.replaceChildren();
+  const book=document.querySelector('#kind').value==='book';
+  toolbar.style.setProperty('--action-count',book?'4':'3');
+  if(book)toolbar.append(action('Annotate','replace'));
+  toolbar.append(action('Lookup','search'),action('Translate','translate'));
+  toolbar.append(action('Copy','copy'));
+  menu.append(toolbar);paint();
+ }
+ function indexAt(y){return Math.max(0,Math.min(words.length-1,Math.floor((y-phone.getBoundingClientRect().top-68)/32)))}
+ handles.forEach((h,which)=>{h.onpointerdown=e=>{e.preventDefault();dragging=true;opened=false;h.setPointerCapture(e.pointerId);paint()};h.onpointermove=e=>{if(!dragging||!h.hasPointerCapture(e.pointerId))return;const i=indexAt(e.clientY-20);if(which===0)start=Math.min(i,end);else end=Math.max(i,start);paint()};h.onpointerup=e=>{dragging=false;opened=true;if(h.hasPointerCapture(e.pointerId))h.releasePointerCapture(e.pointerId);paint()};h.onpointercancel=()=>{dragging=false;opened=false;paint()};h.onkeydown=e=>{if(e.key!=='ArrowUp'&&e.key!=='ArrowDown')return;e.preventDefault();const delta=e.key==='ArrowDown'?1:-1;if(which===0)start=Math.max(0,Math.min(end,start+delta));else end=Math.min(words.length-1,Math.max(start,end+delta));opened=true;paint()}});
+ let pressTimer,pressStart,held=false;
+ phone.addEventListener('pointerdown',e=>{if(e.target.closest('.handle,.menu,.bar'))return;pressStart={x:e.clientX,y:e.clientY};held=false;pressTimer=setTimeout(()=>{start=end=indexAt(e.clientY);selected=true;opened=false;held=true;paint()},450)});
+ phone.addEventListener('pointermove',e=>{if(pressStart&&Math.hypot(e.clientX-pressStart.x,e.clientY-pressStart.y)>12)clearTimeout(pressTimer)});
+ phone.addEventListener('pointerup',e=>{clearTimeout(pressTimer);if(e.target.closest('.handle,.menu,.bar'))return;if(held){opened=true;held=false}else if(!opened&&selected&&indexAt(e.clientY)>=start&&indexAt(e.clientY)<=end){opened=true}else{opened=false}pressStart=null;paint()});
+ phone.addEventListener('pointercancel',()=>{clearTimeout(pressTimer);held=false;pressStart=null});
+ phone.addEventListener('contextmenu',e=>e.preventDefault());
+ phone.addEventListener('keydown',e=>{if(e.key==='Escape'){opened=false;paint()}});
+ examples.push({reset(){start=end=initial;selected=true;opened=true;dragging=false;fill()},fill});fill();
+}
+document.querySelector('#reset').onclick=()=>examples.forEach(x=>x.reset());document.querySelector('#kind').onchange=()=>examples.forEach(x=>x.fill());
+
+const objectHeading=document.createElement('section');objectHeading.className='content-examples';objectHeading.innerHTML='<h2>Image and table actions</h2><p>Long-press the content or right-click to reopen its toolbar. Tap outside to dismiss. Actions are simulated; annotations continue to use their editor.</p>';
+const objectGrid=document.createElement('div');objectGrid.className='grid';document.body.append(objectHeading,objectGrid);
+const objectExamples=[
+ {name:'Image',html:'<svg viewBox="0 0 300 160" role="img" aria-label="Illustration of open country"><rect width="300" height="160" fill="#e1e6dc"/><circle cx="240" cy="36" r="16" fill="#d5c69d"/><path d="M0 110L70 62L135 112L210 78L300 116V160H0Z" fill="#86977d"/><path d="M0 136Q100 92 170 130T300 120V160H0Z" fill="#466853"/></svg>',actions:[['Open image','image'],['Copy','copy']]},
+ {name:'Table',html:'<table><thead><tr><th>Season</th><th>Daylight</th></tr></thead><tbody><tr><td>Spring</td><td>13 hours</td></tr><tr><td>Summer</td><td>18 hours</td></tr><tr><td>Autumn</td><td>10 hours</td></tr></tbody></table>',actions:[['Copy','copy'],['Export','table']]}
+];
+for(const example of objectExamples){
+ const figure=document.createElement('figure');const caption=document.createElement('figcaption');caption.textContent=example.name+' · floating actions';
+ const phone=document.createElement('section');phone.className='phone object-phone';phone.innerHTML='<div class="bar">‹ <span>The open country</span>☰</div><div class="prose">The path continued beside the meadow. She paused to study the page before turning back toward the trees.</div>';
+ const target=document.createElement('div');target.className='object-target';target.tabIndex=0;target.innerHTML=example.html;phone.append(target);
+ const menu=document.createElement('div');menu.className='menu';menu.setAttribute('role','menu');menu.setAttribute('aria-label',example.name+' actions');const toolbar=document.createElement('div');toolbar.className='toolbar';toolbar.style.setProperty('--action-count',example.actions.length);menu.append(toolbar);phone.append(menu);
+ const status=document.createElement('div');status.className='status';status.setAttribute('aria-live','polite');figure.append(caption,phone,status);objectGrid.append(figure);
+ function place(){menu.hidden=false;menu.style.height='auto';menu.style.maxHeight='none';const height=toolbar.getBoundingClientRect().height+2;const bounds=target.getBoundingClientRect(),parent=phone.getBoundingClientRect();const above=bounds.top-parent.top-height-12;menu.style.top=(above>=48?above:bounds.bottom-parent.top+12)+'px';status.textContent='Toolbar stays beside the '+example.name.toLowerCase()+'.'}
+ function openImage(){
+  if(example.name!=='Image')return;
+  phone.querySelector('.image-viewer')?.remove();menu.hidden=true;
+  const overlay=document.createElement('div');overlay.className='image-viewer';overlay.setAttribute('role','dialog');overlay.setAttribute('aria-label','Image preview');overlay.setAttribute('aria-modal','true');
+  const panel=document.createElement('div');panel.className='image-viewer-panel';
+  const availableWidth=phone.clientWidth-48,availableHeight=phone.clientHeight-48;
+  const scale=Math.min((availableWidth-26)/300,(availableHeight-26)/160);
+  panel.style.width=Math.max(Math.min(280,availableWidth),300*scale+26)+'px';panel.style.height=Math.max(Math.min(180,availableHeight),160*scale+26)+'px';
+  const picture=document.createElement('div');picture.className='image-viewer-picture';picture.append(target.querySelector('svg').cloneNode(true));
+  const dismiss=()=>{overlay.remove();target.focus();status.textContent='Image closed. Tap to reopen or long-press for actions.'};
+  let zoom=1,panX=0,panY=0,drag=null;
+  function paintImage(){picture.querySelector('svg').style.transform=`translate(${panX}px,${panY}px) scale(${zoom})`;status.textContent=`Image zoom ${Math.round(zoom*100)}% · Ctrl+scroll or Ctrl+/− · Ctrl+0 to fit · drag to pan.`}
+  function zoomImage(factor,x=picture.clientWidth/2,y=picture.clientHeight/2){const next=Math.max(.1,Math.min(16,zoom*factor));panX=x-(x-panX)*next/zoom;panY=y-(y-panY)*next/zoom;zoom=next;paintImage()}
+  picture.addEventListener('wheel',e=>{e.preventDefault();e.stopPropagation();if(e.ctrlKey||e.metaKey){const bounds=picture.getBoundingClientRect();zoomImage(Math.exp(-e.deltaY*.0015),e.clientX-bounds.left,e.clientY-bounds.top)}else{panX-=e.deltaX;panY-=e.deltaY;paintImage()}},{passive:false});
+  picture.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();drag={x:e.clientX,y:e.clientY,panX,panY};picture.setPointerCapture(e.pointerId)};
+  picture.onpointermove=e=>{if(!drag)return;panX=drag.panX+e.clientX-drag.x;panY=drag.panY+e.clientY-drag.y;paintImage()};
+  picture.onpointerup=picture.onpointercancel=e=>{drag=null;if(picture.hasPointerCapture(e.pointerId))picture.releasePointerCapture(e.pointerId)};
+  overlay.tabIndex=0;
+  overlay.onclick=e=>{if(e.target===overlay)dismiss()};
+  overlay.onkeydown=async e=>{
+   if(e.key==='Escape'){e.stopPropagation();dismiss()}
+   if((e.ctrlKey||e.metaKey)&&['+','=','-','0'].includes(e.key)){e.preventDefault();e.stopPropagation();if(e.key==='0'){zoom=1;panX=panY=0;paintImage()}else zoomImage(e.key==='-'?1/1.2:1.2);return}
+   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='c'){
+    e.preventDefault();e.stopPropagation();
+    try{
+     const svg=picture.querySelector('svg').cloneNode(true);svg.setAttribute('xmlns','http://www.w3.org/2000/svg');
+     const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml'}));
+     const image=new Image();
+     try{await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=reject;image.src=url});const canvas=document.createElement('canvas');canvas.width=1200;canvas.height=640;canvas.getContext('2d').drawImage(image,0,0,1200,640);const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));await navigator.clipboard.write([new ClipboardItem({'image/png':blob})]);status.textContent='Image copied.'}finally{URL.revokeObjectURL(url)}
+    }catch{status.textContent='Image clipboard unavailable in this browser.'}
+   }
+   if(e.key==='Tab'){e.preventDefault();overlay.focus()}
+  };
+  panel.append(picture);overlay.append(panel);phone.append(overlay);overlay.focus();paintImage();
+ }
+ for(const [label,icon] of example.actions){const button=document.createElement('button');button.className='action';button.setAttribute('role','menuitem');const image=document.createElement('img');image.src='assets/phosphor-light/'+icon+'.svg';image.alt='';const name=document.createElement('span');name.textContent=label;button.append(image,name);button.onclick=()=>{if(label==='Open image'){openImage();return}menu.hidden=true;status.textContent=example.name+' · '+label+' selected (preview only).'};toolbar.append(button)}
+ let timer,origin,held=false,moved=false;
+ target.addEventListener('pointerdown',e=>{origin={x:e.clientX,y:e.clientY};held=false;moved=false;timer=setTimeout(()=>{held=true;place()},450)});
+ target.addEventListener('pointermove',e=>{if(origin&&Math.hypot(e.clientX-origin.x,e.clientY-origin.y)>12){moved=true;clearTimeout(timer)}});
+ for(const event of ['pointerup','pointercancel','pointerleave'])target.addEventListener(event,()=>clearTimeout(timer));
+ target.addEventListener('click',e=>{e.preventDefault();if(!held&&!moved&&example.name==='Image')openImage()});target.addEventListener('contextmenu',e=>{e.preventDefault();place()});target.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();if(example.name==='Image')openImage();else place()}});
+ phone.addEventListener('pointerdown',e=>{if(!menu.contains(e.target)&&!target.contains(e.target)){menu.hidden=true;status.textContent='Long-press the '+example.name.toLowerCase()+' to reopen.'}});
+ phone.addEventListener('keydown',e=>{if(e.key==='Escape')menu.hidden=true});
+ examples.push({reset:place,fill:()=>{}});place();if(example.name==='Image'&&location.hash==='#image-viewer'){openImage();figure.scrollIntoView({block:'center'})}
+}
+if(location.hash==='#content-actions')objectHeading.scrollIntoView();
+</script>
+</html>

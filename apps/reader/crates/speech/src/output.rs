@@ -1,5 +1,6 @@
 //! Pausable device output; retaining the stream also retains queued PCM and
 //! the resampler's position. The callback gate covers backends without hardware pause.
+use crate::SpeechError;
 use rodio::{
     Player,
     cpal::{
@@ -16,7 +17,7 @@ use std::time::Duration;
 
 pub(super) trait OutputControl: Send + Sync {
     fn pause(&self);
-    fn resume(&self) -> Result<(), String>;
+    fn resume(&self) -> Result<(), SpeechError>;
 }
 
 #[derive(Default)]
@@ -97,14 +98,14 @@ impl OutputControl for DeviceOutput {
             }
         }
     }
-    fn resume(&self) -> Result<(), String> {
+    fn resume(&self) -> Result<(), SpeechError> {
         if self.gate.state().closed {
             return Err("Speech output is closed. Start reading aloud again to retry.".into());
         }
         if self.gate.set_paused(false) {
             if let Err(error) = self.stream.play() {
                 self.gate.set_paused(true);
-                return Err(error.to_string());
+                return Err(SpeechError::operation(error));
             }
         }
         Ok(())
@@ -117,7 +118,7 @@ impl Drop for DeviceOutput {
     }
 }
 
-pub(super) fn open_default() -> Result<(Arc<Player>, DeviceOutput, Duration), String> {
+pub(super) fn open_default() -> Result<(Arc<Player>, DeviceOutput, Duration), SpeechError> {
     let host = cpal::default_host();
     let mut first_error = None;
     if let Some(device) = host.default_output_device() {
@@ -126,7 +127,7 @@ pub(super) fn open_default() -> Result<(Arc<Player>, DeviceOutput, Duration), St
             Err(error) => first_error = Some(error),
         }
     }
-    let devices = host.output_devices().map_err(|error| error.to_string())?;
+    let devices = host.output_devices().map_err(SpeechError::operation)?;
     for device in devices {
         if device.description().ok().is_some_and(|description| description.driver() == Some("null")) {
             continue;
@@ -141,15 +142,15 @@ pub(super) fn open_default() -> Result<(Arc<Player>, DeviceOutput, Duration), St
     Err(first_error.unwrap_or_else(|| "No audio output device is available".into()))
 }
 
-fn open_device(device: &Device) -> Result<(Arc<Player>, DeviceOutput, Duration), String> {
+fn open_device(device: &Device) -> Result<(Arc<Player>, DeviceOutput, Duration), SpeechError> {
     let first_error = match device.default_output_config() {
         Ok(config) => match open_config(device, &config, true) {
             Ok(output) => return Ok(output),
             Err(error) => error,
         },
-        Err(error) => error.to_string(),
+        Err(error) => SpeechError::operation(error),
     };
-    for config in supported_output_configs(device).map_err(|error| error.to_string())? {
+    for config in supported_output_configs(device).map_err(SpeechError::operation)? {
         if let Ok(output) = open_config(device, &config, false) {
             return Ok(output);
         }
@@ -157,7 +158,7 @@ fn open_device(device: &Device) -> Result<(Arc<Player>, DeviceOutput, Duration),
     Err(first_error)
 }
 
-fn open_config(device: &Device, supported: &SupportedStreamConfig, fixed_buffer: bool) -> Result<(Arc<Player>, DeviceOutput, Duration), String> {
+fn open_config(device: &Device, supported: &SupportedStreamConfig, fixed_buffer: bool) -> Result<(Arc<Player>, DeviceOutput, Duration), SpeechError> {
     let mut config = supported.config();
     if fixed_buffer {
         let frames = (config.sample_rate / 20).max(1);
@@ -189,7 +190,7 @@ fn open_config(device: &Device, supported: &SupportedStreamConfig, fixed_buffer:
     Ok((Arc::new(Player::connect_new(&controller)), DeviceOutput { stream, gate }, drain))
 }
 
-fn build_stream<T: SizedSample + Sample + cpal::FromSample<f32>>(device: &Device, config: &cpal::StreamConfig, mut samples: MixerSource, gate: Arc<CallbackGate>) -> Result<Stream, String> {
+fn build_stream<T: SizedSample + Sample + cpal::FromSample<f32>>(device: &Device, config: &cpal::StreamConfig, mut samples: MixerSource, gate: Arc<CallbackGate>) -> Result<Stream, SpeechError> {
     device
         .build_output_stream::<T, _, _>(
             config,
@@ -205,7 +206,7 @@ fn build_stream<T: SizedSample + Sample + cpal::FromSample<f32>>(device: &Device
             |error| eprintln!("Speech output error: {error}"),
             None,
         )
-        .map_err(|error| error.to_string())
+        .map_err(SpeechError::operation)
 }
 
 #[cfg(test)]

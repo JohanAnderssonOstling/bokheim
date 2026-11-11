@@ -46,9 +46,13 @@ Applications never use that build-machine directory at runtime (unit tests do).
 
 ## Platform entry points
 
-- Desktop: `python3 apps/desktop-gpui/scripts/build.py` builds release and stages
-  `target/release/pdfium/`. `--target` supports cross builds; `--offline` disables
-  dependency downloads. Distribute the executable with its `pdfium/` directory on Linux; Windows links PDFium statically.
+- Desktop: prepare the target inputs first, then compile with `cargo desktop
+  --release` on Windows/macOS. Linux releases use `cargo desktop-app --release`
+  in the pinned SDK environment. See `apps/desktop-gpui/README.md`. Stage PDFium
+  explicitly with `prepare.py --target <target> --dest target/release/pdfium
+  --offline`, adjusting the directory for `CARGO_TARGET_DIR` and cross targets.
+  Distribute the executable with its `pdfium/` directory on Linux; Windows links
+  PDFium statically.
 - AppImage: the packaging script stages PDFium and includes native dependencies.
 - Windows x64 MSVC: PDFium 8046b and its /MT C runtime are statically linked.
   Both installer and update ZIP deliver the executable without a PDFium directory.

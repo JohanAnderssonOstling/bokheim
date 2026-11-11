@@ -58,17 +58,21 @@ def build_environment(offline=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--offline', action='store_true')
+    parser.add_argument('--env-file', type=Path, help='Write browser SDK exports for direct Cargo commands')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     environment = build_environment(args.offline)
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
+    if args.env_file:
+        if command:
+            parser.error('--env-file cannot be combined with a command')
+        write_environment = runpy.run_path(str(Path(__file__).resolve().with_name('toolchain.py')))['write_environment']
+        write_environment(args.env_file, environment)
+        return
     if not command:
-        command = ['cargo', 'rustc', '--release', '-p', 'embedded-browser-ui', '--bin', 'bokheim-browser']
+        command = ['cargo', 'desktop-browser', '--release']
         if args.offline:
             command.append('--offline')
-        # Host GUI libraries are not bundled. Their internal libc references
-        # resolve against the user's system, while the helper targets 2.17.
-        command += ['--', '-C', 'link-arg=-Wl,--allow-shlib-undefined']
     subprocess.run(command, env=environment, check=True)
 
 

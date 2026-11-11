@@ -2,6 +2,7 @@
 //! playback source and forwards service position events to library persistence,
 //! independently of the GPUI activity's rendering/lifetime.
 
+use crate::PlaybackError;
 use crate::{AudiobookBook, PlaybackPosition, ReadSeek, lock_state, playback_progress, position_save_required};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 #[cfg(not(target_arch = "wasm32"))]
@@ -21,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-type Dispatch = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+type Dispatch = dyn Fn(&str) -> Result<(), PlaybackError> + Send + Sync;
 struct Bridge {
     dispatch: Box<Dispatch>,
 }
@@ -32,7 +33,7 @@ fn sessions() -> &'static Mutex<HashMap<u64, Arc<Session>>> {
     SESSIONS.get_or_init(Default::default)
 }
 
-pub fn initialize(directory: PathBuf, dispatch: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) {
+pub fn initialize(directory: PathBuf, dispatch: impl Fn(&str) -> Result<(), PlaybackError> + Send + Sync + 'static) {
     if BRIDGE.get().is_none() {
         // Sources belong to a process-local session. Remove staging left by a
         // killed process, but never remove files when reattaching an activity.
@@ -46,7 +47,7 @@ pub fn initialize(directory: PathBuf, dispatch: impl Fn(&str) -> Result<(), Stri
     }
     let _ = BRIDGE.set(Bridge { dispatch: Box::new(dispatch) });
 }
-fn dispatch(command: Value) -> Result<(), String> {
+fn dispatch(command: Value) -> Result<(), PlaybackError> {
     (BRIDGE.get().ok_or("Android audio bridge is not initialized")?.dispatch)(&command.to_string())
 }
 /// A file handoff leaves an idle service ready for its replacement. Closing
@@ -62,7 +63,7 @@ struct Status {
     buffering: bool,
     ended: bool,
     confirmed: bool,
-    error: Option<String>,
+    error: Option<PlaybackError>,
     last_saved: Option<Duration>,
     sequence: u64,
     rate: Option<f64>,
@@ -76,7 +77,7 @@ struct Session {
     read_generation: AtomicU64,
     control: Option<AudioStreamControl>,
     release: (async_channel::Sender<()>, async_channel::Receiver<()>),
-    stop_error: Mutex<Option<String>>,
+    stop_error: Mutex<Option<PlaybackError>>,
     reader: Mutex<Option<Box<dyn ReadSeek>>>,
     _file: Option<File>,
     duration: Duration,
@@ -101,7 +102,7 @@ impl PositionSnapshot {
     }
 }
 /// Called by Media3 on its loader thread; reads only the requested audio bytes.
-pub fn read_source(id: u64, offset: u64, length: usize) -> Result<Vec<u8>, String> {
+pub fn read_source(id: u64, offset: u64, length: usize) -> Result<Vec<u8>, PlaybackError> {
     if length > 256 * 1024 {
         return Err("audio read is too large".into());
     }
@@ -114,9 +115,9 @@ pub fn read_source(id: u64, offset: u64, length: usize) -> Result<Vec<u8>, Strin
         }
     }
     let reader = guard.as_mut().ok_or("audio session has no stream")?;
-    reader.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    reader.seek(SeekFrom::Start(offset)).map_err(PlaybackError::operation)?;
     let mut bytes = vec![0; length];
-    let count = reader.read(&mut bytes).map_err(|e| e.to_string())?;
+    let count = reader.read(&mut bytes).map_err(PlaybackError::operation)?;
     if session.read_generation.load(Ordering::Acquire) != generation {
         return Err("audio read superseded".into());
     }
@@ -143,7 +144,7 @@ pub(crate) struct AudioEngine {
 impl AudioEngine {
     pub(crate) fn open(
         mut reader: Box<dyn ReadSeek>, file: Option<File>, control: Option<AudioStreamControl>, book: &AudiobookBook, track: Option<&book_model::AudiobookTrack>, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PlaybackError> {
         BRIDGE.get().ok_or("Android audio bridge is not initialized")?;
         #[cfg(any(target_os = "android", target_os = "linux"))]
         let path = file.as_ref().map(|file| {
@@ -152,7 +153,7 @@ impl AudioEngine {
         });
         #[cfg(not(any(target_os = "android", target_os = "linux")))]
         let path: Option<PathBuf> = None;
-        let length = if path.is_none() { reader.seek(SeekFrom::End(0)).map_err(|e| e.to_string())? } else { 0 };
+        let length = if path.is_none() { reader.seek(SeekFrom::End(0)).map_err(PlaybackError::operation)? } else { 0 };
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let global_offset = track.map(|track| Duration::from_millis(track.start_ms)).unwrap_or_default();
         let duration = track.map(|track| Duration::from_millis(track.end_ms - track.start_ms)).unwrap_or(book.duration);
@@ -216,7 +217,7 @@ impl AudioEngine {
     pub fn playback_requested(&self) -> bool {
         lock_state(&self.session.status).requested
     }
-    pub fn set_artwork(&self, cover: &[u8]) -> Result<(), String> {
+    pub fn set_artwork(&self, cover: &[u8]) -> Result<(), PlaybackError> {
         dispatch(json!({"command":"artwork", "id":self.id, "coverBase64":STANDARD.encode(cover)}))
     }
     pub fn position(&self) -> Duration {
@@ -241,17 +242,17 @@ impl AudioEngine {
     pub fn is_buffering(&self) -> bool {
         lock_state(&self.session.status).buffering
     }
-    pub fn toggle(&self) -> Result<(), String> {
+    pub fn toggle(&self) -> Result<(), PlaybackError> {
         dispatch(json!({"command":"toggle", "id":self.id}))
     }
-    pub fn pause(&self) -> Result<(), String> {
+    pub fn pause(&self) -> Result<(), PlaybackError> {
         dispatch(json!({"command":"pause", "id":self.id}))?;
         if let Some(control) = &self.session.control {
             control.set_paused(true);
         }
         Ok(())
     }
-    pub fn seek_to(&self, position: Duration) -> Result<(), String> {
+    pub fn seek_to(&self, position: Duration) -> Result<(), PlaybackError> {
         if !self.started.load(Ordering::Acquire) {
             lock_state(&self.session.status).initial_seek = Some(position.min(self.session.duration));
             return Ok(());
@@ -265,7 +266,7 @@ impl AudioEngine {
         };
         dispatch(json!({"command":"seek", "id":self.id, "position":position.min(self.session.duration).as_millis() as u64, "sequence":sequence}))
     }
-    pub fn set_tempo(&mut self, tempo: f32) -> Result<(), String> {
+    pub fn set_tempo(&mut self, tempo: f32) -> Result<(), PlaybackError> {
         if !tempo.is_finite() || tempo <= 0.0 {
             return Err("Playback speed must be positive and finite".into());
         }
@@ -275,7 +276,7 @@ impl AudioEngine {
         }
         dispatch(json!({"command":"speed", "id":self.id, "speed":tempo}))
     }
-    pub fn set_sleep(&self, remaining: Option<Duration>, chapter_end: Option<Duration>) -> Result<(), String> {
+    pub fn set_sleep(&self, remaining: Option<Duration>, chapter_end: Option<Duration>) -> Result<(), PlaybackError> {
         {
             let mut status = lock_state(&self.session.status);
             status.sleep_finished = false;
@@ -291,7 +292,7 @@ impl AudioEngine {
     pub fn take_sleep_finished(&self) -> bool {
         std::mem::take(&mut lock_state(&self.session.status).sleep_finished)
     }
-    pub fn take_error(&self) -> Option<String> {
+    pub fn take_error(&self) -> Option<PlaybackError> {
         lock_state(&self.session.status).error.take()
     }
     /// Retire this file while keeping the Android service available for the
@@ -316,11 +317,11 @@ impl AudioEngine {
         }
     }
 
-    pub fn release_completion(&self) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>>>> {
+    pub fn release_completion(&self) -> Pin<Box<dyn std::future::Future<Output = Result<(), PlaybackError>>>> {
         self.release_completion_with_timeout(Duration::from_secs(30))
     }
 
-    fn release_completion_with_timeout(&self, timeout: Duration) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>>>> {
+    fn release_completion_with_timeout(&self, timeout: Duration) -> Pin<Box<dyn std::future::Future<Output = Result<(), PlaybackError>>>> {
         let started = self.started.load(Ordering::Acquire);
         let session = self.session.clone();
         Box::pin(async move {
@@ -337,7 +338,7 @@ impl AudioEngine {
                     return Poll::Ready(Ok(()));
                 }
                 if deadline.as_mut().poll(cx).is_ready() {
-                    return Poll::Ready(Err("Android audio service did not acknowledge stop".to_owned()));
+                    return Poll::Ready(Err(PlaybackError::from("Android audio service did not acknowledge stop")));
                 }
                 Poll::Pending
             })
@@ -366,7 +367,7 @@ pub fn playback_state(event: &str) {
     status.sleep_finished |= event["sleepFinished"].as_bool().unwrap_or(false);
     let released = event["released"].as_bool().unwrap_or(false);
     if let Some(error) = event["error"].as_str() {
-        status.error = Some(error.to_owned());
+        status.error = Some(serde_json::from_value(event["failure"].clone()).ok().map_or_else(|| PlaybackError::from(error), |failure| PlaybackError::classified(failure, error)));
     }
     if event["sequence"].as_u64().unwrap_or(0) >= status.sequence {
         let playing = event["playing"].as_bool().unwrap_or(false);
@@ -514,7 +515,7 @@ mod tests {
         let engine = AudioEngine { id, session, load: Value::Null, started: AtomicBool::new(true) };
         let mut released = engine.release_completion_with_timeout(Duration::ZERO);
         let mut poll = Context::from_waker(Waker::noop());
-        assert!(matches!(released.as_mut().poll(&mut poll), std::task::Poll::Ready(Err(error)) if error.contains("did not acknowledge")));
+        assert!(matches!(released.as_mut().poll(&mut poll), std::task::Poll::Ready(Err(error)) if error.to_string().contains("did not acknowledge")));
         sessions().lock().unwrap().remove(&id);
     }
     #[test]
@@ -599,7 +600,7 @@ mod tests {
     fn terminal_start_failure_releases_source_without_saving_zero() {
         let (id, session, receiver) = session();
         playback_state(&json!({"id":id,"error":"Cannot start service","released":true}).to_string());
-        assert_eq!(session.status.lock().unwrap().error.as_deref(), Some("Cannot start service"));
+        assert_eq!(session.status.lock().unwrap().error.as_ref().map(ToString::to_string).as_deref(), Some("Cannot start service"));
         assert!(receiver.try_recv().is_err());
         assert!(!sessions().lock().unwrap().contains_key(&id));
     }

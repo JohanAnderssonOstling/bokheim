@@ -14,6 +14,7 @@ pub(super) struct FontSelected(pub String);
 
 pub(super) struct FontPicker {
     input: Entity<InputState>,
+    panel_focus: FocusHandle,
     selected: Option<String>,
     active: bool,
     catalog: FontCatalog,
@@ -47,7 +48,7 @@ impl FontPicker {
             match event {
                 InputEvent::Change => this.filter(cx),
                 InputEvent::PressEnter { .. } => {
-                    if let Some(family) = this.catalog.filtered.first().map(|index| this.catalog.families[*index].clone()) {
+                    if let Some(family) = this.catalog.filtered.get(this.catalog.cursor).map(|index| this.catalog.families[*index].clone()) {
                         this.choose(family, window, cx);
                     }
                 }
@@ -57,7 +58,17 @@ impl FontPicker {
         })
         .detach();
         components::observe_font_catalog(cx, |this: &mut Self, cx| this.load_catalog(cx)).detach();
-        Self { input, selected: None, active: false, catalog: FontCatalog::default(), open: false, trigger_focus: cx.focus_handle().tab_stop(true), scroll: UniformListScrollHandle::new(), _catalog_task: None }
+        Self {
+            input,
+            panel_focus: cx.focus_handle(),
+            selected: None,
+            active: false,
+            catalog: FontCatalog::default(),
+            open: false,
+            trigger_focus: cx.focus_handle().tab_stop(true),
+            scroll: UniformListScrollHandle::new(),
+            _catalog_task: None,
+        }
     }
 
     pub(super) fn set_selected(&mut self, family: Option<String>) {
@@ -142,8 +153,12 @@ impl Render for FontPicker {
                         let index = this.catalog.filtered[row];
                         let family = this.catalog.families[index].clone();
                         components::font_picker_row(("ui-font", index), family.clone(), this.selected.as_deref() == Some(family.as_str()), theme)
+                            .when(this.catalog.cursor == row && this.selected.as_deref() != Some(family.as_str()), |row| row.bg(theme.hover))
                             .debug_selector(move || format!("ui-font-row-{row}"))
-                            .on_click(cx.listener(move |this, _, window, cx| this.choose(family.clone(), window, cx)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.catalog.cursor = row;
+                                this.choose(family.clone(), window, cx);
+                            }))
                     })
                     .collect()
             }),
@@ -162,11 +177,10 @@ impl Render for FontPicker {
             .child(rows)
             .child(Scrollbar::new(&self.scroll).axis(ScrollbarAxis::Vertical).scrollbar_show(ScrollbarShow::Always));
         let panel = components::font_picker_surface(window, theme)
-            .key_context("BrowserFontPicker")
             .id("ui-font-overlay")
             .debug_selector(|| "ui-font-overlay".into())
             .tab_group()
-            .track_focus(&self.input.read(cx).focus_handle(cx))
+            .capture_key_down(cx.listener(|this, event, _, cx| this.navigate_font_catalog(event, cx)))
             .when(self.catalog.loaded && self.selected.as_ref().is_some_and(|family| !self.catalog.families.contains(family)), |panel| {
                 panel.child(div().text_color(theme.text_muted).child(text!(common::saved_font_unavailable_on_this_device)))
             })
@@ -181,6 +195,7 @@ impl Render for FontPicker {
             )
             .when(self.catalog.loading || self.catalog.filtered.is_empty(), |panel| panel.child(div().text_color(theme.text_muted).child(if self.catalog.loading { text!(common::loading_fonts) } else { text!(common::no_matching_fonts) })))
             .when(!self.catalog.loading && !self.catalog.filtered.is_empty(), |panel| panel.child(list));
+        let panel = components::contain_modal_focus(panel, &self.panel_focus, "BrowserFontPicker ModalFocus", cx);
         let picker = cx.entity();
         trigger.child(components::font_picker_overlay(panel, window, theme, move |window, cx| picker.update(cx, |picker, cx| picker.close(window, cx))))
     }

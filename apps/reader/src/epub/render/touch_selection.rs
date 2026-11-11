@@ -1,23 +1,18 @@
-//! Selection actions for mouse and touch, plus touch selection handles.
-
-use ui_text::text;
-
-use std::{cell::Cell, rc::Rc};
+//! Shared selection commands and touch selection handles.
 
 use dictionary::can_lookup;
 use gpui::prelude::*;
-use gpui::{Anchor, AnyElement, Bounds, Context, IntoElement, LongPressEvent, MouseDownEvent, MouseUpEvent, Pixels, Point, TouchEvent, TouchId, TouchPhase, Window, anchored, canvas, deferred, div, point, px};
+use gpui::{AnyElement, Context, IntoElement, LongPressEvent, MouseDownEvent, MouseUpEvent, Pixels, Point, TouchEvent, TouchId, TouchPhase, Window, anchored, deferred, div, point, px};
 use ui_components as components;
+use reader_lookups::WikipediaArticle;
 
-use crate::epub::{LoadState, ReaderView, Selection};
+use crate::epub::{DocumentNavigation, LoadState, ReaderView};
 use crate::shell::dictionary::{Closed, DictionaryPopup, SelectElement, WordClick};
 
 #[derive(Default)]
 pub(in crate::epub) struct TouchSelectionState {
     pub(in crate::epub) active: bool,
-    pub(in crate::epub) lookup_available: bool,
     drag: Option<SelectionDrag>,
-    action_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     word_click: WordClick,
 }
 
@@ -71,10 +66,17 @@ impl ReaderView {
             return;
         }
         let anchor = renderer.read(cx).selection_bounds();
+        let mut languages = self.book.languages();
+        if let Some(language) = renderer.read(cx).selection_language().filter(|language| reader_lookups::parse_language_tag(language).is_some()) {
+            languages.retain(|tag| !tag.eq_ignore_ascii_case(language));
+            languages.insert(0, language.to_owned());
+        }
         self.selection = Some(cfi_range);
         self.close_annotation_popup(cx);
-        let dictionary =
-            cx.new(|cx| if translate { DictionaryPopup::translate(self.locator.book_id(), text, self.book.languages(), anchor, window, cx) } else { DictionaryPopup::new(text, self.book.languages(), anchor, window, cx) });
+        let dictionary = cx.new(|cx| {
+            let popup = if translate { DictionaryPopup::translate(self.locator.book_id(), text, languages, anchor, window, cx) } else { DictionaryPopup::new(text, languages, anchor, window, cx) };
+            popup.with_reader(self.library.clone(), self.locator.clone(), self.document_history.is_some())
+        });
         cx.subscribe_in(&dictionary, window, |this, _, _: &Closed, window, cx| {
             this.dictionary = None;
             this.dismiss_selection(cx);
@@ -82,6 +84,16 @@ impl ReaderView {
             cx.notify();
         })
         .detach();
+        if self.document_history.is_some() {
+            cx.subscribe_in(&dictionary, window, |this, _, article: &WikipediaArticle, window, cx| {
+                this.dictionary = None;
+                this.dismiss_selection(cx);
+                this.focus_document(window, cx);
+                cx.emit(DocumentNavigation::Link(article.url.clone()));
+                cx.notify();
+            })
+            .detach();
+        }
         cx.subscribe_in(&dictionary, window, |this, popup, event: &SelectElement, window, cx| {
             let LoadState::Ready(renderer) = &this.load_state else { return };
             if !renderer.update(cx, |view, cx| view.select_element_at(event.position, cx)) {
@@ -90,8 +102,7 @@ impl ReaderView {
             let Some((cfi_range, text)) = renderer.read(cx).selected_passage() else { return };
             let anchor = renderer.read(cx).selection_bounds();
             this.selection = Some(cfi_range);
-            this.touch_selection.lookup_available = can_lookup(&text);
-            if !this.touch_selection.lookup_available {
+            if !can_lookup(&text) {
                 this.dictionary = None;
                 this.focus_document(window, cx);
                 cx.notify();
@@ -112,12 +123,9 @@ impl ReaderView {
         self.selection = None;
         self.touch_selection.active = true;
         self.touch_selection.drag = Some(SelectionDrag { id: event.id, offset: Point::default() });
-        self.touch_selection.action_bounds.set(None);
         self.context_sheet = None;
         self.close_annotation_popup(cx);
         self.chrome.hide(cx);
-        self.wheel_debounce.take();
-        self.wheel_delta = 0.0;
         self.touch_swipe = None;
         self.focus_document(window, cx);
         window.prevent_default();
@@ -126,7 +134,7 @@ impl ReaderView {
     }
 
     pub(super) fn handle_selection_touch(&mut self, event: &TouchEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dictionary.is_some() || !self.touch_selection.active {
+        if self.dictionary.is_some() || self.context_sheet.is_some() || !self.touch_selection.active {
             return;
         }
         let LoadState::Ready(renderer) = &self.load_state else { return };
@@ -157,9 +165,6 @@ impl ReaderView {
         if event.phase != TouchPhase::Started {
             return;
         }
-        if self.touch_selection.action_bounds.get().is_some_and(|bounds| bounds.contains(&event.position)) {
-            return;
-        }
         let (start, end) = renderer.read(cx).selection_endpoints();
         let handle = [(true, start), (false, end)]
             .into_iter()
@@ -175,10 +180,11 @@ impl ReaderView {
                 // Touches land on the knob below the text. Preserve the grab
                 // offset, and hit-test slightly above the line's lower edge.
                 self.touch_selection.drag = Some(SelectionDrag { id: event.id, offset: event.position - endpoint + point(px(0.0), px(3.0)) });
-                self.touch_selection.action_bounds.set(None);
                 cx.notify();
             }
-        } else if !renderer.read(cx).selection_contains(event.position) {
+        } else if renderer.read(cx).selection_contains(event.position) {
+            self.open_context_sheet(event.position, cx);
+        } else {
             self.dismiss_selection(cx);
         }
         window.prevent_default();
@@ -190,23 +196,13 @@ impl ReaderView {
             return false;
         }
         self.touch_selection.active = false;
-        self.touch_selection.lookup_available = false;
         self.touch_selection.drag = None;
-        self.touch_selection.action_bounds.set(None);
         self.selection = None;
         if let LoadState::Ready(renderer) = &self.load_state {
             renderer.update(cx, |view, cx| view.clear_text_selection(cx));
         }
         cx.notify();
         true
-    }
-
-    fn annotate_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let LoadState::Ready(renderer) = &self.load_state else { return };
-        let Some((cfi_range, text)) = renderer.read(cx).selected_passage() else { return };
-        self.dismiss_selection(cx);
-        self.create_annotation(Selection { cfi_range, text }, window, cx);
-        self.annotation_note_input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) {
@@ -219,24 +215,26 @@ impl ReaderView {
     }
 
     pub(super) fn copy_selection_with_source(&mut self, cx: &mut Context<Self>) {
+        if self.book.is_transient() {
+            return;
+        }
         let LoadState::Ready(renderer) = &self.load_state else { return };
-        let Some((cfi, text)) = renderer.read(cx).selected_passage() else { return };
-        let section = self.toc.ordinal_for_cfi(&cfi).and_then(|ordinal| self.toc.title_for_ordinal(ordinal));
-        crate::shell::annotation_copy::copy_passage(&self.locator, &self.book_title, section.as_deref(), &text, "", None, self.book.annotation_anchor(cfi), cx);
+        let Some((cfi, _)) = renderer.read(cx).selected_passage() else { return };
+        let section = self.toc.ordinal_for_cfi(&cfi).and_then(|ordinal| self.toc.title_for_ordinal(ordinal)).or_else(|| self.toc.active_title());
+        crate::shell::annotation_copy::copy_link(&self.locator, &self.book_title, section.as_deref(), self.book.annotation_anchor(cfi), cx);
         self.dismiss_selection(cx);
     }
 
-    pub(super) fn render_selection_actions(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.dictionary.is_some() || !self.touch_selection.active && self.selection.is_none() {
+    pub(super) fn render_selection_handles(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.dictionary.is_some() || self.context_sheet.is_some() || !self.touch_selection.active {
             return None;
         }
         let LoadState::Ready(renderer) = &self.load_state else { return None };
         let view = renderer.read(cx);
         let (start, end) = view.selection_endpoints();
-        let bounds = view.selection_bounds()?;
         let theme = components::browser_theme(cx);
         let mut overlay = div().absolute().inset_0();
-        for (name, endpoint) in [("start", start), ("end", end)].into_iter().filter(|_| self.touch_selection.active) {
+        for (name, endpoint) in [("start", start), ("end", end)] {
             let Some(endpoint) = endpoint else { continue };
             let center = handle_center(endpoint, window);
             let knob = div()
@@ -251,80 +249,6 @@ impl ReaderView {
                 .child(div().absolute().left(px(21.0)).top(px(6.0)).w(px(2.0)).h(px(16.0)).bg(theme.accent))
                 .child(div().size(px(18.0)).rounded_full().bg(theme.accent));
             overlay = overlay.child(deferred(anchored().position(center - point(px(22.0), px(22.0))).child(knob)).with_priority(2));
-        }
-        if self.touch_selection.drag.is_none() {
-            let measure = self.touch_selection.action_bounds.clone();
-            let actions = components::modal_form_surface(theme)
-                .id("epub-selection-actions")
-                .debug_selector(|| "epub-selection-actions".into())
-                .w(px(240.0))
-                .max_w((window.viewport_size().width - px(16.0)).max(px(1.0)))
-                .max_h((window.viewport_size().height - window.insets().effective().top - window.insets().effective().bottom - px(16.0)).max(px(1.0)))
-                .overflow_y_scroll()
-                .gap_0()
-                .p(px(4.0))
-                .child(canvas(move |bounds, _, _| measure.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0())
-                .child(
-                    components::outlined_text_button("epub-selection-annotate", text!(reader::annotate))
-                        .ghost()
-                        .no_fill()
-                        .h(px(44.0))
-                        .w_full()
-                        .justify_start()
-                        .on_click(cx.listener(|reader, _, window, cx| reader.annotate_selection(window, cx))),
-                )
-                .when(self.touch_selection.lookup_available, |actions| {
-                    actions.child(
-                        components::outlined_text_button("epub-selection-lookup", text!(reader::lookup))
-                            .ghost()
-                            .no_fill()
-                            .h(px(44.0))
-                            .w_full()
-                            .justify_start()
-                            .on_click(cx.listener(|reader, _, window, cx| reader.lookup_selection(window, cx))),
-                    )
-                })
-                .child(
-                    components::outlined_text_button("epub-selection-translate", text!(reader::translate))
-                        .ghost()
-                        .no_fill()
-                        .h(px(44.0))
-                        .w_full()
-                        .justify_start()
-                        .on_click(cx.listener(|reader, _, window, cx| reader.translate_selection(window, cx))),
-                )
-                .child(
-                    components::outlined_text_button("epub-selection-copy-markdown", text!(reader::copy_markdown))
-                        .ghost()
-                        .no_fill()
-                        .h(px(44.0))
-                        .w_full()
-                        .justify_start()
-                        .debug_selector(|| "epub-selection-copy-markdown".into())
-                        .on_click(cx.listener(|reader, _, _, cx| reader.copy_selection(cx))),
-                )
-                .child(
-                    components::outlined_text_button("epub-selection-copy-source-link", text!(reader::copy_link))
-                        .ghost()
-                        .no_fill()
-                        .h(px(44.0))
-                        .w_full()
-                        .justify_start()
-                        .debug_selector(|| "epub-selection-copy-source-link".into())
-                        .on_click(cx.listener(|reader, _, _, cx| reader.copy_selection_with_source(cx))),
-                );
-            // Above the passage when there is room, otherwise below it.
-            let action_count = if self.touch_selection.lookup_available { 5.0 } else { 4.0 };
-            let above = f32::from(bounds.top()) > action_count * 44.0 + 16.0 + f32::from(window.insets().safe_area.top);
-            let position = point(bounds.left(), if above { bounds.top() - px(8.0) } else { bounds.bottom() + px(40.0) });
-            let actions = if cx.supports_touch_input() {
-                let viewport = window.viewport_size();
-                let safe = window.insets().effective();
-                anchored().position(point(safe.left, viewport.height - safe.bottom)).anchor(Anchor::BottomLeft).child(actions.w((viewport.width - safe.left - safe.right).max(px(1.0))))
-            } else {
-                anchored().position(position).anchor(if above { Anchor::BottomLeft } else { Anchor::TopLeft }).snap_to_window_with_margin(px(8.0)).child(actions)
-            };
-            overlay = overlay.child(deferred(actions).with_priority(3));
         }
         Some(overlay.into_any_element())
     }

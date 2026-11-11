@@ -1,5 +1,5 @@
 //! Values shared by dictionary clients and storage.
-use crate::{Definition, Metadata};
+use crate::{Definition, Metadata, OperationError};
 use dictionary_catalog::CuratedDictionary;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,7 @@ pub struct DictionaryMatches {
 pub struct DictionaryLookup {
     pub dictionaries: Vec<DictionaryMatches>,
     pub enabled_count: usize,
-    pub errors: Vec<String>,
+    pub errors: Vec<OperationError>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,7 +32,7 @@ pub struct DictionaryDownloads {
     pub available: Vec<CuratedDictionary>,
     pub recommended: Vec<String>,
     pub active: Option<String>,
-    pub error: Option<String>,
+    pub error: Option<OperationError>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

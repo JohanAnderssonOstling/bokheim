@@ -152,7 +152,7 @@ impl PdfView {
     }
 
     fn visible_ruler_lines(&self) -> Vec<VisibleLine> {
-        let slots = page_slots(self.available_width, &self.screen_column_widths(), self.right_to_left, self.page_gap);
+        let slots = self.screen_slots(self.available_width);
         let mut lines = Vec::new();
         let viewport = Bounds::new(point(px(0.0), px(0.0)), size(px(self.available_width), px(self.flow_column_height())));
         let base = self.flow_base_index();

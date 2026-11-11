@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use crate::{Button, Interactive};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, ClickEvent, Div, ElementId, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, RenderOnce, Role, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, div, img, px};
+use gpui::{AnyElement, App, ClickEvent, Div, ElementId, Entity, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, RenderOnce, Role, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, div, img, px, rems};
 use gpui_component::IconName;
 use gpui_component::checkbox::Checkbox;
-use gpui_component::menu::PopupMenu;
+use gpui_component::menu::{ContextMenuExt, PopupMenu};
 
 use crate::{BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_SM, TEXT_XS, browser_theme, menu_item, outlined_text_button, scroll::Scrollable, settings_control_size_rem};
 
@@ -129,7 +129,7 @@ pub fn annotation_editor_panel(passage: Option<AnyElement>, note: impl IntoEleme
     // absolutely-placed, content-sized panel.
     crate::modal_surface(theme)
         .id("reader-annotation-editor")
-        .w(px(crate::ANNOTATION_EDITOR_WIDTH))
+        .w(rems(crate::ANNOTATION_EDITOR_WIDTH_REM))
         .max_w_full()
         // A scroll surface is full height unless it is told otherwise, and this
         // one is placed against a point in the page: it should be as tall as
@@ -297,7 +297,10 @@ pub fn reader_settings_group(theme: BrowserTheme) -> Div {
 }
 
 pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
-    div().w_full().min_h(gpui::rems(2.375)).flex().items_center().gap(px(SPACE_SM)).child(div().w(gpui::rems(7.0)).max_w(px(112.0)).flex_none().whitespace_nowrap().text_size(gpui::rems(TEXT_SM)).child(label.into())).child(div().flex_1())
+    // Wrap the control as a unit instead of pushing it beyond a narrow sidebar.
+    div().w_full().min_w_0().min_h(gpui::rems(2.375)).flex().flex_wrap().items_center().justify_end().gap(px(SPACE_SM)).child(
+        div().w(gpui::rems(7.0)).max_w_full().min_w_0().flex_grow(1.0).flex_shrink(0.0).text_size(gpui::rems(TEXT_SM)).child(label.into()),
+    )
 }
 
 /// A full-width checkbox row with its label on the left and check on the right.
@@ -386,6 +389,11 @@ impl ReaderDestination {
 
 /// A sidebar panel's own header: its name and a close button.
 pub fn reader_panel_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    reader_panel_header_content(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_features(crate::small_caps()).child(title.into()), theme)
+}
+
+/// A panel header whose leading content can be navigation instead of a title.
+pub fn reader_panel_header_content(content: impl IntoElement, theme: BrowserTheme) -> Div {
     div()
         .flex_none()
         .w_full()
@@ -398,7 +406,7 @@ pub fn reader_panel_header(title: impl Into<SharedString>, theme: BrowserTheme) 
         .pr(px(SPACE_XS))
         .border_b_1()
         .border_color(theme.rule)
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_features(crate::small_caps()).child(title.into()))
+        .child(content)
 }
 
 /// The handle at the top of a phone sheet, which a downward swipe closes.
@@ -407,18 +415,20 @@ pub fn reader_sheet_grab(theme: BrowserTheme) -> Div {
 }
 
 /// Book and current chapter on one line, joined as "Title: Chapter".
-pub fn reader_top_bar_title(title: impl Into<SharedString>, chapter: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    let title = title.into();
-    let chapter = chapter.into();
+pub fn reader_window_title(title: &str, chapter: &str) -> String {
     let title = title.trim();
     let chapter = chapter.trim();
-    let heading = if title.is_empty() {
+    if title.is_empty() {
         chapter.to_owned()
     } else if chapter.is_empty() || chapter == title {
         title.to_owned()
     } else {
         format!(text!(common::book_chapter_title), chapter = chapter, title = title)
-    };
+    }
+}
+
+pub fn reader_top_bar_title(title: impl Into<SharedString>, chapter: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    let heading = reader_window_title(&title.into(), &chapter.into());
     div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(heading)
 }
 
@@ -669,7 +679,7 @@ fn reader_image_preview(source: impl Into<ImageSource>) -> Img {
 }
 
 fn reader_modal_panel(width: Pixels, height: Pixels, theme: BrowserTheme) -> Div {
-    crate::modal_surface(theme).w(width).h(height).max_w_full().max_h_full().p(px(SPACE_MD)).flex().flex_col().gap(px(SPACE_SM))
+    crate::modal_surface(theme).w(width).h(height).max_w_full().max_h_full().p(px(2.0)).flex().flex_col()
 }
 
 type ReaderPopupCallback = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -755,40 +765,28 @@ impl ReaderContextMenu {
 }
 
 fn image_popup_panel_size(reader_width: f32, reader_height: f32, intrinsic: Option<(f32, f32)>) -> (f32, f32) {
-    const OVERLAY_INSET: f32 = 48.0;
-    const PANEL_HORIZONTAL_CHROME: f32 = SPACE_MD * 2.0 + 2.0;
-    const PANEL_VERTICAL_CHROME: f32 = 92.0;
-    const MIN_PANEL_WIDTH: f32 = 280.0;
-    const MIN_PANEL_HEIGHT: f32 = 180.0;
-    let available_width = (reader_width - OVERLAY_INSET).max(1.0);
-    let available_height = (reader_height - OVERLAY_INSET).max(1.0);
-    let image_limit_width = (available_width - PANEL_HORIZONTAL_CHROME).max(1.0);
-    let image_limit_height = (available_height - PANEL_VERTICAL_CHROME).max(1.0);
+    const CHROME: f32 = 6.0; // Two 2px insets and the 1px border on each side.
+    let available_width = reader_width.max(1.0);
+    let available_height = (reader_height - 48.0).max(1.0);
+    let image_limit_width = (available_width - CHROME).max(1.0);
+    let image_limit_height = (available_height - CHROME).max(1.0);
     let (image_width, image_height) = intrinsic.filter(|(width, height)| width.is_finite() && height.is_finite() && *width > 0.0 && *height > 0.0).unwrap_or((4.0, 3.0));
-    let scale = (image_limit_width / image_width).min(image_limit_height / image_height);
-    let displayed_width = image_width * scale;
-    let displayed_height = image_height * scale;
-    ((displayed_width + PANEL_HORIZONTAL_CHROME).clamp(MIN_PANEL_WIDTH.min(available_width), available_width), (displayed_height + PANEL_VERTICAL_CHROME).clamp(MIN_PANEL_HEIGHT.min(available_height), available_height))
+    let scale = (image_limit_width / image_width).min(image_limit_height / image_height).min(1.0);
+    ((image_width * scale + CHROME).min(available_width), (image_height * scale + CHROME).min(available_height))
 }
 
 /// Centered, responsive image viewer used by reader surfaces.
 #[derive(IntoElement)]
 pub struct ReaderImagePopup {
-    uri: SharedString,
     image: Arc<Image>,
+    canvas: Entity<crate::InfiniteCanvas>,
     reader_size: Size<Pixels>,
-    on_copy: ReaderPopupCallback,
     on_dismiss: ReaderPopupCallback,
 }
 
 impl ReaderImagePopup {
-    pub fn new(uri: impl Into<SharedString>, image: Arc<Image>, reader_size: Size<Pixels>) -> Self {
-        Self { uri: uri.into(), image, reader_size, on_copy: Rc::new(|_, _| {}), on_dismiss: Rc::new(|_, _| {}) }
-    }
-
-    pub fn on_copy(mut self, callback: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        self.on_copy = Rc::new(callback);
-        self
+    pub fn new(image: Arc<Image>, reader_size: Size<Pixels>, canvas: Entity<crate::InfiniteCanvas>) -> Self {
+        Self { image, canvas, reader_size, on_dismiss: Rc::new(|_, _| {}) }
     }
 
     pub fn on_dismiss(mut self, callback: impl Fn(&mut Window, &mut App) + 'static) -> Self {
@@ -799,32 +797,30 @@ impl ReaderImagePopup {
 
 impl RenderOnce for ReaderImagePopup {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = browser_theme(cx);
         let intrinsic = self.image.clone().use_render_image(window, cx).map(|rendered| {
             let size = rendered.size(0);
             (size.width.0 as f32, size.height.0 as f32)
         });
         let (panel_width, panel_height) = image_popup_panel_size(f32::from(self.reader_size.width), f32::from(self.reader_size.height), intrinsic);
-        let copy = self.on_copy;
-        let dismiss_modal = self.on_dismiss.clone();
-        let dismiss_button = self.on_dismiss;
-        let content = div()
-            .size_full()
-            .min_h_0()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_SM))
-            .child(reader_state_note(self.uri, theme).min_w_0().flex_none().truncate().line_clamp(1))
-            .child(reader_content().child(reader_image_preview(self.image)))
-            .child(
-                crate::action_row()
-                    .flex_none()
-                    .child(crate::topbar_action_button("reader-image-copy", text!(common::copy_image_action), IconName::Copy, theme).on_click(move |_, window, cx| copy(window, cx)))
-                    .child(crate::topbar_action_button("reader-image-close", text!(common::close), IconName::Close, theme).on_click(move |_, window, cx| dismiss_button(window, cx))),
-            );
+        let dismiss_modal = self.on_dismiss;
+        let inner_width = (panel_width - 6.0).max(1.0);
+        let inner_height = (panel_height - 6.0).max(1.0);
+        let (width, height) = intrinsic.unwrap_or((4.0, 3.0));
+        let fit = (inner_width / width).min(inner_height / height);
+        let width = width * fit;
+        let height = height * fit;
+        let copy_image = self.image.clone();
+        let content = crate::infinite_canvas(&self.canvas).control_wheel_zoom().child(
+            div().absolute().left(px((inner_width - width) / 2.0)).top(px((inner_height - height) / 2.0))
+                .w(px(width)).h(px(height)).child(reader_image_preview(self.image)),
+        );
 
-        ReaderModal::new(gpui::size(px(panel_width), px(panel_height)), content).on_dismiss(move |window, cx| dismiss_modal(window, cx))
+        ReaderModal::new(gpui::size(px(panel_width), px(panel_height)), div().id("reader-image-context").size_full().child(content).context_menu(move |menu, _, _| {
+            let image = copy_image.clone();
+            let save_image = copy_image.clone();
+            menu.item(menu_item(text!(common::copy_image), move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image))))
+                .when(crate::image_saving_available(), |menu| menu.item(menu_item(text!(common::save_image), move |_, window, cx| crate::save_image(save_image.clone(), window, cx))))
+        })).on_dismiss(move |window, cx| dismiss_modal(window, cx))
     }
 }
 

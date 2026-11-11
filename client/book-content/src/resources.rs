@@ -1,12 +1,13 @@
 //! Prepared bytes shared by text reading preparation.
 
 use crate::resource_path::{is_container_resource, local_resource_uri, resolve_resource_href, resource_entry};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
 
 pub(crate) const MAX_BINARY_RESOURCE_BYTES: u64 = 24 * 1024 * 1024;
-pub(crate) const MAX_PREPARED_TEXT_BYTES: u64 = 64 * 1024 * 1024;
 
+#[derive(Serialize, Deserialize)]
 pub struct PreparedResources {
     bytes: HashMap<String, Vec<u8>>,
     // EPUB media types must come from the manifest. MOBI has no manifest.

@@ -1,6 +1,7 @@
 //! EPUB table-of-contents, focus, and document navigation.
 
 use book_content::BookToc;
+use std::sync::Arc;
 use book_model::BookTocEntry;
 use gpui::{App, Context, FocusHandle, Window};
 use gpui_component::tree::TreeItem;
@@ -16,13 +17,18 @@ impl ReaderView {
         let book = self.book.clone();
         let book_id = self.locator.book_id();
         cx.spawn(async move |this, cx| {
-            let (entries, read_status) = match library.book_detail(book_id).await {
-                Ok(detail) => (if detail.toc.is_empty() { book.toc().to_vec() } else { detail.toc }, detail.chapter_read_status),
-                Err(error) => {
-                    log::warn!("could not load EPUB table of contents from library database: {error}");
-                    (book.toc().to_vec(), Default::default())
+            let (entries, read_status) = if book.is_transient() {
+                (book.toc().to_vec(), Default::default())
+            } else {
+                match library.book_detail(book_id).await {
+                    Ok(detail) => (if detail.toc.is_empty() { book.toc().to_vec() } else { detail.toc }, detail.chapter_read_status),
+                    Err(error) => {
+                        log::warn!("could not load EPUB table of contents from library database: {error}");
+                        (book.toc().to_vec(), Default::default())
+                    }
                 }
             };
+            let source = book.clone();
             let (entries, resolutions, positions) = cx
                 .background_executor()
                 .spawn(async move {
@@ -32,7 +38,7 @@ impl ReaderView {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !matches!(&this.load_state, LoadState::Ready(_)) {
+                if !matches!(&this.load_state, LoadState::Ready(_)) || !Arc::ptr_eq(&this.book, &source) {
                     return;
                 }
                 this.toc.read_status = read_status;
@@ -94,12 +100,20 @@ impl ReaderView {
         }
     }
 
-    pub(in crate::epub) fn navigate_to(&mut self, href: String, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_to(&mut self, href: String, cx: &mut Context<Self>) {
         self.page_turn = None;
         self.swipe_preview.clear();
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::NavigateToHref(href), cx));
         #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
         self.tts_navigation_changed(cx);
+    }
+
+    pub(crate) fn restore_document_position(&mut self, cfi: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_selection(cx);
+        self.clear_navigation_overlays();
+        self.close_annotation_popup(cx);
+        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetCfiPosition(Some(cfi)), cx));
+        self.focus_document(window, cx);
     }
 
     pub(in crate::epub) fn navigate_from_footnote(&mut self, cx: &mut Context<Self>) {

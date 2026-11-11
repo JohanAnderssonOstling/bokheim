@@ -2,8 +2,6 @@
 
 use ui_text::text;
 
-use skrift_column_paginator::RendererCommand;
-
 use gpui::prelude::*;
 use std::{cell::Cell, rc::Rc};
 
@@ -11,38 +9,47 @@ use gpui::{AnyElement, App, Context, Window, div, font, px, rems};
 use html_view_gpui::ReadingRulerStyle;
 use ui_components as components;
 
-use crate::epub::{LoadState, ReaderView};
+use crate::epub::{DocumentNavigation, LoadState, ReaderView};
 use crate::invalidation::{Component, notify};
-use crate::settings::{CjkFontChoice, ReaderFontRole, ReaderSettings};
+use crate::settings::{CjkFontChoice, ReaderFontRole, ReaderSettings, SidebarTab};
 use crate::shell::reading_ruler::{self, ReadingRulerSettings};
 use crate::shell::settings_navigation::{self, SettingsRow, adjacent_step, adjacent_value};
+use crate::shell::state_panel::sidebar_tabs;
 use crate::shell::toolbar::{SidebarTarget, document_sidebar_methods};
 use crate::{ReaderFontFamily, ReaderTextAlignment};
 use app_preferences::{
-    FIRST_LINE_INDENT_MAX_EM, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, PARAGRAPH_SPACING_MAX_EM, PARAGRAPH_STEP_EM, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFirstLineIndent, ReaderFontWeight, ReaderHyphenation, WORD_SPACING_MAX_PERCENT,
-    WORD_SPACING_MIN_PERCENT, WORD_SPACING_STEP_PERCENT,
+    FIRST_LINE_INDENT_MAX_EM, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, PARAGRAPH_SPACING_MAX_EM, PARAGRAPH_STEP_EM, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFirstLineIndent, ReaderFontWeight,
+    ReaderHyphenation, WORD_SPACING_MAX_PERCENT, WORD_SPACING_MIN_PERCENT, WORD_SPACING_STEP_PERCENT,
 };
 
 impl SidebarTarget for ReaderView {
     document_sidebar_methods!();
+    fn control_click(&mut self, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_link_at_in_new_window(position, window, cx);
+    }
+    fn close_label(&self) -> &'static str {
+        if self.book.is_transient() { text!(common::back) } else { text!(common::return_to_library) }
+    }
+    fn available_tabs(&self) -> &'static [SidebarTab] {
+        if self.book.is_transient() { &[SidebarTab::Contents, SidebarTab::Search, SidebarTab::Settings] } else { sidebar_tabs(self.contents_available()) }
+    }
+    fn source_url(&self) -> Option<&str> {
+        self.book.is_transient().then(|| self.book.document_uris().first().map(String::as_str)).flatten()
+    }
     fn history_availability(&self) -> (bool, bool) {
-        self.history.availability()
+        self.document_history.unwrap_or_else(|| self.history.availability())
     }
 
     fn navigate_history(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.document_history.is_some() {
+            cx.emit(DocumentNavigation::History(forward));
+            return;
+        }
         let LoadState::Ready(renderer) = &self.load_state else { return };
         let renderer = renderer.clone();
         let Some(current) = renderer.read(cx).current_cfi() else { return };
         if let Some(target) = self.history.navigate(current, forward) {
-            self.dismiss_selection(cx);
-            self.context_sheet = None;
-            self.page_turn = None;
-            self.swipe_preview.clear();
-            self.footnote = None;
-            self.image_preview = None;
-            self.close_annotation_popup(cx);
-            renderer.update(cx, |renderer, cx| renderer.apply(RendererCommand::SetCfiPosition(Some(target)), cx));
-            self.focus_document(window, cx);
+            self.restore_document_position(target, window, cx);
         }
         cx.notify();
     }
@@ -119,12 +126,6 @@ const ALIGNMENTS: Steps<ReaderTextAlignment> = [
     (ReaderTextAlignment::Start, text!(reader::left), "icons/reader-settings/align-left.svg"),
     (ReaderTextAlignment::Justify, text!(reader::justify), "icons/reader-settings/align-justify.svg"),
 ];
-/// Minimum and maximum line length in characters.
-const LINE_LENGTHS: Steps<(f64, f64)> = [
-    ((35.0, 50.0), text!(reader::short), "icons/reader-settings/line-length-short.svg"),
-    ((45.0, 65.0), text!(reader::medium), "icons/reader-settings/line-length-medium.svg"),
-    ((60.0, 85.0), text!(reader::long), "icons/reader-settings/line-length-long.svg"),
-];
 
 fn step_values<T: Copy>(steps: &Steps<T>) -> [T; 3] {
     steps.map(|(value, _, _)| value)
@@ -146,7 +147,7 @@ impl ReaderView {
         }
         rows.push(SettingsRow::Alignment);
         rows.extend([SettingsRow::FontWeight, SettingsRow::Hyphenation, SettingsRow::FontSize, SettingsRow::WordSpacing]);
-        rows.push(SettingsRow::LineLength);
+        rows.push(SettingsRow::ColumnWidth);
         rows.extend([SettingsRow::LineHeightMode, SettingsRow::LineHeight, SettingsRow::ParagraphSpacingMode, SettingsRow::ParagraphSpacing, SettingsRow::FirstLineIndentMode, SettingsRow::FirstLineIndent]);
         rows.extend([SettingsRow::SideMargins, SettingsRow::VerticalMargins]);
         rows.push(SettingsRow::ColumnGap);
@@ -196,7 +197,7 @@ impl ReaderView {
                 SettingsRow::ReadingRuler => self.set_reading_ruler_enabled(direction > 0, cx),
                 SettingsRow::ReadingRulerStyle => self.set_reading_ruler(adjacent_value(&[ReadingRulerStyle::Band, ReadingRulerStyle::Focus, ReadingRulerStyle::Underline], current.reading_ruler, direction), cx),
                 SettingsRow::ReadingRulerLines => self.set_reading_ruler_lines(adjacent_step(&[1, 2, 3, 4, 5], current.reading_ruler_lines, direction), cx),
-                SettingsRow::LineLength => self.set_line_width_range(adjacent_step(&step_values(&LINE_LENGTHS), (current.synchronized.min_line_width_ch(), current.synchronized.max_line_width_ch()), direction), window, cx),
+                SettingsRow::ColumnWidth => self.adjust_column_width(f64::from(direction) * 40.0, cx),
                 SettingsRow::SideMargins => self.set_horizontal_margin(current.synchronized.horizontal_margin_px() + direction as f32 * SPACING_STEP_PX, cx),
                 SettingsRow::VerticalMargins => self.set_vertical_margin(current.synchronized.vertical_margin_px() + direction as f32 * SPACING_STEP_PX, cx),
                 SettingsRow::ColumnGap => self.set_min_column_gap(current.synchronized.min_column_gap_px() + direction as f32 * SPACING_STEP_PX, cx),
@@ -251,14 +252,15 @@ impl ReaderView {
                 .child(
                     components::reader_settings_group(theme)
                         .gap(px(components::SPACE_MD))
-                        .child(self.tile_row(
-                            TileRow { id: "reader-line-length", row: SettingsRow::LineLength, label: text!(reader::line_length) },
-                            &LINE_LENGTHS,
-                            (current.synchronized.min_line_width_ch(), current.synchronized.max_line_width_ch()),
-                            theme,
-                            cx,
-                            |this, range, window, cx| this.set_line_width_range(range, window, cx),
-                        ))
+                        .child(
+                            components::reader_setting_row(text!(reader::column_width)).map(|row| self.settings_navigation.row(SettingsRow::ColumnWidth, &rows, row, theme)).child(components::settings_stepper(
+                                components::settings_stepper_button("reader-column-width-decrease", text!(reader::minus), current.synchronized.max_line_width_px() <= LINE_WIDTH_MIN)
+                                    .on_click(cx.listener(|this, _, _, cx| this.adjust_column_width(-40.0, cx))),
+                                format!("{:.0}px", current.synchronized.max_line_width_px()),
+                                components::settings_stepper_button("reader-column-width-increase", "+", current.synchronized.max_line_width_px() >= LINE_WIDTH_MAX).on_click(cx.listener(|this, _, _, cx| this.adjust_column_width(40.0, cx))),
+                                theme,
+                            )),
+                        )
                         .child(self.line_height_settings(theme, cx)),
                 )
                 .child(components::reader_settings_group(theme).child(self.paragraph_spacing_settings(theme, cx)))
@@ -297,7 +299,7 @@ impl ReaderView {
                         ),
                 )
                 .into_any_element();
-        crate::shell::keyboard_settings::with_keyboard_settings(general, window, cx)
+        general
     }
 
     fn hyphenation_settings(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {

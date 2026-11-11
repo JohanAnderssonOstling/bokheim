@@ -1,4 +1,5 @@
 //! Native taxonomy resource. SQLite opens this file directly with a bounded page cache.
+use operation_failure::OperationError;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -7,7 +8,7 @@ static PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Android supplies the extracted APK resource before opening any library.
 /// Register the packaged file's location; SQLite opens it when it is needed.
-pub fn set_path(path: &Path) -> Result<(), String> {
+pub fn set_path(path: &Path) -> Result<(), OperationError> {
     let path = path.to_path_buf();
     if let Some(previous) = PATH.get() {
         return if previous == &path { Ok(()) } else { Err("bundled taxonomy path is already configured".into()) };
@@ -20,11 +21,11 @@ pub fn set_path(path: &Path) -> Result<(), String> {
     }
 }
 
-pub fn path() -> Result<PathBuf, String> {
+pub fn path() -> Result<PathBuf, OperationError> {
     if let Some(path) = PATH.get() {
         return Ok(path.clone());
     }
-    let executable = std::env::current_exe().map_err(|error| format!("locate bundled taxonomy: {error}"))?;
+    let executable = std::env::current_exe().map_err(|error| OperationError::operation(error).context("locate bundled taxonomy"))?;
     let directory = executable.parent().ok_or("executable has no parent directory")?;
     let directory = if matches!(directory.file_name().and_then(|name| name.to_str()), Some("deps" | "examples")) { directory.parent().unwrap_or(directory) } else { directory };
     let path = directory.join("taxonomy.sqlite3");
@@ -41,5 +42,5 @@ pub fn path() -> Result<PathBuf, String> {
             return Ok(generated);
         }
     }
-    Err(format!("bundled taxonomy resource is missing: {}", path.display()))
+    Err(format!("bundled taxonomy resource is missing: {}", path.display()).into())
 }

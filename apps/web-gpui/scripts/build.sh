@@ -41,6 +41,7 @@ mkdir -p "$bundle_dir"
     cargo run --release -p subject-projection --example export_web_taxonomy -- "$bundle_dir"
 )
 install -d "$output_dir/assets/icons"
+cp "$workspace_dir/apps/ui/design-tokens/assets/icon/bokheim.svg" "$output_dir/assets/bokheim.svg"
 cp -a "$workspace_dir/vendor/gpui-component/crates/assets/assets/icons/." "$output_dir/assets/icons/"
 bindgen_version=$(python3 - "$workspace_dir/Cargo.lock" <<'PY_BINDGEN'
 import sys, tomllib
@@ -72,11 +73,13 @@ bind_module() {
     # Release stripping removes target-feature metadata. Unwinding imports need
     # the externref transform even when bindgen cannot infer reference types.
     "$wasm_bindgen" --reference-types --target web --out-dir "$bundle_dir/$module_name" --out-name "$module_name" "$module_binary"
-    printf 'import initialize from "./%s/%s.js";\nimport { compressedWasm } from "./compressed_wasm.js";\nexport * from "./%s/%s.js";\nexport default async function init(options) {\n  if (options !== undefined) return initialize(options);\n  const response = await compressedWasm(new URL("./%s/%s_bg.wasm", import.meta.url));\n  return initialize(response ? { module_or_path: response } : undefined);\n}\n' "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" > "$bundle_dir/$module_name.js"
 }
 bind_module web_gpui "$target_dir/wasm32-unknown-unknown/web-release/web_gpui.wasm"
 bind_module cpu_worker "$target_dir/wasm32-unknown-unknown/web-release/web_backend_worker.wasm"
 cp "$app_dir/compressed_wasm.js" "$bundle_dir/compressed_wasm.js"
+# Startup modules share the same immutable identity as their WASM loaders.
+cp "$app_dir/startup.mjs" "$app_dir/compatibility.mjs" "$app_dir/ui-text.mjs" "$app_dir/tabs.mjs" "$bundle_dir/"
+cp "$workspace_dir/client/app/src/hosting/single_tab.js" "$bundle_dir/single_tab.js"
 if command -v wasm-opt >/dev/null 2>&1; then
     for wasm in "$bundle_dir"/*/*_bg.wasm; do
         # Rust and wgpu emit post-MVP WebAssembly features such as SIMD and
@@ -88,6 +91,15 @@ if command -v wasm-opt >/dev/null 2>&1; then
 else
     echo "warning: wasm-opt is unavailable; shipping the size-optimized Rust output without Binaryen post-processing" >&2
 fi
+
+write_module_loader() {
+    local module_name="$1"
+    local wasm_bytes
+    wasm_bytes=$(wc -c < "$bundle_dir/$module_name/${module_name}_bg.wasm")
+    printf 'import initialize from "./%s/%s.js";\nimport { compressedWasm } from "./compressed_wasm.js";\nexport * from "./%s/%s.js";\nexport default async function init(options) {\n  if (options !== undefined) return initialize(options);\n  const response = await compressedWasm(new URL("./%s/%s_bg.wasm", import.meta.url), %s);\n  return initialize(response ? { module_or_path: response } : undefined);\n}\n' "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" "$wasm_bytes" > "$bundle_dir/$module_name.js"
+}
+write_module_loader web_gpui
+write_module_loader cpu_worker
 
 # Some optimizers can leave an empty output after an exhausted filesystem.
 # Reject incomplete artifacts before assigning an immutable bundle identity.
@@ -101,6 +113,8 @@ for module in Path(sys.argv[1]).glob("*/*_bg.wasm"):
 PY_VALIDATE_WASM
 
 cp "$workspace_dir/apps/web-backend-worker/cpu_worker_loader.js" "$bundle_dir/cpu_worker_loader.js"
+cp "$workspace_dir/apps/web-backend-worker/import_worker_loader.js" "$bundle_dir/import_worker_loader.js"
+cp "$workspace_dir/client/platforms/web/src/import_worker.js" "$workspace_dir/client/platforms/web/src/staged_assets.js" "$bundle_dir/"
 
 cp "$app_dir/pdf_worker.js" "$bundle_dir/pdf_worker.js"
 python3 "$app_dir/scripts/package-pdfium.py" "$bundle_dir/pdfium"
@@ -132,8 +146,9 @@ fi
 python3 "$workspace_dir/apps/ui-text/export.py" --output-dir "$output_dir"
 cp "$app_dir/compatibility.mjs" "$output_dir/compatibility.mjs"
 cp "$app_dir/startup.mjs" "$output_dir/startup.mjs"
-sed -i "s|\"\./pkg\"|\"./${asset_base}\"|" "$output_dir/index.html"
-sed -i "s|\./pkg/web_gpui\.js|./${asset_base}/web_gpui.js|" "$output_dir/index.html"
+cp "$app_dir/tabs.mjs" "$output_dir/tabs.mjs"
+cp "$workspace_dir/client/app/src/hosting/single_tab.js" "$output_dir/single_tab.js"
+sed -i "s|\"\./pkg|\"./${asset_base}|g" "$output_dir/index.html"
 
 # These files refer to the final bundle identity, so compress them afterwards.
 python3 "$app_dir/scripts/compress-assets.py" --top-level "$output_dir"

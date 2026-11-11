@@ -21,7 +21,10 @@ use web_time::Instant;
 const COVER_FADE_DURATION: Duration = Duration::from_millis(180);
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, AppContext, Context, DismissEvent, Div, Entity, FocusHandle, IntoElement, Pixels, Point, Render, RenderImage, SharedString, StyleRefinement, Subscription, Task, Window, deferred, div, px};
+use gpui::{
+    AnyElement, App, AppContext, AvailableSpace, Context, DismissEvent, Div, Entity, FocusHandle, IntoElement, Pixels, Point, Render, RenderImage, SharedString, StyleRefinement, Subscription, Task, Window, canvas, deferred, div, point, px,
+    size,
+};
 use gpui_component::menu::PopupMenu;
 use gpui_component::{Icon, IconName};
 use library_model::{BookCardRow, BookDetail, BookSource, CardKey, FINISHED_PROGRESS_THRESHOLD};
@@ -150,10 +153,13 @@ pub(crate) struct BookCardInteraction {
     pub(crate) marquee: bool,
 }
 
+pub(crate) type BookCardFrame = Rc<dyn Fn(AnyElement, &App) -> AnyElement>;
+
 pub(crate) struct BookCardElement {
     card: Entity<BookCardView>,
     presentation: BookCardPresentation,
     interaction: BookCardInteraction,
+    pub(crate) frame: Option<BookCardFrame>,
     _subscription: Subscription,
     #[cfg(test)]
     renders: usize,
@@ -165,7 +171,7 @@ impl Render for BookCardElement {
         {
             self.renders += 1;
         }
-        self.card.update(cx, |card, cx| card.render_card(self.presentation, self.interaction, false, window, cx))
+        self.card.update(cx, |card, cx| card.render_card(self.presentation, self.interaction, false, self.frame.clone(), window, cx))
     }
 }
 
@@ -373,6 +379,7 @@ impl BookCardView {
                 card,
                 presentation,
                 interaction: BookCardInteraction::default(),
+                frame: None,
                 _subscription: subscription,
                 #[cfg(test)]
                 renders: 0,
@@ -392,7 +399,7 @@ impl BookCardView {
     }
 
     pub(crate) fn preview(card: &Entity<Self>, presentation: BookCardPresentation, interaction: BookCardInteraction, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
-        card.update(cx, |card, cx| card.render_card(presentation, interaction, true, window, cx))
+        card.update(cx, |card, cx| card.render_card(presentation, interaction, true, None, window, cx))
     }
 
     pub(crate) fn replace_row(&mut self, row: BookCardRow, cx: &mut Context<Self>) {
@@ -450,7 +457,7 @@ impl BookCardView {
                             mark_catalog_book_added(key, cx);
                             notify_info("catalog-add", format!(text!(browse::added_title_to_the_library), title = title), window, cx);
                         }
-                        Err(error) => notify_error("catalog-add-error", format!(text!(browse::could_not_add_book), user_facing_error(&error, text!(common::please_try_again)), title = title), window, cx),
+                        Err(error) => notify_error("catalog-add-error", format!(text!(browse::could_not_add_book), user_facing_error(&error, ""), title = title), window, cx),
                     }
                 }
                 cx.notify();
@@ -976,7 +983,7 @@ impl BookCardView {
 }
 
 impl BookCardView {
-    fn render_card(&mut self, presentation: BookCardPresentation, interaction: BookCardInteraction, preview: bool, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_card(&mut self, presentation: BookCardPresentation, interaction: BookCardInteraction, preview: bool, frame: Option<BookCardFrame>, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         if !preview {
             self.cover_visibility.track(window);
             self.prepare(Self::thumbnail_resolution(window), cx);
@@ -1099,8 +1106,9 @@ impl BookCardView {
         let context_menu = self.context_menu.as_ref().map(|active| active.render(window));
         let context_menu_target = cx.entity();
         let long_press_target = context_menu_target.clone();
-        let hover_enabled = !interaction.marquee && presentation != BookCardPresentation::Section;
+        let hover_enabled = !interaction.marquee;
         let card = components::book_card(element_id, interaction.focused, interaction.selected, hover_enabled, theme)
+            .when(preview, |card| card.border_color(gpui::transparent_black()))
             .when(presentation == BookCardPresentation::Section, |card| {
                 // The section's keyboard frame adds a 1px border outside this
                 // card's 2px outline. Together with padding they total 8px.
@@ -1125,14 +1133,35 @@ impl BookCardView {
         // No text block at all under "cover only", not an empty one: an empty
         // child would still hold the cover-to-text gap open under a cover that
         // has nothing under it. The download mark is on the cover, so it stays.
-        let card = match cover_text {
-            CoverText::Always => card.child(components::book_card_title_row(book.title, book.subtitle.as_deref())),
-            CoverText::CoverOnly => card,
-        };
-
         // A drag preview draws the card alone.
         let overlay = if preview { None } else { self.render_overlay(window, cx) };
-        components::book_card_cell().when(presentation == BookCardPresentation::GraphCover, |cell| cell.justify_start()).child(card.children(context_menu).children(overlay)).into_any_element()
+        let card = match cover_text {
+            CoverText::Always => canvas(
+                move |bounds, window, cx| {
+                    // Keep the cover at its existing grid position, with the
+                    // unused title budget outside the painted, clickable card.
+                    let padding = components::BOOK_CARD_PADDING - if presentation == BookCardPresentation::Section { 1.0 } else { 0.0 };
+                    let content_width = (bounds.size.width - px(padding * 2.0)).max(px(1.0));
+                    let title = components::book_card_intrinsic_title(book.title, book.subtitle.as_deref(), content_width, window, cx);
+                    let reserved_height = content_width / cover_ratio + px(padding * 2.0 + components::BOOK_CARD_COVER_CONTENT_GAP) + window.rem_size() * components::BOOK_CARD_TITLE_HEIGHT_REM;
+                    let card = card.child(title).children(context_menu).children(overlay).into_any_element();
+                    let mut card = if let Some(frame) = &frame { frame(card, cx) } else { card };
+                    // Drag previews receive the painted bounds, without the
+                    // grid's unused title budget above or below the card.
+                    let top = if preview { bounds.top() } else { bounds.bottom() - reserved_height };
+                    card.prepaint_as_root(point(bounds.left(), top), size(AvailableSpace::Definite(bounds.size.width), AvailableSpace::MaxContent), window, cx);
+                    card
+                },
+                |_, mut card, window, cx| card.paint(window, cx),
+            )
+            .size_full()
+            .into_any_element(),
+            CoverText::CoverOnly => {
+                let card = card.children(context_menu).children(overlay).into_any_element();
+                if let Some(frame) = &frame { frame(card, cx) } else { card }
+            }
+        };
+        components::book_card_cell().when(presentation == BookCardPresentation::GraphCover, |cell| cell.justify_start()).child(card).into_any_element()
     }
 
     /// The overlay: beside the card where the window has room — right, else
@@ -1284,7 +1313,7 @@ impl BookCardView {
 
 impl Render for BookCardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_card(BookCardPresentation::Grid, BookCardInteraction::default(), false, window, cx)
+        self.render_card(BookCardPresentation::Grid, BookCardInteraction::default(), false, None, window, cx)
     }
 }
 

@@ -113,13 +113,6 @@ impl PdfReaderView {
                 }
             },
         );
-        let reset = components::contents_read_reset_button("reset-chapter-read-status").on_click(move |_, _, cx| {
-            entity.update(cx, |this, cx| {
-                this.positions.reset_read_status();
-                this.toc.read_status.reset();
-                cx.notify();
-            });
-        });
-        components::reader_toc(theme).child(self.toc_filter.clone()).child(gpui::div().flex_none().p(gpui::px(components::SPACE_SM)).child(reset)).child(toc).into_any_element()
+        components::reader_toc(theme).child(self.toc_filter.clone()).child(toc).into_any_element()
     }
 }

@@ -36,6 +36,12 @@ pub fn outlined_text_button(id: impl Into<ElementId>, label: impl Into<SharedStr
     base_button(id).label(label).with_size(Size::Small)
 }
 
+/// Back navigation with an arrow and a visible label. Icon-only navigation
+/// continues to use `outlined_icon_button`.
+pub fn back_text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    outlined_text_button(id, label).icon(IconName::ArrowLeft).ghost().no_fill().h(rems(topbar_action_height_rem()))
+}
+
 /// Deleting something for good: the standard icon button wearing `danger`, an
 /// icon where the actions beside it that keep things (Restore, Save) are words.
 pub fn delete_icon_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {

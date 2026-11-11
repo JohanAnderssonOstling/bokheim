@@ -1,3 +1,4 @@
+use crate::PlaybackError;
 use crate::{AudiobookBook, PlaybackPosition};
 #[cfg(target_arch = "wasm32")]
 use library_backend::library::BrowserAudiobook;
@@ -34,7 +35,7 @@ extern "C" {
     #[wasm_bindgen(method)]
     fn rate(this: &BrowserAudio) -> f64;
     #[wasm_bindgen(method, js_name = takeError)]
-    fn take_error(this: &BrowserAudio) -> Option<String>;
+    fn take_error(this: &BrowserAudio) -> JsValue;
     #[wasm_bindgen(method)]
     fn failed(this: &BrowserAudio) -> bool;
     #[wasm_bindgen(method)]
@@ -49,11 +50,11 @@ pub(crate) struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn open(source: BrowserAudiobook, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>) -> Result<Self, String> {
+    pub fn open(source: BrowserAudiobook, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>) -> Result<Self, PlaybackError> {
         let metadata = js_sys::JSON::parse(
             &serde_json::json!({"title": book.title, "artist": book.author.clone().unwrap_or_default(), "tracks": source.metadata.tracks, "localTrackUrls": source.local_tracks, "bookDuration": book.duration.as_secs_f64()}).to_string(),
         )
-        .map_err(|e| format!("{e:?}"))?;
+        .map_err(PlaybackError::from)?;
         let save = Closure::own_aborting(move |position: f64, progress: f64| {
             if let Some(position) = crate::browser_position_update(position, progress) {
                 let _ = updates.try_send(position);
@@ -61,7 +62,7 @@ impl AudioEngine {
         });
         let browser =
             BrowserAudio::new(&source.url, book.cover.as_ref().map(|cover| cover.bytes()).unwrap_or_default(), &metadata, initial.min(book.duration).as_secs_f64(), save.as_ref().unchecked_ref(), &source.direct_config()?, &source.renewal())
-                .map_err(|e| format!("Could not initialize browser audio: {e:?}"))?;
+                .map_err(PlaybackError::from)?;
         Ok(Self { browser, _save: save, _source: source })
     }
     pub fn play(&self) {
@@ -70,15 +71,15 @@ impl AudioEngine {
     pub fn pause(&self) {
         self.browser.pause();
     }
-    pub fn toggle(&self) -> Result<(), String> {
+    pub fn toggle(&self) -> Result<(), PlaybackError> {
         self.browser.toggle();
         Ok(())
     }
-    pub fn seek_to(&self, position: Duration) -> Result<(), String> {
+    pub fn seek_to(&self, position: Duration) -> Result<(), PlaybackError> {
         self.browser.seek(position.as_secs_f64());
         Ok(())
     }
-    pub fn set_tempo(&mut self, tempo: f32) -> Result<(), String> {
+    pub fn set_tempo(&mut self, tempo: f32) -> Result<(), PlaybackError> {
         self.browser.set_rate(tempo as f64);
         Ok(())
     }
@@ -103,8 +104,9 @@ impl AudioEngine {
     pub fn rate(&self) -> f64 {
         self.browser.rate()
     }
-    pub fn take_error(&self) -> Option<String> {
-        self.browser.take_error()
+    pub fn take_error(&self) -> Option<PlaybackError> {
+        let error = self.browser.take_error();
+        (!error.is_null() && !error.is_undefined()).then(|| PlaybackError::from(error))
     }
     pub fn has_failed(&self) -> bool {
         self.browser.failed()

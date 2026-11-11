@@ -66,6 +66,10 @@ SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=:content_hash);
 -- param: content_hash: &SqlParam<'_>
 SELECT deleted_at IS NOT NULL FROM book WHERE content_hash=:content_hash;
 
+-- name: projection_book_format ->
+-- param: content_hash: &BookId
+SELECT (SELECT format FROM book WHERE content_hash=:content_hash);
+
 -- name: projection_set_book_facts !
 -- param: content_hash: &BookId
 -- param: format: Option<i64>

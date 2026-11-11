@@ -1,6 +1,7 @@
 //! Selected-file capabilities. Only the import service opens and buffers them.
 #[cfg(feature = "store")]
 use crate::DictionaryFile;
+use crate::OperationError;
 use crate::{MAX_FILE_BYTES, MAX_IMPORT_BYTES, Result};
 #[cfg(not(target_arch = "wasm32"))]
 use std::{future::Future, io::Read, pin::Pin};
@@ -75,7 +76,7 @@ impl DictionaryImport {
             #[cfg(not(target_arch = "wasm32"))]
             let (name, bytes) = {
                 let reader = (source.open)().await?;
-                let bytes = client_platform_runtime::executor::run_blocking(move || crate::bounded_read(reader, limit)).await.map_err(|error| error.to_string())??;
+                let bytes = client_platform_runtime::executor::run_blocking(move || crate::bounded_read(reader, limit)).await.map_err(OperationError::operation)??;
                 (source.name, bytes)
             };
             #[cfg(target_arch = "wasm32")]
@@ -92,8 +93,8 @@ impl DictionaryImport {
                 let mut bytes = Vec::new();
                 while (bytes.len() as u64) < length {
                     let end = length.min(bytes.len() as u64 + 64 * 1024);
-                    let chunk = file.slice_with_f64_and_f64(bytes.len() as f64, end as f64).map_err(|error| format!("{error:?}"))?;
-                    let chunk = JsFuture::from(chunk.array_buffer()).await.map_err(|error| format!("{error:?}"))?;
+                    let chunk = file.slice_with_f64_and_f64(bytes.len() as f64, end as f64).map_err(OperationError::from)?;
+                    let chunk = JsFuture::from(chunk.array_buffer()).await.map_err(OperationError::from)?;
                     let chunk = Uint8Array::new(&chunk).to_vec();
                     if chunk.len() as u64 != end - bytes.len() as u64 {
                         return Err("Dictionary source ended before its declared size".into());

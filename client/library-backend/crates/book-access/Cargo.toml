@@ -12,7 +12,7 @@ pdf = []
 book-content = { path = "../../../book-content" }
 http-response = { path = "../../../../shared/http-response" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
-operation-failure = { path = "../../../client-protocol/crates/operation-failure" }
+operation-failure = { path = "../../../client-protocol/crates/operation-failure", features = ["http"] }
 sync-common = { path = "../../../../shared/sync-common" }
 serde = { version = "1", features = ["derive"] }
 futures-util = { version = "0.3", features = ["io"] }

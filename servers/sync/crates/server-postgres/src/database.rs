@@ -1,4 +1,4 @@
-//! Shared PostgreSQL connection and initial schema setup.
+//! Shared PostgreSQL connection and explicit schema setup/upgrades.
 
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -82,20 +82,68 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
         .map(PostgresDatabase::from_pool)
 }
 
-const SCHEMA_VERSION: i32 = 17;
+const SCHEMA_VERSION: i32 = 20;
 
 /// Applies the initial schema to an empty database. Files are
 /// applied in filename order -- `01_core.sql` before the domain files that
 /// reference it.
 pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
-    const SCHEMA_FILES: &[&str] = &[include_str!("../schema/01_core.sql"), include_str!("../schema/02_accounts.sql"), include_str!("../schema/03_sync.sql"), include_str!("../schema/04_assets.sql")];
+    const SCHEMA_FILES: &[&str] = &[
+        include_str!("../schema/01_core.sql"),
+        include_str!("../schema/02_accounts.sql"),
+        include_str!("../schema/03_sync.sql"),
+        include_str!("../schema/04_assets.sql"),
+        include_str!("../schema/05_billing.sql"),
+        include_str!("../schema/06_scheduled_billing.sql"),
+    ];
+    let mut transaction = database.pool().begin().await?;
     for file in SCHEMA_FILES {
-        sqlx::raw_sql(file).execute(database.pool()).await?;
+        sqlx::raw_sql(file).execute(&mut *transaction).await?;
     }
-    Ok(())
+    transaction.commit().await
 }
 
-/// Reject databases created with earlier development schemas before activating a release.
+/// Whether startup must finish a supported historical upgrade before serving.
+/// Current installations avoid launching the data upgrader or scanning state.
+pub async fn needs_upgrade(database: &PostgresDatabase) -> Result<bool, sqlx::Error> {
+    let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(database.pool()).await?;
+    match version {
+        SCHEMA_VERSION => Ok(false),
+        14 | 17 | 18 | 19 => Ok(true),
+        _ => Err(sqlx::Error::Protocol(format!("unsupported sync schema version {version}; expected 14, 17, 18, 19 or {SCHEMA_VERSION}"))),
+    }
+}
+
+/// Atomic relational step used by startup and explicit maintenance commands.
+/// Older cloud schemas first pass through the separate cloud-data upgrader.
+pub async fn upgrade_schema(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('bokheim-schema-upgrade'))").execute(&mut *transaction).await?;
+    sqlx::query("LOCK TABLE bokheim_schema_version IN ACCESS EXCLUSIVE MODE").execute(&mut *transaction).await?;
+    let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(&mut *transaction).await?;
+    match version {
+        SCHEMA_VERSION => {}
+        // The separate client-domain tool completes 19 → 20 after this step.
+        19 => {}
+        17 | 18 => {
+            if version == 17 {
+                sqlx::raw_sql(include_str!("../schema/05_billing.sql")).execute(&mut *transaction).await?;
+            }
+            sqlx::raw_sql(include_str!("../schema/06_scheduled_billing.sql")).execute(&mut *transaction).await?;
+            sqlx::raw_sql(
+                "ALTER TABLE bokheim_schema_version DROP CONSTRAINT bokheim_schema_version_version_check;
+                 UPDATE bokheim_schema_version SET version=19;
+                 ALTER TABLE bokheim_schema_version ADD CONSTRAINT bokheim_schema_version_version_check CHECK (version=19);",
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
+        _ => return Err(sqlx::Error::Protocol(format!("unsupported sync schema upgrade from {version}; expected 17, 18, 19 or {SCHEMA_VERSION}"))),
+    }
+    transaction.commit().await
+}
+
+/// Verify that startup or explicit maintenance completed every upgrade.
 pub async fn verify_schema(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
     let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(database.pool()).await?;
     if version != SCHEMA_VERSION {

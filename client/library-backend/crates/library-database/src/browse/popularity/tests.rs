@@ -26,6 +26,7 @@ fn add(db: &Database, parent: DirId, number: u8, title: &str, count: Option<u64>
     db.commit_import(ImportCommit {
         source_identity: None,
         byte_checksum: None,
+        audiobook_content_hash: None,
         parent_id: parent,
         file_name: name.clone(),
         format: BookFormat::Epub,

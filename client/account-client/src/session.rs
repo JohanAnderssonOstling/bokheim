@@ -11,6 +11,7 @@ pub enum AuthError {
     Http(reqwest::Error),
     /// The native HTTP I/O runtime could not be initialized.
     Runtime(std::io::Error),
+    Storage(std::io::Error),
     Wire(WireError),
     Url(ParseError),
     InvalidData(String),
@@ -24,6 +25,7 @@ impl fmt::Display for AuthError {
         match self {
             Self::Http(error) => error.fmt(formatter),
             Self::Runtime(error) => write!(formatter, "could not initialize HTTP runtime: {error}"),
+            Self::Storage(error) => error.fmt(formatter),
             Self::Wire(error) => error.fmt(formatter),
             Self::Url(error) => error.fmt(formatter),
             Self::InvalidData(message) => write!(formatter, "invalid authentication data: {message}"),
@@ -38,6 +40,7 @@ impl std::error::Error for AuthError {
         match self {
             Self::Http(error) => Some(error),
             Self::Runtime(error) => Some(error),
+            Self::Storage(error) => Some(error),
             Self::Wire(error) => Some(error),
             Self::Url(error) => Some(error),
             Self::InvalidData(_) | Self::PasswordTooLong | Self::SignInRequired(_) => None,
@@ -62,6 +65,12 @@ impl AuthError {
     /// cannot succeed.
     pub fn is_rejected(&self) -> bool {
         matches!(self, Self::Http(error) if matches!(error.status(), Some(StatusCode::BAD_REQUEST | StatusCode::CONFLICT)))
+    }
+}
+
+impl From<std::io::Error> for AuthError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Storage(error)
     }
 }
 

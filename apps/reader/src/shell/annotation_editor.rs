@@ -10,14 +10,13 @@ use ui_text::text;
 
 use gpui::prelude::*;
 
-use gpui::{AnyElement, App, Context, Edges, Entity, Pixels, Point, ScrollHandle, Window, px};
+use gpui::{AnyElement, App, Context, Edges, Entity, Pixels, Point, ScrollHandle, Window, div, px};
 use gpui_component::Disableable;
 use gpui_component::input::{Enter as InputEnter, Input, InputState};
 use ui_components as components;
 
 use library_backend::Annotation;
 
-const WIDTH: f32 = components::ANNOTATION_EDITOR_WIDTH;
 const MAX_HEIGHT: f32 = components::ANNOTATION_EDITOR_MAX_HEIGHT;
 const MIN_HEIGHT: f32 = 160.0;
 
@@ -101,7 +100,7 @@ impl Passage {
 /// line", below means "starting `GAP` under the last".
 /// System UI and keyboard insets bound the available space. If neither side
 /// can fit an editor, it covers part of the passage within that visible space.
-pub(crate) fn geometry(passage: Option<Passage>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, toolbar_height: f32, column_count: usize, insets: Edges<Pixels>) -> Geometry {
+pub(crate) fn geometry(passage: Option<Passage>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, toolbar_height: f32, column_count: usize, insets: Edges<Pixels>, panel_width: f32) -> Geometry {
     let document_width = document_width(viewport_width, sidebar_width);
     let document_height = (viewport_height - toolbar_height).max(1.0);
     let visible_top = (f32::from(insets.top) - toolbar_height).clamp(0.0, document_height);
@@ -121,7 +120,7 @@ pub(crate) fn geometry(passage: Option<Passage>, viewport_width: f32, viewport_h
 
     let column = (center_x / column_width).floor().min(column_count - 1.0);
     let column_center = (column + 0.5) * column_width;
-    let panel_width = WIDTH.min((document_width - INSET * 2.0).max(1.0));
+    let panel_width = panel_width.min((document_width - INSET * 2.0).max(1.0));
     let maximum_left = (document_width - panel_width).max(0.0);
     let side_inset = INSET.min(maximum_left / 2.0);
     let left = (column_center - panel_width / 2.0).clamp(side_inset, (maximum_left - side_inset).max(side_inset));
@@ -148,6 +147,11 @@ fn editor<C: AnnotationEditorTarget>(
 ) -> AnyElement {
     let dismiss_target = target.clone();
     let controls = components::annotation_editor_controls(id_prefix, annotation, target, theme, window, cx);
+    let controls = if extra.is_some() && annotation.anchor.recurring_scope().is_some() {
+        div().flex().flex_col().gap(px(components::SPACE_SM)).child(components::annotation_alias_controls(annotation, target, window, cx)).child(controls).into_any_element()
+    } else {
+        controls
+    };
     components::annotation_editor_panel(extra, Input::new(note).appearance(false).w_full(), controls, scroll, theme)
         .debug_selector(|| "reader-annotation-popup".to_owned())
         .absolute()
@@ -209,12 +213,12 @@ mod tests {
     #[test]
     fn editor_moves_above_keyboard_for_a_passage_below_it_and_restores_after_dismissal() {
         let passage = Some(Passage { left: 40.0, right: 200.0, top: 680.0, bottom: 720.0 });
-        let before = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, Edges::default());
+        let before = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, Edges::default(), 360.0);
         let keyboard = Edges { top: px(24.0), bottom: px(320.0), ..Default::default() };
-        let during = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, keyboard);
+        let during = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, keyboard, 360.0);
         assert_panel_fits(&during, 800.0, 24.0, 480.0);
         assert!(during.edge_offset > before.edge_offset);
-        let after = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, Edges::default());
+        let after = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, Edges::default(), 360.0);
         assert_eq!(after.edge_offset, before.edge_offset);
         assert_eq!(after.max_height, before.max_height);
     }
@@ -223,7 +227,7 @@ mod tests {
     fn editor_below_passage_caps_long_notes_at_keyboard_edge() {
         let passage = Some(Passage { left: 40.0, right: 200.0, top: 40.0, bottom: 80.0 });
         let keyboard = Edges { top: px(24.0), bottom: px(320.0), ..Default::default() };
-        let placement = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, keyboard);
+        let placement = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, keyboard, 360.0);
         assert!(!placement.above);
         assert_panel_fits(&placement, 800.0, 24.0, 480.0);
         assert!(placement.max_height < MAX_HEIGHT);
@@ -233,7 +237,7 @@ mod tests {
     fn editor_remains_usable_when_passage_spans_space_above_keyboard() {
         let passage = Some(Passage { left: 40.0, right: 200.0, top: 30.0, bottom: 720.0 });
         let keyboard = Edges { top: px(24.0), bottom: px(440.0), ..Default::default() };
-        let placement = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, keyboard);
+        let placement = geometry(passage, 400.0, 800.0, 0.0, 0.0, 1, keyboard, 360.0);
         assert_panel_fits(&placement, 800.0, 24.0, 360.0);
     }
 
@@ -353,7 +357,7 @@ mod tests {
         let bounds = cx.debug_bounds("reader-annotation-popup").unwrap();
         assert_eq!(bounds.left(), px(120.0));
         assert_eq!(bounds.top(), px(100.0));
-        assert_eq!(bounds.size.width, px(WIDTH));
+        assert_eq!(bounds.size.width, px(components::ANNOTATION_EDITOR_WIDTH_REM * 16.0));
         assert!(bounds.size.height > px(80.0));
         assert!(bounds.size.height <= px(250.0));
         let styles = cx.debug_bounds("reader-annotation-style-row").unwrap();
@@ -603,7 +607,7 @@ pub(crate) fn bookmark_editor<C: BookmarkEditorTarget>(target: &Entity<C>, geome
         .id("reader-bookmark-editor")
         .debug_selector(|| "reader-bookmark-popup".into())
         .absolute()
-        .w(px(WIDTH))
+        .w(gpui::rems(components::ANNOTATION_EDITOR_WIDTH_REM))
         .max_w_full()
         .max_h(px(geometry.max_height))
         .left(px(geometry.left))

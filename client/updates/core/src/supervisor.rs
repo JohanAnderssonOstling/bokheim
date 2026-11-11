@@ -1,4 +1,5 @@
 //! A trial process must be known to have exited before callers restore its files.
+use crate::UpdateError;
 use crate::activation::{Journal, State};
 use std::{path::Path, process::{Child, ExitStatus}, time::{Duration, Instant}};
 
@@ -7,26 +8,26 @@ pub enum Outcome {
     Committed,
     /// The process has exited/reaped. Recovery must still consult the journal:
     /// a commit racing the timeout must never be rolled back.
-    Stopped(String),
+    Stopped(UpdateError),
 }
 
-pub fn stop_process(child: &mut Child) -> Result<(), String> {
+pub fn stop_process(child: &mut Child) -> Result<(), UpdateError> {
     if !matches!(child.try_wait(), Ok(Some(_))) {
         if let Err(error) = child.kill() {
             // A normal exit can race kill. Only proceed when wait proves it exited.
-            if child.try_wait().map_err(|e| e.to_string())?.is_none() {
-                return Err(format!("cannot stop trial process: {error}"));
+            if child.try_wait().map_err(UpdateError::operation)?.is_none() {
+                return Err(UpdateError::operation(error).context("cannot stop trial process"));
             }
         }
     }
-    child.wait().map_err(|e| format!("cannot reap trial process: {e}"))?;
+    child.wait().map_err(|e| UpdateError::operation(e).context("cannot reap trial process"))?;
     Ok(())
 }
 
 /// Wait for a candidate migration to exit. A timeout or observation failure
 /// stops and reaps it before returning. If stopping itself fails, callers must
 /// keep its private workspace isolated and must not promote its output.
-pub fn wait_for_preparation(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
+pub fn wait_for_preparation(child: &mut Child, timeout: Duration) -> Result<ExitStatus, UpdateError> {
     let deadline = Instant::now().checked_add(timeout).ok_or("preparation timeout overflow")?;
     loop {
         match child.try_wait() {
@@ -34,7 +35,7 @@ pub fn wait_for_preparation(child: &mut Child, timeout: Duration) -> Result<Exit
             Ok(None) => {}
             Err(error) => {
                 stop_process(child)?;
-                return Err(format!("cannot observe candidate migration: {error}"));
+                return Err(UpdateError::operation(error).context("cannot observe candidate migration"));
             }
         }
         if Instant::now() >= deadline {
@@ -45,7 +46,7 @@ pub fn wait_for_preparation(child: &mut Child, timeout: Duration) -> Result<Exit
     }
 }
 
-pub fn wait_for_trial(child: &mut Child, root: &Path, plan_id: &str, timeout: Duration) -> Result<Outcome, String> {
+pub fn wait_for_trial(child: &mut Child, root: &Path, plan_id: &str, timeout: Duration) -> Result<Outcome, UpdateError> {
     let deadline = Instant::now().checked_add(timeout).ok_or("trial timeout overflow")?;
     loop {
         match Journal::load(root) {
@@ -53,20 +54,20 @@ pub fn wait_for_trial(child: &mut Child, root: &Path, plan_id: &str, timeout: Du
             Ok(_) => {}
             Err(error) => {
                 stop_process(child)?;
-                return Ok(Outcome::Stopped(format!("cannot read trial acknowledgement: {error}")));
+                return Ok(Outcome::Stopped(error.context("cannot read trial acknowledgement")));
             }
         }
         match child.try_wait() {
-            Ok(Some(status)) => return Ok(Outcome::Stopped(format!("trial exited before acknowledgement: {status}"))),
+            Ok(Some(status)) => return Ok(Outcome::Stopped(format!("trial exited before acknowledgement: {status}").into())),
             Ok(None) => {}
             Err(error) => {
                 stop_process(child)?;
-                return Ok(Outcome::Stopped(format!("cannot observe trial process: {error}")));
+                return Ok(Outcome::Stopped(UpdateError::operation(error).context("cannot observe trial process")));
             }
         }
         if Instant::now() >= deadline {
             stop_process(child)?;
-            return Ok(Outcome::Stopped("trial startup timed out".into()));
+            return Ok(Outcome::Stopped(UpdateError::classified(crate::Failure::TimedOut, "trial startup timed out")));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -134,7 +135,7 @@ mod tests {
             match mode {
                 "prepared" => assert!(result.unwrap().success()),
                 "exit" => assert_eq!(result.unwrap().code(), Some(23)),
-                _ => assert!(result.unwrap_err().contains("time limit")),
+                _ => assert!(result.unwrap_err().to_string().contains("time limit")),
             }
         }
     }

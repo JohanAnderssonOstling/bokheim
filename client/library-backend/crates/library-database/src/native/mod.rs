@@ -6,7 +6,9 @@ use crate::transactions::WriteOutcome::{Commit, Rollback};
 use content_address::ContentHash;
 use library_model::RelativeBookPath;
 use rusqlite::{Error as SqlError, Row, types::Type};
+mod migration;
 pub(crate) mod observations;
+pub(crate) use migration::{migrate_cleanup_owners, migrate_file_work};
 #[cfg(not(target_arch = "wasm32"))]
 mod placement_edit;
 mod relocation;
@@ -358,6 +360,23 @@ impl Database {
         Ok(())
     }
 
+    pub fn pending_directory_purges(&self) -> Result<Vec<(DirId, String)>, DatabaseError> {
+        Ok(query_rows(|read| self.connection.native_directory_purges(read), |row| Ok((directory_id_column(row, 0)?, row.get(1)?)))?)
+    }
+
+    /// File cleanup and descendant moves must finish before removing the tree.
+    pub fn directory_purge_ready(&self, directory: &DirId, relative: &str) -> Result<bool, DatabaseError> {
+        if *directory == sync_common::ROOT_DIR_ID || relative.is_empty() {
+            return Ok(false);
+        }
+        Ok(self.connection.native_directory_purge_ready(&directory.to_string(), relative, &format!("{relative}/"), |row| row.get(0))?)
+    }
+
+    pub fn forget_purged_directory(&self, directory: &DirId, relative: &str) -> Result<(), DatabaseError> {
+        self.connection.native_forget_purged_directory(&directory.to_string(), relative)?;
+        Ok(())
+    }
+
     /// Removes replayed books from the book replay list, keeping any that
     /// still have file work.
     pub fn complete_book_replay(&self, ids: &[i64]) -> Result<(), DatabaseError> {
@@ -573,6 +592,18 @@ database_methods! {
     fn complete_directory_replay(ids: &[i64]) -> ();
     arguments (Vec<i64>,) = (ids.to_vec(),);
     execute database, arguments => database.complete_directory_replay(&arguments.0);
+
+    fn pending_directory_purges() -> Vec<(DirId, String)>;
+    arguments () = ();
+    execute database, arguments => database.pending_directory_purges();
+
+    fn directory_purge_ready(directory: &DirId, relative: &str) -> bool;
+    arguments (DirId, String,) = (*directory, relative.to_owned(),);
+    execute database, arguments => database.directory_purge_ready(&arguments.0, &arguments.1);
+
+    fn forget_purged_directory(directory: &DirId, relative: &str) -> ();
+    arguments (DirId, String,) = (*directory, relative.to_owned(),);
+    execute database, arguments => database.forget_purged_directory(&arguments.0, &arguments.1);
 
     fn complete_book_replay(ids: &[i64]) -> ();
     arguments (Vec<i64>,) = (ids.to_vec(),);

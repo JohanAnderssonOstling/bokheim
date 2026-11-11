@@ -142,7 +142,7 @@ impl TtsReader for PdfReaderView {
                         }
                     }
                     Err(error) => {
-                        reader.stop_tts_with_status(user_facing_error(&error.to_string(), text!(reader::couldn_t_read_this_pdf_page_s_text_try_another_page_or)), cx);
+                        reader.stop_tts_with_status(user_facing_error(&error, text!(reader::couldn_t_read_this_pdf_page_s_text_try_another_page_or)), cx);
                     }
                 }
                 cx.notify();

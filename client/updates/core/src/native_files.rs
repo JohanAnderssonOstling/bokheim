@@ -1,20 +1,21 @@
 //! String-error adapters for the shared durable update file operations.
+use crate::UpdateError;
 use std::path::Path;
 
-pub fn parent_directory(path: &Path) -> Result<&Path, String> {
-    update_files::parent_directory(path).map_err(|e| e.to_string())
+pub fn parent_directory(path: &Path) -> Result<&Path, UpdateError> {
+    update_files::parent_directory(path).map_err(UpdateError::operation)
 }
-pub fn sync_file(path: &Path) -> Result<(), String> {
-    update_files::sync_file(path).map_err(|e| e.to_string())
+pub fn sync_file(path: &Path) -> Result<(), UpdateError> {
+    update_files::sync_file(path).map_err(UpdateError::operation)
 }
-pub fn sync_dir(path: &Path) -> Result<(), String> {
-    update_files::sync_dir(path).map_err(|e| e.to_string())
+pub fn sync_dir(path: &Path) -> Result<(), UpdateError> {
+    update_files::sync_dir(path).map_err(UpdateError::operation)
 }
-pub fn replace(source: &Path, destination: &Path) -> Result<(), String> {
-    update_files::replace(source, destination).map_err(|e| e.to_string())
+pub fn replace(source: &Path, destination: &Path) -> Result<(), UpdateError> {
+    update_files::replace(source, destination).map_err(UpdateError::operation)
 }
-pub fn remove(path: &Path) -> Result<(), String> {
-    update_files::remove(path).map_err(|e| e.to_string())
+pub fn remove(path: &Path) -> Result<(), UpdateError> {
+    update_files::remove(path).map_err(UpdateError::operation)
 }
 
 #[cfg(test)]

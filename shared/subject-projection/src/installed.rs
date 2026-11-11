@@ -1,6 +1,7 @@
 //! Immutable, approved snapshot selection. Hosts call activate once, before workers.
 //! Every host selects an immutable file. SQLite pages and classification
 //! matchers are loaded on demand using the same policy on every platform.
+use operation_failure::OperationError;
 use rusqlite::{Connection, OpenFlags};
 use std::{
     path::{Path, PathBuf},
@@ -23,13 +24,13 @@ pub fn active_path() -> Option<&'static Path> {
     ACTIVE.get().map(PathBuf::as_path)
 }
 
-pub fn path() -> Result<PathBuf, String> {
+pub fn path() -> Result<PathBuf, OperationError> {
     if let Some(path) = active_path() {
         return Ok(path.to_owned());
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        crate::bundled::path()
+        crate::bundled::path().map_err(Into::into)
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -38,7 +39,7 @@ pub fn path() -> Result<PathBuf, String> {
 }
 
 /// Use the same read-only, immutable SQLite attachment on every host.
-pub fn read_only_uri(path: &Path) -> Result<String, String> {
+pub fn read_only_uri(path: &Path) -> Result<String, OperationError> {
     let path = path.to_str().ok_or("taxonomy path is not UTF-8")?;
     let mut encoded = String::with_capacity(path.len());
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -54,46 +55,46 @@ pub fn read_only_uri(path: &Path) -> Result<String, String> {
     Ok(format!("file:{encoded}?mode=ro&immutable=1"))
 }
 
-pub fn open_read_only(path: &Path) -> Result<Connection, String> {
-    let db = Connection::open_with_flags(read_only_uri(path)?, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI).map_err(|e| e.to_string())?;
-    db.pragma_update(None, "cache_size", -PAGE_CACHE_KIB).map_err(|e| e.to_string())?;
+pub fn open_read_only(path: &Path) -> Result<Connection, OperationError> {
+    let db = Connection::open_with_flags(read_only_uri(path)?, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI).map_err(|error| OperationError::from_error(&error))?;
+    db.pragma_update(None, "cache_size", -PAGE_CACHE_KIB).map_err(|error| OperationError::from_error(&error))?;
     #[cfg(not(target_arch = "wasm32"))]
-    db.pragma_update(None, "mmap_size", READ_ONLY_MMAP_BYTES).map_err(|e| e.to_string())?;
+    db.pragma_update(None, "mmap_size", READ_ONLY_MMAP_BYTES).map_err(|error| OperationError::from_error(&error))?;
     Ok(db)
 }
 
-pub fn metadata(path: &Path) -> Result<(u64, u32), String> {
+pub fn metadata(path: &Path) -> Result<(u64, u32), OperationError> {
     let db = open_read_only(path)?;
     metadata_in(&db)
 }
 
-fn metadata_in(db: &Connection) -> Result<(u64, u32), String> {
-    let read = |key| -> Result<String, String> { db.query_row("SELECT value FROM taxonomy_meta WHERE key=?1", [key], |r| r.get(0)).map_err(|e| e.to_string()) };
-    Ok((read("release_id")?.parse::<u64>().map_err(|e| e.to_string())?, read("format_version")?.parse::<u32>().map_err(|e| e.to_string())?))
+fn metadata_in(db: &Connection) -> Result<(u64, u32), OperationError> {
+    let read = |key| -> Result<String, OperationError> { db.query_row("SELECT value FROM taxonomy_meta WHERE key=?1", [key], |r| r.get(0)).map_err(|error| OperationError::from_error(&error)) };
+    Ok((read("release_id")?.parse::<u64>().map_err(|error| OperationError::from_error(&error))?, read("format_version")?.parse::<u32>().map_err(|error| OperationError::from_error(&error))?))
 }
 
 /// Transform a private copy of a verified server snapshot into the client image.
 /// Never called on the signed source or the currently active image.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn prepare(path: &Path) -> Result<(), String> {
-    let db = Connection::open(path).map_err(|e| e.to_string())?;
+pub fn prepare(path: &Path) -> Result<(), OperationError> {
+    let db = Connection::open(path).map_err(|error| OperationError::from_error(&error))?;
     prepare_in(&db)?;
-    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;").map_err(|e| e.to_string())?;
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;").map_err(|error| OperationError::from_error(&error))?;
     Ok(())
 }
 
-fn prepare_in(db: &Connection) -> Result<(), String> {
+fn prepare_in(db: &Connection) -> Result<(), OperationError> {
     let concepts = crate::read_unified_taxonomy_connection(db, "taxonomy snapshot")?;
     let matcher = build_runtime_with_subclasses(concepts, read_lcc_subclasses(db)?)?;
-    db.execute_batch("DROP VIEW IF EXISTS unified_concept_paths").map_err(|e| e.to_string())?;
-    db.execute_batch(include_str!("route_storage.sql")).map_err(|e| e.to_string())?;
+    db.execute_batch("DROP VIEW IF EXISTS unified_concept_paths").map_err(|error| OperationError::from_error(&error))?;
+    db.execute_batch(include_str!("route_storage.sql")).map_err(|error| OperationError::from_error(&error))?;
     crate::matcher_storage::prepare(db, &matcher)?;
     Ok(())
 }
 
-pub fn activate(path: &Path) -> Result<(), String> {
+pub fn activate(path: &Path) -> Result<(), OperationError> {
     #[cfg(not(target_arch = "wasm32"))]
-    let path = path.canonicalize().map_err(|e| e.to_string())?;
+    let path = path.canonicalize().map_err(|error| OperationError::from_error(&error))?;
     #[cfg(target_arch = "wasm32")]
     let path = path.to_owned();
     if let Some(previous) = ACTIVE.get() {
@@ -101,37 +102,37 @@ pub fn activate(path: &Path) -> Result<(), String> {
     }
     // Hosts have already selected the reference. Open SQLite only when a
     // consumer queries it, rather than reading metadata again at activation.
-    ACTIVE.set(path).map_err(|_| "taxonomy already selected".to_string())
+    ACTIVE.set(path).map_err(|_| OperationError::from("taxonomy already selected"))
 }
 
 /// The client image of a verified server snapshot, checked against the
 /// release and format the signed manifest names. `source` records where the
 /// snapshot came from, for workers that load it themselves.
-pub fn prepare_image(snapshot: &[u8], expected: (u64, u32), source: &str) -> Result<Vec<u8>, String> {
+pub fn prepare_image(snapshot: &[u8], expected: (u64, u32), source: &str) -> Result<Vec<u8>, OperationError> {
     let db = open_snapshot(snapshot)?;
     if metadata_in(&db)? != expected {
         return Err("taxonomy version differs from signed manifest".into());
     }
     prepare_in(&db)?;
-    db.execute("INSERT INTO taxonomy_meta(key,value) VALUES('source',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [source]).map_err(|e| e.to_string())?;
-    Ok(db.serialize("main").map_err(|e| e.to_string())?.to_vec())
+    db.execute("INSERT INTO taxonomy_meta(key,value) VALUES('source',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [source]).map_err(|error| OperationError::from_error(&error))?;
+    Ok(db.serialize("main").map_err(|error| OperationError::from_error(&error))?.to_vec())
 }
 
 /// Installs an already prepared client image for matching in a worker.
-pub fn install_snapshot(snapshot: &[u8]) -> Result<(), String> {
-    crate::runtime::install_from_connection(open_snapshot(snapshot)?)
+pub fn install_snapshot(snapshot: &[u8]) -> Result<(), OperationError> {
+    crate::runtime::install_from_connection(open_snapshot(snapshot)?).map_err(Into::into)
 }
 
 /// Prepares a verified published source snapshot and installs it for matching.
 /// Downloading workers use this boundary; bundled client images are prepared
 /// at build time and use `install_snapshot` directly.
-pub fn install_published_snapshot(snapshot: &[u8]) -> Result<(), String> {
+pub fn install_published_snapshot(snapshot: &[u8]) -> Result<(), OperationError> {
     let db = open_snapshot(snapshot)?;
     prepare_in(&db)?;
-    crate::runtime::install_from_connection(db)
+    crate::runtime::install_from_connection(db).map_err(Into::into)
 }
 
-fn open_snapshot(snapshot: &[u8]) -> Result<Connection, String> {
+fn open_snapshot(snapshot: &[u8]) -> Result<Connection, OperationError> {
     let mut snapshot = snapshot.to_vec();
     // A snapshot saved in WAL mode cannot be deserialized; mark it as a
     // rollback-journal database, which is what it is once in memory.
@@ -139,8 +140,8 @@ fn open_snapshot(snapshot: &[u8]) -> Result<Connection, String> {
         snapshot[18] = 1;
         snapshot[19] = 1;
     }
-    let mut db = Connection::open_in_memory().map_err(|e| e.to_string())?;
-    db.deserialize_read_exact("main", snapshot.as_slice(), snapshot.len(), false).map_err(|e| e.to_string())?;
+    let mut db = Connection::open_in_memory().map_err(|error| OperationError::from_error(&error))?;
+    db.deserialize_read_exact("main", snapshot.as_slice(), snapshot.len(), false).map_err(|error| OperationError::from_error(&error))?;
     Ok(db)
 }
 
@@ -158,9 +159,9 @@ impl StoredMetadata {
     }
 }
 
-pub fn load_metadata(path: &Path) -> Result<StoredMetadata, String> {
+pub fn load_metadata(path: &Path) -> Result<StoredMetadata, OperationError> {
     let db = open_read_only(path)?;
     let (release, format) = metadata_in(&db)?;
-    let source = db.query_row("SELECT value FROM taxonomy_meta WHERE key='source'", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let source = db.query_row("SELECT value FROM taxonomy_meta WHERE key='source'", [], |r| r.get(0)).map_err(|error| OperationError::from_error(&error))?;
     Ok(StoredMetadata { release, format, source })
 }

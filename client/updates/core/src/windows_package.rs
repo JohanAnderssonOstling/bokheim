@@ -1,6 +1,7 @@
 //! Complete Windows application packages. Authenticate the ZIP against the pinned
 //! manifest before calling these functions; extraction never changes installed files.
 
+use crate::UpdateError;
 use crate::native_files::{parent_directory, sync_dir};
 use std::{
     collections::BTreeMap,
@@ -15,7 +16,7 @@ pub struct Package {
     pub files: Vec<PathBuf>,
 }
 
-fn safe_name(raw: &str) -> Result<String, String> {
+fn safe_name(raw: &str) -> Result<String, UpdateError> {
     let name = raw.strip_suffix('/').unwrap_or(raw);
     if name.is_empty() || !name.is_ascii() {
         return Err("invalid Windows package path".into());
@@ -24,13 +25,13 @@ fn safe_name(raw: &str) -> Result<String, String> {
         let stem = part.split_once('.').map_or(part, |(stem, _)| stem).to_ascii_uppercase();
         let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
         if part.is_empty() || part == "." || part == ".." || part.len() > 255 || part.ends_with(['.', ' ']) || reserved || part.bytes().any(|b| b < 32 || b == 127 || b"\\:<>\"|?*".contains(&b)) {
-            return Err(format!("unsafe Windows package path: {raw}"));
+            return Err(format!("unsafe Windows package path: {raw}").into());
         }
     }
     Ok(name.into())
 }
 
-fn inspect_archive(archive: &mut zip::ZipArchive<File>) -> Result<Package, String> {
+fn inspect_archive(archive: &mut zip::ZipArchive<File>) -> Result<Package, UpdateError> {
     if archive.len() > 4096 {
         return Err("too many Windows package entries".into());
     }
@@ -38,7 +39,7 @@ fn inspect_archive(archive: &mut zip::ZipArchive<File>) -> Result<Package, Strin
     let mut files = Vec::new();
     let mut expanded_bytes = 0u64;
     for index in 0..archive.len() {
-        let file = archive.by_index(index).map_err(|e| e.to_string())?;
+        let file = archive.by_index(index).map_err(UpdateError::operation)?;
         let name = safe_name(file.name())?;
         let kind = file.unix_mode().unwrap_or(0) & 0o170000;
         if !matches!(kind, 0 | 0o100000 | 0o040000) || (kind == 0o040000 && !file.is_dir()) {
@@ -62,35 +63,35 @@ fn inspect_archive(archive: &mut zip::ZipArchive<File>) -> Result<Package, Strin
     }
     for required in ["bokheim.exe"] {
         if names.get(required) != Some(&false) {
-            return Err(format!("Windows package lacks {required}"));
+            return Err(format!("Windows package lacks {required}").into());
         }
     }
     Ok(Package { expanded_bytes, files })
 }
 
-pub fn inspect(source: &Path) -> Result<Package, String> {
-    let file = File::open(source).map_err(|e| e.to_string())?;
-    inspect_archive(&mut zip::ZipArchive::new(file).map_err(|e| e.to_string())?)
+pub fn inspect(source: &Path) -> Result<Package, UpdateError> {
+    let file = File::open(source).map_err(UpdateError::operation)?;
+    inspect_archive(&mut zip::ZipArchive::new(file).map_err(UpdateError::operation)?)
 }
 
 /// Destination must not already exist. A failed extraction remains isolated and
 /// must never be promoted; the caller can remove it before a fresh attempt.
-pub fn unpack(source: &Path, destination: &Path, available_bytes: u64) -> Result<Package, String> {
-    let mut archive = zip::ZipArchive::new(File::open(source).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+pub fn unpack(source: &Path, destination: &Path, available_bytes: u64) -> Result<Package, UpdateError> {
+    let mut archive = zip::ZipArchive::new(File::open(source).map_err(UpdateError::operation)?).map_err(UpdateError::operation)?;
     let package = inspect_archive(&mut archive)?;
     if package.expanded_bytes > available_bytes {
-        return Err(format!("Windows package needs {} additional bytes", package.expanded_bytes - available_bytes));
+        return Err(format!("Windows package needs {} additional bytes", package.expanded_bytes - available_bytes).into());
     }
-    fs::create_dir(destination).map_err(|e| e.to_string())?;
+    fs::create_dir(destination).map_err(UpdateError::operation)?;
     for index in 0..archive.len() {
-        let mut file = archive.by_index(index).map_err(|e| e.to_string())?;
+        let mut file = archive.by_index(index).map_err(UpdateError::operation)?;
         let path = destination.join(safe_name(file.name())?);
         if file.is_dir() {
-            fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+            fs::create_dir_all(&path).map_err(UpdateError::operation)?;
             continue;
         }
-        fs::create_dir_all(parent_directory(&path)?).map_err(|e| e.to_string())?;
-        let mut output = OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent_directory(&path)?).map_err(UpdateError::operation)?;
+        let mut output = OpenOptions::new().write(true).create_new(true).open(&path).map_err(UpdateError::operation)?;
         let size = file.size();
         let copied = update_files::copy_observed(
             &mut file,
@@ -100,11 +101,11 @@ pub fn unpack(source: &Path, destination: &Path, available_bytes: u64) -> Result
             },
             |_, _| {},
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(UpdateError::operation)?;
         if copied != size {
             return Err("truncated Windows package entry".into());
         }
-        output.sync_all().map_err(|e| e.to_string())?;
+        output.sync_all().map_err(UpdateError::operation)?;
     }
     // Flush nested directory entries before the host writes its activation journal.
     for path in &package.files {

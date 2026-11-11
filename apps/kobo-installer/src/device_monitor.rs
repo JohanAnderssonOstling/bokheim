@@ -1,15 +1,16 @@
 //! Mount recognized Kobo USB volumes without blocking the GUI or prompting for privileges.
 use crate::{KoboDevice, detect_kobo_devices};
+use operation_failure::OperationError;
 
 #[derive(Default)]
 pub struct DeviceMonitor {
     #[cfg(target_os = "linux")]
-    attempts: std::collections::BTreeMap<String, Option<String>>,
+    attempts: std::collections::BTreeMap<String, Option<OperationError>>,
 }
 
 pub struct DeviceDetection {
     pub devices: Vec<KoboDevice>,
-    pub mount_error: Option<String>,
+    pub mount_error: Option<OperationError>,
 }
 
 impl DeviceMonitor {
@@ -22,7 +23,7 @@ impl DeviceMonitor {
     }
 
     #[cfg(target_os = "linux")]
-    fn mount_linux(&mut self) -> Option<String> {
+    fn mount_linux(&mut self) -> Option<OperationError> {
         use std::process::Command;
         let output = match Command::new("lsblk").args(["--json", "--paths", "--tree", "--output", "PATH,TYPE,FSTYPE,LABEL,MOUNTPOINTS,TRAN,RM"]).output() {
             Ok(output) if output.status.success() => output,
@@ -37,13 +38,13 @@ impl DeviceMonitor {
             collect_kobos(device, false, false, &mut candidates);
         }
         self.process_candidates(&candidates, |path| {
-            let output = Command::new("udisksctl").args(["mount", "--block-device", path, "--no-user-interaction"]).output().map_err(|error| error.to_string())?;
-            if output.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()) }
+            let output = Command::new("udisksctl").args(["mount", "--block-device", path, "--no-user-interaction"]).output().map_err(OperationError::from)?;
+            if output.status.success() { Ok(()) } else { Err(OperationError::new(String::from_utf8_lossy(&output.stderr).trim())) }
         })
     }
 
     #[cfg(target_os = "linux")]
-    fn process_candidates(&mut self, candidates: &[MountCandidate], mut mount: impl FnMut(&str) -> Result<(), String>) -> Option<String> {
+    fn process_candidates(&mut self, candidates: &[MountCandidate], mut mount: impl FnMut(&str) -> Result<(), OperationError>) -> Option<OperationError> {
         // Remember mounted volumes too, so a safe eject is never undone by this monitor.
         // Removal clears the record; reconnecting enables one new mount attempt.
         self.attempts.retain(|key, _| candidates.iter().any(|candidate| &candidate.key == key));
@@ -139,7 +140,7 @@ mod tests {
     fn permission_denial_is_reported_without_repeated_attempts() {
         let mut monitor = DeviceMonitor::default();
         let error = monitor.process_candidates(&[candidate("1", false)], |_| Err("Not authorized".into()));
-        assert_eq!(error.as_deref(), Some("Not authorized"));
+        assert_eq!(error.as_ref().map(ToString::to_string).as_deref(), Some("Not authorized"));
         assert_eq!(monitor.process_candidates(&[candidate("1", false)], |_| panic!("no retry loop")), error);
         assert_eq!(monitor.process_candidates(&[candidate("1", true)], |_| panic!("manually mounted")), None);
     }

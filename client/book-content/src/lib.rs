@@ -19,7 +19,7 @@ mod toc_index;
 mod toc_source;
 mod xml;
 
-pub use book::{Book, BookFormat, ReadingBook};
+pub use book::{Book, BookFormat, ReadingBook, ResourceFetch};
 pub use book_model::BookTocEntry;
 pub use epub::opening::EpubOpeningPlan;
 pub use inspection::DocumentInspection;

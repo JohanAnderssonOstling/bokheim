@@ -68,9 +68,9 @@ impl PreferenceStore {
         if let Some(store) = STORES.lock().unwrap_or_else(PoisonError::into_inner).get(&root).and_then(Weak::upgrade) {
             return Ok(store);
         }
-        let reader = decode(files::read(&root.join(READER)).await.map_err(Error::other)?)?;
-        let browsing = recoverable(files::read(&root.join(BROWSING)).await.map_err(Error::other)?, "browsing")?;
-        let export_folder = recoverable(files::read(&root.join(EXPORT_FOLDER)).await.map_err(Error::other)?, "annotation export")?;
+        let reader = decode(files::read(&root.join(READER)).await?)?;
+        let browsing = recoverable(files::read(&root.join(BROWSING)).await?, "browsing")?;
+        let export_folder = recoverable(files::read(&root.join(EXPORT_FOLDER)).await?, "annotation export")?;
         let mut stores = STORES.lock().unwrap_or_else(PoisonError::into_inner);
         stores.retain(|_, store| store.strong_count() > 0);
         if let Some(store) = stores.get(&root).and_then(Weak::upgrade) {
@@ -104,7 +104,7 @@ impl PreferenceStore {
 
     async fn write(&self, name: &str, value: &impl Serialize) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(value).map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
-        files::write_atomic(&self.root.join(name), bytes).await.map_err(Error::other)
+        files::write_atomic(&self.root.join(name), bytes).await
     }
 
     /// Serialize the whole read–modify–write operation, publishing only persisted values.

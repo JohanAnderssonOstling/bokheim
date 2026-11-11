@@ -19,19 +19,21 @@ pub use reading::PdfReadingFragment;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use operation_failure::{Classified, Failure, OperationError};
 use std::fs;
 use std::io::SeekFrom;
 use std::io::{Read, Seek};
 use std::mem::{size_of, size_of_val};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 mod annotations;
 mod metadata;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 mod runtime;
-pub use metadata::{inspect_reader_metadata, inspect_reader_metadata_with_identity};
+pub use metadata::{PdfInspection, inspect_reader_metadata, inspect_reader_metadata_with_identity, inspect_reader_with_text, inspect_reader_with_text_visitor};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::PdfDocumentSession;
 pub use pdf_view_common::{PdfReaderMetadata, PdfStoredAnnotationKind};
@@ -49,18 +51,19 @@ const ELEMENT_CROP_PADDING: f32 = 0.008;
 #[cfg(target_arch = "wasm32")]
 pub mod browser;
 
-static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
+static PDFIUM: OnceLock<Result<Pdfium, PdfError>> = OnceLock::new();
 
 pub type PdfResult<T> = Result<T, PdfError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PdfError {
     message: String,
+    failure: Option<Failure>,
 }
 
 impl PdfError {
     fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
+        Self { message: message.into(), failure: None }
     }
 }
 
@@ -70,7 +73,28 @@ impl fmt::Display for PdfError {
     }
 }
 
-impl std::error::Error for PdfError {}
+impl std::error::Error for PdfError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { self.failure.as_ref().map(|failure| failure as _) }
+}
+impl Classified for PdfError {
+    fn failure(&self) -> Option<Failure> { self.failure }
+}
+impl PdfError {
+    fn from_error(error: &(dyn std::error::Error + 'static)) -> Self {
+        let error = OperationError::from_error(error);
+        Self { message: error.to_string(), failure: error.failure() }
+    }
+    fn context(mut self, context: impl fmt::Display) -> Self {
+        self.message = format!("{context}: {}", self.message);
+        self
+    }
+}
+
+impl From<std::io::Error> for PdfError {
+    fn from(error: std::io::Error) -> Self {
+        Self::from_error(&error)
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 pub struct PdfDocumentSession {
@@ -189,7 +213,7 @@ impl RenderedPdfImage {
 /// reader metadata, text geometry, repeating headers, or trim bounds.
 pub fn render_first_page_image(path: impl AsRef<Path>, target_width: u16) -> PdfResult<RenderedPdfImage> {
     let path = path.as_ref();
-    let reader = fs::File::open(path).map_err(|error| PdfError::new(format!("opening {}: {error}", path.display())))?;
+    let reader = fs::File::open(path).map_err(|error| PdfError::from_error(&error).context(format!("opening {}", path.display())))?;
     render_first_page_image_from_reader(reader, target_width)
 }
 
@@ -199,12 +223,12 @@ pub fn render_first_page_image_from_reader(reader: impl Read + Seek + Send + 'st
 }
 
 fn render_first_page_image_local(reader: impl Read + Seek + 'static, target_width: u16) -> PdfResult<RenderedPdfImage> {
-    let document = load_document(reader).map_err(|error| PdfError::new(format!("opening PDF cover: {error}")))?;
+    let document = load_document(reader).map_err(|error| PdfError::from_error(&error).context("opening PDF cover"))?;
     let page = document.pages().get(0).map_err(|_| PdfError::new("the PDF has no pages"))?;
     // Render the actual page so stored thumbnails cannot reintroduce annotations.
     let width = target_width.clamp(1, MAX_RENDER_WIDTH) as i32;
     cover_render_height(page.width().value, page.height().value, width)?;
-    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(width).render_annotations(false).render_form_data(false)).map_err(|error| PdfError::new(format!("rendering PDF page 1: {error}")))?;
+    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(width).render_annotations(false).render_form_data(false)).map_err(|error| PdfError::from_error(&error).context("rendering PDF page 1"))?;
     Ok(RenderedPdfImage { rgba: bitmap.as_rgba_bytes(), pixel_width: bitmap.width() as u32, pixel_height: bitmap.height() as u32, source: RenderedPdfImageSource::RenderedPage })
 }
 
@@ -274,8 +298,8 @@ pub fn extract_search_text(reader: impl Read + Seek + Send + 'static, selected: 
 }
 
 fn extract_search_page(document: &runtime::Document, index: usize, with_bounds: bool) -> PdfResult<BookTextPart> {
-    let page = document.pages().get(index as i32).map_err(|error| PdfError::new(error.to_string()))?;
-    let text = page.text().map_err(|error| PdfError::new(error.to_string()))?;
+    let page = document.pages().get(index as i32).map_err(|error| PdfError::from_error(&error))?;
+    let text = page.text().map_err(|error| PdfError::from_error(&error))?;
     let coordinates = PdfPageCoordinates::new(&page);
     let mut value = String::new();
     let mut bounds = Vec::new();
@@ -299,25 +323,77 @@ pub fn inspect_page_text_with_count(reader: impl Read + Seek + Send + 'static, e
     runtime::run(move || inspect_page_text_local(reader, edge_pages, max_text_bytes))
 }
 
+/// Receives complete visible-page text. Return false to skip all later pages.
+pub trait PdfPageTextVisitor: Send + 'static {
+    fn visit(&mut self, page: usize, text: String) -> PdfResult<bool>;
+}
+
+#[derive(Default)]
+struct PageTextCollector(Vec<(usize, String)>);
+
+impl PdfPageTextVisitor for PageTextCollector {
+    fn visit(&mut self, page: usize, text: String) -> PdfResult<bool> {
+        self.0.push((page, text));
+        Ok(true)
+    }
+}
+
+/// Visit the supplied one-based pages in order without collecting their text.
+/// Returns the full document page count and the visitor with its accumulated state.
+pub fn visit_page_text<R: Read + Seek + Send + 'static, V: PdfPageTextVisitor>(reader: R, pages: Vec<usize>, max_text_bytes: usize, mut visitor: V) -> PdfResult<(usize, V)> {
+    runtime::run(move || {
+        let document = load_document(reader)?;
+        let count = visit_document_page_text(&document, &pages, max_text_bytes, &mut visitor)?;
+        Ok((count, visitor))
+    })
+}
+
 fn inspect_page_text_local(reader: impl Read + Seek + 'static, edge_pages: usize, max_text_bytes: usize) -> PdfResult<(usize, Vec<(usize, String)>)> {
     let document = load_document(reader)?;
+    inspect_document_page_text(&document, edge_pages, max_text_bytes)
+}
+
+fn inspect_document_page_text(document: &runtime::Document, edge_pages: usize, max_text_bytes: usize) -> PdfResult<(usize, Vec<(usize, String)>)> {
     let count = document.pages().len() as usize;
-    let mut result = Vec::new();
-    for index in 0..count.min(edge_pages) {
-        let page = document.pages().get(index as i32).map_err(|e| PdfError::new(e.to_string()))?;
-        let text = page.text().map_err(|e| PdfError::new(e.to_string()))?;
-        if text.len() as usize > max_text_bytes {
+    let pages: Vec<_> = (1..=count.min(edge_pages)).collect();
+    let mut collector = PageTextCollector::default();
+    visit_document_page_text(document, &pages, max_text_bytes, &mut collector)?;
+    Ok((count, collector.0))
+}
+
+fn visit_document_page_text(document: &runtime::Document, pages: &[usize], max_text_bytes: usize, visitor: &mut impl PdfPageTextVisitor) -> PdfResult<usize> {
+    let count = document.pages().len() as usize;
+    for &number in pages.iter().filter(|&&number| number > 0 && number <= count) {
+        let index = number - 1;
+        let started = pdf_profile_start();
+        let page = document.pages().get(index as i32).map_err(|e| PdfError::from_error(&e))?;
+        profile_pdf_phase("page_load", index + 1, started);
+        let started = pdf_profile_start();
+        let text = page.text().map_err(|e| PdfError::from_error(&e))?;
+        profile_pdf_phase("text_page_load", index + 1, started);
+        let started = pdf_profile_start();
+        let length = text.len() as usize;
+        profile_pdf_phase("text_character_count", index + 1, started);
+        if length > max_text_bytes {
             continue;
         }
         // Respect offset crop/media boxes just as character selection does,
         // without fetching Unicode and two bounds for every character.
+        let started = pdf_profile_start();
         let value = text.inside_rect(PdfPageCoordinates::new(&page).bounds);
+        profile_pdf_phase("text_extract", index + 1, started);
+        let started = pdf_profile_start();
         let value = value.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n");
-        if value.len() <= max_text_bytes {
-            result.push((index + 1, value));
+        profile_pdf_phase("text_normalize", index + 1, started);
+        let started = pdf_profile_start();
+        drop(text);
+        drop(page);
+        profile_pdf_phase("page_close", index + 1, started);
+        if value.len() <= max_text_bytes && !visitor.visit(number, value)? {
+            break;
         }
     }
-    Ok((count, result))
+    Ok(count)
 }
 
 /// Renders a bounded set of inspection pages one at a time. The visitor can stop
@@ -338,7 +414,20 @@ pub fn inspect_page_images(reader: impl Read + Seek + Send + 'static, pages: &[u
 
 // Both native and WASM keep a seekable source alive for on-demand reads.
 fn load_document(reader: impl Read + Seek + 'static) -> PdfResult<runtime::Document> {
-    shared_pdfium()?.load_pdf_from_reader(PdfiumExactReader::new(reader), None).map_err(|error| PdfError::new(error.to_string()))
+    let started = pdf_profile_start();
+    let result = shared_pdfium()?.load_pdf_from_reader(PdfiumExactReader::new(reader), None).map_err(|error| PdfError::from_error(&error));
+    profile_pdf_phase("document_open", 0, started);
+    result
+}
+
+fn pdf_profile_start() -> Option<Instant> {
+    log::log_enabled!(target: "library_pdf_profile", log::Level::Debug).then(Instant::now)
+}
+
+fn profile_pdf_phase(stage: &str, page: usize, started: Option<Instant>) {
+    if let Some(started) = started {
+        log::debug!(target: "library_pdf_profile", "{{\"event\":\"pdf_phase\",\"stage\":\"{stage}\",\"page\":{page},\"elapsed_ns\":{}}}", started.elapsed().as_nanos());
+    }
 }
 
 /// Adapts Rust's short-read semantics to Pdfium's custom file-access contract.
@@ -374,13 +463,13 @@ impl<R: Seek> Seek for PdfiumExactReader<R> {
 impl LocalDocumentSession {
     pub fn open(path: impl Into<PathBuf>) -> PdfResult<Self> {
         let path = path.into();
-        let bytes = fs::read(&path).map_err(|error| PdfError::new(format!("reading {}: {error}", path.display())))?;
+        let bytes = fs::read(&path).map_err(|error| PdfError::from_error(&error).context(format!("reading {}", path.display())))?;
         Self::from_bytes(path.display().to_string(), bytes)
     }
 
     pub fn from_bytes(source_name: impl Into<String>, bytes: Vec<u8>) -> PdfResult<Self> {
         let source_name = source_name.into();
-        let document = shared_pdfium()?.load_pdf_from_byte_vec(bytes, None).map_err(|error| PdfError::new(format!("opening {source_name}: {error}")))?;
+        let document = shared_pdfium()?.load_pdf_from_byte_vec(bytes, None).map_err(|error| PdfError::from_error(&error).context(format!("opening {source_name}")))?;
         Self::from_document(source_name, document)
     }
 
@@ -389,23 +478,29 @@ impl LocalDocumentSession {
         R: Read + Seek + 'static,
     {
         let source_name = source_name.into();
-        let document = load_document(reader).map_err(|error| PdfError::new(format!("opening {source_name}: {error}")))?;
+        let document = load_document(reader).map_err(|error| PdfError::from_error(&error).context(format!("opening {source_name}")))?;
         Self::from_document(source_name, document)
     }
 
     fn from_document(source_name: String, document: runtime::Document) -> PdfResult<Self> {
+        let started = pdf_profile_start();
         let pages = document
             .pages()
             .page_sizes()
-            .map_err(|error| PdfError::new(format!("reading PDF page dimensions: {error}")))?
+            .map_err(|error| PdfError::from_error(&error).context("reading PDF page dimensions"))?
             .into_iter()
             .map(|size| PdfPageInfo { width_points: size.width().value, height_points: size.height().value })
             .collect::<Vec<_>>();
+        profile_pdf_phase("page_geometry", 0, started);
         if pages.is_empty() {
             return Err(PdfError::new("the PDF has no pages"));
         }
+        let started = pdf_profile_start();
         let outline = document_outline(&document);
+        profile_pdf_phase("outline", 0, started);
+        let started = pdf_profile_start();
         let right_to_left = document.catalog().is_right_to_left();
+        profile_pdf_phase("reading_direction", 0, started);
         Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline, right_to_left }, analysis: RefCell::new(PageAnalysisCache::default()) })
     }
 
@@ -476,14 +571,14 @@ impl LocalDocumentSession {
             }
             None => crop,
         };
-        let mut bitmap = PdfBitmap::empty(raster_crop.width() as i32, raster_crop.height() as i32, PdfBitmapFormat::BGRA).map_err(|error| PdfError::new(format!("allocating PDF page raster: {error}")))?;
+        let mut bitmap = PdfBitmap::empty(raster_crop.width() as i32, raster_crop.height() as i32, PdfBitmapFormat::BGRA).map_err(|error| PdfError::from_error(&error).context("allocating PDF page raster"))?;
         let config = PdfRenderConfig::new()
             .set_fixed_size(pixel_width as i32, pixel_height as i32)
             .set_origin(-(raster_crop.left() as i32), -(raster_crop.top() as i32))
             .set_format(PdfBitmapFormat::BGRA)
             .set_reverse_byte_order(!bgra)
             .render_annotations(true);
-        page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|error| PdfError::new(format!("rendering PDF page {}: {error}", page_index + 1)))?;
+        page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|error| PdfError::from_error(&error).context(format!("rendering PDF page {}", page_index + 1)))?;
         let mut rgba = bitmap.as_raw_bytes();
         if let Some((paper, ink)) = colors {
             recolor_around_images(&mut rgba, raster_crop, &analysis.images, paper, ink);
@@ -522,8 +617,8 @@ impl LocalDocumentSession {
         }
         let page = self.document.pages().get(page_index as i32).map_err(|_| PdfError::new(format!("PDF page {} does not exist", page_index + 1)))?;
         let coordinates = PdfPageCoordinates::new(&page);
-        let text = page.text().map_err(|error| PdfError::new(format!("extracting text from page {}: {error}", page_index + 1)))?;
-        let search = text.search(query, &PdfSearchOptions::new()).map_err(|error| PdfError::new(format!("searching page {}: {error}", page_index + 1)))?;
+        let text = page.text().map_err(|error| PdfError::from_error(&error).context(format!("extracting text from page {}", page_index + 1)))?;
+        let search = text.search(query, &PdfSearchOptions::new()).map_err(|error| PdfError::from_error(&error).context(format!("searching page {}", page_index + 1)))?;
         let mut hits = Vec::new();
         search.iter(PdfSearchDirection::SearchForward).for_each(|segments| {
             segments.iter().for_each(|segment| {
@@ -1075,7 +1170,7 @@ pub fn pdfium_third_party_notices() -> &'static str {
 
 fn extract_text_layout(page: &PdfPage<'_>, page_index: usize) -> PdfResult<PdfPageTextLayout> {
     let coordinates = PdfPageCoordinates::new(page);
-    let text = page.text().map_err(|error| PdfError::new(format!("extracting text from page {}: {error}", page_index + 1)))?;
+    let text = page.text().map_err(|error| PdfError::from_error(&error).context(format!("extracting text from page {}", page_index + 1)))?;
     let characters = text
         .chars()
         .iter()
@@ -1278,7 +1373,7 @@ fn shared_pdfium() -> PdfResult<&'static Pdfium> {
     #[cfg(not(target_arch = "wasm32"))]
     assert!(native::on_worker(), "PDFium can only be accessed by its owning worker");
     let pdfium = PDFIUM.get_or_init(runtime::initialize);
-    pdfium.as_ref().map_err(|error| PdfError::new(error.clone()))
+    pdfium.as_ref().map_err(Clone::clone)
 }
 
 #[cfg(test)]
@@ -1458,7 +1553,7 @@ mod tests {
     }
 
     fn fixture_path(label: &str) -> PdfResult<PathBuf> {
-        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| PdfError::new(error.to_string()))?.as_nanos();
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| PdfError::from_error(&error))?.as_nanos();
         Ok(std::env::temp_dir().join(format!("bokheim-pdf-{label}-{suffix}.pdf")))
     }
 
@@ -1469,13 +1564,13 @@ mod tests {
         let path = path.to_owned();
         runtime::run(move || {
             let pdfium = shared_pdfium()?;
-            let mut document = pdfium.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
+            let mut document = pdfium.create_new_pdf().map_err(|error| PdfError::from_error(&error))?;
             let font = document.fonts_mut().helvetica();
             for text in ["First searchable page", "Second searchable page"] {
-                let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::new(error.to_string()))?;
-                page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(720.0), text, font, PdfPoints::new(18.0)).map_err(|error| PdfError::new(error.to_string()))?;
+                let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::from_error(&error))?;
+                page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(720.0), text, font, PdfPoints::new(18.0)).map_err(|error| PdfError::from_error(&error))?;
             }
-            document.save_to_file(&path).map_err(|error| PdfError::new(error.to_string()))
+            document.save_to_file(&path).map_err(|error| PdfError::from_error(&error))
         })
     }
 
@@ -1512,7 +1607,7 @@ mod tests {
             assert_eq!(document.extract_reading_fragments(1)?[0].text, text);
             assert!(Arc::ptr_eq(&document.analysis.borrow_mut().get(1).unwrap(), &cached));
             assert_eq!(document.analysis.borrow().pages.len(), 2);
-            fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
+            fs::remove_file(path).map_err(|error| PdfError::from_error(&error))?;
             Ok(())
         })
     }
@@ -1521,7 +1616,7 @@ mod tests {
     fn search_hits_keep_page_context_in_their_excerpts() -> PdfResult<()> {
         let path = fixture_path("search-excerpts")?;
         create_fixture_pdf(&path)?;
-        let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
+        let bytes = fs::read(&path).map_err(|error| PdfError::from_error(&error))?;
         let session = PdfDocumentSession::from_bytes("search-excerpts", bytes)?;
         let hits = session.search("searchable")?;
         assert_eq!(hits.len(), 2);
@@ -1530,7 +1625,7 @@ mod tests {
         assert_eq!(hits[1].page_index(), 1);
         assert_eq!(hits[1].excerpt(), "Second searchable page");
         assert_eq!(hits[0].clone(), hits[0]);
-        fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
+        fs::remove_file(path).map_err(|error| PdfError::from_error(&error))?;
         Ok(())
     }
 
@@ -1539,7 +1634,7 @@ mod tests {
     fn concurrent_extraction_and_reader_operations_share_pdfium_access() -> PdfResult<()> {
         let path = fixture_path("sequential-extraction")?;
         create_fixture_pdf(&path)?;
-        let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
+        let bytes = fs::read(&path).map_err(|error| PdfError::from_error(&error))?;
         let barrier = Arc::new(std::sync::Barrier::new(4));
         let workers = (0..4)
             .map(|_| {
@@ -1564,7 +1659,7 @@ mod tests {
         for worker in workers {
             worker.join().unwrap()?;
         }
-        fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
+        fs::remove_file(path).map_err(|error| PdfError::from_error(&error))?;
         Ok(())
     }
 
@@ -1573,7 +1668,7 @@ mod tests {
     fn extracted_image_processing_does_not_hold_pdfium_access() -> PdfResult<()> {
         let path = fixture_path("image-processing")?;
         create_fixture_pdf(&path)?;
-        let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
+        let bytes = fs::read(&path).map_err(|error| PdfError::from_error(&error))?;
         inspect_page_images(Cursor::new(bytes.clone()), &[1], |_, _image| {
             let bytes = bytes.clone();
             let (sender, receiver) = std::sync::mpsc::channel();
@@ -1585,7 +1680,7 @@ mod tests {
             worker.join().unwrap();
             false
         })?;
-        fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
+        fs::remove_file(path).map_err(|error| PdfError::from_error(&error))?;
         Ok(())
     }
 
@@ -1593,7 +1688,7 @@ mod tests {
     fn ingestion_metadata_round_trips_and_rejects_a_different_revision() -> PdfResult<()> {
         let path = fixture_path("ingestion")?;
         create_fixture_pdf(&path)?;
-        let bytes = fs::read(&path).map_err(|e| PdfError::new(e.to_string()))?;
+        let bytes = fs::read(&path).map_err(|e| PdfError::from_error(&e))?;
         let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
         assert_eq!(reader.position(), 0);
         assert_eq!(metadata.book_id, blake3::hash(&bytes).to_hex().to_string());
@@ -1857,10 +1952,10 @@ mod tests {
     #[test]
     fn lightweight_page_dimensions_match_loaded_rotated_pages() -> PdfResult<()> {
         runtime::run(move || {
-            let mut document = shared_pdfium()?.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
+            let mut document = shared_pdfium()?.create_new_pdf().map_err(|error| PdfError::from_error(&error))?;
             let mut expected = Vec::new();
             for rotation in [PdfPageRenderRotation::None, PdfPageRenderRotation::Degrees90, PdfPageRenderRotation::Degrees180, PdfPageRenderRotation::Degrees270] {
-                let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::new(error.to_string()))?;
+                let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::from_error(&error))?;
                 page.set_rotation(rotation);
                 expected.push((page.width().value, page.height().value));
             }
@@ -1940,13 +2035,20 @@ mod tests {
     fn reader_short_reads_are_completed_before_pdfium_parses_them() -> PdfResult<()> {
         let path = fixture_path("short-reads")?;
         create_fixture_pdf(&path)?;
-        let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
+        let bytes = fs::read(&path).map_err(|error| PdfError::from_error(&error))?;
         let reader = ChunkedReader { inner: Cursor::new(bytes), chunk_size: 7 };
         let session = PdfDocumentSession::from_reader(path.display().to_string(), reader)?;
         assert_eq!(session.info().page_count(), 2);
 
         drop(session);
-        fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
+        fs::remove_file(path).map_err(|error| PdfError::from_error(&error))?;
         Ok(())
     }
+}
+
+impl From<String> for PdfError {
+    fn from(message: String) -> Self { Self::new(message) }
+}
+impl From<&str> for PdfError {
+    fn from(message: &str) -> Self { Self::new(message) }
 }

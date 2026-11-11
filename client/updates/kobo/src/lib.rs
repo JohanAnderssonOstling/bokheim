@@ -7,6 +7,7 @@ mod package;
 
 pub use host::{Host, UpdateError};
 
+pub use update_client::UpdateError as OperationError;
 use fs2::FileExt;
 pub use kobo_package::Release;
 use kobo_package::{APP, RELEASE_API, installed_profile, newer_release_for_model};
@@ -29,17 +30,17 @@ pub struct Installation {
 }
 
 /// Set by the Kobo executable, whose version is the application release version.
-pub fn initialize(root: PathBuf, version: &str) -> Result<(), String> {
-    let installation = Installation { root, version: Version::parse(version).map_err(|error| error.to_string())? };
-    INSTALLATION.set(installation).map_err(|_| "Kobo updater was already initialized".to_owned())
+pub fn initialize(root: PathBuf, version: &str) -> Result<(), OperationError> {
+    let installation = Installation { root, version: Version::parse(version).map_err(OperationError::operation)? };
+    INSTALLATION.set(installation).map_err(|_| OperationError::from("Kobo updater was already initialized"))
 }
 
-pub fn installation() -> Result<&'static Installation, String> {
-    INSTALLATION.get().ok_or_else(|| "Kobo updater is unavailable in this launcher".to_owned())
+pub fn installation() -> Result<&'static Installation, OperationError> {
+    INSTALLATION.get().ok_or_else(|| OperationError::from("Kobo updater is unavailable in this launcher"))
 }
 
-fn client() -> Result<Client, String> {
-    http_response::blocking_client_builder().https_only(true).connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(15 * 60)).user_agent("Bokheim-Kobo-Updater").build().map_err(|error| error.to_string())
+fn client() -> Result<Client, OperationError> {
+    http_response::blocking_client_builder().https_only(true).connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(15 * 60)).user_agent("Bokheim-Kobo-Updater").build().map_err(OperationError::operation)
 }
 
 impl Installation {
@@ -47,7 +48,7 @@ impl Installation {
         self.root.join(APP).join(".update")
     }
 
-    fn lock(&self) -> Result<File, String> {
+    fn lock(&self) -> Result<File, OperationError> {
         if !self.root.join(".kobo").is_dir() || !self.root.join(APP).join("desktop-gpui-kobo").is_file() {
             return Err("Couldn't find the installation. Restart the app and retry.".into());
         }
@@ -62,17 +63,17 @@ impl Installation {
         (release.version > self.version).then_some(release)
     }
 
-    pub fn last_error(&self) -> Option<String> {
-        fs::read_to_string(self.updates().join("error")).ok()
+    pub fn last_error(&self) -> Option<OperationError> {
+        fs::read_to_string(self.updates().join("error")).ok().map(Into::into)
     }
 
-    pub fn check(&self) -> Result<Option<Release>, String> {
+    pub fn check(&self) -> Result<Option<Release>, OperationError> {
         let response = client()?.get(RELEASE_API).timeout(Duration::from_secs(30)).header("Accept", "application/vnd.github+json").send().and_then(|response| response.error_for_status()).map_err(network_error)?;
         let profile = installed_profile(&fs::read_to_string(self.root.join(".kobo/version")).map_err(io_error)?).map_err(io_error)?;
-        newer_release_for_model(response, &self.version, profile.id)
+        newer_release_for_model(response, &self.version, profile.id).map_err(Into::into)
     }
 
-    pub fn download(&self, release: &Release, progress: impl FnMut(u64, u64)) -> Result<(), String> {
+    pub fn download(&self, release: &Release, progress: impl FnMut(u64, u64)) -> Result<(), OperationError> {
         let _lock = self.lock()?;
         release.validate()?;
         if release.version <= self.version {
@@ -94,7 +95,7 @@ impl Installation {
             let input = client()?.get(&release.url).send().and_then(|response| response.error_for_status()).map_err(network_error)?;
             stage_verified(input, &updates.join("package.tar.gz"), &partial, &release.artifact(), progress)?;
             package::stage(&self.root, &updates, &release.version)?;
-            write_atomic(&updates.join("ready.json"), &serde_json::to_vec(release).map_err(|error| error.to_string())?)
+            write_atomic(&updates.join("ready.json"), &serde_json::to_vec(release).map_err(OperationError::operation)?)
         })();
         if result.is_err() {
             let _ = fs::remove_file(partial);
@@ -104,7 +105,7 @@ impl Installation {
 
     /// Called by the launcher after the application has shut down and flushed
     /// its databases. No user database or preference file belongs to a package.
-    pub fn apply(&self) -> Result<(), String> {
+    pub fn apply(&self) -> Result<(), OperationError> {
         let _lock = self.lock()?;
         let release = self.pending().ok_or("There is no newer verified Kobo update ready to install")?;
         release.validate()?;
@@ -122,29 +123,28 @@ impl Installation {
     }
 }
 
-fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
+fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), OperationError> {
     update_files::write_atomic(path, &path.with_extension("tmp"), contents, None, |_| {}).map(|_| ()).map_err(io_error)
 }
 
-fn require_space(path: &Path, bytes: u64) -> Result<(), String> {
+fn require_space(path: &Path, bytes: u64) -> Result<(), OperationError> {
     let free = fs2::available_space(path).map_err(io_error)?;
     if free < bytes {
-        return Err(format!("Free up {} MB on your Kobo, then retry the update.", (bytes - free).div_ceil(1_000_000)));
+        return Err(OperationError::classified(update_client::Failure::StorageFull, format!("Kobo update needs {} additional bytes", bytes - free)));
     }
     Ok(())
 }
 
-fn remove_file(path: &Path) -> Result<(), String> {
+fn remove_file(path: &Path) -> Result<(), OperationError> {
     update_files::remove_file_if_exists(path).map_err(io_error)
 }
-fn remove_directory(path: &Path) -> Result<(), String> {
+fn remove_directory(path: &Path) -> Result<(), OperationError> {
     update_files::remove_dir_if_exists(path).map_err(io_error)
 }
 
-fn io_error(error: std::io::Error) -> String {
-    format!("Could not prepare the Kobo update: {error}")
+fn io_error(error: std::io::Error) -> OperationError {
+    OperationError::operation(error).context("Could not prepare the Kobo update")
 }
-fn network_error(error: reqwest::Error) -> String {
-    eprintln!("Kobo update request failed: {error}");
-    "Could not download the update. Check your Wi-Fi connection and try again.".into()
+fn network_error(error: reqwest::Error) -> OperationError {
+    OperationError::operation(error).context("Kobo update request failed")
 }

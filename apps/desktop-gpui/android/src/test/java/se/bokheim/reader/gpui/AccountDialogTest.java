@@ -116,7 +116,7 @@ public class AccountDialogTest {
         button("Sign in").getGlobalVisibleRect(primary);
         button("Forgot password?").getGlobalVisibleRect(secondary);
         assertTrue(secondary.top >= primary.bottom + dp(8));
-        assertNull(findText(content(), "Please wait…"));
+        assertNull(findText(content(), "Please wait"));
     }
 
     @Test public void wideScreenCentersABoundedForm() {

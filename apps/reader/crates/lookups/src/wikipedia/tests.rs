@@ -62,7 +62,7 @@ async fn successive_requests_reuse_a_connection() {
     };
     let requests = async {
         for _ in 0..2 {
-            assert_eq!(fetch(&client, url.clone()).await.as_deref(), Some(b"{}".as_slice()));
+            assert_eq!(fetch(&client, url.clone()).await.unwrap().as_deref(), Some(b"{}".as_slice()));
         }
     };
     tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(requests, server) }).await.expect("requests should share one connection");
@@ -86,6 +86,10 @@ async fn failed_http_requests_finish_quietly_without_retrying() {
         };
         let client = client().unwrap();
         let (result, ()) = tokio::join!(fetch(&client, url), server);
-        assert!(result.is_none());
+        if status.starts_with("404") {
+            assert_eq!(result, Ok(None));
+        } else {
+            assert!(result.is_err());
+        }
     }
 }

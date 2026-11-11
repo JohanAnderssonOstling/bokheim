@@ -27,12 +27,12 @@ pub fn prepare_import(files: Vec<DictionaryFile>) -> Result<(Metadata, Vec<Dicti
             return Err("Dictionary file exceeds 256 MiB".into());
         }
         if file.name.to_ascii_lowercase().ends_with(".zip") {
-            let mut archive = zip::ZipArchive::new(Cursor::new(file.bytes)).map_err(|error| error.to_string())?;
+            let mut archive = zip::ZipArchive::new(Cursor::new(file.bytes)).map_err(|error| crate::OperationError::from_error(&error))?;
             if archive.len() > 1024 {
                 return Err("Dictionary archive contains too many files".into());
             }
             for index in 0..archive.len() {
-                let entry = archive.by_index(index).map_err(|error| error.to_string())?;
+                let entry = archive.by_index(index).map_err(|error| crate::OperationError::from_error(&error))?;
                 if entry.is_dir() || !component(entry.name()) {
                     continue;
                 }
@@ -79,7 +79,7 @@ pub fn prepare_import(files: Vec<DictionaryFile>) -> Result<(Metadata, Vec<Dicti
     }
     for (plain, compressed) in [(".idx", ".idx.gz"), (".dict", ".dict.dz")] {
         if selected.contains_key(plain) && selected.contains_key(compressed) {
-            return Err(format!("Select either {plain} or {compressed}, rather than both"));
+            return Err(format!("Select either {plain} or {compressed}, rather than both").into());
         }
     }
     if let Some(compressed) = selected.remove(".idx.gz") {
@@ -90,7 +90,7 @@ pub fn prepare_import(files: Vec<DictionaryFile>) -> Result<(Metadata, Vec<Dicti
     let body = selected.get(".dict.dz").or_else(|| selected.get(".dict")).ok_or("Missing matching .dict or .dict.dz file")?;
     if compressed {
         let limit = 1024 * 1024 * 1024;
-        let size = io::copy(&mut GzDecoder::new(body.as_slice()).take(limit + 1), &mut io::sink()).map_err(|error| format!("Damaged dictzip definition file: {error}"))?;
+        let size = io::copy(&mut GzDecoder::new(body.as_slice()).take(limit + 1), &mut io::sink()).map_err(|error| crate::OperationError::from(error).context("Damaged dictzip definition file"))?;
         if size > limit {
             return Err("Expanded dictionary exceeds 1 GiB".into());
         }

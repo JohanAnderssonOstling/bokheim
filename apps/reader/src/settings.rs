@@ -6,6 +6,7 @@ use ui_text::text;
 
 use content_address::BookId;
 use language_tags::LanguageTag;
+use serde::{Deserialize, Deserializer};
 use pdf_view_gpui::ReadingRulerStyle as PdfReadingRulerStyle;
 use std::{collections::BTreeMap, rc::Rc};
 
@@ -152,8 +153,9 @@ pub struct ReaderPreferences {
     pub narration_device_voice: Option<String>,
     /// One voice per base language, local to this device and never synchronized.
     pub narration_voices: BTreeMap<String, NarrationVoicePreference>,
-    /// Last chosen translation target, local to this device.
-    pub translation_language: Option<LanguageTag>,
+    /// Saved translation targets on this device; None initializes from system languages.
+    #[serde(default, alias = "translation_language", deserialize_with = "deserialize_translation_languages")]
+    pub translation_languages: Option<Vec<LanguageTag>>,
     /// Manually chosen source languages, local to this device and keyed by book.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub translation_sources: BTreeMap<BookId, LanguageTag>,
@@ -183,10 +185,24 @@ impl Default for ReaderPreferences {
             narration_voice: NarrationVoice::default(),
             narration_device_voice: None,
             narration_voices: BTreeMap::new(),
-            translation_language: None,
+            translation_languages: None,
             translation_sources: BTreeMap::new(),
         }
     }
+}
+
+fn deserialize_translation_languages<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<LanguageTag>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SavedLanguages {
+        Multiple(Vec<LanguageTag>),
+        Single(LanguageTag),
+    }
+
+    Ok(Option::<SavedLanguages>::deserialize(deserializer)?.map(|saved| match saved {
+        SavedLanguages::Multiple(languages) => languages,
+        SavedLanguages::Single(language) => vec![language],
+    }))
 }
 
 fn default_pdf_reading_ruler_style() -> PdfReadingRulerStyle {

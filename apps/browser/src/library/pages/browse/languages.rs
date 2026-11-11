@@ -34,6 +34,33 @@ const LANGUAGES: &[(&str, &str, &[&str])] = &[
     ("ar", text!(common::arabic), &["ara"]),
     ("hi", text!(common::hindi), &["hin"]),
     ("la", text!(common::latin), &["lat"]),
+    ("af", text!(reader::afrikaans), &["afr"]),
+    ("sq", text!(reader::albanian), &["sqi", "alb"]),
+    ("hy", text!(reader::armenian), &["hye", "arm"]),
+    ("bn", text!(reader::bengali), &["ben"]),
+    ("ca", text!(reader::catalan), &["cat"]),
+    ("hr", text!(reader::croatian), &["hrv"]),
+    ("cs", text!(reader::czech), &["ces", "cze"]),
+    ("et", text!(reader::estonian), &["est"]),
+    ("ka", text!(reader::georgian), &["kat", "geo"]),
+    ("hu", text!(reader::hungarian), &["hun"]),
+    ("id", text!(reader::indonesian), &["ind"]),
+    ("ga", text!(reader::irish), &["gle"]),
+    ("ko", text!(reader::korean), &["kor"]),
+    ("lv", text!(reader::latvian), &["lav"]),
+    ("lt", text!(reader::lithuanian), &["lit"]),
+    ("ms", text!(reader::malay), &["msa", "may"]),
+    ("fa", text!(reader::persian), &["fas", "per"]),
+    ("ro", text!(reader::romanian), &["ron", "rum"]),
+    ("sr", text!(reader::serbian), &["srp"]),
+    ("sk", text!(reader::slovak), &["slk", "slo"]),
+    ("sl", text!(reader::slovenian), &["slv"]),
+    ("sw", text!(reader::swahili), &["swa"]),
+    ("th", text!(reader::thai), &["tha"]),
+    ("tr", text!(reader::turkish), &["tur"]),
+    ("ur", text!(reader::urdu), &["urd"]),
+    ("vi", text!(reader::vietnamese), &["vie"]),
+    ("cy", text!(reader::welsh), &["cym", "wel"]),
     ("ang", text!(browse::old_english), &[]),
     ("smi", text!(browse::sami_languages), &[]),
     ("mul", text!(browse::multiple_languages), &[]),
@@ -57,7 +84,12 @@ pub(super) fn choices(counts: &[LibraryLanguageCount]) -> Vec<(String, String, u
     let mut choices = languages
         .into_iter()
         .map(|(code, count)| {
-            let label = LANGUAGES.iter().find(|(primary, _, _)| *primary == code).map_or_else(|| code.clone(), |(_, label, _)| (*label).to_owned());
+            let label = LANGUAGES
+                .iter()
+                .find(|(primary, _, _)| *primary == code)
+                .map(|(_, label, _)| *label)
+                .or_else(|| ui_components::LANGUAGE_NAMES.iter().find(|(key, _)| *key == code).map(|(_, label)| *label))
+                .map_or_else(|| code.clone(), str::to_owned);
             (code, label, count)
         })
         .collect::<Vec<_>>();

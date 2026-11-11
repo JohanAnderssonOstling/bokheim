@@ -13,6 +13,7 @@ mod prefetch;
 #[path = "speech_text.rs"]
 mod speech_text;
 
+use crate::SpeechError;
 use crate::{FIRST_CHUNK_CHARS, MAX_CHUNK_CHARS, Pauses, SpeechChunk, SpeechControl, SpeechEvent, SpeechFailure, SpeechPassage, next_chunk_with_language};
 pub use model::{Voice, load_model, load_model_with_threads, load_voice, load_voice_with_threads, model_directory, set_model_preparer, voice_directory};
 
@@ -81,7 +82,7 @@ enum Command {
     },
     OutputFailed {
         generation: u64,
-        message: String,
+        message: SpeechError,
     },
     Wake,
     #[cfg(test)]
@@ -242,7 +243,7 @@ static RUNTIME: OnceLock<Mutex<Option<SpeechRuntime>>> = OnceLock::new();
 static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
 
 impl SpeechRuntime {
-    fn new() -> Result<Self, String> {
+    fn new() -> Result<Self, SpeechError> {
         let (commands, receiver) = mpsc::channel();
         let shared = Arc::new(Shared {
             generation: AtomicU64::new(0),
@@ -276,7 +277,7 @@ impl SpeechRuntime {
                     drop(output);
                 }
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(SpeechError::operation)?;
         Ok(Self { commands, shared })
     }
 }
@@ -291,7 +292,7 @@ pub struct DesktopSpeech {
 }
 
 impl DesktopSpeech {
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self, SpeechError> {
         let mut runtime = recover_lock(RUNTIME.get_or_init(|| Mutex::new(None)));
         if let Some(current) = runtime.as_ref() {
             if current.commands.send(Command::Wake).is_ok() {
@@ -544,7 +545,7 @@ impl DesktopSpeech {
     }
 
     /// Device voices are revalidated by the platform at synthesis time. Never substitute another voice.
-    pub fn set_device_voice(&self, id: Option<&str>) -> Result<u64, String> {
+    pub fn set_device_voice(&self, id: Option<&str>) -> Result<u64, SpeechError> {
         if id.is_some_and(|id| id.is_empty()) {
             return Err("Choose an installed local voice.".into());
         }
@@ -699,11 +700,11 @@ impl Source for OwnedPcm {
 }
 
 trait SpeechEngine {
-    fn generate(&self, text: &str, config: &GenerationConfig, shared: &Arc<Shared>, generation: u64, emit: impl FnMut(AudioChunk) -> bool + 'static) -> Result<(), String>;
+    fn generate(&self, text: &str, config: &GenerationConfig, shared: &Arc<Shared>, generation: u64, emit: impl FnMut(AudioChunk) -> bool + 'static) -> Result<(), SpeechError>;
 }
 
 impl SpeechEngine for OfflineTts {
-    fn generate(&self, text: &str, config: &GenerationConfig, shared: &Arc<Shared>, generation: u64, mut emit: impl FnMut(AudioChunk) -> bool + 'static) -> Result<(), String> {
+    fn generate(&self, text: &str, config: &GenerationConfig, shared: &Arc<Shared>, generation: u64, mut emit: impl FnMut(AudioChunk) -> bool + 'static) -> Result<(), SpeechError> {
         let current = shared.clone();
         let rate = u32::try_from(self.sample_rate()).ok().and_then(NonZeroU32::new).ok_or("Invalid speech sample rate.")?;
         let emitted = Arc::new(AtomicUsize::new(0));
@@ -754,7 +755,7 @@ struct AudioStream {
     rate: Option<NonZeroU32>,
     queued: bool,
     complete: bool,
-    error: Option<String>,
+    error: Option<SpeechError>,
     chunks: Vec<AudioChunk>,
 }
 
@@ -808,7 +809,7 @@ impl AudioStream {
         true
     }
 
-    fn finish(&mut self) -> Result<NonZeroU32, String> {
+    fn finish(&mut self) -> Result<NonZeroU32, SpeechError> {
         if let Some(error) = self.error.take() {
             return Err(error);
         }
@@ -848,7 +849,7 @@ fn unload_voice<E>(engine: &mut Option<E>) {
 }
 
 fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
-    commands: mpsc::Receiver<Command>, wake: mpsc::Sender<Command>, events: SpeechEvents, shared: Arc<Shared>, mut load: impl FnMut(Voice) -> Result<E, String>, mut open: impl FnMut() -> Result<(Arc<Player>, O, Duration), String>,
+    commands: mpsc::Receiver<Command>, wake: mpsc::Sender<Command>, events: SpeechEvents, shared: Arc<Shared>, mut load: impl FnMut(Voice) -> Result<E, SpeechError>, mut open: impl FnMut() -> Result<(Arc<Player>, O, Duration), SpeechError>,
     voice_idle_timeout: Duration,
 ) {
     let mut engine = None;
@@ -1344,7 +1345,7 @@ mod tests {
     }
 
     impl SpeechEngine for TestEngine {
-        fn generate(&self, text: &str, config: &GenerationConfig, _: &Arc<Shared>, _: u64, mut emit: impl FnMut(AudioChunk) -> bool + 'static) -> Result<(), String> {
+        fn generate(&self, text: &str, config: &GenerationConfig, _: &Arc<Shared>, _: u64, mut emit: impl FnMut(AudioChunk) -> bool + 'static) -> Result<(), SpeechError> {
             self.speaker_ids.send(config.sid).unwrap();
             self.generated.send(text.to_owned()).unwrap();
             if let Some(gate) = &self.gate {
@@ -1377,7 +1378,7 @@ mod tests {
                 let _ = self.states.send(true);
             }
         }
-        fn resume(&self) -> Result<(), String> {
+        fn resume(&self) -> Result<(), SpeechError> {
             if self.paused.swap(false, Ordering::AcqRel) {
                 let _ = self.states.send(false);
             }

@@ -2,7 +2,7 @@
 
 use crate::book::{PreparedText, ResourceSource};
 use crate::epub::archive::ArchiveReader;
-use crate::resources::{MAX_BINARY_RESOURCE_BYTES, MAX_PREPARED_TEXT_BYTES};
+use crate::resources::MAX_BINARY_RESOURCE_BYTES;
 use crate::source::Source;
 use crate::xml::{self, Content, Node, invalid};
 use crate::{BookTocEntry, CreatorRole, DeclaredMetadata, MetadataCredit, MetadataDate, MetadataProperty, MetadataSubject, PreparedResources, ReadingBook};
@@ -15,7 +15,6 @@ use std::{
 };
 
 const MAX_FB2_BYTES: u64 = 96 * 1024 * 1024;
-const MAX_DOCUMENT_BYTES: usize = 24 * 1024 * 1024;
 const FB2_NAMESPACE: &str = "http://www.gribuser.ru/xml/fictionbook/2.0";
 
 pub(crate) struct Fb2Container {
@@ -140,6 +139,10 @@ impl Fb2Container {
     pub(crate) fn prepare_reading(self) -> io::Result<ReadingBook> {
         Ok(self.prepare_text()?.into_reading(ResourceSource::Fb2(self.resources)))
     }
+
+    pub(crate) fn into_resources(self) -> Arc<Fb2Resources> {
+        self.resources
+    }
 }
 
 fn property(metadata: &mut DeclaredMetadata, key: &str, value: String) {
@@ -255,15 +258,10 @@ fn prepare_text(root: &Node, mut types: HashMap<String, String>) -> io::Result<P
     let mut bytes = HashMap::new();
     let mut weights = Vec::new();
     let mut toc = Vec::new();
-    let mut total = 0;
     for ((node, uri), is_notes) in nodes.iter().zip(&documents).zip(notes) {
         let mut html = String::from("<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><meta charset=\"utf-8\"/></head><body>");
         render(node, &links, 0, false, &mut html)?;
         html.push_str("</body></html>");
-        total += html.len() as u64;
-        if total > MAX_PREPARED_TEXT_BYTES {
-            return Err(invalid("FB2 prepared text exceeds the size limit"));
-        }
         weights.push(html.len() as u64);
         types.insert(uri.clone(), "application/xhtml+xml".into());
         bytes.insert(uri.clone(), html.into_bytes());
@@ -394,9 +392,6 @@ fn render(node: &Node, links: &HashMap<String, String>, depth: usize, in_title: 
             match item {
                 Content::Text(text) => escaped(text, html),
                 Content::Element(child) => render(child, links, depth + usize::from(node.name == "section"), in_title || node.name == "title", html)?,
-            }
-            if html.len() > MAX_DOCUMENT_BYTES {
-                return Err(invalid("FB2 section exceeds the document limit"));
             }
         }
         if tag != "br" {

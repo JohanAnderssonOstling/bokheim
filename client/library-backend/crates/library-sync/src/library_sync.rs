@@ -1,4 +1,5 @@
-pub(crate) use super::error::SyncError;
+pub(crate) use client_protocol::BackendError;
+use super::error::SyncError;
 pub(crate) use super::error::SyncResult;
 pub(crate) use crate::engine::SyncOutcome;
 pub(crate) use account_client::Url;
@@ -77,15 +78,15 @@ impl LibrarySync {
 
     /// Remote workers adopt the current identity only after management has
     /// confirmed server registration for that account.
-    pub async fn remote_ready(&self) -> Result<bool, String> {
+    pub async fn remote_ready(&self) -> Result<bool, BackendError> {
         let Some(account) = self.authentication.account() else {
             return Ok(self.is_signed_in().await);
         };
-        let Some(session) = account.session().await.map_err(|error| error.to_string())? else {
+        let Some(session) = account.session().await.map_err(BackendError::operation)? else {
             return Ok(false);
         };
         self.bind_account(session.server_url().as_str())?;
-        Ok(self.database.sync_metadata("server_library_created").await.map_err(|error| error.to_string())?.as_deref() == Some(session.identity().as_str()))
+        Ok(self.database.sync_metadata("server_library_created").await.map_err(BackendError::operation)?.as_deref() == Some(session.identity().as_str()))
     }
 
     /// Capture the user and credentials from one live session. Signed-out

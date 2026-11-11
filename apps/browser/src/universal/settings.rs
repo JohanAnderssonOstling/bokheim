@@ -45,7 +45,7 @@ fn kobo_setting_recovery(error: &std::io::Error) -> &'static str {
         Some(app::Failure::StorageFull) => text!(settings::not_enough_storage_to_save_settings_free_up_device_space_and_retry),
         Some(app::Failure::ReadOnlyStorage) => text!(settings::device_storage_is_read_only_it_must_be_writable_to_save_settings),
         Some(app::Failure::PermissionDenied) => text!(settings::access_to_the_settings_file_or_folder_was_denied_check_their_permissions),
-        _ => text!(settings::restart_the_app_and_retry_if_it_persists_check_that_device_storage),
+        _ => "",
     }
 }
 
@@ -262,7 +262,7 @@ impl SettingsPage {
             cx.spawn(async move |page, cx| {
                 let result = saved.await;
                 let _ = page.update(cx, |page, cx| {
-                    page.text_search_error = result.err().map(|error| format!(text!(settings::could_not_save_text_search), user_facing_error(&error, text!(common::please_try_again))).into());
+                    page.text_search_error = result.err().map(|error| format!(text!(settings::could_not_save_text_search), user_facing_error(&error, "")).into());
                     page.index_usage_request = None;
                     page.index_usage = None;
                     cx.notify();
@@ -279,7 +279,7 @@ impl SettingsPage {
             cx.spawn(async move |page, cx| {
                 let result = saved.await;
                 let _ = page.update(cx, |page, cx| {
-                    page.transfer_save_error = result.err().map(|error| format!(text!(settings::could_not_save_the_transfer_setting), user_facing_error(&error, text!(common::please_try_again))).into());
+                    page.transfer_save_error = result.err().map(|error| format!(text!(settings::could_not_save_the_transfer_setting), user_facing_error(&error, "")).into());
                     cx.notify();
                 });
             })
@@ -309,7 +309,7 @@ impl SettingsPage {
             BrowsingPreferencePatch::KeyboardLayouts(_) => (text!(settings::keyboard_layouts), showing.keyboard_layouts().join(", ")),
         };
         let result = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(patch, cx));
-        self.error = result.err().map(|error| format!(text!(settings::was_not_saved_still_showing), user_facing_error(&error, text!(common::please_try_again)), current = current, setting = setting).into());
+        self.error = result.err().map(|error| format!(text!(settings::was_not_saved_still_showing), user_facing_error(&error, ""), current = current, setting = setting).into());
         cx.notify();
     }
 

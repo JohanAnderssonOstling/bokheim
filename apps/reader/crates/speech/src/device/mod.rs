@@ -1,4 +1,5 @@
 //! Installed local speech engines. No adapter may submit text to a network voice.
+use crate::SpeechError;
 use crate::DeviceVoice;
 #[cfg(any(test, target_os = "android", target_os = "windows", target_os = "macos"))]
 mod pcm;
@@ -30,7 +31,7 @@ pub(crate) struct Audio {
     pub last: bool,
 }
 
-pub fn device_voices() -> Result<Vec<DeviceVoice>, String> {
+pub fn device_voices() -> Result<Vec<DeviceVoice>, SpeechError> {
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         platform::voices()
@@ -41,7 +42,7 @@ pub fn device_voices() -> Result<Vec<DeviceVoice>, String> {
     }
 }
 
-pub(crate) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -> bool, emit: impl FnMut(Audio) -> bool) -> Result<(), String> {
+pub(crate) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -> bool, emit: impl FnMut(Audio) -> bool) -> Result<(), SpeechError> {
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         platform::synthesize(id, text, rate, cancelled, emit)

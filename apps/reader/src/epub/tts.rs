@@ -1,4 +1,3 @@
-use html_pipeline::engine::reading_queries;
 use ui_text::text;
 
 use crate::epub::{LoadState, ReaderView};
@@ -26,12 +25,12 @@ fn follow_passage(view: &mut HtmlView, target: &ReadingTarget, cx: &mut Context<
 }
 fn follow_passage_in_language(view: &mut HtmlView, target: &ReadingTarget, language: &str, cx: &mut Context<HtmlView>) {
     if let Some(chunk) = speech_chunk_in_language(view, target, 0, FIRST_CHUNK_CHARS, language) {
-        view.follow_reading_target(reading_queries::reading_target_with_glyph_ranges(&target, chunk.glyph_ranges), cx);
+        view.follow_reading_target(target.with_glyph_ranges(chunk.glyph_ranges), cx);
     }
 }
 
 impl ReaderView {
-    pub(super) fn tts_document_failed(&mut self, message: &str, cx: &mut Context<Self>) {
+    pub(super) fn tts_document_failed(&mut self, message: &client_protocol::BackendError, cx: &mut Context<Self>) {
         if self.tts.awaiting_page() {
             self.stop_tts_with_status(user_facing_error(message, text!(reader::couldn_t_read_the_next_passage_restart_read_aloud)), cx);
         }
@@ -245,7 +244,7 @@ impl TtsReader for ReaderView {
             SpeechEvent::Started { index, glyph_ranges, .. } => {
                 self.tts.started_item(index);
                 if let Some(fragment) = self.tts_fragments.get(index) {
-                    let target = reading_queries::reading_target_with_glyph_ranges(&fragment, glyph_ranges);
+                    let target = fragment.with_glyph_ranges(glyph_ranges);
                     if let LoadState::Ready(view) = &self.load_state
                         && let Some(cfi) = view.read(cx).reading_target_cfi(&target)
                         && let Some(position) = &self.reading_position
@@ -321,7 +320,7 @@ mod tests {
             let position = view.current_cfi();
             follow_passage(view, passage, cx);
             assert_ne!(view.current_cfi(), position, "skipping must reveal a passage on a later page");
-            (reading_queries::reading_target_with_glyph_ranges(&passage, chunk.glyph_ranges), revision)
+            (passage.with_glyph_ranges(chunk.glyph_ranges), revision)
         });
         visual.run_until_parked();
         let preview = visual.update(|window, _| window.painted_quads().into_iter().map(|quad| quad.bounds).collect::<Vec<_>>());

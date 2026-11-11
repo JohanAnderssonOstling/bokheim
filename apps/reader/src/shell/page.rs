@@ -55,7 +55,18 @@ struct ReaderPage {
 
 pub(crate) fn reader_surface<C: CommonReaderCommands + SidebarTarget>(owner: &C, surface: ReaderSurface, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<C>) -> Div {
     let ReaderSurface { document, dock, sidebar, active_tab, chrome_visible, document_ready, loading_focus, title, chapter, progress_label, progress_fraction, progress_detail, bottom_bar_id } = surface;
-    let document = if window.supports_region_capture() { super::screenshot::document(document, cx.entity_id(), theme) } else { document };
+    let window_title = components::reader_window_title(&title, &chapter);
+    let cached_title = window.use_keyed_state("reader-window-title", cx, |_, _| String::new());
+    if cached_title.read(cx) != &window_title {
+        window.set_window_title(&window_title);
+        cached_title.update(cx, |cached, _| *cached = window_title);
+    }
+    let document = if window.supports_region_capture() {
+        let target = cx.weak_entity();
+        super::screenshot::document(document, cx.entity_id(), theme, move |position, window, cx| {
+            let _ = target.update(cx, |reader, cx| reader.control_click(position, window, cx));
+        })
+    } else { document };
     #[cfg(feature = "kobo")]
     let document = div()
         .relative()
@@ -72,7 +83,7 @@ pub(crate) fn reader_surface<C: CommonReaderCommands + SidebarTarget>(owner: &C,
     }
     let target = cx.entity();
     let top_bar = chrome_visible.then(|| reader_top_bar(owner, &target, title, chapter, progress_label, owner.available_tabs().contains(&SidebarTab::Search), theme, cx));
-    let bottom_bar = chrome_visible.then(|| reader_bottom_bar(bottom_bar_id, owner, &target, active_tab, theme, cx));
+    let bottom_bar = chrome_visible.then(|| reader_bottom_bar(bottom_bar_id, owner, &target, active_tab, theme, window, cx));
     let mobile_chrome = MobileChrome { top_bar, bottom_bar, dock, sheet: sidebar, partial_sheet: active_tab == Some(SidebarTab::Settings) };
     reader_page(ReaderPage { document_ready, loading_focus, chrome_visible, mobile_chrome, content: document }, theme, window, cx)
 }

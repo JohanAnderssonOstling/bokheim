@@ -202,7 +202,7 @@ impl Render for PdfReaderView {
             let mut insets = window.insets().effective();
             insets.bottom = (insets.bottom - px(dock_height)).max(px(0.0));
             let toolbar_height = if mobile { 0.0 } else { components::reader_toolbar_size_px(window) };
-            let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height) - dock_height, toc_width, toolbar_height, visible_column_count, insets);
+            let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height) - dock_height, toc_width, toolbar_height, visible_column_count, insets, f32::from(window.rem_size()) * components::ANNOTATION_EDITOR_WIDTH_REM);
             body = body.child(self.render_annotation_popup(annotation, geometry, window, cx));
         }
         self.chrome.sync_system_bars(chrome_visible, cx);
@@ -302,8 +302,10 @@ impl PdfReaderView {
         self.marks.clear_selection();
         self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(None, cx));
         let anchor = self.pdf.read(cx).passage_bounds().or_else(|| self.annotation_popup_anchor.map(|position| gpui::Bounds::new(position, gpui::size(px(1.0), px(1.0)))));
-        let dictionary =
-            cx.new(|cx| if translate { DictionaryPopup::translate(self.locator.book_id(), selection.text.clone(), Vec::new(), anchor, window, cx) } else { DictionaryPopup::new(selection.text.clone(), Vec::new(), anchor, window, cx) });
+        let dictionary = cx.new(|cx| {
+            let popup = if translate { DictionaryPopup::translate(self.locator.book_id(), selection.text.clone(), Vec::new(), anchor, window, cx) } else { DictionaryPopup::new(selection.text.clone(), Vec::new(), anchor, window, cx) };
+            popup.with_reader(self.library.clone(), self.locator.clone(), false)
+        });
         cx.subscribe_in(&dictionary, window, |this, _, _: &Closed, window, cx| {
             this.dictionary = None;
             this.pdf.update(cx, |pdf, cx| pdf.clear_text_selection(cx));
@@ -336,11 +338,11 @@ impl PdfReaderView {
         let mut actions = ContextActions::default();
         if let Some(selection) = self.pdf.read(cx).selection_snapshot() {
             actions = ContextActions::selection(SelectionCommands {
-                annotate: PdfContextCommand::Annotation,
+                annotate: Some(PdfContextCommand::Annotation),
                 lookup: can_lookup(&selection.text).then_some(PdfContextCommand::Lookup),
                 translate: PdfContextCommand::Translate,
                 copy: PdfContextCommand::Copy(self.pdf.clone()),
-                copy_link: PdfContextCommand::CopySelectionWithSource,
+                copy_link: Some(PdfContextCommand::CopySelectionWithSource),
             });
         }
         actions

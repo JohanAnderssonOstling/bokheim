@@ -12,7 +12,7 @@ use super::sys;
 
 type JsValueStream = dyn Stream<Item = Result<JsValue, JsValue>>;
 
-#[wasm_bindgen]
+#[wasm_bindgen(private)]
 pub(crate) struct IntoUnderlyingSource {
     state: AbortOnPanic<State>,
 }

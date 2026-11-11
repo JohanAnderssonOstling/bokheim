@@ -1,5 +1,6 @@
 //! Prepare the browser's taxonomy database from its immutable app bundle.
 //! Published taxonomy updates are installed in the background for the next start.
+use client_protocol::{BackendError, Failure, OperationError};
 use super::download_bundle;
 use crate::executor::spawn_detached;
 use client_platform_web::web_storage;
@@ -13,7 +14,7 @@ const FORMATS: [u32; 1] = [1];
 
 /// Activates the stored taxonomy and looks for a newer release in the
 /// background, taking effect on the next start like native updates.
-pub(crate) async fn install() -> Result<(), String> {
+pub(crate) async fn install() -> Result<(), BackendError> {
     let bundled = StoredMetadata::bundled();
     let bundled_path = format!("taxonomy-{}.sqlite3", bundled.source.replace(':', "-"));
     let selected = match web_storage::reference_database(STORED)? {
@@ -54,7 +55,7 @@ pub(crate) async fn install() -> Result<(), String> {
     web_storage::publish_reference_database(STORED, &path)?;
     web_storage::prune_reference_databases("taxonomy-", &path)?;
     if !stored.source.starts_with("bundled:") {
-        client_platform_web::cpu_host::set_taxonomy(serde_json::from_str(&stored.source).map_err(|e| e.to_string())?);
+        client_platform_web::cpu_host::set_taxonomy(serde_json::from_str(&stored.source).map_err(BackendError::operation)?);
     }
     installed::activate(Path::new(&path))?;
     spawn_detached(async move {
@@ -66,15 +67,15 @@ pub(crate) async fn install() -> Result<(), String> {
 }
 
 /// CPU workers use the same packaged reference on their first inspection.
-pub async fn install_bundled_matching() -> Result<(), String> {
-    installed::install_snapshot(&download_bundle(STORED).await?)
+pub async fn install_bundled_matching() -> Result<(), BackendError> {
+    installed::install_snapshot(&download_bundle(STORED).await?).map_err(BackendError::operation)
 }
 
 /// Downloads, prepares and stores the published taxonomy when it is newer
 /// than `installed` and this build can read it.
-async fn download_newer(installed: u64) -> Result<(), String> {
+async fn download_newer(installed: u64) -> Result<(), BackendError> {
     let config = DiscoveryConfig::bundled()?;
-    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(BackendError::operation)?.as_secs();
     let manifest = update_client::fetch::discover(&config, now, 0).await?;
     // The deployed bundle is always the current application, so only the
     // format and schema decide compatibility.
@@ -85,10 +86,10 @@ async fn download_newer(installed: u64) -> Result<(), String> {
     let path = format!("taxonomy-{}-{}.sqlite3", release.release_id, release.artifact.sha256);
     if !web_storage::database_exists(&path)? {
         let snapshot = update_client::fetch::download(&release.artifact).await?;
-        let source = serde_json::to_string(&release.artifact).map_err(|e| e.to_string())?;
+        let source = serde_json::to_string(&release.artifact).map_err(BackendError::operation)?;
         let image = installed::prepare_image(&snapshot, (release.release_id, release.format_version), &source)?;
         client_platform_web::reserve_database_capacity(1).await?;
         web_storage::import_reference_database(&path, &image)?;
     }
-    web_storage::publish_reference_database(STORED, &path)
+    web_storage::publish_reference_database(STORED, &path).map_err(BackendError::operation)
 }

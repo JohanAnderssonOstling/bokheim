@@ -139,7 +139,7 @@ pub(super) fn keyboard_item(frame: Stateful<Div>, activate: impl Fn(&mut Window,
         .key_context("BrowseItem")
         .border_1()
         .border_color(gpui::transparent_black())
-        .focus(move |style| style.bg(theme.accent_wash))
+        .focus_visible(move |style| style.bg(theme.accent_wash))
         .child(components::measured_bounds(bounds))
         .on_action(move |_: &OpenContextMenu, window, cx| menu(menu_bounds.get().bottom_left(), window, cx))
         .on_key_down(move |event, window, cx| {
@@ -164,6 +164,8 @@ pub(super) fn book_child(
     let rendered = book.clone();
     let activated = book.clone();
     let view = BookCardView::presentation(book.clone(), presentation, cx);
+    let hit_bounds = Rc::new(Cell::new(Bounds::default()));
+    let painted_bounds = hit_bounds.clone();
     let child = PaginatorChild::new(move |state, window, cx| {
         let interaction = interaction(state, &frame_id, cx);
         if state.preview {
@@ -176,27 +178,38 @@ pub(super) fn book_child(
                 .child(BookCardView::preview(&rendered, presentation, interaction, window, cx))
                 .into_any_element();
         }
-        let card = BookCardView::present(view.clone(), interaction, window, cx);
-        let mut frame = div().id(frame_id.clone()).w_full().h_full().min_w_0().when(presentation == BookCardPresentation::Grid, |frame| frame.overflow_hidden()).child(card);
-        if presentation != BookCardPresentation::Grid {
-            let activate = rendered.clone();
-            let menu = rendered.clone();
-            frame = keyboard_item(frame, move |window, cx| BookCardView::activate(&activate, window, cx), move |position, window, cx| BookCardView::open_items_menu(std::slice::from_ref(&menu), position, window, cx), cx);
-            let copy = rendered.clone();
-            let cut = rendered.clone();
-            frame = frame.on_action(move |_: &CopyBooks, window, cx| dispatch_book_clipboard(&copy, false, window, cx)).on_action(move |_: &CutBooks, window, cx| dispatch_book_clipboard(&cut, true, window, cx));
-        }
-        if presentation == BookCardPresentation::Section {
-            let theme = components::browser_theme(cx);
-            frame = frame.when(!interaction.marquee, |frame| frame.hover(move |style| style.bg(theme.hover))).when(!interaction.selected, |frame| frame.on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation()));
-        }
-        if let Some((targets, preview)) = drag.as_ref().and_then(|drag| drag(state, &frame_id, cx)) {
+        let drag_payload = drag.as_ref().and_then(|drag| drag(state, &frame_id, cx)).map(|(targets, preview)| {
             let preview = state.drag_preview(&frame_id).map_or(preview, |snapshot| vec![DragPreviewItem::Snapshot(snapshot)]);
-            frame = folder_drag_source(frame, targets, preview);
-        }
-        frame.into_any_element()
+            (targets, preview)
+        });
+        let rendered = rendered.clone();
+        let frame_id = frame_id.clone();
+        let painted_bounds = painted_bounds.clone();
+        view.update(cx, |view, _| {
+            view.frame = Some(Rc::new(move |card, cx| {
+                let mut frame = div().id(frame_id.clone()).w_full().min_w_0().flex_none().child(card);
+                if presentation != BookCardPresentation::Grid {
+                    let activate = rendered.clone();
+                    let menu = rendered.clone();
+                    frame = keyboard_item(frame, move |window, cx| BookCardView::activate(&activate, window, cx), move |position, window, cx| BookCardView::open_items_menu(std::slice::from_ref(&menu), position, window, cx), cx);
+                    let copy = rendered.clone();
+                    let cut = rendered.clone();
+                    frame = frame.on_action(move |_: &CopyBooks, window, cx| dispatch_book_clipboard(&copy, false, window, cx)).on_action(move |_: &CutBooks, window, cx| dispatch_book_clipboard(&cut, true, window, cx));
+                }
+                if presentation == BookCardPresentation::Section && !interaction.selected {
+                    frame = frame.on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+                }
+                if let Some((targets, preview)) = &drag_payload {
+                    frame = folder_drag_source(frame, targets.clone(), preview.clone());
+                }
+                frame.child(components::measured_bounds(painted_bounds.clone())).into_any_element()
+            }));
+        });
+        let card = BookCardView::present(view.clone(), interaction, window, cx);
+        div().w_full().h_full().min_w_0().when(presentation == BookCardPresentation::Grid, |frame| frame.overflow_hidden()).child(card).into_any_element()
     })
     .with_id(item_id)
+    .with_hit_bounds(hit_bounds)
     .prevent_selection_start()
     .with_activate(move |window, cx| BookCardView::activate(&activated, window, cx))
     .with_prepare(move |window, cx| BookCardView::prefetch_for_window(&book, window, cx));

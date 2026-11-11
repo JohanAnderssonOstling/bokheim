@@ -57,6 +57,8 @@ pub struct AnnotationExportFailure {
     pub kind: AnnotationExportFailureKind,
     /// Publication succeeded, but recording or flushing its result failed.
     pub file_written: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<operation_failure::Failure>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,4 +112,11 @@ pub struct AnnotationExportResult {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AnnotationExportReport {
     pub results: Vec<AnnotationExportResult>,
+}
+
+impl std::fmt::Display for AnnotationExportFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(formatter, "{:?}", self.kind) }
+}
+impl operation_failure::Classified for AnnotationExportFailure {
+    fn failure(&self) -> Option<operation_failure::Failure> { self.cause }
 }

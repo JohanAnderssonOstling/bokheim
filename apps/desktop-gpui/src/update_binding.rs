@@ -1,4 +1,5 @@
 //! Native startup ownership, configuration and binding to the shared UI worker.
+use update_client::UpdateError;
 use browser_ui::{UpdateAction, UpdateControls, UpdateEvent, UpdateView, bind_update_worker};
 use gpui::{App, Entity};
 use std::{
@@ -20,7 +21,7 @@ thread_local! {
     static HOST: RefCell<Option<CurrentHost>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn discovery_config() -> Result<DiscoveryConfig, String> {
+pub(crate) fn discovery_config() -> Result<DiscoveryConfig, UpdateError> {
     let mut config = DiscoveryConfig::bundled()?;
     #[cfg(all(feature = "desktop", any(target_os = "linux", target_os = "windows")))]
     if let Ok(endpoint) = std::env::var("BOKHEIM_UPDATE_ENDPOINT") {
@@ -29,12 +30,12 @@ pub(crate) fn discovery_config() -> Result<DiscoveryConfig, String> {
     Ok(config)
 }
 
-pub(crate) fn startup_config(data: &Path) -> Result<Option<DiscoveryConfig>, String> {
+pub(crate) fn startup_config(data: &Path) -> Result<Option<DiscoveryConfig>, UpdateError> {
     match discovery_config() {
         Ok(config) => Ok(Some(config)),
         Err(error) => {
             for file in ["activation.json", "active-taxonomy.json"] {
-                if data.join("updates").join(file).try_exists().map_err(|e| e.to_string())? {
+                if data.join("updates").join(file).try_exists().map_err(UpdateError::operation)? {
                     return Err(error);
                 }
             }
@@ -43,7 +44,7 @@ pub(crate) fn startup_config(data: &Path) -> Result<Option<DiscoveryConfig>, Str
     }
 }
 
-pub(crate) fn store(host: CurrentHost) -> Result<(), String> {
+pub(crate) fn store(host: CurrentHost) -> Result<(), UpdateError> {
     HOST.with_borrow_mut(|slot| {
         if slot.is_some() {
             return Err("update host already initialized".into());
@@ -57,7 +58,7 @@ pub(crate) fn take_host() -> Option<CurrentHost> {
     HOST.with_borrow_mut(Option::take)
 }
 
-pub fn healthy() -> Result<(), String> {
+pub fn healthy() -> Result<(), UpdateError> {
     HOST.with_borrow_mut(|host| host.as_mut().map_or(Ok(()), CurrentHost::healthy))
 }
 
@@ -67,7 +68,7 @@ pub fn trial_pending() -> bool {
 }
 
 pub(crate) fn bind(
-    restart: Option<PathBuf>, mut platform_action: impl FnMut(&mut CurrentHost, UpdateAction) -> Result<(), String> + Send + 'static, mut present: impl FnMut(UpdateView) -> Result<UpdateView, String> + Send + 'static, cx: &mut App,
+    restart: Option<PathBuf>, mut platform_action: impl FnMut(&mut CurrentHost, UpdateAction) -> Result<(), UpdateError> + Send + 'static, mut present: impl FnMut(UpdateView) -> Result<UpdateView, UpdateError> + Send + 'static, cx: &mut App,
 ) -> Option<Entity<UpdateControls>> {
     if !HOST.with_borrow(|host| host.is_some()) {
         return None;
@@ -87,7 +88,7 @@ pub(crate) fn bind(
             present(host.prepare()?)
         },
         CurrentHost::view,
-        |_| None,
+        |error| Some(ui_components::user_facing_error(error, ui_text::text!(browse::could_not_continue_update_try_again)).into()),
         cx,
     ))
 }

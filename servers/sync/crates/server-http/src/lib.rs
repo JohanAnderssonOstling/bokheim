@@ -135,6 +135,7 @@ pub fn router_with_operational_limits(
         .route("/api/health", get(ready))
         .route("/api/notifications", get(notifications::connect))
         .route("/api/account/snapshot", get(account::get_snapshot))
+        .route("/api/account/entitlements", get(account::get_entitlements))
         .route("/api/account/storage/books", get(account::get_book_storage))
         .route("/api/sync/exchange", post(sync::exchange_events))
         .route("/api/cloud-storage", axum::routing::get(sync::cloud_storage))

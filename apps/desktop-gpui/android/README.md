@@ -404,6 +404,24 @@ actions bind `on_long_press` or `capture_long_press`. Moving past the touch slop
 adding a second finger, or cancelling the contact prevents a pending hold;
 releasing a recognized hold does not produce a mouse click or page swipe.
 
+The Android GPUI backend recognizes two-finger pinches and dispatches GPUI
+`PinchEvent` gestures for content views to handle. Pinching outside content
+views that handle their own zoom adjusts the saved interface font size by one
+pixel per completed gesture. Tiny movements and cancelled gestures leave it
+unchanged. In a PDF, pinch uses the existing PDF zoom setting and switches to
+fixed zoom, including magnification beyond page width. In fixed zoom, drag to
+scroll by any distance and pan horizontally when the page exceeds the viewport
+width. Releasing a drag keeps that position. Fit-width and fit-height modes use
+ordinary swipe navigation. The PDF zoom setting is saved when the gesture
+finishes.
+
+Ordinary scroll areas and virtual lists follow the finger and continue with
+momentum after a flick. Touching again, dragging the scrollbar, or using the
+keyboard interrupts the motion; content stops at its edges. Reader page-turn
+gestures retain their single-page behavior. GPUI preserves touch pixel movement
+through release; individual views choose whether to scroll or turn a page.
+Momentum respects reduced motion and is disabled on Kobo, as are pinch gestures.
+
 In an EPUB, hold a word to select it, then drag either handle to adjust the
 passage. Annotate opens its annotation editor, which stays above the keyboard
 while entering a note. Back or a tap outside the selection dismisses it

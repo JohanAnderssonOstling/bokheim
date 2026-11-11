@@ -28,6 +28,7 @@ mod screenshot;
 pub(crate) mod search;
 pub(crate) mod settings_navigation;
 pub(crate) mod sidebar_list;
+mod source;
 pub(crate) mod state_panel;
 pub(crate) mod theme_picker;
 pub(crate) mod toolbar;

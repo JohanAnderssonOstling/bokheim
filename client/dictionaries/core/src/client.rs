@@ -1,11 +1,11 @@
 //! Typed dictionary lookup with host-provided storage and lifecycle access.
 use std::{future::Future, pin::Pin};
 
-use crate::{DictionaryDownloads, DictionaryImport, DictionaryInfo, DictionaryLookup, DictionarySnapshot, Result};
+use crate::{DictionaryDownloads, DictionaryImport, DictionaryInfo, DictionaryLookup, DictionarySnapshot, OperationResult};
 use tokio::sync::watch;
 
 /// UI calls run on the local executor; storage work stays behind the host client.
-pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
+pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = OperationResult<T>> + 'a>>;
 
 pub trait Client {
     fn import(&self, input: DictionaryImport) -> ClientFuture<'_, Vec<DictionaryInfo>>;

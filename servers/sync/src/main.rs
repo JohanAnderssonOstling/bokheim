@@ -36,14 +36,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match arguments.next() {
         None => run_server().await,
         Some(command) if command == "migrate" && arguments.next().is_none() => run_migrate().await,
-        Some(command) if command == "upgrade" && arguments.next().is_none() => run_cloud_upgrade("apply"),
-        Some(command) if command == "check-upgrade" && arguments.next().is_none() => run_cloud_upgrade("check"),
+        Some(command) if command == "upgrade" && arguments.next().is_none() => run_upgrade().await,
+        Some(command) if command == "upgrade-schema" && arguments.next().is_none() => {
+            run_upgrade_schema().await?;
+            run_cloud_upgrade("apply-book-ids")
+        }
+        Some(command) if command == "check-upgrade" && arguments.next().is_none() => {
+            run_cloud_upgrade("check")?;
+            run_cloud_upgrade("check-book-ids")
+        }
         Some(command) if command == "verify-schema" && arguments.next().is_none() => run_verify_schema().await,
         Some(command) if command == "rotate-sync-generation" && arguments.next().is_none() => run_rotate_sync_generation().await,
-        Some(command) => {
-            Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command, 'migrate', 'upgrade', 'check-upgrade', 'verify-schema', or 'rotate-sync-generation'", command.to_string_lossy()))
-                .into())
-        }
+        Some(command) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unknown sync-server command: {}; expected no command, 'migrate', 'upgrade', 'upgrade-schema', 'check-upgrade', 'verify-schema', or 'rotate-sync-generation'", command.to_string_lossy()),
+        )
+        .into()),
     }
 }
 
@@ -57,8 +65,7 @@ fn run_cloud_upgrade(mode: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Applies the initial schema to an empty database. The server
-/// never applies schema implicitly on startup.
+/// Initialize an empty database; startup upgrades existing installations only.
 async fn run_migrate() -> Result<(), Box<dyn Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database = server_postgres::connect(&database_url).await?;
@@ -70,6 +77,19 @@ async fn run_verify_schema() -> Result<(), Box<dyn Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database = server_postgres::connect(&database_url).await?;
     server_postgres::verify_schema(&database).await?;
+    Ok(())
+}
+
+async fn run_upgrade() -> Result<(), Box<dyn Error>> {
+    run_cloud_upgrade("apply")?;
+    run_upgrade_schema().await?;
+    run_cloud_upgrade("apply-book-ids")
+}
+
+async fn run_upgrade_schema() -> Result<(), Box<dyn Error>> {
+    let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
+    let database = server_postgres::connect(&database_url).await?;
+    server_postgres::upgrade_schema(&database).await?;
     Ok(())
 }
 
@@ -86,6 +106,10 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database_pool = server_postgres::DatabasePoolConfig::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let pool = server_postgres::connect_configured(&database_url, database_pool).await?;
+    if server_postgres::needs_upgrade(&pool).await? {
+        tracing::info!("upgrading stored library identities before accepting requests");
+        run_upgrade().await?;
+    }
     server_postgres::verify_schema(&pool).await?;
 
     let account_token_key = secret_from_environment_or_systemd_credential("BOKHEIM_ACCOUNT_TOKEN_KEY", "account_token_key")?

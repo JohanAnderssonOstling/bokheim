@@ -8,6 +8,9 @@ pub struct DeviceVoice {
     pub id: String,
     pub name: String,
     pub language: String,
+    /// Human-readable platform provider, when the platform exposes one.
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 pub fn language_base(language: &str) -> String {
@@ -62,7 +65,7 @@ pub fn preview_text(language: &str) -> &'static str {
 mod tests {
     use super::*;
     fn voice(language: &str) -> DeviceVoice {
-        DeviceVoice { id: language.into(), name: language.into(), language: language.into() }
+        DeviceVoice { id: language.into(), name: language.into(), language: language.into(), engine: None }
     }
 
     #[test]

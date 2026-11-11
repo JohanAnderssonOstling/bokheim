@@ -38,11 +38,11 @@ impl Storage for TestStorage {
         match fs::read(self.root.join(key)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(error.into()),
         }
     }
     async fn write_value(&self, key: &str, bytes: &[u8]) -> Result<()> {
-        fs::write(self.root.join(key), bytes).map_err(|error| error.to_string())
+        fs::write(self.root.join(key), bytes).map_err(Into::into)
     }
     async fn open(&self, id: &str, name: &str) -> Result<Self::Source> {
         Ok(MeteredFile { file: LocalStorage::new(self.root.clone()).open(id, name).await?, bytes_read: self.bytes_read.clone() })
@@ -208,7 +208,7 @@ async fn obsolete_installs_can_be_listed_and_removed_without_migration() {
     assert_eq!(backend.list().await.unwrap().len(), 1);
     let found = backend.lookup("book".into(), Vec::new()).await.unwrap();
     assert!(found.dictionaries.is_empty());
-    assert!(found.errors[0].contains("imported or downloaded again"));
+    assert!(found.errors[0].to_string().contains("imported or downloaded again"));
     assert!(backend.remove(id).await.unwrap().is_empty());
 }
 

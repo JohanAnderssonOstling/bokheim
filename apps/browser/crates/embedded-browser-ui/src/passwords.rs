@@ -1,6 +1,7 @@
 //! Device-local browser passwords. The profile holds only site/account labels;
 //! secrets live in the OS credential store, outside all sync contracts.
 use ui_text::text;
+use operation_failure::OperationError;
 
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
@@ -69,27 +70,27 @@ pub fn fill_script(login: &Login, nonce: &str) -> Result<Zeroizing<String>, serd
 }
 
 pub(crate) trait SecretStore {
-    fn read(&self, key: &str) -> Result<Zeroizing<String>, String>;
-    fn write(&self, key: &str, password: &str) -> Result<(), String>;
-    fn delete(&self, key: &str) -> Result<(), String>;
+    fn read(&self, key: &str) -> Result<Zeroizing<String>, OperationError>;
+    fn write(&self, key: &str, password: &str) -> Result<(), OperationError>;
+    fn delete(&self, key: &str) -> Result<(), OperationError>;
 }
 pub struct SystemSecrets;
 
-fn entry(key: &str) -> Result<Entry, String> {
+fn entry(key: &str) -> Result<Entry, OperationError> {
     #[cfg(target_os = "windows")]
     let result = Entry::new_with_target(key, SERVICE, key);
     #[cfg(not(target_os = "windows"))]
     let result = Entry::new(SERVICE, key);
-    result.map_err(|_| STORAGE_ERROR.to_owned())
+    result.map_err(|error| OperationError::operation(error).context(STORAGE_ERROR))
 }
 
 impl SecretStore for SystemSecrets {
-    fn read(&self, key: &str) -> Result<Zeroizing<String>, String> {
-        let bytes = Zeroizing::new(entry(key)?.get_secret().map_err(|_| STORAGE_ERROR.to_owned())?);
-        let password = std::str::from_utf8(&bytes).map_err(|_| STORAGE_ERROR.to_owned())?;
+    fn read(&self, key: &str) -> Result<Zeroizing<String>, OperationError> {
+        let bytes = Zeroizing::new(entry(key)?.get_secret().map_err(|error| OperationError::operation(error).context(STORAGE_ERROR))?);
+        let password = std::str::from_utf8(&bytes).map_err(|error| OperationError::operation(error).context(STORAGE_ERROR))?;
         Ok(Zeroizing::new(password.to_owned()))
     }
-    fn write(&self, key: &str, password: &str) -> Result<(), String> {
+    fn write(&self, key: &str, password: &str) -> Result<(), OperationError> {
         #[cfg(target_os = "windows")]
         {
             use windows::Win32::Security::Credentials::{CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredWriteW};
@@ -109,11 +110,11 @@ impl SecretStore for SystemSecrets {
                 ..Default::default()
             };
             // All pointers remain owned and valid during this synchronous call.
-            unsafe { CredWriteW(&credential, 0) }.map_err(|_| STORAGE_ERROR.to_owned())
+            unsafe { CredWriteW(&credential, 0) }.map_err(|error| OperationError::operation(error).context(STORAGE_ERROR))
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            entry(key)?.set_secret(password.as_bytes()).map_err(|_| STORAGE_ERROR.to_owned())
+            entry(key)?.set_secret(password.as_bytes()).map_err(|error| OperationError::operation(error).context(STORAGE_ERROR))
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
@@ -121,10 +122,10 @@ impl SecretStore for SystemSecrets {
             Err(text!(browser::password_storage_is_unavailable_on_this_platform).into())
         }
     }
-    fn delete(&self, key: &str) -> Result<(), String> {
+    fn delete(&self, key: &str) -> Result<(), OperationError> {
         match entry(key)?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(_) => Err(STORAGE_ERROR.into()),
+            Err(error) => Err(OperationError::operation(error).context(STORAGE_ERROR)),
         }
     }
 }
@@ -148,10 +149,10 @@ impl<S: SecretStore> Vault<S> {
         }
         format!("{SERVICE}.{}", hash.finalize().to_hex())
     }
-    fn list(&self) -> Result<Vec<SavedLogin>, String> {
+    fn list(&self) -> Result<Vec<SavedLogin>, OperationError> {
         match fs::read(self.directory.join("passwords.json")) {
             Ok(bytes) => {
-                let mut sites: Vec<SavedLogin> = serde_json::from_slice(&bytes).map_err(|_| INDEX_ERROR.to_owned())?;
+                let mut sites: Vec<SavedLogin> = serde_json::from_slice(&bytes).map_err(|error| OperationError::operation(error).context(INDEX_ERROR))?;
                 if sites.iter().any(|site| origin(&site.origin).as_deref() != Some(site.origin.as_str()) || site.username.len() > 4096) {
                     return Err(INDEX_ERROR.into());
                 }
@@ -160,10 +161,10 @@ impl<S: SecretStore> Vault<S> {
                 Ok(sites)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(_) => Err(INDEX_ERROR.into()),
+            Err(error) => Err(OperationError::from(error).context(INDEX_ERROR)),
         }
     }
-    fn persist(&self, sites: &[SavedLogin]) -> Result<(), String> {
+    fn persist(&self, sites: &[SavedLogin]) -> Result<(), OperationError> {
         (|| -> io::Result<()> {
             // tempfile creates files with 0600 on Unix; replacement is atomic.
             // Only site/account labels are serialized here, never passwords.
@@ -173,16 +174,16 @@ impl<S: SecretStore> Vault<S> {
             file.persist(self.directory.join("passwords.json")).map_err(|error| error.error)?;
             Ok(())
         })()
-        .map_err(|_| INDEX_ERROR.to_owned())
+        .map_err(|error| OperationError::operation(error).context(INDEX_ERROR))
     }
-    fn lock(&self) -> Result<File, String> {
-        let file = File::options().read(true).write(true).create(true).truncate(false).open(self.directory.join("passwords.lock")).map_err(|_| INDEX_ERROR.to_owned())?;
-        file.lock().map_err(|_| INDEX_ERROR.to_owned())?;
+    fn lock(&self) -> Result<File, OperationError> {
+        let file = File::options().read(true).write(true).create(true).truncate(false).open(self.directory.join("passwords.lock")).map_err(|error| OperationError::operation(error).context(INDEX_ERROR))?;
+        file.lock().map_err(|error| OperationError::operation(error).context(INDEX_ERROR))?;
         Ok(file)
     }
     /// Run off the UI thread. File locking merges saves/deletes from every
     /// browser process before updating the index.
-    pub fn execute(&self, command: Command) -> Result<Reply, String> {
+    pub fn execute(&self, command: Command) -> Result<Reply, OperationError> {
         let _lock = self.lock()?;
         let mut sites = self.list()?;
         match command {
@@ -246,14 +247,14 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemorySecrets(Arc<Mutex<HashMap<String, Zeroizing<String>>>>);
     impl SecretStore for MemorySecrets {
-        fn read(&self, key: &str) -> Result<Zeroizing<String>, String> {
+        fn read(&self, key: &str) -> Result<Zeroizing<String>, OperationError> {
             self.0.lock().unwrap().get(key).cloned().ok_or_else(|| STORAGE_ERROR.into())
         }
-        fn write(&self, key: &str, password: &str) -> Result<(), String> {
+        fn write(&self, key: &str, password: &str) -> Result<(), OperationError> {
             self.0.lock().unwrap().insert(key.into(), Zeroizing::new(password.into()));
             Ok(())
         }
-        fn delete(&self, key: &str) -> Result<(), String> {
+        fn delete(&self, key: &str) -> Result<(), OperationError> {
             self.0.lock().unwrap().remove(key);
             Ok(())
         }
@@ -356,13 +357,13 @@ mod tests {
     fn unavailable_keyring_and_corrupt_index_never_fall_back_to_plaintext() {
         struct Locked;
         impl SecretStore for Locked {
-            fn read(&self, _: &str) -> Result<Zeroizing<String>, String> {
+            fn read(&self, _: &str) -> Result<Zeroizing<String>, OperationError> {
                 Err(STORAGE_ERROR.into())
             }
-            fn write(&self, _: &str, _: &str) -> Result<(), String> {
+            fn write(&self, _: &str, _: &str) -> Result<(), OperationError> {
                 Err(STORAGE_ERROR.into())
             }
-            fn delete(&self, _: &str) -> Result<(), String> {
+            fn delete(&self, _: &str) -> Result<(), OperationError> {
                 Err(STORAGE_ERROR.into())
             }
         }
@@ -399,15 +400,15 @@ mod tests {
             directory: PathBuf,
         }
         impl SecretStore for BlockIndex {
-            fn read(&self, key: &str) -> Result<Zeroizing<String>, String> {
+            fn read(&self, key: &str) -> Result<Zeroizing<String>, OperationError> {
                 self.secrets.read(key)
             }
-            fn write(&self, key: &str, password: &str) -> Result<(), String> {
+            fn write(&self, key: &str, password: &str) -> Result<(), OperationError> {
                 self.secrets.write(key, password)?;
                 fs::create_dir(self.directory.join("passwords.json")).unwrap();
                 Ok(())
             }
-            fn delete(&self, key: &str) -> Result<(), String> {
+            fn delete(&self, key: &str) -> Result<(), OperationError> {
                 self.secrets.delete(key)
             }
         }

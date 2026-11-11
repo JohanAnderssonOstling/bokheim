@@ -1,6 +1,7 @@
 //! Synchronous parser adapters over the shared async range reader. JS futures
 //! stay on their event loop; parser workers wait using shared-memory wakeups.
 
+use operation_failure::OperationError;
 use crate::fetch_dispatch;
 use crate::range_reader::{RangeFetcher, RangeReader};
 use crate::{AsyncBookSource, BoxedAsyncBookReader, BoxedBookReader, BundleFetch, FetchFuture};
@@ -79,7 +80,7 @@ impl Seek for BrowserReader {
 
 pub fn browser_reader<F>(length: u64, prefix: Vec<u8>, fetch: F) -> io::Result<BoxedBookReader>
 where
-    F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
+    F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, OperationError>> + 'static,
 {
     Signal::check().map_err(io::Error::other)?;
     let source = AsyncBookSource::browser(length, prefix, fetch)?;
@@ -88,7 +89,7 @@ where
 
 pub fn browser_bundle_fetch<F>(fetch: F) -> io::Result<BundleFetch>
 where
-    F: FnMut(Vec<(u64, usize)>) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
+    F: FnMut(Vec<(u64, usize)>) -> FetchFuture<'static, Result<Vec<u8>, OperationError>> + 'static,
 {
     Signal::check().map_err(io::Error::other)?;
     let fetch = fetch_dispatch::browser(fetch);

@@ -10,5 +10,6 @@ dictionary-catalog = { path = "../../client/dictionaries/catalog" }
 ui-components = { path = "../components" }
 gpui.workspace = true
 gpui-component.workspace = true
+log = "0.4"
 sys-locale = { version = "0.3", features = ["js"] }
 

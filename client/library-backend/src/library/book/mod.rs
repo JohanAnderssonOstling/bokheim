@@ -19,6 +19,8 @@ mod annotations;
 mod progress;
 pub(super) mod reading;
 mod reads;
+mod text_cache;
+pub use text_cache::TextCache;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod browser;
@@ -118,10 +120,11 @@ pub struct DocumentBook {
     pub path: String,
     pub format: DocumentFormat,
     pub source: DocumentSource,
+    remote: bool,
 }
 impl DocumentBook {
     pub fn new(path: String, format: DocumentFormat, reader: BoxedBookReader) -> Self {
-        Self { path, format, source: DocumentSource::Reader(reader) }
+        Self { path, format, source: DocumentSource::Reader(reader), remote: false }
     }
 }
 
@@ -133,7 +136,15 @@ pub enum DocumentSource {
 
 impl DocumentBook {
     pub fn from_async_source(path: String, format: DocumentFormat, source: book_access::AsyncBookSource) -> Self {
-        Self { path, format, source: DocumentSource::Async(source) }
+        Self { path, format, source: DocumentSource::Async(source), remote: false }
+    }
+
+    pub fn from_remote_source(path: String, format: DocumentFormat, source: book_access::AsyncBookSource) -> Self {
+        Self { path, format, source: DocumentSource::Async(source), remote: true }
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.remote
     }
 }
 

@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-client-protocol = { path = "../../../client-protocol" }
+client-protocol = { path = "../../../client-protocol", features = ["http"] }
 http-response = { workspace = true }
 account-client = { path = "../../../account-client" }
 client-platform-runtime = { path = "../../../platforms/runtime" }

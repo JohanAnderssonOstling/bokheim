@@ -59,11 +59,12 @@ def prepare():
     CACHE.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     specs = json.loads(SOURCES.read_text())
+    jobs = os.environ.get("CARGO_BUILD_JOBS", str(os.cpu_count() or 1))
     make_source = unpack(specs["make"])
     make = CACHE / "make-host/bin/make"
     if not make.is_file():
         run(["./configure", "--prefix=" + str(CACHE / "make-host"), "--without-guile"], cwd=make_source)
-        run(["make", "-j4"], cwd=make_source)
+        run(["make", "-j" + jobs], cwd=make_source)
         run(["make", "install"], cwd=make_source)
     toolchain = unpack(specs["toolchain"])
     source = unpack(specs["glibc"])
@@ -72,7 +73,6 @@ def prepare():
     sysroot = OUTPUT / "sysroot"
     marker = sysroot / ".bokheim-runtime"
     runtime_key = f"{specs['toolchain']['sha256']} {specs['glibc']['sha256']} kernel=2.6.32 {BASELINE}"
-    jobs = os.environ.get("CARGO_BUILD_JOBS", "4")
     if not marker.is_file() or marker.read_text() != runtime_key:
         build = CACHE / source.name.replace("-source", "-build")
         build.mkdir(parents=True, exist_ok=True)

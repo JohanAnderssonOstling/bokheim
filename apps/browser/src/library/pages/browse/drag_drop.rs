@@ -173,6 +173,7 @@ impl gpui::Render for DragPreview {
             div()
                 .flex()
                 .items_start()
+                .bg(theme.page_bg.opacity(0.8))
                 .gap(px(components::SPACE_XS))
                 .children(self.items.iter().map(|item| match item {
                     DragPreviewItem::Snapshot(preview) => preview.render(window, cx).into_any_element(),

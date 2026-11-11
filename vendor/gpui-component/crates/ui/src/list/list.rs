@@ -1,5 +1,5 @@
 use instant::Duration;
-use std::ops::Range;
+use std::{ops::Range, rc::Rc};
 
 use crate::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use crate::input::InputState;
@@ -13,7 +13,7 @@ use crate::{
 use crate::{Icon, IndexPath, Selectable, Sizable, StyledExt};
 use crate::{VirtualListScrollHandle, list::ListDelegate, v_virtual_list};
 use gpui::{
-    App, AvailableSpace, ClickEvent, Context, DefiniteLength, EdgesRefinement, EventEmitter,
+    AnyElement, App, AvailableSpace, ClickEvent, Context, DefiniteLength, EdgesRefinement, EventEmitter,
     ListSizingBehavior, RenderOnce, Role, ScrollStrategy, SharedString, StatefulInteractiveElement,
     StyleRefinement, Subscription, px, size,
 };
@@ -48,6 +48,7 @@ struct ListOptions {
     size: Size,
     scrollbar_visible: bool,
     search_placeholder: Option<SharedString>,
+    search_prefix: Option<Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>>,
     max_height: Option<Length>,
     paddings: EdgesRefinement<DefiniteLength>,
 }
@@ -59,6 +60,7 @@ impl Default for ListOptions {
             scrollbar_visible: true,
             max_height: None,
             search_placeholder: None,
+            search_prefix: None,
             paddings: EdgesRefinement::default(),
         }
     }
@@ -631,6 +633,7 @@ where
         let entities_count = self.rows_cache.len();
         let mouse_right_clicked_index = self.mouse_right_clicked_index;
 
+        let search_prefix = self.options.search_prefix.as_ref().map(|build| build(window, cx));
         v_flex()
             .key_context("List")
             .id("list-state")
@@ -647,7 +650,10 @@ where
                         })
                         .border_b_1()
                         .border_color(cx.theme().border)
-                        .child(
+                        .flex()
+                        .items_center()
+                        .children(search_prefix)
+                        .child(div().flex_1().min_w_0().child(
                             Input::new(&input)
                                 .with_size(self.options.size)
                                 .prefix(
@@ -657,7 +663,7 @@ where
                                 .cleanable(true)
                                 .p_0()
                                 .appearance(false),
-                        ),
+                        )),
                 )
             })
             .when(!loading, |this| {
@@ -708,6 +714,12 @@ where
     /// Set whether the scrollbar is visible, default is `true`.
     pub fn scrollbar_visible(mut self, visible: bool) -> Self {
         self.options.scrollbar_visible = visible;
+        self
+    }
+
+    /// Adds navigation beside the filter while retaining the list's keyboard handling.
+    pub fn search_prefix(mut self, build: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
+        self.options.search_prefix = Some(Rc::new(build));
         self
     }
 

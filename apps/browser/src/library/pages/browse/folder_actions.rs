@@ -473,7 +473,7 @@ impl FolderActions {
                     if changed {
                         crate::services::notify_undoable("library-transfer-partial", text!(browse::copied_items_transfer_did_not_finish), window, cx);
                     }
-                    notify_error("library-transfer-error", format!(text!(browse::could_not_finish_the_transfer_some_items_may_already_have_been_copied), user_facing_error(&error, text!(common::please_try_again))), window, cx);
+                    notify_error("library-transfer-error", format!(text!(browse::could_not_finish_the_transfer_some_items_may_already_have_been_copied), user_facing_error(&error, "")), window, cx);
                 } else {
                     Self::clear_pasted_clipboard(clear_clipboard, cx);
                     if changed {
@@ -537,7 +537,7 @@ impl FolderActions {
                                     FolderPlacement::Copy => "copy",
                                     FolderPlacement::Move => "move",
                                 },
-                                user_facing_error(&error, text!(browse::please_try_again_for_the_remaining_items))
+                                user_facing_error(&error, "")
                             ),
                             window,
                             cx,
@@ -581,7 +581,7 @@ impl FolderActions {
     fn finish_removal(result: Result<(), BackendError>, label: String, id: &'static str, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         match result {
             Ok(()) => crate::services::notify_undoable(id, label, window, cx),
-            Err(error) => notify_error(id, format!(text!(browse::could_not), user_facing_error(&error, text!(common::please_try_again)), action = action), window, cx),
+            Err(error) => notify_error(id, format!(text!(browse::could_not), user_facing_error(&error, ""), action = action), window, cx),
         }
     }
 
@@ -624,7 +624,7 @@ impl FolderActions {
             .await;
             let _ = actions.update_in(cx, |_, window, cx| {
                 if let Err(error) = result {
-                    notify_error("folder-evict-error", format!(text!(browse::could_not_remove_every_download), user_facing_error(&error, text!(common::please_try_again))), window, cx);
+                    notify_error("folder-evict-error", format!(text!(browse::could_not_remove_every_download), user_facing_error(&error, "")), window, cx);
                 }
             });
         })

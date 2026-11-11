@@ -1,6 +1,7 @@
 //! Deliver external reader links and book files to a live application window.
 
 use application_shell::ApplicationRoot;
+use app::BackendError;
 use gpui::{App, Context, Render, WeakEntity, Window};
 use gpui_component::{Root, WindowExt, notification::Notification};
 use serde::{Deserialize, Serialize};
@@ -106,16 +107,16 @@ fn deliver_reader_links(activation: ReaderActivation, fallback: &WeakEntity<Appl
 fn open_book_file(url: String, token: Option<String>, fallback: WeakEntity<ApplicationRoot>, cx: &mut App) {
     let staged = cx.background_executor().spawn(async move {
         use std::{fs::File, io};
-        let path = url::Url::parse(&url).map_err(|error| error.to_string())?.to_file_path().map_err(|_| "invalid local book URL")?;
+        let path = url::Url::parse(&url).map_err(BackendError::operation)?.to_file_path().map_err(|_| "invalid local book URL")?;
         let name = path.file_name().ok_or("book file has no name")?.to_string_lossy().into_owned();
-        if !path.metadata().map_err(|error| error.to_string())?.is_file() {
-            return Err("book path is not a regular file".to_owned());
+        if !path.metadata().map_err(BackendError::operation)?.is_file() {
+            return Err(BackendError::message("book path is not a regular file"));
         }
-        let mut source = File::open(&path).map_err(|error| error.to_string())?;
+        let mut source = File::open(&path).map_err(BackendError::operation)?;
         // The import flow consumes its staging file. Never give it the original.
-        let mut staged = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
-        io::copy(&mut source, &mut staged).map_err(|error| error.to_string())?;
-        Ok((name, staged.into_temp_path()))
+        let mut staged = tempfile::NamedTempFile::new().map_err(BackendError::operation)?;
+        io::copy(&mut source, &mut staged).map_err(BackendError::operation)?;
+        Ok::<_, BackendError>((name, staged.into_temp_path()))
     });
     cx.spawn(async move |cx| {
         let staged = staged.await;
@@ -126,10 +127,10 @@ fn open_book_file(url: String, token: Option<String>, fallback: WeakEntity<Appli
                 cx,
                 |_, _| true,
                 |root, window, cx| {
-                    let result = staged.and_then(|(name, staged)| staged.keep().map(|path| (name, path)).map_err(|error| error.to_string()));
+                    let result = staged.and_then(|(name, staged)| staged.keep().map(|path| (name, path)).map_err(BackendError::operation));
                     match result {
                         Ok((name, path)) => root.import_and_open_path(name, path, window, cx),
-                        Err(error) => window.push_notification(Notification::error(format!(text!(browse::could_not_prepare_this_book_for_import), error)), cx),
+                        Err(error) => window.push_notification(Notification::error(format!(text!(browse::could_not_prepare_this_book_for_import), ui_components::user_facing_error(&error, ""))), cx),
                     }
                 },
             )

@@ -11,6 +11,8 @@
 
 use ui_text::text;
 
+use super::source::{self, Placement as SourcePlacement};
+
 use std::{cell::Cell, rc::Rc};
 
 use super::search::{self, SearchBarTarget};
@@ -22,12 +24,19 @@ use ui_components::{self as components, ReaderDestination, ReaderRailMark};
 
 /// Operations provided by the entity that owns a reader sidebar.
 pub(crate) trait SidebarTarget: SearchBarTarget {
+    fn control_click(&mut self, _position: gpui::Point<gpui::Pixels>, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn close_label(&self) -> &'static str {
+        text!(common::return_to_library)
+    }
     fn history_availability(&self) -> (bool, bool) {
         (false, false)
     }
     fn navigate_history(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
     fn available_tabs(&self) -> &'static [SidebarTab] {
         sidebar_tabs(self.contents_available())
+    }
+    fn source_url(&self) -> Option<&str> {
+        None
     }
     #[cfg(feature = "kobo")]
     fn device_controls(&self) -> Option<gpui::AnyView>;
@@ -62,11 +71,15 @@ pub(crate) trait SidebarTarget: SearchBarTarget {
 macro_rules! document_sidebar_methods {
     () => {
         fn sidebar_tab(&self) -> $crate::settings::SidebarTab {
-            self.sidebar.effective_or_default(self.contents_available())
+            let tab = self.sidebar.effective_or_default(self.contents_available());
+            if self.available_tabs().contains(&tab) { tab } else { self.available_tabs()[0] }
         }
         fn select_sidebar_tab(&mut self, tab: $crate::settings::SidebarTab, window: &mut ::gpui::Window, cx: &mut ::gpui::Context<Self>) {
             use ::gpui::Focusable;
             use $crate::settings::SidebarTab;
+            if !self.available_tabs().contains(&tab) {
+                return;
+            }
             $crate::shell::state_panel::select_tab(&mut self.sidebar, tab, cx);
             self.chrome.show(cx);
             if tab == SidebarTab::Search {
@@ -117,11 +130,12 @@ pub(crate) struct SidebarContent {
     /// the settings — whichever `SidebarTab` is selected.
     body: AnyElement,
     header_action: Option<AnyElement>,
+    header_content: Option<AnyElement>,
 }
 
 impl SidebarContent {
     pub(crate) fn new(body: AnyElement) -> Self {
-        Self { body, header_action: None }
+        Self { body, header_action: None, header_content: None }
     }
 
     pub(crate) fn with_header_action(mut self, action: AnyElement) -> Self {
@@ -171,6 +185,7 @@ impl ChromeTarget {
 
 /// Snapshot the leased reader before rendering; callbacks access it later.
 struct ChromePresentation {
+    close_label: &'static str,
     sidebar_focus: FocusHandle,
     rail_focus: FocusHandle,
     active: SidebarTab,
@@ -184,6 +199,7 @@ struct ChromePresentation {
 impl ChromePresentation {
     fn new<C: SidebarTarget>(owner: &C) -> Self {
         Self {
+            close_label: owner.close_label(),
             sidebar_focus: owner.sidebar_focus(),
             rail_focus: owner.rail_focus(),
             active: owner.sidebar_tab(),
@@ -213,6 +229,11 @@ pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, co
     if components::uses_mobile_reader_controls(window) {
         install_sidebar_keyboard(owner, target, window, cx);
     }
+    let mut content = content;
+    if owner.sidebar_tab() == SidebarTab::Settings && !components::uses_mobile_reader_controls(window) {
+        content.body = super::keyboard_settings::with_keyboard_settings(content.body, window, cx);
+        content.header_content = Some(super::keyboard_settings::header(window, cx));
+    }
     render_sidebar(&ChromePresentation::new(owner), &ChromeTarget::new(target), content, theme, window)
 }
 
@@ -223,7 +244,10 @@ fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: Si
     let sidebar_focus = owner.sidebar_focus.clone();
     let active = owner.active;
 
-    let header = components::reader_panel_header(panel_destination(active).label(), theme)
+    let header = match content.header_content {
+        Some(tabs) => components::reader_panel_header_content(tabs, theme).pl_0(),
+        None => components::reader_panel_header(panel_destination(active).label(), theme),
+    }
         .key_context("ReaderSidebarHeader")
         .when(active == SidebarTab::Search, |header| header.child(search::header_controls(owner.search_position, target, theme)))
         .children(content.header_action);
@@ -407,10 +431,13 @@ pub(crate) fn reader_rail<C: SidebarTarget>(
     if !components::uses_mobile_reader_controls(window) {
         install_sidebar_keyboard(owner, target, window, cx);
     }
-    render_rail(&ChromePresentation::new(owner), &ChromeTarget::new(target), active, progress_fraction, progress_label, progress_detail, theme, cx)
+    render_rail(&ChromePresentation::new(owner), &ChromeTarget::new(target), active, progress_fraction, progress_label, progress_detail, owner.source_url(), theme, window, cx)
 }
 
-fn render_rail(owner: &ChromePresentation, target: &ChromeTarget, active: Option<SidebarTab>, progress_fraction: f32, progress_label: String, progress_detail: String, theme: components::BrowserTheme, cx: &App) -> gpui::Div {
+fn render_rail(
+    owner: &ChromePresentation, target: &ChromeTarget, active: Option<SidebarTab>, progress_fraction: f32, progress_label: String, progress_detail: String, source_url: Option<&str>, theme: components::BrowserTheme, window: &Window,
+    cx: &App,
+) -> gpui::Div {
     let item = |tab: SidebarTab| {
         let index = tab as usize;
         let target = target.clone();
@@ -427,7 +454,7 @@ fn render_rail(owner: &ChromePresentation, target: &ChromeTarget, active: Option
         .when(active.is_some(), |rail| rail.key_context("ReaderSidebar"))
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .track_focus(&rail_focus)
-        .child(components::reader_rail_item("reader-rail-library", ReaderDestination::Library, text!(common::return_to_library), ReaderRailMark::None, theme, cx).on_click(move |_, window, cx| {
+        .child(components::reader_rail_item("reader-rail-library", ReaderDestination::Library, owner.close_label, ReaderRailMark::None, theme, cx).on_click(move |_, window, cx| {
             library_target.execute(ChromeCommand::CloseReader, window, cx);
         }))
         .child(div().flex_none().h(px(components::SPACE_SM)));
@@ -436,7 +463,7 @@ fn render_rail(owner: &ChromePresentation, target: &ChromeTarget, active: Option
             rail = rail.child(item(tab));
         }
     }
-    rail = rail.child(history_button(owner, target, false, cx)).child(history_button(owner, target, true, cx));
+    rail = rail.child(history_button(owner, target, false, cx)).child(history_button(owner, target, true, cx)).children(source::actions(source_url, SourcePlacement::Reader, window, cx));
     if owner.tabs.contains(&SidebarTab::Settings) {
         rail = rail.child(components::reader_rail_spacer()).child(item(SidebarTab::Settings));
     }
@@ -459,7 +486,7 @@ fn render_top_bar(owner: &ChromePresentation, target: &ChromeTarget, title: Stri
     let search_target = target.clone();
     components::ruled_topbar(theme)
         .when(cfg!(feature = "kobo") || !components::has_native_back_button(), |bar| {
-            bar.child(components::outlined_icon_button("reader-top-library", ReaderDestination::Library.tooltip(ReaderDestination::Library.label(), cx), ReaderDestination::Library.icon()).on_click(move |_, window, cx| {
+            bar.child(components::outlined_icon_button("reader-top-library", ReaderDestination::Library.tooltip(owner.close_label, cx), ReaderDestination::Library.icon()).on_click(move |_, window, cx| {
                 library_target.execute(ChromeCommand::CloseReader, window, cx);
             }))
         })
@@ -476,11 +503,11 @@ fn render_top_bar(owner: &ChromePresentation, target: &ChromeTarget, title: Stri
 
 /// The phone's bar below the page: Contents, Notes, Settings and reading
 /// aloud. Tapping the open sheet's action closes it.
-pub(crate) fn reader_bottom_bar<C: SidebarTarget>(id: &'static str, owner: &C, target: &Entity<C>, active: Option<SidebarTab>, theme: components::BrowserTheme, cx: &gpui::App) -> AnyElement {
-    render_bottom_bar(id, &ChromePresentation::new(owner), &ChromeTarget::new(target), active, theme, cx)
+pub(crate) fn reader_bottom_bar<C: SidebarTarget>(id: &'static str, owner: &C, target: &Entity<C>, active: Option<SidebarTab>, theme: components::BrowserTheme, window: &Window, cx: &gpui::App) -> AnyElement {
+    render_bottom_bar(id, &ChromePresentation::new(owner), &ChromeTarget::new(target), active, owner.source_url(), theme, window, cx)
 }
 
-fn render_bottom_bar(id: &'static str, owner: &ChromePresentation, target: &ChromeTarget, active: Option<SidebarTab>, theme: components::BrowserTheme, cx: &App) -> AnyElement {
+fn render_bottom_bar(id: &'static str, owner: &ChromePresentation, target: &ChromeTarget, active: Option<SidebarTab>, source_url: Option<&str>, theme: components::BrowserTheme, window: &Window, cx: &App) -> AnyElement {
     let mut bar = components::bottom_navigation(theme).id(id);
     // Search is in the top bar.
     for &tab in owner.tabs.iter().filter(|tab| **tab != SidebarTab::Search) {
@@ -494,7 +521,7 @@ fn render_bottom_bar(id: &'static str, owner: &ChromePresentation, target: &Chro
         let target = target.clone();
         bar = bar.child(components::reader_bottom_bar_item((id, 5usize), ReaderDestination::Tts, mark, theme, cx).on_click(move |_, window, cx| target.execute(ChromeCommand::Tts, window, cx)));
     }
-    bar.into_any_element()
+    bar.children(source::actions(source_url, SourcePlacement::Reader, window, cx)).into_any_element()
 }
 
 #[cfg(all(test, not(feature = "mobile")))]

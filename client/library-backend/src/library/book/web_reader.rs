@@ -11,7 +11,7 @@ use book_model::BookFormat;
 pub use client_platform_web::transport::range::connect;
 
 use crate::{BackendError, BookSource, ResolvedBookData};
-use client_protocol::Failure;
+use client_protocol::{Failure, OperationError};
 
 /// Library-scoped source operations supplied by the application host. Each
 /// operation fixes its result type; wire commands stay inside the adapter.
@@ -31,7 +31,7 @@ enum RangeSource {
 }
 
 /// Keep the subscription alive for every in-flight read as well as the fetcher.
-fn range_fetch<T: BookTransport>(library: T, lease: Option<async_channel::Receiver<()>>, source: RangeSource) -> impl Fn(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, String>> {
+fn range_fetch<T: BookTransport>(library: T, lease: Option<async_channel::Receiver<()>>, source: RangeSource) -> impl Fn(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, OperationError>> {
     move |offset, length| {
         let library = library.clone();
         let lease = lease.clone();
@@ -42,7 +42,7 @@ fn range_fetch<T: BookTransport>(library: T, lease: Option<async_channel::Receiv
                 RangeSource::Local(capability) => library.read_book_range(capability, offset, length).await,
                 RangeSource::Remote(source) => library.read_file_range(source, offset, length).await,
             }
-            .map_err(|error| error.to_string())
+            .map_err(|error| OperationError::from_classified(&error))
         })
     }
 }
@@ -53,8 +53,8 @@ async fn audiobook<T: BookTransport>(source: crate::library::PlaybackSource, lea
         client_platform_web::transport::resources::AsyncCallback::new(move || {
             let library = renewal_library.clone();
             async move {
-                let direct = library.renew_remote_audio(book_id).await.map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
-                let json = serde_json::to_string(&direct).map_err(|error| wasm_bindgen::JsValue::from_str(&format!("Invalid direct playback configuration: {error}")))?;
+                let direct = library.renew_remote_audio(book_id).await.map_err(|error| OperationError::from_classified(&error).into_js())?;
+                let json = serde_json::to_string(&direct).map_err(|error| OperationError::operation(error).context("Invalid direct playback configuration").into_js())?;
                 js_sys::JSON::parse(&json)
             }
         })
@@ -73,6 +73,7 @@ pub async fn resolve_book<T: BookTransport>(library: &T, book_id: BookId) -> Res
     }
     let (lease, resolved) = crate::executor::timeout(std::time::Duration::from_secs(65), library.subscribe_book(book_id)).await.map_err(|_| BackendError::classified(Failure::TimedOut, "opening the book source timed out"))??;
     if let Ok(document_format) = DocumentFormat::try_from(resolved.format) {
+        let remote = matches!(&resolved.source, BookSource::Remote { .. } | BookSource::RemoteArchive { .. });
         let source = match resolved.source {
             BookSource::Local { capability, length } => {
                 let fetch = range_fetch(library.clone(), Some(lease), RangeSource::Local(capability));
@@ -87,7 +88,7 @@ pub async fn resolve_book<T: BookTransport>(library: &T, book_id: BookId) -> Res
                 let sparse = sparse.with_browser_prefetch(move |ranges| {
                     let library = batch_library.clone();
                     let source = batch_source.clone();
-                    Box::pin(async move { library.read_file_ranges(source, ranges).await.map_err(|error| error.to_string()) })
+                    Box::pin(async move { library.read_file_ranges(source, ranges).await.map_err(|error| OperationError::from_classified(&error)) })
                 });
                 document_format.prepare_archive(sparse).await?
             }
@@ -98,7 +99,8 @@ pub async fn resolve_book<T: BookTransport>(library: &T, book_id: BookId) -> Res
             }
             _ => return Err("browser received an invalid book source".into()),
         };
-        return Ok(ResolvedBook::Document(crate::library::DocumentBook::from_async_source(String::new(), document_format, source)));
+        let document = if remote { crate::library::DocumentBook::from_remote_source(String::new(), document_format, source) } else { crate::library::DocumentBook::from_async_source(String::new(), document_format, source) };
+        return Ok(ResolvedBook::Document(document));
     }
     let reader: crate::BoxedBookReader = match resolved.source {
         BookSource::Audiobook(source) => return audiobook(source, Some(lease), library.clone(), book_id).await,
@@ -113,9 +115,9 @@ pub async fn resolve_book<T: BookTransport>(library: &T, book_id: BookId) -> Res
                 let fetch = book_access::remote_file::browser_bundle_fetch(move |ranges| {
                     let library = library.clone();
                     let source = source.clone();
-                    Box::pin(async move { library.read_file_ranges(source, ranges).await.map_err(|error| error.to_string()) })
+                    Box::pin(async move { library.read_file_ranges(source, ranges).await.map_err(|error| OperationError::from_classified(&error)) })
                 })?;
-                book_access::pdf_bundle::open(length, prefix, fetch).map_err(|error| error.to_string())?
+                book_access::pdf_bundle::open(length, prefix, fetch).map_err(|error| OperationError::from_classified(&error))?
             } else {
                 let length = source.length;
                 let fetch = range_fetch(library, None, RangeSource::Remote(source));

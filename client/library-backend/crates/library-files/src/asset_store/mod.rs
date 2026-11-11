@@ -26,9 +26,9 @@ use std::io::{Error, ErrorKind};
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use std::time::Duration;
 pub(crate) use sync_common::BookId;
@@ -38,6 +38,8 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 #[cfg(target_arch = "wasm32")]
 mod browser_transfer;
 mod import;
+mod text_cache;
+pub use text_cache::TextCacheWriter;
 #[cfg(not(target_arch = "wasm32"))]
 mod import_batch;
 pub use import::ImportOptions;
@@ -73,6 +75,12 @@ impl From<std::io::Error> for AssetStoreError {
 pub struct AssetStore(imp::Handle);
 
 impl AssetStore {
+    /// Opening runs this before actors or readers can hold old identities.
+    pub async fn migrate_book_ids(&self, ids: Vec<(BookId, BookId)>) -> Result<(), AssetStoreError> {
+        let store = self.clone();
+        run_blocking(move || imp::migrate_book_ids(&store.0, &ids)).await.map_err(AssetStoreError::operation)?
+    }
+
     /// Short native file operations run inline. Browser metadata includes the
     /// OPFS index, so it stays on the storage worker with its SQLite connection.
     async fn metadata<T: Send + 'static>(&self, operation: impl FnOnce(&Self) -> Result<T, AssetStoreError> + Send + 'static) -> Result<T, AssetStoreError> {
@@ -165,7 +173,7 @@ impl AssetStore {
     /// Persist one scan batch's checksum proofs without holding library state.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn remember_local_contents(&self, contents: Vec<(BookId, ContentHash)>) -> Result<(), AssetStoreError> {
-        let store = self.clone();
+        let store = self.for_import_batch();
         let root = self.lock_root_shared().await;
         run_blocking(move || {
             let _root = root;
@@ -175,6 +183,9 @@ impl AssetStore {
             for (book, checksum) in contents {
                 store.remember_local_content(book, checksum)?;
             }
+            // One durability boundary for the scan batch. Proofs must survive
+            // before the caller commits the identities that depend on them.
+            store.flush_import_batch_blocking()?;
             if !store.root_available() {
                 return Err(AssetStoreError::operation("library folder changed during scan"));
             }
@@ -246,24 +257,12 @@ impl AssetStore {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = paths;
-            use std::io::Seek as _;
-            let Some(mut reader) = imp::open_verified_reader(&self.0, &hash).await? else { return Ok(None) };
-            let mut hasher = self.0.hash_service.start().await.map_err(AssetStoreError::operation)?;
-            let mut length = 0_u64;
-            loop {
-                let buffer = reader.read_chunk(256 * 1024).await.map_err(AssetStoreError::operation)?;
-                let read = buffer.len();
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]).await.map_err(AssetStoreError::operation)?;
-                length += read as u64;
-            }
-            let actual: BookId = hasher.finish().await.map_err(AssetStoreError::operation)?;
+            let Some(reader) = imp::open_verified_reader(&self.0, &hash).await? else { return Ok(None) };
+            let (actual, length) = reader.checksum().await.map_err(AssetStoreError::operation)?;
+            let actual = BookId::from(actual);
             if actual.content_hash() != checksum.or_else(|| hash.content_hash()) {
                 return Ok(None);
             }
-            reader.seek(SeekFrom::Start(0))?;
             Ok(Some(VerifiedBook { reader, length, book_id: actual, _lease: lease }))
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -272,13 +271,35 @@ impl AssetStore {
             run_blocking(move || {
                 use std::io::Seek as _;
                 for relative_path in paths {
+                    let expected = checksum.or(hash.content_hash());
+                    let path = imp::placement_path(&store.0, &relative_path);
+                    let folder_revision = if path.is_dir() { Some(crate::filesystem::audiobook_fingerprint(&path, &audiobook_folder::discover(&path)?)?) } else { None };
+                    // A newly scanned audiobook has a recording identity but
+                    // no ZIP-byte checksum yet. Verify its member proof before
+                    // constructing the transport, and pin that source revision.
+                    let source = if expected.is_none() {
+                        if folder_revision.is_none() {
+                            continue;
+                        }
+                        let Some(source) = imp::VerifiedPath::matching(path.clone(), &hash)? else { continue };
+                        Some(source)
+                    } else {
+                        None
+                    };
                     let Some(mut reader): Option<BoxedBookReader> = imp::open_book_at_path(&store.0, &relative_path)? else { continue };
                     let mut hasher = blake3::Hasher::new();
                     hasher.update_reader(&mut reader)?;
                     let actual = BookId::from(hasher.finalize());
-                    let expected = checksum.or(hash.content_hash());
-                    if actual.content_hash() != expected {
+                    if expected.is_some() && actual.content_hash() != expected {
                         continue;
+                    }
+                    if let Some(source) = source {
+                        source.check_metadata()?;
+                    }
+                    if let Some(revision) = folder_revision {
+                        if crate::filesystem::audiobook_fingerprint(&path, &audiobook_folder::discover(&path)?)? != revision {
+                            return Err(AssetStoreError::operation("audiobook changed while preparing transfer"));
+                        }
                     }
                     reader.seek(SeekFrom::Start(0))?;
                     return Ok(Some(VerifiedBook { reader, length: hasher.count(), book_id: actual, _lease: lease }));
@@ -844,6 +865,11 @@ impl CopiedBook {
 pub use library_model::PublishedStagedBook;
 
 impl StagedBook {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_reader(&self) -> Result<BoxedBookReader, AssetStoreError> {
+        Ok(Box::new(File::open(&self.inner.temporary_path)?))
+    }
+
     pub fn byte_checksum(&self) -> content_address::ContentHash {
         self.inner.byte_checksum
     }
@@ -960,7 +986,8 @@ fn asset_name(kind: BlobKind, book_id: &BookId) -> String {
 fn generated_thumbnail_name(name: &str) -> Option<String> {
     let name = name.strip_prefix("thumbnail/")?;
     let (book, suffix) = name.split_once('.').map_or((name, ""), |(book, suffix)| (book, suffix));
-    if book.len() != 64 || (!suffix.is_empty() && !suffix.starts_with("card-v")) {
+    // Local identities include a tag and are longer than content hashes.
+    if book.parse::<BookId>().is_err() || (!suffix.is_empty() && !suffix.starts_with("card-v")) {
         return None;
     }
     let suffix = if suffix.is_empty() { String::new() } else { format!(".{suffix}") };
@@ -989,7 +1016,7 @@ mod tests {
             let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
             let bytes = b"verified local import";
             let checksum = ContentHash::from(blake3::hash(bytes));
-            let identity = BookId::for_local_content(&[7; 16], checksum);
+            let identity = BookId::for_local_content(checksum);
             let proof = store.0.assets_root.join("local-proofs").join(identity.to_hex());
             let (_, copied) = store.copy_import(path("book.epub"), Box::new(Cursor::new(bytes)), vec![], ImportOptions { direct }).await.unwrap();
             let staged = copied.into_staged(checksum.into(), bytes.len() as u64).with_local_identity(&store, identity).await.unwrap();
@@ -1013,7 +1040,7 @@ mod tests {
             let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
             let bytes = b"verified local import";
             let checksum = ContentHash::from(blake3::hash(bytes));
-            let identity = BookId::for_local_content(&[7; 16], checksum);
+            let identity = BookId::for_local_content(checksum);
             let (_, copied) = store.copy_import(path("book.epub"), Box::new(Cursor::new(bytes)), vec![], ImportOptions { direct }).await.unwrap();
             let temporary = copied.path().to_owned();
             let staged = copied.into_staged(checksum.into(), bytes.len() as u64).with_local_identity(&store, identity).await.unwrap();
@@ -1033,7 +1060,7 @@ mod tests {
             let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
             let bytes = b"downloaded revision";
             let checksum = ContentHash::from(blake3::hash(bytes));
-            let identity = BookId::for_local_content(&[8; 16], checksum);
+            let identity = BookId::for_local_content(checksum);
             let proof = store.0.assets_root.join("local-proofs").join(identity.to_hex());
             let mut writer = store.begin_book_write(&path("book.epub"), &identity).unwrap();
             writer.write_all(bytes).await.unwrap();
@@ -1132,7 +1159,7 @@ mod tests {
 
     fn nonportable_audio_archive() -> Vec<u8> {
         use std::io::{Cursor, Write};
-        use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+        use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
         let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
         for (name, bytes) in [("NUL.mp3", b"opening".as_slice()), ("Disc?/track?.mp3", b"ending".as_slice()), ("chapters?.cue", b"FILE \"NUL.mp3\" MP3\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n".as_slice())] {
             zip.start_file(name, SimpleFileOptions::default().compression_method(CompressionMethod::Stored).system(zip::System::Unix)).unwrap();
@@ -1160,7 +1187,7 @@ mod tests {
     #[tokio::test]
     async fn foreign_audiobook_download_keeps_its_identity_through_copy_and_upload() {
         use std::io::{Cursor, Read, Write};
-        use zip::{write::SimpleFileOptions, CompressionMethod, System, ZipWriter};
+        use zip::{CompressionMethod, System, ZipWriter, write::SimpleFileOptions};
         let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
         let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored).system(if cfg!(windows) { System::Unix } else { System::Dos });
         for (name, bytes) in [("02.mp3", b"opening".as_slice()), ("01.mp3", b"ending".as_slice()), ("book.cue", b"FILE 02.mp3 MP3\n".as_slice()), ("book.nfo", b"Title: Story\n".as_slice())] {

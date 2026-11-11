@@ -10,8 +10,10 @@ default = []
 packaged-pdfium = []
 
 [dependencies]
+operation-failure = { path = "../../client/client-protocol/crates/operation-failure", features = ["web"] }
 pdf-range-reader = { path = "../pdf-range-reader" }
 blake3 = "1"
+log = "0.4"
 image = { workspace = true }
 pdf-view-common = { path = "../pdf-view-common" }
 book-model = { path = "../book-model", default-features = false }

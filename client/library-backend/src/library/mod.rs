@@ -34,7 +34,7 @@ pub use storage::StorageCopyProgress;
 pub mod browser_audiobook;
 
 pub use crate::book::{PlaybackLocation, PlaybackSource};
-pub use book::{AudiobookBook, DocumentBook, DocumentFormat, DocumentSource, PdfBook, ResolvedBook};
+pub use book::{AudiobookBook, DocumentBook, DocumentFormat, DocumentSource, PdfBook, ResolvedBook, TextCache};
 pub use book_access::{BookReader, BoxedBookReader};
 #[cfg(target_arch = "wasm32")]
 pub use browser_audiobook::{BrowserAudiobook, PlaybackLease};

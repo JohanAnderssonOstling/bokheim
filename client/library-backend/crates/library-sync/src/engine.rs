@@ -3,7 +3,8 @@
 use library_replica::StatePublication;
 use std::collections::HashSet;
 use std::error::Error;
-use std::fmt::Display;
+use std::fmt;
+use client_protocol::{BackendError, Classified, Failure};
 use sync_common::{BookId, LibraryId, MutationIssue, OpaquePublication, PullStateResponse, PushBatcher, PushMutationsResponse, ReplicaId, ReplicaSeq, SyncCursor};
 use sync_transport::SyncCredentials;
 
@@ -38,19 +39,37 @@ pub trait SyncStore {
     fn apply_exchange_response(&self, ids: Vec<ReplicaSeq>, page: PullStateResponse) -> StoreFuture<'_, ()>;
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, thiserror::Error)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum SyncError {
-    #[error("synchronization authentication is required")]
     AuthenticationRequired,
-    #[error("the synchronization cursor was rejected after recovery")]
     CursorRejected,
-    #[error("{0}")]
-    Failed(String),
+    Failed(BackendError),
+}
+
+
+impl fmt::Display for SyncError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
+            Self::CursorRejected => formatter.write_str("the synchronization cursor was rejected after recovery"),
+            Self::Failed(error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for SyncError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::AuthenticationRequired => Some(&Failure::SignInRequired),
+            Self::Failed(error) => Some(error),
+            Self::CursorRejected => None,
+        }
+    }
 }
 
 impl SyncError {
-    fn failed(error: impl Display) -> Self {
-        Self::Failed(error.to_string())
+    fn failed(error: impl Into<Box<dyn Error + Send + Sync>>) -> Self {
+        Self::Failed(BackendError::operation(error))
     }
 }
 
@@ -291,3 +310,13 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "engine_tests.rs"]
 mod tests;
+
+impl Classified for SyncError {
+    fn failure(&self) -> Option<Failure> {
+        match self {
+            Self::AuthenticationRequired => Some(Failure::SignInRequired),
+            Self::Failed(error) => error.failure(),
+            Self::CursorRejected => None,
+        }
+    }
+}

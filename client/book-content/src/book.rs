@@ -14,6 +14,9 @@ use std::io::{self, Read, Seek};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod cache;
+pub use cache::ResourceFetch;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BookFormat {
     Epub,
@@ -149,6 +152,20 @@ impl Book {
         self.prepare_reading_inner::<false>(&mut PreparationProfile::default()).await
     }
 
+    /// Retain container metadata for independent lazy resource reads without
+    /// preparing text that has already been restored from a disk cache.
+    pub async fn into_resource_fetch(self) -> io::Result<ResourceFetch> {
+        let source = match self.container {
+            Container::Epub(epub) => ResourceSource::Epub(Arc::new(epub.into_provider().await?)),
+            Container::Mobi(mobi) => ResourceSource::Mobi(Arc::new(mobi.into_resources().await?)),
+            Container::Fb2(fb2) => ResourceSource::Fb2(fb2.into_resources()),
+        };
+        Ok(Arc::new(move |uri| {
+            let source = source.clone();
+            Box::pin(async move { source.read_resource(uri).await })
+        }))
+    }
+
     /// Runs the same preparation with per-stage and per-resource measurements.
     /// EPUB resources include wall time, active polling, and suspended time.
     /// The ordinary `prepare_reading` path does not sample clocks.
@@ -160,7 +177,7 @@ impl Book {
     }
 
     async fn prepare_reading_inner<const PROFILE: bool>(self, profile: &mut PreparationProfile) -> io::Result<ReadingBook> {
-        let (epub, toc) = match self.container {
+        let (epub, toc, navigation_complete) = match self.container {
             Container::Mobi(mobi) => return mobi.prepare_reading().await,
             Container::Fb2(fb2) => return fb2.prepare_reading(),
             Container::Epub(mut epub) => {
@@ -169,11 +186,12 @@ impl Book {
                     profile.record("toc", timing);
                 }
                 let toc = toc?.unwrap_or_default();
+                let navigation_complete = epub.navigation_complete();
                 let (epub, timing) = measure::<PROFILE, _>(epub.into_provider()).await;
                 if PROFILE {
                     profile.record("source_promotion", timing);
                 }
-                (Arc::new(epub?), toc)
+                (Arc::new(epub?), toc, navigation_complete)
             }
         };
         let started = PROFILE.then(Instant::now);
@@ -186,7 +204,7 @@ impl Book {
         if PROFILE {
             profile.record("text_resources", timing);
         }
-        let bytes = bytes?;
+        let (bytes, cache_complete) = bytes?;
         documents.retain(|uri| bytes.get(uri).is_some_and(|bytes| !bytes.is_empty()));
         if documents.is_empty() {
             documents = epub.package.fallback_documents().into_iter().filter(|uri| bytes.get(uri).is_some_and(|bytes| !bytes.is_empty())).collect();
@@ -199,7 +217,8 @@ impl Book {
         let types = epub.package.resource_media_types(&bytes);
         profile.record_sync("media_types", started);
         let started = PROFILE.then(Instant::now);
-        let reading = PreparedText { resources: PreparedResources::new(bytes, Some(types), documents), document_weights: weights, toc }.into_reading(ResourceSource::Epub(epub));
+        let mut reading = PreparedText { resources: PreparedResources::new(bytes, Some(types), documents), document_weights: weights, toc }.into_reading(ResourceSource::Epub(epub));
+        reading.cache_complete = cache_complete && navigation_complete;
         profile.record_sync("finish", started);
         Ok(reading)
     }
@@ -214,16 +233,29 @@ pub(crate) struct PreparedText {
 
 impl PreparedText {
     pub(crate) fn into_reading(self, source: ResourceSource) -> ReadingBook {
-        ReadingBook { resources: self.resources, document_weights: self.document_weights, source, toc: self.toc }
+        ReadingBook { resources: self.resources, document_weights: self.document_weights, source, toc: self.toc, cache_complete: true }
     }
 }
 
-/// Both formats retain immutable containers for on-demand binary resources.
+/// Immutable containers or a deferred fetcher for on-demand binary resources.
 #[derive(Clone)]
 pub(crate) enum ResourceSource {
     Epub(Arc<EpubProvider>),
     Mobi(Arc<MobiResources>),
     Fb2(Arc<Fb2Resources>),
+    Cached(Arc<cache::CachedResources>),
+}
+
+impl ResourceSource {
+    async fn read_resource(&self, uri: String) -> io::Result<Vec<u8>> {
+        let uri = local_resource_uri("", &uri)?;
+        match self {
+            Self::Epub(epub) => epub.read_bytes_async(&uri).await,
+            Self::Mobi(mobi) => mobi.read_bytes(&uri).await,
+            Self::Fb2(fb2) => fb2.read_bytes(&uri, crate::resources::MAX_BINARY_RESOURCE_BYTES),
+            Self::Cached(cached) => (cached.fetch)(uri).await,
+        }
+    }
 }
 
 /// Immutable documents and CSS for synchronous consumers, with asynchronous
@@ -233,15 +265,21 @@ pub struct ReadingBook {
     pub document_weights: Vec<u64>,
     source: ResourceSource,
     pub toc: Vec<BookTocEntry>,
+    cache_complete: bool,
 }
 
 impl ReadingBook {
+    pub(crate) fn prevent_caching(&mut self) {
+        self.cache_complete = false;
+    }
+
     /// Original OPF paths aligned with the final prepared document list. The
     /// renderer uses these for EPUB CFIs and synthetic addresses otherwise.
     pub fn publication_cfi_bases(&self) -> Option<Vec<Option<String>>> {
         match &self.source {
             ResourceSource::Epub(epub) => epub.package.cfi_bases(self.document_uris()),
             ResourceSource::Mobi(_) | ResourceSource::Fb2(_) => None,
+            ResourceSource::Cached(cached) => cached.cfi_bases.clone(),
         }
     }
 
@@ -251,6 +289,7 @@ impl ReadingBook {
             ResourceSource::Epub(epub) => epub.languages(),
             ResourceSource::Mobi(mobi) => mobi.languages(),
             ResourceSource::Fb2(fb2) => fb2.languages(),
+            ResourceSource::Cached(cached) => cached.languages.clone(),
         }
     }
 
@@ -264,14 +303,7 @@ impl ReadingBook {
         async move {
             match prepared {
                 Ok(bytes) => Ok(bytes),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    let uri = local_resource_uri("", &uri)?;
-                    match source {
-                        ResourceSource::Epub(epub) => epub.read_bytes_async(&uri).await,
-                        ResourceSource::Mobi(mobi) => mobi.read_bytes(&uri).await,
-                        ResourceSource::Fb2(fb2) => fb2.read_bytes(&uri, crate::resources::MAX_BINARY_RESOURCE_BYTES),
-                    }
-                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => source.read_resource(uri).await,
                 Err(error) => Err(error),
             }
         }

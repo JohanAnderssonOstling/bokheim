@@ -10,6 +10,7 @@ store = ["client", "dictionary-catalog/download", "dep:client-platform-runtime",
 
 [dependencies]
 dictionary-catalog = { path = "../catalog", optional = true }
+operation-failure = { path = "../../client-protocol/crates/operation-failure", features = ["web"] }
 client-platform-runtime = { path = "../../platforms/runtime", optional = true }
 tokio = { version = "1", features = ["sync"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }

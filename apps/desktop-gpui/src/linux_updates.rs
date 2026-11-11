@@ -1,5 +1,6 @@
 //! GPUI binding for the Linux startup/update host. Activation belongs to startup.
 pub use crate::update_binding::{bind_desktop as bind, healthy, trial_pending};
+use update_client::UpdateError;
 use linux_update_host::Host;
 pub use linux_update_host::Startup;
 use std::{
@@ -9,12 +10,12 @@ use std::{
 
 pub use crate::update_entry::candidate_entry;
 
-pub fn initialize(data: &Path) -> Result<Startup, String> {
+pub fn initialize(data: &Path) -> Result<Startup, UpdateError> {
     let Some(config) = crate::update_binding::startup_config(data)? else {
         return Ok(Startup::Run);
     };
-    let appimage = std::env::var_os("APPIMAGE").filter(|_| std::env::var_os("BOKHEIM_DISABLE_SELF_UPDATE").is_none()).map(PathBuf::from).map(|p| p.canonicalize().map_err(|e| e.to_string())).transpose()?;
-    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let appimage = std::env::var_os("APPIMAGE").filter(|_| std::env::var_os("BOKHEIM_DISABLE_SELF_UPDATE").is_none()).map(PathBuf::from).map(|p| p.canonicalize().map_err(UpdateError::operation)).transpose()?;
+    let executable = std::env::current_exe().map_err(UpdateError::operation)?;
     let mut host = Host::open(data, env!("CARGO_PKG_VERSION"), config, appimage, executable)?;
     let args = std::env::args_os().collect::<Vec<_>>();
     let trial = args.windows(2).find(|a| a[0] == "--bokheim-update-trial").and_then(|a| a[1].to_str());
@@ -27,7 +28,7 @@ pub fn initialize(data: &Path) -> Result<Startup, String> {
 
 /// Parent waits only during a new launch, while no previous user session exists.
 /// Failure returns to the old process, whose next startup recovers the journal.
-pub fn launch(data: &Path, executable: &Path, trial: Option<&str>, startup_arguments: &[String]) -> Result<bool, String> {
+pub fn launch(data: &Path, executable: &Path, trial: Option<&str>, startup_arguments: &[String]) -> Result<bool, UpdateError> {
     let mut command = std::process::Command::new(executable);
     command.env_remove("APPIMAGE").env_remove("APPDIR");
     command.args(startup_arguments);

@@ -1,4 +1,5 @@
 //! One durable lifecycle for native hosts; policies supply package differences.
+use update_client::UpdateError;
 use super::*;
 use std::ops::Deref;
 use update_client::{blocking, native_files::sync_file};
@@ -10,11 +11,11 @@ pub trait Platform: Sized {
         ApplicationActivation::Restart
     }
 
-    fn workspace(&self, host: &NativeHost<Self>) -> Result<u64, String> {
+    fn workspace(&self, host: &NativeHost<Self>) -> Result<u64, UpdateError> {
         databases::workspace(&host.data)
     }
 
-    fn preparation_wait(&self, _host: &NativeHost<Self>, _workspace: u64) -> Result<Option<WaitReason>, String> {
+    fn preparation_wait(&self, _host: &NativeHost<Self>, _workspace: u64) -> Result<Option<WaitReason>, UpdateError> {
         Ok(None)
     }
 }
@@ -36,11 +37,11 @@ impl<P> Deref for NativeHost<P> {
 }
 
 impl<P: Platform> NativeHost<P> {
-    pub(crate) fn open_platform(data: &Path, version: &str, config: DiscoveryConfig, platform: P) -> Result<Self, String> {
+    pub(crate) fn open_platform(data: &Path, version: &str, config: DiscoveryConfig, platform: P) -> Result<Self, UpdateError> {
         Self::open_for_startup(data, version, config, platform).map(|(host, _, _)| host)
     }
 
-    pub(crate) fn open_for_startup(data: &Path, version: &str, config: DiscoveryConfig, platform: P) -> Result<(Self, UpdateLock, Option<ActiveTaxonomy>), String> {
+    pub(crate) fn open_for_startup(data: &Path, version: &str, config: DiscoveryConfig, platform: P) -> Result<(Self, UpdateLock, Option<ActiveTaxonomy>), UpdateError> {
         let root = data.join("updates");
         let lock = UpdateLock::acquire(&root)?;
         let taxonomy = active(&root)?;
@@ -51,11 +52,11 @@ impl<P: Platform> NativeHost<P> {
         Ok((Self { root, data: data.into(), version: version.into(), coordinator, trial: false, platform }, lock, taxonomy))
     }
 
-    pub(crate) fn installed(&self) -> Result<DeviceVersion, String> {
+    pub(crate) fn installed(&self) -> Result<DeviceVersion, UpdateError> {
         self.installed_with_taxonomy(active(&self.root)?.as_ref())
     }
 
-    pub(crate) fn installed_with_taxonomy(&self, taxonomy: Option<&ActiveTaxonomy>) -> Result<DeviceVersion, String> {
+    pub(crate) fn installed_with_taxonomy(&self, taxonomy: Option<&ActiveTaxonomy>) -> Result<DeviceVersion, UpdateError> {
         let mut installed = device(&self.version, taxonomy)?;
         installed.target = self.platform.target();
         Ok(installed)
@@ -65,7 +66,7 @@ impl<P: Platform> NativeHost<P> {
         self.trial
     }
 
-    pub(crate) fn accept_trial(&mut self, journal: &Journal, trial: Option<&str>) -> Result<bool, String> {
+    pub(crate) fn accept_trial(&mut self, journal: &Journal, trial: Option<&str>) -> Result<bool, UpdateError> {
         if journal.state != State::Trial || trial != Some(journal.plan_id.as_str()) || journal.next_version != self.version {
             return Ok(false);
         }
@@ -79,7 +80,7 @@ impl<P: Platform> NativeHost<P> {
 
     /// A committed receipt remains available until the supervisor observes it.
     /// Bookkeeping errors after commit must never take down a usable app.
-    pub fn healthy(&mut self) -> Result<(), String> {
+    pub fn healthy(&mut self) -> Result<(), UpdateError> {
         if !self.trial {
             return Ok(());
         }
@@ -94,7 +95,7 @@ impl<P: Platform> NativeHost<P> {
         Ok(())
     }
 
-    pub fn approve(&mut self) -> Result<(), String> {
+    pub fn approve(&mut self) -> Result<(), UpdateError> {
         let _lock = self.reload_locked()?;
         self.coordinator.approve(now())
     }
@@ -103,13 +104,13 @@ impl<P: Platform> NativeHost<P> {
         self.coordinator.view(now())
     }
 
-    pub fn check_for_updates(&mut self) -> Result<(), String> {
+    pub fn check_for_updates(&mut self) -> Result<(), UpdateError> {
         let lock = self.reload_locked()?;
         self.acknowledge_committed()?;
         self.coordinator.check_for_updates(&self.root, &lock, &blocking::client(concat!("Bokheim-update/", env!("CARGO_PKG_VERSION")))?, now())
     }
 
-    pub fn prepare(&mut self) -> Result<UpdateView, String> {
+    pub fn prepare(&mut self) -> Result<UpdateView, UpdateError> {
         let lock = self.reload_locked()?;
         if self.coordinator.needs_preparation() {
             let workspace = self.workspace_bytes()?;
@@ -119,12 +120,12 @@ impl<P: Platform> NativeHost<P> {
             }
             let client = blocking::client(concat!("Bokheim-update/", env!("CARGO_PKG_VERSION")))?;
             if let Err(error) = self.coordinator.prepare(&self.root, &lock, &client, workspace, 0) {
-                self.coordinator.preparation_failed(WaitReason::Retry, error.clone())?;
+                self.coordinator.preparation_failed(WaitReason::from_error(&error), error.clone())?;
                 return Err(error);
             }
         }
         if let Err(error) = self.prepare_taxonomy(&lock) {
-            self.coordinator.activation_recovered_for_retry(WaitReason::Retry, error.clone())?;
+            self.coordinator.activation_recovered_for_retry(WaitReason::from_error(&error), error.clone())?;
             return Err(error);
         }
         Ok(self.view())
@@ -132,7 +133,7 @@ impl<P: Platform> NativeHost<P> {
 
     /// Publish an immutable reference for the next process. The running
     /// process keeps its selected snapshot and all existing library handles.
-    fn prepare_taxonomy(&mut self, lock: &UpdateLock) -> Result<(), String> {
+    fn prepare_taxonomy(&mut self, lock: &UpdateLock) -> Result<(), UpdateError> {
         if !self.coordinator.is_taxonomy_only() || !self.coordinator.record().approved.as_ref().is_some_and(|plan| matches!(plan.phase, Phase::Ready | Phase::Activating)) {
             return Ok(());
         }
@@ -146,7 +147,7 @@ impl<P: Platform> NativeHost<P> {
         let source = &paths.iter().find(|(kind, _)| *kind == ArtifactKind::Taxonomy).ok_or("missing staged taxonomy")?.1;
         let id = &self.coordinator.record().approved.as_ref().ok_or("missing approved taxonomy")?.id;
         let directory = self.root.join("generations").join(id);
-        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&directory).map_err(UpdateError::operation)?;
         let path = directory.join("taxonomy.sqlite3");
         // Never overwrite a snapshot selected by this or another process,
         // including a retry after publication but before acknowledgement.
@@ -171,20 +172,20 @@ impl<P: Platform> NativeHost<P> {
         self.coordinator.activated(installed)
     }
 
-    pub(crate) fn reload_locked(&mut self) -> Result<UpdateLock, String> {
+    pub(crate) fn reload_locked(&mut self) -> Result<UpdateLock, UpdateError> {
         let lock = UpdateLock::acquire(&self.root)?;
         self.coordinator.reload()?;
         Ok(lock)
     }
 
-    pub(crate) fn acknowledge(&mut self, journal: &Journal) -> Result<(), String> {
+    pub(crate) fn acknowledge(&mut self, journal: &Journal) -> Result<(), UpdateError> {
         if self.coordinator.record().approved.as_ref().is_some_and(|plan| plan.id == journal.plan_id) {
             self.coordinator.activated(self.installed()?)?;
         }
         Ok(())
     }
 
-    pub(crate) fn acknowledge_committed(&mut self) -> Result<(), String> {
+    pub(crate) fn acknowledge_committed(&mut self) -> Result<(), UpdateError> {
         if let Some(journal) = Journal::load(&self.root)? {
             if journal.state == State::Committed {
                 self.acknowledge(&journal)?;
@@ -193,7 +194,7 @@ impl<P: Platform> NativeHost<P> {
         Ok(())
     }
 
-    pub(crate) fn recover(&mut self, journal: &Journal, reason: String) -> Result<(), String> {
+    pub(crate) fn recover(&mut self, journal: &Journal, reason: UpdateError) -> Result<(), UpdateError> {
         if journal.state == State::Committed {
             return Ok(());
         }
@@ -204,7 +205,7 @@ impl<P: Platform> NativeHost<P> {
         Journal::clear(&self.root)
     }
 
-    pub(crate) fn failed_activation(&mut self, reason: String) -> Result<(), String> {
+    pub(crate) fn failed_activation(&mut self, reason: UpdateError) -> Result<(), UpdateError> {
         if let Some(journal) = Journal::load(&self.root)? {
             self.recover(&journal, reason)
         } else {
@@ -216,13 +217,13 @@ impl<P: Platform> NativeHost<P> {
         }
     }
 
-    pub(crate) fn finish_committed(&mut self, journal: &Journal) -> Result<(), String> {
+    pub(crate) fn finish_committed(&mut self, journal: &Journal) -> Result<(), UpdateError> {
         self.acknowledge(journal)?;
         Journal::clear(&self.root)?;
         self.cleanup_committed()
     }
 
-    pub(crate) fn workspace_bytes(&self) -> Result<u64, String> {
+    pub(crate) fn workspace_bytes(&self) -> Result<u64, UpdateError> {
         if self.coordinator.is_taxonomy_only() {
             return self
                 .coordinator
@@ -237,7 +238,7 @@ impl<P: Platform> NativeHost<P> {
         self.platform.workspace(self)
     }
 
-    pub(crate) fn data_workspace(&self) -> Result<u64, String> {
+    pub(crate) fn data_workspace(&self) -> Result<u64, UpdateError> {
         let mut bytes = databases::workspace(&self.data)?;
         if let Some(plan) = &self.coordinator.record().approved {
             for artifact in &plan.artifacts {
@@ -247,35 +248,35 @@ impl<P: Platform> NativeHost<P> {
         Ok(bytes)
     }
 
-    pub(crate) fn select_taxonomy(&self) -> Result<(), String> {
+    pub(crate) fn select_taxonomy(&self) -> Result<(), UpdateError> {
         activate_taxonomy(active(&self.root)?.as_ref())
     }
 
-    pub(crate) fn cleanup_committed(&self) -> Result<(), String> {
+    pub(crate) fn cleanup_committed(&self) -> Result<(), UpdateError> {
         let active = active(&self.root)?.map(|taxonomy| taxonomy.path);
         let pending = self.coordinator.record().approved.as_ref().map(|plan| plan.id.as_str());
         for directory in ["generations", "staging"] {
             let parent = self.root.join(directory);
-            if !parent.try_exists().map_err(|error| error.to_string())? {
+            if !parent.try_exists().map_err(UpdateError::operation)? {
                 continue;
             }
-            for entry in fs::read_dir(parent).map_err(|error| error.to_string())? {
-                let entry = entry.map_err(|error| error.to_string())?;
+            for entry in fs::read_dir(parent).map_err(UpdateError::operation)? {
+                let entry = entry.map_err(UpdateError::operation)?;
                 let name = entry.file_name();
-                if !entry.file_type().map_err(|error| error.to_string())?.is_dir() || pending == name.to_str() || update_client::decode_hex::<32>(&name.to_string_lossy()).is_err() {
+                if !entry.file_type().map_err(UpdateError::operation)?.is_dir() || pending == name.to_str() || update_client::decode_hex::<32>(&name.to_string_lossy()).is_err() {
                     continue;
                 }
                 let path = entry.path();
                 if active.as_ref().and_then(|path| path.parent()) == Some(path.as_path()) {
-                    for file in fs::read_dir(path).map_err(|error| error.to_string())? {
-                        let file = file.map_err(|error| error.to_string())?;
+                    for file in fs::read_dir(path).map_err(UpdateError::operation)? {
+                        let file = file.map_err(UpdateError::operation)?;
                         if active.as_ref() == Some(&file.path()) {
                             continue;
                         }
-                        if file.file_type().map_err(|error| error.to_string())?.is_dir() { fs::remove_dir_all(file.path()) } else { fs::remove_file(file.path()) }.map_err(|error| error.to_string())?;
+                        if file.file_type().map_err(UpdateError::operation)?.is_dir() { fs::remove_dir_all(file.path()) } else { fs::remove_file(file.path()) }.map_err(UpdateError::operation)?;
                     }
                 } else {
-                    fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+                    fs::remove_dir_all(path).map_err(UpdateError::operation)?;
                 }
             }
         }
@@ -283,7 +284,7 @@ impl<P: Platform> NativeHost<P> {
     }
 }
 
-pub(crate) fn activate_taxonomy(taxonomy: Option<&ActiveTaxonomy>) -> Result<(), String> {
+pub(crate) fn activate_taxonomy(taxonomy: Option<&ActiveTaxonomy>) -> Result<(), UpdateError> {
     if let Some(taxonomy) = taxonomy {
         subject_projection::installed::activate(&taxonomy.path)?;
     }

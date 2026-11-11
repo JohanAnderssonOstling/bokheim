@@ -1,4 +1,5 @@
 //! Adapter for the browser's Web Speech synthesis service.
+use crate::SpeechError;
 use crate::{DeviceVoice, FIRST_CHUNK_CHARS, MAX_CHUNK_CHARS, Pauses, SpeechChunk, SpeechControl, SpeechEvent, SpeechFailure, SpeechPassage, next_chunk_with_language};
 use async_channel::{Receiver, bounded, unbounded};
 use serde::Deserialize;
@@ -55,7 +56,7 @@ extern "C" {
     fn dispose(this: &BrowserSpeech);
 }
 
-pub fn device_voices() -> Result<Vec<DeviceVoice>, String> {
+pub fn device_voices() -> Result<Vec<DeviceVoice>, SpeechError> {
     serde_json::from_str(&browser_device_voices()).map_err(|_| "Could not read installed local voices. Try opening the voice picker again.".into())
 }
 
@@ -92,7 +93,7 @@ enum BrowserEvent {
     Requested { generation: u64, index: usize, glyph_start: u32, max_chars: usize },
     Started { generation: u64, index: usize, glyph_ranges: Vec<[u32; 2]> },
     Finished { generation: u64 },
-    Failed { generation: u64, failure: SpeechFailure, message: String },
+    Failed { generation: u64, failure: SpeechFailure, message: SpeechError },
     Stopped { generation: u64 },
 }
 
@@ -105,7 +106,7 @@ pub struct DesktopSpeech {
 }
 
 impl DesktopSpeech {
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self, SpeechError> {
         let (sender, events) = unbounded();
         let event = Closure::own_aborting(move |event: JsValue| {
             let parsed = js_sys::JSON::stringify(&event).ok().and_then(|value| value.as_string()).and_then(|value| serde_json::from_str::<BrowserEvent>(&value).ok());
@@ -119,7 +120,7 @@ impl DesktopSpeech {
             };
             let _ = sender.try_send(event);
         });
-        let browser = BrowserSpeech::new(event.as_ref().unchecked_ref()).map_err(|_| "Browser speech is unavailable. Check your installed voices and try again.".to_owned())?;
+        let browser = BrowserSpeech::new(event.as_ref().unchecked_ref()).map_err(SpeechError::from)?;
         Ok(Self { browser, languages: RefCell::new(Vec::new()), events, _event: event })
     }
 
@@ -128,7 +129,7 @@ impl DesktopSpeech {
     }
     pub fn set_title(&self, _title: &str) {}
     pub fn set_media_metadata(&self, _author: &str, _chapter: &str, _cover: &[u8]) {}
-    pub fn set_device_voice(&self, id: Option<&str>) -> Result<u64, String> {
+    pub fn set_device_voice(&self, id: Option<&str>) -> Result<u64, SpeechError> {
         self.browser.set_device_voice(id.map(str::to_owned)).map(|generation| generation as u64).map_err(|_| "The selected installed local voice is unavailable for this book’s language. Choose another local voice.".into())
     }
     pub fn set_languages(&self, languages: &[String]) {

@@ -48,11 +48,11 @@ impl CpuHost for WebHost {
 }
 
 /// Dropping the range server releases the request's worker-side stream.
-pub fn serve_reader<R: Read + Seek + Send + 'static>(mut reader: R) -> Result<Server, String> {
-    let length = reader.seek(SeekFrom::End(0)).map_err(|error| error.to_string())?;
-    Server::sync(length, move |offset, length| crate::reader::read_range(&mut reader, offset, length.min(256 * 1024)).map_err(|error| error.to_string()))
+pub fn serve_reader<R: Read + Seek + Send + 'static>(mut reader: R) -> Result<Server, operation_failure::OperationError> {
+    let length = reader.seek(SeekFrom::End(0)).map_err(operation_failure::OperationError::from)?;
+    Server::sync(length, move |offset, length| crate::reader::read_range(&mut reader, offset, length.min(256 * 1024)).map_err(operation_failure::OperationError::from))
 }
 
-pub async fn run_book_operation_with_source<C: BookOperation>(operation: C, source: JsValue) -> Result<C::Reply, String> {
-    C::decode(send(operation.request(), source).await.map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+pub async fn run_book_operation_with_source<C: BookOperation>(operation: C, source: JsValue) -> Result<C::Reply, BackendError> {
+    C::decode(send(operation.request(), source).await?)
 }

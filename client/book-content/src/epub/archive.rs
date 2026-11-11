@@ -11,7 +11,7 @@ use async_zip::base::read1::{
 };
 use futures_lite::io::AsyncReadExt;
 
-use super::{MAX_ARCHIVE_ENTRIES, MAX_BINARY_RESOURCE_BYTES, MAX_PACKAGE_DOCUMENT_BYTES};
+use super::MAX_ARCHIVE_ENTRIES;
 use crate::resource_path::{normalize_path, resource_entry};
 
 use crate::profile::{PreparationTiming, ResourceReadTiming, measure};
@@ -120,11 +120,11 @@ impl ArchiveReader {
         Self { metadata, source }
     }
     pub(crate) async fn open(source: Source) -> io::Result<Self> {
-        Self::open_with_limit(source, MAX_BINARY_RESOURCE_BYTES.max(MAX_PACKAGE_DOCUMENT_BYTES)).await
+        Self::open_with_limit(source, u64::MAX).await
     }
     pub(crate) async fn open_with_limit(mut source: Source, limit: u64) -> io::Result<Self> {
         // EPUB exporters often leave stale local headers and checksums. Read
-        // using the central directory, enforcing limits on actual decoded data.
+        // using the central directory. Callers bound decoded reads when needed.
         let options = ZipOptions {
             validate_eor_is_eoa: false,
             validate_compressed_size_header_match: false,

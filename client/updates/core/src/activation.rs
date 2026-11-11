@@ -1,6 +1,7 @@
 //! Native startup transaction. The host holds application ownership and UpdateLock.
 //! Durable backups precede mutations; recovery is repeatable after any interruption.
 
+use crate::UpdateError;
 use crate::native_files::{remove, sync_file};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -33,34 +34,34 @@ pub struct Journal {
     pub state: State,
 }
 
-pub fn sync_dir(path: &Path) -> Result<(), String> {
+pub fn sync_dir(path: &Path) -> Result<(), UpdateError> {
     crate::native_files::sync_dir(path)
 }
-pub fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+pub fn write_json(path: &Path, value: &impl Serialize) -> Result<(), UpdateError> {
+    let bytes = serde_json::to_vec(value).map_err(UpdateError::operation)?;
     atomic_bytes(path, &bytes)
 }
-fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    update_files::write_atomic(path, &path.with_extension("writing"), bytes, None, |_| {}).map(|_| ()).map_err(|e| e.to_string())
+fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), UpdateError> {
+    update_files::write_atomic(path, &path.with_extension("writing"), bytes, None, |_| {}).map(|_| ()).map_err(UpdateError::operation)
 }
-pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
-    serde_json::from_reader(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, UpdateError> {
+    serde_json::from_reader(File::open(path).map_err(UpdateError::operation)?).map_err(UpdateError::operation)
 }
 
 /// The SQLite backup API includes committed WAL pages and never copies a live
 /// database by reading its main file alone. Also used to restore the prior schema.
-pub fn copy_database(source: &Path, destination: &Path) -> Result<(), String> {
-    let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
-    let mut dst = Connection::open(destination).map_err(|e| e.to_string())?;
-    dst.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
+pub fn copy_database(source: &Path, destination: &Path) -> Result<(), UpdateError> {
+    let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(UpdateError::operation)?;
+    let mut dst = Connection::open(destination).map_err(UpdateError::operation)?;
+    dst.busy_timeout(std::time::Duration::from_secs(5)).map_err(UpdateError::operation)?;
     {
-        let backup = rusqlite::backup::Backup::new(&src, &mut dst).map_err(|e| e.to_string())?;
-        match backup.step(-1).map_err(|e| e.to_string())? {
+        let backup = rusqlite::backup::Backup::new(&src, &mut dst).map_err(UpdateError::operation)?;
+        match backup.step(-1).map_err(UpdateError::operation)? {
             rusqlite::backup::StepResult::Done => {}
             _ => return Err("database is busy; backup must be retried".into()),
         }
     }
-    let (busy, _, _): (i64, i64, i64) = dst.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|e| e.to_string())?;
+    let (busy, _, _): (i64, i64, i64) = dst.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(UpdateError::operation)?;
     if busy != 0 {
         return Err("database checkpoint is busy".into());
     }
@@ -69,27 +70,27 @@ pub fn copy_database(source: &Path, destination: &Path) -> Result<(), String> {
     sync_dir(destination.parent().ok_or("database has no parent")?)
 }
 
-pub fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
-    update_files::copy_atomic(source, destination, &destination.with_extension("update-writing")).map_err(|e| e.to_string())
+pub fn copy_file(source: &Path, destination: &Path) -> Result<(), UpdateError> {
+    update_files::copy_atomic(source, destination, &destination.with_extension("update-writing")).map_err(UpdateError::operation)
 }
 
-fn identical(left: &Path, right: &Path) -> Result<bool, String> {
-    if !right.try_exists().map_err(|e| e.to_string())? {
+fn identical(left: &Path, right: &Path) -> Result<bool, UpdateError> {
+    if !right.try_exists().map_err(UpdateError::operation)? {
         return Ok(false);
     }
-    let mut a = File::open(left).map_err(|e| e.to_string())?;
-    let mut b = File::open(right).map_err(|e| e.to_string())?;
-    if a.metadata().map_err(|e| e.to_string())?.len() != b.metadata().map_err(|e| e.to_string())?.len() {
+    let mut a = File::open(left).map_err(UpdateError::operation)?;
+    let mut b = File::open(right).map_err(UpdateError::operation)?;
+    if a.metadata().map_err(UpdateError::operation)?.len() != b.metadata().map_err(UpdateError::operation)?.len() {
         return Ok(false);
     }
     let mut x = [0u8; 65536];
     let mut y = [0u8; 65536];
     loop {
-        let n = a.read(&mut x).map_err(|e| e.to_string())?;
+        let n = a.read(&mut x).map_err(UpdateError::operation)?;
         if n == 0 {
             return Ok(true);
         }
-        b.read_exact(&mut y[..n]).map_err(|e| e.to_string())?;
+        b.read_exact(&mut y[..n]).map_err(UpdateError::operation)?;
         if x[..n] != y[..n] {
             return Ok(false);
         }
@@ -97,17 +98,17 @@ fn identical(left: &Path, right: &Path) -> Result<bool, String> {
 }
 
 impl Journal {
-    pub fn save(&self, root: &Path) -> Result<(), String> {
+    pub fn save(&self, root: &Path) -> Result<(), UpdateError> {
         write_json(&root.join("activation.json"), self)
     }
-    pub fn load(root: &Path) -> Result<Option<Self>, String> {
+    pub fn load(root: &Path) -> Result<Option<Self>, UpdateError> {
         let path = root.join("activation.json");
-        if !path.try_exists().map_err(|e| e.to_string())? {
+        if !path.try_exists().map_err(UpdateError::operation)? {
             return Ok(None);
         }
         read_json(&path).map(Some)
     }
-    pub fn promote(&mut self, root: &Path) -> Result<(), String> {
+    pub fn promote(&mut self, root: &Path) -> Result<(), UpdateError> {
         // This durable record makes even an interrupted first replacement recoverable.
         self.state = State::Applying;
         self.save(root)?;
@@ -121,14 +122,14 @@ impl Journal {
         self.state = State::Trial;
         self.save(root)
     }
-    pub fn commit(&mut self, root: &Path) -> Result<(), String> {
+    pub fn commit(&mut self, root: &Path) -> Result<(), UpdateError> {
         if self.state != State::Trial {
             return Err("update trial is not ready to commit".into());
         }
         self.state = State::Committed;
         self.save(root)
     }
-    pub fn recover(&self, root: &Path) -> Result<(), String> {
+    pub fn recover(&self, root: &Path) -> Result<(), UpdateError> {
         if self.state == State::Committed {
             return Ok(());
         }
@@ -139,14 +140,14 @@ impl Journal {
                 } else if !identical(previous, &entry.destination)? {
                     copy_file(previous, &entry.destination)?;
                 }
-            } else if entry.destination.try_exists().map_err(|e| e.to_string())? {
+            } else if entry.destination.try_exists().map_err(UpdateError::operation)? {
                 remove(&entry.destination)?;
             }
         }
         // Host clears only after its coordinator has recorded recovery too.
         sync_dir(root)
     }
-    pub fn clear(root: &Path) -> Result<(), String> {
+    pub fn clear(root: &Path) -> Result<(), UpdateError> {
         remove(&root.join("activation.json"))
     }
 }
@@ -182,7 +183,7 @@ mod tests {
         interrupted.recover(p).unwrap();
         interrupted.recover(p).unwrap();
         let db = Connection::open(p.join("live.db")).unwrap();
-        assert_eq!(db.query_row("SELECT v FROM book", [], |r| r.get::<_, String>(0)).unwrap(), "original");
+        assert_eq!(db.query_row("SELECT v FROM book", [], |r| r.get::<_, UpdateError>(0)).unwrap(), "original");
         assert_eq!(db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 1);
         for path in ["live.db", "prior.db", "next.db"] {
             let connection = Connection::open(p.join(path)).unwrap();

@@ -2,7 +2,7 @@ use crate::bandwidth::{TransferGovernor, TransferLimits};
 use crate::notifications::{NotificationConfig, NotificationHub};
 use crate::{Readiness, RequestLimits};
 use server_account::PostgresAccountService;
-use server_postgres::{AssetApplication, PostgresSyncRepository};
+use server_postgres::{AssetApplication, PostgresBillingService, PostgresSyncRepository};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -61,6 +61,7 @@ pub(crate) struct AppState {
     pub(crate) account: Arc<PostgresAccountService>,
     pub(crate) sync: Arc<PostgresSyncRepository>,
     pub(crate) assets: Arc<AssetApplication>,
+    pub(crate) billing: PostgresBillingService,
     pub(crate) readiness: Arc<Readiness>,
     pub(crate) transfer_governor: TransferGovernor,
     pub(crate) thumbnail_uploads: Arc<ThumbnailUploadGate>,
@@ -77,6 +78,7 @@ impl AppState {
             account,
             sync,
             assets,
+            billing: PostgresBillingService::new(readiness.database.clone()),
             readiness,
             transfer_governor: TransferGovernor::new(transfer_limits),
             thumbnail_uploads: Arc::new(ThumbnailUploadGate::new(

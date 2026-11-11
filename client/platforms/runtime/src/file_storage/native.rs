@@ -16,9 +16,9 @@ pub fn read_sync(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-pub async fn read(path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub async fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let path = path.to_owned();
-    run_blocking(move || read_sync(&path)).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())
+    run_blocking(move || read_sync(&path)).await.map_err(io::Error::other)?
 }
 
 /// Publish a complete file by atomically replacing its previous contents.
@@ -32,38 +32,39 @@ pub fn write_atomic_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-pub async fn write_atomic(path: &Path, bytes: Vec<u8>) -> Result<(), String> {
+/// Preserve I/O error kinds for callers that present actionable storage failures.
+pub async fn write_atomic(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
     let path = path.to_owned();
-    storage_queue::run(move || write_atomic_sync(&path, &bytes)).await?.map_err(|error| error.to_string())
+    storage_queue::run(move || write_atomic_sync(&path, &bytes)).await.map_err(io::Error::other)?
 }
 
-pub async fn open(path: &Path) -> Result<Source, String> {
+pub async fn open(path: &Path) -> io::Result<Source> {
     let path = path.to_owned();
-    run_blocking(move || File::open(path)).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())
+    run_blocking(move || File::open(path)).await.map_err(io::Error::other)?
 }
 
-pub async fn remove_directory(path: &Path) -> Result<(), String> {
+pub async fn remove_directory(path: &Path) -> io::Result<()> {
     let path = path.to_owned();
     storage_queue::run(move || match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error),
     })
-    .await?
+    .await.map_err(io::Error::other)?
 }
 
-pub async fn file_size(path: &Path) -> Result<Option<u64>, String> {
+pub async fn file_size(path: &Path) -> io::Result<Option<u64>> {
     let path = path.to_owned();
     run_blocking(move || match fs::metadata(path) {
         Ok(metadata) => Ok(Some(metadata.len())),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error),
     })
-    .await.map_err(|error| error.to_string())?
+    .await.map_err(io::Error::other)?
 }
 
 /// List regular files directly inside a directory; a missing directory is empty.
-pub async fn list_directory(path: &Path) -> Result<Vec<DirectoryEntry>, String> {
+pub async fn list_directory(path: &Path) -> io::Result<Vec<DirectoryEntry>> {
     let path = path.to_owned();
     run_blocking(move || -> io::Result<Vec<DirectoryEntry>> {
         let entries = match fs::read_dir(path) {
@@ -87,16 +88,15 @@ pub async fn list_directory(path: &Path) -> Result<Vec<DirectoryEntry>, String> 
         }
         Ok(files)
     })
-    .await.map_err(|error| error.to_string())?
-    .map_err(|error| error.to_string())
+    .await.map_err(io::Error::other)?
 }
 
-pub async fn remove_file(path: &Path) -> Result<(), String> {
+pub async fn remove_file(path: &Path) -> io::Result<()> {
     let path = path.to_owned();
     storage_queue::run(move || match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error),
     })
-    .await?
+    .await.map_err(io::Error::other)?
 }

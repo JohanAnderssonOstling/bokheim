@@ -162,4 +162,39 @@ WHERE source_root IS NULL AND relative_path >= :prefix AND relative_path < :uppe
 -- name: native_has_pending_file_work ->
 SELECT EXISTS(SELECT 1 FROM local_directory_work)
     OR EXISTS(SELECT 1 FROM local_file_work)
-    OR EXISTS(SELECT 1 FROM local_book_work);
+    OR EXISTS(SELECT 1 FROM local_book_work)
+    OR EXISTS(SELECT 1 FROM local_directory_projection p LEFT JOIN dir d ON d.id=p.dir_id WHERE d.id IS NULL);
+
+-- Remove purged folder trees after their book-file work finishes.
+-- name: native_directory_purges?
+SELECT p.dir_id,trim(p.relative_path,'/')
+FROM local_directory_projection p LEFT JOIN dir d ON d.id=p.dir_id
+WHERE d.id IS NULL
+ORDER BY length(trim(p.relative_path,'/')) DESC,p.dir_id;
+
+-- name: native_directory_purge_ready ->
+-- param: dir_id: &str
+-- param: relative_path: &str
+-- param: prefix: &str
+SELECT EXISTS(
+    SELECT 1 FROM local_directory_projection p LEFT JOIN dir d ON d.id=p.dir_id
+    WHERE p.dir_id=:dir_id AND trim(p.relative_path,'/')=:relative_path AND d.id IS NULL
+)
+AND NOT EXISTS(
+    SELECT 1 FROM local_file_work
+    WHERE source_root IS NULL AND (ltrim(relative_path,'/')=:relative_path OR substr(ltrim(relative_path,'/'),1,length(:prefix))=:prefix)
+)
+AND NOT EXISTS(
+    SELECT 1 FROM local_file_projection
+    WHERE ltrim(relative_path,'/')=:relative_path OR substr(ltrim(relative_path,'/'),1,length(:prefix))=:prefix
+)
+AND NOT EXISTS(
+    SELECT 1 FROM local_directory_projection
+    WHERE dir_id!=:dir_id AND (trim(relative_path,'/')=:relative_path OR substr(ltrim(relative_path,'/'),1,length(:prefix))=:prefix)
+);
+
+-- name: native_forget_purged_directory!
+-- param: dir_id: &str
+-- param: relative_path: &str
+DELETE FROM local_directory_projection WHERE dir_id=:dir_id AND trim(relative_path,'/')=:relative_path
+    AND NOT EXISTS(SELECT 1 FROM dir WHERE id=:dir_id);

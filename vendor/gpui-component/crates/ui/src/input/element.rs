@@ -273,7 +273,7 @@ impl TextElement {
     /// - current row index (No only the visible lines, but all lines)
     ///
     /// This method also will update for track scroll to cursor.
-    fn layout_cursor(&self, last_layout: &LastLayout, bounds: &mut Bounds<Pixels>, scroll_size: Size<Pixels>, _: &mut Window, cx: &mut App) -> (Option<Bounds<Pixels>>, Point<Pixels>, Option<usize>) {
+    fn layout_cursor(&self, last_layout: &LastLayout, bounds: &mut Bounds<Pixels>, scroll_size: Size<Pixels>, window: &mut Window, cx: &mut App) -> (Option<Bounds<Pixels>>, Point<Pixels>, Option<usize>) {
         let state = self.state.read(cx);
 
         let line_height = last_layout.line_height;
@@ -413,6 +413,21 @@ impl TextElement {
             scroll_offset = deferred_scroll_offset;
         }
         scroll_offset.y = clamp_auto_grow_vertical_scroll_offset(&state.mode, scroll_offset.y, scroll_size.height, bounds.size.height);
+
+        let anchor = if state.selection_reversed { state.selected_range.end } else { state.selected_range.start };
+        if !state.selecting && !state.auto_scroll.is_active() && window.should_autoscroll_input(&state.focus_handle, bounds.size, anchor..state.cursor(), state.text_revision) {
+            // Resizing an editor for the keyboard can hide a caret without
+            // changing the selection. Resolve its internal scroll in this pass,
+            // before asking enclosing surfaces to reveal the resulting caret.
+            let margin = px(12.0).min(((bounds.size.height - line_height) / 2.0).max(px(0.0)));
+            let top = cursor_pos.y + scroll_offset.y;
+            if top < margin {
+                scroll_offset.y += margin - top;
+            } else if top + line_height > bounds.size.height - margin {
+                scroll_offset.y -= top + line_height - (bounds.size.height - margin);
+            }
+            scroll_offset.y = scroll_offset.y.clamp(-(scroll_size.height - bounds.size.height).max(px(0.0)), px(0.0));
+        }
 
         bounds.origin = bounds.origin + scroll_offset;
 
@@ -929,43 +944,10 @@ fn print_points_as_svg_path(line_corners: &Vec<gpui::Corners<Pixels>>, points: &
         }
     }
 }
-impl Element for TextElement {
-    type RequestLayoutState = ();
-    type PrepaintState = PrepaintState;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(&mut self, _id: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
-        let state = self.state.read(cx);
-        let line_height = window.line_height();
-
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        if state.mode.is_multi_line() {
-            style.flex_grow = 1.0;
-            style.size.height = relative(1.).into();
-            if state.mode.is_auto_grow() {
-                // Auto grow to let height match to rows, but not exceed max rows.
-                let rows = state.mode.max_rows().min(state.mode.rows());
-                style.min_size.height = (rows * line_height).into();
-            } else {
-                style.min_size.height = line_height.into();
-            }
-        } else {
-            // For single-line inputs, the minimum height should be the line height
-            style.size.height = line_height.into();
-        };
-
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(&mut self, _id: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _request_layout: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
+impl TextElement {
+    /// Lay out this text leaf. An internal scroll correction can require a new
+    /// visible line range, but never requires re-rendering the surrounding UI.
+    fn prepaint_text(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App, retry: bool) -> Result<PrepaintState, ()> {
         let style = window.text_style();
         let font = style.font();
         let text_size = style.font_size.to_pixels(window.rem_size());
@@ -1137,6 +1119,32 @@ impl Element for TextElement {
         let (cursor_bounds, cursor_scroll_offset, current_row) = self.layout_cursor(&last_layout, &mut bounds, scroll_size, window, cx);
         last_layout.cursor_bounds = cursor_bounds;
 
+        let state = self.state.read(cx);
+        if !state.selecting && !state.auto_scroll.is_active() {
+            let target = cursor_bounds
+                .map(|mut caret| {
+                    caret.origin.y += cursor_scroll_offset.y;
+                    caret
+                })
+                .unwrap_or(input_bounds);
+            let anchor = if state.selection_reversed { state.selected_range.end } else { state.selected_range.start };
+            let needs_reshape = window.should_autoscroll_input(&state.focus_handle, input_bounds.size, anchor..state.cursor(), state.text_revision) && cursor_scroll_offset.y != state.scroll_handle.offset().y;
+            if needs_reshape && retry {
+                // Only the newly visible text needs shaping. Keep the scroll
+                // correction, discard this attempt, and retry this leaf element.
+                self.state.update(cx, |state, _| {
+                    state.scroll_handle.set_offset(cursor_scroll_offset);
+                    state.deferred_scroll_offset = Some(cursor_scroll_offset);
+                });
+                return Err(());
+            }
+            if !needs_reshape {
+                // If local shaping exhausted its budget, leave the reveal
+                // pending. Painting saves the offset for the next normal draw.
+                window.request_input_autoscroll(&state.focus_handle, target, input_bounds.size, anchor..state.cursor(), state.text_revision);
+            }
+        }
+
         #[cfg(feature = "input-search")]
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
         let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
@@ -1169,7 +1177,7 @@ impl Element for TextElement {
         state.editor_scrollbar_snapshot.set(Some(EditorScrollbarSnapshot::new(input_bounds, &last_layout, scroll_size, cursor_scroll_offset, state)));
         let fold_icon_layout = self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
 
-        PrepaintState {
+        Ok(PrepaintState {
             bounds,
             last_layout,
             scroll_size,
@@ -1182,7 +1190,60 @@ impl Element for TextElement {
             search_match_paths,
             indent_guides_path,
             fold_icon_layout,
+        })
+    }
+}
+
+impl Element for TextElement {
+    type RequestLayoutState = ();
+    type PrepaintState = PrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _id: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
+        let state = self.state.read(cx);
+        let line_height = window.line_height();
+
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        if state.mode.is_multi_line() {
+            style.flex_grow = 1.0;
+            style.size.height = relative(1.).into();
+            if state.mode.is_auto_grow() {
+                // Auto grow to let height match to rows, but not exceed max rows.
+                let rows = state.mode.max_rows().min(state.mode.rows());
+                style.min_size.height = (rows * line_height).into();
+            } else {
+                style.min_size.height = line_height.into();
+            }
+        } else {
+            // For single-line inputs, the minimum height should be the line height
+            style.size.height = line_height.into();
+        };
+
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(&mut self, _id: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _request_layout: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
+        let state = self.state.read(cx);
+        let anchor = if state.selection_reversed { state.selected_range.end } else { state.selected_range.start };
+        let reveal = !state.selecting && !state.auto_scroll.is_active() && window.should_autoscroll_input(&state.focus_handle, bounds.size, anchor..state.cursor(), state.text_revision);
+        if !reveal {
+            // Ordinary draws, including non-Kobo windows, need no transaction.
+            return self.prepaint_text(bounds, window, cx, false).expect("text layout without retries must finish");
         }
+        for attempt in 0..=2 {
+            if let Ok(layout) = window.transact(|window| self.prepaint_text(bounds, window, cx, attempt < 2)) {
+                return layout;
+            }
+        }
+        unreachable!("the final text layout attempt cannot request another retry")
     }
 
     fn paint(

@@ -42,6 +42,12 @@ Account and synchronization PostgreSQL code remain separate modules over the
 shared `server-postgres::PostgresDatabase` capability and do not share
 credential or synchronization persistence.
 
+`server-postgres::PostgresBillingService` provides provider-neutral storage
+plans, subscription snapshots, atomic event receipts and a durable cancellation
+outbox. Authenticated clients can read `/api/account/entitlements`; checkout and
+payment processing are not configured. See [billing infrastructure](BILLING.md)
+for the adapter boundary, quota semantics and installation steps.
+
 ## Boundary enforcement
 
 - Every server package is `publish = false` and inherits workspace lints that
@@ -262,9 +268,9 @@ modification time, and deletion flag; the client's stored annotation blob
 serializes that same type. Existing flat JSON and positional binary layouts
 remain readable and writable without converting between mirrored value types.
 
-Protocol 32 requires matching clients and servers. Historical inner payload
-versions are rejected. Storage codec 18 and SQLite library schema 54 use the
-current domain layout; PostgreSQL sync schema 17 starts new installations.
+Protocol 33 requires matching clients and servers. Historical inner payload
+versions are rejected. Storage codec 18 and SQLite library schema 55 use the
+current domain layout; PostgreSQL sync schema 20 starts new installations.
 Queue generations use the publisher's monotonic sequence; forwarded state
 retains its original authored version. Push responses list
 only rejected sequences, and clients acknowledge exactly the submitted sequences
@@ -432,10 +438,26 @@ address. Embedded certificate management is deliberately not part of the
 application. See [`deploy/README.md`](deploy/README.md) for the complete public
 Internet deployment.
 
-PostgreSQL stores content hashes and book register keys as raw 32-byte digests,
-and other register keys as UTF-8 bytea values. JSON hashes remain hexadecimal
+PostgreSQL stores legacy book IDs as raw 32-byte digests and local IDs as
+33-byte tagged digests. New local IDs use tag 3 and the initial content checksum,
+without a library scope; tag 2 is retained only for decoding pre-migration IDs.
+Other register keys use UTF-8 bytea values. JSON hashes remain hexadecimal
 and register addresses retain their existing strings.
 
-Initialize an empty database with `sync-server migrate`. Existing databases
-must already match the current schema; `sync-server verify-schema` checks it.
-Historical schema upgrades are not supported.
+Initialize an empty database with `sync-server migrate`. Existing schemas 14,
+17, 18 and 19 upgrade automatically on startup before any workers or HTTP
+listeners start. Current databases only read the schema marker; they do not
+scan synchronized records again. The bundled `library-cloud-upgrade` executable
+must be installed beside `sync-server` for a historical upgrade.
+Schema 19 adds provider-neutral billing and scheduled subscription changes without changing existing quotas or
+synchronized data. The optional maintenance command
+`sync-server upgrade` also runs the legacy cloud-data upgrade before this schema
+upgrade, then migrates local book IDs and opaque payloads to schema 20.
+The client migrates existing SQLite IDs on opening, preserving annotations,
+progress, placements and old reader links. The cloud upgrade retains authored
+versions and canonical blob bytes, then rotates sync history to force a full pull.
+Protocol 33 prevents older clients from writing scoped IDs back after migration.
+After upgrading, startup verifies schema 20 before accepting requests.
+HTTP and synchronized payload decoding accept only protocol 33. Historical
+envelope decoding is confined to migration of stored records; old clients
+receive a version error and must update.

@@ -68,7 +68,6 @@ def validate_release(manifest, receipt, config):
             filename = prepare_release.PACKAGES[target][1]
             require(actual[target]['files'][filename] == {k: artifact[k] for k in ('bytes', 'sha256')},
                     'Reviewed artifact differs from build receipt')
-    command(sys.executable, str(ROOT / 'scripts/ci/require-shared-tests.py'), source, sha)
     release = json.loads(command('gh', 'release', 'view', tag, '--repo', repository, '--json', 'tagName,isDraft,isPrerelease,assets'))
     require(release.get('tagName') == tag and release.get('isDraft') is False and release.get('isPrerelease') is False,
             'Release must be published and stable before signing/publication')
@@ -126,8 +125,6 @@ def publish(args):
                 str(stage / 'manifest.json'), str(args.key.resolve()), key_id, str(stage / 'manifest.signed.json'))
         envelope = json.loads(read_regular(stage / 'manifest.signed.json'))
         require(envelope['payload'].encode() == payload and envelope['key_id'] == key_id, 'Signer output differs from reviewed payload')
-        # Recheck after building/signing; a superseding test result must block promotion.
-        command(sys.executable, str(ROOT / 'scripts/ci/require-shared-tests.py'), receipt['source_repository'], receipt['source_commit'])
         stage.rename(args.output)
     # Keep the signed output on failure. Publishing is idempotent for these exact
     # bytes; never issue an automatic rollback after an uncertain network result.

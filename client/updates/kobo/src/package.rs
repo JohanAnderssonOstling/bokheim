@@ -1,11 +1,12 @@
 use crate::{APP, SPACE_MARGIN, io_error, remove_directory, require_space, write_atomic};
+use update_client::UpdateError as OperationError;
 use kobo_package::{Policy, destination, inspect, visit, installed_profile, validate_device};
 use semver::Version;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
-pub(crate) fn stage(root: &Path, updates: &Path, version: &Version) -> Result<Vec<String>, String> {
+pub(crate) fn stage(root: &Path, updates: &Path, version: &Version) -> Result<Vec<String>, OperationError> {
     let profile = installed_profile(&fs::read_to_string(root.join(".kobo/version")).map_err(io_error)?).map_err(io_error)?;
     validate_device(File::open(updates.join("package.tar.gz")).map_err(io_error)?, Policy::OnDevice, profile).map_err(io_error)?;
     let package = inspect(File::open(updates.join("package.tar.gz")).map_err(io_error)?, Policy::OnDevice, Some(root)).map_err(io_error)?;
@@ -57,7 +58,7 @@ pub(crate) fn stage(root: &Path, updates: &Path, version: &Version) -> Result<Ve
     Ok(files)
 }
 
-fn copy_atomic(source: &Path, target: &Path) -> Result<(), String> {
+fn copy_atomic(source: &Path, target: &Path) -> Result<(), OperationError> {
     let temporary = target.with_file_name(format!("{}.bokheim-update-tmp", target.file_name().ok_or("Invalid update filename")?.to_string_lossy()));
     update_files::copy_atomic(source, target, &temporary).map_err(io_error)
 }
@@ -102,7 +103,7 @@ mod tests {
     }
 }
 
-pub(crate) fn install(root: &Path, updates: &Path, files: &[String]) -> Result<(), String> {
+pub(crate) fn install(root: &Path, updates: &Path, files: &[String]) -> Result<(), OperationError> {
     let backup = updates.join("backup");
     remove_directory(&backup)?;
     fs::create_dir_all(&backup).map_err(io_error)?;

@@ -79,8 +79,8 @@ GitHub can store these artifacts, while in-app update discovery uses the signed
 Bokheim feed. The package does not embed a separate zsync update endpoint.
 
 Build the release binary and package it with versioned releases of
-`linuxdeploy` and `appimagetool` available on `PATH`. The build script prepares
-the checksum-pinned Zig 0.15.2/native SDK automatically; it does not use the
+`linuxdeploy` and `appimagetool` available on `PATH`. Prepare
+the checksum-pinned Zig 0.15.2/native SDK before running Cargo; it does not use the
 host's glibc headers or C++ runtime for the main executable. Install Python
 3.11+, `cpio`, `zstd`, `pkg-config`, `file`, `binutils`, and the native GPUI
 development packages on the build host. Docker and an old distribution are not
@@ -89,11 +89,26 @@ required. SDK downloads and generated files stay in `.linux-toolchain/`; set
 verified archives to have been downloaded already.
 
 ```sh
-python3 apps/desktop-gpui/scripts/build.py --speech-from-source
-apps/desktop-gpui/linux/appimage/build-appimage.sh
+export CARGO_TARGET_DIR="$(python3 scripts/ci/build_cache.py path linux-glibc217)"
+python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu
+python3 scripts/linux/toolchain.py --env-file .tmp/desktop-sdk-env.sh
+source .tmp/desktop-sdk-env.sh
+python3 apps/reader/crates/speech/build_native.py --env-file .tmp/desktop-speech-env.sh
+source .tmp/desktop-speech-env.sh
+cargo desktop-app --release --timings
+python3 scripts/linux/browser-toolchain.py --env-file .tmp/desktop-browser-env.sh
+(
+  source .tmp/desktop-browser-env.sh
+  cargo desktop-browser --release --timings
+)
+bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$CARGO_TARGET_DIR/release/bokheim" 2.17
+bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$CARGO_TARGET_DIR/release/bokheim-browser" 2.17
+python3 apps/reader/crates/speech/prepare.py --voice all --dest "$CARGO_TARGET_DIR/release/tts" --runtime "$(dirname "$SHERPA_ONNX_LIB_DIR")"
+python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu --dest "$CARGO_TARGET_DIR/release/pdfium" --offline
+DESKTOP_BINARY="$CARGO_TARGET_DIR/release/bokheim" apps/desktop-gpui/linux/appimage/build-appimage.sh
 ```
 
-`--speech-from-source` builds pinned Sherpa and ONNX Runtime sources with the
+`build_native.py` builds pinned Sherpa and ONNX Runtime sources with the
 same glibc 2.17 SDK. Both pinned voice models are converted to pre-optimized
 `.ort` files, and the basic minimal runtime includes their required operators
 and kernel types. Conversion disables the CPU-specific NCHWc transformer so
@@ -107,15 +122,18 @@ Function and data sections allow the final
 linker to discard unused native APIs; dependency source files are not patched
 by Bokheim. The first build requires Git, CMake 3.28+, Ninja, LLVM's `llvm-ar`
 and `llvm-ranlib`/`llvm-strip`, Python with venv/pip, and at least 8 GiB of free local build
-space. `--speech-jobs` defaults to one to limit memory usage.
+space. Native compilation uses all available CPU cores by default; `--jobs`
+selects an explicit limit.
 
 Sources, analysis tools and intermediate files are cached in
-`.tmp/speech-reduced-native/`; `--speech-work` selects another local directory.
+`.tmp/speech-reduced-native/`; `build_native.py --work` selects another local directory.
 Verified static libraries and license notices are stored under
 `target/native-speech/` and selected with `SHERPA_ONNX_LIB_DIR` for the Cargo
 build. `--offline` requires the pinned sources, dependencies, voices and Python
-analysis packages to be cached already. Omitting `--speech-from-source` retains
-the prebuilt runtime path, including an explicit `SHERPA_ONNX_LIB_DIR` override.
+analysis packages to be cached already. To use prebuilt speech libraries, omit
+`build_native.py` and set `SHERPA_ONNX_LIB_DIR` to those libraries instead. Stage
+their original ONNX voices using `prepare.py --voice all --dest
+"$CARGO_TARGET_DIR/release/tts"` without `--runtime`.
 
 The workspace release profile uses optimization level 3, full LTO and one
 codegen unit per crate. Browser UI/control code uses a package override at
@@ -148,12 +166,15 @@ The browser helper is optional in the AppImage. By default packaging includes
 the executable beside `bokheim` if it exists. `BOKHEIM_BROWSER=required` makes a
 missing helper an error; an explicit `BOKHEIM_BROWSER_HELPER` path also requires that file.
 To build and package without a browser (and without WebKitGTK development
-packages), use both options so a stale helper is not accidentally included:
+packages), omit the browser environment preparation, `cargo desktop-browser`
+and helper audit above. After preparing the app's SDK and runtime assets, use:
 
 ```sh
-python3 apps/desktop-gpui/scripts/build.py --without-browser
-BOKHEIM_BROWSER=disabled apps/desktop-gpui/linux/appimage/build-appimage.sh
+cargo desktop-app --release --timings
+BOKHEIM_BROWSER=disabled DESKTOP_BINARY="$CARGO_TARGET_DIR/release/bokheim" apps/desktop-gpui/linux/appimage/build-appimage.sh
 ```
+
+The explicit disabled setting prevents packaging a stale helper.
 
 The browser helper uses the same glibc 2.17 SDK as the main app. Host
 `pkg-config` supplies GTK/WebKit headers and versions; an isolated library
@@ -163,7 +184,11 @@ inside system shared libraries during linking; its own glibc imports are still
 audited against 2.17. To build the helper separately, run:
 
 ```sh
-python3 scripts/linux/browser-toolchain.py
+python3 scripts/linux/browser-toolchain.py --env-file .tmp/desktop-browser-env.sh
+(
+  source .tmp/desktop-browser-env.sh
+  cargo desktop-browser --release --timings
+)
 ```
 
 Set `BOKHEIM_BROWSER_HELPER=/path/to/bokheim-browser` when packaging a separately

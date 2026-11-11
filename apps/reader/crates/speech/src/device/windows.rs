@@ -1,4 +1,7 @@
 //! Installed Microsoft speech voices, synthesized to memory rather than system playback.
+use crate::SpeechError;
+use operation_failure::Failure;
+use windows::core::Error as WindowsError;
 use super::{Audio, DeviceVoice, pcm};
 use std::time::{Duration, Instant};
 use windows::{
@@ -11,11 +14,11 @@ use windows_future::AsyncStatus;
 
 struct Apartment(bool);
 impl Apartment {
-    fn new() -> Result<Self, String> {
+    fn new() -> Result<Self, SpeechError> {
         match unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
             Ok(()) => Ok(Self(true)),
             Err(error) if error.code().0 == 0x80010106u32 as i32 => Ok(Self(false)),
-            Err(error) => Err(format!("Could not initialize local Windows speech: {error}")),
+            Err(error) => Err(windows_error(error).context("Could not initialize local Windows speech")),
         }
     }
 }
@@ -27,21 +30,22 @@ impl Drop for Apartment {
     }
 }
 
-pub(super) fn voices() -> Result<Vec<DeviceVoice>, String> {
+pub(super) fn voices() -> Result<Vec<DeviceVoice>, SpeechError> {
     let _apartment = Apartment::new()?;
-    let voices = SpeechSynthesizer::AllVoices().map_err(|error| format!("Could not list installed Windows voices: {error}"))?;
+    let voices = SpeechSynthesizer::AllVoices().map_err(|error| windows_error(error).context("Could not list installed Windows voices"))?;
     let mut result = Vec::new();
     for voice in voices {
         result.push(DeviceVoice {
-            id: voice.Id().map_err(|error| error.to_string())?.to_string(),
-            name: voice.DisplayName().map_err(|error| error.to_string())?.to_string(),
-            language: voice.Language().map_err(|error| error.to_string())?.to_string(),
+            id: voice.Id().map_err(windows_error)?.to_string(),
+            name: voice.DisplayName().map_err(windows_error)?.to_string(),
+            language: voice.Language().map_err(windows_error)?.to_string(),
+            engine: None,
         });
     }
     Ok(result)
 }
 
-pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -> bool, mut emit: impl FnMut(Audio) -> bool) -> Result<(), String> {
+pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -> bool, mut emit: impl FnMut(Audio) -> bool) -> Result<(), SpeechError> {
     let _apartment = Apartment::new()?;
     let operation = || -> windows::core::Result<_> {
         let voice = SpeechSynthesizer::AllVoices()?
@@ -54,9 +58,9 @@ pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -
         let operation = synth.SynthesizeTextToStreamAsync(&HSTRING::from(text))?;
         Ok((synth, operation))
     };
-    let (synth, operation) = operation().map_err(|error| format!("The installed local Windows voice could not start: {error}"))?;
+    let (synth, operation) = operation().map_err(|error| windows_error(error).context("The installed local Windows voice could not start"))?;
     let deadline = Instant::now() + Duration::from_secs(60);
-    while operation.Status().map_err(|error| error.to_string())? == AsyncStatus::Started {
+    while operation.Status().map_err(windows_error)? == AsyncStatus::Started {
         if cancelled() || Instant::now() >= deadline {
             let _ = operation.Cancel();
             let _ = synth.Close();
@@ -64,19 +68,19 @@ pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let result = (|| -> Result<Audio, String> {
-        let stream = operation.GetResults().map_err(|error| format!("Local voice synthesis failed: {error}"))?;
-        let size = stream.Size().map_err(|error| error.to_string())?;
+    let result = (|| -> Result<Audio, SpeechError> {
+        let stream = operation.GetResults().map_err(|error| windows_error(error).context("Local voice synthesis failed"))?;
+        let size = stream.Size().map_err(windows_error)?;
         if size == 0 || size > pcm::MAX_AUDIO_BYTES as u64 {
             return Err("The local voice returned empty or oversized audio.".into());
         }
-        let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
-        let loaded = reader.LoadAsync(size as u32).map_err(|error| error.to_string())?.join().map_err(|error| error.to_string())?;
+        let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0).map_err(windows_error)?).map_err(windows_error)?;
+        let loaded = reader.LoadAsync(size as u32).map_err(windows_error)?.join().map_err(windows_error)?;
         if u64::from(loaded) != size {
             return Err("The local voice audio stream was incomplete.".into());
         }
         let mut bytes = vec![0; size as usize];
-        reader.ReadBytes(&mut bytes).map_err(|error| error.to_string())?;
+        reader.ReadBytes(&mut bytes).map_err(windows_error)?;
         pcm::wave(&bytes)
     })();
     let _ = synth.Close();
@@ -84,4 +88,13 @@ pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -
         return Err("Cancelled".into());
     }
     if emit(result?) { Ok(()) } else { Err("Cancelled".into()) }
+}
+
+fn windows_error(error: WindowsError) -> SpeechError {
+    match error.code().0 as u32 {
+        0x80070005 => SpeechError::classified(Failure::PermissionDenied, error),
+        0x80070070 => SpeechError::classified(Failure::StorageFull, error),
+        0x800705B4 => SpeechError::classified(Failure::TimedOut, error),
+        _ => SpeechError::operation(error),
+    }
 }

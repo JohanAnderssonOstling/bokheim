@@ -7,6 +7,7 @@ import lzma
 import os
 from pathlib import Path
 import platform
+import shlex
 import shutil
 import struct
 import subprocess
@@ -162,15 +163,32 @@ def build_environment(offline=False):
             'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER': str(sdk / 'bin/linker')}
 
 
+def write_environment(destination, environment):
+    # Export only the prepared SDK settings, never unrelated process secrets.
+    names = ('BOKHEIM_LINUX_SDK', 'TMPDIR', 'CC_x86_64_unknown_linux_gnu',
+             'CXX_x86_64_unknown_linux_gnu', 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER',
+             'PKG_CONFIG', 'BOKHEIM_BROWSER_PKG_CONFIG', 'BOKHEIM_BROWSER_LIBRARY_PATH')
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(''.join(f'export {name}={shlex.quote(environment[name])}\n'
+                                   for name in names if name in environment))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--offline', action='store_true')
+    parser.add_argument('--env-file', type=Path, help='Write SDK exports for direct Cargo commands')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     environment = build_environment(args.offline)
     command = args.command
     if command[:1] == ['--']:
         command = command[1:]
+    if args.env_file:
+        if command:
+            parser.error('--env-file cannot be combined with a command')
+        write_environment(args.env_file, environment)
+        return
     if command:
         subprocess.run(command, env=environment, check=True)
     else:

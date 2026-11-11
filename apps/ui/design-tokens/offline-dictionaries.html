@@ -265,7 +265,7 @@ function render(){
  const list=document.querySelector('#catalog');list.replaceChildren();
  for(const spec of catalog){
   const exists=installed.some(item=>item.spec.id===spec.id);
-  const control=button(exists?'Installed':active===spec.id?'Downloading…':'Download',()=>download(spec),exists||active!==null);
+  const control=button(exists?'Installed':active===spec.id?'Downloading':'Download',()=>download(spec),exists||active!==null);
   control.setAttribute('aria-label',`${exists?'Installed':active===spec.id?'Downloading':'Download'} ${spec.name} dictionary`);
   const item=element('div','download-row');
   const infoId=`info-${spec.id}`;
@@ -291,7 +291,7 @@ function download(spec){
  if(active!==null)return;
  document.querySelector('#picker').close();
  active=spec.id;
- const status=document.querySelector('#status');status.hidden=false;status.textContent=`Downloading ${spec.name} dictionary… (preview simulation)`;render();
+ const status=document.querySelector('#status');status.hidden=false;status.textContent=`Downloading ${spec.name} dictionary (preview simulation)`;render();
  setTimeout(()=>{installed.push({spec,enabled:true});active=null;status.textContent=`${spec.name} dictionary installed in this preview. No files were downloaded.`;render()},900);
 }
 function move(index,direction){const next=index+direction;[installed[index],installed[next]]=[installed[next],installed[index]];render()}

@@ -21,20 +21,21 @@ use book_model::BookFormat;
 use std::cell::RefCell;
 use std::error::Error;
 use std::sync::Arc;
-use sync_common::storage::LibraryStorage;
 use sync_common::BookId;
+use sync_common::storage::LibraryStorage;
 #[macro_use]
 mod query_methods;
 mod annotation_export;
 mod content_identity;
 pub(crate) mod contributors;
+mod migration;
 pub(crate) mod purge;
 pub mod shared_sql;
 mod taxonomy_update;
 mod transactions;
 pub mod transfer;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 54;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 55;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -129,8 +130,8 @@ fn attach_taxonomy(connection: &rusqlite::Connection) -> Result<(), DatabaseErro
         Ok(())
     })?;
     if !attached {
-        let path = subject_projection::installed::path().map_err(DatabaseError::message)?;
-        let uri = subject_projection::installed::read_only_uri(&path).map_err(DatabaseError::message)?;
+        let path = subject_projection::installed::path().map_err(DatabaseError::operation)?;
+        let uri = subject_projection::installed::read_only_uri(&path).map_err(DatabaseError::operation)?;
         connection.taxonomy_attach(&uri)?;
     }
     // The immutable taxonomy is shared by all library and catalog connections.
@@ -178,13 +179,37 @@ impl Database {
         let transaction = self.connection.unchecked_transaction()?;
         const VERSION: i64 = LIBRARY_SCHEMA_VERSION;
         let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version == VERSION {
+        // Retain upgrades from the published web (44), Windows and Kobo
+        // libraries. The unused remote-name column can remain in older files.
+        if (44..=VERSION).contains(&version) {
+            if version < 54 {
+                migration::upgrade_storage(&transaction)?;
+            }
+            if version < 50 {
+                migration::upgrade_before_50(&transaction, version)?;
+            }
+            if version < 51 {
+                native::migrate_file_work(&transaction)?;
+            }
+            if version < 52 {
+                native::migrate_cleanup_owners(&transaction)?;
+            }
+            if version < 53 {
+                transaction.execute_batch(include_str!("placements/sql/schema/path_indexes.sql"))?;
+            }
+            transaction.execute_batch(include_str!("audiobook_content.sql"))?;
             transaction.schema_placements_views()?;
             transaction.schema_assets_views()?;
             transaction.initialization_reset_enrichment_policy()?;
             let raw: String = transaction.initialization_replica_id(|row| row.get(0))?;
             let replica_id = raw.parse().map_err(DatabaseError::operation)?;
             content_identity::initialize_scope(&transaction, library, replica_id)?;
+            if version < 55 {
+                migration::book_ids::upgrade(&transaction)?;
+            }
+            if version != VERSION {
+                transaction.pragma_update(None, "user_version", VERSION)?;
+            }
             transaction.commit()?;
             if refresh_taxonomy {
                 self.refresh_taxonomy_assignments()?;
@@ -208,6 +233,7 @@ impl Database {
         transaction.schema_placements_views()?;
         transaction.schema_assets_tables()?;
         transaction.execute_batch(include_str!("content_identity.sql"))?;
+        transaction.execute_batch(include_str!("audiobook_content.sql"))?;
         transaction.execute_batch(include_str!("storage.sql"))?;
         transaction.schema_assets_views()?;
         transaction.schema_annotations_tables()?;

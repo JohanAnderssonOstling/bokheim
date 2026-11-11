@@ -1,3 +1,4 @@
+use crate::PlaybackError;
 use ui_text::text;
 
 use super::*;
@@ -32,12 +33,12 @@ impl ActiveAudiobook {
         Self { version: Self::VERSION, session_id: uuid::Uuid::new_v4(), locator, position_ms, speed, metadata, cover: Vec::new() }
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), PlaybackError> {
         if self.version != Self::VERSION {
-            return Err("unsupported active audiobook version".to_owned());
+            return Err("unsupported active audiobook version".into());
         }
         if !self.speed.is_finite() || self.speed <= 0.0 {
-            return Err("invalid active audiobook speed".to_owned());
+            return Err("invalid active audiobook speed".into());
         }
         Ok(())
     }
@@ -56,9 +57,9 @@ pub struct PlaybackSession {
     stopped_position: Option<android::PositionSnapshot>,
     #[cfg(target_os = "android")]
     seek_source: Option<android::PositionSnapshot>,
-    position_task: Option<gpui::Task<Result<(), String>>>,
+    position_task: Option<gpui::Task<Result<(), PlaybackError>>>,
     #[cfg(target_os = "android")]
-    release: Option<Pin<Box<dyn Future<Output = Result<(), String>>>>>,
+    release: Option<Pin<Box<dyn Future<Output = Result<(), PlaybackError>>>>>,
     #[cfg(not(target_arch = "wasm32"))]
     stream_control: Option<AudioStreamControl>,
     resolve_task: Option<gpui::Task<()>>,
@@ -315,7 +316,7 @@ impl PlaybackSession {
     }
 
     pub(super) fn set_rate(&mut self, rate: f64, cx: &mut Context<Self>) {
-        let applied = tempo_for(rate).and_then(|tempo| match self.audio.as_mut() {
+        let applied = tempo_for(rate).map_err(PlaybackError::from).and_then(|tempo| match self.audio.as_mut() {
             Some(audio) => audio.set_tempo(tempo),
             None => Ok(()),
         });
@@ -324,7 +325,7 @@ impl PlaybackSession {
                 self.rate = rate;
                 (self.save_speed)(rate, cx);
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned()),
         }
         cx.notify();
     }
@@ -353,7 +354,7 @@ impl PlaybackSession {
                     log::warn!("failed to persist audiobook position for book {title:?}: {error}");
                 }
             }
-            result.map_err(|error| error.to_string())
+            result.map_err(PlaybackError::operation)
         });
 
         #[cfg(target_arch = "wasm32")]
@@ -372,7 +373,7 @@ impl PlaybackSession {
                     log::warn!("failed to persist audiobook position for book {title:?}: {error}");
                 }
             }
-            result.map_err(|error| error.to_string())
+            result.map_err(PlaybackError::operation)
         });
 
         #[cfg(feature = "kobo")]
@@ -509,13 +510,13 @@ impl PlaybackSession {
             let track_position = initial_position.saturating_sub(track_start).min(track_duration);
             drop(metadata_timing);
             let rewind_timing = OpeningTiming::new("rewind");
-            source.reader.seek(SeekFrom::Start(0)).map_err(|error| format!("Could not rewind M4B: {error}"))?;
+            source.reader.seek(SeekFrom::Start(0)).map_err(|error| PlaybackError::operation(error).context("Could not rewind M4B"))?;
             drop(rewind_timing);
             #[cfg(target_os = "android")]
             let audio = AudioEngine::open(source.reader, source.playback_file, source.stream_control, &book, source.track.as_ref(), track_position, position_updates)?;
             #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
-            let audio = AudioEngine::open(source.reader, track_duration, source.stream_control).map_err(|error| format!("Could not open audiobook audio: {error}"))?;
-            Ok::<_, String>((book, audio))
+            let audio = AudioEngine::open(source.reader, track_duration, source.stream_control).map_err(|error| PlaybackError::operation(error).context("Could not open audiobook audio"))?;
+            Ok::<_, PlaybackError>((book, audio))
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -559,7 +560,7 @@ impl PlaybackSession {
         self.resolve_task = Some(cx.spawn(async move |this, cx| {
             let result = async {
                 let position_timing = OpeningTiming::new("saved_position_read");
-                let saved_position = library.reading_position(book_id).await.map_err(|error| format!("Could not load audiobook position: {error}"))?;
+                let saved_position = library.reading_position(book_id).await.map_err(|error| PlaybackError::operation(error).context("Could not load audiobook position"))?;
                 drop(position_timing);
                 let requested_position = initial_target.as_deref().and_then(book_model::audiobook_toc_position);
                 let saved_position = saved_position.as_deref().and_then(book_model::audiobook_position_millis);
@@ -585,17 +586,17 @@ impl PlaybackSession {
                 });
                 #[cfg(not(target_arch = "wasm32"))]
                 let resolved = if let Some((index, _)) = &selected_track {
-                    library.resolve_audiobook_track(book_id, *index).await.map_err(|error| error.to_string())?
+                    library.resolve_audiobook_track(book_id, *index).await.map_err(PlaybackError::operation)?
                 } else {
                     match resolved {
                         Some(resolved) => resolved,
-                        None => library.resolve_book(book_id).await.map_err(|error| error.to_string())?,
+                        None => library.resolve_book(book_id).await.map_err(PlaybackError::operation)?,
                     }
                 };
                 #[cfg(target_arch = "wasm32")]
                 let resolved = match resolved {
                     Some(resolved) => resolved,
-                    None => library.resolve_book(book_id).await.map_err(|error| error.to_string())?,
+                    None => library.resolve_book(book_id).await.map_err(PlaybackError::operation)?,
                 };
                 let resolved = match resolved {
                     ResolvedBook::Audiobook(book) => book,
@@ -616,7 +617,7 @@ impl PlaybackSession {
                 let source = resolved;
                 #[cfg(target_os = "android")]
                 let source = AudiobookSource { playback_file: resolved.playback_file, ..source };
-                Ok::<_, String>((source, initial_position))
+                Ok::<_, PlaybackError>((source, initial_position))
             }
             .await;
             let _ = this.update(cx, |this, cx| match result {
@@ -629,14 +630,14 @@ impl PlaybackSession {
                     if this.seek_source.take().is_some() {
                         android::stop_detached_service();
                     }
-                    this.error = Some(error);
+                    this.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned());
                     cx.notify();
                 }
             });
         }));
     }
 
-    fn finish_load(&mut self, result: Result<(AudiobookBook, AudioEngine), String>, _initial_position: Duration) {
+    fn finish_load(&mut self, result: Result<(AudiobookBook, AudioEngine), PlaybackError>, _initial_position: Duration) {
         if self.stopped {
             return;
         }
@@ -678,7 +679,7 @@ impl PlaybackSession {
                 if let Ok(tempo) = tempo_for(self.rate)
                     && let Err(error) = audio.set_tempo(tempo)
                 {
-                    self.error = Some(error);
+                    self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned());
                 }
                 if self.playback_requested {
                     audio.play();
@@ -693,7 +694,7 @@ impl PlaybackSession {
                 let audio_position = audio.position();
                 self.position = clamp_position(audio_position, book.duration);
                 if let Some(error) = audio.take_error() {
-                    self.error = Some(error);
+                    self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned());
                 }
                 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
                 {
@@ -717,7 +718,7 @@ impl PlaybackSession {
                 if self.seek_source.take().is_some() {
                     android::stop_detached_service();
                 }
-                self.error = Some(error);
+                self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned());
             }
         }
     }
@@ -831,7 +832,7 @@ impl PlaybackSession {
 
     /// Stop all producers, close the position queue, and await its final write.
     /// Used before deleting the originating library and during normal shutdown.
-    pub fn stop_and_flush(&mut self) -> Pin<Box<dyn Future<Output = Result<(), String>>>> {
+    pub fn stop_and_flush(&mut self) -> Pin<Box<dyn Future<Output = Result<(), PlaybackError>>>> {
         self.stop_playback();
         #[cfg(not(target_os = "android"))]
         self.position_updates.close();
@@ -904,7 +905,7 @@ impl PlaybackSession {
         let error = self.audio.as_ref().and_then(AudioEngine::take_error);
         let has_error = error.is_some();
         if let Some(error) = error {
-            self.error = Some(error);
+            self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned());
         }
         let slept = self.tick_sleep_timer();
         self.persist_position(has_error);
@@ -976,7 +977,7 @@ impl PlaybackSession {
                 _ => None,
             };
             if let Err(error) = audio.set_sleep(deadline, chapter_end) {
-                self.error = Some(error);
+                self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned());
                 return;
             }
         }
@@ -996,7 +997,7 @@ impl PlaybackSession {
             audio.pause();
             #[cfg(target_os = "android")]
             if let Err(error) = audio.pause() {
-                self.error = Some(error);
+                self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned());
                 return;
             }
         }
@@ -1026,7 +1027,7 @@ impl PlaybackSession {
                 self.error = None;
                 self.persist_position(true);
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned()),
         }
     }
 
@@ -1096,7 +1097,7 @@ impl PlaybackSession {
         let engine_position = position;
         match audio.seek_to(engine_position) {
             Ok(()) => self.position = position,
-            Err(error) => self.error = Some(error),
+            Err(error) => self.error = Some(ui_components::user_facing_error(&error, text!(audiobook::playback_failed)).to_owned()),
         }
     }
 

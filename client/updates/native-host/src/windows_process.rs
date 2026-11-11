@@ -2,6 +2,7 @@
 //! desktop ownership and the trial acquiring it. Only that helper's child may
 //! bypass the gate; every live-file mutation additionally holds desktop ownership.
 
+use update_client::UpdateError;
 use std::ffi::OsString;
 use std::io::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,24 +12,24 @@ use std::os::windows::process::CommandExt;
 use serde::{Deserialize, Serialize};
 use std::{fs::{self, File, OpenOptions}, path::{Path, PathBuf}, process::{Child, Command}, time::{Duration, Instant}};
 
-fn error(e: impl std::fmt::Display) -> String { e.to_string() }
+fn error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> UpdateError { UpdateError::operation(e) }
 fn arg(name: &str) -> Option<PathBuf> {
     let args: Vec<_> = std::env::args_os().collect();
     args.windows(2).find(|v| v[0] == name).map(|v| PathBuf::from(&v[1]))
 }
-fn open_lock(path: &Path) -> Result<File, String> {
+fn open_lock(path: &Path) -> Result<File, UpdateError> {
     OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path).map_err(error)
 }
-fn try_lock(file: &File) -> Result<bool, String> {
+fn try_lock(file: &File) -> Result<bool, UpdateError> {
     match FileExt::try_lock_exclusive(file) {
         Ok(()) => Ok(true),
         Err(e) if e.raw_os_error() == fs2::lock_contended_error().raw_os_error() => Ok(false),
         Err(e) => Err(error(e)),
     }
 }
-fn gate(data: &Path) -> Result<File, String> { open_lock(&data.join("windows-update-launch.lock")) }
+fn gate(data: &Path) -> Result<File, UpdateError> { open_lock(&data.join("windows-update-launch.lock")) }
 fn owner(data: &Path) -> PathBuf { data.join("updates/helper-owner.json") }
-fn canonical(path: &Path) -> Result<PathBuf, String> { path.canonicalize().map_err(error) }
+fn canonical(path: &Path) -> Result<PathBuf, UpdateError> { path.canonicalize().map_err(error) }
 
 #[derive(Serialize, Deserialize)]
 struct Job { installation: PathBuf, parent: u32 }
@@ -44,7 +45,7 @@ pub struct Entry {
 impl Entry {
     /// Call only after DesktopInstance::Primary has been acquired. Returning
     /// releases the normal-launch gate, or acknowledges the supervised child.
-    pub fn acquired(self) -> Result<Option<String>, String> {
+    pub fn acquired(self) -> Result<Option<String>, UpdateError> {
         if self._gate.is_some() { cleanup_helpers(&self.data); }
         if let Some(directory) = self.directory {
             activation::write_json(&directory.join(format!("accepted-{}.json", std::process::id())), &true)?;
@@ -57,7 +58,7 @@ impl Entry {
 /// library databases. The caller forwards any activation request. A supervised
 /// child is bound to the current helper, its PID
 /// and the expected installed executable, so stale restart arguments cannot work.
-pub fn enter(data: &Path) -> Result<Option<Entry>, String> {
+pub fn enter(data: &Path) -> Result<Option<Entry>, UpdateError> {
     let lock = gate(data)?;
     let available = try_lock(&lock)?;
     let Some(directory) = arg("--bokheim-supervised-launch") else {
@@ -99,7 +100,7 @@ fn cleanup_helpers(data: &Path) {
     let _ = fs::remove_file(owner(data));
 }
 
-fn validate_directory(data: &Path, directory: &Path) -> Result<PathBuf, String> {
+fn validate_directory(data: &Path, directory: &Path) -> Result<PathBuf, UpdateError> {
     let directory = canonical(directory)?;
     if directory.parent() != Some(canonical(&data.join("updates/helpers"))?.as_path()) {
         return Err("helper directory is outside application update storage".into());
@@ -110,12 +111,12 @@ fn validate_directory(data: &Path, directory: &Path) -> Result<PathBuf, String> 
 /// Caller still owns DesktopInstance. The helper signals readiness only after
 /// opening a handle to this process and taking the launch gate. The caller must
 /// then exit; dropping the desktop lock alone does not satisfy the handoff.
-pub fn spawn_helper(data: &Path, installation: &Path) -> Result<(), String> {
+pub fn spawn_helper(data: &Path, installation: &Path) -> Result<(), UpdateError> {
     spawn_helper_with_arguments(data, installation, &[])
 }
 
 /// Forward launch arguments through the helper and its replacement application.
-pub fn spawn_helper_with_arguments(data: &Path, installation: &Path, startup_arguments: &[String]) -> Result<(), String> {
+pub fn spawn_helper_with_arguments(data: &Path, installation: &Path, startup_arguments: &[String]) -> Result<(), UpdateError> {
     let helpers = data.join("updates/helpers");
     fs::create_dir_all(&helpers).map_err(error)?;
     let unique = format!("{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
@@ -144,13 +145,13 @@ pub fn spawn_helper_with_arguments(data: &Path, installation: &Path, startup_arg
         match child.try_wait() {
             Ok(Some(status)) => {
                 let _ = fs::remove_dir_all(&directory);
-                return Err(format!("update helper exited: {status}"));
+                return Err(format!("update helper exited: {status}").into());
             }
             Ok(None) => {}
             Err(error) => {
                 update_client::supervisor::stop_process(&mut child)?;
                 let _ = fs::remove_dir_all(&directory);
-                return Err(error.to_string());
+                return Err(UpdateError::operation(error));
             }
         }
         if Instant::now() >= deadline {
@@ -162,7 +163,7 @@ pub fn spawn_helper_with_arguments(data: &Path, installation: &Path, startup_arg
     }
 }
 
-pub fn helper_entry(data: &Path, version: &str, config: impl FnOnce() -> Result<DiscoveryConfig, String>) -> Result<bool, String> {
+pub fn helper_entry(data: &Path, version: &str, config: impl FnOnce() -> Result<DiscoveryConfig, UpdateError>) -> Result<bool, UpdateError> {
     let Some(directory) = arg("--bokheim-update-helper") else { return Ok(false); };
     let directory = validate_directory(data, &directory)?;
     if canonical(&std::env::current_exe().map_err(error)?)? != canonical(&directory.join("Bokheim.exe"))? {
@@ -187,7 +188,7 @@ pub fn helper_entry(data: &Path, version: &str, config: impl FnOnce() -> Result<
     Ok(true)
 }
 
-fn launch_and_supervise(data: &Path, directory: &Path, host: &mut WindowsHost, trial: Option<&str>, startup_arguments: &[OsString]) -> Result<(), String> {
+fn launch_and_supervise(data: &Path, directory: &Path, host: &mut WindowsHost, trial: Option<&str>, startup_arguments: &[OsString]) -> Result<(), UpdateError> {
     let executable = host.installation.join("Bokheim.exe");
     let outcome = match spawn_application(directory, &executable, trial, startup_arguments) {
         Ok(mut child) => {
@@ -235,12 +236,12 @@ fn spawn_application(directory: &Path, executable: &Path, trial: Option<&str>, s
     }
     Ok(Started { process: child, directory })
 }
-fn wait_for_acceptance(child: &mut Started) -> Result<(), String> {
+fn wait_for_acceptance(child: &mut Started) -> Result<(), UpdateError> {
     let path = child.directory.join(format!("accepted-{}.json", child.process.id()));
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if path.exists() { return Ok(()); }
-        if let Some(status) = child.process.try_wait().map_err(error)? { return Err(format!("application startup exited: {status}")); }
+        if let Some(status) = child.process.try_wait().map_err(error)? { return Err(format!("application startup exited: {status}").into()); }
         if Instant::now() >= deadline {
             update_client::supervisor::stop_process(&mut child.process)?;
             return Err("application did not acquire desktop ownership".into());
@@ -257,12 +258,12 @@ extern "system" {
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
 }
 impl ParentProcess {
-    fn open(pid: u32) -> Result<Self, String> {
+    fn open(pid: u32) -> Result<Self, UpdateError> {
         // SYNCHRONIZE only; open before readiness to avoid PID reuse.
         let handle = unsafe { OpenProcess(0x00100000, 0, pid) };
         if handle.is_null() { Err(error(Error::last_os_error())) } else { Ok(Self(handle)) }
     }
-    fn wait(&self, timeout: Duration) -> Result<(), String> {
+    fn wait(&self, timeout: Duration) -> Result<(), UpdateError> {
         match unsafe { WaitForSingleObject(self.0, timeout.as_millis().min(u32::MAX as u128 - 1) as u32) } {
             0 => Ok(()),
             258 => Err("original application did not exit before update".into()),

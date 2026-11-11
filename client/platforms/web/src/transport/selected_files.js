@@ -25,7 +25,7 @@ export async function sendSelectedFiles(token, files, signal) {
     let aborted;
     try {
         await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('The storage worker did not receive the selected files')), 30000);
+            const timeout = setTimeout(() => reject(new DOMException('The storage worker did not receive the selected files', 'TimeoutError')), 30000);
             aborted = () => {
                 clearTimeout(timeout);
                 channel.postMessage({kind: 'release', token});

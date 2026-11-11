@@ -1,6 +1,7 @@
 //! Android UI transport. Session IDs prevent a dismissed screen receiving a
 //! later account response. Credentials exist only in the bounded request queue.
 use ui_text::text;
+use operation_failure::OperationError;
 
 use async_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
-type Transport = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+type Transport = dyn Fn(&str) -> Result<(), OperationError> + Send + Sync;
 static TRANSPORT: OnceLock<Arc<Transport>> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE: Mutex<Option<(u64, Sender<Request>)>> = Mutex::new(None);
@@ -34,7 +35,7 @@ pub(crate) enum Request {
     Submit(crate::AuthenticationRequest),
 }
 
-pub fn initialize(transport: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) {
+pub fn initialize(transport: impl Fn(&str) -> Result<(), OperationError> + Send + Sync + 'static) {
     let _ = TRANSPORT.set(Arc::new(transport));
 }
 
@@ -52,7 +53,7 @@ pub fn receive(id: u64, message: &str) {
         }
     }
 }
-fn send(message: serde_json::Value) -> Result<(), String> {
+fn send(message: serde_json::Value) -> Result<(), OperationError> {
     TRANSPORT.get().ok_or("Android authentication is unavailable")?(&message.to_string())
 }
 /// Named ARGB colors for the native account form's JSON boundary.
@@ -72,7 +73,7 @@ pub(crate) struct Theme {
 
 pub(crate) struct Session(pub u64);
 impl Session {
-    pub fn open(theme: Theme) -> Result<(Self, Receiver<Request>), String> {
+    pub fn open(theme: Theme) -> Result<(Self, Receiver<Request>), OperationError> {
         let session = Self(NEXT_ID.fetch_add(1, Ordering::Relaxed));
         let (sender, receiver) = async_channel::bounded(2);
         *active_session() = Some((session.0, sender));

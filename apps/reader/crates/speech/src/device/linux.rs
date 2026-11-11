@@ -1,4 +1,5 @@
 //! Optional local eSpeak installation. Dynamic loading preserves the Linux ABI baseline.
+use crate::SpeechError;
 use super::{Audio, DeviceVoice};
 use libloading::Library;
 use std::cell::Cell;
@@ -34,23 +35,23 @@ static ENGINE: OnceLock<Mutex<Option<Engine>>> = OnceLock::new();
 thread_local! { static REQUEST: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) }; }
 
 impl Engine {
-    fn load() -> Result<Self, String> {
+    fn load() -> Result<Self, SpeechError> {
         // This engine only reads installed local voice data; it has no network backend.
         let library = ["libespeak-ng.so.1", "libespeak.so.1"].into_iter().find_map(|name| unsafe { Library::new(name).ok() }).ok_or("No local device speech engine is installed. Install eSpeak NG or choose a Bokheim voice.")?;
         unsafe {
-            let initialize = library.get::<unsafe extern "C" fn(c_int, c_int, *const c_char, c_int) -> c_int>(b"espeak_Initialize\0").map_err(|error| error.to_string())?;
+            let initialize = library.get::<unsafe extern "C" fn(c_int, c_int, *const c_char, c_int) -> c_int>(b"espeak_Initialize\0").map_err(SpeechError::operation)?;
             // Synchronous retrieval, never engine-owned playback; missing data must not exit the app.
             let rate = initialize(2, 0, std::ptr::null(), 0x8000);
             if rate <= 0 {
                 return Err("The local speech engine has no installed voice data.".into());
             }
             Ok(Self {
-                list: *library.get(b"espeak_ListVoices\0").map_err(|error| error.to_string())?,
-                current: *library.get(b"espeak_GetCurrentVoice\0").map_err(|error| error.to_string())?,
-                select: *library.get(b"espeak_SetVoiceByName\0").map_err(|error| error.to_string())?,
-                parameter: *library.get(b"espeak_SetParameter\0").map_err(|error| error.to_string())?,
-                callback: *library.get(b"espeak_SetSynthCallback\0").map_err(|error| error.to_string())?,
-                synth: *library.get(b"espeak_Synth\0").map_err(|error| error.to_string())?,
+                list: *library.get(b"espeak_ListVoices\0").map_err(SpeechError::operation)?,
+                current: *library.get(b"espeak_GetCurrentVoice\0").map_err(SpeechError::operation)?,
+                select: *library.get(b"espeak_SetVoiceByName\0").map_err(SpeechError::operation)?,
+                parameter: *library.get(b"espeak_SetParameter\0").map_err(SpeechError::operation)?,
+                callback: *library.get(b"espeak_SetSynthCallback\0").map_err(SpeechError::operation)?,
+                synth: *library.get(b"espeak_Synth\0").map_err(SpeechError::operation)?,
                 rate: rate as u32,
                 _library: library,
             })
@@ -76,7 +77,7 @@ impl Engine {
                 let id = format!("espeak:{}", CStr::from_ptr(voice.identifier).to_string_lossy());
                 let language = CStr::from_ptr(voice.languages.add(1)).to_string_lossy().into_owned();
                 if !name.is_empty() && !language.is_empty() {
-                    result.push(DeviceVoice { id, name, language });
+                    result.push(DeviceVoice { id, name, language, engine: None });
                 }
             }
         }
@@ -84,7 +85,7 @@ impl Engine {
     }
 }
 
-fn with_engine<T>(action: impl FnOnce(&Engine) -> Result<T, String>) -> Result<T, String> {
+fn with_engine<T>(action: impl FnOnce(&Engine) -> Result<T, SpeechError>) -> Result<T, SpeechError> {
     let mut engine = ENGINE.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "The local speech engine was interrupted. Restart the app to retry.")?;
     if engine.is_none() {
         *engine = Some(Engine::load()?);
@@ -92,7 +93,7 @@ fn with_engine<T>(action: impl FnOnce(&Engine) -> Result<T, String>) -> Result<T
     action(engine.as_ref().expect("engine was loaded"))
 }
 
-pub(super) fn voices() -> Result<Vec<DeviceVoice>, String> {
+pub(super) fn voices() -> Result<Vec<DeviceVoice>, SpeechError> {
     with_engine(|engine| Ok(engine.voices()))
 }
 
@@ -130,7 +131,7 @@ unsafe extern "C" fn collect<C: Fn() -> bool>(audio: *mut i16, count: c_int, _: 
     })
 }
 
-pub(super) fn synthesize<C: Fn() -> bool>(id: &str, text: &str, rate: f32, cancelled: C, mut emit: impl FnMut(Audio) -> bool) -> Result<(), String> {
+pub(super) fn synthesize<C: Fn() -> bool>(id: &str, text: &str, rate: f32, cancelled: C, mut emit: impl FnMut(Audio) -> bool) -> Result<(), SpeechError> {
     with_engine(|engine| {
         let voice = engine.voices().into_iter().find(|voice| voice.id == id).ok_or("The selected local voice is no longer installed. Choose another local voice.")?;
         let name = CString::new(voice.name).map_err(|_| "Invalid installed voice name.")?;

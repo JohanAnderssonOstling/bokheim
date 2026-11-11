@@ -37,6 +37,7 @@ struct ScreenshotDocument {
     document: AnyElement,
     owner: EntityId,
     theme: BrowserTheme,
+    control_click: std::rc::Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>,
 }
 
 impl RenderOnce for ScreenshotDocument {
@@ -72,12 +73,13 @@ impl RenderOnce for ScreenshotDocument {
         });
         let selection = state.read(cx).drag.map(|drag| (drag.rectangle(), drag.viewport));
         let events = state.clone();
+        let control_click = self.control_click;
         let tracker = canvas(
             |bounds, window, _| (bounds, window.insert_hitbox(bounds, HitboxBehavior::Normal)),
             move |_, (bounds, hitbox), window, _| {
                 let begin = events.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.capture() || !hitbox.is_hovered(window) || event.button != MouseButton::Left || !event.modifiers.control {
+                    if !phase.capture() || !hitbox.is_hovered(window) || event.button != MouseButton::Left || !(event.modifiers.control || event.modifiers.platform) {
                         return;
                     }
                     begin.update(cx, |state, cx| {
@@ -110,29 +112,27 @@ impl RenderOnce for ScreenshotDocument {
                     }
                 });
                 let finish = events.clone();
+                let control_click = control_click.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                     if !phase.capture() || event.button != MouseButton::Left || !finish.read(cx).swallow_release {
                         return;
                     }
-                    let rectangle = finish.update(cx, |state, cx| {
+                    let (rectangle, clicked) = finish.update(cx, |state, cx| {
                         state.swallow_release = false;
-                        let rectangle = state
-                            .drag
-                            .take()
-                            .map(|mut drag| {
-                                drag.end = event.position;
-                                drag.rectangle()
-                            })
-                            .filter(|bounds| bounds.size.width >= px(2.0) && bounds.size.height >= px(2.0));
-                        if rectangle.is_some() {
-                            state.busy = true;
-                        }
+                        let drag = state.drag.take();
+                        let bounds = drag.map(|mut drag| { drag.end = event.position; drag.rectangle() });
+                        let rectangle = bounds.filter(|bounds| bounds.size.width >= px(2.0) && bounds.size.height >= px(2.0));
+                        let clicked = bounds.is_some_and(|bounds| bounds.size.width < px(2.0) && bounds.size.height < px(2.0));
+                        if rectangle.is_some() { state.busy = true; }
                         cx.notify();
-                        rectangle
+                        (rectangle, clicked)
                     });
                     window.prevent_default();
                     cx.stop_propagation();
-                    let Some(rectangle) = rectangle else { return };
+                    let Some(rectangle) = rectangle else {
+                        if clicked { control_click(event.position, window, cx); }
+                        return;
+                    };
                     let capture = window.capture_region(rectangle, cx);
                     let target = finish.downgrade();
                     window
@@ -200,8 +200,8 @@ impl RenderOnce for ScreenshotDocument {
     }
 }
 
-pub(super) fn document(document: AnyElement, owner: EntityId, theme: BrowserTheme) -> AnyElement {
-    ScreenshotDocument { document, owner, theme }.into_any_element()
+pub(super) fn document(document: AnyElement, owner: EntityId, theme: BrowserTheme, control_click: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static) -> AnyElement {
+    ScreenshotDocument { document, owner, theme, control_click: std::rc::Rc::new(control_click) }.into_any_element()
 }
 
 #[cfg(test)]
@@ -223,7 +223,7 @@ mod tests {
                 .on_mouse_move(cx.listener(|view, _, _, _| view.events.push("move")))
                 .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, _| view.events.push("up")))
                 .on_click(cx.listener(|view, _, _, _| view.events.push("click")));
-            let document = ScreenshotDocument { document: document.into_any_element(), owner: cx.entity_id(), theme: BrowserTheme::default() }.render(window, cx).into_any_element();
+            let document = ScreenshotDocument { document: document.into_any_element(), owner: cx.entity_id(), theme: BrowserTheme::default(), control_click: std::rc::Rc::new(|_, _, _| {}) }.render(window, cx).into_any_element();
             self.selection = Some(window.use_keyed_state(("reader-screenshot", cx.entity_id()), cx, |_, _| panic!("screenshot state was not initialized")));
             document
         }

@@ -2,8 +2,22 @@ use crate::extract::{asset_error, sync_error, AuthUser};
 use crate::state::AppState;
 use account_contract::{AccountSnapshotResponse, BookStorageUsage, LibraryStorageUsage, StorageUsageResponse, MAX_ACCOUNT_STORAGE_BOOKS};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
+
+pub(crate) async fn get_entitlements(State(state): State<AppState>, user: AuthUser, headers: HeaderMap) -> Result<Response, StatusCode> {
+    let entitlements = state.billing.entitlements(&user.user_id).await.map_err(|error| {
+        if matches!(error, server_postgres::BillingError::UnknownAccount) {
+            StatusCode::UNAUTHORIZED
+        } else {
+            tracing::error!(%error, "account entitlements failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
+    let mut response = server_wire_http::response(&headers, entitlements)?;
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
 
 pub(crate) async fn get_snapshot(State(state): State<AppState>, user: AuthUser, headers: HeaderMap) -> Result<Response, StatusCode> {
     let user_id = &user.user_id;

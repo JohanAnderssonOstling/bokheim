@@ -1136,9 +1136,10 @@ impl Paginator {
                 }
             }
             TouchPhase::Ended => {
-                let Some(swipe) = self.swipe.take() else {
+                let Some(mut swipe) = self.swipe.take() else {
                     return;
                 };
+                swipe.add(x, y);
                 let Some(axis) = swipe.axis.filter(|axis| self.allows_axis(*axis)) else {
                     return;
                 };
@@ -1295,7 +1296,7 @@ impl Render for Paginator {
 
         let paginator = div().id(id).w_full().min_h_0().min_w_0().flex().flex_col().h_full().flex_1();
         let paginator = paginator.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-            if cfg!(feature = "mobile") || window.is_page_scroll_swipe() || this.swipe.is_some() || matches!(event.delta, ScrollDelta::Pages(_)) {
+            if cfg!(feature = "mobile") || window.is_touch_scroll() || this.swipe.is_some() || matches!(event.delta, ScrollDelta::Pages(_)) {
                 this.handle_swipe(event, window, cx);
             } else {
                 #[cfg(not(feature = "mobile"))]

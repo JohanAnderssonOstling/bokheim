@@ -2,17 +2,26 @@
 
 use crate::asset_store::AssetStore;
 use crate::library::{LibraryHandle, LibraryResources};
+#[cfg(not(target_arch = "wasm32"))]
 use book_access::BoxedBookReader;
+#[cfg(target_arch = "wasm32")]
+use client_platform_runtime::executor::{local_service_on_current_thread, storage_call, ServiceHandle};
 use client_protocol::BackendError;
 use library_database::transfer::{BookTransferState, ImportedBook, LocalBookMetadata, TransferBook, TransferPlan};
 use library_database::DatabaseClient;
+#[cfg(target_arch = "wasm32")]
+use library_files::asset_store::VerifiedBook;
 use library_model::{DownloadProgress, DownloadState, TransferOrigin};
 use library_placement::LibraryState;
 use remote_book_access::{describe_remote_file, RemoteBookAccess};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 use sync_common::BookId;
 use sync_common::{DirId, ROOT_DIR_ID};
+#[cfg(target_arch = "wasm32")]
+use tokio::sync::Mutex;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct StorageCopyProgress {
@@ -70,7 +79,7 @@ pub struct TransferResource {
     #[cfg(not(target_arch = "wasm32"))]
     pub reader: BoxedBookReader,
     #[cfg(target_arch = "wasm32")]
-    pub(crate) source: client_platform_runtime::executor::ServiceHandle<std::rc::Rc<tokio::sync::Mutex<BrowserTransferSource>>>,
+    pub(crate) source: BrowserTransferSource,
     pub state: BookTransferState,
 }
 
@@ -187,33 +196,36 @@ impl LibraryResources {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) enum BrowserTransferSource {
-    Local(BoxedBookReader),
-    Remote(RemoteBookAccess),
+    Local(ServiceHandle<Rc<VerifiedBook>>),
+    Remote(ServiceHandle<Rc<Mutex<RemoteBookAccess>>>),
 }
 #[cfg(target_arch = "wasm32")]
 impl TransferResource {
     async fn stage(&mut self, assets: &AssetStore) -> Result<library_files::asset_store::StagedBook, BackendError> {
         use library_files::AssetStoreError;
-        use std::io::{Read, Seek, SeekFrom};
-        assets
-            .stage_transfer_chunks(self.length, self.state.expected_checksum(), async |offset, count| {
-                self.source
-                    .call(move |source| async move {
-                        match &mut *source.lock().await {
-                            BrowserTransferSource::Remote(access) => access.read(offset, count).await.map_err(AssetStoreError::operation),
-                            BrowserTransferSource::Local(reader) => {
-                                reader.seek(SeekFrom::Start(offset))?;
-                                let mut bytes = vec![0; count];
-                                reader.read_exact(&mut bytes)?;
-                                Ok(bytes)
-                            }
+        let length = self.length;
+        let expected = self.state.expected_checksum();
+        match &self.source {
+            BrowserTransferSource::Local(source) => {
+                let assets = assets.clone();
+                source
+                    .call(move |reader| async move {
+                        if reader.length != length || expected.is_some_and(|expected| reader.book_id.content_hash() != Some(expected)) {
+                            return Err(AssetStoreError::operation("local transfer source does not match its recorded content"));
                         }
+                        assets.copy_verified_book(&reader).await
                     })
                     .await
-                    .map_err(AssetStoreError::operation)?
-            })
-            .await
-            .map_err(BackendError::operation)
+                    .map_err(BackendError::operation)?
+                    .map_err(BackendError::operation)
+            }
+            BrowserTransferSource::Remote(source) => assets
+                .stage_transfer_chunks(length, expected, async |offset, count| {
+                    source.call(move |access| async move { access.lock().await.read(offset, count).await.map_err(AssetStoreError::operation) }).await.map_err(AssetStoreError::operation)?
+                })
+                .await
+                .map_err(BackendError::operation),
+        }
     }
 }
 impl LibraryResources {
@@ -223,15 +235,15 @@ impl LibraryResources {
         let reader = storage.assets().verified_book_reader_with_checksum(hash, paths, state.byte_checksum).await.map_err(BackendError::operation)?;
         let (source, length) = if let Some(reader) = reader {
             let length = reader.length;
-            (BrowserTransferSource::Local(Box::new(reader) as BoxedBookReader), length)
+            let source = storage_call(move || async move { local_service_on_current_thread(Rc::new(reader), ()) }).await.map_err(BackendError::operation)?;
+            (BrowserTransferSource::Local(source), length)
         } else {
             let (file, _) = describe_remote_file(self.sync.http_client(), &self.account, self.id, hash).await.map_err(BackendError::operation)?;
             let length = file.length;
-            (BrowserTransferSource::Remote(RemoteBookAccess::new(self.sync.http_client().clone(), self.account.clone(), self.id, file)), length)
+            let access = RemoteBookAccess::new(self.sync.http_client().clone(), self.account.clone(), self.id, file);
+            let source = storage_call(move || async move { local_service_on_current_thread(Rc::new(Mutex::new(access)), ()) }).await.map_err(BackendError::operation)?;
+            (BrowserTransferSource::Remote(source), length)
         };
-        let source = client_platform_runtime::executor::storage_call(move || async move { client_platform_runtime::executor::local_service_on_current_thread(std::rc::Rc::new(tokio::sync::Mutex::new(source)), ()) })
-            .await
-            .map_err(BackendError::operation)?;
         Ok(TransferResource { source, state, length })
     }
 

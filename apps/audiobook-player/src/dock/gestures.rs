@@ -107,7 +107,7 @@ impl AudiobookDock {
         if !self.inline
             || self.scrub.is_some()
             || overlay_open
-            || window.is_page_scroll_swipe()
+            || window.is_touch_scroll()
             || matches!(event.delta, ScrollDelta::Pages(_))
             || modifiers.control
             || modifiers.alt

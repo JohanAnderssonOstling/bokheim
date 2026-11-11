@@ -5,7 +5,8 @@ use ui_text::text;
 use std::cell::OnceCell;
 use std::rc::Rc;
 
-use app::AppClient;
+use app::{AppClient, BackendError};
+use operation_failure::OperationError;
 use application_shell::ApplicationRoot;
 use browser_ui::{AppServices, AppStartup, NavigationSession};
 use gpui::{App, AppContext, Bounds, SharedString, WindowBounds, WindowOptions, px, size};
@@ -33,7 +34,7 @@ pub fn start() {
             Ok(initialized) => initialized,
             Err(error) => {
                 log::error!("failed to start SQLite web backend: {error}");
-                notify_startup("__BOKHEIM_STARTUP_FAILED__", &error);
+                notify_startup("__BOKHEIM_STARTUP_FAILED__", &OperationError::from_classified(&error).into_js());
                 return;
             }
         };
@@ -48,10 +49,10 @@ pub fn start() {
         let mut preferences = reader_preferences::load();
         preferences.apply_synchronized(&state.reader_preferences);
         let handle = application.run_embedded(move |cx| match open_bokheim(backend, startup, preferences, cx) {
-            Ok(()) => notify_startup("__BOKHEIM_STARTUP_READY__", ""),
+            Ok(()) => notify_startup("__BOKHEIM_STARTUP_READY__", &JsValue::UNDEFINED),
             Err(error) => {
                 log::error!("failed to open the Bokheim browser window: {error}");
-                notify_startup("__BOKHEIM_STARTUP_FAILED__", &error);
+                notify_startup("__BOKHEIM_STARTUP_FAILED__", &OperationError::from_classified(&error).into_js());
                 cx.quit();
             }
         });
@@ -59,20 +60,20 @@ pub fn start() {
     });
 }
 
-fn notify_startup(name: &str, detail: &str) {
+fn notify_startup(name: &str, detail: &JsValue) {
     if let Ok(callback) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(name)) {
         if let Some(callback) = callback.dyn_ref::<js_sys::Function>() {
-            let _ = callback.call1(&JsValue::UNDEFINED, &JsValue::from_str(detail));
+            let _ = callback.call1(&JsValue::UNDEFINED, detail);
         }
     }
 }
 
-async fn connect_backend() -> Result<(AppClient, app::AppStartupState), String> {
+async fn connect_backend() -> Result<(AppClient, app::AppStartupState), BackendError> {
     let asset_base = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__BOKHEIM_ASSET_BASE__")).ok().and_then(|value| value.as_string()).unwrap_or_else(|| "./pkg".to_owned());
-    AppClient::connect_web(&asset_base).await.map_err(|error| if error.failure() == Some(app::Failure::StorageBusy) { format!("BOKHEIM_STORAGE_BUSY: {error}") } else { error.to_string() })
+    AppClient::connect_web(&asset_base).await
 }
 
-fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: reader_ui::ReaderPreferences, cx: &mut App) -> Result<(), String> {
+fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: reader_ui::ReaderPreferences, cx: &mut App) -> Result<(), BackendError> {
     gpui_component::init(cx);
     ui_components::init_page_scrolling(cx);
     browser_ui::bind_keys(cx);
@@ -104,7 +105,7 @@ fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: rea
             cx.new(|cx| Root::new(application, window, cx))
         },
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(BackendError::operation)?;
     cx.activate(true);
     Ok(())
 }
@@ -114,9 +115,9 @@ fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: rea
 const NAVIGATION_STORAGE_KEY: &str = "bokheim.navigation.v1";
 
 fn load_navigation_session() -> NavigationSession {
-    let load = || -> Result<Option<NavigationSession>, String> {
-        let storage = web_sys::window().ok_or("browser window is unavailable")?.local_storage().map_err(|error| format!("{error:?}"))?.ok_or("local storage is unavailable")?;
-        storage.get_item(NAVIGATION_STORAGE_KEY).map_err(|error| format!("{error:?}"))?.map(|value| serde_json::from_str(&value).map_err(|error| error.to_string())).transpose()
+    let load = || -> Result<Option<NavigationSession>, OperationError> {
+        let storage = web_sys::window().ok_or("browser window is unavailable")?.local_storage().map_err(OperationError::from)?.ok_or("local storage is unavailable")?;
+        storage.get_item(NAVIGATION_STORAGE_KEY).map_err(OperationError::from)?.map(|value| serde_json::from_str(&value).map_err(OperationError::operation)).transpose()
     };
     match load() {
         Ok(session) => session.unwrap_or_default(),
@@ -128,10 +129,10 @@ fn load_navigation_session() -> NavigationSession {
 }
 
 fn save_navigation_session(session: NavigationSession, _: &mut App) {
-    let save = || -> Result<(), String> {
-        let storage = web_sys::window().ok_or("browser window is unavailable")?.local_storage().map_err(|error| format!("{error:?}"))?.ok_or("local storage is unavailable")?;
-        let value = serde_json::to_string(&session).map_err(|error| error.to_string())?;
-        storage.set_item(NAVIGATION_STORAGE_KEY, &value).map_err(|error| format!("{error:?}"))
+    let save = || -> Result<(), OperationError> {
+        let storage = web_sys::window().ok_or("browser window is unavailable")?.local_storage().map_err(OperationError::from)?.ok_or("local storage is unavailable")?;
+        let value = serde_json::to_string(&session).map_err(OperationError::operation)?;
+        storage.set_item(NAVIGATION_STORAGE_KEY, &value).map_err(OperationError::from)
     };
     if let Err(error) = save() {
         log::warn!("could not save navigation: {error}");

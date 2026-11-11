@@ -52,7 +52,7 @@ impl BookCommand {
             Self::SetRead(true) => ("book-read-error", text!(browse::could_not_mark_the_book_read)),
             Self::SetRead(false) => ("book-read-error", text!(browse::could_not_mark_the_book_unread)),
         };
-        notify_error(id, format!(text!(browse::recovery_with_detail), user_facing_error(&error, text!(common::please_try_again)), prefix = prefix), window, cx);
+        notify_error(id, format!(text!(browse::recovery_with_detail), user_facing_error(&error, ""), prefix = prefix), window, cx);
     }
 }
 

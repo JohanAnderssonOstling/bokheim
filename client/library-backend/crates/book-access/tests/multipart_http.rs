@@ -62,7 +62,7 @@ async fn multipart_limits_apply_to_advertised_lengths_and_streamed_bytes() {
     let advertised = fetch(&format!("Content-Length: {}", BODY_LIMIT + 1), Vec::new()).await.unwrap_err();
     let streamed = fetch("Transfer-Encoding: chunked", chunked(&vec![b'x'; BODY_LIMIT + 1], 128)).await.unwrap_err();
     for error in [advertised, streamed] {
-        assert!(matches!(error, RemoteFileError::Failed(ref message) if message == "oversized multipart response"), "{error}");
+        assert!(matches!(error, RemoteFileError::Failed(ref message) if message.to_string() == "oversized multipart response"), "{error}");
     }
 }
 

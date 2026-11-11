@@ -1,18 +1,19 @@
 //! Android startup and GPUI binding. Downloads never invoke the package installer.
 pub use crate::update_binding::healthy;
+use update_client::UpdateError;
 use browser_ui::{UpdateAction, UpdateControls, UpdateView};
 use gpui::{App, Entity};
 use linux_update_host::android::AndroidHost;
 use std::{path::Path, sync::OnceLock};
 
-type Bridge = dyn Fn(&str) -> Result<String, String> + Send + Sync;
+type Bridge = dyn Fn(&str) -> Result<String, UpdateError> + Send + Sync;
 static BRIDGE: OnceLock<Box<Bridge>> = OnceLock::new();
 
-fn command(value: serde_json::Value) -> Result<String, String> {
+fn command(value: serde_json::Value) -> Result<String, UpdateError> {
     BRIDGE.get().ok_or("Android update bridge is unavailable")?(&value.to_string())
 }
 
-pub fn initialize(data: &Path, bridge: impl Fn(&str) -> Result<String, String> + Send + Sync + 'static) -> Result<bool, String> {
+pub fn initialize(data: &Path, bridge: impl Fn(&str) -> Result<String, UpdateError> + Send + Sync + 'static) -> Result<bool, UpdateError> {
     // The bridge retains application context, so it survives Activity recreation
     // and remains usable when startup is retried after a recovery error.
     BRIDGE.get_or_init(|| Box::new(bridge));
@@ -30,7 +31,7 @@ pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
         |host: &mut AndroidHost, action| {
             match action {
                 UpdateAction::Install => {
-                    let mut request = serde_json::to_value(host.install_request()?).map_err(|error| error.to_string())?;
+                    let mut request = serde_json::to_value(host.install_request()?).map_err(UpdateError::operation)?;
                     request["action"] = "install".into();
                     if command(request)? == "invalidPackage" {
                         host.reject_package()?;

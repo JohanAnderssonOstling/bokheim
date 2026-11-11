@@ -326,6 +326,8 @@ pub struct Attrs<'a> {
     //TODO: should this be an option?
     pub color_opt: Option<Color>,
     pub family: Family<'a>,
+    /// Exact face selected by the caller; bypasses matching and automatic fallback.
+    pub font_id: Option<fontdb::ID>,
     pub stretch: Stretch,
     pub style: Style,
     pub weight: Weight,
@@ -348,6 +350,7 @@ impl<'a> Attrs<'a> {
         Self {
             color_opt: None,
             family: Family::SansSerif,
+            font_id: None,
             stretch: Stretch::Normal,
             style: Style::Normal,
             weight: Weight::NORMAL,
@@ -463,7 +466,8 @@ impl<'a> Attrs<'a> {
 
     /// Check if this set of attributes can be shaped with another
     pub fn compatible(&self, other: &Self) -> bool {
-        self.family == other.family
+        self.font_id == other.font_id
+            && self.family == other.family
             && self.stretch == other.stretch
             && self.style == other.style
             && self.weight == other.weight
@@ -499,6 +503,7 @@ pub struct AttrsOwned {
     //TODO: should this be an option?
     pub color_opt: Option<Color>,
     pub family_owned: FamilyOwned,
+    pub font_id: Option<fontdb::ID>,
     pub stretch: Stretch,
     pub style: Style,
     pub weight: Weight,
@@ -517,6 +522,7 @@ impl AttrsOwned {
         Self {
             color_opt: attrs.color_opt,
             family_owned: FamilyOwned::new(attrs.family),
+            font_id: attrs.font_id,
             stretch: attrs.stretch,
             style: attrs.style,
             weight: attrs.weight,
@@ -534,6 +540,7 @@ impl AttrsOwned {
         Attrs {
             color_opt: self.color_opt,
             family: self.family_owned.as_family(),
+            font_id: self.font_id,
             stretch: self.stretch,
             style: self.style,
             weight: self.weight,

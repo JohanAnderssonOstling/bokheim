@@ -367,8 +367,8 @@ async fn scan_and_watch(session: &LibraryResources, wake: &SyncScheduler, watche
     }
     match session.scan_folder().await {
         Ok(super::import::filesystem_scan::FolderScan::Complete) => {}
-        // File replay owns excluded paths. Release the scan's busy state so
-        // replay can finish, then verify those files even without a watch event.
+        // Coalesce concurrent changes and excluded paths into one later pass.
+        // Release the busy state first so pending file replay can finish.
         Ok(super::import::filesystem_scan::FolderScan::Deferred) => wake.wake_after(Duration::from_secs(1)),
         Err(error) => {
             log::warn!("filesystem scan failed; retrying in 30 seconds: {error}");

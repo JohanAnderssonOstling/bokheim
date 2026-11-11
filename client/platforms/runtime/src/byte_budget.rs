@@ -1,17 +1,20 @@
 //! Admission accounting follows owned requests through dispatch and cancellation.
 use std::{cell::Cell, rc::Rc};
+use tokio::sync::Notify;
 #[derive(Clone)]
 pub struct ByteBudget {
     used: Rc<Cell<usize>>,
+    released: Rc<Notify>,
     limit: usize,
 }
 pub struct Reservation {
     used: Rc<Cell<usize>>,
+    released: Rc<Notify>,
     bytes: usize,
 }
 impl ByteBudget {
     pub fn new(limit: usize) -> Self {
-        Self { used: Rc::new(Cell::new(0)), limit }
+        Self { used: Rc::new(Cell::new(0)), released: Rc::new(Notify::new()), limit }
     }
     pub fn reserve(&self, bytes: usize) -> Option<Reservation> {
         let next = self.used.get().checked_add(bytes)?;
@@ -19,7 +22,24 @@ impl ByteBudget {
             return None;
         }
         self.used.set(next);
-        Some(Reservation { used: self.used.clone(), bytes })
+        Some(Reservation { used: self.used.clone(), released: self.released.clone(), bytes })
+    }
+    /// Wait for admitted work to release capacity; a request that cannot fit
+    /// even in an empty budget still fails immediately.
+    pub async fn reserve_when_available(&self, bytes: usize) -> Option<Reservation> {
+        if bytes > self.limit {
+            return None;
+        }
+        loop {
+            let released = self.released.notified();
+            tokio::pin!(released);
+            // Register before checking capacity so a release cannot be missed.
+            released.as_mut().enable();
+            if let Some(reservation) = self.reserve(bytes) {
+                return Some(reservation);
+            }
+            released.await;
+        }
     }
     pub fn limit(&self) -> usize {
         self.limit
@@ -31,6 +51,7 @@ impl ByteBudget {
 impl Drop for Reservation {
     fn drop(&mut self) {
         self.used.set(self.used.get() - self.bytes);
+        self.released.notify_waiters();
     }
 }
 

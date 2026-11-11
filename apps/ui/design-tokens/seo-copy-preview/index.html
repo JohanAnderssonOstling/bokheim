@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Bokheim: Before and after copy preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ede6dc; color: #2e3d31; font: 14px/1.45 system-ui, sans-serif; }
+  header { padding: 15px 22px; border-bottom: 1px solid #bac1b3; background: #f9f5ee; }
+  .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; }
+  h1 { margin: 0; font: 400 24px/1.2 Georgia, serif; }
+  header p { margin: 8px 0 0; color: #586153; }
+  nav { display: flex; flex-wrap: wrap; gap: 6px; }
+  button, select { padding: 7px 12px; color: inherit; background: transparent; border: 1px solid #bac1b3; border-radius: 4px; font: inherit; }
+  button { cursor: pointer; }
+  button:hover, button[aria-pressed="true"] { background: #e1e7dc; border-color: #536d50; }
+  :focus-visible { outline: 2px solid #2e3d31; outline-offset: 3px; }
+  label { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; padding: 14px; }
+  section { min-width: 0; }
+  .caption { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 0 5px 9px; }
+  h2 { font-size: 14px; margin: 0; font-weight: 600; }
+  a { color: inherit; text-underline-offset: 3px; }
+  .frame { margin: 0 auto; width: 100%; background: #f9f5ee; border: 1px solid #bac1b3; }
+  iframe { display: block; width: 100%; height: calc(100dvh - 162px); min-height: 480px; border: 0; background: #f9f5ee; }
+  body[data-size="mobile"] .frame { max-width: 390px; }
+  body[data-size="mobile"] iframe { height: 760px; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; }
+    label { margin-left: 0; }
+    iframe { height: 660px; }
+  }
+</style>
+</head>
+<body data-size="desktop">
+<header>
+  <div class="toolbar">
+    <h1>Bokheim copy preview</h1>
+    <nav aria-label="Compare page sections">
+      <button type="button" data-section="top" aria-pressed="false">Top</button>
+      <button type="button" data-section="sync-heading" aria-pressed="true">Sync</button>
+      <button type="button" data-section="devices-heading" aria-pressed="false">Devices</button>
+      <button type="button" data-section="listen-heading" aria-pressed="false">Listening</button>
+    </nav>
+    <label>View <select id="size"><option value="desktop">Desktop</option><option value="mobile">Phone</option></select></label>
+  </div>
+  <p>Three short copy changes below the opening screen. The top stays the same.</p>
+</header>
+<main>
+  <section aria-labelledby="before-label">
+    <div class="caption"><h2 id="before-label">Before</h2><a href="before.html" target="_blank" rel="noopener">Open full page</a></div>
+    <div class="frame"><iframe src="before.html" title="Bokheim before the proposed copy changes"></iframe></div>
+  </section>
+  <section aria-labelledby="after-label">
+    <div class="caption"><h2 id="after-label">After</h2><a href="after.html" target="_blank" rel="noopener">Open full page</a></div>
+    <div class="frame"><iframe src="after.html" title="Bokheim with the proposed copy changes"></iframe></div>
+  </section>
+</main>
+<script>
+  let activeSection = 'sync-heading';
+  const frames = [...document.querySelectorAll('iframe')];
+  function scrollFrame(frame) {
+    if (!frame.contentDocument) return;
+    if (activeSection === 'top') {
+      frame.contentWindow.scrollTo(0, 0);
+    } else {
+      const heading = frame.contentDocument.getElementById(activeSection);
+      if (heading) {
+        const offset = heading.getBoundingClientRect().top + frame.contentWindow.scrollY;
+        frame.contentWindow.scrollTo(0, Math.max(0, offset - 32));
+      }
+    }
+  }
+  for (const frame of frames) {
+    frame.addEventListener('load', () => {
+      const fonts = frame.contentDocument.fonts;
+      (fonts ? fonts.ready : Promise.resolve()).then(() => scrollFrame(frame));
+    });
+  }
+  for (const button of document.querySelectorAll('[data-section]')) {
+    button.addEventListener('click', () => {
+      activeSection = button.dataset.section;
+      for (const other of document.querySelectorAll('[data-section]')) {
+        other.setAttribute('aria-pressed', String(other === button));
+      }
+      frames.forEach(scrollFrame);
+    });
+  }
+  document.getElementById('size').addEventListener('change', event => {
+    document.body.dataset.size = event.target.value;
+    requestAnimationFrame(() => frames.forEach(scrollFrame));
+  });
+</script>
+</body>
+</html>

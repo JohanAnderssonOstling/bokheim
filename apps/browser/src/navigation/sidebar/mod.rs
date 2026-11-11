@@ -136,13 +136,11 @@ impl Sidebar {
             destinations = destinations
                 .child(components::nav_rail_item("split-pane", IconName::PanelLeft, text!(browse::split), false, theme).tooltip(text!(browse::open_split_pane)).on_click(move |_, _, cx| split.update(cx, |_, cx| cx.emit(SplitPane))));
         }
-        let library_name = self.active_library_name(cx);
         if close_pane {
             let close = emitter.clone();
             destinations = destinations.child(components::nav_rail_item("close-pane", IconName::Close, text!(common::close), false, theme).on_click(move |_, _, cx| close.update(cx, |_, cx| cx.emit(crate::PaneRequest::Close))));
         }
-        let labels = rail_routes(cx).map(|route| route.presentation().0).chain(std::iter::once(library_name.as_ref())).chain(split_available.then_some(text!(browse::split))).chain(close_pane.then_some(text!(common::close)));
-        let width = components::navigation_rail_width(labels, window, cx);
+        let width = window.rem_size() * components::NAV_RAIL_SIZE_REM;
         let sidebar = components::sidebar(theme).w(width).flex_1().child(self.render_library_switcher_trigger(emitter.clone(), cx)).child(destinations);
         gpui::div().w(width).h_full().min_h_0().flex_none().flex().flex_col().bg(theme.page_bg).child(sidebar).child(destination(Route::Global(GlobalRoute::Settings))).into_any_element()
     }

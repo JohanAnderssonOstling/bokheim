@@ -157,6 +157,23 @@ cancelled gesture, and the remaining finger after a pinch cannot produce a
 click. Lost pointer capture and a hidden tab cancel active contacts. Mouse and
 hardware keyboard input keep their existing paths.
 
+On touch devices, pinching outside content views that handle their own zoom
+adjusts the saved interface font size by one pixel per completed gesture.
+Tiny movements and cancelled gestures leave the size unchanged.
+
+Touch scrolling in ordinary scroll areas and virtual lists includes momentum
+after a flick. A new touch or direct scrolling interrupts it, and content stops
+at its edges. Scrollbar dragging remains precise; reader page-turn gestures
+retain their single-page behavior. GPUI preserves touch pixel movement through
+release, and each view chooses whether to scroll or turn a page. Momentum
+respects reduced motion.
+
+PDF pinches use the existing PDF zoom setting, switch to fixed zoom, and can
+magnify past page width. Fixed zoom scrolls by the dragged distance and pans
+horizontally when the page exceeds the viewport width. Releasing a drag keeps
+that position. Fit-width and fit-height modes use ordinary swipe navigation.
+The PDF zoom setting is saved when the gesture finishes.
+
 Safe-area CSS values and VisualViewport changes feed GPUI's window insets.
 Browser toolbar changes resize the canvas; keyboard occlusion moves overlays
 and controls above the keyboard without changing the book viewport. Tapping a

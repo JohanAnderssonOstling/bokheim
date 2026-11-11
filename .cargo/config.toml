@@ -1,3 +1,10 @@
+[alias]
+# Build both executables in one dependency graph on Windows and macOS.
+desktop = ["build", "--locked", "-p", "desktop-gpui", "-p", "embedded-browser-ui", "--bin", "bokheim", "--bin", "bokheim-browser", "--no-default-features", "--features", "desktop-gpui/desktop,desktop-gpui/release-logging,embedded-browser-ui/desktop-helper,embedded-browser-ui/release-logging"]
+# Linux release executables use separate native library environments.
+desktop-app = ["build", "--locked", "-p", "desktop-gpui", "--bin", "bokheim", "--no-default-features", "--features", "desktop,release-logging"]
+desktop-browser = ["build", "--locked", "-p", "embedded-browser-ui", "--bin", "bokheim-browser", "--no-default-features", "--features", "desktop-helper,release-logging"]
+
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
 

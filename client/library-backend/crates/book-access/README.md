@@ -25,6 +25,11 @@ for seekable readers. This crate has no backend or account-client dependency. Ti
 - `range_reader.rs`: one async cursor implementation for EPUB, native and
   browser parser adapters, and audiobook streaming. Position, pending downloads,
   cache, and read-ahead policy have no HTTP or format knowledge.
+- `sparse_source.rs`: exact intervals shared across cursors. Prefetch visits every
+  missing interval, splitting spans into batches of at most 4 MiB and 128 ranges
+  to match the server transport. EPUB opening retains its prefetched text ranges
+  for the source lifetime; ordinary demand reads and comic prefetch use a bounded
+  cache.
 - `range_cache.rs` (internal): bounded in-memory fragments for one immutable revision,
   with shared block insertion, response length validation, and seek arithmetic.
 - `pdf_bundle.rs` (`pdf` feature): shared page-warmer/parser cache. Page-aware

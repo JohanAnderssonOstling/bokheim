@@ -7,7 +7,7 @@ pub fn request_id(value: f64) -> Result<u32, String> {
 }
 
 /// A reply carries exactly one success payload or error, including empty bytes.
-pub fn reply<T>(payload: Option<T>, error: Option<String>) -> Result<Result<T, String>, String> {
+pub fn reply<T, E>(payload: Option<T>, error: Option<E>) -> Result<Result<T, E>, String> {
     match (payload, error) {
         (Some(payload), None) => Ok(Ok(payload)),
         (None, Some(error)) => Ok(Err(error)),

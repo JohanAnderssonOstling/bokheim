@@ -1,3 +1,4 @@
+use crate::BackendError;
 use crate::executor::BackendExecutor;
 use app_preferences::PreferenceStore;
 pub use library_registry::LibraryEntry;
@@ -16,16 +17,16 @@ pub enum AppDataLocation {
 }
 
 impl AppDataLocation {
-    pub(crate) fn data_dir(&self) -> Result<PathBuf, String> {
+    pub(crate) fn data_dir(&self) -> Result<PathBuf, BackendError> {
         match self {
-            Self::SharedDesktop => client_platform_desktop::data_dir(),
+            Self::SharedDesktop => client_platform_desktop::data_dir().map_err(BackendError::message),
             Self::PlatformLocal(locator) => Ok(locator.into()),
         }
     }
 
-    pub(crate) fn default_library_root(&self) -> Result<std::path::PathBuf, String> {
+    pub(crate) fn default_library_root(&self) -> Result<std::path::PathBuf, BackendError> {
         match self {
-            Self::SharedDesktop => client_platform_desktop::default_library_root(),
+            Self::SharedDesktop => client_platform_desktop::default_library_root().map_err(BackendError::message),
             Self::PlatformLocal(locator) => Ok(Path::new(locator).join("libraries")),
         }
     }
@@ -49,28 +50,28 @@ pub(crate) struct BackendContext {
 
 impl BackendContext {
     #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub fn initialize(location: AppDataLocation) -> Result<Self, String> {
+    pub fn initialize(location: AppDataLocation) -> Result<Self, BackendError> {
         Self::open(location.data_dir()?, &location.default_library_root()?)
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub async fn initialize(location: AppDataLocation) -> Result<Self, String> {
+    pub async fn initialize(location: AppDataLocation) -> Result<Self, BackendError> {
         let app_data_dir = location.data_dir()?;
-        let preferences = PreferenceStore::open(app_data_dir.join("preferences")).await.map_err(|error| error.to_string())?;
+        let preferences = PreferenceStore::open(app_data_dir.join("preferences")).await.map_err(BackendError::operation)?;
         Self::open_with_preferences(app_data_dir, &location.default_library_root()?, preferences)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn open(app_data_dir: PathBuf, library_root: &Path) -> Result<Self, String> {
-        let preferences = PreferenceStore::open(app_data_dir.join("preferences")).map_err(|error| error.to_string())?;
+    pub(crate) fn open(app_data_dir: PathBuf, library_root: &Path) -> Result<Self, BackendError> {
+        let preferences = PreferenceStore::open(app_data_dir.join("preferences")).map_err(BackendError::operation)?;
         Self::open_with_preferences(app_data_dir, library_root, preferences)
     }
 
-    fn open_with_preferences(app_data_dir: PathBuf, library_root: &Path, preferences: Arc<PreferenceStore>) -> Result<Self, String> {
-        let registry = LibraryRegistry::open_with_library_root(app_data_dir.to_string_lossy(), library_root.to_string_lossy()).map_err(|error| format!("failed to initialize library registry: {error}"))?;
+    fn open_with_preferences(app_data_dir: PathBuf, library_root: &Path, preferences: Arc<PreferenceStore>) -> Result<Self, BackendError> {
+        let registry = LibraryRegistry::open_with_library_root(app_data_dir.to_string_lossy(), library_root.to_string_lossy()).map_err(|error| BackendError::operation(error).context("failed to initialize library registry"))?;
         #[cfg(target_os = "android")]
-        client_platform_android::book::configure_lease_root(&app_data_dir).map_err(|error| error.to_string())?;
-        let executor = BackendExecutor::new().map_err(|error| error.to_string())?;
+        client_platform_android::book::configure_lease_root(&app_data_dir).map_err(BackendError::operation)?;
+        let executor = BackendExecutor::new().map_err(BackendError::operation)?;
         Ok(Self { registry, preferences, app_data_dir, executor })
     }
 }

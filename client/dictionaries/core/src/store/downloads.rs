@@ -1,7 +1,6 @@
 //! Explicit curated downloads and metadata-only recommendations.
 use super::{DictionaryFile, DictionaryInfo, DictionaryStore, Storage};
-use crate::DictionaryDownloads;
-use crate::Result;
+use crate::{DictionaryDownloads, OperationError, OperationResult as Result};
 use dictionary_catalog::{dictionaries, find, for_language};
 use std::collections::BTreeSet;
 use std::sync::PoisonError;
@@ -9,7 +8,7 @@ use std::sync::PoisonError;
 #[derive(Default)]
 pub(super) struct Activity {
     pub active: Option<String>,
-    pub error: Option<String>,
+    pub error: Option<OperationError>,
 }
 
 /// Resolve only the languages supplied by the caller, preserving priority.
@@ -57,7 +56,7 @@ impl<S: Storage> DictionaryStore<S> {
         }
         .await;
         if let Err(error) = &result {
-            self.activity.lock().unwrap_or_else(PoisonError::into_inner).error = Some(format!("{}: {error}", spec.name));
+            self.activity.lock().unwrap_or_else(PoisonError::into_inner).error = Some(error.clone().context(&spec.name));
         }
         result
     }

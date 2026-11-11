@@ -20,12 +20,13 @@ use std::rc::Rc;
 use futures_channel::oneshot;
 use wasm_bindgen::prelude::*;
 
-use super::{BytesFuture, error_message};
+use super::BytesFuture;
+use operation_failure::{Failure, OperationError};
 use crate::transport::endpoint::{OwnedEndpoint, WorkerEndpoint};
 use crate::transport::protocol::{CpuEvent, CpuRequest};
 use client_platform_runtime::coordinator::CpuJobs;
 
-type Reply = oneshot::Sender<Result<Vec<u8>, String>>;
+type Reply = oneshot::Sender<Result<Vec<u8>, OperationError>>;
 struct Job {
     _bytes: client_platform_runtime::byte_budget::Reservation,
     source: crate::transport::request::Source,
@@ -53,8 +54,9 @@ impl Service {
             (state.worker.take(), state.policy.fail())
         };
         drop(worker);
+        let error = OperationError::from(error);
         for job in jobs {
-            let _ = job.reply.send(Err(error_message(&error)));
+            let _ = job.reply.send(Err(error.clone()));
         }
     }
 
@@ -91,8 +93,8 @@ impl Service {
             let Some(elapsed) = client_platform_runtime::task_scope::until_cancelled(client_platform_runtime::executor::sleep(startup_timeout), cancelled).await else { return };
             if let Some(service) = service.upgrade() {
                 if service.state.borrow().worker.as_ref().is_some_and(|worker| worker.waiting(generation)) {
-                    let message = elapsed.err().map(|error| error.to_string()).unwrap_or_else(|| "CPU worker startup timed out".into());
-                    service.fail(message.into());
+                    let error = elapsed.err().map(OperationError::operation).unwrap_or_else(|| OperationError::classified(Failure::TimedOut, "CPU worker startup timed out"));
+                    service.fail(error.into_js());
                 }
             }
         });
@@ -109,7 +111,7 @@ impl Service {
         };
         match event {
             CpuEvent::Failed(error) => {
-                self.fail(error.into());
+                self.fail(error.into_js());
                 return;
             }
             CpuEvent::Ready => {
@@ -167,37 +169,37 @@ impl CpuService {
 impl CpuService {
     pub fn request_source(&self, bytes: Vec<u8>, source: JsValue) -> BytesFuture {
         let source = crate::transport::request::Source::new(source);
-        let Some(reservation) = self.0.budget.reserve(bytes.len()) else {
-            let error = if bytes.len() > self.0.budget.limit() { "CPU request exceeds configured input byte limit" } else { "CPU input queue byte limit exceeded; retry after queued work completes" };
-            return Box::pin(async move { Err(error.into()) });
-        };
-        let (sender, receiver) = oneshot::channel();
-        let (id, start) = {
-            let mut state = self.0.state.borrow_mut();
-            let id = state.next;
-            let Some(next) = state.next.checked_add(1) else {
-                return Box::pin(async { Err("CPU request IDs exhausted".into()) });
-            };
-            state.next = next;
-            match state.policy.request(id, Job { _bytes: reservation, bytes, source, reply: sender }) {
-                Ok(()) => (id, state.worker.is_none()),
-                Err((error, _)) => return Box::pin(async move { Err(error) }),
-            }
-        };
-        if start {
-            if let Err(error) = self.0.start() {
-                self.0.fail(error);
-            }
-        }
-        self.0.pump();
-        let service = Rc::downgrade(&self.0);
-        let cleanup = client_platform_runtime::task_scope::OnDrop::new(move || {
-            if let Some(service) = service.upgrade() {
-                let cancelled = service.state.borrow_mut().policy.cancel_pending(id);
-                drop(cancelled);
-            }
-        });
+        let service = self.0.clone();
         Box::pin(async move {
+            let Some(reservation) = service.budget.reserve_when_available(bytes.len()).await else {
+                return Err("CPU request exceeds configured input byte limit".into());
+            };
+            let (sender, receiver) = oneshot::channel();
+            let (id, start) = {
+                let mut state = service.state.borrow_mut();
+                let id = state.next;
+                let Some(next) = state.next.checked_add(1) else {
+                    return Err("CPU request IDs exhausted".into());
+                };
+                state.next = next;
+                match state.policy.request(id, Job { _bytes: reservation, bytes, source, reply: sender }) {
+                    Ok(()) => (id, state.worker.is_none()),
+                    Err((error, _)) => return Err(error.into()),
+                }
+            };
+            if start {
+                if let Err(error) = service.start() {
+                    service.fail(error);
+                }
+            }
+            service.pump();
+            let service = Rc::downgrade(&service);
+            let cleanup = client_platform_runtime::task_scope::OnDrop::new(move || {
+                if let Some(service) = service.upgrade() {
+                    let cancelled = service.state.borrow_mut().policy.cancel_pending(id);
+                    drop(cancelled);
+                }
+            });
             let _cleanup = cleanup;
             receiver.await.unwrap_or_else(|_| Err("CPU service closed".into()))
         })
