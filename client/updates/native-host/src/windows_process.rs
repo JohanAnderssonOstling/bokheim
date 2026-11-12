@@ -217,11 +217,11 @@ fn launch_and_supervise(data: &Path, directory: &Path, host: &mut WindowsHost, t
 }
 
 enum LaunchFailure {
-    NotRunning(String),
-    Uncertain(String),
+    NotRunning(UpdateError),
+    Uncertain(UpdateError),
 }
 impl LaunchFailure {
-    fn message(self) -> String { match self { Self::NotRunning(s) | Self::Uncertain(s) => s } }
+    fn message(self) -> UpdateError { match self { Self::NotRunning(error) | Self::Uncertain(error) => error } }
 }
 struct Started { process: Child, directory: PathBuf }
 fn spawn_application(directory: &Path, executable: &Path, trial: Option<&str>, startup_arguments: &[OsString]) -> Result<Started, LaunchFailure> {
