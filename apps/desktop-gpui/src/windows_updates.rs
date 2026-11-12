@@ -20,7 +20,7 @@ pub fn register_reader_scheme() -> Result<(), UpdateError> {
     for arguments in [vec!["add", key, "/ve", "/d", "URL:Bokheim reader", "/f"], vec!["add", key, "/v", "URL Protocol", "/d", "", "/f"], vec!["add", &open, "/ve", "/d", &command, "/f"]] {
         let result = Command::new("reg.exe").creation_flags(0x08000000).args(arguments).output().map_err(UpdateError::operation)?;
         if !result.status.success() {
-            return Err(String::from_utf8_lossy(&result.stderr).into_owned());
+            return Err(String::from_utf8_lossy(&result.stderr).into_owned().into());
         }
     }
     Ok(())

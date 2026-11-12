@@ -108,7 +108,7 @@ pub(super) fn synthesize(id: &str, text: &str, rate: f32, cancelled: impl Fn() -
             if capture.done || capture.error.is_some() {
                 return;
             }
-            let result = catch_unwind(AssertUnwindSafe(|| buffer.as_ref().downcast_ref::<AVAudioPCMBuffer>().ok_or_else(|| "The local voice returned unsupported audio buffers.".to_owned()).and_then(|buffer| capture.append(buffer))))
+            let result = catch_unwind(AssertUnwindSafe(|| buffer.as_ref().downcast_ref::<AVAudioPCMBuffer>().ok_or_else(|| SpeechError::from("The local voice returned unsupported audio buffers.")).and_then(|buffer| capture.append(buffer))))
                 .unwrap_or_else(|_| Err("The local voice audio callback was interrupted.".into()));
             if let Err(error) = result {
                 capture.error = Some(error);
