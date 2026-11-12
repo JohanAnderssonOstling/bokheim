@@ -1,12 +1,22 @@
 use std::cell::Cell;
 use std::panic::Location;
 use std::rc::Rc;
+use std::time::Duration;
+use web_time::Instant;
 
 use gpui::{
     App, Bounds, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Window, canvas, div, point,
 };
 use gpui_component::StyledExt;
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
+
+pub const PAGE_WHEEL_REPEAT_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Physical wheel paging consumes fresh input only, never queues it behind an
+/// animation. Closely spaced notches therefore cannot schedule a second turn.
+pub fn page_wheel_ready(last_turn: Option<Instant>, animating: bool, now: Instant) -> bool {
+    !animating && last_turn.is_none_or(|last| now.duration_since(last) >= PAGE_WHEEL_REPEAT_INTERVAL)
+}
 
 struct RegisteredScroll {
     id: ElementId,
@@ -180,7 +190,7 @@ where
 /// `relative()` for the measurement to be of the parent rather than of the
 /// nearest positioned ancestor.
 pub fn measured_bounds(bounds: Rc<Cell<Bounds<Pixels>>>) -> impl IntoElement {
-    canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _: (), _, _| {}).absolute().size_full()
+    canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _: (), _, _| {}).absolute().inset_0().size_full()
 }
 /// Scrolls `handle` the shortest distance that brings `target` inside the
 /// viewport, with `margin` of room left around it. Returns whether the offset

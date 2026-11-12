@@ -21,7 +21,7 @@ fn import() -> ImportCommit {
         book_id: hash,
         size_bytes: 10,
         inspection_version: 1,
-        inspection: Some(book_inspection::InspectedBook {
+        inspection: Some(book_inspection_contract::InspectedBook {
             pdf: None,
             audiobook: None,
             metadata: book_model::BookRecord {
@@ -114,7 +114,7 @@ fn definitive_enrichment_answers_do_not_expire() {
         let hash = book.book_id;
         db.commit_import(book).unwrap();
         let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-        let answer = BookEnrichment { key: String::new(), status, record: (status == BookEnrichmentStatus::Found).then_some(candidate.record), toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
+        let answer = BookEnrichment { key: String::new(), status, record: (status == BookEnrichmentStatus::Found).then_some(candidate.record), toc: None, cover: None, failure: None, detail: String::new() };
         db.record_enrichment(&hash, &candidate.request_key, answer, 100).unwrap();
         assert!(db.enrichment_candidates(&[hash], 100).unwrap().is_empty());
         assert!(db.enrichment_candidates(&[hash], 10 * 365 * 24 * 60 * 60).unwrap().is_empty());
@@ -131,7 +131,7 @@ fn failed_enrichment_retries_until_a_definitive_answer() {
     let hash = book.book_id;
     db.commit_import(book).unwrap();
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
+    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, failure: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, answer.clone(), 100).unwrap();
     assert_eq!(db.enrichment_next_retry().unwrap(), Some(160));
     assert!(db.enrichment_candidates(&[hash], 159).unwrap().is_empty());
@@ -151,7 +151,7 @@ fn enrichment_candidate_deadlines_preserve_scope_order_and_request_inputs() {
     let scope = [hashes[2], hashes[0], hashes[1]];
     let original = db.enrichment_candidates(&scope, 0).unwrap();
     assert_eq!(original.iter().map(|candidate| candidate.book_id).collect::<Vec<_>>(), hashes);
-    let failure = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
+    let failure = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, failure: None, detail: String::new() };
     db.record_enrichment(&hashes[0], &original[0].request_key, failure.clone(), 10).unwrap();
     db.record_enrichment(&hashes[1], &original[1].request_key, failure, 25).unwrap();
     // The third draft has no retry deadline and remains immediately eligible.
@@ -180,7 +180,7 @@ fn enrichment_defers_corrupt_drafts_until_their_retry_deadline() {
     let db = database();
     let hash = import_in_folder(&db, 1, ROOT_DIR_ID);
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let failure = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
+    let failure = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, failure: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, failure, 100).unwrap();
     db.connection.execute("UPDATE local_book_draft SET body=?1 WHERE content_hash=?2", rusqlite::params![b"invalid draft".as_slice(), hash]).unwrap();
     assert!(db.enrichment_candidates(&[hash], 159).unwrap().is_empty());
@@ -241,7 +241,7 @@ fn audiobook_detail_preserves_current_chapter_boundaries_and_fallback_titles() {
     let mut book = import();
     let hash = book.book_id;
     book.format = BookFormat::M4b;
-    book.inspection.as_mut().unwrap().audiobook = Some(book_inspection::AudiobookMetadata {
+    book.inspection.as_mut().unwrap().audiobook = Some(book_inspection_contract::AudiobookMetadata {
         title: "Audio".into(),
         authors: Vec::new(),
         description: String::new(),
@@ -480,13 +480,13 @@ mod scanner {
             db.connection.execute_batch("DELETE FROM local_file_work; DELETE FROM local_book_work; DELETE FROM local_directory_work; PRAGMA foreign_keys=OFF;").unwrap();
             db.connection.execute("UPDATE book_dir SET dir_id='invalid-directory',deleted_at=?1", [trashed.then_some(1)]).unwrap();
 
-            assert!(db.scan_snapshot().is_err());
+            assert!(db.scan_snapshot(1).is_err());
             assert!(db.connection.is_autocommit());
             assert_eq!(state(), before, "failed inventory reads must not advance the scan or its activity state");
 
             db.connection.execute("UPDATE book_dir SET dir_id=?1", [ROOT_DIR_ID.to_string()]).unwrap();
             db.connection.pragma_update(None, "foreign_keys", true).unwrap();
-            let repaired = db.scan_snapshot().unwrap();
+            let repaired = db.scan_snapshot(1).unwrap();
             assert_eq!(repaired.scan_id, before.0 + 1);
             if trashed {
                 assert!(repaired.books.is_empty());
@@ -495,7 +495,7 @@ mod scanner {
                 assert_eq!(repaired.books.len(), 1);
                 assert_eq!((repaired.books[0].book_id, repaired.books[0].directory, repaired.books[0].fingerprint), (hash, ROOT_DIR_ID, 1));
                 db.connection.execute("UPDATE book_dir SET local_hash='outdated-fingerprint'", []).unwrap();
-                let skipped = db.scan_snapshot().unwrap();
+                let skipped = db.scan_snapshot(1).unwrap();
                 assert!(skipped.books.is_empty());
                 assert_eq!(skipped.placements.len(), 1, "unreadable fingerprints do not hide live placements");
             }
@@ -511,7 +511,7 @@ mod scanner {
         db.connection.execute("INSERT INTO local_directory_work(dir_id) VALUES(?1)", [shelf.to_string()]).unwrap();
         db.connection.execute("INSERT INTO local_directory_projection(dir_id,relative_path) VALUES(?1,'Elsewhere') ON CONFLICT(dir_id) DO UPDATE SET relative_path=excluded.relative_path", [nested.to_string()]).unwrap();
 
-        let snapshot = db.scan_snapshot().unwrap();
+        let snapshot = db.scan_snapshot(1).unwrap();
 
         assert!(snapshot.excluded_paths.iter().any(|path| path == "Shelf"));
         assert!(snapshot.excluded_paths.iter().any(|path| path == "Shelf/Nested"));
@@ -521,7 +521,7 @@ mod scanner {
     #[test]
     fn scan_batches_publish_books_before_final_missing_file_cleanup() {
         let (db, missing) = fixture();
-        let mut snapshot = db.scan_snapshot().unwrap();
+        let mut snapshot = db.scan_snapshot(1).unwrap();
         let mut first = replacement();
         first.name = "first.epub".into();
         first.path = first.name.clone();
@@ -1298,7 +1298,7 @@ use crate::sql_fixtures::FixturesSql;
 fn complete_no_match(db: &Database, hash: &BookId) {
     use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
     let Some(candidate) = db.enrichment_candidates(&[*hash], 0).unwrap().pop() else { return };
-    db.record_enrichment(hash, &candidate.request_key, BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() }, 0).unwrap();
+    db.record_enrichment(hash, &candidate.request_key, BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, cover: None, failure: None, detail: String::new() }, 0).unwrap();
 }
 
 #[test]
@@ -1583,7 +1583,7 @@ fn enrichment_cover_checks_preserve_transfer_state_and_survive_reopening() {
     db.complete_thumbnail_work(&hash, false).unwrap();
     assert!(db.enrichment_cover_candidates(&[hash]).unwrap().is_empty());
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let answer = metadata_contract::books::BookEnrichment { key: String::new(), status: metadata_contract::books::BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, failure: None, detail: String::new() };
+    let answer = metadata_contract::books::BookEnrichment { key: String::new(), status: metadata_contract::books::BookEnrichmentStatus::NoMatch, record: None, toc: None, cover: None, failure: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, answer, 0).unwrap();
     assert_eq!(db.enrichment_cover_record(&hash).unwrap().unwrap().title, "Original");
     assert_eq!(db.enrichment_cover_candidates(&[hash]).unwrap(), vec![hash]);
@@ -1613,13 +1613,7 @@ fn direct_cover_lookup_uses_file_title_and_enriched_attributes_without_a_server_
     enriched.description = "Provider description".into();
     enriched.contributors = vec![Contributor::new("Matched Author", AUTHOR_MARC_RELATOR_CODE).unwrap()];
     enriched.book.identifiers.push(Identifier::new("9780306406157", Scheme::Isbn, Scope::Book).unwrap());
-    db.record_enrichment(
-        &hash,
-        &candidate.request_key,
-        BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Found, record: Some(enriched.clone()), toc: None, cover: None, popularity: None, failure: None, detail: String::new() },
-        0,
-    )
-    .unwrap();
+    db.record_enrichment(&hash, &candidate.request_key, BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Found, record: Some(enriched.clone()), toc: None, cover: None, failure: None, detail: String::new() }, 0).unwrap();
     let record = db.enrichment_cover_record(&hash).unwrap().unwrap();
     assert_eq!(record.title, "Original");
     assert_eq!(record.book.identifiers, enriched.book.identifiers);

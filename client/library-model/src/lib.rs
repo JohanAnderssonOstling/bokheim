@@ -26,15 +26,12 @@ pub use view::*;
 
 pub use book_model::BookTocEntry;
 
-mod foliate_identity;
-pub use foliate_identity::match_foliate_annotations;
-
 mod annotation_export;
 pub use annotation_export::*;
 mod recurring_annotation;
 pub use recurring_annotation::RecurringAnnotation;
-mod annotation_markdown;
-pub use annotation_markdown::{annotation_markdown, annotation_source_label, ReaderLink};
+mod reader_link;
+pub use reader_link::ReaderLink;
 mod notebook;
 mod text_search;
 pub use text_search::{BookTextMatch, BookTextMatchPage, BookTextSearchBook, BookTextSearchPage, TextSearchRemoval};

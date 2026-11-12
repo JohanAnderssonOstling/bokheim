@@ -115,18 +115,6 @@ def verify_existing_covers(catalog, originals):
 
 def run(args):
     args.output.mkdir(parents=True, exist_ok=True)
-    if args.popularity_only:
-        manifest = json.loads(args.popularity_only.read_text())
-        popularity = module('standardebooks_ordinal_popularity', 'standardebooks-popularity.py')
-        with sqlite3.connect(args.catalog / 'curation.sqlite3', timeout=60) as db:
-            db.execute('BEGIN IMMEDIATE')
-            updated = popularity.apply(db, manifest)
-            db.commit()
-        write_json(args.output / 'popularity-ranking.json', manifest)
-        publisher = module('standardebooks_rank_publish', 'run-volume-merge-pass.py')
-        publisher.publish(SimpleNamespace(catalog=args.catalog, binary=args.binary, output=args.output))
-        print(json.dumps({'state': 'popularity-published', 'ranked_imported_books': updated, 'ranking_total': manifest['total']}), flush=True)
-        return
     inventory_path = args.output / 'inventory.json'
     if args.manifest:
         entries = json.loads(args.manifest.read_text())
@@ -256,6 +244,5 @@ if __name__ == '__main__':
     parser.add_argument('--downloads', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--binary', type=Path, required=True)
-    parser.add_argument('--popularity-only', type=Path, help='Apply a validated observed ranking and publish, without reimporting books')
     parser.add_argument('--manifest', type=Path, help='Import explicit acquisition entries instead of scanning local ZIPs')
     run(parser.parse_args())

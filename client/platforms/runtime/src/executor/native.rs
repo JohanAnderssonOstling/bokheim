@@ -63,7 +63,7 @@ impl BackendExecutor {
         let executor = self.clone();
         self.inner.handle.spawn_blocking(move || {
             let _executor = executor;
-            operation();
+            crate::profiling::operation(operation);
         });
         Ok(())
     }
@@ -80,7 +80,7 @@ impl BackendExecutor {
 
 pub async fn run_blocking<T: BackendOutput>(operation: impl FnOnce() -> T + BackendSend + 'static) -> Result<T, BackendExecutorError> {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.spawn_blocking(operation).await.map_err(|error| BackendExecutorError(format!("backend blocking task failed: {error}"))),
+        Ok(handle) => handle.spawn_blocking(move || crate::profiling::operation(operation)).await.map_err(|error| BackendExecutorError(format!("backend blocking task failed: {error}"))),
         Err(_) => crate::storage_queue::run(operation).await.map_err(BackendExecutorError),
     }
 }

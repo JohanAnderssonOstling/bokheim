@@ -3,7 +3,7 @@
 use crate::invalidation::notify;
 use gpui::{Context, Window};
 use html_view_gpui::HtmlPageSnapshot;
-use ui_components::PageTurn;
+use ui_components::{self as components, PageTurn};
 
 use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
@@ -66,7 +66,7 @@ impl ReaderView {
         } else if !self.dismiss_selection(cx) {
             if self.sidebar.is_visible() && self.chrome.is_visible() {
                 self.hide_sidebar(window, cx);
-            } else if self.history_availability().0 {
+            } else if !components::has_native_back_button() && self.history_availability().0 {
                 self.navigate_history(false, window, cx);
             } else {
                 self.close_reader(window, cx);

@@ -4,8 +4,6 @@ pub mod audible;
 pub mod authority_subjects;
 pub mod books;
 pub mod catalog;
-pub mod popularity;
-pub use popularity::{unique_work_popularity, WorkPopularity};
 mod classification_method;
 pub mod matching;
 pub mod subject_consensus;
@@ -158,8 +156,6 @@ pub struct RichWorkMetadataMatch {
     pub description: Option<String>,
     #[serde(default)]
     pub subjects: Vec<SubjectHeading>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub popularity: Option<WorkPopularity>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -176,7 +172,6 @@ pub struct SubjectHeading {
 /// for a unique edition identity.
 pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWorkMetadataMatch>, similarity_keys: impl Fn(ClassificationScheme, &str) -> Vec<String>) -> RichWorkMetadataMatch {
     let matches = matches.into_iter().collect::<Vec<_>>();
-    let popularity = unique_work_popularity(matches.iter().copied());
     let mut work_ids = BTreeSet::new();
     let mut edition_ids = BTreeSet::new();
     let mut classifications = Vec::new();
@@ -217,7 +212,6 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         // description when all available Open Library evidence agrees.
         description: if descriptions.len() == 1 { descriptions.into_iter().next() } else { None },
         subjects: subjects.into_iter().collect(),
-        popularity,
     }
 }
 

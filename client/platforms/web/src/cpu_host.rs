@@ -2,7 +2,7 @@
 
 use super::transport::{cpu_client, range::Server};
 use client_platform_runtime::executor::BoxedBackendFuture;
-use cpu_host::{Artifact, BackendError, BookOperation, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse};
+use cpu_contract::{Artifact, BackendError, BookOperation, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse};
 use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom};
 use wasm_bindgen::JsValue;

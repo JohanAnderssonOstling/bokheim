@@ -12,7 +12,7 @@ pub(crate) fn now() -> i64 {
 }
 
 fn failed(key: String, detail: String) -> BookEnrichment {
-    BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: None, detail }
+    BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, failure: None, detail }
 }
 
 impl LibraryEnrichment {

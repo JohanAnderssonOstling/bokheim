@@ -12,6 +12,8 @@ mobile = ["ui-components/mobile"]
 packaged-pdfium = ["pdf-reader-core/packaged-pdfium"]
 
 [dependencies]
+annotation-format = { path = "../../client/annotation-format" }
+ui-html-components = { path = "../../client/ui/html-components" }
 html-parse = { package = "skrift-parse", path = "../../../HtmlEngine/crates/02-html-parse" }
 html-resources = { package = "skrift-resources", path = "../../../HtmlEngine/crates/html-resources" }
 html-style-model = { package = "skrift-style-model", path = "../../../HtmlEngine/crates/html-style-model" }

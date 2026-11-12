@@ -26,6 +26,7 @@ pub(crate) mod persistence;
 pub(crate) mod reading_ruler;
 mod screenshot;
 pub(crate) mod search;
+pub(crate) mod search_contents;
 pub(crate) mod settings_navigation;
 pub(crate) mod sidebar_list;
 mod source;

@@ -1,11 +1,8 @@
 //! Filtering and ordering shared by browse pages. Each page picks candidate
 //! books its own way; these apply the page's filters and book order to them.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use super::{
-    BooksSql,
-    options::{BrowseBookSort, BrowseChipSort},
-};
+use super::{BooksSql, options::BrowseBookSort};
 use crate::{Database, DatabaseError};
 
 /// The candidate books that pass the page's filters. The search is not one of
@@ -16,13 +13,9 @@ pub(super) struct MatchingBooks {
     /// Books whose own title or author contains the search. Empty when there
     /// is no search.
     pub text_matches: BTreeSet<i64>,
-    /// Only known scores for books that pass this page's filters.
-    pub popularity: BTreeMap<i64, f64>,
     /// Filtered catalog books from the preferred acquisition source. Empty
     /// for personal-library browsing, where source preference does not apply.
     pub preferred: BTreeSet<i64>,
-    /// Formats sharing one source popularity observation count once in totals.
-    pub popularity_groups: BTreeMap<i64, String>,
 }
 
 impl Database {
@@ -30,18 +23,13 @@ impl Database {
         let mut matching = BTreeSet::new();
         let mut downloaded = BTreeSet::new();
         let mut text_matches = BTreeSet::new();
-        let mut popularity = BTreeMap::new();
         let ids = serde_json::to_string(candidates).map_err(DatabaseError::operation)?;
-        // Book ordering reads the column directly in SQL. Only chip totals
-        // need a per-book score map in Rust.
-        self.connection.matching_books(&ids, i32::from(options.downloaded_only), options.file_types, &options.languages, &options.search, i32::from(options.chip_sort == BrowseChipSort::Popularity), |row| {
+        self.connection.matching_books(&ids, i32::from(options.downloaded_only), options.file_types, &options.languages, &options.search, |row| {
             if options.hide_finished && row.get::<_, Option<f32>>(3)?.unwrap_or_default() >= library_model::FINISHED_PROGRESS_THRESHOLD {
                 return Ok(());
             }
             let book = row.get(0)?;
-            if let Some(score) = row.get::<_, Option<f64>>(4)? {
-                popularity.insert(book, score);
-            }
+
             matching.insert(book);
             if row.get::<_, bool>(1)? {
                 downloaded.insert(book);
@@ -51,7 +39,7 @@ impl Database {
             }
             Ok(())
         })?;
-        Ok(MatchingBooks { books: matching, downloaded, text_matches, popularity, preferred: BTreeSet::new(), popularity_groups: BTreeMap::new() })
+        Ok(MatchingBooks { books: matching, downloaded, text_matches, preferred: BTreeSet::new() })
     }
 
     /// `books` in the page's book order.
@@ -62,7 +50,6 @@ impl Database {
             let sort = match options.book_sort {
                 BrowseBookSort::Alphabetical | BrowseBookSort::DefaultOrder => 0,
                 BrowseBookSort::RecentlyRead => 1,
-                BrowseBookSort::Popularity => 2,
             };
             self.connection.ordered_books(&ids, sort, |row| {
                 ordered.push(row.get(0)?);

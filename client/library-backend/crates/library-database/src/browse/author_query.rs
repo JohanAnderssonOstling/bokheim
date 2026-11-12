@@ -1,10 +1,10 @@
 //! Relational author selection. Only heading aggregates cross into Rust;
 //! each requested author's ordered membership is loaded on demand.
-use super::{BrowseOptions, BrowseRow, invalid_integer_column, parse_uuid_column, popularity};
+use super::{BrowseOptions, BrowseRow, invalid_integer_column, ordering, parse_uuid_column};
 use crate::query_methods::uuid_blob_column;
 use crate::{Database, DatabaseError, SqlParam};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AuthorId, normalize_search_text};
-use library_model::{BrowseBookSort, BrowseChipSort, BrowseLocation, FINISHED_PROGRESS_THRESHOLD};
+use library_model::{BrowseBookSort, BrowseLocation, FINISHED_PROGRESS_THRESHOLD};
 use rusqlite::{Connection, Row, Statement, types::Value};
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ names AS (
 ),
 eligible AS (
  SELECT book.row_id,book.search_title,book.title,book.content_hash AS key,book.read_at,
-        presence.downloaded,0 AS source_priority,book.popularity_rating_count AS score,
+        presence.downloaded,0 AS source_priority,
         CASE WHEN :search='' THEN 0 ELSE instr(book.search_title,:search)>0 OR instr(book.search_author,:search)>0 END AS text_match
  FROM book JOIN library_book_presence presence ON presence.book_row_id=book.row_id
  WHERE book.deleted_at IS NULL
@@ -43,7 +43,7 @@ members AS (
 names AS (SELECT row_id AS author_id,author_id AS identity,name FROM author WHERE 1 {name_scope}),
 eligible AS (
  SELECT browse.row_id,browse.search_title,source.title,source.key,NULL AS read_at,
-        0 AS downloaded,browse.source_priority,browse.popularity_score AS score,
+        0 AS downloaded,browse.source_priority,
         CASE WHEN :search='' THEN 0 ELSE instr(browse.search_title,:search)>0 OR instr(browse.search_author,:search)>0 END AS text_match
  FROM catalog_browse_search browse JOIN book source ON source.row_id=browse.book_row_id
  WHERE (:formats=0 OR (:formats & source.format)!=0)
@@ -142,30 +142,15 @@ impl AuthorQuery<'_> {
     }
 
     pub(super) fn headings(&self) -> Result<Vec<BrowseRow>, DatabaseError> {
-        let popularity = self.options.chip_sort == BrowseChipSort::Popularity;
-        let stats = if popularity {
-            r#",credited AS (
-                 SELECT members.author_id,eligible.*
-                 FROM members JOIN eligible ON eligible.row_id=members.book_row_id
-                 {name_filter}
-               ),stats AS (
-                 SELECT author_id,count(*) AS total,sum(downloaded) AS downloaded,
-                        min(source_priority) AS priority,
-                        sum(score) AS score
-                 FROM credited GROUP BY author_id
-               )"#
-        } else {
-            r#",stats AS (
+        let stats = r#",stats AS (
                  SELECT members.author_id,count(*) AS total,sum(downloaded) AS downloaded,
-                        min(source_priority) AS priority,NULL AS score
+                        min(source_priority) AS priority
                  FROM members JOIN eligible ON eligible.row_id=members.book_row_id {name_filter} GROUP BY members.author_id
-               )"#
-        };
+               )"#;
         let name_filter = if self.options.search.is_empty() { "" } else { "WHERE members.author_id IN (SELECT author_id FROM names WHERE instr(normalize_search_text(name),:search)>0)" };
         let stats = stats.replace("{name_filter}", name_filter);
-        let sql = format!("{stats} SELECT names.identity,names.name,stats.total,stats.downloaded,stats.priority,stats.score FROM names JOIN stats USING(author_id)");
+        let sql = format!("{stats} SELECT names.identity,names.name,stats.total,stats.downloaded,stats.priority FROM names JOIN stats USING(author_id)");
         let mut rows = Vec::new();
-        let mut scores = HashMap::new();
         let mut priorities = HashMap::new();
         self.read(&sql, None, &[], |row| {
             let name: String = row.get(1)?;
@@ -176,13 +161,12 @@ impl AuthorQuery<'_> {
             let location = if self.catalog { BrowseLocation::CatalogAuthor(Some(id)) } else { BrowseLocation::Author(Some(id)) };
             rows.push(BrowseRow { id: location, name, path: None, book_count: count(row, 2)?, downloaded_book_count: count(row, 3)? });
             priorities.insert(location, row.get::<_, u8>(4)?);
-            scores.insert(location, row.get::<_, Option<f64>>(5)?);
             Ok(())
         })?;
         rows.sort_unstable_by_key(|row| row.id);
-        popularity::sort_rows(&mut rows, self.options.chip_sort, |row| scores[&row.id]);
-        if self.catalog && !popularity {
-            popularity::prefer_rows(&mut rows, &|row| priorities[&row.id] == 0);
+        ordering::sort_rows(&mut rows, self.options.chip_sort);
+        if self.catalog {
+            ordering::prefer_rows(&mut rows, &|row| priorities[&row.id] == 0);
         }
         Ok(rows)
     }
@@ -212,11 +196,10 @@ impl AuthorQuery<'_> {
 
     fn order(&self) -> &'static str {
         if self.catalog {
-            if self.options.book_sort == BrowseBookSort::Popularity { "score IS NULL,score DESC,search_title,title,key" } else { "(source_priority=0) DESC,search_title,title,key" }
+            "(source_priority=0) DESC,search_title,title,key"
         } else {
             match self.options.book_sort {
                 BrowseBookSort::RecentlyRead => "read_at DESC,search_title,title,key",
-                BrowseBookSort::Popularity => "score IS NULL,score DESC,search_title,title,key",
                 _ => "search_title,title,key",
             }
         }

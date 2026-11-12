@@ -4,7 +4,7 @@
 use crate::build::tests::snapshot_from;
 use crate::schema::{self, now_ms};
 use crate::*;
-use metadata_contract::{authority_subjects::OPEN_LIBRARY_WORK_PROVIDER, AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod};
+use metadata_contract::{AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod, authority_subjects::OPEN_LIBRARY_WORK_PROVIDER};
 
 /// Older answer files may already contain a union of work and sibling codes.
 /// Apply the same source priority while reading them; exact LCC remains first.
@@ -190,7 +190,7 @@ mod snapshot_tests {
             &[],
         );
         let answers = dir.path().join("answers.sqlite");
-        build_answers_with_ratings(&source, None, None, None, None, &answers).unwrap();
+        build_answers(&source, None, None, None, &answers).unwrap();
         let c = Connection::open(&answers).unwrap();
         assert_eq!(c.query_row("SELECT count(*) FROM work_description", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
         let raw: Vec<u8> = c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=9780306406157", [], |r| r.get(0)).unwrap();

@@ -56,7 +56,7 @@ async fn audiobook_archive_is_unchanged_and_thumbnail_source_bypasses_browsing_c
     let downloaded = library_catalog::download_audiobook_with_progress(key, &|update| progress.borrow_mut().push(update)).await.unwrap();
     assert_eq!(progress.borrow().last(), Some(&CatalogImportProgress::Importing));
     assert!(progress.borrow().contains(&CatalogImportProgress::Downloading { downloaded_bytes: archive_bytes, total_bytes: Some(archive_bytes) }));
-    assert_eq!(library_catalog::fresh_external_cover(key).await.unwrap().unwrap(), selected);
+    assert_eq!(library_catalog::fresh_catalog_cover(key).await.unwrap().unwrap(), selected);
     assert!(!POLICY.allowed(), "explicit acquisitions must not enable automatic transfers");
     server.join().unwrap();
     assert_eq!(archived_cover(Cursor::new(&downloaded)).unwrap(), None);

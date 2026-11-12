@@ -3,13 +3,14 @@ use ui_text::text;
 mod annotation_paint;
 mod ruler;
 mod session;
+mod touch;
 pub use ruler::ReadingRulerStyle;
 
 use fixed_page::{DISPLAY_CACHE_BUDGET, PageCache, PageImage, PageSwipe, PageZoom};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseMoveEvent,
-    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, Style, Task, TouchPhase, Window, canvas, div, fill, point, px, rgba, size,
+    AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseButton, MouseMoveEvent,
+    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, Style, Task, TouchEvent, TouchId, TouchPhase, Window, canvas, div, fill, point, px, rgba, size,
 };
 use gpui_component::ElementExt;
 use gpui_image_eviction::track_image;
@@ -102,6 +103,7 @@ impl PdfSourcePosition {
 
 #[derive(Clone, Debug)]
 pub enum PdfViewEvent {
+    SelectionAdjustmentStarted,
     NavigationJump {
         from: PdfSourcePosition,
     },
@@ -247,6 +249,12 @@ pub struct PdfView {
     selection_anchor_source_index: Option<usize>,
     selection_active: Option<(f32, f32)>,
     tap_start: Option<(Point<Pixels>, Instant)>,
+    touch_selection_handles_visible: bool,
+    touch_selection_id: Option<TouchId>,
+    touch_selection_offset: Point<Pixels>,
+    touch_momentum: gpui::TouchScroll,
+    touch_scroll_offset: Point<Pixels>,
+    touch_scroll_axis: Option<Axis>,
     selection_page: Option<usize>,
     selection_page_column: Option<u32>,
     selection_granularity: SelectionGranularity,
@@ -480,6 +488,12 @@ impl PdfView {
             selection_anchor_source_index: None,
             selection_active: None,
             tap_start: None,
+            touch_selection_handles_visible: true,
+            touch_selection_id: None,
+            touch_selection_offset: Point::default(),
+            touch_momentum: gpui::TouchScroll::default(),
+            touch_scroll_offset: Point::default(),
+            touch_scroll_axis: None,
             selection_page: None,
             selection_page_column: None,
             selection_granularity: SelectionGranularity::Word,
@@ -643,6 +657,7 @@ impl PdfView {
     }
 
     fn turn_page(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.touch_momentum.cancel();
         self.pending_search_scroll = None;
         self.finish_scroll_animation(cx);
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
@@ -1552,6 +1567,7 @@ impl PdfView {
     }
 
     fn clear_selection(&mut self) {
+        self.touch_selection_id = None;
         self.selection_anchor = None;
         self.selection_anchor_source_index = None;
         self.selection_active = None;
@@ -1573,6 +1589,7 @@ impl PdfView {
     /// results, and future scrollbar targets may all name an anchor that has
     /// never been visible before.
     fn seek_viewport_anchor(&mut self, anchor: FitWidthAnchor, remember_previous: bool, cx: &mut Context<Self>) -> bool {
+        self.touch_momentum.cancel();
         self.scroll_animation = None;
         if !self.reflow_viewport_anchor(anchor, remember_previous) {
             return false;
@@ -2681,6 +2698,11 @@ impl Render for PdfView {
             self.page_turn = None;
             self.scroll_animation = None;
         }
+        if let Some(delta) = self.touch_momentum.advance_surface(self.touch_scroll_offset, window, cx) {
+            self.scroll_touch_content(delta.y, cx);
+            self.touch_momentum.constrain(self.touch_scroll_offset);
+        }
+        if self.touch_momentum.is_animating() { window.request_animation_frame(); }
         if self.advance_scroll_animation(cx) {
             window.request_animation_frame();
         }
@@ -2735,6 +2757,13 @@ impl Render for PdfView {
             .absolute()
             .inset_0(),
         );
+        if self.touch_selection_handles_visible && components::uses_mobile_reader_controls(window) {
+            for (index, endpoint) in self.selection_endpoints().into_iter().enumerate() {
+                if let Some(endpoint) = endpoint {
+                    document = document.child(components::reader_selection_handle(format!("pdf-selection-{index}-handle"), endpoint, window, theme));
+                }
+            }
+        }
         let surface_bounds = Rc::new(Cell::new(Bounds::default()));
         let measured_bounds = surface_bounds.clone();
         let measure_target = view.clone();
@@ -2809,9 +2838,53 @@ impl Render for PdfView {
                     cx.stop_propagation();
                 });
             })
+            .on_long_press(cx.listener(|view, event: &LongPressEvent, window, cx| {
+                if !components::uses_mobile_reader_controls(window) { return; }
+                let Some(target) = view.interaction_target(event.position, view.surface_bounds) else { return };
+                let Some(source_index) = view.selection_anchor_source_index(target) else { return };
+                view.begin_selection(target.page_index, target.column.page_column_index(), target.page_point, source_index, SelectionGranularity::Word, cx);
+                view.tap_start = None;
+                view.touch_selection_id = Some(event.id);
+                view.touch_selection_offset = Point::default();
+                view.touch_momentum.cancel();
+                window.prevent_default();
+                cx.stop_propagation();
+            }))
+            .capture_any_touch(cx.listener(|view, event: &TouchEvent, window, cx| {
+                if view.touch_selection_handles_visible && event.phase == TouchPhase::Started && components::uses_mobile_reader_controls(window) {
+                    view.begin_selection_handle(event, window, cx);
+                }
+                if view.touch_selection_id != Some(event.id) { return; }
+                let target = view.interaction_target(event.position - view.touch_selection_offset, view.surface_bounds);
+                match event.phase {
+                    TouchPhase::Moved => {
+                        if let Some(target) = target {
+                            view.update_selection_to(target.page_index, target.column.page_column_index(), target.page_point, cx);
+                        }
+                    }
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        view.touch_selection_id = None;
+                        view.finish_selection_at(target, cx);
+                        if event.phase == TouchPhase::Ended {
+                            if let Some(selection) = view.selection_snapshot() {
+                                cx.emit(PdfViewEvent::WordSelected { selection, position: event.position });
+                            }
+                        }
+                    }
+                    TouchPhase::Started => {}
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            }))
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 mouse_down_target.update(cx, |view, cx| {
                     view.scroll_animation = None;
+                    if components::uses_mobile_reader_controls(window) {
+                        view.clear_text_selection(cx);
+                        view.tap_start = Some((event.position, Instant::now()));
+                        cx.stop_propagation();
+                        return;
+                    }
                     let Some(target) = view.interaction_target(event.position, mouse_down_bounds.get()) else { return };
                     view.focus.focus(window, cx);
                     window.prevent_default();
@@ -2830,8 +2903,8 @@ impl Render for PdfView {
                     cx.stop_propagation();
                 });
             })
-            .on_mouse_move(move |event, _, cx| {
-                if !event.dragging() {
+            .on_mouse_move(move |event, window, cx| {
+                if components::uses_mobile_reader_controls(window) || !event.dragging() {
                     return;
                 }
                 mouse_move_target.update(cx, |view, cx| {
@@ -2841,8 +2914,17 @@ impl Render for PdfView {
                     }
                 });
             })
-            .on_mouse_up(MouseButton::Left, move |event, _, cx| {
+            .on_mouse_up(MouseButton::Left, move |event, window, cx| {
                 mouse_up_target.update(cx, |view, cx| {
+                    if components::uses_mobile_reader_controls(window) {
+                        if let Some((_, started_at)) = view.tap_start.take() {
+                            if started_at.elapsed() < Duration::from_millis(600) {
+                                cx.emit(PdfViewEvent::PageTapped);
+                            }
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
                     let target = view.interaction_target(event.position, mouse_up_bounds.get());
                     if view.finish_selection_at(target, cx) {
                         if let Some((start, started_at)) = view.tap_start.take() {
@@ -2883,18 +2965,18 @@ impl Render for PdfView {
                         (direction * view.flow_column_height(), 0.0)
                     }
                 };
+                if window.is_touch_scroll() {
+                    let from_edge = components::in_bottom_gesture_edge(event.position, window);
+                    wheel_target.update(cx, |view, cx| view.handle_touch_scroll(point(horizontal, vertical), event.touch_phase, from_edge, window, cx));
+                    cx.stop_propagation();
+                    return;
+                }
                 if panning && !matches!(event.delta, ScrollDelta::Pages(_)) {
                     wheel_target.update(cx, |view, cx| view.pan_document(point(horizontal, vertical), event.touch_phase, cx));
                     cx.stop_propagation();
                     return;
                 }
                 let flow_delta = wheel_target.read(cx).flow_scroll_delta(point(horizontal, vertical));
-                if window.is_touch_scroll() {
-                    let from_edge = components::in_bottom_gesture_edge(event.position, window);
-                    wheel_target.update(cx, |view, cx| view.handle_page_scroll(gpui::point(horizontal, vertical), event.touch_phase, from_edge, window, cx));
-                    cx.stop_propagation();
-                    return;
-                }
                 if matches!(event.delta, ScrollDelta::Pages(_)) {
                     wheel_target.update(cx, |view, cx| {
                         view.touch_swipe.cancel();

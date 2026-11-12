@@ -6,6 +6,7 @@ publish = false
 
 [features]
 blocking = ["reqwest/blocking"]
+bundled-roots = ["dep:webpki-roots"]
 
 [dependencies]
 futures-util = "0.3"
@@ -14,4 +15,5 @@ reqwest = { workspace = true, features = ["stream"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 rustls.workspace = true
+webpki-roots = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }

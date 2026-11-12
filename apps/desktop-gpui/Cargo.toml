@@ -29,7 +29,7 @@ flatpak = ["desktop", "reader-ui/packaged-pdfium", "application-shell/packaged-p
 # Kobo is a touch device, so it takes the mobile surface too: swipe handling
 # is gated on `mobile`, and without it the hardware buttons were the only way
 # to turn a page on a touchscreen reader.
-kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "dep:kobo-update", "browser-ui/kobo", "reader-ui/kobo", "application-shell/kobo"]
+kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "dep:kobo-update", "browser-ui/kobo", "reader-ui/kobo", "application-shell/kobo", "http-response/bundled-roots"]
 mobile = ["browser-ui/mobile", "reader-ui/mobile", "application-shell/mobile", "ui-components/mobile"]
 android = ["mobile", "reader-ui/native-tts", "dep:reader-speech", "dep:audiobook-player", "dep:gpui_android", "dep:gpui_platform", "dep:update-client", "dep:linux-update-host"]
 

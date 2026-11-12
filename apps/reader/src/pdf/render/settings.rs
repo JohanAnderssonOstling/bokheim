@@ -266,7 +266,7 @@ impl PdfReaderView {
                         ))
                     })),
             )
-            .child(components::reader_settings_group(theme).children(spacing))
+            .child(components::reader_settings_group(theme).child(components::reader_stepper_rows().children(spacing)))
             .into_any_element();
         general
     }

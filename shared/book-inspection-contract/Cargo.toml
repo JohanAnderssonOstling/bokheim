@@ -1,0 +1,12 @@
+[package]
+name = "book-inspection-contract"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+book-model = { path = "../book-model" }
+content-address = { path = "../content-address" }
+metadata-contract = { path = "../metadata-contract" }
+pdf-view-common = { path = "../pdf-view-common" }
+serde = { version = "1", features = ["derive"] }

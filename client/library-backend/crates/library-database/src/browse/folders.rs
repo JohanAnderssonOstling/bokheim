@@ -2,10 +2,10 @@
 
 use crate::browse::{BrowseRow, FoldersSql, invalid_integer_column, parse_uuid_column};
 use crate::{Database, DatabaseError};
-use library_model::{BrowseChipSort, BrowseLocation};
+use library_model::BrowseLocation;
 #[cfg(test)]
 use std::collections::BTreeMap;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use sync_common::{DirId, ROOT_DIR_ID};
 
 impl Database {
@@ -40,10 +40,7 @@ impl Database {
                         }
                     }
                     plain.extend(wrappers);
-                    if options.chip_sort == BrowseChipSort::Popularity {
-                        let positions: HashMap<_, _> = parents.iter().enumerate().map(|(index, row)| (row.id, index)).collect();
-                        plain.sort_by_key(|section| positions[&section.parent.id]);
-                    }
+
                     plain
                 }
             } else {
@@ -150,7 +147,7 @@ impl Database {
                 // Folders containing only remote books still obey the download filter.
                 folder.book_count > 0 || show_empty && count.total == 0
             });
-            super::popularity::sort_rows(folders, options.chip_sort, |row| row.id.folder().and_then(|id| counts.get(&id.to_string()).and_then(|count| count.popularity)));
+            super::ordering::sort_rows(folders, options.chip_sort);
         };
         Ok(folders)
     }
@@ -179,7 +176,7 @@ impl Database {
         let selected = json(&folders)?;
         let mut counts = FolderCounts::new();
         self.connection.folder_direct_counts(&selected, options.file_types, &options.languages, i32::from(options.hide_finished), f64::from(library_model::FINISHED_PROGRESS_THRESHOLD), |row| {
-            counts.insert(row.get(0)?, FolderCount { total: count_column(row, 1)?, downloaded: count_column(row, 2)?, popularity: None });
+            counts.insert(row.get(0)?, FolderCount { total: count_column(row, 1)?, downloaded: count_column(row, 2)? });
             Ok(())
         })?;
         // Children follow their parents in `folders`, so going in reverse
@@ -190,29 +187,7 @@ impl Database {
             let entry = counts.entry(folder.clone()).or_default();
             (entry.total, entry.downloaded) = (entry.total + total, entry.downloaded + downloaded);
         }
-        if options.chip_sort == BrowseChipSort::Popularity {
-            let mut members = HashMap::<String, BTreeSet<i64>>::new();
-            self.connection.folder_placements(&selected, |row| {
-                if options.downloaded_only && !row.get::<_, bool>(2)? {
-                    return Ok(());
-                }
-                members.entry(row.get(1)?).or_default().insert(row.get(0)?);
-                Ok(())
-            })?;
-            let candidates = members.values().flat_map(|ids| ids.iter().copied()).collect();
-            let matching = self.matching_books(&candidates, options)?;
-            for folder in folders.iter().rev() {
-                let mut ids = members.remove(folder).unwrap_or_default();
-                for child in children.get(folder).into_iter().flatten() {
-                    // Its score is already saved; only this parent still needs its members.
-                    if let Some(below) = members.remove(child) {
-                        ids.extend(below);
-                    }
-                }
-                counts.entry(folder.clone()).or_default().popularity = super::popularity::sum(&ids, &matching);
-                members.insert(folder.clone(), ids);
-            }
-        }
+
         Ok(FolderTree { folders, counts })
     }
 }
@@ -222,7 +197,6 @@ impl Database {
 pub(super) struct FolderCount {
     total: usize,
     downloaded: usize,
-    popularity: Option<f64>,
 }
 pub(super) type FolderCounts = HashMap<String, FolderCount>;
 

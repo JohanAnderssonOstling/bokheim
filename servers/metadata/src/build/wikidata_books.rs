@@ -1,5 +1,5 @@
 //! Exact ISBN associations and conservative cross-authority author reconciliation.
-use crate::{error, open_library_id, Connection, MetadataError};
+use crate::{Connection, MetadataError, error, open_library_id};
 use metadata_contract::{matching::author_names_compatible, *};
 use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, BTreeSet};
@@ -295,7 +295,6 @@ pub(crate) fn enrich(c: &Connection, core: &Connection, results: &mut [RichIsbnM
                     classifications: direct_codes(book, isbn),
                     authors: book.authors.iter().enumerate().map(|(i, a)| wd_author(a, i)).collect(),
                     description: book.description.clone(),
-                    popularity: None,
                     subjects: Vec::new(),
                 });
             }

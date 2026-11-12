@@ -263,7 +263,7 @@ mod tests {
             cx.notify();
         }
 
-        fn go_to_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>) {
+        fn go_to_annotation(&mut self, annotation: &Annotation, _window: &mut Window, cx: &mut Context<Self>) {
             self.navigated_id = Some(annotation.id.clone());
             cx.notify();
         }

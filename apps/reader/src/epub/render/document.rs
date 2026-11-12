@@ -40,7 +40,10 @@ impl ReaderView {
         let context_target = entity.clone();
         let movement_target = entity.downgrade();
         let keyboard_target = entity.clone();
-        renderer.update(cx, |view, cx| view.set_reading_ruler_margins(horizontal_margin, vertical_margin, cx));
+        renderer.update(cx, |view, cx| {
+            view.set_touch_selection_only(mobile);
+            view.set_reading_ruler_margins(horizontal_margin, vertical_margin, cx);
+        });
         let document = components::reader_content()
             .relative()
             .id("epub-reader-document")
@@ -75,9 +78,19 @@ impl ReaderView {
                         return;
                     }
                 }
+                if components::uses_mobile_reader_controls(window) && event.button == MouseButton::Left {
+                    reader.dismiss_selection(cx);
+                    return;
+                }
                 reader.begin_word_click(event);
                 if event.button == MouseButton::Left {
+                    let dismiss_selection = event.click_count == 1
+                        && matches!(&reader.load_state, LoadState::Ready(renderer)
+                            if renderer.read(cx).has_text_selection());
                     reader.dismiss_selection(cx);
+                    if dismiss_selection {
+                        cx.stop_propagation();
+                    }
                     return;
                 }
                 if event.button != MouseButton::Right {
@@ -209,6 +222,14 @@ impl ReaderView {
     }
 
     fn show_context_sheet(&mut self, actions: ContextActions<EpubContextCommand>, cx: &mut Context<Self>) {
+        if matches!(&self.load_state, LoadState::Ready(renderer) if renderer.read(cx).has_text_selection()) {
+            self.touch_selection = Default::default();
+            self.touch_selection.active = true;
+            self.context_sheet = None;
+            self.chrome.hide(cx);
+            cx.notify();
+            return;
+        }
         if !actions.is_empty() {
             self.context_sheet = Some(actions);
             self.chrome.hide(cx);
@@ -221,8 +242,16 @@ impl ContextActionTarget for ReaderView {
     type Command = EpubContextCommand;
 
     fn run_context_action(&mut self, command: Self::Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.touch_selection = Default::default();
+        cx.notify();
         match command {
             EpubContextCommand::OpenLinkInNewWindow(href) => self.open_link_in_new_window(href, window, cx),
+            EpubContextCommand::CopySelectionPlainText => {
+                if let LoadState::Ready(renderer) = &self.load_state {
+                    renderer.update(cx, |view, cx| view.copy_selection_as_plain_text(cx));
+                }
+                self.dismiss_selection(cx);
+            }
             EpubContextCommand::CopySelectionMarkdown => self.copy_selection(cx),
             EpubContextCommand::CopySelectionWithSource => self.copy_selection_with_source(cx),
             EpubContextCommand::AnnotateSelection => {

@@ -11,7 +11,6 @@ mod links;
 mod loyalbooks;
 mod manifest;
 mod opds;
-mod popularity;
 mod publish;
 mod timing;
 
@@ -34,7 +33,7 @@ const USAGE: &str = "usage: catalog DIR search FEED_URL
        catalog DIR import-gutenberg MANIFEST_JSON
        catalog DIR backfill-gutenberg-descriptions MANIFEST_JSON
        catalog DIR backfill-gutenberg-subjects MANIFEST_JSON
-       catalog DIR add-loyalbooks BOOK_URL [POPULARITY_PAGE_URL]
+       catalog DIR add-loyalbooks BOOK_URL
        catalog DIR add-loyalbooks BOOK_URL --epub-url EPUB_URL
        catalog DIR crawl-loyalbooks [--retry-failures]
        catalog DIR loyalbooks-status
@@ -44,7 +43,6 @@ const USAGE: &str = "usage: catalog DIR search FEED_URL
        catalog DIR analyze-link-manifest MANIFEST_JSON
        catalog DIR remove-link SOURCE ENTRY_ID
        catalog DIR remove HASH
-       catalog DIR litteraturbanken-popularity INDEX_JSON OBSERVED_AT
        catalog DIR review
        catalog DIR subject|unsubject HASH lcc|ddc|bisac|unified CODE
        catalog DIR cover HASH IMAGE_URL
@@ -65,14 +63,12 @@ missing summaries without downloading books or replacing existing descriptions.
 backfill-gutenberg-subjects appends subjects from cached source pages to explicit
 book/external_book targets verified against their Gutenberg identifiers.
 add-loyalbooks fetches a free, rated book directly from its source page. EPUBs
-are retained; audio rated 4+ is linked without downloading audio. An optional
-Top_100 page supplies popularity rank. Source metadata goes directly into SQLite.
+are retained; audio rated 4+ is linked without downloading audio.
+Source metadata goes directly into SQLite.
 crawl-loyalbooks scans every sitemap book across all languages, respects the
 source crawl delay, resumes its SQLite queue and installs local snapshots as it
 progresses. --retry-failures requeues exhausted failures. loyalbooks-status
 prints queue progress without fetching source pages.
-litteraturbanken-popularity retains reading and EPUB popularity from an observed
-index response and combines their tied-rank percentiles with equal weight.
 retain-covers downloads images, or reads image paths supplied by a manifest,
 and retains card/detail versions for hosted or source-linked catalog entries.
 link-manifest stores bibliographic records and source-page links without fetching
@@ -117,13 +113,11 @@ fn run(args: &[String]) -> Result<(), String> {
         ("import-gutenberg", [path]) => gutenberg::import(&dir, &db, &http, Path::new(path)),
         ("backfill-gutenberg-descriptions", [path]) => gutenberg::backfill_descriptions(&db, Path::new(path)),
         ("backfill-gutenberg-subjects", [path]) => gutenberg::backfill_subjects(&db, Path::new(path)),
-        ("add-loyalbooks", [page]) => loyalbooks::add(&dir, &db, &http, page, None).map_err(String::from),
-        ("add-loyalbooks", [page, popularity]) => loyalbooks::add(&dir, &db, &http, page, Some(popularity)).map_err(String::from),
-        ("add-loyalbooks", [page, flag, epub]) if flag == "--epub-url" => loyalbooks::add_with_epub(&dir, &db, &http, page, None, Some(epub)).map_err(String::from),
+        ("add-loyalbooks", [page]) => loyalbooks::add(&dir, &db, &http, page).map_err(String::from),
+        ("add-loyalbooks", [page, flag, epub]) if flag == "--epub-url" => loyalbooks::add_with_epub(&dir, &db, &http, page, Some(epub)).map_err(String::from),
         ("crawl-loyalbooks", []) => loyalbooks::crawl::run(&dir, &db, &http, false),
         ("crawl-loyalbooks", [flag]) if flag == "--retry-failures" => loyalbooks::crawl::run(&dir, &db, &http, true),
         ("loyalbooks-status", []) => loyalbooks::crawl::status(&db),
-        ("litteraturbanken-popularity", [index, observed_at]) => popularity::import(&db, Path::new(index), observed_at),
         ("import", []) => import(&dir, &db, &http),
         ("import-manifest", [path]) => manifest::import(&dir, &db, &http, Path::new(path)),
         ("link-manifest", [path]) => links::import(&db, &http, Path::new(path), false),
@@ -504,7 +498,7 @@ mod enrichment_tests {
         let _restore = RestoreEnvironment(std::env::var_os("BOKHEIM_METADATA_URL"));
         let bytes = include_bytes!("../../../client/library-backend/crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
         let hash = content_address::hash_reader(&mut &bytes[..]).unwrap().to_hex();
-        let versions = thumbnail::ThumbnailVersions::from_image(&image::RgbImage::new(8, 8)).unwrap();
+        let versions = thumbnail::thumbnail_versions_from_image(&image::RgbImage::new(8, 8)).unwrap();
         for scenario in ["retained", "source", "missing", "broken_source"] {
             let dir = tempfile::tempdir().unwrap();
             let db = curation::open(dir.path()).unwrap();

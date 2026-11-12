@@ -1,7 +1,10 @@
 //! Snapshots and reversible source removal for transfers to another library.
+mod foliate_identity;
+use self::foliate_identity::match_foliate_annotations;
+
 use crate::sync::apply::registers::canonical_body;
 use crate::{Database, DatabaseError};
-use book_inspection::{CachedPdfReader, InspectedBook};
+use book_inspection_contract::{CachedPdfReader, InspectedBook};
 use book_model::{Annotation, BookFormat};
 use content_address::ContentHash;
 use library_model::{LibraryFolderDestination, RelativeBookPath};
@@ -351,7 +354,7 @@ pub(crate) fn reconcile_reader_annotations(tx: &rusqlite::Transaction<'_>, sourc
     let mut query = tx.prepare("SELECT a.body FROM annotation a JOIN book b ON b.row_id=a.book_row_id WHERE b.content_hash=?1 ORDER BY a.id")?;
     let bodies = query.query_map([source.book_id], |row| row.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?;
     let history = bodies.iter().map(|body| Annotation::decode(body).map_err(DatabaseError::operation)).collect::<Result<Vec<_>, _>>()?;
-    let matched = library_model::match_foliate_annotations(&source.annotations, &history).map_err(DatabaseError::operation)?;
+    let matched = match_foliate_annotations(&source.annotations, &history).map_err(DatabaseError::operation)?;
     for (annotation, matched) in source.annotations.iter_mut().zip(matched) {
         let Some(index) = matched else {
             continue;

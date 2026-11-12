@@ -125,6 +125,14 @@ impl SyncState {
         if self.account_status != snapshot.account {
             return;
         }
+        if self.storage_usage == snapshot.storage_usage
+            && self.pending_cloud_bytes == snapshot.pending_cloud_bytes
+            && self.sync_statuses == snapshot.sync_statuses
+            && self.server_storage_usage == snapshot.server_storage_usage
+            && self.server_book_storage_usage == snapshot.server_book_storage_usage
+        {
+            return;
+        }
         self.storage_usage = snapshot.storage_usage;
         self.pending_cloud_bytes = snapshot.pending_cloud_bytes;
         self.sync_statuses = snapshot.sync_statuses.clone();
@@ -134,6 +142,9 @@ impl SyncState {
     }
 
     pub fn apply_local_storage_usage(&mut self, usage: Vec<LocalLibraryStorageUsage>, cx: &mut Context<Self>) {
+        if self.local_storage_usage == usage {
+            return;
+        }
         self.local_storage_usage = usage;
         cx.notify();
     }

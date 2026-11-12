@@ -2,7 +2,7 @@
 
 use crate::Isbn13;
 use crate::{
-    error, sql_placeholders, Classification, ClassificationScheme, ClassificationSource, Connection, LookupStatus, MetadataError, RichIsbnMetadataResult, RichWorkMetadataMatch, SubjectHeading, WorkClassificationMatch, MAX_DESCRIPTION_BYTES,
+    Classification, ClassificationScheme, ClassificationSource, Connection, LookupStatus, MAX_DESCRIPTION_BYTES, MetadataError, RichIsbnMetadataResult, RichWorkMetadataMatch, SubjectHeading, WorkClassificationMatch, error, sql_placeholders,
 };
 use rusqlite::params_from_iter;
 use serde::Deserialize;
@@ -67,7 +67,7 @@ pub(crate) fn enrich(connection: &Connection, results: &mut [RichIsbnMetadataRes
             continue;
         }
         if result.matches.is_empty() {
-            result.matches.push(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications: Vec::new(), authors: Vec::new(), description: None, popularity: None, subjects: Vec::new() });
+            result.matches.push(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications: Vec::new(), authors: Vec::new(), description: None, subjects: Vec::new() });
             result.status = LookupStatus::Matched;
         }
         let matched = &mut result.matches[0];
@@ -112,7 +112,7 @@ pub(crate) fn enrich_many(connection: &Connection, results: &mut [RichIsbnMetada
             continue;
         }
         if result.matches.is_empty() {
-            result.matches.push(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: vec![], classifications: vec![], authors: vec![], description: None, popularity: None, subjects: vec![] });
+            result.matches.push(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: vec![], classifications: vec![], authors: vec![], description: None, subjects: vec![] });
             result.status = LookupStatus::Matched;
         }
         let matched = &mut result.matches[0];
@@ -142,7 +142,7 @@ mod tests {
             let isbn = body * 10 + (10 - sum % 10) % 10;
             let mut result = RichIsbnMetadataResult { requested_isbn: format!("{isbn:013}"), canonical_isbn13: Some(format!("{isbn:013}")), status: LookupStatus::NoMatch, matches: vec![] };
             if id % 4 == 0 {
-                let matched = RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: vec![], classifications: vec![], authors: vec![], description: Some("Existing description".into()), popularity: None, subjects: vec![] };
+                let matched = RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: vec![], classifications: vec![], authors: vec![], description: Some("Existing description".into()), subjects: vec![] };
                 result.matches = vec![matched.clone(), matched];
                 result.status = LookupStatus::Ambiguous;
             }

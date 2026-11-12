@@ -294,6 +294,7 @@ impl ArticlePage {
         };
         let panel = components::modal_surface(theme)
             .id("wikipedia-article-surface")
+            .when(components::uses_mobile_reader_controls(window), |panel| panel.border_0().rounded_none().shadow_none())
             .font_family(Theme::global(cx).font_family.clone())
             .text_size(Theme::global(cx).font_size)
             .size_full()
@@ -312,7 +313,15 @@ impl ArticlePage {
             .children(status)
             .child(div().size_full().flex_1().min_h_0().min_w_0().children(body))
             .focus_trap("wikipedia-article-focus", focus);
-        Some(gpui::deferred(components::anchor_to_window(components::absolute_full_size().child(panel), window)).into_any_element())
+        // The embedded reader owns mobile safe-area padding, just like a book.
+        let overlay = if components::uses_mobile_reader_controls(window) {
+            let viewport = window.viewport_size();
+            gpui::anchored().position(gpui::point(px(0.0), px(0.0)))
+                .child(components::absolute_full_size().w(viewport.width).h(viewport.height).child(panel))
+        } else {
+            components::anchor_to_window(components::absolute_full_size().child(panel), window)
+        };
+        Some(gpui::deferred(overlay).into_any_element())
     }
 }
 
@@ -364,16 +373,6 @@ impl DictionaryPopup {
     }
 
     pub(crate) fn native_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Some(popup) = self.wikipedia_popup.clone() {
-            window.defer(cx, move |window, cx| {
-                popup.update(cx, |popup, cx| {
-                    if !popup.native_back(window, cx) {
-                        cx.emit(super::Closed);
-                    }
-                })
-            });
-            return true;
-        }
         if self.wikipedia_page.current.is_some() || !matches!(self.wikipedia_page.load, ArticleLoad::Idle) {
             if let Some((_, reader)) = self.wikipedia_page.current.as_ref() {
                 let reader = reader.clone();

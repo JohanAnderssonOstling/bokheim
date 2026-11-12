@@ -202,6 +202,9 @@ impl PdfReaderView {
                 }
                 let indexed = self.search_list.hit_count();
                 self.search_list.extend_pages(pdf.read(cx).search_hits().iter().skip(indexed).map(|hit| hit.page_index()));
+                if indexed != self.search_list.hit_count() {
+                    self.search_list.rebuild_contents(&self.toc);
+                }
                 if self.search_match.is_none_or(|(previous, _)| previous != *current) {
                     self.search_list.reveal_match(*current);
                 }
@@ -211,14 +214,24 @@ impl PdfReaderView {
                     notify(cx, Component::PdfShell, "match_changed");
                 }
             }
-            PdfViewEvent::PageTapped => self.toggle_mobile_controls(window, cx),
+            PdfViewEvent::SelectionAdjustmentStarted => {
+                self.context_sheet = None;
+                cx.notify();
+            }
+            PdfViewEvent::PageTapped => {
+                self.context_sheet = None;
+                self.toggle_mobile_controls(window, cx);
+            }
             PdfViewEvent::WordSelected { selection, position } => {
-                if !components::touch_ui() {
+                if components::uses_mobile_reader_controls(window) {
+                    self.open_context_sheet(cx);
+                } else {
                     self.annotation_popup_anchor = Some(*position);
                     self.lookup_selection(selection.clone(), window, cx);
                 }
             }
             PdfViewEvent::PassageBoundsChanged { bounds } => {
+                if self.context_sheet.is_some() { cx.notify(); }
                 if let Some(dictionary) = &self.dictionary {
                     dictionary.update(cx, |dictionary, cx| dictionary.set_anchor(*bounds, cx));
                 }

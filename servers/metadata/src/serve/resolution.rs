@@ -209,5 +209,5 @@ pub fn classification_only_fallback(query: &EditionIdentityQuery, matched: metad
             open_library_edition_id: matched.open_library_edition_id.clone(),
         });
     }
-    Some(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, popularity: None, subjects: Vec::new() })
+    Some(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, subjects: Vec::new() })
 }

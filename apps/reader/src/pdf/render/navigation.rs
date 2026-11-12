@@ -40,18 +40,18 @@ impl PdfReaderView {
         }));
     }
 
-    /// Reclaim document focus on hover without interrupting sidebar keyboard input.
+    /// Reclaim document focus inside the active window without raising it.
     pub(super) fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dictionary.is_some() || self.sidebar_focus.contains_focused(window, cx) || self.rail_focus.contains_focused(window, cx) || self.marks.selected().is_some() {
+        if !window.is_window_active() || self.dictionary.is_some() || self.sidebar_focus.contains_focused(window, cx) || self.rail_focus.contains_focused(window, cx) || self.marks.selected().is_some() {
             return;
         }
-        window.activate_window();
         self.focus_document(window, cx);
     }
 
     pub(super) fn set_toc(&mut self, outline: Vec<BookTocEntry>, cx: &mut Context<Self>) {
         self.toc_filter.update(cx, |filter, cx| filter.set_items(pdf_toc_tree_items(&outline), cx));
         self.toc.replace_entries(outline);
+        self.search_list.rebuild_contents(&self.toc);
         self.refresh_bookmark_rows(cx);
         self.refresh_annotation_overlays(cx);
     }
@@ -108,7 +108,9 @@ impl PdfReaderView {
             cx,
             |id, activation, window, this: &mut Self, cx| {
                 this.navigate_to_toc(id, cx);
-                if activation == TocActivation::Pointer {
+                if components::uses_mobile_reader_controls(window) {
+                    this.hide_sidebar(window, cx);
+                } else if activation == TocActivation::Pointer {
                     this.focus_sidebar_body(window, cx);
                 }
             },

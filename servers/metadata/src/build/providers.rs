@@ -1,8 +1,8 @@
 //! Fold provider evidence into a batch while preserving LC-before-LibraryThing precedence.
 use super::has_lcc;
-use crate::{error, sql_placeholders, Classification, Connection, Isbn13, LookupStatus, MetadataError, RichIsbnMetadataResult, RichWorkMetadataMatch, SubjectHeading};
+use crate::{Classification, Connection, Isbn13, LookupStatus, MetadataError, RichIsbnMetadataResult, RichWorkMetadataMatch, SubjectHeading, error, sql_placeholders};
 #[cfg(test)]
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use rusqlite::{params_from_iter, types::ToSql};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,7 +47,7 @@ fn merge(answer: &mut RichIsbnMetadataResult, codes: &[u8], subjects: &[u8]) -> 
         return Ok(());
     }
     if answer.matches.is_empty() {
-        answer.matches.push(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: vec![], classifications: vec![], authors: vec![], description: None, popularity: None, subjects: vec![] });
+        answer.matches.push(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: vec![], classifications: vec![], authors: vec![], description: None, subjects: vec![] });
     }
     // Preserve existing schemes while allowing crawled LCC to fill a record
     // that previously had only BISAC or DDC.
@@ -85,7 +85,7 @@ pub(super) fn apply_one(c: &Connection, isbn: i64, answer: &mut RichIsbnMetadata
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{schema, ClassificationScheme, ClassificationSource};
+    use crate::{ClassificationScheme, ClassificationSource, schema};
 
     #[test]
     fn bulk_provider_merge_matches_individual_lookups_across_query_boundaries() {
@@ -120,7 +120,7 @@ mod tests {
                     loc_status = "no_match";
                 }
                 4 | 5 | 6 => {
-                    answer.matches.push(RichWorkMetadataMatch { open_library_work_id: Some("OL1W".into()), exact_edition_ids: vec![], classifications: vec![], authors: vec![], description: None, popularity: None, subjects: vec![] });
+                    answer.matches.push(RichWorkMetadataMatch { open_library_work_id: Some("OL1W".into()), exact_edition_ids: vec![], classifications: vec![], authors: vec![], description: None, subjects: vec![] });
                     answer.status = LookupStatus::Matched;
                     if id % 8 == 4 {
                         answer.matches[0].classifications.push(classification(ClassificationScheme::LibraryOfCongress, "D1"));

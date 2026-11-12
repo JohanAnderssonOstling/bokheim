@@ -5,7 +5,7 @@ use std::cmp::Ordering as KeyOrder;
 
 // Bump when the stored resolution, candidate or queue rules change. Server-only
 // changes can continue to use the existing immutable answers.
-pub(super) const RECIPE_VERSION: i64 = 5;
+pub(super) const RECIPE_VERSION: i64 = 6;
 const MAX_CHANGED_ISBNS: usize = 100_000;
 
 pub(crate) const STATE_SCHEMA: &str = "
@@ -20,7 +20,6 @@ CREATE TABLE answer_demand(isbn13 INTEGER PRIMARY KEY,requests INTEGER NOT NULL)
 pub(super) struct InputIdentity {
     source: FileIdentity,
     descriptions: Option<FileIdentity>,
-    ratings: Option<FileIdentity>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,12 +54,12 @@ impl InputIdentity {
         }
         Ok(())
     }
-    pub(super) fn read(source: &Path, descriptions: Option<&Path>, ratings: Option<&Path>) -> Result<Self, MetadataError> {
-        Ok(Self { source: FileIdentity::read(source)?, descriptions: descriptions.map(FileIdentity::read).transpose()?, ratings: ratings.map(FileIdentity::read).transpose()? })
+    pub(super) fn read(source: &Path, descriptions: Option<&Path>) -> Result<Self, MetadataError> {
+        Ok(Self { source: FileIdentity::read(source)?, descriptions: descriptions.map(FileIdentity::read).transpose()? })
     }
 
-    pub(super) fn verify(&self, source: &Path, descriptions: Option<&Path>, ratings: Option<&Path>) -> Result<(), MetadataError> {
-        if *self != Self::read(source, descriptions, ratings)? {
+    pub(super) fn verify(&self, source: &Path, descriptions: Option<&Path>) -> Result<(), MetadataError> {
+        if *self != Self::read(source, descriptions)? {
             return Err(MetadataError("immutable build inputs changed while building; output was not published".into()));
         }
         Ok(())
@@ -152,12 +151,12 @@ fn collect_changes<T: PartialEq>(
 }
 
 /// PREVIOUS remains immutable. Unsupported/changed inputs use a fresh full build.
-pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, ratings: Option<&Path>, previous: &Path, output: &Path) -> Result<BuildReport, MetadataError> {
+pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, previous: &Path, output: &Path) -> Result<BuildReport, MetadataError> {
     if output.exists() {
         return Err(MetadataError("answer output already exists; build to a new dated file".into()));
     }
     let started = Instant::now();
-    let inputs = InputIdentity::read(snapshot, descriptions, ratings)?;
+    let inputs = InputIdentity::read(snapshot, descriptions)?;
     let old = crate::snapshot::open(previous)?;
     let state = if has_table(&old, "answer_build")? {
         old.query_row("SELECT recipe_version,inputs,isbn_rows,json_bytes FROM answer_build WHERE singleton=1", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))).optional().map_err(error)?
@@ -167,7 +166,7 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
     let compatible = state.as_ref().is_some_and(|(version, identity, _, _)| *version == RECIPE_VERSION && serde_json::from_str::<InputIdentity>(identity).ok().as_ref() == Some(&inputs));
     if !compatible {
         tracing::info!("incremental base is incompatible; building a fresh snapshot");
-        return build_answers_with_ratings(snapshot, providers, demand, descriptions, ratings, output);
+        return build_answers(snapshot, providers, demand, descriptions, output);
     }
     let (_, _, count, bytes) = state.unwrap();
     let mut count = u64::try_from(count).map_err(error)?;
@@ -189,11 +188,11 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
     let changes = metadata_changes.union(&demand_updates).copied().collect::<BTreeSet<_>>();
     if changes.len() > MAX_CHANGED_ISBNS {
         tracing::info!("incremental changes exceed the bounded update limit; building a fresh snapshot");
-        return build_answers_with_ratings(snapshot, providers, demand, descriptions, ratings, output);
+        return build_answers(snapshot, providers, demand, descriptions, output);
     }
     let old_through: i64 = old.query_row("SELECT provider_results_through_ms FROM snapshot WHERE singleton=1", [], |r| r.get(0)).map_err(error)?;
     if changes.is_empty() && through == old_through {
-        inputs.verify(snapshot, descriptions, ratings)?;
+        inputs.verify(snapshot, descriptions)?;
         fs::hard_link(previous, output).map_err(error)?;
         return Ok(report("reused", started, count, bytes, 0, count, fs::metadata(output).map_err(error)?.len()));
     }
@@ -212,7 +211,7 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
     let (refresh, editions, works) = affected(&source, &metadata_changes)?;
     if refresh.len() > MAX_CHANGED_ISBNS {
         tracing::info!("affected works exceed the bounded update limit; building a fresh snapshot");
-        return build_answers_with_ratings(snapshot, providers, demand, descriptions, ratings, output);
+        return build_answers(snapshot, providers, demand, descriptions, output);
     }
     tracing::info!(changed_isbns = changes.len(), refreshed_isbns = refresh.len(), editions = editions.len(), works = works.len(), "building incremental answers");
     let temporary = output.with_extension(format!("building-{}", std::process::id()));
@@ -221,7 +220,6 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
         // The base stays immutable; only a cumulative delta is written/copied.
         let out = crate::snapshot::create_update(previous, &temporary)?;
         out.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-65536; BEGIN;").map_err(error)?;
-        super::popularity::load(&out, ratings)?;
         let mut stats = report("incremental", started, count, bytes, 0, count, 0);
         let mut cache = WorkEvidenceCache::default();
         let mut removed = 0;
@@ -256,7 +254,6 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
             if let Some(c) = &provider {
                 super::providers::apply_many(c, &mut response)?;
             }
-            super::popularity::attach(&out, &mut response, &resolver.state.snapshot.dump_date)?;
             stats.provider_seconds += lookup.elapsed().as_secs_f64();
             let write = Instant::now();
             let (written, new_bytes) = write_answer_batch(&out, rows, response)?;
@@ -285,12 +282,10 @@ pub fn build_answers_incremental(snapshot: &Path, providers: Option<&Path>, dema
             let rank = if requests > 0 { (-1_000_000_000_000_i64).saturating_sub(requests) } else { 0 };
             out.execute("UPDATE wanted SET rank=?1 WHERE isbn13=?2", params![rank, isbn]).map_err(error)?;
         }
-        let rerank = refresh.union(&demand_updates).copied().collect();
-        rank_changed(&out, &rerank)?;
         sync_inputs(&out, provider.as_ref(), demand_input.as_ref(), &changes)?;
         save_counts(&out, &inputs, count, bytes)?;
         out.execute("UPDATE snapshot SET built_at_ms=?1,provider_results_through_ms=?2 WHERE singleton=1", params![now_ms(), through]).map_err(error)?;
-        inputs.verify(snapshot, descriptions, ratings)?;
+        inputs.verify(snapshot, descriptions)?;
         stats.queue_seconds = queue.elapsed().as_secs_f64();
         out.execute_batch("COMMIT; PRAGMA main.optimize;").map_err(error)?;
         let integrity: String = out.query_row("PRAGMA main.quick_check", [], |r| r.get(0)).map_err(error)?;
@@ -404,12 +399,4 @@ pub(super) fn sync_inputs(out: &Connection, provider: Option<&Connection>, deman
         }
     }
     Ok(())
-}
-
-fn rank_changed(out: &Connection, refreshed: &BTreeSet<i64>) -> Result<(), MetadataError> {
-    for chunk in refreshed.iter().copied().collect::<Vec<_>>().chunks(500) {
-        let sql = format!("UPDATE wanted SET rank=-COALESCE((SELECT count FROM build_rating WHERE work_id=wanted.work_id),0) WHERE rank=0 AND isbn13 IN ({})", sql_placeholders(chunk.len()));
-        out.execute(&sql, params_from_iter(chunk)).map_err(error)?;
-    }
-    out.execute_batch("DROP TABLE build_rating").map_err(error)
 }

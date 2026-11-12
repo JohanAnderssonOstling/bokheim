@@ -228,12 +228,7 @@ impl ReaderView {
                         ))
                         .child(div().w_full().min_w_0().flex().flex_col().gap(px(components::SPACE_MD)).child(self.font_weight_settings(theme, cx)).child(self.hyphenation_settings(theme, cx)))
                         .child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(components::SPACE_XS))
+                            components::reader_stepper_rows()
                                 .child(
                                     components::reader_setting_row(text!(reader::font_size)).map(|row| self.settings_navigation.row(SettingsRow::FontSize, &rows, row, theme)).child(components::settings_stepper(
                                         components::settings_stepper_button("font-size-smaller", text!(reader::minus), false)
@@ -267,6 +262,7 @@ impl ReaderView {
                 .child(components::reader_settings_group(theme).child(self.first_line_indent_settings(theme, cx)))
                 .child(
                     components::reader_settings_group(theme)
+                        .when(cfg!(feature = "kobo"), |group| group.flex_row().flex_wrap().items_start().gap(px(components::SPACE_SM)))
                         .child(
                             components::reader_setting_row(text!(reader::side_margins)).map(|row| self.settings_navigation.row(SettingsRow::SideMargins, &rows, row, theme)).child(components::settings_stepper(
                                 components::settings_stepper_button("reader-side-margins-decrease", text!(reader::minus), current.synchronized.horizontal_margin_px() <= READER_SPACING_MIN)

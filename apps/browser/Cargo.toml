@@ -10,6 +10,7 @@ kobo = ["mobile", "app/kobo", "dep:gpui_kobo", "dep:kobo-device", "dep:kobo-upda
 mobile = ["ui-components/mobile"]
 
 [dependencies]
+ui-html-components = { path = "../../client/ui/html-components" }
 operation-failure = { path = "../../client/client-protocol/crates/operation-failure" }
 ui-text = { path = "../ui-text" }
 dictionary-settings = { path = "../dictionary-settings" }

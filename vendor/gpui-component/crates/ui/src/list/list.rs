@@ -154,7 +154,8 @@ where
         &mut self.delegate
     }
 
-    /// Focus the list, if the list is searchable, focus the search input.
+    /// Focus the list. On pointer platforms, searchable lists focus the filter.
+    /// Touch users focus the filter explicitly to open the software keyboard.
     pub fn focus(&mut self, window: &mut Window, cx: &mut App) {
         self.focus_handle(cx).focus(window, cx);
     }
@@ -580,7 +581,7 @@ where
     D: ListDelegate,
 {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        if self.searchable {
+        if self.searchable && !cx.supports_touch_input() {
             self.query_input.focus_handle(cx)
         } else {
             self.focus_handle.clone()

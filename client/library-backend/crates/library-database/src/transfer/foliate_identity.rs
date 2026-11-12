@@ -8,7 +8,7 @@ use std::{
 /// Match a complete Foliate annotation list to one book's history, including
 /// tombstones. Creation times are evidence only when the old location vanished
 /// and the match is unique on both sides. Quotes are never used as identity.
-pub fn match_foliate_annotations(incoming: &[Annotation], history: &[Annotation]) -> io::Result<Vec<Option<usize>>> {
+pub(super) fn match_foliate_annotations(incoming: &[Annotation], history: &[Annotation]) -> io::Result<Vec<Option<usize>>> {
     let locations = incoming.iter().filter_map(|a| a.anchor.epub_cfi_value().map(|cfi| (a.book_id, cfi))).collect::<HashSet<_>>();
     let mut ids = HashMap::new();
     let mut anchors = HashMap::<_, Vec<_>>::new();

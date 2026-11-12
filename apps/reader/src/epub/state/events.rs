@@ -153,10 +153,19 @@ impl ReaderView {
                 let next = Some((*current, *total));
                 if self.search.match_position != next {
                     self.search.match_position = next;
+                    if let Some(index) = current.checked_sub(1) {
+                        self.search.contents.reveal(index);
+                        self.search.refresh_rows();
+                        if let Some(row) = self.search.rows.iter().position(|row| matches!(row, crate::epub::search::SearchRow::Match(hit) if *hit == index)) {
+                            crate::shell::sidebar_list::reveal_row(&self.search.list, row);
+                        }
+                    }
                     notify(cx, Component::ReaderShell, "search_match_changed");
                 }
             }
             RendererEvent::SearchResults(results) => {
+                self.search.rows.clear();
+                self.search.list.reset(0);
                 self.search.results = results.clone();
                 self.search.rebuild_rows(&self.toc);
                 notify(cx, Component::ReaderShell, "search_results_changed");
@@ -175,7 +184,7 @@ impl ReaderView {
                 }
                 #[cfg(all(any(feature = "native-tts", target_arch = "wasm32"), not(feature = "kobo")))]
                 if *operation == skrift_column_paginator::RendererOperation::UpdateDocument {
-                    self.tts_document_failed(&client_protocol::BackendError::operation(message.clone()), cx);
+                    self.tts_document_failed(&client_protocol::BackendError::Operation(message.clone()), cx);
                 }
             }
             _ => {}

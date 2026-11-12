@@ -53,7 +53,7 @@ impl<'a> CoverAssets<'a> {
     pub fn store_image(&self, bytes: &[u8]) -> Result<(), String> {
         let format = image::guess_format(bytes).map_err(|error| error.to_string())?;
         let decoded = thumbnail::decode_cover_image(bytes, format).map_err(|error| error.to_string())?;
-        self.store(ThumbnailVersions::from_image(&decoded).map_err(|error| error.to_string())?)
+        self.store(thumbnail::thumbnail_versions_from_image(&decoded).map_err(|error| error.to_string())?)
     }
 
     pub fn extract_book(&self, bytes: &[u8]) -> Result<bool, String> {

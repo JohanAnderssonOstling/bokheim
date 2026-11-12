@@ -192,9 +192,9 @@ impl Database {
                 children.push(row);
             }
         }
-        super::popularity::sort_rows(&mut children, options.chip_sort, |row| route_of(row.id).and_then(|route| super::popularity::sum(&nodes[&route].members, matching)));
-        if books == Books::Catalog && options.chip_sort != library_model::BrowseChipSort::Popularity {
-            super::popularity::prefer_rows(&mut children, &|row| route_of(row.id).is_some_and(|route| !nodes[&route].members.is_disjoint(&matching.preferred)));
+        super::ordering::sort_rows(&mut children, options.chip_sort);
+        if books == Books::Catalog {
+            super::ordering::prefer_rows(&mut children, &|row| route_of(row.id).is_some_and(|route| !nodes[&route].members.is_disjoint(&matching.preferred)));
         }
         children
     }
@@ -229,83 +229,6 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn catalog_subject_popularity_sums_normalized_sources_and_shared_observations_after_filters() {
-        use crate::browse::popularity::sum;
-        use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery};
-
-        let nodes = BTreeMap::from([
-            (0, SubjectNode { children: BTreeSet::from([1, 2, 3, 4, 5]), ..Default::default() }),
-            (1, SubjectNode { label: "Gutenberg".into(), members: BTreeSet::from([10]), ..Default::default() }),
-            (2, SubjectNode { label: "LoyalBooks".into(), members: BTreeSet::from([11, 12]), ..Default::default() }),
-            (3, SubjectNode { label: "Unglue".into(), members: BTreeSet::from([13]), ..Default::default() }),
-            (4, SubjectNode { label: "Litteraturbanken".into(), members: BTreeSet::from([14, 10]), ..Default::default() }),
-            (5, SubjectNode { label: "PDL".into(), members: BTreeSet::from([15]), ..Default::default() }),
-        ]);
-        let mut matching = MatchingBooks {
-            books: BTreeSet::from([10, 11, 12, 13, 14, 15]),
-            downloaded: BTreeSet::new(),
-            text_matches: BTreeSet::new(),
-            popularity: BTreeMap::from([(10, 100.0), (11, 55.0), (12, 55.0), (13, 20.0), (14, 0.0)]),
-            preferred: BTreeSet::from([15]),
-            popularity_groups: BTreeMap::from([(11, "paired".into()), (12, "paired".into())]),
-        };
-        let query =
-            LibraryBrowseQuery { location: BrowseLocation::Catalog(0), search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::Popularity, book_sort: BrowseBookSort::Popularity, hide_finished: false };
-        let options = BrowseOptions::from_query(&query, false);
-        let rows = Database::subject_children(Books::Catalog, 0, &nodes, &matching, &options);
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Gutenberg", "Litteraturbanken", "LoyalBooks", "Unglue", "PDL"]);
-        assert_eq!(sum(&nodes[&2].members, &matching), Some(55.0));
-        assert_eq!(sum(&nodes[&4].members, &matching), Some(100.0));
-        matching.books.remove(&14);
-        matching.books.remove(&11);
-        let rows = Database::subject_children(Books::Catalog, 0, &nodes, &matching, &options);
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Gutenberg", "Litteraturbanken", "LoyalBooks", "Unglue", "PDL"]);
-        assert_eq!(sum(&nodes[&2].members, &matching), Some(55.0));
-    }
-
-    #[test]
-    fn catalog_subject_source_preference_does_not_override_popularity() {
-        use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery};
-
-        let nodes = BTreeMap::from([
-            (0, SubjectNode { children: BTreeSet::from([1, 2, 3]), ..Default::default() }),
-            (1, SubjectNode { label: "A popular".into(), members: BTreeSet::from([10]), ..Default::default() }),
-            (2, SubjectNode { label: "Z preferred".into(), members: BTreeSet::from([11, 13]), ..Default::default() }),
-            (3, SubjectNode { label: "M other".into(), members: BTreeSet::from([12]), ..Default::default() }),
-        ]);
-        let mut matching = MatchingBooks {
-            books: BTreeSet::from([10, 11, 12, 13]),
-            downloaded: BTreeSet::new(),
-            text_matches: BTreeSet::new(),
-            popularity: BTreeMap::from([(10, 100.0), (12, 20.0), (13, 10.0)]),
-            preferred: BTreeSet::from([11]),
-            popularity_groups: BTreeMap::new(),
-        };
-        let mut query =
-            LibraryBrowseQuery { location: BrowseLocation::Catalog(0), search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::DefaultOrder, book_sort: BrowseBookSort::DefaultOrder, hide_finished: false };
-        for sort in [BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::Popularity, BrowseChipSort::BookCount] {
-            query.chip_sort = sort;
-            let options = BrowseOptions::from_query(&query, false);
-            let rows = Database::subject_children(Books::Catalog, 0, &nodes, &matching, &options);
-            let expected = if sort == BrowseChipSort::Popularity { ["A popular", "M other", "Z preferred"] } else { ["Z preferred", "A popular", "M other"] };
-            assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), expected);
-        }
-
-        // The same taxonomy still honors ordinary popularity in the library.
-        query.chip_sort = BrowseChipSort::Popularity;
-        let options = BrowseOptions::from_query(&query, false);
-        let rows = Database::subject_children(Books::Library, 0, &nodes, &matching, &options);
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["A popular", "M other", "Z preferred"]);
-
-        // A section loses source preference when its preferred book is filtered
-        // out, even if other books keep the section visible.
-        matching.books.remove(&11);
-        matching.preferred.clear();
-        let rows = Database::subject_children(Books::Catalog, 0, &nodes, &matching, &options);
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["A popular", "M other", "Z preferred"]);
-    }
 
     #[test]
     fn subject_cards_navigate_by_id_and_breadcrumbs_follow_compacted_parents() {

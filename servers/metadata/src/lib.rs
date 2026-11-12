@@ -1,18 +1,18 @@
+use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use flate2::read::MultiGzDecoder;
 use metadata_contract::{
     AuthorIdentifier, AuthorMetadata, AuthorSource, Classification, ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, EditionTitleMatch,
-    IsbnClassificationResult, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES,
+    IsbnClassificationResult, LookupStatus, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES, RichIsbnMetadataResult, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch,
 };
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use rayon::prelude::*;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -21,7 +21,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -174,7 +174,7 @@ pub(crate) use build::authority_ingestion::ingest_wikidata_authorities;
 mod build;
 mod schema;
 mod snapshot;
-pub use build::{ build_answers_incremental, build_answers_with_ratings, extend_edition_index, import_authorities, index_work_classifications, reclassify_answers, BuildReport, EditionIndexReport};
+pub use build::{BuildReport, EditionIndexReport, build_answers, build_answers_incremental, extend_edition_index, import_authorities, index_work_classifications, reclassify_answers};
 mod serve;
 pub use serve::MetadataService;
 mod crawl;

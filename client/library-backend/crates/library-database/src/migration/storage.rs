@@ -4,18 +4,25 @@
 use crate::DatabaseError;
 use book_model::{Annotation, AudiobookTrack, BookRecord, BookTocDocument, BookTocEntry, ChapterReadStatus};
 use library_replica::{BookAddition, BookFacts, BookLifecycleState, DirectoryLifecycleState, EnrichmentResult, LibraryStateEntry, ReadingPositionState};
-use metadata_contract::{WorkPopularity, audible::LookupRequest};
+use metadata_contract::audible::LookupRequest;
 use pdf_view_common::PdfReaderMetadata;
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sync_common::{BookId, DirId, FileName, MutationIssue, VersionKey, wire};
 
 #[derive(Deserialize)]
+struct RetiredScore {
+    _work: String,
+    _count: u64,
+    _date: String,
+}
+
+#[derive(Deserialize)]
 enum LegacyEnrichment {
     Found { record: BookRecord, toc: Option<Vec<BookTocEntry>>, cover_id: Option<String> },
     NoMatch,
-    FoundWithPopularity { record: BookRecord, toc: Option<Vec<BookTocEntry>>, cover_id: Option<String>, popularity: WorkPopularity },
-    Applied { toc: Option<Vec<BookTocEntry>>, cover_id: Option<String>, popularity: Option<WorkPopularity> },
+    FoundWithPopularity { record: BookRecord, toc: Option<Vec<BookTocEntry>>, cover_id: Option<String>, _popularity: RetiredScore },
+    Applied { toc: Option<Vec<BookTocEntry>>, cover_id: Option<String>, _popularity: Option<RetiredScore> },
 }
 
 #[derive(Deserialize)]
@@ -34,9 +41,9 @@ impl LegacyAddition {
         let mut addition = BookAddition { facts: self.facts, record: self.record, navigation: self.navigation, pdf: self.pdf, recording: self.recording, enrichment: None };
         let Some(enrichment) = self.enrichment else { return addition };
         match enrichment {
-            LegacyEnrichment::Found { record, toc, cover_id } => addition.apply_enrichment(record, EnrichmentResult::Found { toc, cover_id, popularity: None }),
-            LegacyEnrichment::FoundWithPopularity { record, toc, cover_id, popularity } => addition.apply_enrichment(record, EnrichmentResult::Found { toc, cover_id, popularity: Some(popularity) }),
-            LegacyEnrichment::Applied { toc, cover_id, popularity } => addition.enrichment = Some(EnrichmentResult::Found { toc, cover_id, popularity }),
+            LegacyEnrichment::Found { record, toc, cover_id } => addition.apply_enrichment(record, EnrichmentResult::Found { toc, cover_id }),
+            LegacyEnrichment::FoundWithPopularity { record, toc, cover_id, .. } => addition.apply_enrichment(record, EnrichmentResult::Found { toc, cover_id }),
+            LegacyEnrichment::Applied { toc, cover_id, .. } => addition.enrichment = Some(EnrichmentResult::Found { toc, cover_id }),
             LegacyEnrichment::NoMatch => addition.enrichment = Some(EnrichmentResult::NoMatch),
         }
         addition

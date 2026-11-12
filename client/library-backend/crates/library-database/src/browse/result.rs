@@ -80,7 +80,7 @@ impl BrowseResult {
             SelectedBooks::Membership { eligible, direct } => {
                 let _stage = Stage::new("eligible book ordering");
                 let ordered = match catalog {
-                    Some(catalog) => super::catalog::ordered_books_in(catalog, &eligible, &options)?,
+                    Some(catalog) => super::catalog::ordered_books_in(catalog, &eligible)?,
                     None => db.ordered_books(&eligible, &options)?,
                 };
                 if ordered.len() != eligible.len() {

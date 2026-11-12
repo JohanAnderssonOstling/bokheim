@@ -1,0 +1,17 @@
+[package]
+name = "cpu-contract"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+book-inspection-contract = { path = "../../shared/book-inspection-contract" }
+thumbnail-contract = { path = "../../shared/thumbnail-contract" }
+book-model = { path = "../../shared/book-model" }
+content-address = { path = "../../shared/content-address" }
+update-protocol = { path = "../../shared/update-protocol" }
+client-protocol = { path = "../client-protocol" }
+client-platform-runtime = { path = "../platforms/runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+uuid = { version = "1", features = ["v4"] }

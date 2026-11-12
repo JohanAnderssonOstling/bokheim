@@ -223,7 +223,8 @@ fn in_place_reclassification_preserves_rich_fields_updates_search() {
             serde_json::json!({"key":"/books/OL9M","title":"Exact literature","works":[{"key":"/works/OL50W"}],"isbn_13":["9780000000002"],"lc_classifications":["PR4034"]}),
             serde_json::json!({"key":"/books/OL10M","title":"Exact economics","works":[{"key":"/works/OL50W"}],"isbn_13":["9780000000019"],"lc_classifications":["HB161"]}),
             serde_json::json!({"key":"/books/OL11M","title":"Unclassified sibling","works":[{"key":"/works/OL50W"}],"isbn_13":["9780000000026"]}),
-        ], &[
+        ],
+        &[
             serde_json::json!({"key":"/works/OL10W","title":"Emma","lc_classifications":["PR4030"],"description":"Shared description","subjects":["Fiction"]}),
             serde_json::json!({"key":"/works/OL20W","title":"Sparse work","lc_classifications":["HB161"]}),
             serde_json::json!({"key":"/works/OL30W","title":"Bare code","lc_classifications":["PR"]}),
@@ -233,8 +234,8 @@ fn in_place_reclassification_preserves_rich_fields_updates_search() {
     );
     let base = temp.path().join("answers.sqlite");
     let fresh = temp.path().join("fresh.sqlite");
-    build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
-    build_answers_with_ratings(&source, None, None, None, None, &fresh).unwrap();
+    build_answers(&source, None, None, None, &base).unwrap();
+    build_answers(&source, None, None, None, &fresh).unwrap();
     let c = Connection::open(&base).unwrap();
     let unchanged: Vec<u8> = c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=9780131103627", [], |r| r.get(0)).unwrap();
     for isbn in [9780306406157_i64, 9781404309982, 9781324096900, 9780141439518] {
@@ -258,7 +259,7 @@ fn in_place_reclassification_preserves_rich_fields_updates_search() {
     drop(c);
     // A reader already connected before the write sees its committed data.
     let server = MetadataService::open(&base, &temp.path().join("serve-demand.sqlite")).unwrap();
-    let report = reclassify_answers(&source, None, None, None, None, &base).unwrap();
+    let report = reclassify_answers(&source, None, None, None, &base).unwrap();
     assert_eq!(report.mode, "reclassified");
     assert_eq!(report.reclassified_rows, 4);
     assert_eq!(report.resolved_rows, 0);
@@ -280,7 +281,7 @@ fn in_place_reclassification_preserves_rich_fields_updates_search() {
         ["Emma", "Sparse work", "Bare code"].into_iter().map(|title| EditionIdentityQuery { query_id: title.into(), title: title.into(), authors: vec![], author_surname: None, publishers: vec![], book_year: None }).collect::<Vec<_>>();
     assert_eq!(serde_json::to_value(server.resolve_editions(queries.clone()).unwrap()).unwrap(), serde_json::to_value(full.resolve_editions(queries).unwrap()).unwrap());
     let next = temp.path().join("next.sqlite");
-    assert_eq!(build_answers_incremental(&source, None, None, None, None, &base, &next).unwrap().mode, "reused");
+    assert_eq!(build_answers_incremental(&source, None, None, None, &base, &next).unwrap().mode, "reused");
 }
 
 #[test]
@@ -296,21 +297,21 @@ fn failed_in_place_reclassification_rolls_back_answers_indexes_and_bookkeeping()
         &[],
     );
     let base = temp.path().join("answers.sqlite");
-    build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
+    build_answers(&source, None, None, None, &base).unwrap();
     let c = Connection::open(&base).unwrap();
     let mut q = c.prepare("SELECT isbn13,answer FROM isbn_answer ORDER BY isbn13").unwrap();
-    let before = q.query_map([], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+    let before = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
     drop(q);
     let mut first: schema::StoredAnswer = serde_json::from_slice(&before[0].1).unwrap();
-    first.result.matches[0].classifications[0].notation="A14".into();
-    c.execute("UPDATE isbn_answer SET answer=?1 WHERE isbn13=?2",params![serde_json::to_vec(&first).unwrap(),before[0].0]).unwrap();
-    c.execute("UPDATE isbn_answer SET answer=?1 WHERE isbn13=?2",params![b"invalid JSON".as_slice(),before[1].0]).unwrap();
+    first.result.matches[0].classifications[0].notation = "A14".into();
+    c.execute("UPDATE isbn_answer SET answer=?1 WHERE isbn13=?2", params![serde_json::to_vec(&first).unwrap(), before[0].0]).unwrap();
+    c.execute("UPDATE isbn_answer SET answer=?1 WHERE isbn13=?2", params![b"invalid JSON".as_slice(), before[1].0]).unwrap();
     c.execute_batch("DROP TABLE answer_build; DROP TABLE answer_classification; DROP TABLE answer_work_lcc; DROP TABLE answer_provider; DROP TABLE answer_demand;").unwrap();
-    let before_first: Vec<u8> = c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=?1",[before[0].0],|r|r.get(0)).unwrap();
-    assert!(reclassify_answers(&source,None,None,None,None,&base).is_err());
-    assert_eq!(c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=?1",[before[0].0],|r|r.get::<_,Vec<u8>>(0)).unwrap(),before_first);
-    assert!(!crate::build::has_table(&c,"answer_build").unwrap());
-    assert_eq!(c.query_row("SELECT count(*) FROM edition_candidate",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    let before_first: Vec<u8> = c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=?1", [before[0].0], |r| r.get(0)).unwrap();
+    assert!(reclassify_answers(&source, None, None, None, &base).is_err());
+    assert_eq!(c.query_row("SELECT answer FROM isbn_answer WHERE isbn13=?1", [before[0].0], |r| r.get::<_, Vec<u8>>(0)).unwrap(), before_first);
+    assert!(!crate::build::has_table(&c, "answer_build").unwrap());
+    assert_eq!(c.query_row("SELECT count(*) FROM edition_candidate", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
 }
 
 #[test]
@@ -326,46 +327,46 @@ fn in_place_update_applies_provider_and_demand_changes_and_tracks_later_deletion
         &[],
     );
     let base = temp.path().join("answers.sqlite");
-    build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
+    build_answers(&source, None, None, None, &base).unwrap();
     let provider_path = temp.path().join("provider.sqlite");
     let provider = crate::crawl::open_provider(&provider_path).unwrap();
-    let codes = serde_json::to_vec(&vec![Classification { scheme:ClassificationScheme::LibraryOfCongress,notation:"QA76".into(),source:ClassificationSource::ExactEdition,evidence:vec![] }]).unwrap();
-    for isbn in [9780306406157_i64,9780000000019] {
-        provider.execute("INSERT INTO provider_result VALUES('loc',?1,1,'matched',?2,?3)",params![isbn,codes,b"[]".as_slice()]).unwrap();
+    let codes = serde_json::to_vec(&vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76".into(), source: ClassificationSource::ExactEdition, evidence: vec![] }]).unwrap();
+    for isbn in [9780306406157_i64, 9780000000019] {
+        provider.execute("INSERT INTO provider_result VALUES('loc',?1,1,'matched',?2,?3)", params![isbn, codes, b"[]".as_slice()]).unwrap();
     }
     let demand_path = temp.path().join("demand.sqlite");
     Connection::open(&demand_path).unwrap().execute_batch("CREATE TABLE demand(isbn13 INTEGER PRIMARY KEY,requests INTEGER NOT NULL); INSERT INTO demand VALUES(9780000000002,5);").unwrap();
     for iteration in 0..2 {
-        let report = reclassify_answers(&source,Some(&provider_path),Some(&demand_path),None,None,&base).unwrap();
-        assert_eq!(report.mode,"reclassified");
-        assert!(report.resolved_rows>0);
+        let report = reclassify_answers(&source, Some(&provider_path), Some(&demand_path), None, &base).unwrap();
+        assert_eq!(report.mode, "reclassified");
+        assert!(report.resolved_rows > 0);
         let fresh = temp.path().join(format!("fresh-{iteration}.sqlite"));
-        build_answers_with_ratings(&source, Some(&provider_path), Some(&demand_path), None, None, &fresh).unwrap();
-        assert_answer_tables_equal(&base,&fresh);
+        build_answers(&source, Some(&provider_path), Some(&demand_path), None, &fresh).unwrap();
+        assert_answer_tables_equal(&base, &fresh);
         provider.execute_batch("DELETE FROM provider_result").unwrap();
     }
 }
 
 #[test]
 fn in_place_reclassification_rebuilds_candidates_across_work_page_boundaries() {
-    let temp=tempfile::tempdir().unwrap();
-    let mut editions=Vec::new();
-    let mut works=Vec::new();
+    let temp = tempfile::tempdir().unwrap();
+    let mut editions = Vec::new();
+    let mut works = Vec::new();
     for id in 1..=501_i64 {
-        let body=978000000000+id;
-        let sum=(0..12).map(|p|body/10_i64.pow(11-p)%10*if p%2==0 {1}else{3}).sum::<i64>();
-        let isbn=body*10+(10-sum%10)%10;
+        let body = 978000000000 + id;
+        let sum = (0..12).map(|p| body / 10_i64.pow(11 - p) % 10 * if p % 2 == 0 { 1 } else { 3 }).sum::<i64>();
+        let isbn = body * 10 + (10 - sum % 10) % 10;
         editions.push(serde_json::json!({"key":format!("/books/OL{id}M"),"title":format!("Book {id}"),"works":[{"key":format!("/works/OL{id}W")}],"isbn_13":[format!("{isbn}")]}));
         works.push(serde_json::json!({"key":format!("/works/OL{id}W"),"title":format!("Book {id}"),"lc_classifications":["QA76"]}));
     }
-    let source=snapshot_from(temp.path(),&editions,&works,&[]);
-    let answers=temp.path().join("answers.sqlite");
-    build_answers_with_ratings(&source, None, None, None, None, &answers).unwrap();
+    let source = snapshot_from(temp.path(), &editions, &works, &[]);
+    let answers = temp.path().join("answers.sqlite");
+    build_answers(&source, None, None, None, &answers).unwrap();
     Connection::open(&answers).unwrap().execute_batch("DELETE FROM edition_title_key WHERE edition_id IN (1,501); DELETE FROM edition_candidate WHERE edition_id IN (1,501);").unwrap();
-    let report=reclassify_answers(&source,None,None,None,None,&answers).unwrap();
-    assert_eq!(report.reclassified_rows,0);
-    assert_eq!(report.reclassified_editions,2);
-    assert_eq!(Connection::open(&answers).unwrap().query_row("SELECT count(*) FROM edition_candidate",[],|r|r.get::<_,i64>(0)).unwrap(),501);
+    let report = reclassify_answers(&source, None, None, None, &answers).unwrap();
+    assert_eq!(report.reclassified_rows, 0);
+    assert_eq!(report.reclassified_editions, 2);
+    assert_eq!(Connection::open(&answers).unwrap().query_row("SELECT count(*) FROM edition_candidate", [], |r| r.get::<_, i64>(0)).unwrap(), 501);
 }
 
 #[test]
@@ -557,7 +558,7 @@ fn zero_isbn_in_snapshot_is_built_before_edition_indexing() {
         &[],
     );
     let answers = temp.path().join("answers.sqlite");
-    let report = build_answers_with_ratings(&database, None, None, None, None, &answers).unwrap();
+    let report = build_answers(&database, None, None, None, &answers).unwrap();
     assert_eq!(report.isbn_rows, 2);
     let resolver = Resolver::open(&database, None).unwrap();
     let server = MetadataService::open(&answers, &temp.path().join("demand.sqlite")).unwrap();
@@ -585,7 +586,7 @@ fn answers_across_query_and_commit_boundaries_preserve_metadata_and_edition_owne
     let works = (1..=2100).map(|id| serde_json::json!({"key":format!("/works/OL{id}W"),"title":"Example","description":format!("Description {id}")})).collect::<Vec<_>>();
     let database = snapshot_from(temp.path(), &editions, &works, &[serde_json::json!({"key":"/authors/OL1A","name":"Example Author"})]);
     let answers = temp.path().join("answers.sqlite");
-    let report = build_answers_with_ratings(&database, None, None, None, None, &answers).unwrap();
+    let report = build_answers(&database, None, None, None, &answers).unwrap();
     assert_eq!(report.isbn_rows, 4200);
     let service = FixtureService { resolver: Resolver::open(&database, None).unwrap(), server: MetadataService::open(&answers, &temp.path().join("demand.sqlite")).unwrap() };
     for requested in isbns.chunks(256) {
@@ -720,7 +721,7 @@ impl FixtureService {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let answers = path.with_extension(format!("answers-{n}.sqlite"));
         let demand = path.with_extension(format!("demand-{n}.sqlite"));
-        build_answers_with_ratings(&path, None, None, descriptions.as_deref(), None, &answers)?;
+        build_answers(&path, None, None, descriptions.as_deref(), &answers)?;
         Ok(Self { resolver: Resolver::open(&path, descriptions.as_deref())?, server: MetadataService::open(&answers, &demand)? })
     }
     fn enrich_rich(&self, isbns: Vec<String>) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
@@ -784,7 +785,7 @@ fn edition_index_keeps_provider_fallbacks_and_title_author_authority_candidates(
             Connection::open(&database).unwrap().execute("INSERT INTO title_author_classification VALUES(?1,'','Jane Smith',0,'',2,'E1')", [metadata_contract::matching::bibliographic_title_match_key("Authority Title")]).unwrap();
         }
         let answers = temp.path().join(format!("answers-{authority}.sqlite"));
-        build_answers_with_ratings(&database, Some(&provider), None, None, None, &answers).unwrap();
+        build_answers(&database, Some(&provider), None, None, &answers).unwrap();
         let c = Connection::open(&answers).unwrap();
         let ids = c.prepare("SELECT edition_id FROM edition_candidate ORDER BY edition_id").unwrap().query_map([], |r| r.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(ids, if authority { vec![1, 2] } else { vec![1] });
@@ -842,13 +843,9 @@ fn incremental_provider_and_demand_updates_match_full_builds_and_restore_work_qu
     let demand_path = temp.path().join("demand.sqlite");
     let demand = Connection::open(&demand_path).unwrap();
     demand.execute_batch("CREATE TABLE demand(isbn13 INTEGER PRIMARY KEY,requests INTEGER NOT NULL); INSERT INTO demand VALUES(9780306406157,9);").unwrap();
-    let rating_path = temp.path().join("ratings.gz");
-    let mut gzip = GzEncoder::new(File::create(&rating_path).unwrap(), Compression::fast());
-    gzip.write_all(b"OL10W\t\t5\t2026-09-01\nOL10W\t\t4\t2026-09-02\nOL20W\t\t3\t2026-09-01\n").unwrap();
-    gzip.finish().unwrap();
     let code = |notation: &str| serde_json::to_vec(&vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: notation.into(), source: ClassificationSource::ExactEdition, evidence: vec![] }]).unwrap();
     let mut previous = temp.path().join("base.sqlite");
-    build_answers_with_ratings(&database, Some(&provider_path), Some(&demand_path), None, Some(&rating_path), &previous).unwrap();
+    build_answers(&database, Some(&provider_path), Some(&demand_path), None, &previous).unwrap();
     let original = fs::read(&previous).unwrap();
     for iteration in 0..5 {
         match iteration {
@@ -874,9 +871,9 @@ fn incremental_provider_and_demand_updates_match_full_builds_and_restore_work_qu
         }
         let updated = temp.path().join(format!("incremental-{iteration}.sqlite"));
         let fresh = temp.path().join(format!("full-{iteration}.sqlite"));
-        let report = build_answers_incremental(&database, Some(&provider_path), Some(&demand_path), None, Some(&rating_path), &previous, &updated).unwrap();
+        let report = build_answers_incremental(&database, Some(&provider_path), Some(&demand_path), None, &previous, &updated).unwrap();
         assert_eq!(report.mode, "incremental");
-        build_answers_with_ratings(&database, Some(&provider_path), Some(&demand_path), None, Some(&rating_path), &fresh).unwrap();
+        build_answers(&database, Some(&provider_path), Some(&demand_path), None, &fresh).unwrap();
         assert_answer_tables_equal(&fresh, &updated);
         let server = MetadataService::open(&updated, &temp.path().join(format!("serve-demand-{iteration}.sqlite"))).unwrap();
         let full = MetadataService::open(&fresh, &temp.path().join(format!("serve-full-demand-{iteration}.sqlite"))).unwrap();
@@ -901,8 +898,8 @@ fn unchanged_incremental_inputs_reuse_the_same_snapshot_without_resolution() {
     let database = snapshot_from(temp.path(), &[serde_json::json!({"key":"/books/OL1M","isbn_13":["9780306406157"]})], &[], &[]);
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
-    build_answers_with_ratings(&database, None, None, None, None, &base).unwrap();
-    let report = build_answers_incremental(&database, None, None, None, None, &base, &next).unwrap();
+    build_answers(&database, None, None, None, &base).unwrap();
+    let report = build_answers_incremental(&database, None, None, None, &base, &next).unwrap();
     assert_eq!(report.mode, "reused");
     assert_eq!(report.resolved_rows, 0);
     assert_eq!(report.reused_rows, 1);
@@ -919,13 +916,13 @@ fn changed_source_and_legacy_base_fall_back_to_full_resolution() {
     let temp = tempfile::tempdir().unwrap();
     let database = snapshot_from(temp.path(), &[serde_json::json!({"key":"/books/OL1M","isbn_13":["9780306406157"]})], &[], &[]);
     let base = temp.path().join("base.sqlite");
-    build_answers_with_ratings(&database, None, None, None, None, &base).unwrap();
+    build_answers(&database, None, None, None, &base).unwrap();
     Connection::open(&database).unwrap().execute("INSERT INTO edition_classification VALUES(1,2,'QA76')", []).unwrap();
     let changed = temp.path().join("changed.sqlite");
-    assert_eq!(build_answers_incremental(&database, None, None, None, None, &base, &changed).unwrap().mode, "full");
+    assert_eq!(build_answers_incremental(&database, None, None, None, &base, &changed).unwrap().mode, "full");
     Connection::open(&changed).unwrap().execute("DROP TABLE answer_build", []).unwrap();
     let legacy = temp.path().join("legacy.sqlite");
-    assert_eq!(build_answers_incremental(&database, None, None, None, None, &changed, &legacy).unwrap().mode, "full");
+    assert_eq!(build_answers_incremental(&database, None, None, None, &changed, &legacy).unwrap().mode, "full");
 }
 
 #[test]
@@ -936,10 +933,10 @@ fn failed_incremental_resolution_preserves_the_base_and_does_not_publish() {
     let provider = crate::crawl::open_provider(&provider_path).unwrap();
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
-    build_answers_with_ratings(&database, Some(&provider_path), None, None, None, &base).unwrap();
+    build_answers(&database, Some(&provider_path), None, None, &base).unwrap();
     let original = fs::read(&base).unwrap();
     provider.execute("INSERT INTO provider_result VALUES('loc',9780306406157,1,'matched',?1,?2)", params![b"invalid JSON".as_slice(), b"[]".as_slice()]).unwrap();
-    assert!(build_answers_incremental(&database, Some(&provider_path), None, None, None, &base, &next).is_err());
+    assert!(build_answers_incremental(&database, Some(&provider_path), None, None, &base, &next).is_err());
     assert!(!next.exists());
     assert_eq!(fs::read(&base).unwrap(), original);
     assert!(!next.with_extension(format!("building-{}", std::process::id())).exists());
@@ -954,9 +951,9 @@ fn demand_priority_changes_do_not_resolve_existing_metadata() {
     demand.execute_batch("CREATE TABLE demand(isbn13 INTEGER PRIMARY KEY,requests INTEGER NOT NULL); INSERT INTO demand VALUES(9780306406157,1);").unwrap();
     let base = temp.path().join("base.sqlite");
     let next = temp.path().join("next.sqlite");
-    build_answers_with_ratings(&database, None, Some(&demand_path), None, None, &base).unwrap();
+    build_answers(&database, None, Some(&demand_path), None, &base).unwrap();
     demand.execute("UPDATE demand SET requests=100", []).unwrap();
-    let report = build_answers_incremental(&database, None, Some(&demand_path), None, None, &base, &next).unwrap();
+    let report = build_answers_incremental(&database, None, Some(&demand_path), None, &base, &next).unwrap();
     assert_eq!(report.mode, "incremental");
     assert_eq!(report.resolved_rows, 0);
     assert_eq!(report.reused_rows, 1);

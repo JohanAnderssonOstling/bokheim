@@ -26,7 +26,7 @@ impl SettingsPage {
             .on_action(cx.listener(Self::move_setting_row))
             .on_action(cx.listener(Self::adjust_setting_value))
             .on_key_down(cx.listener(Self::on_setting_row_key))
-            .when(desktop, |page| page.child(div().flex_none().w_full().flex().justify_center().border_b_1().border_color(theme.rule).child(tabs)))
+            .when(desktop, |page| page.child(div().flex_none().w_full().flex().justify_center().child(tabs)))
             .child(div().flex_1().min_h_0().child(components::browser_settings_page_with_scroll(&self.scroll).child(content)))
     }
 

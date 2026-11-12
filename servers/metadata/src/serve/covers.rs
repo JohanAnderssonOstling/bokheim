@@ -88,7 +88,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = snapshot_from(dir.path(), &[], &[], &[]);
         let answers = dir.path().join("answers.sqlite");
-        crate::build_answers_with_ratings(&input, None, None, None, None, &answers).unwrap();
+        crate::build_answers(&input, None, None, None, &answers).unwrap();
         let service = MetadataService::open(&answers, &dir.path().join("demand.sqlite")).unwrap();
         service.save_cover("isbn-9780306406157", b"retained cover".to_vec()).unwrap();
         let _download = OPEN_LIBRARY.lock().await;

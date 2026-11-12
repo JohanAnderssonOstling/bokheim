@@ -137,14 +137,26 @@ pub async fn external_cover(entry: CardKey, high_density: bool) -> Option<Vec<u8
     fetch_cover(entry, high_density).await
 }
 
-/// Fetch current catalog artwork for an explicit thumbnail replacement.
-/// Bypass the browsing cache without modifying the audiobook archive.
-pub async fn fresh_external_cover(entry: CardKey) -> Result<Option<Vec<u8>>, BackendError> {
+/// Fetch selected artwork for a hosted or external catalog import.
+/// Prefer the current master, but keep cached catalog artwork usable when
+/// the cover server is unavailable. This never modifies the book archive.
+pub async fn fresh_catalog_cover(entry: CardKey) -> Result<Option<Vec<u8>>, BackendError> {
     let generation = COVER_GENERATION.load(Ordering::SeqCst);
     let origin = origin();
-    let cover = fetch_cover_asset_allowed(&origin, entry, "detail").await?;
-    COVERS.get_or_init(Default::default).replace((origin, entry, "detail".into()), cover.clone(), generation).await;
-    Ok(cover)
+    let cache = COVERS.get_or_init(Default::default);
+    let result = fetch_cover_asset_allowed(&origin, entry, "detail").await;
+    if let Ok(Some(cover)) = &result {
+        cache.replace((origin, entry, "detail".into()), Some(cover.clone()), generation).await;
+        return result;
+    }
+    // Browsing may have cached only a card. It still preserves the selected
+    // artwork better than falling back to a different embedded cover.
+    for suffix in ["detail".to_owned(), thumbnail::card_thumbnail_suffix(thumbnail::THUMBNAIL_WIDTH), thumbnail::card_thumbnail_suffix(thumbnail::BROWSE_THUMBNAIL_WIDTH)] {
+        if let Some(Some(cover)) = cache.get(&(origin.clone(), entry, suffix)).await {
+            return Ok(Some(cover));
+        }
+    }
+    result
 }
 
 async fn fetch_cover(key: CardKey, high_density: bool) -> Option<Vec<u8>> {

@@ -1,6 +1,7 @@
 use book_model::{pdf_toc_page, Annotation, BookTocEntry};
 use chrono::{DateTime, SecondsFormat, Utc};
-use library_model::{annotation_markdown, annotation_source_label, AnnotationExportBook, AnnotationExportPlacement, BookLocator, ReaderLink};
+use annotation_format::{annotation_markdown, annotation_source_label};
+use library_model::{AnnotationExportBook, AnnotationExportPlacement, BookLocator, ReaderLink};
 use serde_json::{json, Value};
 use std::{fmt::Write, io};
 use sync_common::LibraryId;

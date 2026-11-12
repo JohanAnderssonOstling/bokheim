@@ -1,7 +1,7 @@
 //! Pure verification policy; callers perform ISBN requests without uploading book bytes.
 use metadata_contract::{
-    matching::{author_match_keys, matching_author_count, NormalizedTitle},
     Classification, ClassificationEvidence, ClassificationMethod, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, RichWorkMetadataMatch,
+    matching::{NormalizedTitle, author_match_keys, matching_author_count},
 };
 
 /// All checksum-valid ISBN references identified as a candidate edition of this
@@ -61,7 +61,7 @@ pub fn classifications(verified: &[String], records: impl Fn(&str) -> Vec<RichWo
 }
 
 pub fn classification_record(classifications: Vec<Classification>) -> RichWorkMetadataMatch {
-    RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, popularity: None, subjects: Vec::new() }
+    RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, subjects: Vec::new() }
 }
 
 /// Keep the supporting print ISBN in the persisted subject's provenance.

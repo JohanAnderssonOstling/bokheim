@@ -11,6 +11,8 @@ use reqwest::{Client, ClientBuilder, Error, IntoUrl, Response};
 use std::{error::Error as StdError, fmt};
 #[cfg(not(target_arch = "wasm32"))]
 use rustls::crypto::{ring, CryptoProvider};
+#[cfg(all(feature = "bundled-roots", not(target_arch = "wasm32")))]
+use rustls::{ClientConfig, RootCertStore};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Once, OnceLock};
 
@@ -30,7 +32,22 @@ pub fn initialize_tls() {
 
 pub fn client_builder() -> ClientBuilder {
     initialize_tls();
-    Client::builder()
+    let builder = Client::builder();
+    #[cfg(all(feature = "bundled-roots", not(target_arch = "wasm32")))]
+    let builder = builder.tls_backend_preconfigured(bundled_tls_config());
+    builder
+}
+
+#[cfg(all(feature = "bundled-roots", not(target_arch = "wasm32")))]
+fn bundled_tls_config() -> ClientConfig {
+    // Devices such as Kobo have no system CA store. Configure the verifier
+    // explicitly so Reqwest does not try to initialize the platform verifier.
+    let roots = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
 }
 
 pub fn try_client() -> Result<Client, Error> {
@@ -59,7 +76,10 @@ pub async fn get(url: impl IntoUrl) -> Result<Response, Error> {
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 pub fn blocking_client_builder() -> BlockingClientBuilder {
     initialize_tls();
-    BlockingClient::builder()
+    let builder = BlockingClient::builder();
+    #[cfg(feature = "bundled-roots")]
+    let builder = builder.tls_backend_preconfigured(bundled_tls_config());
+    builder
 }
 
 #[derive(Debug)]

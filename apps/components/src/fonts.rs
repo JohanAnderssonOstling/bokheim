@@ -13,7 +13,15 @@ use operation_failure::OperationError;
 use app_preferences::{BrowsingPreferences, UiFontFamily};
 use gpui::{App, AsyncApp, Global, Pixels, Result, TextRun, TextSystem, Window, WindowTextSystem, px};
 use gpui_component::Theme;
-use html_gpui::backend::{FontLoadRequest, FontLoader};
+
+/// Font registration requested by a consumer of bundled application fonts.
+#[derive(Clone, Copy, Debug)]
+pub enum BundledFontRequest<'a> {
+    Family(&'a str),
+    TextFallbacks(&'a str),
+}
+
+pub type BundledFontLoader = Rc<dyn Fn(&WindowTextSystem, BundledFontRequest<'_>) -> bool>;
 
 #[cfg(target_arch = "wasm32")]
 /// A bundled face, also available to native browser DOM controls.
@@ -109,7 +117,6 @@ fn bundled_fonts(cx: &mut App) -> Rc<RefCell<BundledFonts>> {
         return fonts.0.clone();
     }
     let fonts = Rc::new(RefCell::new(BundledFonts { loaded: [false; FAMILIES.len()], source: Rc::new(register_bundled_font), interface_family: None }));
-    html_gpui::backend::configure_font_loader(loader_for_fonts(fonts.clone()), cx);
     cx.set_global(RegisteredBundledFonts(fonts.clone()));
     fonts
 }
@@ -160,18 +167,18 @@ fn register_picker_fonts(cx: &mut App) -> Result<()> {
     Ok(())
 }
 
-/// Hook used by the HTML adapter before resolving a family or shaping text.
+/// Registration policy for consumers resolving a family or shaping text.
 /// State contains registration flags, never an additional copy of font bytes.
-pub fn bundled_font_loader(cx: &mut App) -> FontLoader {
+pub fn bundled_font_loader(cx: &mut App) -> BundledFontLoader {
     loader_for_fonts(bundled_fonts(cx))
 }
 
-fn loader_for_fonts(fonts: Rc<RefCell<BundledFonts>>) -> FontLoader {
+fn loader_for_fonts(fonts: Rc<RefCell<BundledFonts>>) -> BundledFontLoader {
     Rc::new(
-        move |text_system: &WindowTextSystem, request: FontLoadRequest<'_>| {
+        move |text_system: &WindowTextSystem, request: BundledFontRequest<'_>| {
             let mut fonts = fonts.borrow_mut();
             match request {
-                FontLoadRequest::Family(family) => {
+                BundledFontRequest::Family(family) => {
                     let known = FAMILIES
                         .iter()
                         .any(|entry| entry.name.eq_ignore_ascii_case(family));
@@ -186,7 +193,7 @@ fn loader_for_fonts(fonts: Rc<RefCell<BundledFonts>>) -> FontLoader {
                         }
                     }
                 }
-                FontLoadRequest::TextFallbacks(text) => {
+                BundledFontRequest::TextFallbacks(text) => {
                     #[cfg(not(target_arch = "wasm32"))]
                     if !fonts.loaded[3]
                         && !text.is_ascii()
@@ -307,7 +314,7 @@ async fn load_cjk_font() -> Result<Cow<'static, [u8]>, OperationError> {
     use wasm_bindgen::JsValue;
 
     let url = Reflect::get(&global(), &JsValue::from_str("__BOKHEIM_CJK_FONT_URL__")).ok().and_then(|value| value.as_string()).ok_or("bundled CJK font URL is unavailable")?;
-    html_gpui::backend::load_remote_font(&url).await.map(Cow::Owned).map_err(Into::into)
+    html_fonts::load_remote_font(&url).await.map(Cow::Owned).map_err(Into::into)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

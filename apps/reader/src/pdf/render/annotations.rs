@@ -6,6 +6,7 @@ use crate::invalidation::notify;
 use crate::shell::bookmarks::{self, BookmarkTarget};
 use crate::shell::marks::BookmarkChange;
 use crate::shell::sidebar_list;
+use crate::shell::toolbar::SidebarTarget;
 use crate::shell::state_panel::{AnnotationSidebarTarget, reader_state_rows, render_annotation_row};
 use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, RecurringScope};
 use gpui::prelude::*;
@@ -119,7 +120,7 @@ impl AnnotationEditorTarget for PdfReaderView {
 
 impl AnnotationSidebarTarget for PdfReaderView {
     fn copy_sidebar_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>) {
-        crate::shell::annotation_copy::copy_passage(&self.locator, &self.title, None, &annotation.exact_text, &annotation.note, Some(annotation.id.clone()), annotation.anchor.clone(), cx);
+        crate::shell::annotation_copy::copy_annotation(&self.locator, &self.title, annotation.anchor.pdf_anchor().and_then(|anchor| self.toc.chapter_title_at(anchor.page_index as usize)), annotation, cx);
     }
 
     fn select_sidebar_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -127,8 +128,11 @@ impl AnnotationSidebarTarget for PdfReaderView {
         self.select_annotation(id, window, cx);
     }
 
-    fn go_to_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>) {
+    fn go_to_annotation(&mut self, annotation: &Annotation, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate_to_annotation(annotation, cx);
+        if annotation.is_bookmark() && components::uses_mobile_reader_controls(window) {
+            self.hide_sidebar(window, cx);
+        }
     }
 
     fn delete_sidebar_annotation(&mut self, id: String, cx: &mut Context<Self>) {

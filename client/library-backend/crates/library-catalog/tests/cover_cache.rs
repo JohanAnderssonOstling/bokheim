@@ -68,7 +68,7 @@ async fn cover_files_share_fallbacks_retry_failures_and_refresh_together() {
     assert_eq!(library_catalog::card_cover(key, 600).await.unwrap(), b"shared master");
     assert_eq!(library_catalog::external_cover(key, true).await.unwrap(), b"shared master");
 
-    assert_eq!(library_catalog::fresh_external_cover(key).await.unwrap().unwrap(), b"fresh master");
+    assert_eq!(library_catalog::fresh_catalog_cover(key).await.unwrap().unwrap(), b"fresh master");
     assert_eq!(library_catalog::external_cover(key, true).await.unwrap(), b"fresh master");
     assert_eq!(library_catalog::card_cover(key, 300).await.unwrap(), b"fresh card");
     assert_eq!(library_catalog::card_cover(key, 600).await.unwrap(), b"fresh master");

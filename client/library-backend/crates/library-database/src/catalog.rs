@@ -15,8 +15,6 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 
-mod popularity;
-
 mod storage;
 pub use storage::{activate, activate_path, audiobook_candidates, audiobook_url, contains, entry};
 pub(crate) use storage::{browse_row, read, read_snapshot};
@@ -28,7 +26,7 @@ pub fn import_record(hash: BookId, format: BookFormat) -> Result<Option<BookReco
 }
 
 /// The latest catalog snapshot layout.
-pub const FORMAT_VERSION: u32 = 11;
+pub const FORMAT_VERSION: u32 = 12;
 
 /// One catalog book, with what browsing filters, sorts and shows, and the
 /// record a library adding it records as its enrichment answer.
@@ -58,13 +56,11 @@ pub struct CatalogBook {
     pub record: BookRecord,
     /// Catalog navigation is empty; chapters are inspected from added files.
     pub toc: Vec<BookTocEntry>,
-    /// Source popularity is catalog evidence, separate from the book's metadata.
-    pub popularity: Option<CatalogPopularity>,
 }
 
 impl CatalogBook {
     pub(crate) fn source_priority(&self) -> u8 {
-        self.sources.iter().map(|source| popularity::source_priority(source)).min().unwrap_or_else(|| popularity::source_priority(""))
+        self.sources.iter().map(|source| source_priority(source)).min().unwrap_or_else(|| source_priority(""))
     }
 
     pub fn format(&self) -> BookFormat {
@@ -77,7 +73,9 @@ impl CatalogBook {
     }
 }
 
-pub use metadata_contract::catalog::{CatalogPopularity, CombinedPopularity};
+fn source_priority(source: &str) -> u8 {
+    metadata_contract::catalog::source_priority(if source == "gutenberg.org" { "loyalbooks.com" } else { source })
+}
 
 fn read_sources(db: &Connection) -> Result<HashMap<[u8; 32], Vec<String>>, DatabaseError> {
     let mut sources = HashMap::<[u8; 32], Vec<String>>::new();
@@ -202,7 +200,7 @@ fn normalize_author_list(book: &mut CatalogBook, named: &BTreeMap<String, Contri
 pub fn store(image: &[u8], path: &Path, expected: (u64, u32)) -> Result<(), DatabaseError> {
     let mut source = Connection::open_in_memory()?;
     source.deserialize_read_exact("main", image, image.len(), true)?;
-    if expected.1 != FORMAT_VERSION {
+    if !matches!(expected.1, 11 | FORMAT_VERSION) {
         return Err(DatabaseError::message("unsupported catalog snapshot format"));
     }
     if release(&source)? != expected {

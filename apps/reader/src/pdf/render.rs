@@ -147,7 +147,9 @@ impl Render for PdfReaderView {
         let page_gap = preferences.synchronized.pdf_page_gap_px();
         let ruler_style = preferences.pdf_reading_ruler;
         let ruler_lines = preferences.pdf_reading_ruler_lines;
+        let selection_handles_visible = self.dictionary.is_none() && self.marks.selected().is_none() && !sidebar_visible;
         self.pdf.update(cx, |pdf, cx| {
+            pdf.set_selection_handles_visible(selection_handles_visible, cx);
             pdf.set_reading_ruler(ruler_style, ruler_lines, theme.accent, cx);
             pdf.set_page_gap(page_gap, cx);
             pdf.set_available_width((available_width - 2.0 * horizontal_margin).max(1.0), cx);
@@ -169,6 +171,7 @@ impl Render for PdfReaderView {
             .child(self.pdf.clone())
             .on_click(cx.listener(|reader, event, window, cx| {
                 if chrome::is_page_tap(event) {
+                    reader.context_sheet = None;
                     reader.toggle_mobile_controls(window, cx);
                 }
             }))
@@ -248,8 +251,8 @@ impl Render for PdfReaderView {
         };
         let page = crate::shell::page::reader_surface(self, surface, theme, window, cx)
             .id("pdf-reader-page")
-            // The reader deliberately uses hover-to-focus: returning the
-            // pointer here immediately gives page keys back to the document.
+            // Restore page-key focus only within the active window;
+            // hovering a background reader must not raise it.
             .on_mouse_move(cx.listener(|reader: &mut Self, _, window, cx| reader.reclaim_hover_focus(window, cx)));
         let interactions = chrome::surface_interactions("pdf", sidebar_visible, touch_input, cx, |reader: &mut Self, action, window, cx| match action {
             chrome::SurfaceAction::PreviousPage => {
@@ -263,8 +266,10 @@ impl Render for PdfReaderView {
         let mut page = page.children(interactions);
         page = page.children(self.dictionary.clone());
         if let Some(actions) = &self.context_sheet {
-            let sheet = actions.sheet(theme, window.insets().safe_area.bottom, &entity);
-            page = page.child(sheet);
+            if let Some(selection) = self.pdf.read(cx).passage_bounds() {
+                let bounds = crate::shell::context_sheet::selection_toolbar_bounds(selection, window);
+                page = page.child(actions.toolbar(bounds, theme, &entity));
+            }
         }
         page
     }
@@ -349,7 +354,14 @@ impl PdfReaderView {
     }
 
     fn open_context_sheet(&mut self, cx: &mut Context<Self>) {
-        let actions = self.context_actions(cx);
+        let Some(selection) = self.pdf.read(cx).selection_snapshot() else { return };
+        let actions = ContextActions::mobile_selection(SelectionCommands {
+            annotate: Some(PdfContextCommand::Annotation),
+            lookup: can_lookup(&selection.text).then_some(PdfContextCommand::Lookup),
+            translate: PdfContextCommand::Translate,
+            copy: PdfContextCommand::Copy(self.pdf.clone()),
+            copy_link: None,
+        });
         if !actions.is_empty() {
             self.context_sheet = Some(actions);
             self.chrome.hide(cx);
@@ -362,6 +374,8 @@ impl ContextActionTarget for PdfReaderView {
     type Command = PdfContextCommand;
 
     fn run_context_action(&mut self, command: Self::Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_sheet = None;
+        cx.notify();
         match command {
             PdfContextCommand::Lookup => {
                 let Some(selection) = self.pdf.read(cx).selection_snapshot() else { return };
@@ -374,7 +388,10 @@ impl ContextActionTarget for PdfReaderView {
             PdfContextCommand::Annotation => self.create_annotation(window, cx),
             PdfContextCommand::CopySelectionWithSource => self.copy_selection_with_source(cx),
             PdfContextCommand::Copy(pdf) => {
-                pdf.update(cx, |pdf, cx| pdf.copy_selection(cx));
+                pdf.update(cx, |pdf, cx| {
+                    pdf.copy_selection(cx);
+                    pdf.clear_text_selection(cx);
+                });
             }
         }
     }

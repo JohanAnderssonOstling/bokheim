@@ -67,12 +67,11 @@ pub(crate) fn reader_surface<C: CommonReaderCommands + SidebarTarget>(owner: &C,
             let _ = target.update(cx, |reader, cx| reader.control_click(position, window, cx));
         })
     } else { document };
-    #[cfg(feature = "kobo")]
     let document = div()
         .relative()
         .size_full()
         .child(document)
-        .when(chrome_visible && document_ready && sidebar.is_none(), |document| document.children(super::toolbar::reader_history_controls(owner, &cx.entity(), theme, window, cx)))
+        .when((cfg!(feature = "kobo") || components::uses_mobile_reader_controls(window)) && chrome_visible && document_ready && sidebar.is_none(), |document| document.children(super::toolbar::reader_history_controls(owner, &cx.entity(), theme, window, cx)))
         .into_any_element();
     if !components::uses_mobile_reader_controls(window) {
         let rail = reader_rail(owner, &cx.entity(), active_tab.filter(|_| sidebar.is_some()), progress_fraction, progress_label, progress_detail, theme, window, cx);

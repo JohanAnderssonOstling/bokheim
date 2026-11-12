@@ -828,7 +828,19 @@ impl BrowsePage {
             .children(browse_language_control(cx.entity(), &browse_controls, &selection, compact, menu_anchor, theme))
             .child(browse_options_control(cx.entity(), &selection, compact, menu_anchor, theme));
         if graph_shown.is_some() {
-            div().h(gpui::rems(components::topbar_height_rem())).flex_none().flex().items_center().p(px(4.0)).rounded(px(8.0)).bg(theme.page_bg).border_1().border_color(theme.rule).child(controls).into_any_element()
+            div()
+                .h(gpui::rems(components::topbar_height_rem()))
+                .flex_none()
+                .flex()
+                .items_center()
+                .p(px(4.0))
+                .when(cfg!(feature = "kobo"), |bar| bar.px(px(components::CONTENT_INSET)))
+                .rounded(px(8.0))
+                .bg(theme.page_bg)
+                .border_1()
+                .border_color(theme.rule)
+                .child(controls)
+                .into_any_element()
         } else {
             let topbar = components::topbar(theme).child(self.navigation_heading(window, cx)).child(controls);
             if let Some(search_field) = mobile_search_field {

@@ -35,7 +35,7 @@ mod taxonomy_update;
 mod transactions;
 pub mod transfer;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 55;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 56;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -198,6 +198,14 @@ impl Database {
                 transaction.execute_batch(include_str!("placements/sql/schema/path_indexes.sql"))?;
             }
             transaction.execute_batch(include_str!("audiobook_content.sql"))?;
+            if version < 56 {
+                transaction.execute_batch("DROP TABLE IF EXISTS book_popularity_cache; DROP TABLE IF EXISTS book_popularity_policy; DROP TRIGGER IF EXISTS browse_book_metadata_update;")?;
+                let has_score: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('book') WHERE name='popularity_rating_count')", [], |row| row.get(0))?;
+                if has_score {
+                    transaction.execute_batch("ALTER TABLE book DROP COLUMN popularity_rating_count;")?;
+                }
+                browse::revision::install(&transaction)?;
+            }
             transaction.schema_placements_views()?;
             transaction.schema_assets_views()?;
             transaction.initialization_reset_enrichment_policy()?;

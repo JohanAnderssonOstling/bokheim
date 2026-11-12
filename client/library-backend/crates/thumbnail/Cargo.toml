@@ -10,8 +10,7 @@ book-memory = ["dep:book-content", "dep:resvg"]
 book-extractors = ["book-memory", "dep:mp4ameta"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
+thumbnail-contract = { path = "../../../../shared/thumbnail-contract" }
 moxcms = { version = "0.8.1" }
 jpeg-decoder = { version = "0.3.2", default-features = false }
 log = "0.4"

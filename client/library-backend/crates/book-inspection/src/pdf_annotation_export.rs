@@ -18,7 +18,7 @@ pub struct PreparedPdfAnnotationExport {
 }
 impl PreparedPdfAnnotationExport {
     pub fn source_identity(&self) -> Option<PdfSourceIdentity> {
-        PdfSourceIdentity::from_document(&self.document)
+        crate::pdf_source_identity::from_document(&self.document)
     }
 
     pub fn write(self, writer: impl Write, source: PdfSourceIdentity, annotations: &[Annotation]) -> MetadataResult<()> {
@@ -185,11 +185,11 @@ fn write_document_annotations(mut document: Document, mut writer: impl Write, mu
     // Recovered provenance remains a hint until server confirmation. Do not
     // erase it merely because this device has not confirmed that revision yet.
     if source.canonical_hash.is_none() {
-        if let Some(previous) = PdfSourceIdentity::from_document(&document).filter(|previous| previous.book_id == source.book_id) {
+        if let Some(previous) = crate::pdf_source_identity::from_document(&document).filter(|previous| previous.book_id == source.book_id) {
             source.canonical_hash = previous.canonical_hash;
         }
     }
-    source.write(&mut document)?;
+    crate::pdf_source_identity::write(source, &mut document)?;
     document.save_to(&mut writer)?;
     Ok(())
 }
@@ -276,7 +276,7 @@ pub fn prepare_pdf_annotation_export(mut reader: impl Read + Seek + Send + 'stat
     if document.is_encrypted() {
         return Err("encrypted PDFs cannot be rewritten without their password".into());
     }
-    if PdfSourceIdentity::from_document(&document).is_some_and(|source| source.book_id != book) {
+    if crate::pdf_source_identity::from_document(&document).is_some_and(|source| source.book_id != book) {
         return Err("PDF source identity belongs to another book".into());
     }
     if known.iter().any(|annotation| annotation.book_id != book) {

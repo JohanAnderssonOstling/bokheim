@@ -467,18 +467,21 @@ impl BookDetailPage {
                         page.render_contents(&detail, audiobook, position, None, theme, cx)
                     })
                 } else {
-                    page.detail.as_ref().and_then(|detail| components::book_detail_description(&detail.description, theme, cx)).map(IntoElement::into_any_element)
+                    page.detail.as_ref().and_then(|detail| ui_html_components::book_detail_description(&detail.description, theme, cx)).map(IntoElement::into_any_element)
                 };
                 let empty = if contents { text!(browse::no_contents_available) } else { text!(browse::no_description_available) };
                 (title, content.unwrap_or_else(|| components::muted_line(empty, theme).into_any_element()))
             });
             let max_height = (window.viewport_size().height - safe_area.top).max(px(0.0));
-            sheet.title(title).size(max_height).when(!contents, |sheet| sheet.size(gpui::Length::Auto)).max_h(max_height).resizable(false).bg(theme.page_bg).p_0().child(
+            // The sheet's flexing scroll body needs a definite height to avoid
+            // collapsing when it contains an HTML description.
+            sheet.title(title).size(max_height).max_h(max_height).resizable(false).bg(theme.page_bg).p_0().child(
                 div()
                     .debug_selector(move || if contents { "book-contents-sheet".into() } else { "book-description-sheet".into() })
                     .flex_none()
                     .w_full()
-                    .pt(px(components::SPACE_MD))
+                    // The contents filter already supplies its own top spacing.
+                    .when(!contents, |body| body.pt(px(components::SPACE_MD)))
                     .pb(safe_area.bottom + px(components::SPACE_MD))
                     .pl(safe_area.left + px(components::SPACE_MD))
                     .pr(safe_area.right + px(components::SPACE_MD))
@@ -521,7 +524,7 @@ impl BookDetailPage {
 
         let audiobook = book.format_category == LibraryFileTypeFilter::Audiobook;
         let mobile = compact && layout == DetailLayout::Stacked && !cfg!(feature = "kobo");
-        let left_aligned_actions = !mobile && layout != DetailLayout::Columns;
+        let left_aligned_actions = layout == DetailLayout::Hero;
         let page_padding = if mobile && width < 360.0 { components::SPACE_MD } else { components::SPACE_LG };
         let back_size = components::topbar_action_height_rem() * rem_size;
         // The book that is playing: its controls, and where playback is now.
@@ -533,8 +536,8 @@ impl BookDetailPage {
         let progress = listening.map(|(_, progress)| progress).unwrap_or(book.progress);
         let cover_gutter = if back.is_some() { back_size + components::SPACE_SM } else { 0.0 };
 
-        // Cover size follows the page width, independently of playback. The
-        // introduction scrolls when the cover and headline need more height.
+        // Desktop covers follow the page width. Mobile also fits the cover to
+        // the height left after the headline and playback controls.
         let cover = (if beside_cover { components::book_detail_cover_slot() } else { components::book_detail_sidebar_cover_slot() })
             .debug_selector(|| "book-detail-cover".into())
             .when(layout == DetailLayout::Stacked, |cover| cover.max_w(px((width - page_padding * 2.0 - cover_gutter * 2.0).max(0.0))))
@@ -687,7 +690,7 @@ impl BookDetailPage {
         // Empty contents and descriptions do not occupy a section.
         let contents = detail.as_ref().filter(|detail| !mobile && !detail.toc.is_empty()).map(|detail| self.render_contents(detail, audiobook, listening.map(|(position, _)| position), Some(collapsible), theme, cx));
         // A description containing only markup is empty.
-        let description = detail.as_ref().filter(|_| !mobile).and_then(|detail| components::book_detail_description(&detail.description, theme, cx)).map(|description| {
+        let description = detail.as_ref().filter(|_| !mobile).and_then(|detail| ui_html_components::book_detail_description(&detail.description, theme, cx)).map(|description| {
             let open = !collapsible || self.description_open;
             let heading = components::book_detail_section_heading(text!(common::description), None::<SharedString>, collapsible.then_some(open), theme).id("book-detail-description-heading").when(collapsible, |heading| {
                 heading.on_click(cx.listener(|page, _, window, cx| {
@@ -702,10 +705,30 @@ impl BookDetailPage {
         // A description of markup alone has no section after all.
         let three_columns = three_columns && description.is_some();
 
-        // On desktop each column scrolls on its own and the page does not; the
-        // narrower pages scroll as one.
+        // Mobile reserves space for the headline and controls, shrinking only
+        // the cover. Other narrow layouts scroll as one page.
         let body = if mobile {
-            let introduction = components::column(components::SPACE_MD).w_full().items_center().debug_selector(|| "book-detail-stacked".into()).child(components::book_detail_cover_row(back, cover)).child(headline);
+            let aspect_ratio = self.cover.loaded().map(|cover| cover_aspect_ratio(cover)).unwrap_or_else(|| if audiobook && !matches!(self.cover, DetailCover::Missing) { 1.0 } else { components::BOOK_COVER_ASPECT_RATIO });
+            let cover_width = components::BOOK_DETAIL_COVER_WIDTH.min((width - page_padding * 2.0 - cover_gutter * 2.0).max(0.0));
+            let fitted_cover = canvas(
+                move |bounds, window, cx| {
+                    let width = px(cover_width).min(bounds.size.width).min(bounds.size.height * aspect_ratio);
+                    let origin = bounds.origin + gpui::point((bounds.size.width - width) / 2.0, px(0.0));
+                    let mut cover = cover.w(width).into_any_element();
+                    cover.prepaint_as_root(origin, gpui::size(AvailableSpace::Definite(width), AvailableSpace::Definite(width / aspect_ratio)), window, cx);
+                    cover
+                },
+                |_, mut cover, window, cx| cover.paint(window, cx),
+            )
+            .size_full();
+            let introduction = components::column(components::SPACE_MD)
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .items_center()
+                .debug_selector(|| "book-detail-stacked".into())
+                .child(components::book_detail_cover_row(back, fitted_cover).flex_1().min_h(px(if cover_gutter > 0.0 { back_size } else { 0.0 })).max_h(px(cover_width / aspect_ratio)))
+                .child(headline.flex_none());
             components::now_playing_page(theme)
                 .debug_selector(|| "book-detail-mobile".into())
                 .min_w_0()
@@ -725,7 +748,7 @@ impl BookDetailPage {
                     components::now_playing_body()
                         .pt(px(components::SPACE_SM))
                         .when(width < 360.0, |body| body.px(px(components::SPACE_MD)))
-                        .child(div().flex_1().min_h_0().w_full().child(introduction).overflow_y_scrollbar())
+                        .child(introduction)
                         .children(player_under_hero)
                         .when(!has_player, |body| body.child(components::book_detail_mobile_tools(theme))),
                 )

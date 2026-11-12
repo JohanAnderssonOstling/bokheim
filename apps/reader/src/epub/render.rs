@@ -20,6 +20,8 @@ use gpui::prelude::*;
 use gpui::{App, Context, Div, FocusHandle, Focusable, IntoElement, KeyDownEvent, Pixels, Point, Render, ScrollDelta, Window, px};
 use skrift_column_paginator::RendererCommand;
 use ui_components as components;
+use ui_components::scroll::page_wheel_ready;
+use web_time::Instant;
 
 impl Focusable for ReaderView {
     /// Focusing the reader means focusing the document.
@@ -115,12 +117,6 @@ impl Render for ReaderView {
         let turn_frame = self.page_turn.as_mut().and_then(|turn| turn.frame(page_size, page_ready, window, cx));
         if turn_frame.is_none() {
             self.page_turn = None;
-            if let Some(forward) = self.pending_wheel_turn.take() {
-                let reader = cx.weak_entity();
-                window.defer(cx, move |window, cx| {
-                    let _ = reader.update(cx, |reader, cx| reader.advance_from_gesture(forward, true, window, cx));
-                });
-            }
         }
         let drag_offset = turn_frame.as_ref().map_or_else(|| self.swipe_preview.offset(window, cx), |frame| frame.incoming);
         let content = if let Some(backdrop) = &self.image_backdrop {
@@ -237,10 +233,8 @@ impl Render for ReaderView {
                     cx.stop_propagation();
                 }
             }))
-            // Reading is pointer-first: merely returning to this window should
-            // make its page keys available again. Activate at the platform
-            // level as well as restoring the document's GPUI focus, so this
-            // also takes keyboard input back from another application.
+            // Restore document keyboard focus within the active reader only.
+            // Hover must not raise this window above a newly opened article.
             .on_mouse_move(cx.listener(|reader: &mut Self, _, window, cx| reader.reclaim_hover_focus(window, cx)))
             .capture_any_touch(cx.listener(Self::handle_selection_touch))
             .on_action(cx.listener(shell_input::dispatch::<Self, PreviousSection>))
@@ -329,12 +323,11 @@ impl ReaderView {
         cx.stop_propagation();
     }
 
-    /// Reclaim document focus on hover without interrupting sidebar keyboard input.
+    /// Reclaim document focus inside the active window without raising it.
     fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dictionary.is_some() || self.sidebar_focus.contains_focused(window, cx) || self.rail_focus.contains_focused(window, cx) || self.marks.selected().is_some() {
+        if !window.is_window_active() || self.dictionary.is_some() || self.sidebar_focus.contains_focused(window, cx) || self.rail_focus.contains_focused(window, cx) || self.marks.selected().is_some() {
             return;
         }
-        window.activate_window();
         self.focus_document(window, cx);
     }
 
@@ -342,7 +335,7 @@ impl ReaderView {
     /// and scrolling with the ruler disabled turn whole pages.
     ///
     /// Android touch swipes commit on their end event. Physical wheel events
-    /// turn immediately or queue behind the active animation; touchpads advance
+    /// turn immediately when the shared paging throttle permits; touchpads advance
     /// after sufficient movement.
     /// Scrolling down goes forward, the same direction as vertical touch swipes.
     fn handle_mouse_wheel(&mut self, event: &gpui::ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -448,12 +441,15 @@ impl ReaderView {
         if !delta.is_finite() || delta == 0.0 {
             return;
         }
-        if self.page_turn.is_some() && !self.reading_ruler_enabled(cx) {
-            // Coalesce wheel events into one turn after the current animation.
-            self.pending_wheel_turn = Some(delta < 0.0);
-        } else {
-            self.advance_from_gesture(delta < 0.0, true, window, cx);
+        if !self.reading_ruler_enabled(cx) {
+            let now = Instant::now();
+            if !page_wheel_ready(self.last_wheel_turn, self.page_turn.is_some(), now) {
+                cx.stop_propagation();
+                return;
+            }
+            self.last_wheel_turn = Some(now);
         }
+        self.advance_from_gesture(delta < 0.0, true, window, cx);
         cx.stop_propagation();
     }
 }

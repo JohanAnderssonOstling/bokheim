@@ -478,7 +478,7 @@ fn reading_metadata_and_background_writes_preserve_structural_tree() {
         db.connection.fixtures_insert_book_unified_concept_2(&id, &concept).unwrap();
     }
     let original = db.subject_tree_for(Books::Library).unwrap();
-    db.connection.execute("UPDATE book SET title='Updated',read_progress=0.5,read_at=100,popularity_rating_count=12", []).unwrap();
+    db.connection.execute("UPDATE book SET title='Updated',read_progress=0.5,read_at=100", []).unwrap();
     db.connection.execute("UPDATE library_local_state SET scan_state='pending'", []).unwrap();
     db.connection.execute("UPDATE book_dir SET local_hash='new fingerprint',is_downloaded=1", []).unwrap();
     assert!(Arc::ptr_eq(&original, &db.subject_tree_for(Books::Library).unwrap()));

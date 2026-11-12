@@ -1,0 +1,13 @@
+[package]
+name = "annotation-format"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+book-model = { path = "../../shared/book-model", default-features = false }
+library-model = { path = "../library-model", default-features = false }
+
+[dev-dependencies]
+content-address = { path = "../../shared/content-address" }
+uuid = "1"

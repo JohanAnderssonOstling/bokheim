@@ -165,7 +165,7 @@ impl PaginatorElement {
     ///
     /// Down is gated on the paginator's own hitbox; move and up deliberately
     /// are not, so a band survives the pointer leaving it mid-drag.
-    fn paint_selection_input(&self, container: Hitbox, child_rects: Vec<(usize, Bounds<Pixels>)>, window: &mut Window) {
+    fn paint_selection_press(&self, container: Hitbox, child_rects: Vec<(usize, Bounds<Pixels>)>, window: &mut Window) {
         let paginator = self.paginator.clone();
         let rects = child_rects.clone();
         let hitbox = container.clone();
@@ -177,7 +177,12 @@ impl PaginatorElement {
             let _ = paginator.update(cx, |paginator, cx| match pressed_child {
                 // Pressing something already selected begins a drag of the
                 // whole selection, so the selection has to survive the press.
-                Some(index) if paginator.selection().contains(&index) => {}
+                Some(index) if paginator.selection().contains(&index) => {
+                    // Nested book groups own their selected items. Let the
+                    // item's drag handler carry them without an enclosing
+                    // paginator starting a new selection on the same press.
+                    cx.stop_propagation();
+                }
                 Some(index) if paginator.select_on_drag && paginator.data.children[index].selection_start => {
                     paginator.begin_marquee(event.position, cx);
                 }
@@ -189,7 +194,9 @@ impl PaginatorElement {
                 }
             });
         });
+    }
 
+    fn paint_selection_input(&self, window: &mut Window) {
         let paginator = self.paginator.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
             if phase != DispatchPhase::Bubble || !event.dragging() {
@@ -506,7 +513,11 @@ impl Element for PaginatorElement {
 
     fn paint(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _layout: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
         if let Some(container) = prepaint.container.clone() {
-            self.paint_secondary_input(prepaint.child_rects.clone(), container, window);
+            self.paint_secondary_input(prepaint.child_rects.clone(), container.clone(), window);
+            // Bubble dispatch runs in reverse registration order. Books must
+            // receive the press and arm their drag before this paginator stops
+            // it from reaching an enclosing group.
+            self.paint_selection_press(container, prepaint.child_rects.clone(), window);
         }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for element in &mut prepaint.elements {
@@ -523,8 +534,8 @@ impl Element for PaginatorElement {
             }
         });
 
-        if let Some(container) = prepaint.container.clone() {
-            self.paint_selection_input(container, prepaint.child_rects.clone(), window);
+        if prepaint.container.is_some() {
+            self.paint_selection_input(window);
         }
     }
 }

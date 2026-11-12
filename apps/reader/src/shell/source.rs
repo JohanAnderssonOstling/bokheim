@@ -20,6 +20,7 @@ pub(super) fn actions(uri: Option<&str>, placement: Placement, window: &Window, 
         return Vec::new();
     }
     let in_reader = matches!(placement, Placement::Reader);
+    if in_reader && components::uses_mobile_reader_controls(window) { return Vec::new(); }
     let anchor = match placement {
         Placement::Lookup => Anchor::TopRight,
         Placement::Reader if components::uses_mobile_reader_controls(window) => Anchor::BottomRight,

@@ -262,10 +262,8 @@ async fn sync_pass(library: &LibraryResources, remote: bool) -> Result<(), ()> {
             events.sync.wake_after(Duration::from_secs(30));
         }
     }
-    if result.is_ok() {
-        // The file worker owns physical replay; sync only commits protocol pages.
-        events.files.wake();
-    }
+    // Committed content changes wake file replay through ContentsChanged.
+    // Waking it after an empty pass would loop: file preparation wakes sync.
     result.map_err(|error| log::warn!("library synchronization will resume: {error}"))
 }
 

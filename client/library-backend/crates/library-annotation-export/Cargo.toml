@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+annotation-format = { path = "../../../annotation-format" }
 operation-failure = { path = "../../../client-protocol/crates/operation-failure" }
 book-model = { path = "../../../../shared/book-model" }
 content-address = { path = "../../../../shared/content-address" }

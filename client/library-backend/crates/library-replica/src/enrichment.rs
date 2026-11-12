@@ -1,19 +1,55 @@
 use book_model::BookTocEntry;
-use metadata_contract::WorkPopularity;
 use serde::{Deserialize, Serialize};
 
 /// A definitive lookup outcome; its metadata is already applied to the book.
 /// Failures are device-local retry work.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(from = "StoredEnrichment", into = "StoredEnrichment")]
 pub enum EnrichmentResult {
     Found {
         #[serde(with = "book_model::toc_transport::optional")]
         toc: Option<Vec<BookTocEntry>>,
         cover_id: Option<String>,
-        popularity: Option<WorkPopularity>,
     },
     NoMatch,
+}
+
+// Keep the existing binary slot readable without exposing or using retired scores.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RetiredScore {
+    open_library_work_id: String,
+    rating_count: u64,
+    snapshot_date: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredEnrichment {
+    Found {
+        #[serde(with = "book_model::toc_transport::optional")]
+        toc: Option<Vec<BookTocEntry>>,
+        cover_id: Option<String>,
+        popularity: Option<RetiredScore>,
+    },
+    NoMatch,
+}
+
+impl From<StoredEnrichment> for EnrichmentResult {
+    fn from(value: StoredEnrichment) -> Self {
+        match value {
+            StoredEnrichment::Found { toc, cover_id, .. } => Self::Found { toc, cover_id },
+            StoredEnrichment::NoMatch => Self::NoMatch,
+        }
+    }
+}
+
+impl From<EnrichmentResult> for StoredEnrichment {
+    fn from(value: EnrichmentResult) -> Self {
+        match value {
+            EnrichmentResult::Found { toc, cover_id } => Self::Found { toc, cover_id, popularity: None },
+            EnrichmentResult::NoMatch => Self::NoMatch,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -59,7 +95,7 @@ mod tests {
                 addition.record.description = " \n".into();
                 addition.record.book.year = None;
             }
-            addition.apply_enrichment(provider(), EnrichmentResult::Found { toc: None, cover_id: Some("cover".into()), popularity: None });
+            addition.apply_enrichment(provider(), EnrichmentResult::Found { toc: None, cover_id: Some("cover".into()) });
             assert_effective_record(&addition, if has_file_values { "File description" } else { "Provider description" }, if has_file_values { 1999 } else { 2005 });
             let json = serde_json::to_value(&addition).unwrap();
             assert!(json["enrichment"]["found"].get("record").is_none());

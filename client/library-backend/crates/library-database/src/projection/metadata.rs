@@ -1,6 +1,5 @@
 //! Complete metadata sets written in bounded SQL batches on every platform.
 
-use super::popularity_rating_count;
 use crate::DatabaseError;
 use crate::browse::{options::base_language, text::search_title};
 use crate::contributors::{ContributorNameMatcher, resolve_credits};
@@ -14,7 +13,7 @@ use rusqlite::{Transaction, limits::Limit, params_from_iter, types::Value};
 use std::collections::{BTreeSet, HashMap};
 
 const BATCH_ROWS: usize = 1024;
-const BOOK_COLUMNS: &str = "format,added_at,popularity_rating_count,title,subtitle,search_title,author,search_author";
+const BOOK_COLUMNS: &str = "format,added_at,title,subtitle,search_title,author,search_author";
 
 fn batch_rows(tx: &Transaction<'_>, width: usize) -> Result<usize, DatabaseError> {
     let rows = tx.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)? as usize / width;
@@ -76,17 +75,7 @@ pub(super) fn project<'a>(tx: &Transaction<'_>, inputs: impl Iterator<Item = (&'
         let subtitle = metadata.subtitle.clone();
         let search = search_title(title.as_deref(), subtitle.as_deref());
         let added_at = addition.map(|addition| storage_i64(addition.facts.added_at, "book addition timestamp")).transpose()?;
-        books.push([
-            id.into(),
-            addition.map(|addition| addition.facts.format as i64).into(),
-            added_at.into(),
-            addition.and_then(popularity_rating_count).into(),
-            title.into(),
-            subtitle.into(),
-            search.into(),
-            author.into(),
-            search_author.into(),
-        ]);
+        books.push([id.into(), addition.map(|addition| addition.facts.format as i64).into(), added_at.into(), title.into(), subtitle.into(), search.into(), author.into(), search_author.into()]);
         credit_counts.push([id.into(), (resolved.len() as i64).into()]);
         for (position, (identity, credit)) in resolved.into_iter().enumerate() {
             credits.push([id.into(), identity.into(), (position as i64).into(), credit.name().to_owned().into(), credit.role_code().0.to_vec().into()]);

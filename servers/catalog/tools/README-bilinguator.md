@@ -66,10 +66,6 @@ file checksums and reuse successful acquisitions. The tool stops when less than
 1 GiB of local storage remains. Import, publication and activation are separate
 operations; the acquisition tool never modifies an existing catalog snapshot.
 
-For catalog popularity, bilingual editions receive the operator-assigned score
-50. This is a neutral ranking value, not an observed download count or percentile
-inferred from Bilinguator traffic. Publisher and client migration apply the same
-assignment; popularity sorting compares scores without source tiers.
 
 Checks:
 

@@ -14,12 +14,11 @@ pub(crate) mod import;
 pub(crate) mod incremental;
 pub(crate) mod loc_dump;
 pub(crate) mod openlibrary;
-mod popularity;
 mod providers;
 mod reclassify;
 mod work_classification;
 mod work_lookup;
-pub use edition_index::{extend_edition_index, EditionIndexReport};
+pub use edition_index::{EditionIndexReport, extend_edition_index};
 pub use incremental::build_answers_incremental;
 pub use reclassify::reclassify_answers;
 pub use work_lookup::index_work_classifications;
@@ -51,12 +50,12 @@ pub struct BuildReport {
     pub queue_seconds: f64,
 }
 
-pub fn build_answers_with_ratings(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, ratings: Option<&Path>, output: &Path) -> Result<BuildReport, MetadataError> {
+pub fn build_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, output: &Path) -> Result<BuildReport, MetadataError> {
     if output.exists() {
         return Err(MetadataError("answer output already exists; build to a new dated file".into()));
     }
     let started = Instant::now();
-    let inputs = incremental::InputIdentity::read(snapshot, descriptions, ratings)?;
+    let inputs = incremental::InputIdentity::read(snapshot, descriptions)?;
     let resolver = Resolver::open(snapshot, descriptions)?;
     let source = resolver.connection()?;
     validate_source(&source)?;
@@ -105,9 +104,6 @@ pub fn build_answers_with_ratings(snapshot: &Path, providers: Option<&Path>, dem
             }
         }
         out.execute_batch("COMMIT").map_err(error)?;
-        out.execute_batch("BEGIN").map_err(error)?;
-        popularity::load(&out, ratings)?;
-        out.execute_batch("COMMIT").map_err(error)?;
         let preparation_seconds = started.elapsed().as_secs_f64();
         let mut lookup_seconds = 0.0;
         let mut provider_seconds = 0.0;
@@ -131,7 +127,6 @@ pub fn build_answers_with_ratings(snapshot: &Path, providers: Option<&Path>, dem
             if let Some(c) = &provider {
                 providers::apply_many(c, &mut response)?;
             }
-            popularity::attach(&out, &mut response, &resolver.state.snapshot.dump_date)?;
             provider_seconds += provider_started.elapsed().as_secs_f64();
             let write_started = Instant::now();
             out.execute_batch("BEGIN").map_err(error)?;
@@ -163,13 +158,12 @@ DELETE FROM wanted WHERE work_id IN (SELECT work_id FROM answer_work_lcc UNION S
 ",
         )
         .map_err(error)?;
-        out.execute_batch("UPDATE wanted SET rank=-COALESCE((SELECT count FROM build_rating WHERE work_id=wanted.work_id),0) WHERE rank=0; DROP TABLE build_rating;").map_err(error)?;
         out.execute_batch(
             "CREATE INDEX wanted_by_rank ON wanted(rank,isbn13); CREATE INDEX edition_candidate_by_work ON edition_candidate(work_id); CREATE INDEX edition_title_key_by_edition ON edition_title_key(edition_id); DROP TABLE build_isbn;",
         )
         .map_err(error)?;
         incremental::save_state(&out, provider.as_ref(), demand_input.as_ref(), &inputs, count, bytes)?;
-        inputs.verify(snapshot, descriptions, ratings)?;
+        inputs.verify(snapshot, descriptions)?;
         let queue_seconds = queue_started.elapsed().as_secs_f64();
         out.execute("INSERT INTO snapshot VALUES(1,?1,?2,?3,?4)", params![schema::ANSWER_VERSION, resolver.state.snapshot.dump_date, now_ms(), through]).map_err(error)?;
         out.execute_batch("COMMIT; PRAGMA main.optimize;").map_err(error)?;
@@ -325,7 +319,7 @@ mod wanted_tests {
             &[],
         );
         let out = dir.path().join("answers.sqlite");
-        build_answers_with_ratings(&source, None, None, None, None, &out).unwrap();
+        build_answers(&source, None, None, None, &out).unwrap();
         assert_eq!(Connection::open(out).unwrap().query_row("SELECT work_id FROM wanted WHERE isbn13=9780131103627", [], |r| r.get::<_, i64>(0)).unwrap(), 20);
     }
 }

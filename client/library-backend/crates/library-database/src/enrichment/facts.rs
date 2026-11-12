@@ -129,7 +129,7 @@ impl Database {
                 match result.status {
                     BookEnrichmentStatus::Found => {
                         let record = result.record.ok_or_else(|| DatabaseError::message("found enrichment has no record"))?;
-                        addition.apply_enrichment(record, EnrichmentResult::Found { toc: result.toc, cover_id: result.cover.map(|cover| cover.id), popularity: result.popularity });
+                        addition.apply_enrichment(record, EnrichmentResult::Found { toc: result.toc, cover_id: result.cover.map(|cover| cover.id) });
                     }
                     BookEnrichmentStatus::NoMatch => addition.enrichment = Some(EnrichmentResult::NoMatch),
                     BookEnrichmentStatus::Failed => unreachable!(),
@@ -260,7 +260,7 @@ fn record_enrichment_on(transaction: &Connection, hash: &BookId, request_key: &s
             transaction.facts_record_failure(hash, now.saturating_add(FAILURE_RETRY_SECONDS))?;
             return Ok(());
         }
-        BookEnrichmentStatus::Found => EnrichmentResult::Found { toc: result.toc, cover_id: result.cover.map(|cover| cover.id), popularity: result.popularity },
+        BookEnrichmentStatus::Found => EnrichmentResult::Found { toc: result.toc, cover_id: result.cover.map(|cover| cover.id) },
         BookEnrichmentStatus::NoMatch => EnrichmentResult::NoMatch,
     };
     let LibraryStateEntry::BookAdd { value: mut addition, .. } = sync_common::wire::decode::<LibraryStateEntry>(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? else {
@@ -285,7 +285,7 @@ pub(crate) fn record_catalog_answer(transaction: &rusqlite::Transaction<'_>, has
     let LibraryStateEntry::BookAdd { value: mut addition, .. } = sync_common::wire::decode::<LibraryStateEntry>(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? else {
         return Err(DatabaseError::message("invalid local book draft"));
     };
-    addition.apply_enrichment(record, EnrichmentResult::Found { toc: None, cover_id: None, popularity: None });
+    addition.apply_enrichment(record, EnrichmentResult::Found { toc: None, cover_id: None });
     record_local(transaction, LibraryStateEntry::BookAdd { book_id: *hash, value: addition })?;
     Ok(())
 }

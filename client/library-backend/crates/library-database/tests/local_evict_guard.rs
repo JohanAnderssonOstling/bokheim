@@ -19,7 +19,7 @@ fn import() -> ImportCommit {
         book_id: hash,
         size_bytes: 10,
         inspection_version: 1,
-        inspection: Some(book_inspection::InspectedBook {
+        inspection: Some(book_inspection_contract::InspectedBook {
             pdf: None,
             audiobook: None,
             metadata: book_model::BookRecord {

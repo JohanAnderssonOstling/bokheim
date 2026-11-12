@@ -45,7 +45,7 @@ pub(crate) fn install(connection: &Connection) -> Result<(), DatabaseError> {
     // inspect values, rather than merely the columns mentioned by a writer.
     for (name, table, domains, columns, rows) in [
         ("book_visibility", "book", "visibility,facets", "content_hash,deleted_at", true),
-        ("book_metadata", "book", "metadata", "content_hash,title,subtitle,author,search_title,search_author,format,popularity_rating_count,duration_ms", true),
+        ("book_metadata", "book", "metadata", "content_hash,title,subtitle,author,search_title,search_author,format,duration_ms", true),
         ("book_reading", "book", "reading", "read_progress,read_at,added_at", true),
         ("book_format", "book", "facets", "format", false),
         ("subjects", "book_unified_concept", "subjects", "book_row_id,concept_id", true),

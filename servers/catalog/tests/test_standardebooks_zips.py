@@ -131,7 +131,7 @@ class StandardEbooksTests(unittest.TestCase):
                 {'file': name + '.epub', 'entry_id': name, 'source_evidence': {}}
                 for name in ('first', 'second')
             ]))
-            args = SimpleNamespace(output=output, manifest=manifest, popularity_only=None,
+            args = SimpleNamespace(output=output, manifest=manifest,
                                    catalog=root, binary=Path('catalog'))
             response = SimpleNamespace(returncode=1, stdout='', stderr='HTTP status client error (429 Too Many Requests)')
             with patch.object(importer.subprocess, 'run', return_value=response) as request:

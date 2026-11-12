@@ -180,7 +180,7 @@ pub(crate) mod tests {
     fn recovering_one_derivative_preserves_the_existing_card() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("covers")).unwrap();
-        let versions = thumbnail::ThumbnailVersions::from_image(&image::RgbImage::new(8, 8)).unwrap();
+        let versions = thumbnail::thumbnail_versions_from_image(&image::RgbImage::new(8, 8)).unwrap();
         CoverAssets::new(dir.path(), "retained").store(versions).unwrap();
         let retained = dir.path().join(format!("covers/retained-{}.jpg", thumbnail::card_thumbnail_suffix(thumbnail::BROWSE_THUMBNAIL_WIDTH)));
         let missing = dir.path().join(format!("covers/retained-{}.jpg", thumbnail::card_thumbnail_suffix(thumbnail::THUMBNAIL_WIDTH)));

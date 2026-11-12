@@ -2,30 +2,25 @@
 
 use dictionary::can_lookup;
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, IntoElement, LongPressEvent, MouseDownEvent, MouseUpEvent, Pixels, Point, TouchEvent, TouchId, TouchPhase, Window, anchored, deferred, div, point, px};
+use gpui::{AnyElement, Bounds, Context, IntoElement, LongPressEvent, MouseDownEvent, MouseUpEvent, Pixels, Point, TouchEvent, TouchId, TouchPhase, Window, div, point, px};
 use ui_components as components;
 use reader_lookups::WikipediaArticle;
 
-use crate::epub::{DocumentNavigation, LoadState, ReaderView};
+use crate::epub::{DocumentNavigation, EpubContextCommand, LoadState, ReaderView};
+use crate::shell::context_sheet::{ContextActions, SelectionCommands, selection_toolbar_bounds};
 use crate::shell::dictionary::{Closed, DictionaryPopup, SelectElement, WordClick};
 
 #[derive(Default)]
 pub(in crate::epub) struct TouchSelectionState {
     pub(in crate::epub) active: bool,
     drag: Option<SelectionDrag>,
+    toolbar_bounds: Option<Bounds<Pixels>>,
     word_click: WordClick,
 }
 
 struct SelectionDrag {
     id: TouchId,
     offset: Point<Pixels>,
-}
-
-/// Keep both the knob and its touch target clear of the system gesture area.
-fn handle_center(endpoint: Point<Pixels>, window: &Window) -> Point<Pixels> {
-    let viewport = window.viewport_size();
-    let bottom = (f32::from(viewport.height - window.insets().safe_area.bottom) - 22.0).max(22.0);
-    point(px(f32::from(endpoint.x).clamp(22.0, f32::from(viewport.width).max(44.0) - 22.0)), px((f32::from(endpoint.y) + 12.0).clamp(22.0, bottom)))
 }
 
 impl ReaderView {
@@ -38,16 +33,15 @@ impl ReaderView {
     }
 
     pub(super) fn finish_word_click(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.touch_selection.word_click.finish(event) || components::touch_ui() {
+        if !self.touch_selection.word_click.finish(event) || components::uses_mobile_reader_controls(window) {
             return;
         }
         let position = event.position;
-        let whole_element = event.click_count == 4;
         // Let the renderer finish its pointer sequence before selecting the
-        // word; it consumes mouse-up while completing ordinary drag selection.
+        // element. Double-clicks must not be overwritten with a word selection.
         cx.defer_in(window, move |reader, _, cx| {
             let LoadState::Ready(renderer) = &reader.load_state else { return };
-            renderer.update(cx, |view, cx| if whole_element { view.select_element_at(position, cx) } else { view.select_word_at(position, cx) });
+            renderer.update(cx, |view, cx| view.select_element_at(position, cx));
         });
     }
 
@@ -137,6 +131,9 @@ impl ReaderView {
         if self.dictionary.is_some() || self.context_sheet.is_some() || !self.touch_selection.active {
             return;
         }
+        if self.touch_selection.toolbar_bounds.is_some_and(|bounds| bounds.contains(&event.position)) && self.touch_selection.drag.is_none() {
+            return;
+        }
         let LoadState::Ready(renderer) = &self.load_state else { return };
         let renderer = renderer.clone();
         if let Some(drag) = &self.touch_selection.drag {
@@ -170,7 +167,7 @@ impl ReaderView {
             .into_iter()
             .filter_map(|(start, endpoint)| {
                 let endpoint = endpoint?;
-                let center = handle_center(endpoint, window);
+                let center = components::reader_selection_handle_center(endpoint, window);
                 let distance = f32::from(event.position.x - center.x).hypot(f32::from(event.position.y - center.y));
                 (distance <= 24.0).then_some((start, endpoint, distance))
             })
@@ -182,17 +179,19 @@ impl ReaderView {
                 self.touch_selection.drag = Some(SelectionDrag { id: event.id, offset: event.position - endpoint + point(px(0.0), px(3.0)) });
                 cx.notify();
             }
-        } else if renderer.read(cx).selection_contains(event.position) {
-            self.open_context_sheet(event.position, cx);
-        } else {
+        } else if !renderer.read(cx).selection_contains(event.position) {
             self.dismiss_selection(cx);
+            return;
         }
         window.prevent_default();
         cx.stop_propagation();
     }
 
     pub(in crate::epub) fn dismiss_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.touch_selection.active && self.selection.is_none() {
+        if !self.touch_selection.active && self.selection.is_none()
+            && !matches!(&self.load_state, LoadState::Ready(renderer)
+                if renderer.read(cx).has_text_selection())
+        {
             return false;
         }
         self.touch_selection.active = false;
@@ -225,7 +224,8 @@ impl ReaderView {
         self.dismiss_selection(cx);
     }
 
-    pub(super) fn render_selection_handles(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_selection_handles(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.touch_selection.toolbar_bounds = None;
         if self.dictionary.is_some() || self.context_sheet.is_some() || !self.touch_selection.active {
             return None;
         }
@@ -236,19 +236,21 @@ impl ReaderView {
         let mut overlay = div().absolute().inset_0();
         for (name, endpoint) in [("start", start), ("end", end)] {
             let Some(endpoint) = endpoint else { continue };
-            let center = handle_center(endpoint, window);
-            let knob = div()
-                .id(format!("epub-selection-{name}-handle"))
-                .debug_selector(move || format!("epub-selection-{name}-handle"))
-                .size(px(44.0))
-                .relative()
-                .flex()
-                .items_center()
-                .justify_center()
-                .occlude()
-                .child(div().absolute().left(px(21.0)).top(px(6.0)).w(px(2.0)).h(px(16.0)).bg(theme.accent))
-                .child(div().size(px(18.0)).rounded_full().bg(theme.accent));
-            overlay = overlay.child(deferred(anchored().position(center - point(px(22.0), px(22.0))).child(knob)).with_priority(2));
+            overlay = overlay.child(components::reader_selection_handle(format!("epub-selection-{name}-handle"), endpoint, window, theme));
+        }
+        if self.touch_selection.drag.is_none() {
+            if let Some(selection) = view.selection_bounds() {
+                let bounds = selection_toolbar_bounds(selection, window);
+                let actions = ContextActions::mobile_selection(SelectionCommands {
+                    annotate: (!self.book.is_transient()).then_some(EpubContextCommand::AnnotateSelection),
+                    lookup: view.selected_passage().is_some_and(|(_, text)| can_lookup(&text)).then_some(EpubContextCommand::LookupSelection),
+                    translate: EpubContextCommand::TranslateSelection,
+                    copy: EpubContextCommand::CopySelectionPlainText,
+                    copy_link: None,
+                });
+                self.touch_selection.toolbar_bounds = Some(bounds);
+                overlay = overlay.child(actions.toolbar(bounds, theme, &cx.entity()));
+            }
         }
         Some(overlay.into_any_element())
     }

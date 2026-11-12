@@ -5,11 +5,11 @@ CREATE TABLE catalog_browse_revision(
 -- Preserve stable browse IDs while referencing source records by integer ID.
 CREATE TABLE catalog_browse_search(
  row_id INTEGER PRIMARY KEY,book_row_id INTEGER NOT NULL UNIQUE REFERENCES book(row_id),
- search_title TEXT NOT NULL,search_author TEXT NOT NULL,source_priority INTEGER NOT NULL,popularity_score REAL
+ search_title TEXT NOT NULL,search_author TEXT NOT NULL,source_priority INTEGER NOT NULL
 ) STRICT;
 CREATE VIEW catalog_browse_book AS
  SELECT browse.row_id,source.row_id AS source_row_id,source.key AS identity,source.key AS key,
- source.external,source.format,audio.duration_ms,browse.search_title,browse.search_author,browse.source_priority,browse.popularity_score
+ source.external,source.format,audio.duration_ms,browse.search_title,browse.search_author,browse.source_priority
  FROM catalog_browse_search browse JOIN book source ON source.row_id=browse.book_row_id
  LEFT JOIN book_audiobook_duration audio ON audio.book_row_id=source.row_id;
 CREATE VIEW catalog_browse_author AS SELECT author_id,name FROM author;

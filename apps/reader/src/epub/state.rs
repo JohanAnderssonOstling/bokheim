@@ -170,7 +170,7 @@ impl ReaderView {
             touch_swipe: None,
             swipe_preview: ui_components::SwipePreview::default(),
             page_turn: None,
-            pending_wheel_turn: None,
+            last_wheel_turn: None,
             page_size: None,
             touch_swipe_from_edge: false,
             search_input,
@@ -231,7 +231,6 @@ impl ReaderView {
     fn clear_navigation_overlays(&mut self) {
         self.context_sheet = None;
         self.page_turn = None;
-        self.pending_wheel_turn = None;
         self.swipe_preview.clear();
         self.footnote = None;
         self.image_preview = None;

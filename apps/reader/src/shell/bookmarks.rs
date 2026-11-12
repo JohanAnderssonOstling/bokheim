@@ -89,25 +89,38 @@ pub(crate) fn name_matches(name: &str, query: &str) -> bool {
     query.is_empty() || name.to_lowercase().contains(query)
 }
 
-/// Only the name is visible. Rename and deletion live in the context menu.
+/// Bookmark name and inline actions, with renaming available in the context menu.
 pub(crate) fn card<C: AnnotationSidebarTarget>(target: &Entity<C>, index: usize, bookmark: &Annotation, selected: bool, theme: components::BrowserTheme) -> AnyElement {
     let navigate = target.clone();
     let location = bookmark.clone();
     let keyboard = target.clone();
     let keyboard_bookmark = bookmark.clone();
     let menu_target = target.clone();
+    let copy_bookmark = bookmark.clone();
     let id = bookmark.id.clone();
+    let copy_target = target.clone();
+    let copied_bookmark = bookmark.clone();
+    let copy = components::outlined_text_button(("reader-bookmark-copy", index), text!(reader::copy_link)).on_click(move |_, _, cx| {
+        cx.stop_propagation();
+        copy_target.update(cx, |this, cx| this.copy_sidebar_annotation(&copied_bookmark, cx));
+    });
+    let delete_target = target.clone();
+    let deleted_id = bookmark.id.clone();
+    let delete = components::delete_icon_button(("reader-bookmark-delete", index), text!(reader::delete_bookmark), theme).on_click(move |_, _, cx| {
+        cx.stop_propagation();
+        delete_target.update(cx, |this, cx| this.delete_sidebar_annotation(deleted_id.clone(), cx));
+    });
     components::reader_state_card(("reader-bookmark", index), selected, theme)
         .debug_selector(move || format!("reader-bookmark-card-{index}"))
         .focusable()
         .tab_stop(true)
-        .on_click(move |_, _, cx| navigate.update(cx, |this, cx| this.go_to_annotation(&location, cx)))
+        .on_click(move |_, window, cx| navigate.update(cx, |this, cx| this.go_to_annotation(&location, window, cx)))
         .on_key_down(move |event, window, cx| {
             if event.keystroke.modifiers != gpui::Modifiers::default() {
                 return;
             }
             match event.keystroke.key.as_str() {
-                "enter" | "space" => keyboard.update(cx, |this, cx| this.go_to_annotation(&keyboard_bookmark, cx)),
+                "enter" | "space" => keyboard.update(cx, |this, cx| this.go_to_annotation(&keyboard_bookmark, window, cx)),
                 "f2" => keyboard.update(cx, |this, cx| this.select_sidebar_annotation(keyboard_bookmark.id.clone(), window, cx)),
                 "delete" | "backspace" => keyboard.update(cx, |this, cx| this.delete_sidebar_annotation(keyboard_bookmark.id.clone(), cx)),
                 _ => return,
@@ -115,17 +128,38 @@ pub(crate) fn card<C: AnnotationSidebarTarget>(target: &Entity<C>, index: usize,
             cx.stop_propagation();
         })
         .context_menu(move |menu, _, _| {
+            let copy = menu_target.clone();
+            let copy_bookmark = copy_bookmark.clone();
             let rename = menu_target.clone();
             let rename_id = id.clone();
             let delete = menu_target.clone();
             let delete_id = id.clone();
-            menu.item(components::menu_item(text!(reader::rename_bookmark), move |_, window, cx| {
+            menu.item(components::menu_item(text!(reader::copy_link), move |_, _, cx| {
+                copy.update(cx, |this, cx| this.copy_sidebar_annotation(&copy_bookmark, cx));
+            }))
+            .item(components::menu_item(text!(reader::rename_bookmark), move |_, window, cx| {
                 rename.update(cx, |this, cx| this.select_sidebar_annotation(rename_id.clone(), window, cx));
             }))
             .item(components::menu_item(text!(reader::delete_bookmark), move |_, _, cx| {
                 delete.update(cx, |this, cx| this.delete_sidebar_annotation(delete_id.clone(), cx));
             }))
         })
-        .child(components::reader_state_note(bookmark.note.clone(), theme).text_color(theme.text))
+        .child(
+            components::action_row()
+                .flex_nowrap()
+                .w_full()
+                .min_w_0()
+                .child(components::reader_state_note(bookmark.note.clone(), theme).text_color(theme.text).flex_1().min_w_0())
+                .child(
+                    components::action_row()
+                        .id(("reader-bookmark-actions", index))
+                        .flex_nowrap()
+                        .flex_none()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(copy)
+                        .child(delete),
+                ),
+        )
         .into_any_element()
 }

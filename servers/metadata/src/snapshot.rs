@@ -1,8 +1,8 @@
 //! An immutable base plus one cumulative immutable update file. The update's
 //! embedded manifest pins the base; temporary views merge them without copying it.
-use crate::{error, schema, Connection, MetadataError, OpenFlags, Path, PathBuf, Pool, SqliteConnectionManager, QUERY_CONCURRENCY, READ_CACHE_KIB, READ_MMAP_BYTES};
+use crate::{Connection, MetadataError, OpenFlags, Path, PathBuf, Pool, QUERY_CONCURRENCY, READ_CACHE_KIB, READ_MMAP_BYTES, SqliteConnectionManager, error, schema};
 use reqwest::Url;
-use rusqlite::{params, Error as SqliteError};
+use rusqlite::{Error as SqliteError, params};
 use serde::{Deserialize, Serialize};
 use std::{fs, time::UNIX_EPOCH};
 
@@ -102,6 +102,17 @@ pub(crate) fn create_update(previous: &Path, output: &Path) -> Result<Connection
         // Published updates stay immutable too. Copy only their cumulative delta,
         // always referencing the original base: never grow a chain of layers.
         fs::copy(previous, output).map_err(error)?;
+        // Published overlays can be read-only. Only the new working copy
+        // needs owner write access for the next cumulative update.
+        let mut permissions = fs::metadata(output).map_err(error)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(permissions.mode() | 0o200);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        fs::set_permissions(output, permissions).map_err(error)?;
     }
     let out = Connection::open(output).map_err(error)?;
     out.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-65536;").map_err(error)?;
@@ -132,7 +143,7 @@ pub(crate) fn create_update(previous: &Path, output: &Path) -> Result<Connection
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{build::tests::snapshot_from, build_answers_with_ratings, build_answers_incremental, Classification, ClassificationScheme, ClassificationSource, MetadataService};
+    use crate::{Classification, ClassificationScheme, ClassificationSource, MetadataService, build::tests::snapshot_from, build_answers, build_answers_incremental};
 
     #[test]
     fn updates_and_deletions_do_not_copy_or_mutate_the_base_and_use_indexed_reads() {
@@ -146,19 +157,24 @@ mod tests {
         let provider_path = temp.path().join("provider.sqlite");
         let provider = crate::crawl::open_provider(&provider_path).unwrap();
         let base = temp.path().join("base.sqlite");
-        build_answers_with_ratings(&source, Some(&provider_path), None, None, None, &base).unwrap();
+        build_answers(&source, Some(&provider_path), None, None, &base).unwrap();
         // Extra base pages demonstrate that update size is independent of base
         // size, without adding irrelevant resolution work to the fixture.
-        Connection::open(&base).unwrap().execute_batch("CREATE TABLE immutable_padding(value BLOB); INSERT INTO immutable_padding VALUES(zeroblob(8388608));
+        Connection::open(&base)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE immutable_padding(value BLOB); INSERT INTO immutable_padding VALUES(zeroblob(8388608));
             WITH RECURSIVE ids(id) AS (VALUES(1000) UNION ALL SELECT id+1 FROM ids WHERE id<6000)
             INSERT INTO edition_candidate SELECT id,isbn13,NULL,'Unrelated title',NULL,NULL,'[]','[]',NULL,classifications FROM ids,edition_candidate WHERE edition_id=2;
             INSERT INTO edition_title_key SELECT 'unrelated-'||edition_id,edition_id,1,0 FROM edition_candidate WHERE edition_id>=1000;
-            ANALYZE;").unwrap();
+            ANALYZE;",
+            )
+            .unwrap();
         let original = fs::read(&base).unwrap();
         let codes = serde_json::to_vec(&vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76".into(), source: ClassificationSource::ExactEdition, evidence: vec![] }]).unwrap();
         provider.execute("INSERT INTO provider_result VALUES('loc',9780306406157,1,'matched',?1,?2)", params![codes, b"[]".as_slice()]).unwrap();
         let changed = temp.path().join("changed.sqlite");
-        let report = build_answers_incremental(&source, Some(&provider_path), None, None, None, &base, &changed).unwrap();
+        let report = build_answers_incremental(&source, Some(&provider_path), None, None, &base, &changed).unwrap();
         assert_eq!(report.resolved_rows, 1);
         assert!(report.file_bytes < original.len() as u64 / 10);
         let raw = Connection::open(&changed).unwrap();
@@ -181,7 +197,7 @@ mod tests {
         // A reader already opened on an old immutable generation stays pinned.
         provider.execute_batch("DELETE FROM provider_result").unwrap();
         let deleted = temp.path().join("deleted.sqlite");
-        build_answers_incremental(&source, Some(&provider_path), None, None, None, &changed, &deleted).unwrap();
+        build_answers_incremental(&source, Some(&provider_path), None, None, &changed, &deleted).unwrap();
         let next = MetadataService::open(&deleted, &temp.path().join("next-demand.sqlite")).unwrap();
         assert!(next.enrich_rich(vec!["9780306406157".into()]).unwrap()[0].matches[0].classifications.is_empty());
         assert_eq!(server.enrich_rich(vec!["9780306406157".into()]).unwrap()[0].matches[0].classifications[0].notation, "QA76");
@@ -201,7 +217,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = snapshot_from(temp.path(), &[], &[], &[]);
         let base = temp.path().join("base.sqlite");
-        build_answers_with_ratings(&source, None, None, None, None, &base).unwrap();
+        build_answers(&source, None, None, None, &base).unwrap();
         let update = temp.path().join("update.sqlite");
         drop(create_update(&base, &update).unwrap());
         Connection::open(&base).unwrap().execute_batch("CREATE TABLE replacement(value BLOB); INSERT INTO replacement VALUES(zeroblob(8192));").unwrap();
@@ -273,7 +289,9 @@ fn configure(c: &Connection, writable: bool) -> Result<(), MetadataError> {
             let insert = if *table == "work_description" {
                 // Preserve the existing shared description, including when it
                 // lives only in the base. Conflicts stay embedded in the answer.
-                format!("INSERT OR IGNORE INTO {physical}({names}) SELECT {new_values} WHERE NOT EXISTS(SELECT 1 FROM {table} WHERE {match_new}); INSERT OR IGNORE INTO overlay_key_{table}({key_names}) SELECT {new_keys} WHERE EXISTS(SELECT 1 FROM {physical} WHERE {match_new});")
+                format!(
+                    "INSERT OR IGNORE INTO {physical}({names}) SELECT {new_values} WHERE NOT EXISTS(SELECT 1 FROM {table} WHERE {match_new}); INSERT OR IGNORE INTO overlay_key_{table}({key_names}) SELECT {new_keys} WHERE EXISTS(SELECT 1 FROM {physical} WHERE {match_new});"
+                )
             } else {
                 format!("INSERT OR REPLACE INTO {physical}({names}) VALUES({new_values}); INSERT OR REPLACE INTO overlay_key_{table}({key_names}) VALUES({new_keys});")
             };

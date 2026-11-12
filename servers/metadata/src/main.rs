@@ -1,10 +1,12 @@
-use metadata_server::{app, build_answers_incremental, build_answers_with_ratings, crawl, extend_edition_index, import_authorities, import_description_snapshot, import_snapshot, import_subject_editions, index_work_classifications, reclassify_answers, MetadataService};
+use metadata_server::{
+    MetadataService, app, build_answers, build_answers_incremental, crawl, extend_edition_index, import_authorities, import_description_snapshot, import_snapshot, import_subject_editions, index_work_classifications, reclassify_answers,
+};
 use std::{
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fmt().with_writer(io::stderr).with_env_filter(EnvFilter::from_default_env()).init();
@@ -31,13 +33,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let provider = (args[2] != "-").then(|| Path::new(&args[2]));
             let demand = std::env::var_os("BOKHEIM_METADATA_DEMAND").map(PathBuf::from);
             let descriptions = std::env::var_os("BOKHEIM_METADATA_DESCRIPTION_DATABASE").map(PathBuf::from);
-            let ratings = std::env::var_os("BOKHEIM_LIBRARYTHING_RATINGS_DUMP").map(PathBuf::from);
             let report = if command == "reclassify" {
-                reclassify_answers(Path::new(&args[1]), provider, demand.as_deref(), descriptions.as_deref(), ratings.as_deref(), Path::new(&args[3]))?
+                reclassify_answers(Path::new(&args[1]), provider, demand.as_deref(), descriptions.as_deref(), Path::new(&args[3]))?
             } else if args.len() == 6 {
-                build_answers_incremental(Path::new(&args[1]), provider, demand.as_deref(), descriptions.as_deref(), ratings.as_deref(), Path::new(&args[5]), Path::new(&args[3]))?
+                build_answers_incremental(Path::new(&args[1]), provider, demand.as_deref(), descriptions.as_deref(), Path::new(&args[5]), Path::new(&args[3]))?
             } else {
-                build_answers_with_ratings(Path::new(&args[1]), provider, demand.as_deref(), descriptions.as_deref(), ratings.as_deref(), Path::new(&args[3]))?
+                build_answers(Path::new(&args[1]), provider, demand.as_deref(), descriptions.as_deref(), Path::new(&args[3]))?
             };
             println!("{}", serde_json::to_string(&report)?);
         }
@@ -76,7 +77,10 @@ fn required_path(name: &str) -> Result<PathBuf, io::Error> {
     std::env::var_os(name).map(PathBuf::from).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("{name} is required")))
 }
 fn usage() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput,"usage: metadata-server build SNAPSHOT.sqlite PROVIDER.sqlite|- OUT.sqlite [--previous ANSWERS.sqlite]\n       metadata-server import-subject-editions EDITIONS.gz WORKS.gz AUTHORS.gz OUT.sqlite [MAX_RECORDS]\n       metadata-server extend-edition-index SNAPSHOT.sqlite PREVIOUS.sqlite OUT.sqlite [--limit EDITIONS]\n       metadata-server reclassify SNAPSHOT.sqlite PROVIDER.sqlite|- ANSWERS.sqlite\n       metadata-server evaluate-subjects ANSWERS.sqlite REQUEST.json\n       metadata-server serve\n       metadata-server crawl ANSWERS.sqlite PROVIDER.sqlite [--once]\n       metadata-server import EDITIONS.gz WORKS.gz AUTHORS.gz OUT.sqlite [MAX_RECORDS]\n       metadata-server import descriptions WORKS.gz OUT.sqlite DUMP_DATE [MAX_RECORDS]")
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "usage: metadata-server build SNAPSHOT.sqlite PROVIDER.sqlite|- OUT.sqlite [--previous ANSWERS.sqlite]\n       metadata-server import-subject-editions EDITIONS.gz WORKS.gz AUTHORS.gz OUT.sqlite [MAX_RECORDS]\n       metadata-server extend-edition-index SNAPSHOT.sqlite PREVIOUS.sqlite OUT.sqlite [--limit EDITIONS]\n       metadata-server reclassify SNAPSHOT.sqlite PROVIDER.sqlite|- ANSWERS.sqlite\n       metadata-server evaluate-subjects ANSWERS.sqlite REQUEST.json\n       metadata-server serve\n       metadata-server crawl ANSWERS.sqlite PROVIDER.sqlite [--once]\n       metadata-server import EDITIONS.gz WORKS.gz AUTHORS.gz OUT.sqlite [MAX_RECORDS]\n       metadata-server import descriptions WORKS.gz OUT.sqlite DUMP_DATE [MAX_RECORDS]",
+    )
 }
 async fn shutdown_signal() {
     let ctrl_c = async {

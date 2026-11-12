@@ -78,7 +78,7 @@ impl LibraryResources {
             self.events.emit(LibraryEvent::ContentsChanged);
         });
         let profile = ScanProfileStage::new("snapshot", 0);
-        let snapshot = self.database.scan_snapshot().await?;
+        let snapshot = self.database.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).await?;
         drop(profile);
         let excluded = !snapshot.excluded_paths.is_empty();
         let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(self.scan_once(snapshot))).await.unwrap_or_else(|_| Err(BackendError::message("library scan panicked")))?;

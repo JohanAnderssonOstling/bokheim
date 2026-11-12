@@ -17,6 +17,7 @@ audiobook-archive = { path = "../../shared/audiobook-archive" }
 content-address = { path = "../../shared/content-address" }
 client-protocol = { path = "../client-protocol", features = ["http"] }
 book-model = { path = "../../shared/book-model" }
+book-inspection = { path = "crates/book-inspection" }
 library-files = { path = "crates/library-files" }
 client-platform-runtime = { path = "../platforms/runtime" }
 book-access = { path = "crates/book-access", features = ["pdf"] }
@@ -67,7 +68,6 @@ notify = { version = "6.1", optional = true }
 [dev-dependencies]
 blake3 = "1"
 rusqlite = { version = "0.40.0", features = ["bundled", "functions"] }
-book-inspection = { path = "crates/book-inspection" }
 rmp-serde = "1.3"
 wasm-bindgen-futures = "0.4"
 audiobook-folder = { path = "crates/audiobook-folder" }

@@ -14,7 +14,7 @@ use ui_text::text;
 
 use super::*;
 use crate::services::format_storage_bytes;
-use gpui::ScrollHandle;
+use gpui::{ScrollHandle, rems};
 use gpui_component::Disableable;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::DropdownMenu as _;
@@ -224,12 +224,20 @@ impl SyncPage {
                 actions = actions.child(components::secondary_action_button("account-register", text!(account::create_account), IconName::User, self.is_busy()).on_click(move |_, _, cx| {
                     register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, cx));
                 }));
+                #[cfg(not(feature = "kobo"))]
+                {
+                    let reset = entity.clone();
+                    actions = actions.w_full()
+                        .child(components::secondary_action_button("account-request-reset", text!(account::password_reset), IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
+                            reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, cx));
+                        }));
+                }
                 form.child(components::section_header(text!(common::sign_in), "", theme))
                     .children(feedback)
                     .child(Input::new(&self.authentication.login_email))
                     .child(Input::new(&self.authentication.password).mask_toggle())
                     .child(actions)
-                    .child(self.access_link(entity, "account-request-reset", text!(account::forgot_your_password), AccountFlow::RequestPasswordReset))
+                    .when(cfg!(feature = "kobo"), |form| form.child(self.access_link(entity, "account-request-reset", text!(account::forgot_your_password), AccountFlow::RequestPasswordReset)))
             }
             AccountFlow::Register => form
                 .child(components::section_header(text!(account::create_account), "", theme))
@@ -318,8 +326,8 @@ impl SyncPage {
     /// Cloud storage used to be a group of its own, one gap below the identity
     /// that owns it. A quota is not a second subject: it is the answer to "what
     /// does this account get me", so it sits under the address it belongs to.
-    /// Signed out there is no quota, and the group is its header, with the two
-    /// ways in beside the title.
+    /// Signed-out desktop accounts show the access form directly. Platforms
+    /// with a separate account screen keep their entry actions in the header.
     pub(crate) fn settings_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         #[cfg(feature = "kobo")]
         self.update_account_overlay_focus(window, cx);
@@ -337,24 +345,33 @@ impl SyncPage {
         if signed_in && let Some(form) = self.deletion.as_ref() {
             return components::browser_settings_fieldset(text!(account::account), theme).child(components::browser_settings_block().child(self.account_deletion_form(form, &entity, feedback, theme)));
         }
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android", feature = "kobo")))]
+        if !signed_in {
+            return components::browser_settings_fieldset(text!(account::account), theme).child(components::browser_settings_block().child(self.account_access_form(&entity, feedback, theme)));
+        }
         let account = if signed_in {
             components::browser_settings_fieldset(text!(account::account), theme).child(components::browser_settings_block().child(self.identity.clone()).child(self.storage_body(theme, window, cx)))
         } else {
             components::browser_settings_fieldset_with_actions(text!(account::account), self.account_access_actions(&entity, theme), theme)
         };
 
-        // The form is not the group's resting state on any platform any more:
-        // it appears because a header button asked for it, and it is the only
-        // thing in the group while it is open.
+        // Kobo opens an overlay; signed-in desktop accounts can open password
+        // changes. Both can close the form to return to the account.
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         if self.access_open {
             // Every form here can be abandoned: the header opened it, and until
             // it is finished with there is no other way back to the account the
             // group is about.
             let close = entity.clone();
-            let form = self.account_access_form(&entity, feedback, theme).child(components::link_button("account-close", text!(common::close), self.is_busy()).on_click(move |_, _, cx| {
-                close.update(cx, |page, cx| page.close_account_access(cx));
-            }));
+            let form = self.account_access_form(&entity, feedback, theme).map(|form| {
+                let button = if cfg!(feature = "kobo") {
+                    components::link_button("account-close", text!(common::close), self.is_busy())
+                } else {
+                    components::base_button("account-close").label(text!(common::close)).h(rems(components::topbar_action_height_rem())).px(px(components::SPACE_MD)).disabled(self.is_busy())
+                };
+                let button = button.on_click(move |_, _, cx| close.update(cx, |page, cx| page.close_account_access(cx)));
+                form.child(components::action_row().w_full().when(!cfg!(feature = "kobo"), |row| row.justify_end()).child(button))
+            });
             #[cfg(feature = "kobo")]
             return account.child(self.account_overlay(form, window, cx));
             #[cfg(not(feature = "kobo"))]
@@ -541,7 +558,7 @@ impl SyncPage {
         }
         if !compact {
             let header = components::library_table_header(theme);
-            let header = header.child(div().w(gpui::rems(components::topbar_action_height_rem())).flex_none());
+            let header = header.child(div().w(rems(components::topbar_action_height_rem())).flex_none());
             libraries = libraries.child(header.when(!has_rows, |row| row.border_t_0()));
             has_rows = true;
         }

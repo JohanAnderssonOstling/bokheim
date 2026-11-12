@@ -432,13 +432,6 @@ fn project_addition(tx: &Transaction<'_>, hash: &BookId, addition: &BookAddition
     Ok(())
 }
 
-fn popularity_rating_count(addition: &BookAddition) -> Option<f64> {
-    match &addition.enrichment {
-        Some(EnrichmentResult::Found { popularity: Some(popularity), .. }) => Some(popularity.rating_count as f64),
-        _ => None,
-    }
-}
-
 /// Local filenames are projection inputs, not synchronized
 /// registers. Seed local values, then admit membership
 /// through the same canonical path used by directory commands.
@@ -574,7 +567,7 @@ mod tests {
         enriched.title = "Provider title".into();
         enriched.book.subjects = vec![BookSubject::new(None, "Enriched", "provider", None, None).unwrap()];
         let mut addition = BookAddition { facts: BookFacts { added_at: 1, format: BookFormat::Epub }, record: original, navigation: None, pdf: None, recording: None, enrichment: None };
-        addition.apply_enrichment(enriched, EnrichmentResult::Found { toc: None, cover_id: None, popularity: None });
+        addition.apply_enrichment(enriched, EnrichmentResult::Found { toc: None, cover_id: None });
         db.write(|tx| {
             record_local(tx, LibraryStateEntry::BookAdd { book_id: hash, value: addition })?;
             place_book(tx, &ROOT_DIR_ID, &hash, "book.epub")

@@ -123,7 +123,7 @@ pub(crate) fn adjacent_available_tab(active: SidebarTab, tabs: &[SidebarTab], di
 
 pub(crate) trait AnnotationSidebarTarget: Sized + 'static {
     fn select_sidebar_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>);
-    fn go_to_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>);
+    fn go_to_annotation(&mut self, annotation: &Annotation, window: &mut Window, cx: &mut Context<Self>);
     fn delete_sidebar_annotation(&mut self, id: String, cx: &mut Context<Self>);
     fn copy_sidebar_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>);
 }
@@ -254,7 +254,7 @@ pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity
             if event.keystroke.modifiers == gpui::Modifiers::default() && matches!(event.keystroke.key.as_str(), "enter" | "space") {
                 keyboard_target.update(cx, |this, cx| {
                     this.select_sidebar_annotation(keyboard_annotation.id.clone(), window, cx);
-                    this.go_to_annotation(&keyboard_annotation, cx);
+                    this.go_to_annotation(&keyboard_annotation, window, cx);
                 });
                 cx.stop_propagation();
             }
@@ -264,7 +264,7 @@ pub(crate) fn reader_annotation_card<C: AnnotationSidebarTarget>(target: &Entity
             select_target.update(cx, |this, cx| this.select_sidebar_annotation(id, window, cx));
             // Clicking the annotation goes to its passage; there is no Go button.
             let annotation = go_annotation.clone();
-            go_target.update(cx, |this, cx| this.go_to_annotation(&annotation, cx));
+            go_target.update(cx, |this, cx| this.go_to_annotation(&annotation, window, cx));
         })
         .child(components::reader_annotation_color_bar(annotation.color))
         .when_some(annotation.anchor.recurring_scope(), |card, scope| card.child(components::reader_state_note(format!(text!(reader::recurring), scope.label()), theme)))

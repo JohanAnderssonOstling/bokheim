@@ -16,6 +16,8 @@ pub(super) struct SearchList {
     pub(super) generation: usize,
     hit_count: usize,
     last_page: Option<usize>,
+    pages: Vec<usize>,
+    pub(super) contents: crate::shell::search_contents::SearchContents,
 }
 
 impl SearchList {
@@ -24,18 +26,22 @@ impl SearchList {
         self.generation = self.generation.wrapping_add(1);
         self.hit_count = 0;
         self.last_page = None;
+        self.pages.clear();
+        self.contents = Default::default();
     }
 
     /// PDF results stream in reading order. Append descriptions for new hits
     /// without constructing elements for the preceding result pages.
     pub(super) fn extend_pages(&mut self, pages: impl IntoIterator<Item = usize>) {
         let start = self.list.rows.len();
+        let grouped = !self.contents.tree.branches.is_empty() || !self.contents.tree.other.is_empty();
         for page in pages {
+            self.pages.push(page);
             if self.last_page != Some(page) {
                 self.last_page = Some(page);
-                self.list.rows.push(SearchRow::Heading(page));
+                if !grouped { self.list.rows.push(SearchRow::Heading(page)); }
             }
-            self.list.rows.push(SearchRow::Match(self.hit_count));
+            if !grouped { self.list.rows.push(SearchRow::Match(self.hit_count)); }
             self.hit_count += 1;
         }
         if self.list.rows.len() != start {
@@ -44,11 +50,27 @@ impl SearchList {
         }
     }
 
+    pub(super) fn rebuild_contents(&mut self, toc: &super::toc::PdfTocState) {
+        self.contents.tree = toc.search_tree(&self.pages);
+        self.refresh_rows();
+    }
+
+    pub(super) fn refresh_rows(&mut self) {
+        let rows = self.contents.rows().into_iter().map(|(branch, index)| if branch { SearchRow::Heading(index) } else { SearchRow::Match(index) }).collect();
+        self.list.set_rows(rows);
+    }
+
     pub(super) fn hit_count(&self) -> usize {
         self.hit_count
     }
 
-    pub(super) fn reveal_match(&self, current: usize) {
+    pub(super) fn reveal_match(&mut self, current: usize) {
+        if let Some(index) = current.checked_sub(1)
+            && (!self.contents.tree.branches.is_empty() || !self.contents.tree.other.is_empty())
+        {
+            self.contents.reveal(index);
+            self.refresh_rows();
+        }
         if let Some(row) = current.checked_sub(1).and_then(|index| self.list.rows.iter().position(|row| *row == SearchRow::Match(index))) {
             reveal_row(&self.list.state, row);
         }

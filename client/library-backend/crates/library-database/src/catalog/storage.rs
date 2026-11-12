@@ -1,5 +1,4 @@
 //! SQLite ownership and the persisted browse projection of a catalog snapshot.
-use super::popularity::{read_popularity, read_popularity_for};
 use super::{CatalogBook, FORMAT_VERSION, read_sources, read_sources_for, release};
 use crate::query_methods::uuid_blob_column;
 use crate::{DatabaseError, attach_taxonomy, taxonomy_update};
@@ -26,7 +25,7 @@ struct ActiveCatalog {
     generation: u64,
 }
 static ACTIVE: OnceLock<Mutex<ActiveCatalog>> = OnceLock::new();
-const PROJECTION_VERSION: i64 = 19;
+const PROJECTION_VERSION: i64 = 20;
 const SCHEMA: &str = include_str!("schema.sql");
 const COMPACT_SCHEMA: &str = include_str!("compact.sql");
 // An inactive catalog exposes empty browse tables without allocating source records.
@@ -162,7 +161,7 @@ pub fn activate_path(path: &Path) -> Result<Option<u64>, DatabaseError> {
 fn prepare_path(path: &Path) -> Result<Option<(u64, Connection)>, DatabaseError> {
     let Some(mut connection) = open_existing_catalog(path)? else { return Ok(None) };
     let Ok((release_id, format)) = release(&connection) else { return Ok(None) };
-    if format != FORMAT_VERSION {
+    if !matches!(format, 11 | FORMAT_VERSION) {
         return Ok(None);
     }
     connection.pragma_update(None, "cache_size", -2048)?;
@@ -366,7 +365,7 @@ pub fn activate(image: Vec<u8>) -> Result<(), DatabaseError> {
     let mut source = Connection::open_in_memory()?;
     source.deserialize_read_exact("main", image.as_slice(), image.len(), false)?;
     drop(image);
-    if release(&source)?.1 != FORMAT_VERSION {
+    if !matches!(release(&source)?.1, 11 | FORMAT_VERSION) {
         return Err(DatabaseError::message("unsupported catalog snapshot format"));
     }
     let ids = previous_ids(&source)?;
@@ -426,13 +425,11 @@ mod published_concept_tests {
 }
 
 fn build_projection_in(db: &Connection, taxonomy_revision: &str, ids: StableIds) -> Result<(), DatabaseError> {
-    if release(db)?.1 != FORMAT_VERSION {
+    if !matches!(release(db)?.1, 11 | FORMAT_VERSION) {
         return Err(DatabaseError::message("unsupported catalog snapshot format"));
     }
-    db.execute_batch(metadata_contract::catalog::SOURCE_PERCENTILES_SQL)?;
     source_view(db)?;
     let mut sources = read_sources(db)?;
-    let mut popularity = read_popularity(db)?;
     let mut concepts = published_concepts(db)?;
     let keys = db.prepare("SELECT identity FROM catalog_source ORDER BY identity")?.query_map([], |row| row.get::<_, BookId>(0))?.collect::<Result<Vec<_>, _>>()?;
     for table in ["catalog_browse_author_book", "catalog_browse_author", "catalog_browse_language", "catalog_browse_concept", "catalog_browse_book", "catalog_browse_search", "catalog_browse_author_search", "catalog_browse_revision"] {
@@ -496,20 +493,18 @@ fn build_projection_in(db: &Connection, taxonomy_revision: &str, ids: StableIds)
             concepts: Vec::new(),
             record,
             toc: Vec::new(),
-            popularity: popularity.remove(&key.0),
         };
         book.search_title = crate::browse::text::search_title(Some(&book.title), book.subtitle.as_deref());
         book.search_author = normalize_search_text(&book.author);
         book.concepts = concepts.remove(&key).unwrap_or_default();
         book.concepts.sort_unstable();
         book.concepts.dedup();
-        db.prepare_cached("INSERT INTO catalog_browse_search(row_id,book_row_id,search_title,search_author,source_priority,popularity_score) VALUES(?1,?2,?3,?4,?5,?6)")?.execute(params![
+        db.prepare_cached("INSERT INTO catalog_browse_search(row_id,book_row_id,search_title,search_author,source_priority) VALUES(?1,?2,?3,?4,?5)")?.execute(params![
             index,
             source_id,
             book.search_title,
             book.search_author,
             book.source_priority(),
-            book.popularity.as_ref().and_then(|value| value.score())
         ])?;
         for concept in &book.concepts {
             db.execute("INSERT INTO catalog_browse_concept VALUES(?1,?2)", params![index, concept])?;
@@ -571,7 +566,6 @@ pub(super) fn load_entry(db: &Connection, key: CardKey) -> Result<Option<Catalog
         .query_map([&key.0[..]], |row| row.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     let sources = read_sources_for(db, &key.0)?;
-    let popularity = read_popularity_for(db, &key.0)?;
     let languages = record.book.languages.iter().map(|language| crate::browse::options::base_language(language.as_str())).filter(|language| !language.is_empty()).collect();
     Ok(Some(CatalogBook {
         hash: (!external).then(|| BookId::from_bytes(key.0)),
@@ -590,7 +584,6 @@ pub(super) fn load_entry(db: &Connection, key: CardKey) -> Result<Option<Catalog
         concepts,
         record,
         toc: Vec::new(),
-        popularity,
     }))
 }
 
@@ -612,7 +605,6 @@ fn audiobook_candidates_in(db: &Connection, title: &str) -> Result<Vec<CatalogBo
 #[cfg(test)]
 mod record_tests {
     use super::*;
-    use crate::catalog::{CatalogPopularity, CombinedPopularity};
     use uuid::Uuid;
 
     fn fixture() -> Connection {
@@ -728,52 +720,6 @@ mod record_tests {
         assert!(load_entry(&db, CardKey([1; 32])).is_err());
         db.execute_batch("UPDATE source SET name='alpha.org' WHERE id=3").unwrap();
         assert_eq!(load_entry(&db, CardKey([1; 32])).unwrap().unwrap().sources, ["alpha.org", "example.org"]);
-    }
-
-    #[test]
-    fn catalog_popularity_keeps_one_observation_for_each_bound_book() {
-        let db = fixture();
-        assert!(load_entry(&db, CardKey([1; 32])).unwrap().unwrap().popularity.is_none());
-        db.execute_batch(
-            "INSERT INTO source VALUES(2,'standardebooks.org'),(3,'litteraturbanken.se'),(4,'publicdomainlibrary.org');
-            INSERT INTO source_entry(source_id,entry_id,hosted_row_id,external_row_id,ranking_source_id,score,popularity,epub_popularity,reading_percentile,epub_percentile) VALUES
-            (1,1,1,NULL,1,50,999,NULL,NULL,NULL),
-            (2,2,1,2,2,0.1,90,NULL,NULL,NULL),
-            (2,3,1,2,2,0.25,7,NULL,NULL,NULL),
-            (2,4,1,2,2,0.25,NULL,8,NULL,NULL),
-            (3,5,1,2,3,99,999,999,99,99),
-            (4,6,1,NULL,4,NULL,999,NULL,NULL,NULL);",
-        )
-        .unwrap();
-        let expected = CatalogPopularity {
-            popularity: Some(999),
-            epub_popularity: Some(999),
-            source: Some("litteraturbanken.se".into()),
-            combined_popularity: Some(CombinedPopularity { score: Some(99.0), reading_percentile: Some(99.0), epub_percentile: Some(99.0) }),
-            ..Default::default()
-        };
-        let all = read_popularity(&db).unwrap();
-        assert_eq!(all.len(), 2);
-        for index in [1, 2] {
-            let key = CardKey([index; 32]);
-            assert_eq!(load_entry(&db, key).unwrap().unwrap().popularity.as_ref(), Some(&expected));
-            assert_eq!(all.get(&key.0), Some(&expected));
-        }
-        db.execute_batch("INSERT INTO source_entry(source_id,entry_id,external_row_id,ranking_source_id,score) VALUES(2,7,2,2,100)").unwrap();
-        let external = CatalogPopularity { source_score: Some(100.0), source: Some("standardebooks.org".into()), ..Default::default() };
-        let all = read_popularity(&db).unwrap();
-        for (index, expected) in [(1, expected), (2, external)] {
-            let key = CardKey([index; 32]);
-            assert_eq!(load_entry(&db, key).unwrap().unwrap().popularity.as_ref(), Some(&expected));
-            assert_eq!(all.get(&key.0), Some(&expected));
-        }
-        // Losing observations must still be validated; unrelated books stay readable.
-        db.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE source_entry SET popularity=-1 WHERE source_id=4").unwrap();
-        assert!(load_entry(&db, CardKey([1; 32])).is_err());
-        assert!(read_popularity(&db).is_err());
-        assert_eq!(load_entry(&db, CardKey([2; 32])).unwrap().unwrap().popularity.unwrap().score(), Some(100.0));
-        db.execute_batch("UPDATE source_entry SET popularity=NULL WHERE source_id=4").unwrap();
-        assert_eq!(load_entry(&db, CardKey([1; 32])).unwrap().unwrap().popularity.unwrap().score(), Some(99.0));
     }
 
     #[test]

@@ -80,7 +80,7 @@ pub fn card_thumbnail_suffix(width: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ThumbnailVersions, BROWSE_THUMBNAIL_WIDTH, THUMBNAIL_WIDTH};
+    use crate::{BROWSE_THUMBNAIL_WIDTH, THUMBNAIL_WIDTH};
     use image::Rgb;
 
     #[test]
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn card_derivatives_are_adjusted_but_the_master_keeps_the_complete_cover() {
         let source = RgbImage::from_fn(600, 900, |x, _| if !(5..595).contains(&x) { Rgb([220, 10, 20]) } else { Rgb([20, 160, 30]) });
-        let versions = ThumbnailVersions::from_image(&source).unwrap();
+        let versions = crate::thumbnail_versions_from_image(&source).unwrap();
         let card = image::load_from_memory(&versions.browse).unwrap().to_rgb8();
         let dense_card = image::load_from_memory(&versions.card_high_density).unwrap().to_rgb8();
         let master = image::load_from_memory(&versions.high_density).unwrap().to_rgb8();

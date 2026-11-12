@@ -1,6 +1,6 @@
 //! One file-backed, bounded-cache reference connection per process/worker.
-#[cfg(not(target_arch = "wasm32"))]
 use operation_failure::OperationError;
+#[cfg(not(target_arch = "wasm32"))]
 use flate2::read::GzDecoder;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};

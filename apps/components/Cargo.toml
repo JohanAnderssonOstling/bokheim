@@ -9,7 +9,7 @@ kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-profile"]
 mobile = []
 
 [dependencies]
-html-pipeline = { package = "skrift-pipeline", path = "../../../HtmlEngine/crates/html-pipeline" }
+html-fonts = { path = "../../../HtmlEngine/adapters/html-fonts" }
 html-style-model = { package = "skrift-style-model", path = "../../../HtmlEngine/crates/html-style-model" }
 ui-text = { path = "../ui-text" }
 book-model = { path = "../../shared/book-model", default-features = false }
@@ -21,8 +21,6 @@ operation-failure = { path = "../../client/client-protocol/crates/operation-fail
 path-label = { path = "../../client/ui/path-label" }
 app-preferences = { path = "../../client/preferences" }
 gpui.workspace = true
-html.workspace = true
-html-gpui.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 gpui_kobo = { workspace = true, optional = true }
@@ -35,7 +33,6 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "ti
 resvg = { version = "0.46", default-features = false, features = ["raster-images"] }
 
 [dev-dependencies]
-html-engine-model = { package = "skrift-engine-model", path = "../../../HtmlEngine/crates/html-engine-model" }
 gpui = { workspace = true, features = ["test-support"] }
 gpui_wgpu.workspace = true
 

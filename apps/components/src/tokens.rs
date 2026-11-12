@@ -129,6 +129,7 @@ pub const SPACE_4XL: f32 = 96.0;
 
 /// Control density follows the primary input, independently of window width.
 /// The live media query also follows changes to the browser's primary pointer.
+/// Native mobile builds include touchscreen Kobo readers.
 pub fn touch_ui() -> bool {
     #[cfg(target_family = "wasm")]
     {
@@ -140,7 +141,7 @@ pub fn touch_ui() -> bool {
     }
     #[cfg(not(target_family = "wasm"))]
     {
-        cfg!(all(feature = "mobile", not(feature = "kobo")))
+        cfg!(feature = "mobile")
     }
 }
 pub const TOUCH_TARGET_REM: f32 = 3.0;
@@ -329,8 +330,9 @@ pub const BOTTOM_NAV_HEIGHT_REM: f32 = 4.0;
 /// its own buttons at a large UI font. The inset rides along at 16px to the rem
 /// rather than staying fixed, because a height made of a rem part and a pixel
 /// part cannot be given to a single element.
+/// Kobo uses the bottom navigation height for all page bars.
 pub fn topbar_height_rem() -> f32 {
-    topbar_action_height_rem() + 2.0 * CONTENT_INSET / 16.0
+    if cfg!(feature = "kobo") { BOTTOM_NAV_HEIGHT_REM } else { topbar_action_height_rem() + 2.0 * CONTENT_INSET / 16.0 }
 }
 /// Also the size of every square icon button (`outlined_icon_button`).
 pub fn topbar_action_height_rem() -> f32 {

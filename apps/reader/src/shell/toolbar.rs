@@ -237,15 +237,14 @@ pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, co
     render_sidebar(&ChromePresentation::new(owner), &ChromeTarget::new(target), content, theme, window)
 }
 
-fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: SidebarContent, theme: components::BrowserTheme, window: &mut Window) -> AnyElement {
-    let mobile = components::uses_mobile_reader_controls(window);
+fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: SidebarContent, theme: components::BrowserTheme, _window: &mut Window) -> AnyElement {
     let close_target = target.clone();
     let focus_target = target.clone();
     let sidebar_focus = owner.sidebar_focus.clone();
     let active = owner.active;
 
     let header = match content.header_content {
-        Some(tabs) => components::reader_panel_header_content(tabs, theme).pl_0(),
+        Some(tabs) => components::reader_panel_header_content(tabs, theme).when(!cfg!(feature = "kobo"), |header| header.pl_0()),
         None => components::reader_panel_header(panel_destination(active).label(), theme),
     }
         .key_context("ReaderSidebarHeader")
@@ -262,7 +261,7 @@ fn render_sidebar(owner: &ChromePresentation, target: &ChromeTarget, content: Si
         },
     ));
 
-    let panel = div().flex_1().min_w_0().h_full().min_h_0().flex().flex_col().when(mobile, |panel| panel.child(components::reader_sheet_grab(theme))).child(header).child(
+    let panel = div().flex_1().min_w_0().h_full().min_h_0().flex().flex_col().child(header).child(
         div()
             .track_focus(&sidebar_focus)
             .tab_group()
@@ -397,9 +396,8 @@ fn history_button(owner: &ChromePresentation, target: &ChromeTarget, forward: bo
     })
 }
 
-/// Kobo exposes available reading-history directions at the page edges while
+/// Touch readers expose available reading-history directions at the page edges while
 /// the controls are showing, without putting a hit target over the text.
-#[cfg(feature = "kobo")]
 pub(crate) fn reader_history_controls<C: SidebarTarget>(owner: &C, target: &Entity<C>, theme: components::BrowserTheme, window: &Window, cx: &App) -> Vec<AnyElement> {
     let presentation = ChromePresentation::new(owner);
     let target = ChromeTarget::new(target);
@@ -497,7 +495,7 @@ fn render_top_bar(owner: &ChromePresentation, target: &ChromeTarget, title: Stri
                 search_target.execute(ChromeCommand::ToggleTab(SidebarTab::Search), window, cx);
             }))
         })
-        .when(!cfg!(feature = "kobo"), |bar| bar.child(history_button(owner, target, false, cx)).child(history_button(owner, target, true, cx)))
+
         .into_any_element()
 }
 

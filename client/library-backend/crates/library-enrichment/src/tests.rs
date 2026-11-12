@@ -1,16 +1,16 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use axum::{
+    Router,
     body::Body,
     extract::{Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::any,
-    Router,
 };
-use book_model::{BookDetails, BookFormat, BookRecord, Contributor, Identifier, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
+use book_model::{AUTHOR_MARC_RELATOR_CODE, BookDetails, BookFormat, BookRecord, Contributor, Identifier, Scheme, Scope};
 use image::{DynamicImage, ImageFormat, RgbImage};
-use library_database::{executor::BackendExecutor, DatabaseClient, ImportCommit};
+use library_database::{DatabaseClient, ImportCommit, executor::BackendExecutor};
 use library_files::asset_store::AssetStore;
 use library_model::{BlobKind, PublishedStagedBook};
 use library_services::events::LibraryEventRouter;
@@ -228,7 +228,7 @@ async fn metadata_miss_still_downloads_direct_artwork_and_preserves_newer_local_
 
 #[tokio::test]
 async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_failed_and_duplicate_answers() {
-    use axum::{routing::post, Json};
+    use axum::{Json, routing::post};
     use book_inspection::{AudiobookMetadata, InspectedBook};
     use book_model::ChapterOrigin;
     use metadata_contract::books::{BookEnrichment, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, MAX_BOOKS_PER_REQUEST};
@@ -256,7 +256,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
                 let status = if batch == 0 && index == 1 { BookEnrichmentStatus::Failed } else { BookEnrichmentStatus::Found };
                 let mut record = facts.record;
                 record.book.year = Some(2000 + record.title.strip_prefix("Story ").unwrap().parse::<i32>().unwrap());
-                Some(BookEnrichment { key: facts.key, status, record: (status == BookEnrichmentStatus::Found).then_some(record), toc: None, cover: None, popularity: None, failure: None, detail: String::new() })
+                Some(BookEnrichment { key: facts.key, status, record: (status == BookEnrichmentStatus::Found).then_some(record), toc: None, cover: None, failure: None, detail: String::new() })
             })
             .collect();
         // A consumed early answer must not move the later duplicate ahead of
@@ -265,7 +265,7 @@ async fn enrichment_batches_preserve_inputs_and_correlate_reordered_missing_fail
         results.insert(0, first);
         let mut duplicate = results[1].clone();
         duplicate.record.as_mut().unwrap().book.year = Some(9999);
-        results.push(BookEnrichment { key: "unrequested".into(), status: BookEnrichmentStatus::Found, record: None, toc: None, cover: None, popularity: None, failure: None, detail: String::new() });
+        results.push(BookEnrichment { key: "unrequested".into(), status: BookEnrichmentStatus::Found, record: None, toc: None, cover: None, failure: None, detail: String::new() });
         results.push(duplicate);
         Json(BookEnrichmentResponse { policy: "batch fixture".into(), results }).into_response()
     }

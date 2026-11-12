@@ -19,8 +19,9 @@ use crate::epub::toc::TocState;
 
 const MIN_SEARCH_CHARACTERS: usize = 3;
 
+#[derive(PartialEq, Eq)]
 pub(super) enum SearchRow {
-    Heading(String),
+    Heading(usize),
     Match(usize),
 }
 
@@ -37,6 +38,7 @@ impl Default for SearchState {
             match_position: None,
             results: Default::default(),
             rows: Vec::new(),
+            contents: Default::default(),
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
         }
     }
@@ -64,6 +66,7 @@ impl SearchState {
 
     /// Records newly typed text and returns its request number.
     pub(in crate::epub) fn set_query(&mut self, query: String) -> Option<u64> {
+        self.contents.set_query(&query);
         *self.query.as_mut()? = query;
         self.pending = true;
         Some(self.begin_attempt())
@@ -87,19 +90,30 @@ impl SearchState {
     pub(in crate::epub) fn clear_results(&mut self) {
         self.results.clear();
         self.rows.clear();
+        self.contents = Default::default();
         self.list.reset(0);
     }
 
     /// Group once when results or TOC anchors change, rather than parsing every
     /// match's CFI and rebuilding every heading on each sidebar repaint.
     pub(in crate::epub) fn rebuild_rows(&mut self, toc: &TocState) {
-        self.rows.clear();
-        for (chapter, document, indices) in search_groups(toc, self.results.iter()) {
-            let title = chapter.and_then(|ordinal| toc.title_for_ordinal(ordinal)).unwrap_or_else(|| format!(text!(reader::section), document + 1));
-            self.rows.push(SearchRow::Heading(title));
-            self.rows.extend(indices.into_iter().map(SearchRow::Match));
+        self.contents.tree = toc.annotation_tree(self.results.iter().map(|result| match &result.target {
+            BookSearchTarget::SourceCfi(cfi) => toc.ordinal_for_cfi(cfi),
+            BookSearchTarget::LocalOccurrence(_) => toc.ordinal_for_document(result.doc),
+        }));
+        // Publications without an outline still expose matches by document.
+        if self.contents.tree.branches.is_empty() {
+            self.contents.tree.other.clear();
+            self.contents.tree.branches = search_groups(toc, self.results.iter()).into_iter().map(|(_, document, indices)| {
+                crate::shell::annotation_tree::AnnotationBranch { id: document, title: format!(text!(reader::section), document + 1), annotations: indices, children: Vec::new() }
+            }).collect();
         }
-        self.list.reset_with_uniform_height(self.rows.len(), px(80.0));
+        self.refresh_rows();
+    }
+
+    pub(in crate::epub) fn refresh_rows(&mut self) {
+        let rows = self.contents.rows().into_iter().map(|(branch, index)| if branch { SearchRow::Heading(index) } else { SearchRow::Match(index) }).collect();
+        crate::shell::sidebar_list::replace_rows(&self.list, &mut self.rows, rows);
     }
 
     /// Clears the query when the renderer explicitly deactivates search.

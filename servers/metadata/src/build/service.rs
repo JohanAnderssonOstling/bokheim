@@ -17,7 +17,6 @@ fn classification_to_metadata(classification: crate::IsbnClassificationResult) -
             classifications: matched.classifications,
             authors: Vec::new(),
             description: None,
-            popularity: None,
             subjects: Vec::new(),
         })
         .collect();

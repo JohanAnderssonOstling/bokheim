@@ -112,21 +112,13 @@ mod tests {
             db.connection.fixtures_insert_book_language_2(&id, &(if id % 2 == 0 { "sv" } else { "en" })).unwrap();
             db.connection.fixtures_insert_book_unified_concept_2(&id, &(if id <= 6 { 4 } else { 3 })).unwrap();
             db.connection.execute("INSERT INTO book_contributor(book_row_id,position,author_identity_id,name,role) VALUES(?1,0,1,'Writer',?2)", params![id, b"aut".as_slice()]).unwrap();
-            db.connection.execute("UPDATE book SET popularity_rating_count=?1,read_at=?1,read_progress=?2 WHERE row_id=?1", params![id, if id == 9 { 1.0 } else { 0.0 }]).unwrap();
+            db.connection.execute("UPDATE book SET read_at=?1,read_progress=?2 WHERE row_id=?1", params![id, if id == 9 { 1.0 } else { 0.0 }]).unwrap();
         }
         for location in [BrowseLocation::Subject(0), BrowseLocation::Author(None)] {
-            for sort in [BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical, BrowseBookSort::Popularity, BrowseBookSort::RecentlyRead] {
+            for sort in [BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical, BrowseBookSort::RecentlyRead] {
                 for languages in [vec![], vec!["en".into()], vec!["sv".into()]] {
                     for downloaded_only in [false, true] {
-                        let mut query = LibraryBrowseQuery {
-                            location,
-                            search: String::new(),
-                            file_types: vec![],
-                            languages: languages.clone(),
-                            chip_sort: BrowseChipSort::Popularity,
-                            book_sort: sort,
-                            hide_finished: true,
-                        };
+                        let mut query = LibraryBrowseQuery { location, search: String::new(), file_types: vec![], languages: languages.clone(), chip_sort: BrowseChipSort::Alphabetical, book_sort: sort, hide_finished: true };
                         let full = db.browse(&query, downloaded_only).unwrap();
                         assert_windows(&db, &query, downloaded_only);
                         for complete in &full.sections {
@@ -212,22 +204,15 @@ mod tests {
             db.connection.fixtures_insert_book_language_2(&id, &(if id % 2 == 0 { "sv" } else { "en" })).unwrap();
             db.connection.execute("INSERT INTO book_contributor(book_row_id,position,author_identity_id,name,role) VALUES(?1,0,?1,?2,?3)", params![id, format!("Writer {id:02}"), b"aut".as_slice()]).unwrap();
         }
-        let mut query = LibraryBrowseQuery {
-            location: BrowseLocation::Author(None),
-            search: String::new(),
-            file_types: vec![],
-            languages: vec![],
-            chip_sort: BrowseChipSort::Alphabetical,
-            book_sort: BrowseBookSort::Alphabetical,
-            hide_finished: false,
-        };
+        let mut query =
+            LibraryBrowseQuery { location: BrowseLocation::Author(None), search: String::new(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::Alphabetical, book_sort: BrowseBookSort::Alphabetical, hide_finished: false };
         let first = db.browse_page(&query, false, BrowsePageRequest::default()).unwrap();
         assert_eq!(first.contents.children.len(), 24);
         assert_eq!(first.sections.len(), 24);
         assert_eq!(first.page.as_ref().unwrap().section_ids.len(), 24);
         assert_eq!(first.page.as_ref().unwrap().heading_count(), 37);
         let revision = first.page.unwrap().headings.unwrap().revision;
-        for sort in [BrowseChipSort::Alphabetical, BrowseChipSort::BookCount, BrowseChipSort::Popularity] {
+        for sort in [BrowseChipSort::Alphabetical, BrowseChipSort::BookCount] {
             query.chip_sort = sort;
             for search in ["", "writer", "writer 3", "missing"] {
                 query.search = search.into();
@@ -260,15 +245,7 @@ mod tests {
         }
         for location in [BrowseLocation::Books, BrowseLocation::Subject(0), BrowseLocation::Subject(4)] {
             for search in ["", "book"] {
-                let query = LibraryBrowseQuery {
-                    location,
-                    search: search.into(),
-                    file_types: vec![],
-                    languages: vec![],
-                    chip_sort: BrowseChipSort::Alphabetical,
-                    book_sort: BrowseBookSort::Alphabetical,
-                    hide_finished: false,
-                };
+                let query = LibraryBrowseQuery { location, search: search.into(), file_types: vec![], languages: vec![], chip_sort: BrowseChipSort::Alphabetical, book_sort: BrowseBookSort::Alphabetical, hide_finished: false };
                 assert_windows(&db, &query, false);
                 let first = db.browse_page(&query, false, BrowsePageRequest { book_limit: 2, ..Default::default() }).unwrap();
                 assert!(first.contents.books.len() <= 2);

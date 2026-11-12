@@ -96,7 +96,7 @@ pub struct ReaderView {
 }
 
 pub fn configure(preferences: ReaderPreferences, save: SaveReaderSettings, cx: &mut App) {
-    let loader = ui_components::bundled_font_loader(cx);
+    let loader = ui_html_components::bundled_font_loader(cx);
     html_view_gpui::configure_font_loader(loader, cx);
     cx.set_global(ReaderSettings { preferences, save });
 }

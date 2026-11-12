@@ -116,8 +116,10 @@ impl LibrarySync {
         if !outbox_only {
             let completed_at = u64::try_from(web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH)?.as_millis())?;
             self.database.set_sync_metadata("last_successful_sync_at", &completed_at.to_string()).await.map_err(SyncError::failed)?;
+            self.events.updates.publish(LibraryUpdate::SyncStatusChanged);
         }
-        self.events.updates.publish(LibraryUpdate::SyncStatusChanged);
+        // Outbox acknowledgements and issues publish their own changes. An
+        // empty local pass must not refresh account state and the entire UI.
         Ok(outcome)
     }
 }

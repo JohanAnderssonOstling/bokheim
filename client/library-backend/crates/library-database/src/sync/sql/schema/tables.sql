@@ -24,10 +24,6 @@ create table if not exists book(
     -- synchronized register. NULL for a book never opened.
     read_at         INTEGER,
     added_at        INTEGER,
-    -- Browse projection of the immutable enrichment's rating count. REAL
-    -- preserves the existing f64 ordering across the full u64 count range.
-    -- NULL means unknown; zero is a known count.
-    popularity_rating_count REAL CHECK(popularity_rating_count >= 0),
     deleted_at      INTEGER,
     trash_origin_dir_id TEXT,
     -- Navigation belongs to this immutable file identity and is read as a

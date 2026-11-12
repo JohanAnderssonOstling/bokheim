@@ -187,22 +187,21 @@ impl LibraryFileTypeFilter {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowseChipSort {
+    #[serde(alias = "popularity")]
     #[default]
     Alphabetical,
     BookCount,
-    Popularity,
     /// Home's existing shelf order, offered only by Home.
     DefaultOrder,
 }
 
 impl BrowseChipSort {
-    pub const ALL: [Self; 3] = [Self::Alphabetical, Self::BookCount, Self::Popularity];
+    pub const ALL: [Self; 2] = [Self::Alphabetical, Self::BookCount];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Alphabetical => text!(browse::alphabetical),
-            Self::BookCount => text!(browse::book_count),
-            Self::Popularity => text!(browse::popularity),
+            Self::BookCount => text!(browse::book_count_sort),
             Self::DefaultOrder => text!(browse::default_order),
         }
     }
@@ -212,22 +211,21 @@ impl BrowseChipSort {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowseBookSort {
+    #[serde(alias = "popularity")]
     #[default]
     Alphabetical,
     RecentlyRead,
-    Popularity,
     /// Home's existing activity order, offered only by Home.
     DefaultOrder,
 }
 
 impl BrowseBookSort {
-    pub const ALL: [Self; 3] = [Self::Alphabetical, Self::RecentlyRead, Self::Popularity];
+    pub const ALL: [Self; 2] = [Self::Alphabetical, Self::RecentlyRead];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Alphabetical => text!(browse::alphabetical),
             Self::RecentlyRead => text!(browse::recently_read),
-            Self::Popularity => text!(browse::popularity),
             Self::DefaultOrder => text!(browse::default_order),
         }
     }
@@ -501,11 +499,7 @@ pub struct CardKey(pub [u8; 32]);
 
 impl From<BookId> for CardKey {
     fn from(id: BookId) -> Self {
-        if id.is_local() {
-            Self(*blake3::hash(id.as_bytes()).as_bytes())
-        } else {
-            Self(*id.identity_digest())
-        }
+        if id.is_local() { Self(*blake3::hash(id.as_bytes()).as_bytes()) } else { Self(*id.identity_digest()) }
     }
 }
 

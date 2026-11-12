@@ -13,7 +13,7 @@ use update_client::DiscoveryConfig;
 use client_protocol::BackendError;
 
 /// Snapshot formats this build reads.
-const FORMATS: [u32; 1] = [library_database::catalog::FORMAT_VERSION];
+const FORMATS: [u32; 2] = [11, library_database::catalog::FORMAT_VERSION];
 
 /// Activate cached data and fetch updates in the background. Rebuilding a
 /// stored catalog for a new taxonomy must not delay opening the application.

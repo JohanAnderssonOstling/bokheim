@@ -145,10 +145,6 @@ def describe(seed, evidence, download_links=None):
     reviews = int(rating[2]) if rating else None
     rated = bool(value is not None and 1 <= value <= 5 and reviews and reviews >= 1)
     selected_audio = bool(free and rated and audio and value >= 4)
-    popularity = seed.get("popularity", [])
-    sitewide = next((entry for entry in popularity if entry["scope"] == "sitewide"), None)
-    featured = next((entry for entry in popularity if entry["scope"] == "language_featured"), None)
-    listing = sitewide or featured
     download = (download_links or {}).get(seed["entry_url"], {})
     download_url = download.get("download_url") if selected_audio else None
     if download_url:
@@ -163,11 +159,6 @@ def describe(seed, evidence, download_links=None):
         "description_evidence_files": description_evidence,
         "language_listing": seed.get("language"), "survey_groups": sorted(seed["groups"]),
         "page_resolved": resolved, "rating": value, "review_count": reviews, "has_rating": rated,
-        "loyalbooks_popularity": popularity,
-        "loyalbooks_popularity_rank": sitewide["rank"] if sitewide else None,
-        "loyalbooks_popularity_scope": listing["scope"] if listing else None,
-        "loyalbooks_popularity_listing_url": listing["listing_url"] if listing else None,
-        "loyalbooks_language_featured_position": featured["position"] if featured else None,
         "free_book": free, "free_evidence": "Loyal Books free-book detail page" if free else None,
         "epub_available": epub, "retain_epub": free and rated and epub is True,
         "mp3_available": audio if resolved else None, "retain_audiobook": selected_audio,
@@ -190,27 +181,11 @@ def describe(seed, evidence, download_links=None):
 def main(directory, catalog_db):
     inputs = [("top100-listing.json", "popular"), ("language-book-listing.json", "language"), ("random-sample-listing.json", "random")]
     languages = json.loads((directory / "language-counts.json").read_text())
-    language_urls = {row["name"]: row["language_url"] for row in languages}
-    featured_positions = {}
-    click_path = directory / "language-clicks.json"
-    if click_path.exists():
-        positions = Counter()
-        for row in json.loads(click_path.read_text()):
-            positions[row["language"]] += 1
-            featured_positions[(row["language"], row["ref_id"], row["id"])] = positions[row["language"]]
-    survey_date = re.search(r"survey-(\d{4}-\d{2}-\d{2})", directory.name)
-    observed_on = survey_date[1] if survey_date else None
     seeds = {}
     for name, group in inputs:
         for row in json.loads((directory / name).read_text()):
-            seed = seeds.setdefault(row["entry_url"], {"entry_url": row["entry_url"], "groups": set(), "popularity": []})
+            seed = seeds.setdefault(row["entry_url"], {"entry_url": row["entry_url"], "groups": set()})
             seed["groups"].add(group)
-            if group == "popular" and row.get("rank") is not None:
-                seed["popularity"].append({"scope": "sitewide", "rank": row["rank"], "listing_url": "https://www.loyalbooks.com/Top_100", "sort": "popularity", "observed_on": observed_on, "evidence_file": name})
-            if group == "language":
-                position = featured_positions.get((row["language"], row["ref_id"], row["id"]))
-                if position is not None:
-                    seed["popularity"].append({"scope": "language_featured", "language": row["language"], "position": position, "listing_url": language_urls[row["language"]], "sort": "popularity", "observed_on": observed_on, "evidence_files": [name, click_path.name]})
             for key in ("title", "language", "listing_rating", "image_title"):
                 if row.get(key) is not None:
                     seed[key] = row[key]
@@ -240,7 +215,6 @@ def main(directory, catalog_db):
         "scope": {"sitemap_urls": population, "language_listing_pages": len(languages), "advertised_language_audio_count_sum_not_deduplicated": sum(r["count"] or 0 for r in languages), "detail_urls_attempted": len(rows), "detail_urls_resolved": sum(r["page_resolved"] for r in rows), "detail_urls_unresolved": sum(not r["page_resolved"] for r in rows)},
         "candidates": {"total": len(selected), "epubs": sum(r["retain_epub"] for r in rows), "audiobooks": len(audio), "both_formats": sum(r["retain_epub"] and r["retain_audiobook"] for r in rows), "epub_only": sum(r["retain_epub"] and not r["retain_audiobook"] for r in rows), "audio_only": sum(r["retain_audiobook"] and not r["retain_epub"] for r in rows), "possible_existing_epub_title_matches": sum(bool(r["possible_existing_epub_title_matches"]) for r in selected), "possible_existing_epub_title_matches_with_audio": sum(bool(r["possible_existing_epub_title_matches"]) for r in audio)},
         "audiobook_rating_counts": {"strictly_above_4": sum(r["rating"] > 4 for r in audio), "exactly_4": sum(r["rating"] == 4 for r in audio), "at_least_4": len(audio)},
-        "candidate_popularity_data": {"sitewide_rank_available": sum(r["loyalbooks_popularity_rank"] is not None for r in selected), "language_featured_position_available": sum(r["loyalbooks_language_featured_position"] is not None for r in selected), "no_popularity_observed": sum(not r["loyalbooks_popularity"] for r in selected), "missing_values": "unknown, not zero", "scope": "source listing positions; no numeric popularity score inferred"},
         "candidate_descriptions": dict(Counter(r["description_status"] for r in selected)),
         "hosted_audio_storage": {"audio_file_bytes": 0, "download_links_recorded": sum(bool(r["audiobook_download_url"]) for r in audio), "download_links_pending": sum(not r["audiobook_download_url"] for r in audio)},
         "candidate_audio_payload": {"purpose": "external download sizes, not local catalog storage", "advertised_bytes": sum(r["advertised_mp3_bytes"] or 0 for r in audio), "duration_estimated_bytes": sum(r["estimated_mp3_bytes_64kbps"] or 0 for r in audio), "total_bytes": sum(r["storage_bytes"] or 0 for r in audio), "estimated_recordings": sum(r["estimated_mp3_bytes_64kbps"] is not None for r in audio), "unknown_size_recordings": sum(r["storage_bytes"] is None for r in audio)},
@@ -261,7 +235,7 @@ def main(directory, catalog_db):
     save(directory / "reviewed-pages.json", rows)
     save(directory / "candidates.json", selected)
     save(directory / "audiobook-candidates.json", audio)
-    fields = ["source", "source_entry_id", "title", "author", "description", "description_status", "description_source_url", "language_listing", "free_book", "has_rating", "rating", "review_count", "loyalbooks_popularity_rank", "loyalbooks_popularity_scope", "loyalbooks_popularity_listing_url", "loyalbooks_language_featured_position", "retain_epub", "retain_audiobook", "audiobook_delivery", "audiobook_download_url", "audiobook_download_host", "download_link_status", "store_audiobook_file", "hosted_audio_file_bytes", "storage_bytes", "storage_basis", "entry_url"]
+    fields = ["source", "source_entry_id", "title", "author", "description", "description_status", "description_source_url", "language_listing", "free_book", "has_rating", "rating", "review_count", "retain_epub", "retain_audiobook", "audiobook_delivery", "audiobook_download_url", "audiobook_download_host", "download_link_status", "store_audiobook_file", "hosted_audio_file_bytes", "storage_bytes", "storage_basis", "entry_url"]
     for filename, records in (("candidates.csv", selected), ("audiobook-candidates.csv", audio)):
         with (directory / filename).open("w", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
@@ -276,7 +250,7 @@ def main(directory, catalog_db):
     assert len({r["entry_url"] for r in selected}) == len(selected)
     assert not any(r["retain_audiobook"] for r in rows if not r["page_resolved"])
     assert len(random_rows) == 512
-    print(json.dumps({key: summary[key] for key in ("scope", "candidates", "audiobook_rating_counts", "candidate_popularity_data", "candidate_descriptions", "hosted_audio_storage")}, indent=2))
+    print(json.dumps({key: summary[key] for key in ("scope", "candidates", "audiobook_rating_counts", "candidate_descriptions", "hosted_audio_storage")}, indent=2))
 
 
 if __name__ == "__main__":

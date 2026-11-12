@@ -20,6 +20,7 @@ use gpui::{
     touch_page_settle_easing,
 };
 use ui_components::{HierarchyItemWidth, SwipePreview, TouchpadNavigation};
+use ui_components::scroll::{PAGE_WHEEL_REPEAT_INTERVAL as SCROLL_REPEAT_INTERVAL, page_wheel_ready};
 use web_time::Instant;
 
 pub(crate) use drag_preview::PaginatorDragPreview;
@@ -73,7 +74,6 @@ const SWIPE_AXIS_DOMINANCE: f32 = 1.25;
 const SWIPE_VIEWPORT_FRACTION: f32 = 0.12;
 const SWIPE_MINIMUM_DISTANCE: f32 = 48.0;
 const SWIPE_MAXIMUM_DISTANCE: f32 = 120.0;
-const SCROLL_REPEAT_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Default)]
 struct PaginatorSwipe {
@@ -1022,7 +1022,7 @@ impl Paginator {
         // Only fresh input can turn a page. Nothing is queued during the
         // throttle interval or animation, so stopping input stops navigation.
         let now = Instant::now();
-        if self.transition.is_some() || self.last_wheel_turn.is_some_and(|last| now.duration_since(last) < SCROLL_REPEAT_INTERVAL) {
+        if !page_wheel_ready(self.last_wheel_turn, self.transition.is_some(), now) {
             cx.stop_propagation();
             return;
         }

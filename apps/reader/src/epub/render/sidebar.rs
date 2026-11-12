@@ -22,7 +22,7 @@ use crate::shell::toolbar::SidebarTarget;
 impl AnnotationSidebarTarget for ReaderView {
     fn copy_sidebar_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>) {
         let section = annotation.toc_ordinal.and_then(|ordinal| usize::try_from(ordinal).ok()).and_then(|ordinal| self.toc.title_for_ordinal(ordinal));
-        crate::shell::annotation_copy::copy_passage(&self.locator, &self.book_title, section.as_deref(), &annotation.exact_text, &annotation.note, Some(annotation.id.clone()), annotation.anchor.clone(), cx);
+        crate::shell::annotation_copy::copy_annotation(&self.locator, &self.book_title, section.as_deref(), annotation, cx);
     }
 
     fn select_sidebar_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -30,9 +30,12 @@ impl AnnotationSidebarTarget for ReaderView {
         self.select_annotation(id, window, cx);
     }
 
-    fn go_to_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>) {
+    fn go_to_annotation(&mut self, annotation: &Annotation, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(cfi) = self.book.annotation_cfi(&annotation.anchor) {
             self.navigate_to_cfi(cfi, cx);
+        }
+        if annotation.is_bookmark() && components::uses_mobile_reader_controls(window) {
+            self.hide_sidebar(window, cx);
         }
     }
 
@@ -75,14 +78,10 @@ impl ReaderView {
             |id, activation, window, this: &mut Self, cx| {
                 let Some(link) = this.toc.link_for_id(id).map(str::to_owned) else { return };
                 this.navigate_to(link, cx);
-                if activation == TocActivation::Pointer {
+                if components::uses_mobile_reader_controls(window) {
+                    this.hide_sidebar(window, cx);
+                } else if activation == TocActivation::Pointer {
                     this.focus_sidebar_body(window, cx);
-                    #[cfg(feature = "kobo")]
-                    {
-                        this.sidebar.close(cx);
-                        this.focus_document(window, cx);
-                        notify(cx, Component::ReaderShell, "toc_navigated");
-                    }
                 }
             },
         );

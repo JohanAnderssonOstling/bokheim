@@ -383,7 +383,7 @@ mod tests {
                 let database_path = root.path().join(".library.db");
                 let db = Database::open(&database_path).unwrap();
                 db.initialize_library().await.unwrap();
-                let mut snapshot = db.scan_snapshot().await.unwrap();
+                let mut snapshot = db.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).await.unwrap();
                 let discovery = discover(root.path(), &snapshot);
                 let fingerprint = discovery.files[0].fingerprint;
                 let hash = BookId::from(blake3::hash(b"book"));
@@ -418,7 +418,7 @@ mod tests {
 
                 let reopened = Database::open(&database_path).unwrap();
                 reopened.initialize_library().unwrap();
-                let mut snapshot = reopened.scan_snapshot().unwrap();
+                let mut snapshot = reopened.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).unwrap();
                 assert_eq!(snapshot.tombstoned_files, [(ROOT_DIR_ID, name.into())]);
                 let discovery = discover(root.path(), &snapshot);
                 assert!(discovery.readable);
@@ -430,7 +430,7 @@ mod tests {
                 assert!(path.exists(), "Trash must retain the physical book");
 
                 reopened.restore_book(&hash).unwrap();
-                let snapshot = reopened.scan_snapshot().unwrap();
+                let snapshot = reopened.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).unwrap();
                 assert!(snapshot.tombstoned_files.is_empty(), "explicit restore clears the scan tombstone");
                 assert!(reopened.library_trash().unwrap().books.is_empty());
             }

@@ -133,7 +133,7 @@ impl ComicReaderView {
         components::reader_settings_tab_body(theme)
             .child(components::reader_settings_section(text!(reader::page_display), theme).child(fit))
             .child(components::reader_settings_group(theme).child(columns))
-            .child(components::reader_settings_group(theme).children(spacing))
+            .child(components::reader_settings_group(theme).child(components::reader_stepper_rows().children(spacing)))
             .child(components::reader_settings_section(text!(reader::reading_direction), theme).child(direction))
             .child(components::reader_settings_section(text!(reader::zoom), theme).child(zoom))
             .when(super::super::shell::settings_navigation::DESKTOP_FULLSCREEN, |panel| {

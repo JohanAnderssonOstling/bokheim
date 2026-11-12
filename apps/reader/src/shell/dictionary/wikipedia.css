@@ -1,6 +1,9 @@
 /*
- * Table defaults adapted from MediaWiki's content.tables.less:
+ * Content defaults adapted from MediaWiki's skinning styles:
  * https://github.com/wikimedia/mediawiki/blob/master/resources/src/mediawiki.skinning/content.tables.less
+ * https://github.com/wikimedia/mediawiki/blob/master/resources/src/mediawiki.skinning/content.thumbnails-common.less
+ * https://github.com/wikimedia/mediawiki/blob/master/resources/src/mediawiki.skinning/content.variables.less
+ * https://github.com/wikimedia/mediawiki/blob/master/resources/src/mediawiki.skinning/content.media-screen.less
  * Reader theme adaptation recolors these neutral backgrounds and borders at paint time.
  * The layer lets article styles override the defaults.
  */
@@ -21,16 +24,44 @@
         float: left;
     }
 
-    @media (max-width: calc(640px - 1px)) {
-        body.skin--responsive div.tright,
-        body.skin--responsive div.floatright,
-        body.skin--responsive table.floatright,
-        body.skin--responsive div.tleft,
-        body.skin--responsive div.floatleft,
-        body.skin--responsive table.floatleft {
-            clear: both;
-            float: none;
-        }
+    div.floatright,
+    table.floatright {
+        margin: 0 0 0.5em 0.5em;
+    }
+
+    div.floatleft,
+    table.floatleft {
+        margin: 0 0.5em 0.5em 0;
+    }
+
+    div.thumb {
+        width: auto;
+        background-color: transparent;
+        margin-bottom: 0.5em;
+    }
+
+    div.tright {
+        margin: 0.5em 0 1.3em 1.4em;
+    }
+
+    div.tleft {
+        margin: 0.5em 1.4em 1.3em 0;
+    }
+
+    div.thumbinner {
+        padding: 3px;
+        text-align: center;
+        overflow: hidden;
+    }
+
+    .thumbcaption {
+        text-align: start;
+        line-height: 1.4em;
+        padding: 3px;
+    }
+
+    .thumbcaption:empty {
+        padding: 0;
     }
 
     .wikitable {
@@ -58,6 +89,26 @@
     .wikitable > caption {
         font-weight: bold;
     }
+
+    /* Only block media should shrink. Inline flags, formula images and map
+     * markers retain their authored sizing, including inside tables. */
+    figure img.mw-file-element,
+    div.thumbinner > a > img {
+        max-width: 100%;
+        height: auto;
+    }
+
+    figure[typeof~="mw:File/Thumb"] img.mw-file-element,
+    figure[typeof~="mw:File/Frame"] img.mw-file-element {
+        max-width: calc(100% - 8px);
+    }
+
+    .noresize figure img.mw-file-element,
+    figure.noresize img.mw-file-element,
+    .noresize div.thumbinner > a > img,
+    div.thumbinner.noresize > a > img {
+        max-width: none;
+    }
 }
 
 /* Fit website content to the reader's columns. */
@@ -72,10 +123,42 @@ table,
     max-width: 100% !important;
 }
 
-/* Responsive infobox layout from https://en.wikipedia.org/wiki/MediaWiki:Common.css */
-@media (max-width: 640px) {
+/* Reader columns are responsive even when REST HTML has no skin--responsive
+ * body class. Keep these adaptations outside the fallback layer so supplied
+ * desktop defaults do not restore floats in narrow columns. */
+@media (max-width: calc(640px - 1px)) {
+    div.tright,
+    div.floatright,
+    table.floatright,
+    div.tleft,
+    div.floatleft,
+    table.floatleft {
+        clear: both;
+        float: none;
+        margin-left: 0;
+        margin-right: 0;
+    }
+
+    .wikitable {
+        float: none;
+        margin-left: 0;
+        margin-right: 0;
+    }
+
+    figure[typeof~="mw:File"],
+    figure[typeof~="mw:File/Thumb"],
+    figure[typeof~="mw:File/Frame"],
+    figure[typeof~="mw:File/Frameless"] {
+        /* Match MediaWiki's responsive override of explicit image alignment. */
+        float: none !important;
+        margin: 0 auto !important;
+    }
+
     .infobox {
         width: 100%;
+        float: none;
+        margin-left: 0;
+        margin-right: 0;
     }
 
     .infobox .nowrap {
@@ -83,6 +166,7 @@ table,
     }
 }
 
+/* Infobox layout from https://en.wikipedia.org/wiki/MediaWiki:Common.css */
 @media (min-width: 640px) {
     .infobox {
         margin-left: 1em;
@@ -90,22 +174,6 @@ table,
         clear: right;
         width: 22em;
     }
-}
-
-/* Formula templates default to nowrap on Wikipedia. Let table cells reflow. */
-table th,
-table td {
-    overflow-wrap: anywhere;
-}
-
-table .texhtml {
-    white-space: normal !important;
-}
-
-img,
-svg {
-    max-width: 100% !important;
-    height: auto !important;
 }
 
 pre {

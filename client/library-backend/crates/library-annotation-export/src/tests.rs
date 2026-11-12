@@ -41,8 +41,8 @@ fn markdown_frontmatter_preserves_metadata_without_breaking_yaml_and_keeps_toc_h
     assert!(text.contains("## Part\n\n### Child\n\n> *a quote*\n>\n> *a second line*\n\nmy *note*"));
     let annotation = &book.annotations[0];
     let source = library_model::ReaderLink { locator: library_model::BookLocator::new(library, book.book_id), annotation_id: Some(annotation.id.clone()), anchor: annotation.anchor.clone() };
-    let label = library_model::annotation_source_label(&book.metadata.title, Some("Child"), &annotation.anchor);
-    assert!(text.ends_with(&library_model::annotation_markdown(&annotation.exact_text, &annotation.note, &label, &source)));
+    let label = annotation_format::annotation_source_label(&book.metadata.title, Some("Child"), &annotation.anchor);
+    assert!(text.ends_with(&annotation_format::annotation_markdown(&annotation.exact_text, &annotation.note, &label, &source)));
     assert!(text.contains("exported_at: \"1970-01-01T00:00:00.000Z\""));
     assert!(text.contains(&format!("book_id: \"{}\"", book.book_id)));
 }

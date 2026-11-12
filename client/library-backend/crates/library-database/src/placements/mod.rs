@@ -18,6 +18,7 @@ use crate::transactions::WriteOutcome::Commit;
 #[cfg(feature = "scanner")]
 use client_platform_runtime::profiling::ProfileSpan;
 use content_address::ContentHash;
+use book_inspection_contract::{CachedPdfReader, InspectedBook, PdfSourceIdentity};
 use pdf_view_common::PdfReaderMetadata;
 use rusqlite::{Connection, Row, Transaction};
 use std::collections::HashMap;
@@ -1324,7 +1325,7 @@ pub struct ScanKnownBook {
     /// Complete playback facts for these verified bytes, including facts
     /// received through sync. This does not claim a local inspection occurred.
     pub cached_audiobook_format: Option<BookFormat>,
-    pub cached_pdf: Option<Arc<book_inspection::CachedPdfReader>>,
+    pub cached_pdf: Option<Arc<CachedPdfReader>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1358,7 +1359,7 @@ pub struct InspectedFilesystemScan {
 
 #[derive(Clone, Debug)]
 pub struct ScannedBook {
-    pub source_identity: Option<book_inspection::PdfSourceIdentity>,
+    pub source_identity: Option<PdfSourceIdentity>,
     pub audiobook_content_hash: Option<ContentHash>,
     pub byte_checksum: Option<ContentHash>,
     pub directory: DirId,
@@ -1374,15 +1375,16 @@ pub struct ScannedBook {
     /// a bare `content_hash`/no metadata here would be indistinguishable
     /// from "reuse the cached inspection," which does not exist yet for a
     /// book discovered for the first time.
-    pub inspection: book_inspection::InspectedBook,
+    pub inspection: InspectedBook,
     pub inspection_version: i64,
 }
 
 impl Database {
     /// Takes the immutable inventory view required by filesystem discovery. The
     /// connection is released before the caller walks or hashes any path.
+    /// The scanner supplies its extractor version to select reusable PDF facts.
     #[cfg(feature = "scanner")]
-    pub fn scan_snapshot(&self) -> Result<ScanSnapshot, DatabaseError> {
+    pub fn scan_snapshot(&self, pdf_inspection_version: i64) -> Result<ScanSnapshot, DatabaseError> {
         self.with_write_transaction(|transaction| {
             let connection = &*transaction;
             let work_revision = connection.scanner_file_work_revision(|row| row.get(0))?;
@@ -1411,7 +1413,7 @@ impl Database {
                 Ok(())
             })?;
             for book in &mut books {
-                if BookFormat::from_file_name(&book.name) == Some(BookFormat::Pdf) && book.inspection_version != Some(book_inspection::inspection_version(BookFormat::Pdf)) && book.inspection_version.is_none_or(|version| version >= 0) {
+                if BookFormat::from_file_name(&book.name) == Some(BookFormat::Pdf) && book.inspection_version != Some(pdf_inspection_version) && book.inspection_version.is_none_or(|version| version >= 0) {
                     if let Some(checksum) = self.local_content_hash(book.book_id, book.directory)? {
                         book.cached_pdf = self.cached_pdf_reader(BookId::from(checksum))?.map(Arc::new);
                     }
@@ -1992,9 +1994,9 @@ database_methods! {
     execute database, arguments => database.empty_trash();
 
     #[cfg(feature = "scanner")]
-    fn scan_snapshot() -> ScanSnapshot;
-    arguments () = ();
-    execute database, arguments => database.scan_snapshot();
+    fn scan_snapshot(pdf_inspection_version: i64) -> ScanSnapshot;
+    arguments (i64,) = (pdf_inspection_version,);
+    execute database, arguments => database.scan_snapshot(arguments.0);
 
     fn pdf_metadata(hash: &BookId) -> Option<PdfReaderMetadata>;
     arguments (BookId,) = (hash.clone(),);

@@ -37,6 +37,43 @@ pub(crate) struct PdfTocState {
 }
 
 impl PdfTocState {
+    pub(crate) fn search_tree(&self, pages: &[usize]) -> crate::shell::annotation_tree::AnnotationTree {
+        use crate::shell::annotation_tree::{AnnotationBranch, AnnotationTree};
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut other = Vec::new();
+        for (index, &page) in pages.iter().enumerate() {
+            if let Some(ordinal) = self.ordinal_at(page) {
+                groups.entry(ordinal).or_default().push(index);
+            } else {
+                other.push(index);
+            }
+        }
+        fn visit(entries: &[BookTocEntry], groups: &mut HashMap<usize, Vec<usize>>, next: &mut usize) -> Vec<AnnotationBranch> {
+            let mut branches = Vec::new();
+            for entry in entries {
+                let id = *next;
+                *next += 1;
+                let annotations = groups.remove(&id).unwrap_or_default();
+                let children = visit(&entry.children, groups, next);
+                if !annotations.is_empty() || !children.is_empty() {
+                    branches.push(AnnotationBranch { id, title: entry.title.clone(), annotations, children });
+                }
+            }
+            branches
+        }
+        let mut branches = visit(&self.toc.entries, &mut groups, &mut 0);
+        if branches.is_empty() {
+            other.clear();
+            for (index, &page) in pages.iter().enumerate() {
+                if branches.last().is_none_or(|branch| branch.id != page) {
+                    branches.push(AnnotationBranch { id: page, title: format!(text!(reader::page), page + 1), annotations: Vec::new(), children: Vec::new() });
+                }
+                if let Some(branch) = branches.last_mut() { branch.annotations.push(index); }
+            }
+        }
+        AnnotationTree { branches, other }
+    }
+
     pub(crate) fn reset_chapter_read_status(&mut self, id: &str) -> Option<String> {
         let target = self.entry(id)?.target.clone();
         self.read_status.reset_chapter(&self.toc.entries, &target);

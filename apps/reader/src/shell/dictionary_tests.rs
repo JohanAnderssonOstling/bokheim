@@ -31,7 +31,6 @@ fn empty_popup(anchor: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Dic
         element_click: WordClick::default(),
         focus,
         wikipedia_request: None,
-        wikipedia_popup: None,
         wikipedia: None,
         wikipedia_page: wikipedia::ArticlePage::default(),
         wikipedia_equivalents: wikipedia::Equivalents::default(),

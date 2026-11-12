@@ -145,16 +145,6 @@ Inspection uses an isolated temporary inbox. The importer unions original raw
 subjects, languages, and publishers, preserves contributor identities, and
 retains a year only when all components agree. Each component's record, ISBNs,
 source pages, and download observations are retained in `source_entry.metadata`.
-Combined Gutenberg popularity uses the arithmetic mean of the components' raw
-download counts, followed by the usual Gutenberg source percentile calculation.
-Zero counts participate in the mean; a missing component count leaves it unknown.
-`refresh-merged-popularity.py --catalog DIR --observations observations.json
---selection selection.json --output AUDIT_DIR` retains fresh component counts
-with their page fingerprints and lookup dates, backing up curation before writing.
-The observations file maps Gutenberg IDs to `downloads`, `scope`, `listing_url`,
-`observed_at`, `download_metadata`, and `page_sha256`; selection contains book
-`hash` values. Retain the fetched pages and observations with the audit on the
-server. Existing source records and all unrelated book metadata are preserved.
 Descriptions are retained too. Identical descriptions appear once; distinct
 descriptions are associated with their original component labels. The pass puts
 the retained catalog descriptions in the generated EPUB's `dc:description` and

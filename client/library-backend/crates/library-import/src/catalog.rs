@@ -12,32 +12,34 @@ use sync_common::{BookId, DirId};
 use crate::LibraryImport;
 
 impl LibraryImport<'_> {
-    /// Try catalog artwork once during import. Fetch or decode failure leaves
-    /// the generated cover in place; publication errors are still reported.
-    async fn refresh_external_catalog_audiobook_cover(&self, hash: BookId, entry: CardKey) -> Result<bool, BackendError> {
-        if self.storage.database().thumbnail_book_format(hash).await.map_err(BackendError::operation)? != Some(book_model::BookFormat::Mp3Folder) {
+    /// Use the selected catalog artwork for every explicitly imported entry.
+    /// Fetch or decode failure preserves existing artwork; publication errors
+    /// are still reported.
+    async fn refresh_catalog_cover(&self, hash: BookId, entry: CardKey) -> Result<bool, BackendError> {
+        if self.storage.database().thumbnail_book_format(hash).await.map_err(BackendError::operation)?.is_none() {
             return Ok(false);
         }
-        let versions = match Self::fetch_external_catalog_audiobook_cover(&*self.cpu, entry).await {
+        let versions = match Self::fetch_catalog_cover(&*self.cpu, entry).await {
             Ok(Some(versions)) => versions,
             Ok(None) => return Ok(false),
             Err(error) => {
-                log::warn!("catalog cover for {hash} unavailable; keeping the generated cover: {error}");
+                log::warn!("catalog cover for {hash} unavailable; keeping the existing cover: {error}");
                 return Ok(false);
             }
         };
-        self.store_external_catalog_audiobook_cover(hash, &versions).await
+        self.store_catalog_cover(hash, &versions).await
     }
 
-    async fn fetch_external_catalog_audiobook_cover(cpu: &dyn cpu_host::CpuHost, entry: CardKey) -> Result<Option<cpu_host::ThumbnailBytes>, BackendError> {
-        let Some(bytes) = library_catalog::fresh_external_cover(entry).await? else { return Ok(None) };
+    async fn fetch_catalog_cover(cpu: &dyn cpu_host::CpuHost, entry: CardKey) -> Result<Option<cpu_host::ThumbnailBytes>, BackendError> {
+        let Some(bytes) = library_catalog::fresh_catalog_cover(entry).await? else { return Ok(None) };
         cpu_host::cover(cpu, bytes).await.map(Some)
     }
 
-    /// The caller holds the library state lock while publishing artwork.
-    async fn store_external_catalog_audiobook_cover(&self, hash: BookId, versions: &cpu_host::ThumbnailBytes) -> Result<bool, BackendError> {
+    /// Publish selected artwork separately from generated covers so a late
+    /// thumbnail job cannot replace it.
+    async fn store_catalog_cover(&self, hash: BookId, versions: &cpu_host::ThumbnailBytes) -> Result<bool, BackendError> {
         // Keep existing thumbnails until the replacement has been decoded.
-        if self.storage.database().thumbnail_book_format(hash).await.map_err(BackendError::operation)? != Some(book_model::BookFormat::Mp3Folder) {
+        if self.storage.database().thumbnail_book_format(hash).await.map_err(BackendError::operation)?.is_none() {
             return Ok(false);
         }
         self.storage.assets().write_thumbnail_set(&hash, &versions.high_density, &versions.browse, &versions.card_high_density).await.map_err(BackendError::operation)?;
@@ -47,15 +49,13 @@ impl LibraryImport<'_> {
     }
 
     pub async fn import_catalog_download(&self, parent_id: DirId, book: CatalogBook, bytes: Vec<u8>) -> Result<BookId, BackendError> {
-        let external = book.hash.is_none().then_some(book.key);
+        let entry = book.key;
         let extension = book.format().canonical_extension();
         let name = if book.author.is_empty() { book.title } else { format!("{} - {}", book.author, book.title) };
         let file_name = format!("{}.{extension}", name.replace(['/', '\\', ':'], " ").trim());
         let imported = self.import_downloaded_book(parent_id, &file_name, bytes).await?;
         self.storage.database().record_catalog_answer(&imported, book.record).await.map_err(BackendError::operation)?;
-        if let Some(entry) = external {
-            self.refresh_external_catalog_audiobook_cover(imported, entry).await?;
-        }
+        self.refresh_catalog_cover(imported, entry).await?;
         Ok(imported)
     }
 
@@ -166,7 +166,7 @@ mod tests {
         // Discovery of an EPUB already on disk uses the same curated answer.
         let discovered = Database::open(":memory:").unwrap();
         discovered.initialize_library().unwrap();
-        let mut snapshot = discovered.scan_snapshot().unwrap();
+        let mut snapshot = discovered.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).unwrap();
         let file = ScanFileObservation { directory: ROOT_DIR_ID, name: "discovered.epub".into(), path: "discovered.epub".into(), fingerprint: inspected.fingerprint };
         let discovery = FilesystemScan { readable: true, files: vec![file], ..Default::default() };
         let books = InspectedFilesystemScan {
@@ -216,10 +216,10 @@ mod tests {
                 stream.write_all(&chosen).unwrap();
             }
         });
-        assert!(importer.refresh_external_catalog_audiobook_cover(hash, key).await.unwrap());
+        assert!(importer.refresh_catalog_cover(hash, key).await.unwrap());
         let master = assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap();
         assert_ne!(master, old.high_density);
-        assert!(!importer.refresh_external_catalog_audiobook_cover(hash, key).await.unwrap());
+        assert!(!importer.refresh_catalog_cover(hash, key).await.unwrap());
         server.join().unwrap();
         assert_eq!(assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), master);
         let decoded = image::load_from_memory(&master).unwrap().to_rgb8();

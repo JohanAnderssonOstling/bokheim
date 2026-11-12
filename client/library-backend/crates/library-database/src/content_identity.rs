@@ -3,6 +3,7 @@
 use crate::query_methods::try_for_each_row;
 use crate::{Database, DatabaseError};
 use book_model::BookFormat;
+use book_inspection_contract::PdfSourceIdentity;
 use content_address::{BookId, ContentHash};
 use include_sqlite_sql::include_sql;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -38,7 +39,7 @@ pub(crate) fn expected_hash(connection: &Connection, book: BookId) -> Result<Opt
     Ok(connection.query_row("SELECT canonical_hash FROM local_content_origin WHERE book_id=?1", [book], |row| row.get(0)).optional()?)
 }
 
-pub(crate) fn record_origin(connection: &Connection, book: BookId, source: Option<book_inspection::PdfSourceIdentity>) -> Result<(), DatabaseError> {
+pub(crate) fn record_origin(connection: &Connection, book: BookId, source: Option<PdfSourceIdentity>) -> Result<(), DatabaseError> {
     let source = source.map(|mut source| {
         if source.book_id.is_library_scoped() {
             source.book_id = source.canonical_hash.map(BookId::for_local_content).unwrap_or(source.book_id);
@@ -188,7 +189,7 @@ impl Database {
         if reference.is_local() && !reference.is_library_scoped() { Ok(reference) } else { self.resolve_scanned_content(checksum, None) }
     }
 
-    pub fn resolve_scanned_content(&self, checksum: ContentHash, source: Option<book_inspection::PdfSourceIdentity>) -> Result<BookId, DatabaseError> {
+    pub fn resolve_scanned_content(&self, checksum: ContentHash, source: Option<PdfSourceIdentity>) -> Result<BookId, DatabaseError> {
         if let Some(book) = self.book_for_local_content(checksum)? {
             return Ok(book);
         }
@@ -412,7 +413,7 @@ mod tests {
         let book = BookId::for_local_content(hash(b"initial PDF"));
         let original = hash(b"original server revision");
         let edited = hash(b"edited local PDF");
-        let source = book_inspection::PdfSourceIdentity { book_id: book, canonical_hash: Some(original) };
+        let source = PdfSourceIdentity { book_id: book, canonical_hash: Some(original) };
         assert_eq!(db.resolve_scanned_content(edited, Some(source)).unwrap(), book);
         db.commit_import(crate::ImportCommit {
             source_identity: Some(source),
@@ -424,7 +425,7 @@ mod tests {
             book_id: book,
             size_bytes: 400,
             inspection_version: 1,
-            inspection: Some(book_inspection::InspectedBook { metadata: book_model::BookRecord { metadata: Default::default(), description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
+            inspection: Some(book_inspection_contract::InspectedBook { metadata: book_model::BookRecord { metadata: Default::default(), description: String::new() }, pdf: None, audiobook: None, toc: vec![] }),
             published: library_model::PublishedStagedBook { name: "Book.pdf".into(), relative_path: "/Book.pdf".into(), published: true, fingerprint: Some("edited".into()) },
             request_thumbnail: false,
             restore_paths: vec![],
@@ -457,10 +458,10 @@ mod tests {
         assert_eq!(db.book_for_local_content(shared).unwrap(), None);
         let canonical = hash(b"original PDF");
         db.confirm_uploaded_content_with_pdf(book, canonical, Some(100), None).unwrap();
-        let source = book_inspection::PdfSourceIdentity { book_id: book, canonical_hash: Some(hash(b"wrong source")) };
+        let source = PdfSourceIdentity { book_id: book, canonical_hash: Some(hash(b"wrong source")) };
         let modified = hash(b"a different PDF");
         assert_eq!(db.resolve_scanned_content(modified, Some(source)).unwrap(), BookId::for_local_content(modified));
-        let source = book_inspection::PdfSourceIdentity { canonical_hash: Some(canonical), ..source };
+        let source = PdfSourceIdentity { canonical_hash: Some(canonical), ..source };
         assert_eq!(db.resolve_scanned_content(modified, Some(source)).unwrap(), book);
     }
 }
@@ -499,8 +500,8 @@ database_methods! {
     arguments (BookId,) = (reference,);
     execute database, arguments => database.resolve_book_identity(arguments.0);
 
-    fn resolve_scanned_content(checksum: ContentHash, source: Option<book_inspection::PdfSourceIdentity>) -> BookId;
-    arguments (ContentHash, Option<book_inspection::PdfSourceIdentity>,) = (checksum, source,);
+    fn resolve_scanned_content(checksum: ContentHash, source: Option<PdfSourceIdentity>) -> BookId;
+    arguments (ContentHash, Option<PdfSourceIdentity>,) = (checksum, source,);
     execute database, arguments => database.resolve_scanned_content(arguments.0, arguments.1);
 
     fn confirm_uploaded_content_with_pdf(book: BookId, checksum: ContentHash, size_bytes: Option<u64>, pdf: Option<pdf_view_common::PdfReaderMetadata>) -> ();

@@ -9,7 +9,7 @@ mod cards;
 mod catalog;
 pub(crate) mod facets;
 pub(crate) mod options;
-mod popularity;
+mod ordering;
 mod profile;
 pub(crate) mod result;
 pub(crate) mod revision;

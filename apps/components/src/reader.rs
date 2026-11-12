@@ -1,12 +1,12 @@
 use ui_text::text;
 
-use crate::{CONTENT_INSET, topbar_action_height_rem};
+use crate::{CONTENT_INSET, topbar_action_height_rem, topbar_height_rem};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::{Button, Interactive};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, ClickEvent, Div, ElementId, Entity, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, RenderOnce, Role, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, div, img, px, rems};
+use gpui::{AnyElement, App, ClickEvent, Div, ElementId, Entity, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, Point, RenderOnce, Role, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, anchored, deferred, div, img, point, px, rems};
 use gpui_component::IconName;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::{ContextMenuExt, PopupMenu};
@@ -15,7 +15,8 @@ use crate::{BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, SP
 
 /// The toolbar and its controls grow together with the UI font.
 pub fn reader_toolbar_size_px(window: &Window) -> f32 {
-    f32::from(gpui::rems(topbar_action_height_rem()).to_pixels(window.rem_size()))
+    let height = if cfg!(feature = "kobo") { topbar_height_rem() } else { topbar_action_height_rem() };
+    f32::from(rems(height).to_pixels(window.rem_size()))
 }
 const READER_SETTINGS_POPOVER_GAP: f32 = 4.0;
 const READER_SETTINGS_POPOVER_WINDOW_MARGIN: f32 = 8.0;
@@ -297,10 +298,18 @@ pub fn reader_settings_group(theme: BrowserTheme) -> Div {
 }
 
 pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
+    if cfg!(feature = "kobo") {
+        return div().w_auto().max_w_full().min_w_0().flex_none().flex().flex_col().items_start().gap(px(SPACE_XXS)).child(div().text_size(rems(TEXT_SM)).child(label.into()));
+    }
     // Wrap the control as a unit instead of pushing it beyond a narrow sidebar.
     div().w_full().min_w_0().min_h(gpui::rems(2.375)).flex().flex_wrap().items_center().justify_end().gap(px(SPACE_SM)).child(
         div().w(gpui::rems(7.0)).max_w_full().min_w_0().flex_grow(1.0).flex_shrink(0.0).text_size(gpui::rems(TEXT_SM)).child(label.into()),
     )
+}
+
+/// Adjacent steppers share a row when their controls fit in the panel.
+pub fn reader_stepper_rows() -> Div {
+    div().w_full().min_w_0().flex().flex_col().gap(px(SPACE_XS)).when(cfg!(feature = "kobo"), |rows| rows.flex_row().flex_wrap().items_start().gap(px(SPACE_SM)))
 }
 
 /// A full-width checkbox row with its label on the left and check on the right.
@@ -404,14 +413,10 @@ pub fn reader_panel_header_content(content: impl IntoElement, theme: BrowserThem
         .gap(px(SPACE_SM))
         .pl(px(SPACE_MD))
         .pr(px(SPACE_XS))
+        .when(cfg!(feature = "kobo"), |header| header.h(rems(topbar_height_rem())).px(px(CONTENT_INSET)))
         .border_b_1()
         .border_color(theme.rule)
         .child(content)
-}
-
-/// The handle at the top of a phone sheet, which a downward swipe closes.
-pub fn reader_sheet_grab(theme: BrowserTheme) -> Div {
-    div().flex_none().w_full().pt(px(SPACE_SM)).pb(px(SPACE_XS)).flex().justify_center().child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(theme.rule))
 }
 
 /// Book and current chapter on one line, joined as "Title: Chapter".
@@ -531,7 +536,7 @@ pub fn reader_progress_ring(fraction: f32, label: impl Into<SharedString>, detai
                 let steps = ((to - from) * 64.0).ceil().max(1.0) as usize;
                 let point_at = |turn: f32| {
                     let angle = (turn - 0.25) * std::f32::consts::TAU;
-                    center + gpui::point(px(radius * angle.cos()), px(radius * angle.sin()))
+                    center + point(px(radius * angle.cos()), px(radius * angle.sin()))
                 };
                 let mut builder = gpui::PathBuilder::stroke(px(READER_PROGRESS_RING_STROKE));
                 builder.move_to(point_at(from));
@@ -709,7 +714,7 @@ impl RenderOnce for ReaderModal {
         let theme = browser_theme(cx);
         let dismiss = self.on_dismiss;
         crate::anchor_to_window(
-            crate::modal_overlay().child(crate::modal_scrim("reader-modal-scrim", theme).on_click(move |_, window, cx| dismiss(window, cx))).child(reader_modal_panel(self.size.width, self.size.height, theme).child(self.content)),
+            crate::modal_overlay().p_0().child(crate::modal_scrim("reader-modal-scrim", theme).on_click(move |_, window, cx| dismiss(window, cx))).child(reader_modal_panel(self.size.width, self.size.height, theme).child(self.content)),
             window,
         )
     }
@@ -801,18 +806,22 @@ impl RenderOnce for ReaderImagePopup {
             let size = rendered.size(0);
             (size.width.0 as f32, size.height.0 as f32)
         });
-        let (panel_width, panel_height) = image_popup_panel_size(f32::from(self.reader_size.width), f32::from(self.reader_size.height), intrinsic);
+        let reader_width = f32::from(self.reader_size.width);
+        let reader_height = f32::from(self.reader_size.height);
+        let (base_width, base_height) = image_popup_panel_size(reader_width, reader_height, intrinsic);
+        let width = (base_width - 6.0).max(1.0);
+        let height = (base_height - 6.0).max(1.0);
+        let zoom = self.canvas.read(cx).camera.zoom;
+        // Grow the frame with the image before clipping it at the viewport.
+        let panel_width = (width * zoom + 6.0).min(reader_width.max(1.0));
+        let panel_height = (height * zoom + 6.0).min((reader_height - 48.0).max(1.0));
+        self.canvas.update(cx, |canvas, _| {
+            canvas.contain_content(gpui::size(px(width), px(height)), gpui::size(px((panel_width - 6.0).max(1.0)), px((panel_height - 6.0).max(1.0))));
+        });
         let dismiss_modal = self.on_dismiss;
-        let inner_width = (panel_width - 6.0).max(1.0);
-        let inner_height = (panel_height - 6.0).max(1.0);
-        let (width, height) = intrinsic.unwrap_or((4.0, 3.0));
-        let fit = (inner_width / width).min(inner_height / height);
-        let width = width * fit;
-        let height = height * fit;
         let copy_image = self.image.clone();
         let content = crate::infinite_canvas(&self.canvas).control_wheel_zoom().child(
-            div().absolute().left(px((inner_width - width) / 2.0)).top(px((inner_height - height) / 2.0))
-                .w(px(width)).h(px(height)).child(reader_image_preview(self.image)),
+            div().absolute().left_0().top_0().w(px(width)).h(px(height)).child(reader_image_preview(self.image)),
         );
 
         ReaderModal::new(gpui::size(px(panel_width), px(panel_height)), div().id("reader-image-context").size_full().child(content).context_menu(move |menu, _, _| {
@@ -834,3 +843,18 @@ pub fn reader_content() -> Div {
 
 #[cfg(all(test, feature = "mobile"))]
 mod numeric_tile_tests;
+
+/// Position the selection knob below the text, inside the safe viewport.
+pub fn reader_selection_handle_center(endpoint: Point<Pixels>, window: &Window) -> Point<Pixels> {
+    let viewport = window.viewport_size();
+    let bottom = (f32::from(viewport.height - window.insets().safe_area.bottom) - 22.0).max(22.0);
+    point(px(f32::from(endpoint.x).clamp(22.0, f32::from(viewport.width).max(44.0) - 22.0)), px((f32::from(endpoint.y) + 12.0).clamp(22.0, bottom)))
+}
+
+pub fn reader_selection_handle(id: impl Into<ElementId>, endpoint: Point<Pixels>, window: &Window, theme: BrowserTheme) -> AnyElement {
+    let center = reader_selection_handle_center(endpoint, window);
+    let knob = div().id(id).size(px(44.0)).relative().flex().items_center().justify_center().occlude()
+        .child(div().absolute().left(px(21.0)).top(px(6.0)).w(px(2.0)).h(px(16.0)).bg(theme.accent))
+        .child(div().size(px(18.0)).rounded_full().bg(theme.accent));
+    deferred(anchored().position(center - point(px(22.0), px(22.0))).child(knob)).with_priority(2).into_any_element()
+}

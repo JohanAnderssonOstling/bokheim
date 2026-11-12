@@ -34,12 +34,20 @@ fn heading_and_card_continuations_reuse_the_same_prepared_selection() {
     for id in 1..=37 {
         let book = db.connection.query_row("SELECT content_hash FROM book WHERE row_id=?1", [id], |row| row.get(0)).unwrap();
         db.upsert_annotation(&Annotation {
-            id: format!("prepared-{id}"), book_id: book,
+            id: format!("prepared-{id}"),
+            book_id: book,
             anchor: AnnotationAnchor::epub_publication_cfi("epubcfi(/6/2!/4/2/1:0)"),
-            exact_text: "A searchable passage".into(), note: String::new(), style: AnnotationStyle::Highlight,
-            color: 0xe0bb4b, created_at: id as u64, modified_at: id as u64,
-            toc_ordinal: None, progress: None, deleted: false,
-        }).unwrap();
+            exact_text: "A searchable passage".into(),
+            note: String::new(),
+            style: AnnotationStyle::Highlight,
+            color: 0xe0bb4b,
+            created_at: id as u64,
+            modified_at: id as u64,
+            toc_ordinal: None,
+            progress: None,
+            deleted: false,
+        })
+        .unwrap();
     }
     for location in [BrowseLocation::Author(None), BrowseLocation::Subject(0), BrowseLocation::Books, BrowseLocation::Notebook(NotebookSort::Recent), BrowseLocation::Notebook(NotebookSort::BookName)] {
         let query = query(location);
@@ -293,7 +301,7 @@ fn folder_pages_preserve_placements_and_home_pages_preserve_activity_order() {
         BrowseLocation::Home(Some(HomeShelf::Finished)),
         BrowseLocation::Home(Some(HomeShelf::RecentlyAdded)),
     ] {
-        for sort in [BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical, BrowseBookSort::RecentlyRead, BrowseBookSort::Popularity] {
+        for sort in [BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical, BrowseBookSort::RecentlyRead] {
             for search in ["", "book"] {
                 for downloaded_only in [false, true] {
                     let mut query = query(location);

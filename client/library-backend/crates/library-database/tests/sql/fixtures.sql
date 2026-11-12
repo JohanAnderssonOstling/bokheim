@@ -113,10 +113,6 @@ DETACH curated; ATTACH ':' || 'memory' || ':' AS curated;
 -- param: arg_1: &SqlParam<'_>
 INSERT INTO book(row_id,content_hash,title,search_title,format) VALUES(:arg_1,unhex(printf('%064x',:arg_1)),printf('Book %d',:arg_1),printf('book %d',:arg_1),1);
 
--- name: fixtures_popularity_other_subject &
-INSERT INTO curated.concept VALUES(5,'A other');
-INSERT INTO curated.unified_concept_route VALUES(5,5,0);
-
 -- name: fixtures_insert_book_dir !
 -- param: arg_1: &SqlParam<'_>
 -- param: arg_2: &SqlParam<'_>
@@ -536,13 +532,6 @@ DROP TRIGGER guard_annotations;
 DROP TRIGGER guard_placements;
 -- name: fixtures_revert_history_to_schema_37 &
 ALTER TABLE sync_metadata DROP COLUMN pull_generation;
-
--- name: fixtures_has_popularity_projection ->
-SELECT EXISTS(SELECT 1 FROM pragma_table_info('book') WHERE name='popularity_rating_count');
-
--- name: fixtures_remove_popularity_projection !
--- Only constructs an older schema in isolated in-memory migration tests.
-ALTER TABLE book DROP COLUMN popularity_rating_count;
 
 -- name: fixtures_fail_pull_generation_commit &
 CREATE TRIGGER fail_pull_generation BEFORE UPDATE OF pull_generation ON sync_metadata

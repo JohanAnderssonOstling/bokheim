@@ -471,7 +471,7 @@ mod tests {
             let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, mode, None).await.unwrap();
             assert_eq!(repeat.book_id, first.book_id);
             assert!(!repeat.created);
-            let snapshot = importer.storage.database().scan_snapshot().await.unwrap();
+            let snapshot = importer.storage.database().scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).await.unwrap();
             let scan = discover(destination.path(), &snapshot);
             let inspected = inspect(destination.path(), &scan, &snapshot, &importer.cpu).await;
             assert!(inspected.readable);

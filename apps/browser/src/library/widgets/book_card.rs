@@ -1286,7 +1286,7 @@ impl BookCardView {
         let key = self.book.key();
         let mut body = components::book_overlay_body();
         if let Some(detail) = detail {
-            body = body.children(components::book_overlay_description(&detail.description, theme));
+            body = body.children(ui_html_components::book_overlay_description(&detail.description, theme));
             if !detail.subjects.is_empty() {
                 let mut subjects = components::book_overlay_subjects();
                 for (index, path) in detail.subjects.iter().enumerate() {

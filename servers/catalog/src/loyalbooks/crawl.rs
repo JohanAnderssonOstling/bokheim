@@ -1,15 +1,15 @@
 //! A durable, single-worker sitemap acquisition. HTML stays in memory.
-use super::{add, add_fetched, now as unix_time, request_delay, selector, source_url, Popularity, SOURCE};
-use crate::{get, publish, IngestError};
-use reqwest::{blocking::Client, Url};
-use rusqlite::{params, Connection, OptionalExtension};
+use super::{SOURCE, add, add_fetched, now as unix_time, request_delay, selector, source_url};
+use crate::{IngestError, get, publish};
+use reqwest::{Url, blocking::Client};
+use rusqlite::{Connection, OptionalExtension, params};
 use scraper::Html;
-use serde_json::{from_str, json, to_string, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::process::Command;
-use std::thread::{sleep, spawn, JoinHandle};
+use std::thread::{JoinHandle, sleep, spawn};
 use std::time::Duration;
 
 fn now() -> i64 {
@@ -31,10 +31,6 @@ CREATE TABLE IF NOT EXISTS source_crawl_page(
  PRIMARY KEY(source,entry_id)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS source_crawl_ready ON source_crawl_page(source,ordinal);
-CREATE TABLE IF NOT EXISTS source_crawl_popularity(
- source TEXT NOT NULL,entry_id TEXT NOT NULL,listing_url TEXT NOT NULL,metadata TEXT NOT NULL,
- PRIMARY KEY(source,entry_id,listing_url)
-) STRICT, WITHOUT ROWID;
 ";
 
 fn setup(db: &Connection) -> Result<(), String> {
@@ -97,40 +93,6 @@ fn seed(db: &Connection, urls: &[Url]) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
-fn observations(url: &Url, raw: &str) -> Result<Vec<(String, Popularity)>, String> {
-    let language = url.path().strip_prefix("/language/").map(|value| value.replace('_', " "));
-    let page = if language.is_none() { url.path().trim_end_matches('/').rsplit('/').next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1) } else { 1 };
-    let html = Html::parse_document(raw);
-    let mut seen = HashSet::new();
-    let mut results = Vec::new();
-    for anchor in html.select(&selector("td.layout2-blue a[href]")) {
-        let target = url.join(anchor.value().attr("href").unwrap_or_default()).map_err(|e| e.to_string())?;
-        if !matches!(target.host_str(), Some("loyalbooks.com" | "www.loyalbooks.com")) {
-            continue;
-        }
-        let Some(id) = target.path().strip_prefix("/book/") else { continue };
-        if !seen.insert(id.to_owned()) {
-            continue;
-        }
-        let mut details = BTreeMap::new();
-        let (scope, rank) = if let Some(language) = &language {
-            details.insert("language".into(), json!(language));
-            details.insert("position".into(), json!(seen.len()));
-            ("language_featured", None)
-        } else {
-            ("sitewide", Some((page - 1) * 100 + seen.len()))
-        };
-        results.push((id.to_owned(), Popularity { rank, scope: scope.into(), listing_url: url.to_string(), observed_at_unix_seconds: Some(unix_time()), details }));
-        if language.is_some() && results.len() == 2 {
-            break;
-        }
-    }
-    if results.is_empty() {
-        return Err("listing contains no recognizable book positions".into());
-    }
-    Ok(results)
-}
-
 pub(super) fn discover_links(db: &Connection, url: &Url, raw: &str) -> Result<(), String> {
     let html = Html::parse_document(raw);
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -166,22 +128,6 @@ pub(super) fn discover_links(db: &Connection, url: &Url, raw: &str) -> Result<()
     tx.commit().map_err(|e| e.to_string())
 }
 
-fn apply_observations(db: &Connection, id: &str) -> Result<(), String> {
-    let previous: Option<String> = db.query_row("SELECT metadata FROM source_entry WHERE source=?1 AND entry_id=?2", params![SOURCE, id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
-    let Some(previous) = previous else { return Ok(()) };
-    let mut metadata: Value = from_str(&previous).map_err(|e| e.to_string())?;
-    let mut observations = metadata["popularity"].as_array().cloned().unwrap_or_default();
-    let mut statement = db.prepare("SELECT metadata FROM source_crawl_popularity WHERE source=?1 AND entry_id=?2 ORDER BY listing_url").map_err(|e| e.to_string())?;
-    for row in statement.query_map(params![SOURCE, id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())? {
-        let observation: Value = from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        observations.retain(|old| old["listing_url"] != observation["listing_url"]);
-        observations.push(observation);
-    }
-    metadata["popularity"] = json!(observations);
-    db.execute("UPDATE source_entry SET metadata=?3 WHERE source=?1 AND entry_id=?2", params![SOURCE, id, to_string(&metadata).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 struct Prefetch {
     url: String,
     worker: JoinHandle<Result<String, IngestError>>,
@@ -213,25 +159,13 @@ fn acquire(db: &Connection, dir: &Path, http: &Client, id: &str, kind: &str, url
             Some(result) => result?,
             None => String::from_utf8(get(http, &url)?).map_err(|e| e.to_string())?,
         };
-        let observations = observations(&url, &raw)?;
         discover_links(db, &url, &raw)?;
-        let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
-        for (id, observation) in observations {
-            tx.execute(
-                "INSERT INTO source_crawl_popularity VALUES(?1,?2,?3,?4) ON CONFLICT(source,entry_id,listing_url) DO UPDATE SET metadata=excluded.metadata",
-                params![SOURCE, id, observation.listing_url, to_string(&observation).map_err(|e| e.to_string())?],
-            )
-            .map_err(|e| e.to_string())?;
-            apply_observations(&tx, &id)?;
-        }
-        tx.commit().map_err(|e| e.to_string())?;
         return Ok("observed");
     }
     match fetched {
         Some(result) => add_fetched(dir, db, http, url, result?)?,
-        None => add(dir, db, http, url, None)?,
+        None => add(dir, db, http, url)?,
     }
-    apply_observations(db, id)?;
     let error: Option<Option<String>> = db.query_row("SELECT json_extract(metadata,'$.epub_import_error') FROM source_entry WHERE source=?1 AND entry_id=?2", params![SOURCE, id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
     Ok(match error {
         Some(Some(_)) => "partial",
@@ -444,31 +378,6 @@ mod tests {
         seed(&db, &urls).unwrap();
         assert_eq!(db.query_row("SELECT count(*) FROM source_crawl_page", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         assert_eq!(db.query_row("SELECT attempts FROM source_crawl_page WHERE kind='book'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-    }
-
-    #[test]
-    fn popularity_keeps_language_positions_separate_and_refreshes_known_entries() {
-        let raw = r#"<table><tr><td class="layout2-blue"><a href="/book/a">A</a><a href="/book/a">A</a><a href="/book/b">B</a><a href="/book/c">C</a></td></tr></table>"#;
-        let site = observations(&Url::parse("https://www.loyalbooks.com/Top_100/2").unwrap(), raw).unwrap();
-        assert_eq!(site[0].1.rank, Some(101));
-        assert_eq!(site[2].1.rank, Some(103));
-        let language = observations(&Url::parse("https://www.loyalbooks.com/language/Old_English").unwrap(), raw).unwrap();
-        assert_eq!(language.len(), 2);
-        assert_eq!(language[0].1.rank, None);
-        assert_eq!(language[1].1.details["position"], 2);
-        let dir = tempfile::tempdir().unwrap();
-        let db = curation::open(dir.path()).unwrap();
-        setup(&db).unwrap();
-        db.execute("INSERT INTO source_entry(source,entry_id,entry_url,metadata) VALUES(?1,'a','https://www.loyalbooks.com/book/a','{\"rating\":5,\"popularity\":[]}')", [SOURCE]).unwrap();
-        for (_, observation) in [site[0].clone(), language[0].clone()] {
-            db.execute("INSERT INTO source_crawl_popularity VALUES(?1,'a',?2,?3)", params![SOURCE, observation.listing_url, to_string(&observation).unwrap()]).unwrap();
-        }
-        apply_observations(&db, "a").unwrap();
-        apply_observations(&db, "a").unwrap();
-        let metadata: String = db.query_row("SELECT metadata FROM source_entry", [], |row| row.get(0)).unwrap();
-        let value: Value = from_str(&metadata).unwrap();
-        assert_eq!(value["popularity"].as_array().unwrap().len(), 2);
-        assert_eq!(value["rating"], 5);
     }
 
     #[test]

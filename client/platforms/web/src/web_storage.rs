@@ -755,7 +755,7 @@ pub fn migrate_book_ids(namespace: &str, ids: &[(BookId, BookId)]) -> Result<(),
                 let prefix = format!("{namespace}/{kind}/{old}");
                 let names = tx
                     .prepare("SELECT name,physical_name,byte_length FROM asset_file WHERE name=?1 OR (name>=?2 AND name<?3)")?
-                    .query_map(rusqlite::params![prefix, format!("{prefix}."), format!("{prefix}/")], |row| Ok((row.get::<_, StorageError>(0)?, row.get::<_, StorageError>(1)?, row.get::<_, i64>(2)?)))?
+                    .query_map(rusqlite::params![prefix, format!("{prefix}."), format!("{prefix}/")], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))?
                     .collect::<Result<Vec<_>, _>>()?;
                 for (name, physical, length) in names {
                     let destination = format!("{namespace}/{kind}/{new}{}", &name[prefix.len()..]);

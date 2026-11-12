@@ -69,9 +69,6 @@ pub struct BookEnrichment {
     pub toc: Option<Vec<book_model::BookTocEntry>>,
     #[serde(default)]
     pub cover: Option<CoverSource>,
-    /// Work-level participation evidence, independent of bibliographic metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub popularity: Option<crate::WorkPopularity>,
     /// The failed pipeline stage; omitted by servers predating this field.
     /// Missing or unrecognized stages must not trigger optional-cover recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]

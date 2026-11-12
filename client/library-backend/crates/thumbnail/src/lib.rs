@@ -8,7 +8,6 @@ use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 use image::ImageReader;
 use image::codecs::jpeg::JpegEncoder;
 use image::{ColorType, DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, RgbImage};
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "book-extractors")]
 use std::io::SeekFrom;
 use std::io::Cursor;
@@ -38,22 +37,11 @@ mod card;
 mod format_tests;
 pub use card::{card_thumbnail_geometry, card_thumbnail_suffix, encode_card_thumbnail_at_width, CardThumbnailGeometry, CARD_MAX_HORIZONTAL_CROP, CARD_MAX_VERTICAL_STRETCH, CARD_TARGET_HEIGHT_RATIO, CARD_THUMBNAIL_VERSION};
 
-/// An unmodified high-density master plus adjusted 300px and 600px cards.
-/// Every derivative is produced independently from the decoded original.
-#[derive(Serialize, Deserialize)]
-pub struct ThumbnailVersions {
-    #[serde(with = "serde_bytes")]
-    pub browse: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    pub card_high_density: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    pub high_density: Vec<u8>,
-}
+pub use thumbnail_contract::ThumbnailVersions;
 
-impl ThumbnailVersions {
-    pub fn from_image(image: &RgbImage) -> ThumbnailResult<Self> {
-        Ok(Self { browse: encode_card_thumbnail_at_width(image, BROWSE_THUMBNAIL_WIDTH)?, card_high_density: encode_card_thumbnail_at_width(image, THUMBNAIL_WIDTH)?, high_density: encode_thumbnail_at_width(image, THUMBNAIL_WIDTH)? })
-    }
+/// Build each thumbnail independently from the decoded original.
+pub fn thumbnail_versions_from_image(image: &RgbImage) -> ThumbnailResult<ThumbnailVersions> {
+    Ok(ThumbnailVersions { browse: encode_card_thumbnail_at_width(image, BROWSE_THUMBNAIL_WIDTH)?, card_high_density: encode_card_thumbnail_at_width(image, THUMBNAIL_WIDTH)?, high_density: encode_thumbnail_at_width(image, THUMBNAIL_WIDTH)? })
 }
 
 /// Returns whether an image is large enough and sufficiently cover-shaped to
@@ -317,7 +305,7 @@ mod book_extractor_tests {
             let cover = decode_cover_image(png.get_ref(), ImageFormat::Png).unwrap();
             assert_eq!(cover.dimensions(), (600, 900));
             assert_eq!(cover.get_pixel(300, 450).0, [180, 40, 20]);
-            let versions = ThumbnailVersions::from_image(&cover).unwrap();
+            let versions = thumbnail_versions_from_image(&cover).unwrap();
             assert_eq!(image::load_from_memory(&versions.browse).unwrap().width(), 300);
             let high = image::load_from_memory(&versions.high_density).unwrap();
             assert_eq!((high.width(), high.height()), (600, 900));
@@ -411,7 +399,7 @@ fn cover_versions<R: Read + Seek + Send + Sync + 'static>(extension: &str, mut r
         }),
         _ => None,
     };
-    cover.as_ref().map(ThumbnailVersions::from_image).transpose()
+    cover.as_ref().map(thumbnail_versions_from_image).transpose()
 }
 
 #[cfg(all(test, feature = "book-extractors"))]

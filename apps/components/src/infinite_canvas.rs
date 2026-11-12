@@ -6,7 +6,7 @@
 //! past a tap's slop, and a child's click checks [`InfiniteCanvas::panned`] so
 //! that a pan ending over it does not also open it.
 
-use gpui::{AnyElement, App, AvailableSpace, Bounds, ElementTransform, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, ScrollDelta, Styled, TouchPhase, Window, canvas, div, point, px, size};
+use gpui::{AnyElement, App, AvailableSpace, Bounds, ElementTransform, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, ScrollDelta, Size, Styled, TouchPhase, Window, canvas, div, point, px, size};
 
 use crate::browser_theme;
 
@@ -65,6 +65,7 @@ struct Press {
 /// gesture in progress. The page owns it and sets the camera to frame content.
 pub struct InfiniteCanvas {
     pub camera: CanvasCamera,
+    content_bounds: Option<(Size<Pixels>, Size<Pixels>)>,
     min_zoom: f32,
     max_zoom: f32,
     /// Where the canvas was laid out in the window last frame; `None` before its first layout.
@@ -77,7 +78,22 @@ pub struct InfiniteCanvas {
 
 impl InfiniteCanvas {
     pub fn new(min_zoom: f32, max_zoom: f32) -> Self {
-        Self { camera: CanvasCamera::default(), min_zoom, max_zoom, bounds: None, press: None, last_panned: false, touch_pan_origin: None }
+        Self { camera: CanvasCamera::default(), content_bounds: None, min_zoom, max_zoom, bounds: None, press: None, last_panned: false, touch_pan_origin: None }
+    }
+
+    /// Keep finite content inside its viewport; smaller axes stay centered.
+    pub fn contain_content(&mut self, content: Size<Pixels>, viewport: Size<Pixels>) {
+        self.content_bounds = Some((content, viewport));
+        self.constrain_pan();
+    }
+
+    fn constrain_pan(&mut self) {
+        let Some((content, viewport)) = self.content_bounds else { return };
+        let clamp_axis = |pan: Pixels, extent: Pixels, viewport: Pixels| {
+            let remaining = viewport - extent * self.camera.zoom;
+            if remaining >= px(0.0) { remaining / 2.0 } else { pan.max(remaining).min(px(0.0)) }
+        };
+        self.camera.pan = point(clamp_axis(self.camera.pan.x, content.width, viewport.width), clamp_axis(self.camera.pan.y, content.height, viewport.height));
     }
 
     /// Whether the press in progress, or the one just released, panned rather
@@ -93,6 +109,7 @@ impl InfiniteCanvas {
     fn zoom_at(&mut self, window_position: Point<Pixels>, zoom: f32) {
         let zoom = zoom.clamp(self.min_zoom, self.max_zoom);
         self.camera = self.camera.zoomed_about(self.local(window_position), zoom);
+        self.constrain_pan();
     }
 
     /// Zoom around the viewport center for keyboard controls.
@@ -115,6 +132,7 @@ impl InfiniteCanvas {
             return false;
         }
         self.camera = CanvasCamera { pan: press.camera.pan + delta, ..press.camera };
+        self.constrain_pan();
         true
     }
 
@@ -124,6 +142,7 @@ impl InfiniteCanvas {
         self.last_panned = press.panning;
         if press.panning {
             self.camera = CanvasCamera { pan: press.camera.pan + (position - press.start), ..press.camera };
+            self.constrain_pan();
         }
     }
 }
@@ -240,6 +259,7 @@ impl RenderOnce for InfiniteCanvasView {
                                 ScrollDelta::Pages(delta) => canvas.bounds.map_or(point(px(0.0), px(0.0)), |bounds| point(bounds.size.width * delta.x, bounds.size.height * delta.y)),
                             };
                             canvas.camera.pan += delta;
+                            canvas.constrain_pan();
                             cx.notify();
                             return;
                         }
@@ -257,6 +277,7 @@ impl RenderOnce for InfiniteCanvasView {
                                     }
                                 }
                             }
+                            canvas.constrain_pan();
                             cx.notify();
                             return;
                         }
@@ -289,6 +310,7 @@ impl RenderOnce for InfiniteCanvasView {
                                 }
                             }
                         }
+                        canvas.constrain_pan();
                         cx.notify();
                     });
                     cx.stop_propagation();

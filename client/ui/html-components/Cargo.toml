@@ -1,0 +1,18 @@
+[package]
+name = "ui-html-components"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ui-components = { path = "../../../apps/components" }
+gpui.workspace = true
+gpui-component.workspace = true
+html-gpui.workspace = true
+html-parse = { package = "skrift-parse", path = "../../../../HtmlEngine/crates/02-html-parse" }
+
+[dev-dependencies]
+html-engine-model = { package = "skrift-engine-model", path = "../../../../HtmlEngine/crates/html-engine-model" }
+html-style-model = { package = "skrift-style-model", path = "../../../../HtmlEngine/crates/html-style-model" }
+html-pipeline = { package = "skrift-pipeline", path = "../../../../HtmlEngine/crates/html-pipeline" }
+gpui = { workspace = true, features = ["test-support"] }

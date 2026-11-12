@@ -13,7 +13,7 @@ use ui_text::text;
 
 use crate::Button;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, AvailableSpace, Bounds, Div, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId, Pixels, Refineable, SharedString, Stateful, Style, StyleRefinement, Window, div, point, px, relative, rems, size};
+use gpui::{AnyElement, App, AvailableSpace, Bounds, Div, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId, Pixels, Refineable, SharedString, Stateful, Style, StyleRefinement, Window, div, point, px, rems, size};
 use gpui_component::Icon;
 
 use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, base_button, topbar_action_height_rem};
@@ -22,8 +22,6 @@ use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_LG, TEXT
 /// book's Add — still has a column its blurb can be read in.
 pub const BOOK_OVERLAY_MIN_WIDTH_REM: f32 = 22.0;
 /// Enough of the blurb to say what the book is; the rest is on its page.
-const DESCRIPTION_LINES: usize = 6;
-const DESCRIPTION_LINE_HEIGHT: f32 = 1.5;
 /// Space between the buttons of a row, which the width is measured with.
 const COMMAND_GAP: f32 = SPACE_XS;
 
@@ -162,14 +160,6 @@ pub fn book_overlay_facts(facts: impl IntoIterator<Item = SharedString>, theme: 
 /// The blurb, the subjects and the way to the book's page.
 pub fn book_overlay_body() -> Div {
     div().w_full().min_w_0().flex().flex_col().gap(px(SPACE_SM)).px(px(SPACE_MD)).pt(px(SPACE_SM)).pb(px(SPACE_MD))
-}
-
-/// The first lines of the blurb, stored as HTML, read as plain text and cut
-/// with an ellipsis. `None` for a blurb of markup alone.
-pub fn book_overlay_description(description: &str, theme: BrowserTheme) -> Option<Div> {
-    let text = html_pipeline::plain_text_from_fragment(description);
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!text.is_empty()).then(|| div().w_full().min_w_0().whitespace_normal().line_clamp(DESCRIPTION_LINES).text_ellipsis().text_size(rems(TEXT_SM)).line_height(relative(DESCRIPTION_LINE_HEIGHT)).text_color(theme.text).child(text))
 }
 
 /// The subjects, one path to a line.

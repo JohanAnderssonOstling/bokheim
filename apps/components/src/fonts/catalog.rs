@@ -1,7 +1,7 @@
 //! Catalog lifecycle shared by the interface and book font pickers.
 use super::SystemFontFamilies;
 use gpui::{App, Context, ScrollStrategy, SharedString, Subscription, Task, TextSystem, UniformListScrollHandle};
-use html_gpui::backend::is_private_font_family;
+use html_fonts::is_private_font_family;
 use std::sync::Arc;
 
 #[derive(Default)]

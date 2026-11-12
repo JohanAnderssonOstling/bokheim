@@ -20,12 +20,7 @@ impl<R> Default for SidebarList<R> {
 impl<R: PartialEq> SidebarList<R> {
     /// Preserve measured rows and the scroll anchor outside the changed range.
     pub(crate) fn set_rows(&mut self, rows: Vec<R>) {
-        let prefix = self.rows.iter().zip(&rows).take_while(|(old, new)| old == new).count();
-        let suffix = self.rows[prefix..].iter().rev().zip(rows[prefix..].iter().rev()).take_while(|(old, new)| old == new).count();
-        if prefix + suffix != self.rows.len() || self.rows.len() != rows.len() {
-            self.state.splice_with_uniform_height(prefix..self.rows.len() - suffix, rows.len() - prefix - suffix, px(80.0));
-            self.rows = rows;
-        }
+        replace_rows(&self.state, &mut self.rows, rows);
     }
 
     pub(crate) fn reveal_selected(&mut self, id: Option<&str>, row: Option<usize>) {
@@ -35,6 +30,16 @@ impl<R: PartialEq> SidebarList<R> {
                 reveal_row(&self.state, row);
             }
         }
+    }
+}
+
+/// Update only changed rows so streaming results retain their scroll anchor.
+pub(crate) fn replace_rows<R: PartialEq>(state: &ListState, previous: &mut Vec<R>, rows: Vec<R>) {
+    let prefix = previous.iter().zip(&rows).take_while(|(old, new)| old == new).count();
+    let suffix = previous[prefix..].iter().rev().zip(rows[prefix..].iter().rev()).take_while(|(old, new)| old == new).count();
+    if prefix + suffix != previous.len() || previous.len() != rows.len() {
+        state.splice_with_uniform_height(prefix..previous.len() - suffix, rows.len() - prefix - suffix, px(80.0));
+        *previous = rows;
     }
 }
 

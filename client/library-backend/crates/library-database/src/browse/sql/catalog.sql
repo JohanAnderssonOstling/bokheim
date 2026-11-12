@@ -7,7 +7,7 @@
 SELECT book.row_id,
        CASE WHEN :normalized_query='' THEN 1
          ELSE instr(book.search_title,:normalized_query)>0 OR instr(book.search_author,:normalized_query)>0 END,
-       book.source_priority=0,book.source_priority,book.popularity_score,NULL
+       book.source_priority=0,book.source_priority
 FROM json_each(:book_ids) selected
 JOIN catalog_browse_book book ON book.row_id=selected.value
 WHERE (:file_types=0 OR (:file_types & book.format)!=0)
@@ -34,15 +34,12 @@ ORDER BY selected.key;
 
 -- name: catalog_browse_ordered?
 -- param: book_ids: &str
--- param: sort_popularity: i32
 -- Choose each section's page before assembling author strings and card rows.
 SELECT book.row_id
 FROM json_each(:book_ids) selected
 JOIN catalog_browse_book book ON book.row_id=selected.value
 JOIN book source ON source.row_id=book.source_row_id
-ORDER BY CASE WHEN :sort_popularity=0 THEN (book.source_priority=0) END DESC,
-         CASE WHEN :sort_popularity=1 THEN book.popularity_score IS NULL END,
-         CASE WHEN :sort_popularity=1 THEN book.popularity_score END DESC,
+ORDER BY (book.source_priority=0) DESC,
          book.search_title,source.title,book.key;
 
 -- name: catalog_browse_authors?

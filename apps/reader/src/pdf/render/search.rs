@@ -1,11 +1,9 @@
 //! PDF search visibility and renderer navigation.
 
-use ui_text::text;
-
-use crate::shell::search;
+use crate::shell::{search, search_contents};
 use crate::shell::toolbar::SidebarTarget;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Window, div};
+use gpui::{AnyElement, App, Context, Entity, Window, div, px};
 use skrift_column_paginator::SearchOptions;
 use ui_components as components;
 
@@ -32,7 +30,11 @@ impl PdfReaderView {
 
     fn render_search_row(&self, row: usize, target: &Entity<Self>, theme: components::BrowserTheme, cx: &App) -> AnyElement {
         match self.search_list.list.rows.get(row) {
-            Some(SearchRow::Heading(page)) => components::reader_annotation_group_heading(format!(text!(reader::page), page + 1), theme).into_any_element(),
+            Some(SearchRow::Heading(id)) => self.search_list.contents.branch(*id).map(|branch| search_contents::branch_row(target, branch, theme, |reader, id, expanded, cx| {
+                reader.search_list.contents.set_expanded(id, expanded);
+                reader.search_list.refresh_rows();
+                cx.notify();
+            })).unwrap_or_else(|| div().into_any_element()),
             Some(SearchRow::Match(index)) => {
                 let index = *index;
                 let Some(hit) = self.pdf.read(cx).search_hits().get(index) else { return div().into_any_element() };
@@ -40,6 +42,7 @@ impl PdfReaderView {
                 let target = target.downgrade();
                 let selected = self.search_match.is_some_and(|(current, _)| current == index + 1);
                 search::result_row(("pdf-search-hit", index), hit.excerpt().to_owned(), &self.search_input.read(cx).value(), SearchOptions { match_diacritics: true, ..Default::default() }, selected, theme)
+                    .pl(px(16.0 + components::CONTENTS_ROW_INDENT * self.search_list.contents.depth(index).min(3) as f32))
                     .debug_selector(move || format!("pdf-search-hit-{index}"))
                     .on_click(move |_, window, cx| {
                         let _ = target.update(cx, |reader, cx| {

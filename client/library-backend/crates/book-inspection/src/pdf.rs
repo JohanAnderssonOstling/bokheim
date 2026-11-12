@@ -90,7 +90,7 @@ pub fn prepare_pdf_metadata(source_name: &Path, reader: impl Read + Seek) -> (Op
     // the document's cross-reference variant.
     let started = pdf_profile_start();
     let mut identity = None;
-    let document = pdf_range_reader::metadata_with_root(reader, |document| identity = PdfSourceIdentity::from_document(document));
+    let document = pdf_range_reader::metadata_with_root(reader, |document| identity = crate::pdf_source_identity::from_document(document));
     profile_pdf_phase("declared_document_read", 0, started);
     let started = pdf_profile_start();
     let inspected = document.and_then(|document| inspect_pdf_document(source_name, document)).unwrap_or_else(|_| InspectedPdf { metadata: fallback_metadata(source_name) });

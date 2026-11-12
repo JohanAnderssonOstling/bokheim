@@ -239,8 +239,8 @@ impl BrowseListing {
         // Home keeps activity order by default; sorting changes presentation,
         // while its shelves still select books by their original activity rules.
         if kind == BrowseKind::Home {
-            controls.collection_sorts = vec![BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::BookCount, BrowseChipSort::Popularity];
-            controls.book_sorts = vec![BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical, BrowseBookSort::Popularity];
+            controls.collection_sorts = vec![BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::BookCount];
+            controls.book_sorts = vec![BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical];
         }
         controls
     }

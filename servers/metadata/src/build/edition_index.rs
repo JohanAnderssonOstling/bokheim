@@ -23,7 +23,7 @@ pub fn extend_edition_index(snapshot: &Path, previous: &Path, output: &Path, lim
         return Err(MetadataError("index output must be new and any limit must be positive".into()));
     }
     let started = Instant::now();
-    let inputs = incremental::InputIdentity::read(snapshot, None, None)?;
+    let inputs = incremental::InputIdentity::read(snapshot, None)?;
     let resolver = Resolver::open(snapshot, None)?;
     let source = resolver.connection()?;
     validate_source(&source)?;

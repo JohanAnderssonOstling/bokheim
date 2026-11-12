@@ -123,7 +123,7 @@ impl PdfReaderView {
             self.dismiss_annotation_editor(window, cx);
         } else if self.sidebar.is_visible() && self.chrome.is_visible() {
             self.hide_sidebar(window, cx);
-        } else if self.history.availability().0 {
+        } else if !components::has_native_back_button() && self.history.availability().0 {
             self.navigate_history(false, window, cx);
         } else {
             self.close_reader(window, cx);

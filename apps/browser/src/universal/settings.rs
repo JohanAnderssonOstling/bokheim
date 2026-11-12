@@ -317,28 +317,25 @@ impl SettingsPage {
         self.index_usage_request = None;
     }
 
+    // Read once on entering Settings or changing text-search preferences. Keep
+    // the completed task until leaving so rendering does not restart the query.
     fn refresh_index_usage(&mut self, cx: &mut Context<Self>) {
         let libraries = self.preferences.read(cx).backend().management.clone();
         self.index_usage_request = Some(cx.spawn(async move |page, cx| {
-            loop {
-                let result = libraries.text_search_index_bytes().await;
-                if page
-                    .update(cx, |page, cx| {
-                        match result {
-                            Ok(bytes) => page.index_usage = Some(format_storage_bytes(bytes).into()),
-                            Err(error) => {
-                                page.index_usage = Some(text!(common::unavailable).into());
-                                log::warn!("could not read text index usage: {error}");
-                            }
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
+            let result = libraries.text_search_index_bytes().await;
+            let _ = page.update(cx, |page, cx| {
+                let usage = match result {
+                    Ok(bytes) => format_storage_bytes(bytes).into(),
+                    Err(error) => {
+                        log::warn!("could not read text index usage: {error}");
+                        text!(common::unavailable).into()
+                    }
+                };
+                if page.index_usage.as_ref() != Some(&usage) {
+                    page.index_usage = Some(usage);
+                    cx.notify();
                 }
-                cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
-            }
+            });
         }));
     }
 
@@ -588,10 +585,8 @@ impl Render for SettingsPage {
             let uninstall = components::base_button("uninstall-bokheim").label(text!(settings::uninstall_bokheim)).danger().on_click(cx.listener(|page, _, window, cx| page.confirm_uninstall(window, cx)));
             let device = components::browser_settings_fieldset(text!(settings::kobo), theme)
                 .child(self.section(Section::KoboAutoSleep, components::browser_settings_compact_row(text!(settings::automatic_sleep), auto_sleep, theme), cx))
-                .child(div().text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text_muted).child(text!(settings::shared_with_kobo_s_built_in_reader_changes_apply_immediately_listening_keeps)))
                 .children(self.auto_sleep_error.clone().map(|error| components::browser_settings_group_error(error, theme)))
                 .child(self.section(Section::KoboAutoPowerOff, components::browser_settings_compact_row(text!(settings::automatic_power_off), auto_power_off, theme), cx))
-                .child(div().text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text_muted).child(text!(settings::shared_with_kobo_s_built_in_reader_counts_inactivity_including_time_asleep)))
                 .children(self.auto_power_off_error.clone().map(|error| components::browser_settings_group_error(error, theme)))
                 .child(self.section(Section::KoboUninstall, components::browser_settings_row(text!(settings::uninstall_bokheim), text!(settings::remove_the_app_and_its_menu_entry_keep_your_books_and_settings), uninstall, theme), cx))
                 .children(self.uninstall_error.clone().map(|error| components::browser_settings_group_error(error, theme)));

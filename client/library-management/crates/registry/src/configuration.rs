@@ -149,6 +149,13 @@ impl LocalRegistry {
     }
 
     pub(super) fn bind_library_account(&mut self, id: &LibraryId, account: &str) -> RegistryResult<()> {
+        // Authorization checks an existing binding on every remote operation.
+        // Only first-time binding needs a transaction and a durable write.
+        let current = read(&self.connection, id)?;
+        let bound = current.clone().bind(account)?;
+        if current == bound {
+            return Ok(());
+        }
         let tx = self.connection.transaction()?;
         create(&tx, id, &LibraryConfiguration::Unbound { storage: LibraryStorage::Bokheim })?;
         let configuration = read(&tx, id)?.bind(account)?;

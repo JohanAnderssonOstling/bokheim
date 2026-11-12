@@ -79,7 +79,7 @@ mod native {
             self.enqueue(Box::new(move || {
                 if !sender.is_closed() {
                     let _entered = runtime.as_ref().map(|handle| handle.enter());
-                    let _ = sender.send(operation());
+                    let _ = sender.send(crate::profiling::operation(operation));
                 }
             }))?;
             Ok(receiver)
@@ -104,7 +104,7 @@ mod native {
         let runtime = tokio::runtime::Handle::try_current().ok();
         dispatcher()?.enqueue(Box::new(move || {
             let _entered = runtime.as_ref().map(|handle| handle.enter());
-            let _ = sender.send(operation());
+            let _ = sender.send(crate::profiling::operation(operation));
         }))?;
         receiver.recv().map_err(|_| "storage transaction stopped before returning a result".to_owned())
     }

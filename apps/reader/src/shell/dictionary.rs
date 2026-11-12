@@ -11,7 +11,7 @@ use dictionary_settings::{Closed as DictionarySettingsClosed, DictionarySettings
 use gpui::prelude::*;
 use gpui::{
     Anchor, AnyElement, App, Bounds, ClickEvent, Context, DispatchPhase, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta,
-    ScrollHandle, ScrollWheelEvent, Task, WeakEntity, Window, canvas, div, point, px, rems, size,
+    ScrollHandle, ScrollWheelEvent, Task, TouchPhase, WeakEntity, Window, canvas, div, point, px, rems, size,
 };
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::popover::{Popover, PopoverState};
@@ -261,7 +261,6 @@ pub(crate) struct DictionaryPopup {
     element_click: WordClick,
     focus: FocusHandle,
     wikipedia_request: Option<WikipediaRequest>,
-    wikipedia_popup: Option<Entity<Self>>,
     wikipedia: Option<WikipediaArticle>,
     wikipedia_page: wikipedia::ArticlePage,
     wikipedia_equivalents: wikipedia::Equivalents,
@@ -356,7 +355,6 @@ impl DictionaryPopup {
             element_click: WordClick::default(),
             focus,
             wikipedia_request: None,
-            wikipedia_popup: None,
             wikipedia: None,
             wikipedia_page: wikipedia::ArticlePage::default(),
             wikipedia_equivalents: wikipedia::Equivalents::default(),
@@ -493,35 +491,6 @@ impl DictionaryPopup {
             && self.wikipedia_request.is_some()
     }
 
-    fn lookup_entry_on_wikipedia(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selection_only {
-            return;
-        }
-        let Some(request) = self.wikipedia_request.clone() else { return };
-        self.reset_result_wheel();
-        let Some((_, definition)) = self.dictionary_entries().nth(self.dictionary_index) else { return };
-        let query = definition.word.trim().to_owned();
-        let popup = cx.new(|cx| {
-            let mut popup = Self::empty(query, self.languages.clone(), self.anchor, window, cx);
-            popup.popup_area = self.popup_area;
-            popup.popup_height = self.popup_height;
-            popup.result = Some(Ok(DictionaryLookup { dictionaries: Vec::new(), enabled_count: 0, errors: Vec::new() }));
-            popup.wikipedia_request = Some(request);
-            popup.wikipedia_page.context = self.wikipedia_page.context.clone();
-            popup.wikipedia_page.reuse_reader = self.wikipedia_page.reuse_reader;
-            popup.refresh_wikipedia(cx);
-            popup
-        });
-        cx.subscribe_in(&popup, window, |this, _, _: &Closed, window, cx| {
-            this.wikipedia_popup = None;
-            this.focus.focus(window, cx);
-            cx.notify();
-        })
-        .detach();
-        cx.subscribe(&popup, |_, _, article: &WikipediaArticle, cx| cx.emit(article.clone())).detach();
-        self.wikipedia_popup = Some(popup);
-        cx.notify();
-    }
 
     fn visible_wikipedia(&self) -> Option<&WikipediaArticle> {
         self.wikipedia.as_ref().filter(|_| self.wikipedia_eligible())
@@ -689,26 +658,24 @@ impl DictionaryPopup {
         if loading || total < 2 {
             return;
         }
+        if event.touch_phase == TouchPhase::Started {
+            self.wheel_scrolling_text = false;
+        }
         if self.wheel_scrolling_text {
             self.debounce_result_wheel(window, cx);
             return;
         }
         if let ScrollDelta::Pages(delta) = event.delta {
-            let delta = if delta.y != 0.0 { delta.y } else { delta.x };
-            if delta.is_finite() && delta != 0.0 {
-                self.navigate_result(if delta < 0.0 { 1 } else { -1 }, window, cx);
+            if delta.x.is_finite() && delta.x.abs() > delta.y.abs() {
+                self.navigate_result(if delta.x < 0.0 { 1 } else { -1 }, window, cx);
             }
         } else if matches!(event.delta, ScrollDelta::Pixels(_)) || self.touchpad.is_active() || matches!(event.delta, ScrollDelta::Lines(delta) if delta.x.abs() > delta.y.abs()) {
             self.wheel_delta = 0.0;
             self.wheel_debounce.take();
             if let Some(travel) = self.touchpad.update(event) {
-                let delta = if travel.y != 0.0 { travel.y } else { travel.x };
-                self.navigate_result(if delta < 0.0 { 1 } else { -1 }, window, cx);
-            }
-        } else if let ScrollDelta::Lines(delta) = event.delta {
-            if delta.y.is_finite() && delta.y != 0.0 {
-                self.wheel_delta += delta.y;
-                self.debounce_result_wheel(window, cx);
+                if travel.x != 0.0 {
+                    self.navigate_result(if travel.x < 0.0 { 1 } else { -1 }, window, cx);
+                }
             }
         }
     }
@@ -719,10 +686,10 @@ impl DictionaryPopup {
             ScrollDelta::Pixels(delta) => point(f32::from(delta.x), f32::from(delta.y)),
             ScrollDelta::Lines(delta) | ScrollDelta::Pages(delta) => delta,
         };
-        let offset = self.definitions_scroll.offset().y;
-        let maximum = self.definitions_scroll.max_offset().y;
-        let can_scroll = delta.y < 0.0 && offset > -maximum || delta.y > 0.0 && offset < px(0.0);
-        if delta.x.is_finite() && delta.y.is_finite() && delta.y.abs() >= delta.x.abs() && maximum > px(0.0) && (can_scroll || self.wheel_scrolling_text) {
+        if event.touch_phase == TouchPhase::Started {
+            self.wheel_scrolling_text = false;
+        }
+        if delta.x.is_finite() && delta.y.is_finite() && ((delta.y != 0.0 && delta.y.abs() >= delta.x.abs()) || self.wheel_scrolling_text) {
             self.wheel_scrolling_text = true;
             self.wheel_delta = 0.0;
             if matches!(event.delta, ScrollDelta::Pixels(_)) || self.touchpad.is_active() {
@@ -790,9 +757,6 @@ impl DictionaryPopup {
     pub(crate) fn set_anchor(&mut self, anchor: Option<Bounds<Pixels>>, cx: &mut Context<Self>) {
         if self.anchor != anchor {
             self.anchor = anchor;
-            if let Some(popup) = &self.wikipedia_popup {
-                popup.update(cx, |popup, cx| popup.set_anchor(anchor, cx));
-            }
             cx.notify();
         }
     }
@@ -838,9 +802,6 @@ impl Render for DictionaryPopup {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(article) = self.wikipedia_page.render(&self.focus, window, cx) {
             return article;
-        }
-        if let Some(popup) = self.wikipedia_popup.clone() {
-            return popup.into_any_element();
         }
         // Do not paint a small loading popup before its initial content arrives.
         // Once shown, keep the popup available while switching or retrying results.
@@ -1042,13 +1003,6 @@ impl Render for DictionaryPopup {
                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
         });
         let close = (self.translation.is_some() && !components::touch_ui()).then(|| components::outlined_icon_button("translation-close", text!(reader::close_translation), IconName::Close).no_fill().on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))));
-        let show_wikipedia_button = !showing_wikipedia && self.wikipedia_request.is_some() && self.dictionary_entries().nth(self.dictionary_index).is_some_and(|(_, definition)| can_lookup_wikipedia(&definition.word));
-        let wikipedia_lookup = show_wikipedia_button.then(|| {
-            components::outlined_icon_button("lookup-wikipedia", text!(reader::look_up_on_wikipedia), IconName::Globe)
-                .no_fill()
-                .debug_selector(|| "lookup-wikipedia".into())
-                .on_click(cx.listener(|this, _, window, cx| this.lookup_entry_on_wikipedia(window, cx)))
-        });
         let translation_actions = self.translation.as_ref().filter(|_| showing_translation).map(|translation| translation.update(cx, |translation, cx| translation.header_actions(window, cx)));
         let title = components::section_title(title).flex_1().min_w_0();
         if let Some(article) = wikipedia {
@@ -1088,10 +1042,10 @@ impl Render for DictionaryPopup {
                     .children(close),
             );
         } else {
-            heading = heading.child(div().flex().items_center().gap(px(8.0)).child(div().flex_1().min_w_0().overflow_hidden().child(title.truncate().line_clamp(1))).children(translation_actions).children(wikipedia_lookup).children(settings).children(close));
+            heading = heading.child(div().flex().items_center().gap(px(8.0)).child(div().flex_1().min_w_0().overflow_hidden().child(title.truncate().line_clamp(1))).children(translation_actions).children(settings).children(close));
         }
         // Keep the container in the tab order when no child controls exist.
-        self.focus = self.focus.clone().tab_stop((self.selection_only || self.backend.is_none()) && wikipedia.is_none() && total <= 1 && !show_wikipedia_button).tab_index(0);
+        self.focus = self.focus.clone().tab_stop((self.selection_only || self.backend.is_none()) && wikipedia.is_none() && total <= 1).tab_index(0);
         let definitions = div().id("dictionary-definitions").debug_selector(|| "dictionary-definitions".into()).track_scroll(&self.definitions_scroll).min_w_0().min_h_0().overflow_y_scroll().child(definitions);
         self.render_popup(heading.into_any_element(), definitions.into_any_element(), window, cx).into_any_element()
     }

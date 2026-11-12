@@ -140,7 +140,7 @@ async fn ingest_file_inner(
                 (identity, Some(metadata))
             } else {
                 let profile = ProfileSpan::new("pdf_identity_marker", &profile_name);
-                (book_inspection::PdfSourceIdentity::read(ProfileIo::new(&mut reader, profile.io())).ok().flatten(), None)
+                (book_inspection::pdf_source_identity::read(ProfileIo::new(&mut reader, profile.io())).ok().flatten(), None)
             };
             reader.rewind()?;
             Ok((identity, metadata, reader))

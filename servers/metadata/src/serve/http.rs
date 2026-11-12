@@ -14,11 +14,7 @@ pub fn app(service: MetadataService) -> Router {
 }
 
 async fn description_capability(State(service): State<MetadataService>) -> (StatusCode, &'static str) {
-    if service.state.descriptions_available {
-        (StatusCode::OK, "available")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "snapshot has no descriptions")
-    }
+    if service.state.descriptions_available { (StatusCode::OK, "available") } else { (StatusCode::SERVICE_UNAVAILABLE, "snapshot has no descriptions") }
 }
 
 async fn record_request_metrics(State(service): State<MetadataService>, request: Request, next: Next) -> Response {
@@ -127,7 +123,7 @@ mod http_tests {
         let temporary = tempfile::tempdir().unwrap();
         let database = crate::build::tests::snapshot_from(temporary.path(), &[], &[], &[]);
         let answers = temporary.path().join("answers.sqlite");
-        build_answers_with_ratings(&database, None, None, None, None, &answers).unwrap();
+        build_answers(&database, None, None, None, &answers).unwrap();
         let service = MetadataService::open(&answers, &temporary.path().join("demand.sqlite")).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v3/books", listener.local_addr().unwrap());

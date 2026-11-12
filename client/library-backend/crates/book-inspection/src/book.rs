@@ -5,8 +5,8 @@
 use crate::{inspect_epub_reader, MetadataResult};
 use book_content::{comic::ComicBook, Book, BookFormat as ContainerFormat};
 use book_model::{AudiobookChapter, BookFormat, BookMetadataError, BookRecord, BookTocEntry, ChapterOrigin, Contributor, AUTHOR_MARC_RELATOR_CODE};
+use book_inspection_contract::{AudiobookMetadata, CachedPdfReader, InspectedBook};
 use content_address::BookId;
-use metadata_contract::audible::LookupRequest;
 use std::collections::HashSet;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -18,50 +18,6 @@ mod nfo;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use mp3::{inspect_folder_reader as inspect_audiobook_folder_reader, inspect_folder_content as inspect_audiobook_folder_content};
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct AudiobookMetadata {
-    pub title: String,
-    pub authors: Vec<Contributor>,
-    pub description: String,
-    pub duration_ms: u64,
-    pub chapters: Vec<AudiobookChapter>,
-    #[serde(default)]
-    pub tracks: Vec<book_model::AudiobookTrack>,
-    pub chapter_origin: ChapterOrigin,
-    #[serde(default)]
-    pub recording: metadata_contract::audible::RecordingEvidence,
-}
-
-impl AudiobookMetadata {
-    /// Original recording evidence used for lookup and enrichment invalidation.
-    pub fn into_audible_lookup_request(self) -> LookupRequest {
-        LookupRequest { title: self.title, authors: self.authors.iter().map(|author| author.name().to_owned()).collect(), duration_ms: self.duration_ms, recording: self.recording, chapters: self.chapters }
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct InspectedBook {
-    #[serde(default)]
-    pub pdf: Option<pdf_view_common::PdfReaderMetadata>,
-    pub metadata: BookRecord,
-    pub audiobook: Option<AudiobookMetadata>,
-    /// The book's own navigation document, kept rather than discarded:
-    /// the detail page draws contents for books that have never been
-    /// downloaded, and re-reading the file for every visit is not an option
-    /// when the file may be remote. Empty where the format carries none — an
-    /// M4B's chapters are audiobook metadata, which the audiobook path files as
-    /// navigation of its own.
-    #[serde(default)]
-    pub toc: Vec<BookTocEntry>,
-}
-
-/// Geometry and navigation remain valid when only bibliographic extraction changes.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CachedPdfReader {
-    pub metadata: pdf_view_common::PdfReaderMetadata,
-    pub toc: Vec<BookTocEntry>,
-}
 
 /// Inspects a seekable book using the same validation on every platform.
 pub fn inspect_book_reader(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static) -> MetadataResult<InspectedBook> {

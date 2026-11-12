@@ -98,9 +98,7 @@ impl Database {
             }
         }
         let mut rows = shelves.iter().map(|shelf| BrowseRow { id: BrowseLocation::Home(Some(shelf.shelf)), name: shelf.shelf.label().to_owned(), path: None, book_count: shelf.books.len(), downloaded_book_count: 0 }).collect::<Vec<_>>();
-        super::popularity::sort_rows(&mut rows, options.chip_sort, |row| {
-            shelves.iter().find(|shelf| row.id == BrowseLocation::Home(Some(shelf.shelf))).and_then(|shelf| super::popularity::sum(&shelf.books.iter().copied().collect(), &matching))
-        });
+        super::ordering::sort_rows(&mut rows, options.chip_sort);
         let positions: HashMap<_, _> = rows.iter().enumerate().map(|(index, row)| (row.id, index)).collect();
         shelves.sort_by_key(|shelf| positions[&BrowseLocation::Home(Some(shelf.shelf))]);
         Ok(HomeShelves { shelves, matching })

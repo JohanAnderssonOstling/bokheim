@@ -26,6 +26,7 @@ use library_backend::LibraryClient;
 use library_model::BookLocator;
 use skrift_column_paginator::{BookSearchResults, ReadingPosition, SearchOptions};
 use ui_components::PageTurn;
+use web_time::Instant;
 
 use crate::epub::toc::TocState;
 use crate::shell::context_sheet::ContextActions;
@@ -74,6 +75,7 @@ impl Drop for ReaderView {
 #[derive(Clone)]
 pub(crate) enum EpubContextCommand {
     OpenLinkInNewWindow(String),
+    CopySelectionPlainText,
     CopySelectionMarkdown,
     CopySelectionWithSource,
     AnnotateSelection,
@@ -121,6 +123,7 @@ struct SearchState {
     /// The matches the Search panel lists, each with its excerpt.
     results: BookSearchResults,
     rows: Vec<search::SearchRow>,
+    contents: crate::shell::search_contents::SearchContents,
     list: ListState,
 }
 
@@ -152,7 +155,7 @@ pub(crate) struct ReaderView {
     touch_swipe: Option<gpui::Point<f32>>,
     swipe_preview: ui_components::SwipePreview,
     page_turn: Option<PageTurn<HtmlPageSnapshot>>,
-    pending_wheel_turn: Option<bool>,
+    last_wheel_turn: Option<Instant>,
     page_size: Option<Size<Pixels>>,
     /// The swipe began in the bottom gesture area, so it is the system's and
     /// turns no page.

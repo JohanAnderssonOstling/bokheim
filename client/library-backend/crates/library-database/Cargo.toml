@@ -22,7 +22,7 @@ library-replica = { path = "../library-replica", default-features = false }
 sync-common = { path = "../../../../shared/sync-common", default-features = false, features = ["sqlite"] }
 subject-projection = { path = "../../../../shared/subject-projection" }
 metadata-contract = { path = "../../../../shared/metadata-contract" }
-book-inspection = { path = "../book-inspection" }
+book-inspection-contract = { path = "../../../../shared/book-inspection-contract" }
 pdf-view-common = { path = "../../../../shared/pdf-view-common" }
 rusqlite = { version = "0.40.0", features = ["backup", "bundled", "functions", "limits"] }
 include-sqlite-sql = { version = "0.2.2", path = "../../../../vendor/include-sqlite-sql" }

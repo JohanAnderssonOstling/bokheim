@@ -332,8 +332,6 @@ mod tests {
         let checked = controls.options(&selection).into_iter().flat_map(|section| section.options).filter(|row| row.checked).map(|row| row.label).collect::<Vec<_>>();
         assert_eq!(checked, ["Alphabetical", "Book count"]);
         let snapshot = selection.clone();
-        assert!(!selection.apply(BrowseOptionsEvent::SelectBookSort(BrowseBookSort::Popularity), &controls));
-        assert!(!selection.apply(BrowseOptionsEvent::SelectChipSort(BrowseChipSort::Popularity), &controls));
         assert_eq!(selection, snapshot);
     }
 

@@ -20,9 +20,9 @@ fn lcc(m: &RichWorkMetadataMatch) -> Vec<Classification> {
 /// Reclassification requires the recorded immutable inputs and current recipe.
 /// Only work LCC and dependent search/queue entries are changed, together with
 /// pending provider/demand evidence. Readers must use ordinary SQLite reads.
-pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, ratings: Option<&Path>, answers: &Path) -> Result<BuildReport, MetadataError> {
+pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Option<&Path>, descriptions: Option<&Path>, answers: &Path) -> Result<BuildReport, MetadataError> {
     let started = Instant::now();
-    let inputs = InputIdentity::read(snapshot, descriptions, ratings)?;
+    let inputs = InputIdentity::read(snapshot, descriptions)?;
     let resolver = Resolver::open(snapshot, descriptions)?;
     let source = resolver.connection()?;
     validate_source(&source)?;
@@ -31,7 +31,7 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
     if crate::snapshot::is_update(&out)? {
         return Err(MetadataError("in-place reclassification requires a full answer database, not an overlay".into()));
     }
-    for input in [Some(snapshot), providers, demand, descriptions, ratings].into_iter().flatten() {
+    for input in [Some(snapshot), providers, demand, descriptions].into_iter().flatten() {
         crate::snapshot::require_separate(&out, input, "reclassification input")?;
     }
     out.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-65536; BEGIN IMMEDIATE;").map_err(error)?;
@@ -56,7 +56,6 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
             out.execute_batch(&statement.replacen("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)).map_err(error)?;
         }
         out.execute_batch("CREATE INDEX IF NOT EXISTS answer_provider_by_isbn ON answer_provider(isbn13,provider); CREATE INDEX IF NOT EXISTS edition_candidate_by_work ON edition_candidate(work_id); CREATE INDEX IF NOT EXISTS edition_title_key_by_edition ON edition_title_key(edition_id); CREATE TEMP TABLE changed_work(work_id INTEGER PRIMARY KEY); CREATE TEMP TABLE removed_work_lcc(work_id INTEGER PRIMARY KEY);").map_err(error)?;
-        popularity::load(&out, ratings)?;
         let mut cache = WorkEvidenceCache::default();
         let mut changed = 0_u64;
         let mut indexed = 0_u64;
@@ -94,7 +93,10 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
             }
             after = *works.last().unwrap();
             visited += works.len() as u64;
-            let sql = format!("SELECT e.edition_id,e.work_id,i.isbn13 FROM edition e JOIN edition_isbn i USING(edition_id) WHERE e.work_id IN ({}) AND NOT EXISTS(SELECT 1 FROM edition_classification c WHERE c.edition_id=e.edition_id AND c.scheme=2) ORDER BY e.edition_id,i.isbn13", sql_placeholders(works.len()));
+            let sql = format!(
+                "SELECT e.edition_id,e.work_id,i.isbn13 FROM edition e JOIN edition_isbn i USING(edition_id) WHERE e.work_id IN ({}) AND NOT EXISTS(SELECT 1 FROM edition_classification c WHERE c.edition_id=e.edition_id AND c.scheme=2) ORDER BY e.edition_id,i.isbn13",
+                sql_placeholders(works.len())
+            );
             let mut q = source.prepare_cached(&sql).map_err(error)?;
             let editions = q.query_map(params_from_iter(&works), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))).map_err(error)?.collect::<Result<Vec<_>, _>>().map_err(error)?;
             // Exact-edition-only works have no inherited answers or candidates
@@ -116,15 +118,7 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
                         matches: r
                             .matches
                             .into_iter()
-                            .map(|m| RichWorkMetadataMatch {
-                                open_library_work_id: m.open_library_work_id,
-                                exact_edition_ids: m.exact_edition_ids,
-                                classifications: m.classifications,
-                                authors: vec![],
-                                description: None,
-                                popularity: None,
-                                subjects: vec![],
-                            })
+                            .map(|m| RichWorkMetadataMatch { open_library_work_id: m.open_library_work_id, exact_edition_ids: m.exact_edition_ids, classifications: m.classifications, authors: vec![], description: None, subjects: vec![] })
                             .collect(),
                     })
                     .collect::<Vec<_>>();
@@ -239,11 +233,11 @@ pub fn reclassify_answers(snapshot: &Path, providers: Option<&Path>, demand: Opt
         }
         drop(rows);
         drop(q);
-        out.execute_batch("DROP TABLE changed_work; DROP TABLE removed_work_lcc; DROP TABLE reclassify_work; DROP TABLE build_rating;").map_err(error)?;
+        out.execute_batch("DROP TABLE changed_work; DROP TABLE removed_work_lcc; DROP TABLE reclassify_work;").map_err(error)?;
         incremental::save_counts(&out, &inputs, count, bytes)?;
         let through = provider.as_ref().map(|c| c.query_row("SELECT COALESCE(MAX(fetched_at_ms),0) FROM provider_result", [], |r| r.get::<_, i64>(0)).map_err(error)).transpose()?.unwrap_or(0);
         out.execute("UPDATE snapshot SET built_at_ms=?1,provider_results_through_ms=?2 WHERE singleton=1", params![now_ms(), through]).map_err(error)?;
-        inputs.verify(snapshot, descriptions, ratings)?;
+        inputs.verify(snapshot, descriptions)?;
         // Updates and index writes are constraint-checked by SQLite. Do not
         // scan every untouched page of a large base for targeted maintenance.
         out.execute_batch("COMMIT;").map_err(error)?;
@@ -314,7 +308,6 @@ fn refresh_inputs(
         if let Some(c) = provider {
             providers::apply_many(c, &mut response)?;
         }
-        popularity::attach(out, &mut response, &resolver.state.snapshot.dump_date)?;
         let (written, new_bytes) = write_answer_batch(out, rows, response)?;
         *count += written;
         *bytes += new_bytes;
@@ -334,10 +327,6 @@ fn refresh_inputs(
         let requests = out.query_row("SELECT requests FROM answer_demand WHERE isbn13=?1", [isbn], |r| r.get::<_, i64>(0)).optional().map_err(error)?.unwrap_or(0);
         let rank = if requests > 0 { (-1_000_000_000_000_i64).saturating_sub(requests) } else { 0 };
         out.execute("UPDATE wanted SET rank=?1 WHERE isbn13=?2", params![rank, isbn]).map_err(error)?;
-    }
-    let rerank = refresh.union(&demand_updates).copied().collect::<Vec<_>>();
-    for chunk in rerank.chunks(500) {
-        out.execute(&format!("UPDATE wanted SET rank=-COALESCE((SELECT count FROM build_rating WHERE work_id=wanted.work_id),0) WHERE rank=0 AND isbn13 IN ({})", sql_placeholders(chunk.len())), params_from_iter(chunk)).map_err(error)?;
     }
     Ok((resolved, removed))
 }
@@ -362,8 +351,7 @@ fn refresh_work_state(source: &Connection, out: &Connection, works: &BTreeSet<i6
         } else {
             let work = stored.result.matches.first().filter(|_| stored.result.matches.len() == 1).and_then(|m| m.open_library_work_id.as_deref()).and_then(|id| open_library_id(id, 'W'));
             let requests = out.query_row("SELECT requests FROM answer_demand WHERE isbn13=?1", [isbn], |r| r.get::<_, i64>(0)).optional().map_err(error)?.unwrap_or(0);
-            let rating = work.map(|work| out.query_row("SELECT count FROM build_rating WHERE work_id=?1", [work], |r| r.get::<_, i64>(0)).optional().map_err(error)).transpose()?.flatten().unwrap_or(0);
-            let rank = if requests > 0 { (-1_000_000_000_000_i64).saturating_sub(requests) } else { -rating };
+            let rank = if requests > 0 { (-1_000_000_000_000_i64).saturating_sub(requests) } else { 0 };
             out.execute("INSERT OR IGNORE INTO wanted VALUES(?1,?2,?3)", params![isbn, rank, work]).map_err(error)?;
         }
     }

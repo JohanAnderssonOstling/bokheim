@@ -111,3 +111,42 @@ impl<R: Seek> Seek for ProfileIo<R> {
         result
     }
 }
+
+/// Aggregate synchronous operation timings without logging each database call.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn operation<T, F: FnOnce() -> T>(operation: F) -> T {
+    use std::any::type_name;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::Duration;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("BOKHEIM_CPU_PROFILE").is_some()) {
+        return operation();
+    }
+    struct Aggregate {
+        since: Instant,
+        entries: HashMap<&'static str, (u64, Duration)>,
+    }
+    thread_local! {
+        static TOTALS: RefCell<Aggregate> = RefCell::new(Aggregate { since: Instant::now(), entries: HashMap::new() });
+    }
+    let started = Instant::now();
+    let result = operation();
+    let elapsed = started.elapsed();
+    TOTALS.with(|totals| {
+        let mut totals = totals.borrow_mut();
+        let entry = totals.entries.entry(type_name::<F>()).or_default();
+        entry.0 += 1;
+        entry.1 += elapsed;
+        if totals.since.elapsed() >= Duration::from_secs(10) {
+            let seconds = totals.since.elapsed().as_secs_f64();
+            let mut entries: Vec<_> = totals.entries.drain().collect();
+            entries.sort_by_key(|(_, (_, duration))| std::cmp::Reverse(*duration));
+            for (name, (calls, duration)) in entries.into_iter().take(20) {
+                eprintln!("CPU_OPERATION thread={:?} window_s={seconds:.2} calls={calls} wall_ms={:.2} operation={name}", std::thread::current().name(), duration.as_secs_f64() * 1000.0);
+            }
+            totals.since = Instant::now();
+        }
+    });
+    result
+}

@@ -1,7 +1,7 @@
 //! Source adapters prepare identities and navigation without hydrating cards.
 use super::*;
 use crate::browse::{FoldersSql, parse_uuid_column};
-use library_model::{BrowseBookSort, BrowseChipSort, HomeShelf};
+use library_model::{BrowseBookSort, HomeShelf};
 use std::collections::HashSet;
 
 impl Database {
@@ -175,10 +175,6 @@ impl Database {
                 }
             }
             sections.extend(wrappers);
-            if options.chip_sort == BrowseChipSort::Popularity {
-                let positions = metadata.contents.children.iter().enumerate().map(|(index, row)| (row.id, index)).collect::<HashMap<_, _>>();
-                sections.sort_by_key(|section| positions[&section.parent.id]);
-            }
         }
         metadata.path = self.browse_directory_path(&directory)?;
         metadata.ancestors = self.folder_ancestors(&metadata.path, options)?;

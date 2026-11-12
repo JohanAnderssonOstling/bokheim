@@ -125,7 +125,7 @@ async fn pdf_and_markdown_are_local_preserve_identity_and_describe_the_resulting
     assert!(text.contains("## Part I\n\n### Chapter One\n\n> *Quoted text*\n>\n> *Second line*\n\nMy note: åäö"));
     assert!(text.contains("[A Book — p. 1](bokheim://open?"));
     let pdf = Document::load(f.root.join("Original.pdf")).unwrap();
-    assert_eq!(PdfSourceIdentity::from_document(&pdf), Some(PdfSourceIdentity { book_id: f.book, canonical_hash: Some(f.canonical) }));
+    assert_eq!(book_inspection::pdf_source_identity::from_document(&pdf), Some(PdfSourceIdentity { book_id: f.book, canonical_hash: Some(f.canonical) }));
     let page = *pdf.get_pages().values().next().unwrap();
     let annots = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap();
     assert_eq!(annots.len(), 2);
@@ -307,13 +307,13 @@ async fn markdown_works_when_the_library_files_are_temporarily_unavailable() {
 async fn writing_a_recovered_pdf_preserves_its_unconfirmed_original_hash_hint() {
     let f = Fixture::new(false).await;
     let mut document = Document::load(f.root.join("Original.pdf")).unwrap();
-    PdfSourceIdentity { book_id: f.book, canonical_hash: Some(f.canonical) }.write(&mut document).unwrap();
+    book_inspection::pdf_source_identity::write(PdfSourceIdentity { book_id: f.book, canonical_hash: Some(f.canonical) }, &mut document).unwrap();
     let mut input = Vec::new().await;
     document.save_to(&mut input).unwrap();
     let mut output = Vec::new().await;
     book_inspection::prepare_pdf_annotation_export(std::io::Cursor::new(input), f.book, &[]).unwrap().write(&mut output, PdfSourceIdentity { book_id: f.book, canonical_hash: None }, &[f.note.clone()]).unwrap();
     let document = Document::load_mem(&output).unwrap();
-    assert_eq!(PdfSourceIdentity::from_document(&document).unwrap().canonical_hash, Some(f.canonical));
+    assert_eq!(book_inspection::pdf_source_identity::from_document(&document).unwrap().canonical_hash, Some(f.canonical));
 }
 
 async fn add_epub(f: &Fixture) -> (BookId, Annotation) {

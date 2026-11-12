@@ -153,10 +153,10 @@ pub(crate) fn surface_interactions<C: 'static>(
     Vec::new()
 }
 
-/// A single unclaimed document tap toggles mobile controls. Links, images,
+/// An unclaimed short document tap toggles mobile controls on release. Links, images,
 /// selections, and gestures consume their own input before this check runs.
 pub(crate) fn is_page_tap(event: &ClickEvent) -> bool {
-    matches!(event, ClickEvent::Mouse(_) | ClickEvent::Touch(_)) && event.standard_click() && event.click_count() == 1
+    matches!(event, ClickEvent::Mouse(_) | ClickEvent::Touch(_)) && event.standard_click()
 }
 
 /// Keeps the desktop rail mounted while the panel opens and closes.

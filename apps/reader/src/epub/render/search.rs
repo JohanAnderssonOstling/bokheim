@@ -8,7 +8,7 @@ use ui_components as components;
 
 use crate::epub::ReaderView;
 use crate::epub::search::SearchRow;
-use crate::shell::search;
+use crate::shell::{search, search_contents};
 use crate::shell::toolbar::SidebarTarget;
 
 impl ReaderView {
@@ -52,7 +52,11 @@ impl ReaderView {
 
     fn render_search_row(&self, row: usize, reader: &Entity<Self>, theme: components::BrowserTheme) -> AnyElement {
         match self.search.rows.get(row) {
-            Some(SearchRow::Heading(title)) => components::reader_annotation_group_heading(title.clone(), theme).into_any_element(),
+            Some(SearchRow::Heading(id)) => self.search.contents.branch(*id).map(|branch| search_contents::branch_row(reader, branch, theme, |reader, id, expanded, cx| {
+                reader.search.contents.set_expanded(id, expanded);
+                reader.search.refresh_rows();
+                cx.notify();
+            })).unwrap_or_else(|| div().into_any_element()),
             Some(SearchRow::Match(index)) => {
                 let index = *index;
                 let Some(result) = self.search.results.get(index) else { return div().into_any_element() };
@@ -60,6 +64,7 @@ impl ReaderView {
                 let request = self.search.current_request();
                 let reader = reader.downgrade();
                 search::result_row(("epub-search-hit", index), result.excerpt.clone(), self.search.query.as_deref().unwrap_or_default(), self.search.options, selected, theme)
+                    .pl(px(16.0 + components::CONTENTS_ROW_INDENT * self.search.contents.depth(index).min(3) as f32))
                     .on_click(move |_, window, cx| {
                         let Some(reader) = reader.upgrade() else { return };
                         reader.update(cx, |reader, cx| {

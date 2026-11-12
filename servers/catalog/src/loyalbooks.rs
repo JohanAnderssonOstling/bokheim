@@ -1,19 +1,18 @@
 //! On-demand source ingestion: metadata goes to SQLite, EPUBs and covers to disk.
 //! Audiobook downloads remain linked to their source.
-use crate::{covers::CoverAssets, IngestError};
+use crate::{IngestError, covers::CoverAssets};
 use crate::{curation, enrich, get, gutenberg, links, manifest::SourceMetadata, source_cover, store_book};
-use book_model::{agent_id_from_migration_seed, BookDetails, BookFormat, BookRecord, Contributor, LanguageTag, AUTHOR_MARC_RELATOR_CODE};
-use reqwest::blocking::Client;
+use book_model::{AUTHOR_MARC_RELATOR_CODE, BookDetails, BookFormat, BookRecord, Contributor, LanguageTag, agent_id_from_migration_seed};
 use reqwest::Url;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use reqwest::blocking::Client;
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use scraper::{ElementRef, Html, Selector};
-use serde::{Deserialize, Serialize};
-use serde_json::{from_str, from_value, to_string, Value};
-use std::collections::{BTreeMap, HashSet};
+use serde::Serialize;
+use serde_json::{Value, from_str, to_string};
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -44,18 +43,6 @@ pub fn wait_for_request(url: &Url) {
     *last = Some(Instant::now());
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Popularity {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rank: Option<usize>,
-    pub scope: String,
-    pub listing_url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_at_unix_seconds: Option<u64>,
-    #[serde(flatten)]
-    pub details: BTreeMap<String, Value>,
-}
-
 #[derive(Serialize)]
 struct Evidence {
     title: String,
@@ -66,7 +53,6 @@ struct Evidence {
     rating_count: u64,
     description: String,
     description_source_url: String,
-    popularity: Vec<Popularity>,
     epub_url: Option<String>,
     advertised_epub_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -285,49 +271,29 @@ fn language_label(language: &str) -> Option<&'static str> {
     })
 }
 
-fn popularity(url: &Url, raw: &str, book_url: &Url) -> Result<Vec<Popularity>, String> {
-    // Top_100 uses 100 entries per page. Language-featured positions are not
-    // interchangeable with these site-wide ranks.
-    let page_number = match url.path().trim_end_matches('/').strip_prefix("/Top_100") {
-        Some("") => 1,
-        Some(suffix) => suffix.strip_prefix('/').and_then(|value| value.parse::<usize>().ok()).filter(|number| *number > 0).ok_or("invalid popularity page number")?,
-        None => return Err("popularity URL must name a Top_100 page".into()),
-    };
-    let offset = (page_number - 1).checked_mul(100).ok_or("popularity page number is too large")?;
-    let html = Html::parse_document(raw);
-    let mut seen = HashSet::new();
-    for link in html.select(&selector("td.layout2-blue a[href]")) {
-        let target = url.join(link.value().attr("href").unwrap_or_default()).map_err(|e| e.to_string())?;
-        if target.path().starts_with("/book/") && seen.insert(target.path().to_owned()) && target.path() == book_url.path() {
-            return Ok(vec![Popularity { rank: Some(offset + seen.len()), scope: "sitewide".into(), listing_url: url.to_string(), observed_at_unix_seconds: Some(now()), details: BTreeMap::new() }]);
-        }
-    }
-    Ok(Vec::new())
-}
-
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-pub fn add(dir: &Path, db: &Connection, http: &Client, page_url: &str, listing_url: Option<&str>) -> Result<(), IngestError> {
-    add_with_epub(dir, db, http, page_url, listing_url, None)
+pub fn add(dir: &Path, db: &Connection, http: &Client, page_url: &str) -> Result<(), IngestError> {
+    add_with_epub(dir, db, http, page_url, None)
 }
 
-pub fn add_with_epub(dir: &Path, db: &Connection, http: &Client, page_url: &str, listing_url: Option<&str>, epub_url: Option<&str>) -> Result<(), IngestError> {
+pub fn add_with_epub(dir: &Path, db: &Connection, http: &Client, page_url: &str, epub_url: Option<&str>) -> Result<(), IngestError> {
     let _timing = crate::timing::measure("source_ingest", page_url);
     let url = source_url(page_url, "/book/")?;
     let raw = String::from_utf8(get(http, &url)?).map_err(|e| e.to_string())?;
-    ingest_page(dir, db, http, url, raw, listing_url, epub_url)
+    ingest_page(dir, db, http, url, raw, epub_url)
 }
 
 /// Consumes a prefetched source page; admission and every database mutation
 /// still happen on the serialized writer. Prefetching never fetches audio.
 pub(super) fn add_fetched(dir: &Path, db: &Connection, http: &Client, page_url: &str, raw: String) -> Result<(), IngestError> {
     let _timing = crate::timing::measure("source_ingest", page_url);
-    ingest_page(dir, db, http, source_url(page_url, "/book/")?, raw, None, None)
+    ingest_page(dir, db, http, source_url(page_url, "/book/")?, raw, None)
 }
 
-fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String, listing_url: Option<&str>, epub_url: Option<&str>) -> Result<(), IngestError> {
+fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String, epub_url: Option<&str>) -> Result<(), IngestError> {
     let page_url = url.as_str().to_owned();
     let parsing_timing = crate::timing::measure("source_parse_and_discovery", &page_url);
     if CRAWL_ACTIVE.load(Ordering::Relaxed) {
@@ -348,13 +314,6 @@ fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String
         eprintln!("skipped: no eligible EPUB or audiobook link");
         return Ok(());
     }
-    let popularity = if let Some(value) = listing_url {
-        let url = source_url(value, "/Top_100")?;
-        let raw = String::from_utf8(get(http, &url)?).map_err(|e| e.to_string())?;
-        popularity(&url, &raw, &page.url)?
-    } else {
-        Vec::new()
-    };
     let mut tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     // Only EPUB/source requests occur here; no audio URL is ever fetched.
     let hash = if let Some(url) = page.epub.clone() {
@@ -406,7 +365,7 @@ fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String
         None
     };
     let persist_timing = crate::timing::measure("source_persist", &page_url);
-    persist(&tx, &page, hash.as_deref(), popularity, enriched)?;
+    persist(&tx, &page, hash.as_deref(), enriched)?;
     let external: Option<String> = tx.query_row("SELECT entry_key FROM external_book WHERE source=?1 AND entry_id=?2", params![SOURCE, page.id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     drop(persist_timing);
@@ -429,23 +388,12 @@ fn ingest_page(dir: &Path, db: &Connection, http: &Client, url: Url, raw: String
     Ok(())
 }
 
-fn persist(db: &Connection, page: &Page, hash: Option<&str>, mut popularity: Vec<Popularity>, enriched_record: Option<(BookRecord, bool)>) -> Result<(), String> {
+fn persist(db: &Connection, page: &Page, hash: Option<&str>, enriched_record: Option<(BookRecord, bool)>) -> Result<(), String> {
     let previous: Option<(String, Option<String>)> =
         db.query_row("SELECT metadata,book_hash FROM source_entry WHERE source=?1 AND entry_id=?2", params![SOURCE, page.id], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|e| e.to_string())?;
     let previous_metadata: Option<Value> = previous.as_ref().map(|(metadata, _)| from_str(metadata)).transpose().map_err(|e| e.to_string())?;
     let preserved_hash = if page.epub_import_error.is_some() && hash.is_none() { previous.as_ref().and_then(|(_, hash)| hash.as_deref()) } else { None };
     let hash = hash.or(preserved_hash);
-    // A refresh without a listing must not erase an observed, dated rank.
-    if let Some(previous) = &previous_metadata {
-        if let Some(value) = previous.get("popularity") {
-            let old: Vec<Popularity> = from_value(value.clone()).map_err(|e| e.to_string())?;
-            for observation in old {
-                if !popularity.iter().any(|new| new.listing_url == observation.listing_url) {
-                    popularity.push(observation);
-                }
-            }
-        }
-    }
     let inspected = hash.map(|hash| curation::record(db, hash)).transpose()?.flatten().unwrap_or_else(|| page.record.clone());
     let (mut record, enriched) = enriched_record.unwrap_or((inspected, false));
     // A source can link a complete EPUB alongside a recording of one volume
@@ -483,7 +431,6 @@ fn persist(db: &Connection, page: &Page, hash: Option<&str>, mut popularity: Vec
         rating_count: page.rating_count,
         description: page.record.description.clone(),
         description_source_url: page.url.to_string(),
-        popularity,
         epub_url: if preserved_hash.is_some() { previous_metadata.as_ref().and_then(|value| value["epub_url"].as_str()).map(str::to_owned) } else { page.epub.as_ref().map(Url::to_string) },
         advertised_epub_url: page.advertised_epub.as_ref().map(Url::to_string),
         epub_import_error: page.epub_import_error.clone(),
@@ -543,20 +490,17 @@ mod tests {
         let db = curation::open(dir.path()).unwrap();
         let url = source_url("https://www.loyalbooks.com/book/book", "/book/").unwrap();
         let page = page(url.clone(), &html("5", 2)).unwrap().unwrap();
-        let listing = source_url("https://www.loyalbooks.com/Top_100/2", "/Top_100").unwrap();
-        let ranks = popularity(&listing, r#"<table><tr><td class="layout2-blue"><a href="/book/other">Other</a><a href="/book/other">Other</a></td><td class="layout2-blue"><a href="/book/book">Book</a></td></tr></table>"#, &url).unwrap();
         assert_eq!(ranks[0].rank, Some(102));
         let tx = db.unchecked_transaction().unwrap();
-        persist(&tx, &page, None, ranks.clone(), None).unwrap();
+        persist(&tx, &page, None, None).unwrap();
         tx.commit().unwrap();
-        persist(&db, &page, None, Vec::new(), None).unwrap();
+        persist(&db, &page, None, None).unwrap();
         assert_eq!(db.query_row("SELECT count(*) FROM external_book", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
         assert_eq!(db.query_row("SELECT count(*) FROM source_entry", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
         let (metadata, record, link): (String, String, String) =
             db.query_row("SELECT source_entry.metadata,external_book.record,external_book.file_url FROM source_entry JOIN external_book ON entry_key=external_entry_key", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
         let evidence: Value = from_str(&metadata).unwrap();
         assert_eq!(evidence["rating"], 5.0);
-        assert_eq!(evidence["popularity"][0]["rank"], 102);
         assert_eq!(evidence["description_source_url"], url.as_str());
         assert_eq!(from_str::<BookRecord>(&record).unwrap().description, page.record.description);
         assert_eq!(link, "https://archive.org/download/recording/audio.zip");
@@ -572,7 +516,7 @@ mod tests {
         let raw = format!("{}<span>(07:43:09 long)</span>", html("5", 2));
         let page = page(url, &raw).unwrap().unwrap();
         assert_eq!(page.audio_duration_ms, Some(27_789_000));
-        persist(&db, &page, None, Vec::new(), None).unwrap();
+        persist(&db, &page, None, None).unwrap();
         let metadata: String = db.query_row("SELECT metadata FROM source_entry", [], |row| row.get(0)).unwrap();
         assert_eq!(from_str::<Value>(&metadata).unwrap()["audiobook_duration_ms"], 27_789_000);
         for clock in ["00:00:00", "01:60:00", "01:00:60", "1:2", "1:2:3:4", "18446744073709551615:00:00"] {
@@ -596,9 +540,9 @@ mod tests {
         let mut page = page(url, &html("5", 2)).unwrap().unwrap();
         let hash = "4".repeat(64);
         curation::set_record(&db, &hash, &page.record).unwrap();
-        persist(&db, &page, Some(&hash), Vec::new(), None).unwrap();
+        persist(&db, &page, Some(&hash), None).unwrap();
         page.epub_import_error = Some("truncated EPUB download".into());
-        persist(&db, &page, None, Vec::new(), None).unwrap();
+        persist(&db, &page, None, None).unwrap();
         let (stored, external, metadata): (String, String, String) = db.query_row("SELECT book_hash,external_entry_key,metadata FROM source_entry", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
         assert_eq!(stored, hash);
         assert!(!external.is_empty());
@@ -622,7 +566,7 @@ mod tests {
         complete.description = "The complete five-book work".into();
         let hash = "5".repeat(64);
         curation::set_record(&db, &hash, &complete).unwrap();
-        persist(&db, &page, Some(&hash), Vec::new(), None).unwrap();
+        persist(&db, &page, Some(&hash), None).unwrap();
         let json: String = db.query_row("SELECT record FROM external_book", [], |row| row.get(0)).unwrap();
         let audio: BookRecord = from_str(&json).unwrap();
         assert_eq!(audio.title, page.record.title);
@@ -630,7 +574,7 @@ mod tests {
         assert_eq!(audio.description, page.record.description);
         assert_eq!(curation::record(&db, &hash).unwrap().unwrap(), complete);
         // Metadata-only enrichment must preserve the same source-rendition fields.
-        persist(&db, &page, None, Vec::new(), Some((complete, true))).unwrap();
+        persist(&db, &page, None, Some((complete, true))).unwrap();
         let title: String = db.query_row("SELECT title FROM external_book", [], |row| row.get(0)).unwrap();
         assert_eq!(title, page.record.title);
     }
@@ -654,20 +598,6 @@ mod tests {
         assert!(gutenberg_epub(&url, "https://foreign.test/ebooks/5921").is_none());
         assert!(gutenberg_epub(&url, "https://www.gutenberg.org/ebooks/").is_none());
         assert!(gutenberg_epub(&url, "javascript:alert(1)").is_none());
-    }
-
-    #[test]
-    fn language_popularity_observations_survive_a_refresh() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = curation::open(dir.path()).unwrap();
-        let url = source_url("https://www.loyalbooks.com/book/book", "/book/").unwrap();
-        let page = page(url, &html("5", 2)).unwrap().unwrap();
-        let evidence: Value = from_str(r#"[{"scope":"language_featured","language":"Swedish","position":2,"listing_url":"https://www.loyalbooks.com/language/Swedish","observed_on":"2026-10-12"}]"#).unwrap();
-        let observations = from_value(evidence.clone()).unwrap();
-        persist(&db, &page, None, observations, None).unwrap();
-        persist(&db, &page, None, Vec::new(), None).unwrap();
-        let metadata: String = db.query_row("SELECT metadata FROM source_entry", [], |row| row.get(0)).unwrap();
-        assert_eq!(from_str::<Value>(&metadata).unwrap()["popularity"], evidence);
     }
 
     #[test]
@@ -699,7 +629,7 @@ mod tests {
         let url = source_url("https://www.loyalbooks.com/book/book", "/book/").unwrap();
         let page = page(url, &html("5", 2)).unwrap().unwrap();
         let tx = db.unchecked_transaction().unwrap();
-        persist(&tx, &page, None, Vec::new(), None).unwrap();
+        persist(&tx, &page, None, None).unwrap();
         tx.rollback().unwrap();
         assert_eq!(db.query_row("SELECT count(*) FROM external_book", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         assert_eq!(db.query_row("SELECT count(*) FROM source_entry", [], |row| row.get::<_, i64>(0)).unwrap(), 0);

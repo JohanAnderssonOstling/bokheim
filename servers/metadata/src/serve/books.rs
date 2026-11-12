@@ -8,14 +8,14 @@ use crate::query::run_database;
 use crate::serve::resolution::{authoritative_author_resolutions, match_author_resolutions, merge_rich_matches, rich_subjects, sibling_consensus_subjects};
 use crate::serve::{alternatives, related_isbn};
 use crate::{MetadataError, MetadataService};
-use book_model::{AgentId, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
+use book_model::{AUTHOR_MARC_RELATOR_CODE, AgentId, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, Scheme, Scope};
 use metadata_contract::audible::{LookupRequest, LookupResponse, LookupStatus as AudibleStatus};
-use metadata_contract::books::{BookEnrichment, BookEnrichmentFailure, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, BookFacts, TitleReading, MAX_BOOKS_PER_REQUEST};
-use metadata_contract::{ClassificationMethod, EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, MAX_ISBNS_PER_REQUEST};
+use metadata_contract::books::{BookEnrichment, BookEnrichmentFailure, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, BookFacts, MAX_BOOKS_PER_REQUEST, TitleReading};
+use metadata_contract::{ClassificationMethod, EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, MAX_ISBNS_PER_REQUEST, RichIsbnMetadataResult, RichWorkMetadataMatch};
 use std::collections::{BTreeSet, HashMap};
 
 /// Bump whenever a lookup or merge rule below changes; clients ask again.
-pub const POLICY: &str = "books_v27";
+pub const POLICY: &str = "books_v29";
 
 // A work union larger than this is replaced by edition consensus when the
 // consensus is smaller.
@@ -66,7 +66,7 @@ impl MetadataService {
             let key = facts.key.clone();
             match self.enrich_book(facts).await {
                 Ok(result) => result,
-                Err(error) => BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, failure: Some(error.stage), detail: error.error.to_string() },
+                Err(error) => BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, failure: Some(error.stage), detail: error.error.to_string() },
             }
         }))
         .await;
@@ -79,7 +79,6 @@ impl MetadataService {
         record.book.infer_embedded_subject_isbns().map_err(|error| MetadataError(error.to_string()))?;
         let mut lookups = Lookups::new();
         let mut found = false;
-        let mut identity_isbns = BTreeSet::new();
 
         // Subjects: the book's ISBNs, then a title/author match, then any ISBN
         // that match found. Only a supported numeric LCC ends the search;
@@ -95,7 +94,7 @@ impl MetadataService {
             found |= record.book.subjects.len() != previous_count;
             found |= self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await?;
             if !has_specific_lcc(&record.book) && !record.title.trim().is_empty() {
-                found |= self.apply_edition_identity(&mut record, &facts.readings, &mut identity_isbns).await?;
+                found |= self.apply_edition_identity(&mut record, &facts.readings).await?;
                 found |= self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await?;
             }
             // Raw headings are a fallback only without usable LCC, including
@@ -137,12 +136,9 @@ impl MetadataService {
             }
         }
 
-        let isbns = canonical_isbns(&record).into_iter().chain(identity_isbns).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-        self.lookup_isbns(&isbns, &mut lookups).await?;
-        let popularity = metadata_contract::unique_work_popularity(isbns.iter().filter_map(|isbn| lookups.get(isbn)).flat_map(|result| &result.matches));
-        found |= cover.is_some() || popularity.is_some();
+        found |= cover.is_some();
         let status = if found { BookEnrichmentStatus::Found } else { BookEnrichmentStatus::NoMatch };
-        Ok(BookEnrichment { key: facts.key, status, record: found.then_some(record), toc, cover, popularity, failure: None, detail: String::new() })
+        Ok(BookEnrichment { key: facts.key, status, record: found.then_some(record), toc, cover, failure: None, detail: String::new() })
     }
 
     /// Looks up every ISBN not already in `lookups`. An ISBN the lookup
@@ -242,7 +238,7 @@ impl MetadataService {
     /// Title/author edition matching after the book's ISBNs found no subject.
     /// Adds an ISBN only when the evidence names one exact edition and the
     /// book has none.
-    async fn apply_edition_identity(&self, record: &mut BookRecord, readings: &[TitleReading], identity_isbns: &mut BTreeSet<String>) -> Result<bool, MetadataError> {
+    async fn apply_edition_identity(&self, record: &mut BookRecord, readings: &[TitleReading]) -> Result<bool, MetadataError> {
         let resource_isbns = canonical_isbns(record);
         let base = identity_query(record);
         let alternative_queries = alternatives::queries(&base, readings);
@@ -282,11 +278,6 @@ impl MetadataService {
             }
         }
         let Some(result) = result else { return Err(MetadataError("metadata response omitted the edition query".to_owned())) };
-        if result.status == EditionIdentityStatus::Matched && !used_alternative {
-            if let Some(matched) = &result.matched {
-                identity_isbns.extend(isbn_key(&matched.canonical_isbn13));
-            }
-        }
 
         let codes = alternatives::classifications(&query, &resource_isbns, result);
         if !codes.is_empty() {
@@ -472,7 +463,7 @@ fn subject_key(subject: &BookSubject) -> (String, String) {
 mod tests {
     use super::*;
     use crate::build::tests::snapshot_from;
-    use subject_projection::{project_subject_codes, project_subject_concepts, unified_concept_id, unified_subject_paths, BISAC_SYSTEM_ID, LCC_SYSTEM_ID};
+    use subject_projection::{BISAC_SYSTEM_ID, LCC_SYSTEM_ID, project_subject_codes, project_subject_concepts, unified_concept_id, unified_subject_paths};
 
     #[test]
     fn ebook_release_year_does_not_rank_print_editions_or_rewrite_the_year() {
@@ -569,11 +560,7 @@ mod tests {
         );
         {
             let answers = directory.join("answers.sqlite");
-            let ratings = directory.join("ratings.gz");
-            let mut gzip = flate2::write::GzEncoder::new(std::fs::File::create(&ratings).unwrap(), flate2::Compression::fast());
-            std::io::Write::write_all(&mut gzip, b"OL10W\t\t5\t2026-09-01\nOL10W\tOL1M\t4\t2026-09-02\n").unwrap();
-            gzip.finish().unwrap();
-            crate::build_answers_with_ratings(&database, None, None, None, Some(&ratings), &answers).unwrap();
+            crate::build_answers(&database, None, None, None, &answers).unwrap();
             let service = MetadataService::open(&answers, &directory.join("demand.sqlite")).unwrap();
             service.state.demand.lock().unwrap().execute("INSERT INTO resolved_cover VALUES('isbn-9780306406157',?1)", [b"cached art".as_slice()]).unwrap();
             service
@@ -594,11 +581,7 @@ mod tests {
         let provider = axum::Router::new().route(
             "/b/isbn/:file",
             axum::routing::get(|axum::extract::Path(file): axum::extract::Path<String>| async move {
-                if file == "9780306406157-L.jpg" {
-                    (axum::http::StatusCode::OK, b"resolved artwork".to_vec())
-                } else {
-                    (axum::http::StatusCode::NOT_FOUND, Vec::new())
-                }
+                if file == "9780306406157-L.jpg" { (axum::http::StatusCode::OK, b"resolved artwork".to_vec()) } else { (axum::http::StatusCode::NOT_FOUND, Vec::new()) }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -642,9 +625,6 @@ mod tests {
         assert_eq!(record.contributors[0].agent_id(), expected, "an authority-resolved author gets the same id on every device");
         assert_eq!(record.description, "Open Library summary.", "the server reports its own description, never the file's");
         assert_eq!(result.cover.unwrap().id, "isbn-9780306406157");
-        let popularity = result.popularity.unwrap();
-        assert_eq!(popularity.open_library_work_id, "OL10W");
-        assert_eq!(popularity.rating_count, 2);
     }
 
     #[tokio::test]
@@ -662,7 +642,6 @@ mod tests {
         assert_eq!(record.contributors[0].agent_id(), author_id("open_library:OL20A"));
         assert!(record.book.subjects.iter().any(|subject| subject.authority() == Some("lcc")));
         assert_eq!(record.description, "Open Library summary.");
-        assert_eq!(result.popularity.unwrap().rating_count, 2);
         assert_eq!(service.state.demand.lock().unwrap().query_row("SELECT count(*) FROM resolved_cover", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
@@ -689,7 +668,6 @@ mod tests {
         let actual = project_subject_concepts(&project_subject_codes(&record.book.subjects)).into_iter().map(|(_, concept)| concept).collect::<BTreeSet<_>>();
         assert!(!expected.is_empty());
         assert!(expected.is_subset(&actual), "expected classifications {expected:?}, got {actual:?}");
-        assert_eq!(result.popularity.unwrap().rating_count, 2);
     }
 
     #[tokio::test]

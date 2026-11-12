@@ -9,7 +9,7 @@ use crate::sync::apply::registers::{canonical_body, record_local};
 use crate::sync::{normalized_description, toc_entry_count, unix_millis};
 use crate::transfer::BookTransferState;
 use crate::{CreatedDirectory, Database, DatabaseError};
-use book_inspection::{InspectedBook, PdfSourceIdentity};
+use book_inspection_contract::{InspectedBook, PdfSourceIdentity};
 use content_address::ContentHash;
 use include_sqlite_sql::include_sql;
 use library_model::PublishedStagedBook;

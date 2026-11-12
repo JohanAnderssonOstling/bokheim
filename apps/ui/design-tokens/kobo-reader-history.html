@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Bokheim · Kobo reading history</title>
+  <title>Bokheim · Kobo reader</title>
   <style>
     @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
     @font-face { font-family: Raleway; src: url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf'); }
@@ -41,16 +41,32 @@
     .under { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 12px; color: #555; }
     .toggle { border: 1px solid #999; min-height: 36px; padding: 5px 10px; background: transparent; }
     .note { margin: 25px 0 0; font-size: 12px; color: #595959; max-width: 850px; }
+    .search-panel { position: absolute; inset: 0 0 66px; z-index: 2; display: flex; flex-direction: column; background: #fff; font: 16px/1.4 Garamond, Georgia, serif; }
+    .search-header { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-bottom: 1px solid #aaa; min-height: 52px; }
+    .search-header strong { flex: 1; font-weight: 400; font-size: 20px; }
+    .match-count { font-size: 14px; white-space: nowrap; }
+    .search-header .icon-button { width: 38px; padding: 8px; }
+    button:disabled { opacity: .35; cursor: default; }
+    .query-row { padding: 12px; border-bottom: 1px solid #bbb; }
+    .query-row input { width: 100%; min-width: 0; border: 1px solid #777; border-radius: 0; padding: 10px; background: white; color: #111; font: inherit; }
+    .query-row input:focus-visible { outline: 2px solid #111; outline-offset: 2px; }
+    .search-results { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 8px 12px; }
+    .search-results details { margin-bottom: 10px; }
+    .search-results summary { cursor: pointer; padding: 8px 0; }
+    .search-hit { display: block; width: calc(100% - 16px); margin: 4px 0 6px 16px; padding: 10px; border: 1px solid transparent; background: white; text-align: left; }
+    .search-hit[aria-current="true"] { border-color: #222; background: #eee; }
+    .search-hit b { font-weight: 700; }
+    .search-empty { padding: 16px 0; color: #555; }
     @media (max-width: 1050px) { .examples { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 670px) { main { padding: 22px 18px; } .examples { grid-template-columns: 1fr; } .screen { max-width: 536px; } }
   </style>
 </head>
 <body>
 <main>
-  <header><h1>Bokheim · Kobo reading history</h1><p>Controls shown, directions available</p></header>
-  <p class="intro">Back and Forward sit halfway down the page, at the left and right edges. Each appears only when reading history is available in that direction. Try the arrows, or tap the page to hide the controls.</p>
+  <header><h1>Bokheim · Kobo reader</h1><p>Reading, history, and search</p></header>
+  <p class="intro">Tap the magnifying glass to search, type a word, and browse matching passages by chapter. Use the arrows to move between matches and × to return to the page. Tap the reading page to show or hide its controls.</p>
   <div class="examples" id="examples"></div>
-  <p class="note">HTML preview of the implemented placement, not a screenshot from a Kobo. Buttons use the same round shape, 48 px touch target at the default interface size, and 8 px edge inset. They navigate reading history after deliberate jumps; page turns keep their existing controls.</p>
+  <p class="note">Interactive HTML mockup, not a Kobo screenshot. Search uses sample passages from Pride and Prejudice; type with your computer keyboard. The panel covers the page while the bottom navigation remains visible.</p>
 </main>
 <template id="example">
   <figure>
@@ -70,6 +86,16 @@
       </div>
       <button class="history back" aria-label="Back in reading history" title="Back"><img src="assets/phosphor-light/arrow-left.svg" alt=""></button>
       <button class="history forward" aria-label="Forward in reading history" title="Forward"><img src="assets/phosphor-light/arrow-right.svg" alt=""></button>
+      <section class="search-panel" aria-label="Search in book" hidden>
+        <div class="search-header">
+          <strong>Search</strong><span class="match-count" aria-live="polite"></span>
+          <button class="icon-button match-previous" aria-label="Previous match"><img src="assets/phosphor-light/arrow-left.svg" alt=""></button>
+          <button class="icon-button match-next" aria-label="Next match"><img src="assets/phosphor-light/arrow-right.svg" alt=""></button>
+          <button class="icon-button search-close" aria-label="Close search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+        </div>
+        <div class="query-row"><input type="search" aria-label="Search in book" placeholder="Search in book" value="Bennet" autocomplete="off"></div>
+        <div class="search-results"></div>
+      </section>
       <nav class="bar bottom" aria-label="Reader panels">
         <button class="destination"><img src="assets/phosphor-light/list.svg" alt="">Contents</button>
         <button class="destination"><img src="assets/phosphor-light/book-open.svg" alt="">Notes</button>
@@ -83,7 +109,7 @@
 <script>
   const examples = [
     { label: 'Both directions available', positions: ['Chapter I', 'Chapter IV', 'Chapter IX'], index: 1, visible: true },
-    { label: 'Back available', positions: ['Chapter I', 'Chapter IV'], index: 1, visible: true },
+    { label: 'Search open', positions: ['Chapter I', 'Chapter IV'], index: 1, visible: true, searchOpen: true },
     { label: 'Controls hidden', positions: ['Chapter I', 'Chapter IV', 'Chapter IX'], index: 1, visible: false }
   ];
   for (const example of examples) {
@@ -93,12 +119,112 @@
     const back = figure.querySelector('.back');
     const forward = figure.querySelector('.forward');
     const toggle = figure.querySelector('.toggle');
+    const panel = figure.querySelector('.search-panel');
+    const searchButton = figure.querySelector('[aria-label="Search"]');
+    const query = panel.querySelector('input');
+    const results = panel.querySelector('.search-results');
+    const passages = [
+      { chapter: 'Chapter I', text: 'It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife.' },
+      { chapter: 'Chapter I', text: '“My dear Mr. Bennet,” said his lady to him one day, “have you heard that Netherfield Park is let at last?”' },
+      { chapter: 'Chapter I', text: 'Mr. Bennet replied that he had not.' },
+      { chapter: 'Chapter I', text: '“Do not you want to know who has taken it?” cried his wife impatiently.' },
+      { chapter: 'Chapter II', text: 'Mr. Bennet was among the earliest of those who waited on Mr. Bingley.' },
+      { chapter: 'Chapter II', text: 'Observing his second daughter employed in trimming a hat, he suddenly addressed her with: “I hope Mr. Bingley will like it, Lizzy.”' },
+      { chapter: 'Chapter III', text: 'Not all that Mrs. Bennet, however, with the assistance of her five daughters, could ask on the subject, was sufficient to draw from her husband any satisfactory description of Mr. Bingley.' },
+      { chapter: 'Chapter III', text: 'Mrs. Bennet had seen her eldest daughter much admired by the Netherfield party.' }
+    ];
+    let matches = [], selected = 0;
+    function selectMatch(index) {
+      selected = index;
+      const passage = matches[index];
+      if (passage) {
+        if (example.positions[example.index] !== passage.chapter) {
+          example.positions = example.positions.slice(0, example.index + 1);
+          example.positions.push(passage.chapter);
+          example.index++;
+        }
+        const prose = figure.querySelector('.prose');
+        prose.querySelectorAll('p').forEach(p => p.remove());
+        const paragraph = document.createElement('p');
+        paragraph.textContent = passage.text;
+        prose.append(paragraph);
+      }
+      results.querySelectorAll('.search-hit').forEach((button, i) => {
+        button.setAttribute('aria-current', String(i === selected));
+        if (i === selected) {
+          button.closest('details').open = true;
+          button.scrollIntoView({ block: 'nearest' });
+        }
+      });
+      panel.querySelector('.match-count').textContent = `${matches.length ? selected + 1 : 0} of ${matches.length}`;
+      render();
+    }
+    function search() {
+      const term = query.value.trim().toLowerCase();
+      matches = term ? passages.filter(p => p.text.toLowerCase().includes(term)) : [];
+      selected = 0;
+      results.replaceChildren();
+      let group, chapter;
+      matches.forEach((passage, index) => {
+        if (chapter !== passage.chapter) {
+          chapter = passage.chapter;
+          group = document.createElement('details');
+          group.open = true;
+          const heading = document.createElement('summary');
+          heading.textContent = chapter;
+          group.append(heading);
+          results.append(group);
+        }
+        const button = document.createElement('button');
+        button.className = 'search-hit';
+        button.setAttribute('aria-current', String(index === selected));
+        let offset = 0, start;
+        while ((start = passage.text.toLowerCase().indexOf(term, offset)) !== -1) {
+          button.append(document.createTextNode(passage.text.slice(offset, start)));
+          const bold = document.createElement('b');
+          bold.textContent = passage.text.slice(start, start + term.length);
+          button.append(bold);
+          offset = start + term.length;
+        }
+        button.append(document.createTextNode(passage.text.slice(offset)));
+        button.addEventListener('click', () => selectMatch(index));
+        group.append(button);
+      });
+      if (!matches.length) {
+        const message = document.createElement('p');
+        message.className = 'search-empty';
+        message.textContent = term ? 'No matches found.' : 'Type a word to search this book.';
+        results.append(message);
+      }
+      panel.querySelector('.match-count').textContent = `${matches.length ? 1 : 0} of ${matches.length}`;
+      panel.querySelectorAll('.match-previous, .match-next').forEach(button => button.disabled = !matches.length);
+    }
+    function closeSearch() {
+      example.searchOpen = false;
+      render();
+      searchButton.focus();
+    }
+    searchButton.addEventListener('click', () => { example.searchOpen = true; example.visible = true; render(); query.focus(); });
+    panel.querySelector('.search-close').addEventListener('click', closeSearch);
+    query.addEventListener('input', search);
+    panel.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { event.preventDefault(); closeSearch(); }
+      if (event.key === 'Enter' && event.target === query && matches.length) {
+        event.preventDefault();
+        selectMatch((selected + (event.shiftKey ? -1 : 1) + matches.length) % matches.length);
+      }
+    });
+    panel.querySelector('.match-previous').addEventListener('click', () => selectMatch((selected - 1 + matches.length) % matches.length));
+    panel.querySelector('.match-next').addEventListener('click', () => selectMatch((selected + 1) % matches.length));
     figure.querySelector('figcaption').textContent = example.label;
     function render() {
       const chapter = example.positions[example.index];
       back.hidden = example.index === 0;
       forward.hidden = example.index === example.positions.length - 1;
       screen.dataset.controls = String(example.visible);
+      panel.hidden = !example.searchOpen;
+      searchButton.setAttribute('aria-expanded', String(!!example.searchOpen));
+      toggle.disabled = !!example.searchOpen;
       figure.querySelector('.title').textContent = `Pride and Prejudice: ${chapter}`;
       figure.querySelector('h2').textContent = chapter;
       figure.querySelector('.state').textContent = `${example.index ? 'Back available' : 'No Back'} · ${example.index < example.positions.length - 1 ? 'Forward available' : 'No Forward'}`;
@@ -108,6 +234,7 @@
     back.addEventListener('click', () => { example.index--; render(); });
     forward.addEventListener('click', () => { example.index++; render(); });
     for (const element of [toggle, figure.querySelector('.prose')]) element.addEventListener('click', () => { example.visible = !example.visible; render(); });
+    search();
     render();
     document.querySelector('#examples').append(fragment);
   }

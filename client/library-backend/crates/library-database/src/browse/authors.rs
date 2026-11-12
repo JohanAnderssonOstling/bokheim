@@ -30,12 +30,9 @@ pub(super) fn index_rows(authors: &BTreeMap<AuthorId, Author>, matching: &Matchi
             rows.push(BrowseRow { id: location(*id), name: found.name.clone(), path: None, book_count, downloaded_book_count: found.books.intersection(&matching.downloaded).count() });
         }
     }
-    super::popularity::sort_rows(&mut rows, options.chip_sort, |row| match row.id {
-        BrowseLocation::Author(Some(id)) | BrowseLocation::CatalogAuthor(Some(id)) => super::popularity::sum(&authors[&id].books, matching),
-        _ => None,
-    });
-    if options.chip_sort != library_model::BrowseChipSort::Popularity && !matching.preferred.is_empty() {
-        super::popularity::prefer_rows(&mut rows, &|row| match row.id {
+    super::ordering::sort_rows(&mut rows, options.chip_sort);
+    if !matching.preferred.is_empty() {
+        super::ordering::prefer_rows(&mut rows, &|row| match row.id {
             BrowseLocation::CatalogAuthor(Some(id)) => !authors[&id].books.is_disjoint(&matching.preferred),
             _ => false,
         });

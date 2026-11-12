@@ -187,7 +187,7 @@ pub(super) fn book_child(
         let painted_bounds = painted_bounds.clone();
         view.update(cx, |view, _| {
             view.frame = Some(Rc::new(move |card, cx| {
-                let mut frame = div().id(frame_id.clone()).w_full().min_w_0().flex_none().child(card);
+                let mut frame = div().id(frame_id.clone()).relative().w_full().min_w_0().flex_none().child(card);
                 if presentation != BookCardPresentation::Grid {
                     let activate = rendered.clone();
                     let menu = rendered.clone();

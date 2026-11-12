@@ -1,7 +1,7 @@
 //! Builds the snapshot clients attach, and the files they download.
 use crate::{covers::CoverAssets, curation};
 use book_model::{AuthorId, BookMetadata, BookRecord, Scheme, Scope};
-use metadata_contract::catalog::{SOURCE_PERCENTILES_SQL, source_evidence};
+use metadata_contract::catalog::source_evidence;
 use metadata_contract::matching::author_match_keys;
 use reqwest::Url;
 use rusqlite::{Connection, OpenFlags, params};
@@ -11,7 +11,7 @@ use subject_projection::{UNIFIED_MATCHER_VERSION, project_subject_codes, project
 
 mod compression;
 
-pub const FORMAT_VERSION: u32 = 11;
+pub const FORMAT_VERSION: u32 = 12;
 const PAGE_SIZE: u32 = 8192;
 
 /// Adds transfer encodings without changing an immutable snapshot's bytes,
@@ -64,28 +64,9 @@ fn store_evidence(db: &Connection, sources: &mut BTreeMap<String, i64>, source: 
     let metadata = serde_json::from_str(metadata).map_err(|error| error.to_string())?;
     let evidence = source_evidence(source, &metadata)?;
     let id = source_id(db, sources, source)?;
-    let value = evidence.popularity.as_ref();
-    let ranking_source = value.and_then(|value| value.source.as_deref()).map(|name| source_id(db, sources, name)).transpose()?;
-    let combined = value.and_then(|value| value.combined_popularity.as_ref());
     let hosted_id = hosted.map(|key| book_id(db, key)).transpose()?;
     let external_id = external.map(|key| book_id(db, key)).transpose()?;
-    let popularity = value.and_then(|value| value.popularity).map(i64::try_from).transpose().map_err(|error| error.to_string())?;
-    let epub_popularity = value.and_then(|value| value.epub_popularity).map(i64::try_from).transpose().map_err(|error| error.to_string())?;
-    db.prepare_cached("INSERT INTO source_entry(source_id,entry_id,hosted_row_id,external_row_id,ranking_source_id,score,popularity,epub_popularity,reading_percentile,epub_percentile) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)")
-        .map_err(|error| error.to_string())?
-        .execute(params![
-            id,
-            entry_id,
-            hosted_id,
-            external_id,
-            ranking_source,
-            value.and_then(|value| value.score()),
-            popularity,
-            epub_popularity,
-            combined.and_then(|value| value.reading_percentile),
-            combined.and_then(|value| value.epub_percentile)
-        ])
-        .map_err(|error| error.to_string())?;
+    db.execute("INSERT INTO source_entry(source_id,entry_id,hosted_row_id,external_row_id) VALUES(?1,?2,?3,?4)", params![id, entry_id, hosted_id, external_id]).map_err(|error| error.to_string())?;
     for name in evidence.sources {
         let original = source_id(db, sources, &name)?;
         db.execute("INSERT OR IGNORE INTO source_entry_source(source_id,entry_id,original_source_id) VALUES(?1,?2,?3)", params![id, entry_id, original]).map_err(|error| error.to_string())?;
@@ -194,15 +175,13 @@ CREATE TABLE book_concept(book_row_id INTEGER NOT NULL REFERENCES book(row_id),c
 CREATE TABLE book_source(book_row_id INTEGER NOT NULL REFERENCES book(row_id),source_id INTEGER NOT NULL REFERENCES source(id),PRIMARY KEY(book_row_id,source_id)) STRICT, WITHOUT ROWID;
 CREATE TABLE source_entry(
  source_id INTEGER NOT NULL REFERENCES source(id),entry_id INTEGER NOT NULL CHECK(entry_id>0),
- hosted_row_id INTEGER REFERENCES book(row_id),external_row_id INTEGER REFERENCES book(row_id),ranking_source_id INTEGER REFERENCES source(id),
- score REAL,popularity INTEGER CHECK(popularity>=0),epub_popularity INTEGER CHECK(epub_popularity>=0),reading_percentile REAL,epub_percentile REAL,
+ hosted_row_id INTEGER REFERENCES book(row_id),external_row_id INTEGER REFERENCES book(row_id),
  PRIMARY KEY(source_id,entry_id)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE source_entry_source(source_id INTEGER NOT NULL,entry_id INTEGER NOT NULL,original_source_id INTEGER NOT NULL REFERENCES source(id),PRIMARY KEY(source_id,entry_id,original_source_id),FOREIGN KEY(source_id,entry_id) REFERENCES source_entry(source_id,entry_id)) STRICT, WITHOUT ROWID;
 ");
 
 fn finish_snapshot(db: &Connection) -> Result<(), String> {
-    db.execute_batch(SOURCE_PERCENTILES_SQL).map_err(|error| error.to_string())?;
     db.execute_batch("VACUUM").map_err(|error| error.to_string())
 }
 
@@ -331,79 +310,6 @@ pub fn publish(dir: &Path, db: &Connection, out: &Path, release_id: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn other_observed_sources_use_percentiles_and_bilingual_books_keep_fifty() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(SCHEMA).unwrap();
-        db.execute_batch(
-            "INSERT INTO source VALUES(1,'standardebooks.org'),(2,'unglue.it'),(3,'bilinguator.com');
-            INSERT INTO source_entry(source_id,entry_id,ranking_source_id,score) VALUES
-            (1,1,1,0.1),(1,2,1,0.25),(1,3,1,1),(1,4,1,NULL),
-            (2,1,2,3),(2,2,2,10),(2,3,2,10),
-            (3,1,NULL,NULL),(3,2,NULL,NULL);",
-        )
-        .unwrap();
-        for _ in 0..2 {
-            finish_snapshot(&db).unwrap();
-            let scores = |source| db.prepare("SELECT score FROM source_entry WHERE source_id=?1 ORDER BY entry_id").unwrap().query_map([source], |row| row.get::<_, Option<f64>>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-            assert_eq!(scores(1), [Some(0.0), Some(50.0), Some(100.0), None]);
-            assert_eq!(scores(2), [Some(0.0), Some(75.0), Some(75.0)]);
-            assert_eq!(scores(3), [Some(50.0), Some(50.0)]);
-            assert_eq!(db.query_row("SELECT count(*) FROM source_entry WHERE source_id=3 AND ranking_source_id=3", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-        }
-    }
-
-    #[test]
-    fn combined_gutenberg_average_is_stored_before_percentile_ranking() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(SCHEMA).unwrap();
-        db.execute_batch("INSERT INTO description VALUES(1,''); INSERT INTO book(row_id,key,external,title,description_id,format) VALUES(1,zeroblob(32),0,'Combined',1,1);").unwrap();
-        let mut sources = BTreeMap::new();
-        let key = "0".repeat(64);
-        let metadata = serde_json::json!({"components":[
-            {"source_entries":[{"source":"gutenberg.org","metadata":{"downloads":5}}]},
-            {"source_entries":[{"source":"gutenberg.org","metadata":{"downloads":10}}]}
-        ]});
-        store_evidence(&db, &mut sources, "bokheim:combined-volumes", 1, Some(&key), None, &metadata.to_string()).unwrap();
-        let score: f64 = db.query_row("SELECT score FROM source_entry WHERE entry_id=1", [], |row| row.get(0)).unwrap();
-        assert_eq!(score, 7.5);
-        store_evidence(&db, &mut sources, "gutenberg.org", 2, Some(&key), None, r#"{"downloads":7}"#).unwrap();
-        store_evidence(&db, &mut sources, "gutenberg.org", 3, Some(&key), None, r#"{"downloads":8}"#).unwrap();
-        finish_snapshot(&db).unwrap();
-        let scores = db.prepare("SELECT score FROM source_entry ORDER BY entry_id").unwrap().query_map([], |row| row.get::<_, f64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(scores, [50.0, 0.0, 100.0]);
-    }
-
-    #[test]
-    fn source_percentiles_keep_ties_unknowns_and_format_bindings_and_are_idempotent() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(SCHEMA).unwrap();
-        db.execute_batch(
-            "INSERT INTO source VALUES(1,'gutenberg.org'),(2,'loyalbooks.com'),(3,'bokheim:combined-volumes'),(4,'standardebooks.org');
-             INSERT INTO description VALUES(1,'Description');
-             INSERT INTO book(row_id,key,external,title,description_id,format) VALUES(1,zeroblob(32),0,'EPUB',1,1),(2,randomblob(32),1,'Audio',1,16);
-             INSERT INTO source_entry(source_id,entry_id,hosted_row_id,external_row_id,ranking_source_id,score) VALUES
-             (1,1,1,2,1,0),(1,2,1,NULL,1,10),(1,3,NULL,2,1,10),(1,4,1,NULL,1,100),(1,5,1,NULL,1,NULL),
-             (3,6,1,NULL,1,10),
-             (2,1,1,2,2,0.5),(2,2,1,NULL,2,1.1),(2,3,NULL,2,2,2),(2,4,1,NULL,2,NULL),
-             (4,1,1,NULL,4,0.25);",
-        )
-        .unwrap();
-        finish_snapshot(&db).unwrap();
-        let scores = |source: i64| db.prepare("SELECT score FROM source_entry WHERE source_id=?1 ORDER BY entry_id").unwrap().query_map([source], |row| row.get::<_, Option<f64>>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(scores(1), [Some(0.0), Some(50.0), Some(50.0), Some(100.0), None]);
-        assert_eq!(scores(2), [Some(0.0), Some(50.0), Some(100.0), None]);
-        assert_eq!(scores(3), [Some(50.0)]);
-        assert_eq!(scores(4), [Some(50.0)]);
-        finish_snapshot(&db).unwrap();
-        assert_eq!(scores(1), [Some(0.0), Some(50.0), Some(50.0), Some(100.0), None]);
-        assert_eq!(scores(2), [Some(0.0), Some(50.0), Some(100.0), None]);
-        db.execute_batch("DELETE FROM source_entry; INSERT INTO source_entry(source_id,entry_id,ranking_source_id,score) VALUES(1,1,1,12),(1,2,1,NULL),(2,1,2,2),(2,2,2,2);").unwrap();
-        finish_snapshot(&db).unwrap();
-        assert_eq!(scores(1), [Some(50.0), None]);
-        assert_eq!(scores(2), [Some(50.0), Some(50.0)]);
-    }
 
     #[test]
     fn complete_descriptions_preserve_every_byte_and_share_only_identical_text() {
@@ -635,7 +541,7 @@ mod tests {
             },
         )
         .unwrap();
-        let metadata = r#"{"rating":5,"rating_count":2,"popularity":[{"rank":7}],"audiobook_delivery":"external_download","audiobook_duration_ms":27789000}"#;
+        let metadata = r#"{"rating":5,"rating_count":2,"audiobook_delivery":"external_download","audiobook_duration_ms":27789000}"#;
         db.execute("INSERT INTO source_entry(source,entry_id,entry_url,external_entry_key,metadata) VALUES('loyalbooks.com','book',?1,?2,?3)", params![page, key, metadata]).unwrap();
         for size in ["card", "detail"] {
             image::RgbImage::from_pixel(20, 30, image::Rgb([80, 100, 120])).save(dir.path().join(format!("covers/{key}-{size}.jpg"))).unwrap();
@@ -643,13 +549,12 @@ mod tests {
         let out = dir.path().join("published");
         publish(dir.path(), &db, &out, 1).unwrap();
         let snapshot = Connection::open(out.join("releases/1/catalog.sqlite3")).unwrap();
-        let (source, stored_page, stored_download, stored_score, stored_title): (String, String, String, Option<f64>, String) = snapshot.query_row("SELECT source.name,external_book.entry_url,external_book.download_url,source_entry.score,external_book.title FROM source_entry JOIN source ON source.id=source_entry.source_id JOIN external_book ON external_book.row_id=source_entry.external_row_id", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
+        let (source, stored_page, stored_download, stored_title): (String, String, String, String) = snapshot.query_row("SELECT source.name,external_book.entry_url,external_book.download_url,external_book.title FROM source_entry JOIN source ON source.id=source_entry.source_id JOIN external_book ON external_book.row_id=source_entry.external_row_id", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
         assert_eq!(source, "loyalbooks.com");
         assert_eq!(stored_page, page);
         assert_eq!(stored_download, download);
         let format: i64 = snapshot.query_row("SELECT format FROM external_book", [], |row| row.get(0)).unwrap();
         assert_eq!(format, BookFormat::Mp3Folder as i64);
-        assert_eq!(stored_score, Some(50.0));
         assert_eq!(db.query_row("SELECT metadata FROM source_entry", [], |row| row.get::<_, String>(0)).unwrap(), metadata);
         let native: (String, String) = db.query_row("SELECT entry_id,entry_url FROM source_entry", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!(native, ("book".into(), page.into()));

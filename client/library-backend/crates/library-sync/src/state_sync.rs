@@ -66,6 +66,7 @@ pub(crate) async fn acknowledge(database: &DatabaseClient, events: Option<&Libra
     if !ids.is_empty() {
         if let Some(events) = events {
             events.assets.wake();
+            events.updates.publish(LibraryUpdate::SyncStatusChanged);
         }
     }
     Ok(())

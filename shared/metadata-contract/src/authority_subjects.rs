@@ -3,7 +3,7 @@ use crate::{AuthoritySubjectMatch, ClassificationEvidence, ClassificationMethod,
 pub const OPEN_LIBRARY_WORK_PROVIDER: &str = "openlibrary_work";
 
 pub fn classification_record(query: &EditionIdentityQuery, matched: &AuthoritySubjectMatch) -> Option<RichWorkMetadataMatch> {
-    use crate::matching::{matching_author_count_with_title, NormalizedTitle};
+    use crate::matching::{NormalizedTitle, matching_author_count_with_title};
     let provider = ClassificationProvider::from_provider_id(&matched.provider_id)?;
     if matched.record_ids.is_empty() || matched.record_ids.len() > 128 || matched.record_ids.iter().any(|id| id.is_empty() || id.len() > 256) {
         return None;
@@ -52,5 +52,5 @@ pub fn classification_record(query: &EditionIdentityQuery, matched: &AuthoritySu
             .collect();
     }
     let work_id = (matched.provider_id == OPEN_LIBRARY_WORK_PROVIDER && matched.record_ids.len() == 1).then(|| matched.record_ids[0].clone());
-    Some(RichWorkMetadataMatch { open_library_work_id: work_id, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, subjects: Vec::new(), popularity: None })
+    Some(RichWorkMetadataMatch { open_library_work_id: work_id, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, subjects: Vec::new() })
 }

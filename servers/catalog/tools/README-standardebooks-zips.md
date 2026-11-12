@@ -63,16 +63,6 @@ request or starting another download. Resume only after the source's limit has
 reset. Standard Ebooks' anonymous download handler checks both a 30-second
 window and a six-hour window; its current long-window threshold is 100 downloads.
 
-`standardebooks-popularity.py --pages DIRECTORY --output ranking.json` validates
-a cached, complete popularity listing fetched with `per-page=48`. It records
-canonical URLs, titles, authors, page hashes, observation time, and ordinal ranks.
-Pass that file to the import command with `--popularity-only ranking.json` after
-the import completes to retain the observations and publish a ranked snapshot.
-The source's download counts are not available in the listing. The compact
-catalog uses reciprocal rank as an internal positive sorting/aggregation score;
-it never labels the ordinal as a download count. Source order is Public Domain
-Library, Standard Ebooks, then the other sources in their established order.
-
 `audit-standardebooks-missing.py --catalog CATALOG --ranking ranking.json
 --output REPORT_DIRECTORY` compares the finished catalog with those same pages
 and writes JSON and CSV reports. Exact source URLs establish edition presence;

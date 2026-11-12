@@ -24,7 +24,6 @@ metadata-server import authorities current.sqlite wikidata.sqlite authorities.sq
 
 BOKHEIM_METADATA_DESCRIPTION_DATABASE=descriptions.sqlite \
 BOKHEIM_METADATA_DEMAND=/var/lib/bokheim-metadata/demand.sqlite \
-BOKHEIM_LIBRARYTHING_RATINGS_DUMP=ol_dump_ratings.txt.gz \
 metadata-server build authorities.sqlite /var/lib/bokheim-metadata-crawl/provider.sqlite answers-2026-09-30.sqlite
 ```
 
@@ -36,23 +35,6 @@ provider results are read in one SQLite transaction while the crawler continues.
 Every ISBN from the dumps, providers or demand is resolved without network I/O.
 ISBN lookup does not infer LCC by matching titles and authors across separate
 Open Library works.
-The optional `BOKHEIM_LIBRARYTHING_RATINGS_DUMP` input is the
-[Open Library ratings dump](https://openlibrary.org/developers/dumps), a gzip
-TSV with work key, optional edition key, rating and date. The builder aggregates
-valid ratings (1–5) once per work and uses the counts both for crawler priority
-and popularity enrichment. `/v3/books` returns optional `popularity` evidence
-with `open_library_work_id`, `rating_count` and `snapshot_date` (the bibliographic
-snapshot date, not the independently supplied ratings dump date). Rating count
-measures participation; it is not an average rating or a cross-provider score.
-Multiple ISBNs of the same work keep one count; conflicting work identities or
-observations produce no popularity. Missing ratings remain unknown. A uniquely
-matched title/author edition can supply popularity even when classification
-does not add its ISBN to the file record. Clients retain popularity in the
-immutable enrichment answer and synchronize it with the book addition;
-`Database::enrichment_popularity` reads it without changing book metadata.
-Existing saved answers retain their original binary encoding. New answers with
-popularity use an appended encoding variant understood by updated clients.
-Published answer files need a new build to contain popularity.
 Provider results fill missing classification schemes while preserving existing LCC.
 Answers use JSON BLOBs with explicit references to shared work descriptions;
 edition keys and authority candidates preserve the existing scoring rules.
@@ -129,7 +111,7 @@ metadata-server build authorities.sqlite provider.sqlite answers-next.sqlite \
     --previous answers-current.sqlite
 ```
 
-Use the same optional description, ratings and demand environment variables.
+Use the same optional description and demand environment variables.
 Full builds retain compact classification summaries, exact provider evidence,
 demand counts and immutable input identities for this comparison. Provider
 additions, edits and deletions are detected even if their timestamps are unchanged.
@@ -146,7 +128,7 @@ metadata-server reclassify authorities.sqlite provider.sqlite answers-current.sq
 This uses SQL updates in one WAL transaction. It checks work-derived LCC,
 writes changed answers, updates affected edition search entries and crawler
 queues, and folds pending provider/demand evidence into the same transaction.
-Descriptions, authors, popularity, non-LCC classifications and unchanged answer
+Descriptions, authors, non-LCC classifications and unchanged answer
 bytes are preserved. The whole transaction rolls back on failure. Server and
 crawler readers use ordinary SQLite `mode=ro`, so existing connections observe
 committed changes. Restart the crawler afterward to reload its in-memory queue.
@@ -184,7 +166,7 @@ there is always one base and one cumulative update, with no growing layer chain.
 The report's `file_bytes` measures the published file alone; an update also
 depends on its retained base. As cumulative changes grow, run a fresh full build
 without `--previous` to establish a new base, then update that base incrementally.
-An older answer file without build state, changed imported/description/ratings
+An older answer file without build state, changed imported/description
 files, an unsupported builder recipe change, or more than 100,000 changed/affected ISBNs
 falls back to a full build. Immutable file identity includes canonical path,
 size and modification time, plus change time on Unix. Bump `RECIPE_VERSION` in
@@ -444,7 +426,7 @@ read-only; use a separate scratch demand database. Measure projected subject
 placement rather than `found`, which can also mean other metadata was found.
 
 The server records valid ISBNs without LCC in `demand.sqlite`. The next builder
-ranks demand ahead of other wanted ISBNs, then ranks the remainder by OL ratings.
+ranks demand ahead of other wanted ISBNs.
 Descriptions, author identity, ambiguity, provenance and per-book merge behavior
 stay deterministic for the same file facts and answer file. Audible data remains
 live. For older clients and catalog tools, the server can resolve cover artwork:
@@ -452,12 +434,10 @@ ISBN candidates are tried against
 Open Library with a shared one-request-per-second limit, and selected Audible
 artwork is fetched from Audible. Confirmed bytes persist in `demand.sqlite` and
 `/v3/books` returns one reference fetched from `/v3/covers/{id}`. The policy is
-`books_v5`. Successful client answers are immutable; popularity is captured
-when new book additions are enriched.
+`books_v29`. Successful client answers are immutable.
 Library clients send `needs_cover: false` for every book and look up/download
 missing artwork directly on the device: Open Library by ISBN or title/author,
-and Audible by ASIN when recording artwork is needed. Bibliographic, recording
-and popularity enrichment still use `/v3/books`. Existing embedded or downloaded
+and Audible by ASIN when recording artwork is needed. Bibliographic and recording enrichment still use `/v3/books`. Existing embedded or downloaded
 art is retained. Direct browser image downloads remain subject to the provider's
 CORS headers.
 Older clients and catalog tools can still request server-side covers. Omitted
@@ -515,7 +495,7 @@ python3 -m unittest discover -s servers/metadata -p 'test_*.py'
 Resolution fixtures build answer files, read them through the server, and compare
 with the original resolver as a test-only oracle. HTTP, Audible and LC pagination
 tests use local mock servers. Additional tests cover provider merges, description
-sharing, demand and ratings ranking, read-only serving after source removal,
+sharing, demand ranking, read-only serving after source removal,
 snapshot replacement, crawler ordering/backoff/work gates and durable quota.
 Before production activation, compare `/v3/books` over representative production
 file facts against the previous release and record full-build timing and size.

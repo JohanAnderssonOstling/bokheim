@@ -21,7 +21,8 @@ mod book;
 #[cfg(not(target_arch = "wasm32"))]
 pub use book::{inspect_audiobook_folder_reader, inspect_audiobook_folder_content};
 pub use audiobook_archive::archive_content_hash as audiobook_content_hash;
-pub use book::{AudiobookMetadata, CachedPdfReader, InspectedBook, inspect_book_reader, inspect_book_reader_with_cached_pdf, inspect_book_reader_with_hash, inspect_book_reader_with_pdf_metadata};
+pub use book_inspection_contract::{AudiobookMetadata, CachedPdfReader, InspectedBook, PdfSourceIdentity};
+pub use book::{inspect_book_reader, inspect_book_reader_with_cached_pdf, inspect_book_reader_with_hash, inspect_book_reader_with_pdf_metadata};
 pub mod evidence;
 mod mobi;
 pub use mobi::{inspect_mobi_frontmatter, inspect_mobi_metadata_reader, inspect_mobi_pages_reader, inspect_mobi_reader, inspect_mobi_with_frontmatter};
@@ -34,9 +35,8 @@ mod title_identity;
 pub use title_identity::{normalize_with_filename, title_readings};
 mod pdf;
 mod pdf_ranges;
-mod pdf_source_identity;
+pub mod pdf_source_identity;
 pub use pdf::{InspectedPdf, inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspect_pdf_reader, prepare_pdf_metadata};
-pub use pdf_source_identity::PdfSourceIdentity;
 
 /// Inspection cache version for a format. Matches the extractor contract:
 /// EPUB/MOBI include the shared declared-metadata projection; PDF follows

@@ -14,9 +14,6 @@ pub(crate) struct BrowseOptions {
 }
 
 impl BrowseOptions {
-    pub(super) fn needs_popularity(&self) -> bool {
-        self.chip_sort == BrowseChipSort::Popularity || self.book_sort == BrowseBookSort::Popularity
-    }
     pub fn from_query(query: &LibraryBrowseQuery, downloaded_only: bool) -> Self {
         Self {
             // FTS normalizes both sides with its own tokenizer. NFKD here

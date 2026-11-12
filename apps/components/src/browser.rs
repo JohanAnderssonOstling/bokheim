@@ -210,13 +210,13 @@ pub fn library_switcher_group() -> Div {
 /// it carries no underline: the breadcrumb and the actions already mark the
 /// boundary. See [`crate::nav_rail_destinations`].
 pub fn topbar(theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().h(gpui::rems(topbar_height_rem())).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).bg(theme.page_bg)
+    div().w_full().min_w_0().h(gpui::rems(topbar_height_rem())).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).when(cfg!(feature = "kobo"), |bar| bar.px(px(CONTENT_INSET))).bg(theme.page_bg)
 }
 
 /// The reader's single-row topbar, sized to its controls without extra vertical
-/// inset and ruled off from the book under it.
+/// inset and ruled off from the book under it. Kobo keeps the shared bar height.
 pub fn ruled_topbar(theme: BrowserTheme) -> Div {
-    topbar(theme).h_auto().min_h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).border_b_1().border_color(theme.rule)
+    topbar(theme).when(!cfg!(feature = "kobo"), |bar| bar.h_auto().min_h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS))).border_b_1().border_color(theme.rule)
 }
 
 pub fn browser_topbar_left() -> Div {
@@ -237,7 +237,7 @@ pub fn mobile_navigation_heading(title: impl Into<SharedString>, back: Option<Bu
         .flex()
         .items_center()
         .gap(px(SPACE_SM))
-        .pl(px(CONTENT_INSET))
+        .when(!cfg!(feature = "kobo"), |heading| heading.pl(px(CONTENT_INSET)))
         .children(back)
         .child(div().flex_1().min_w_0().truncate().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(gpui::rems(TEXT_MD)).child(title.into()))
 }
@@ -245,7 +245,7 @@ pub fn mobile_navigation_heading(title: impl Into<SharedString>, back: Option<Bu
 /// A navigation heading whose title opens a menu, made by
 /// `mobile_navigation_menu_title`.
 pub fn mobile_navigation_menu_heading(title: impl IntoElement, back: Option<Button>) -> Div {
-    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().flex().child(title))
+    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).when(!cfg!(feature = "kobo"), |heading| heading.pl(px(CONTENT_INSET))).children(back).child(div().flex_1().min_w_0().flex().child(title))
 }
 
 /// A heading title that opens a menu: the title as it always reads, with a
@@ -275,8 +275,9 @@ pub fn mobile_navigation_bar(title: impl Into<SharedString>, back: Option<Button
 /// column reads as having two different right margins — one for the chrome and
 /// one for the content. `CONTENT_INSET` is the same token the breadcrumb's first
 /// crumb uses on the other side.
+/// On Kobo the containing bar supplies this inset on both sides.
 pub fn browser_topbar_right() -> Div {
-    div().flex_none().min_w_0().flex().items_center().justify_end().gap(px(topbar_action_gap())).pr(px(CONTENT_INSET))
+    div().flex_none().min_w_0().flex().items_center().justify_end().gap(px(topbar_action_gap())).when(!cfg!(feature = "kobo"), |actions| actions.pr(px(CONTENT_INSET)))
 }
 
 /// Centred, quiet status text for a section that is still loading.
