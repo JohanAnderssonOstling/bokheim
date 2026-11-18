@@ -1,6 +1,6 @@
 use super::*;
-use crate::app::data::{AppDataLocation, BackendContext};
 use crate::Failure;
+use crate::app::data::{AppDataLocation, BackendContext};
 use account_contract::{AccountSnapshotResponse, StorageUsageResponse};
 use library_backend::LibraryClient;
 use std::sync::{Arc, Mutex};
@@ -41,11 +41,11 @@ pub(in crate::app) async fn quota_backend(context: BackendContext) -> (Arc<AppBa
                 let request = String::from_utf8(header).unwrap();
                 let (status, body) = if request.starts_with("GET /api/account/snapshot ") {
                     let storage = *usage.lock().unwrap();
-                    ("200 OK", sync_common::transport::encode(&AccountSnapshotResponse { libraries: Vec::new(), deleted_library_ids: Vec::new(), storage, library_storage: Vec::new() }).unwrap())
+                    ("200 OK", sync_common::http::encode(&AccountSnapshotResponse { libraries: Vec::new(), deleted_library_ids: Vec::new(), storage, library_storage: Vec::new() }).unwrap())
                 } else {
                     ("503 Service Unavailable", Vec::new())
                 };
-                let header = format!("HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", sync_common::transport::MEDIA_TYPE, body.len());
+                let header = format!("HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", sync_common::http::MEDIA_TYPE, body.len());
                 if stream.write_all(header.as_bytes()).await.is_ok() {
                     let _ = stream.write_all(&body).await;
                 }

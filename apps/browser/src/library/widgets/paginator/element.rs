@@ -133,7 +133,7 @@ impl PaginatorElement {
 
     /// Handles a secondary click left unanswered by a child. Registered before
     /// child paint, since GPUI bubbles mouse listeners in reverse order.
-    fn paint_secondary_input(&self, rects: Vec<(usize, Bounds<Pixels>)>, hitbox: Hitbox, window: &mut Window) {
+    fn paint_secondary_input(&self, rects: Rc<Vec<(usize, Bounds<Pixels>)>>, hitbox: Hitbox, window: &mut Window) {
         let paginator = self.paginator.clone();
         let secondary_input = move |position: Point<Pixels>, window: &mut Window, cx: &mut App| {
             let pressed_child = rects.iter().find(|(_, bounds)| bounds.contains(&position)).map(|(index, _)| *index);
@@ -165,7 +165,7 @@ impl PaginatorElement {
     ///
     /// Down is gated on the paginator's own hitbox; move and up deliberately
     /// are not, so a band survives the pointer leaving it mid-drag.
-    fn paint_selection_press(&self, container: Hitbox, child_rects: Vec<(usize, Bounds<Pixels>)>, window: &mut Window) {
+    fn paint_selection_press(&self, container: Hitbox, child_rects: Rc<Vec<(usize, Bounds<Pixels>)>>, window: &mut Window) {
         let paginator = self.paginator.clone();
         let rects = child_rects.clone();
         let hitbox = container.clone();
@@ -360,8 +360,7 @@ impl PaginatorElement {
     }
 
     fn measure_next_preview(&self, page: VisiblePage, geometries: &[GroupGeometry], available_height: Pixels, window: &mut Window, cx: &mut App) -> Option<MeasuredRow> {
-        let mut next_child = page.last_child.saturating_add(1);
-        let assignment = geometry::next_forward_row(&self.data, &self.widths, geometries, &mut next_child)?;
+        let assignment = geometry::forward_rows(&self.data, &self.widths, geometries, page.last_child.saturating_add(1)).next()?;
         Some(self.measure_row(&assignment, available_height, window, cx))
     }
 
@@ -498,6 +497,7 @@ impl Element for PaginatorElement {
                 }
             }
         }
+        let child_rects = Rc::new(child_rects);
         let container = (self.selectable && self.active).then(|| {
             let paginator = self.paginator.clone();
             let reported = child_rects.clone();
@@ -546,7 +546,7 @@ pub(super) struct PaginatorPrepaint {
     /// Present only while the paginator is selectable, and the only thing that
     /// distinguishes a press on empty space from one on a child.
     container: Option<Hitbox>,
-    child_rects: Vec<(usize, Bounds<Pixels>)>,
+    child_rects: Rc<Vec<(usize, Bounds<Pixels>)>>,
 }
 
 struct MeasuredItem {

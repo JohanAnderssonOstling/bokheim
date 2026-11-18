@@ -36,7 +36,9 @@ ON CONFLICT(id) DO UPDATE SET
     progress=excluded.progress,
     body=excluded.body,
     modified_at=excluded.modified_at,
-    deleted_at=excluded.deleted_at;
+    deleted_at=excluded.deleted_at
+WHERE (annotation.book_row_id,annotation.toc_ordinal,annotation.progress,annotation.body,annotation.modified_at,annotation.deleted_at)
+   IS NOT (excluded.book_row_id,excluded.toc_ordinal,excluded.progress,excluded.body,excluded.modified_at,excluded.deleted_at);
 
 
 -- name: annotation_book_exists ->

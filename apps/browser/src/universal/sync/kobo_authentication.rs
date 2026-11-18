@@ -86,7 +86,7 @@ impl SyncPage {
             .key_context("Dialog")
             .track_focus(&self.access_overlay.focus)
             .tab_group()
-            .w(px(480.0))
+            .w(gpui::rems(30.0))
             .max_h_full()
             .child(div().id("kobo-account-form").min_h_0().overflow_y_scroll().child(form));
         deferred(components::anchor_to_window(

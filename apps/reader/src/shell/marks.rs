@@ -493,7 +493,6 @@ pub(crate) fn watch_updates<V: 'static>(library: Rc<LibraryClient>, reload: fn(&
         }
         while let Ok(update) = updates.recv().await {
             // Structural changes can alter inherited notes or arrive from sync.
-            // ReadingProgress updates only affect shelf cards, not reader marks.
             let relevant = |update| matches!(update, LibraryUpdate::Annotations | LibraryUpdate::Contents);
             let mut refresh = relevant(update);
             while let Ok(update) = updates.try_recv() {

@@ -35,8 +35,12 @@ pub struct AndroidStoragePolicy {
 #[cfg(target_os = "android")]
 impl gpui::Global for AndroidStoragePolicy {}
 
-pub(crate) fn split_panes_available(window: &gpui::Window) -> bool {
-    native_windows_available() && !ui_components::WindowWidthClass::for_window(window).is_compact()
+pub fn split_panes_available(window: &gpui::Window) -> bool {
+    independent_panes_available() && !ui_components::WindowWidthClass::for_window(window).is_compact()
+}
+
+pub fn independent_panes_available() -> bool {
+    !cfg!(any(target_os = "android", target_os = "ios", feature = "mobile"))
 }
 
 pub fn native_windows_available() -> bool {
@@ -137,6 +141,7 @@ actions!(
         FocusNextSetting,
         FocusPreviousSetting,
         UndoLibraryAction,
+        SelectLoadedItems,
         CopyBooks,
         CutBooks,
         PasteBooks
@@ -170,6 +175,7 @@ pub fn bind_keys(cx: &mut App) {
     bind_shortcut(cx, Browse, "browse.select_right", text!(browse::toggle_selection_to_the_right), &["secondary-right"], ToggleGridSelection(CursorMove::Right), GRID_SELECTION_KEY_CONTEXT);
     bind_shortcut(cx, Browse, "browse.select_up", text!(browse::toggle_selection_above), &["secondary-up"], ToggleGridSelection(CursorMove::Up), GRID_SELECTION_KEY_CONTEXT);
     bind_shortcut(cx, Browse, "browse.select_down", text!(browse::toggle_selection_below), &["secondary-down"], ToggleGridSelection(CursorMove::Down), GRID_SELECTION_KEY_CONTEXT);
+    bind_shortcut(cx, Browse, "browse.select_all", text!(browse::select_loaded_items), &["secondary-a"], SelectLoadedItems, "(BrowseSelection || Trash) && !BrowseItem && !Input && !PopupMenu && !Dialog");
     bind_shortcut(cx, Browse, "browse.undo", text!(browse::undo_library_action), &["secondary-z"], UndoLibraryAction, "Browser");
     cx.bind_keys([
         KeyBinding::new("secondary-c", CopyBooks, Some(BOOK_CLIPBOARD_KEY_CONTEXT)),

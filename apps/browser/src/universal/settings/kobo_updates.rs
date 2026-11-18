@@ -17,15 +17,15 @@ fn status(host: &Host) -> UpdateEvent {
 }
 
 fn work(host: &mut Host, action: Option<UpdateAction>, publish: &PublishUpdate<'_>) -> Result<UpdateView, OperationError> {
-    let view = host.work(action, |view| publish(UpdateEvent::View(view)).map_err(Into::into)).map_err(|error| -> OperationError { match error {
-        UpdateError::LauncherUpgradeRequired => text!(settings::use_the_latest_usb_installer_once_to_enable_updates_on_this_kobo).into(),
-        UpdateError::CheckRequired => text!(settings::check_for_updates_before_downloading).into(),
-        UpdateError::RestartRequired => text!(settings::restart_the_app_with_the_latest_kobo_launcher_then_download_the_update).into(),
-        UpdateError::LauncherUnavailable => text!(settings::the_kobo_launcher_is_unavailable).into(),
-        UpdateError::Failed(error) => {
-            ui_components::user_facing_error(&error, text!(settings::update_failed)).to_owned().into()
+    let view = host.work(action, |view| publish(UpdateEvent::View(view)).map_err(Into::into)).map_err(|error| -> OperationError {
+        match error {
+            UpdateError::LauncherUpgradeRequired => text!(settings::use_the_latest_usb_installer_once_to_enable_updates_on_this_kobo).into(),
+            UpdateError::CheckRequired => text!(settings::check_for_updates_before_downloading).into(),
+            UpdateError::RestartRequired => text!(settings::restart_the_app_with_the_latest_kobo_launcher_then_download_the_update).into(),
+            UpdateError::LauncherUnavailable => text!(settings::the_kobo_launcher_is_unavailable).into(),
+            UpdateError::Failed(error) => ui_components::user_facing_error(&error, text!(settings::update_failed)).to_owned().into(),
         }
-    } })?;
+    })?;
     publish(status(host))?;
     Ok(view)
 }

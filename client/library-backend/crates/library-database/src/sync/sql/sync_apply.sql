@@ -52,9 +52,6 @@ SELECT id, stable_id FROM author_identity WHERE stable_id=:stable_id;
 INSERT OR IGNORE INTO dir(id,parent_id,name,canonical_parent_id,canonical_name,lifecycle,deleted_at)
 VALUES(:dir_id,'00000000-0000-0000-0000-000000000000','Pending','00000000-0000-0000-0000-000000000000','Pending',1,1);
 
--- name: hide_remote_directories!
-UPDATE dir SET deleted_at=1 WHERE id != '00000000-0000-0000-0000-000000000000';
-
 -- name: insert_book_language!
 -- param: book_row_id: i64
 -- param: language: &str
@@ -93,17 +90,17 @@ SELECT changed_at,conflict_rank,replica_id,replica_seq FROM sync_state_version
 -- name: set_remote_directory_lifecycle!
 -- param: dir_id: &str
 -- param: lifecycle: i32
-UPDATE dir SET lifecycle=:lifecycle WHERE id=:dir_id;
+UPDATE dir SET lifecycle=:lifecycle WHERE id=:dir_id AND lifecycle IS NOT :lifecycle;
 
 -- name: set_remote_directory_name!
 -- param: dir_id: &str
 -- param: name: &str
-UPDATE dir SET canonical_name=:name WHERE id=:dir_id;
+UPDATE dir SET canonical_name=:name WHERE id=:dir_id AND canonical_name IS NOT :name;
 
 -- name: set_remote_directory_parent!
 -- param: dir_id: &str
 -- param: parent_id: &str
-UPDATE dir SET canonical_parent_id=:parent_id WHERE id=:dir_id;
+UPDATE dir SET canonical_parent_id=:parent_id WHERE id=:dir_id AND canonical_parent_id IS NOT :parent_id;
 
 -- name: reserve_write_lock!
 UPDATE main.book SET row_id=row_id WHERE 0;

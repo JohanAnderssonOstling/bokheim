@@ -242,18 +242,18 @@ mod tests {
         let report = ReadestLibrary::open(source_root.path()).unwrap().import(&importer, options.clone()).await.unwrap();
         assert_eq!(report.imported, 2);
         assert!(report.failures.is_empty());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 2);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 2);
         assert!(destination.path().join("Target/Readest/Dator/Programmering/first.epub").is_file());
         assert!(destination.path().join("Target/Readest/Dator/Programmering/Rust/second.epub").is_file());
         assert!(!destination.path().join("Readest").exists());
         let hash = importer.storage.database().book_for_local_content(blake3::hash(FIRST).into()).await.unwrap().unwrap();
-        assert_eq!(importer.storage.database().reading_position(&hash).unwrap().as_deref(), Some("epub-location-v2:epubcfi(/6/4)"));
+        assert_eq!(importer.storage.database().reading_position(&hash).await.unwrap().as_deref(), Some("epub-location-v2:epubcfi(/6/4)"));
         let annotations = importer.storage.database().annotations(hash).await.unwrap();
         assert_eq!(annotations.len(), 1);
         assert_eq!(annotations[0].note, "Fixture note");
         let repeated = ReadestLibrary::open(source_root.path()).unwrap().import(&importer, options).await.unwrap();
         assert_eq!((repeated.imported, repeated.already_present), (0, 2));
-        assert_eq!(importer.storage.database().annotations(hash).unwrap(), annotations);
+        assert_eq!(importer.storage.database().annotations(hash).await.unwrap(), annotations);
         assert_eq!(fs::read(source_root.path().join("library.json")).unwrap(), original_json);
         assert_eq!(fs::read(source_root.path().join("first.epub")).unwrap(), FIRST);
         assert_eq!(fs::read_dir(destination.path().join("Target")).unwrap().filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().starts_with("Readest")).count(), 1);
@@ -292,6 +292,6 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert!(source_root.path().join("first.epub").is_file());
         assert!(!destination.path().join("Readest").exists());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
     }
 }

@@ -77,7 +77,9 @@ pub async fn download_book_with_progress(hash: BookId, progress: &impl Fn(Catalo
             return Err(BackendError::classified(Failure::UnreadableBook, "the downloaded book differs from the catalog's"));
         }
         Ok(bytes)
-    }).await.map_err(BackendError::operation)?
+    })
+    .await
+    .map_err(BackendError::operation)?
 }
 
 /// An external audiobook from the archive its source offers, repacked as the
@@ -91,17 +93,108 @@ pub async fn download_audiobook(entry: CardKey) -> Result<Vec<u8>, BackendError>
 }
 
 pub async fn download_audiobook_with_progress(entry: CardKey, progress: &impl Fn(CatalogImportProgress)) -> Result<Vec<u8>, BackendError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let file = download_audiobook_file_with_progress(entry, &std::env::temp_dir(), progress).await?;
+        tokio::fs::read(file.path()).await.map_err(BackendError::operation)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut reader = download_audiobook_reader_with_progress(entry, "assets/00000000-0000-0000-0000-000000000000/book/catalog-download", progress).await?;
+        run_blocking(move || {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await
+        .map_err(BackendError::operation)?
+        .map_err(BackendError::operation)
+    }
+}
+
+/// Browser acquisitions use private OPFS generations, never whole-archive buffers.
+#[cfg(target_arch = "wasm32")]
+pub async fn download_audiobook_reader_with_progress(entry: CardKey, temporary_name: &str, progress: &impl Fn(CatalogImportProgress)) -> Result<client_platform_web::web_storage::FileReader, BackendError> {
+    use client_platform_web::web_storage;
     let url = run_blocking(move || library_database::catalog::audiobook_url(entry))
         .await
         .map_err(BackendError::operation)?
         .map_err(BackendError::operation)?
         .ok_or_else(|| BackendError::classified(Failure::NotFound, "the audiobook is not offered for download"))?;
-    let bytes = download_with_progress(&url, progress).await?;
+    let mut source = web_storage::begin_write(temporary_name).await.map_err(BackendError::operation)?;
+    progress(CatalogImportProgress::Downloading { downloaded_bytes: 0, total_bytes: None });
+    let response = http_response::get(&url).await.and_then(|response| response.error_for_status()).map_err(|error| BackendError::http("could not download the audiobook", error))?;
+    let total_bytes = response.content_length().filter(|size| *size > 0);
+    let mut stream = response.bytes_stream();
+    let mut last_report = Instant::now();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| BackendError::http("could not download the audiobook", error))?;
+        source.write_all(&chunk).await.map_err(BackendError::operation)?;
+        if last_report.elapsed() >= Duration::from_millis(100) {
+            progress(CatalogImportProgress::Downloading { downloaded_bytes: source.length(), total_bytes });
+            last_report = Instant::now();
+        }
+    }
+    progress(CatalogImportProgress::Downloading { downloaded_bytes: source.length(), total_bytes });
     progress(CatalogImportProgress::Importing);
-    client_platform_runtime::executor::run_blocking(move || audiobook_archive::repack_zip(std::io::Cursor::new(bytes), None))
+    let reader = source.open_reader().await.map_err(BackendError::operation)?;
+    web_storage::stage_file_with(temporary_name, move |writer| {
+        let _source = source;
+        audiobook_archive::repack_zip_into(reader, writer, None).map(|_| ())
+    })
+    .await
+    .map_err(|error| BackendError::classified(Failure::UnreadableBook, format!("could not prepare the downloaded audiobook: {error}")))
+}
+
+/// Stream both archives through hidden temporary files. Ownership removes them
+/// on failure or cancellation, including while the blocking repacker is running.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn download_audiobook_file_with_progress(entry: CardKey, root: &Path, progress: &impl Fn(CatalogImportProgress)) -> Result<tempfile::NamedTempFile, BackendError> {
+    use tokio::io::AsyncWriteExt;
+    let url = run_blocking(move || library_database::catalog::audiobook_url(entry))
         .await
-        .map_err(|error| BackendError::message(format!("could not prepare the downloaded audiobook: {error}")))?
-        .map_err(|error| BackendError::classified(Failure::UnreadableBook, format!("could not read the downloaded audiobook: {error}")))
+        .map_err(BackendError::operation)?
+        .map_err(BackendError::operation)?
+        .ok_or_else(|| BackendError::classified(Failure::NotFound, "the audiobook is not offered for download"))?;
+
+    let root = root.to_owned();
+    let (source, output) = run_blocking(move || Ok::<_, std::io::Error>((tempfile::Builder::new().prefix(".catalog-source-").tempfile_in(&root)?, tempfile::Builder::new().prefix(".catalog-audiobook-").tempfile_in(&root)?)))
+        .await
+        .map_err(BackendError::operation)?
+        .map_err(BackendError::operation)?;
+    progress(CatalogImportProgress::Downloading { downloaded_bytes: 0, total_bytes: None });
+    let response = http_response::get(&url).await.and_then(|response| response.error_for_status()).map_err(|error| BackendError::http("could not download the audiobook", error))?;
+    let total_bytes = response.content_length().filter(|size| *size > 0);
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::OpenOptions::new().write(true).open(source.path()).await.map_err(BackendError::operation)?;
+    let mut downloaded_bytes = 0u64;
+    let mut last_report = Instant::now();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| BackendError::http("could not download the audiobook", error))?;
+        file.write_all(&chunk).await.map_err(BackendError::operation)?;
+        downloaded_bytes += chunk.len() as u64;
+        if last_report.elapsed() >= Duration::from_millis(100) {
+            progress(CatalogImportProgress::Downloading { downloaded_bytes, total_bytes });
+            last_report = Instant::now();
+        }
+    }
+    file.flush().await.map_err(BackendError::operation)?;
+    drop(file);
+    progress(CatalogImportProgress::Downloading { downloaded_bytes, total_bytes });
+    progress(CatalogImportProgress::Importing);
+    run_blocking(move || {
+        let reader = source.reopen()?;
+        let writer = output.reopen()?;
+        use std::io::Write;
+        let mut writer = audiobook_archive::repack_zip_into(std::io::BufReader::new(reader), std::io::BufWriter::new(writer), None)?;
+        writer.flush()?;
+        drop(writer);
+        Ok::<_, std::io::Error>(output)
+    })
+    .await
+    .map_err(BackendError::operation)?
+    .map_err(|error| BackendError::classified(Failure::UnreadableBook, format!("could not prepare the downloaded audiobook: {error}")))
 }
 
 async fn download_with_progress(url: &str, progress: &impl Fn(CatalogImportProgress)) -> Result<Vec<u8>, BackendError> {

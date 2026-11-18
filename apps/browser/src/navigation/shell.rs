@@ -121,13 +121,6 @@ impl BrowserShell {
 
     /// Builds the browser around the restored session and starts background subscriptions.
     pub fn new(services: AppServices, mut saved: NavigationSession, sync_state: Entity<crate::SyncState>, open_book: OpenBook, preferences: Entity<Preferences>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe_global::<crate::stores::preferences::TextSearchEnabled>(|shell: &mut Self, cx| {
-            if shell.route == Route::Library(super::LibraryRoute::Search) && !crate::stores::preferences::text_search_enabled(cx) {
-                shell.route = Route::Library(super::LibraryRoute::Home);
-                cx.notify();
-            }
-        })
-        .detach();
         let libraries = services.startup.libraries.clone();
         saved.reconcile(&libraries.iter().map(|entry| *entry.library_id()).collect::<Vec<_>>());
         let active_library_id = saved.library_id;
@@ -195,6 +188,9 @@ impl BrowserShell {
         // Sync state belongs to the application shell, not to Settings. The
         // page stays alive across navigation and Settings only renders it.
         let sync_page = cx.new(|cx| SyncPage::new(services.clone(), sync_state, libraries.clone(), window, cx));
+        cx.on_next_frame(window, |shell, _, cx| {
+            shell.sync_page.update(cx, |page, cx| page.set_open(shell.route == Route::Global(GlobalRoute::Settings), cx));
+        });
         let settings = cx.new(|cx| SettingsPage::new(services.updates.clone(), sync_page.clone(), preferences, cx));
         Self {
             services,
@@ -314,6 +310,7 @@ impl BrowserShell {
                 }
             }
         }
+        self.sync_page.update(cx, |page, cx| page.set_open(self.route == Route::Global(GlobalRoute::Settings), cx));
         cx.notify();
     }
 
@@ -325,9 +322,8 @@ impl BrowserShell {
         self.request_navigation(PendingNavigation::Location { library_id, location, label }, window, cx);
     }
 
-    /// Imports an in-memory file into the active library and opens it for reading.
-    #[cfg(not(target_arch = "wasm32"))]
     /// Imports a staged native file into the active library and opens it for reading.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn import_and_open_path(&mut self, name: String, path: std::path::PathBuf, _window: &mut Window, cx: &mut Context<Self>) {
         let library_id = self.libraries.read(cx).selected_id();
         let backend = self.services.backend.clone();
@@ -357,7 +353,6 @@ impl BrowserShell {
         notify_error("incoming-book-stage-error", format!(text!(browse::could_not_prepare_this_book_for_import), user_facing_error(&error, "")), window, cx);
     }
 
-    /// Replaces the current page with the view represented by `route`.
     /// Moves to the neighbouring rail destination. Clamped rather than
     /// wrapping: the rail is a visible list, and jumping from its end back to
     /// its start reads as a mis-press rather than navigation.
@@ -386,10 +381,14 @@ impl BrowserShell {
         }
     }
 
+    fn navigation_blocked(&self, route: Route, cx: &App) -> bool {
+        matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx)
+    }
+
     /// Selecting the active destination returns it to its root. Switching
     /// destinations keeps the cached page, as ordinary navigation does.
     fn select_destination(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
+        if self.navigation_blocked(route, cx) {
             return;
         }
         self.close_reader_surface(cx);
@@ -410,11 +409,11 @@ impl BrowserShell {
         cx.notify();
     }
 
+    /// Replaces the current page with the view represented by `route`.
     pub(crate) fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
+        if self.navigation_blocked(route, cx) {
             return;
         }
-        let route = if route == Route::Library(super::LibraryRoute::Search) && !crate::stores::preferences::text_search_enabled(cx) { Route::Library(super::LibraryRoute::Home) } else { route };
         if route != Route::Global(GlobalRoute::Settings) {
             self.settings.update(cx, |page, _| page.pause_index_usage());
         }
@@ -426,22 +425,22 @@ impl BrowserShell {
             return;
         }
         self.route = route;
+        self.sync_page.update(cx, |page, cx| page.set_open(route == Route::Global(GlobalRoute::Settings), cx));
         match route {
             Route::Library(route) => {
                 if let Some(session) = self.libraries.read(cx).selected_session() {
                     session.update(cx, |session, cx| session.navigate(route, window, cx));
+                    self.route = Route::Library(session.read(cx).route());
                 }
             }
-            Route::Global(GlobalRoute::Settings) => {
-                // Refresh local storage usage when returning after imports.
-                self.sync_page.update(cx, |page, cx| page.schedule_refresh(cx));
-            }
+            Route::Global(GlobalRoute::Settings) => {}
         }
         cx.notify();
     }
 
     /// Leaves a global page by revealing the selected library's last page.
     fn return_to_library_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_page.update(cx, |page, cx| page.set_open(false, cx));
         let session = self.libraries.read(cx).selected_session();
         self.route = if let Some(session) = session {
             session.update(cx, |session, cx| session.focus_page(window, cx));
@@ -468,7 +467,7 @@ impl BrowserShell {
             self.navigation.update(cx, |navigation, cx| navigation.close_library_switcher(window, cx));
             return true;
         }
-        if matches!(self.route, Route::Library(_)) && self.libraries.read(cx).selected_library_blocks_navigation(cx) {
+        if self.navigation_blocked(self.route, cx) {
             if let Some(session) = self.libraries.read(cx).selected_session() {
                 session.update(cx, |session, cx| session.dismiss_operation_dialog(window, cx));
             }

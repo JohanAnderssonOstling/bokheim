@@ -75,6 +75,23 @@ impl LibraryHandle {
                 .filter(|book| book.hash.is_none() == external)
                 .ok_or_else(|| BackendError::classified(Failure::NotFound, if external { "the audiobook is not in the catalog" } else { "the book is not in the catalog" }))?;
             let progress = |progress| library.events.updates.publish(LibraryUpdate::CatalogImport { entry, progress });
+            #[cfg(not(target_arch = "wasm32"))]
+            if book.hash.is_none() {
+                let assets = storage.assets();
+                let _root = assets.lock_root_shared().await;
+                let file = library_catalog::download_audiobook_file_with_progress(entry, assets.native_library_root(), &progress).await?;
+                // Unlink while the root is pinned, then pass the open file to
+                // import. A later root move cannot strand a temporary pathname.
+                let reader = file.into_file();
+                drop(_root);
+                return library.import(&storage).import_catalog_reader(parent_id, book, Box::new(reader)).await;
+            }
+            #[cfg(target_arch = "wasm32")]
+            if book.hash.is_none() {
+                let name = format!("assets/{}/book/catalog-download", library.id);
+                let reader = library_catalog::download_audiobook_reader_with_progress(entry, &name, &progress).await?;
+                return library.import(&storage).import_catalog_reader(parent_id, book, Box::new(reader)).await;
+            }
             let bytes = match book.hash {
                 Some(hash) => library_catalog::download_book_with_progress(hash, &progress).await?,
                 None => library_catalog::download_audiobook_with_progress(entry, &progress).await?,

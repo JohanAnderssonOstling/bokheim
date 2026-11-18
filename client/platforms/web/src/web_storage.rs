@@ -682,6 +682,22 @@ impl Seek for FileWriterCursor {
     }
 }
 
+/// Build an unpublished file and return a reader that owns its lifetime.
+/// The generation is retired when that last reader closes, including cancellation.
+pub async fn stage_file_with<F>(name: &str, write: F) -> Result<FileReader, StorageError>
+where
+    F: FnOnce(&mut FileWriterCursor) -> io::Result<()> + Send + 'static,
+{
+    let name = name.to_owned();
+    storage_call(move || async move {
+        let mut cursor = FileWriterCursor { writer: begin_write(&name).await?, position: 0 };
+        write(&mut cursor).map_err(|error| StorageError::from_error(&error))?;
+        cursor.writer.open_reader().await
+    })
+    .await
+    .map_err(|error| StorageError::from_error(&error))?
+}
+
 /// Stream into a staged generation without collecting its bytes in memory.
 /// Only a successful callback returning true publishes the completed file.
 pub async fn write_file_with<F>(name: &str, write: F) -> Result<(), StorageError>

@@ -1,8 +1,9 @@
 //! Download feedback shared by the desktop and Android book browsers.
 use ui_text::text;
 
+use crate::TEXT_XS;
 use gpui::prelude::*;
-use gpui::{App, AppContext, Context, Entity, SharedString, Window, div, px};
+use gpui::{App, AppContext, Context, Entity, SharedString, Window, div, px, rems};
 use gpui_component::notification::Notification;
 use gpui_component::progress::Progress;
 use gpui_component::{ActiveTheme, Root, WindowExt};
@@ -161,11 +162,11 @@ impl Render for BrowserDownloadProgress {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .h_4()
+                    .min_h(rems(TEXT_XS))
                     .child(div().flex_1().child(Progress::new("download-progress").color(accent).loading(self.percent.is_none()).value(f32::from(self.percent.unwrap_or(0)))))
-                    .when_some(self.percent, |row, percent| row.child(div().text_xs().child(format!(text!(common::percent), percent = percent)))),
+                    .when_some(self.percent, |row, percent| row.child(div().text_size(rems(TEXT_XS)).child(format!(text!(common::percent), percent = percent)))),
             )
-            .when_some(self.detail.clone(), |view, detail| view.child(div().text_xs().child(detail)))
+            .when_some(self.detail.clone(), |view, detail| view.child(div().text_size(rems(TEXT_XS)).child(detail)))
     }
 }
 

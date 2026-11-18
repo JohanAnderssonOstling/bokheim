@@ -120,11 +120,14 @@ are removed when no live library in their account retains the book. Files
 already downloaded to devices remain on those devices.
 
 Permanent book deletion, library deletion and disabling cloud storage also wake
-cleanup. Books in the trash retain their files so they can be restored. A sweep
-runs at startup and every minute to retry failures and reclaim published files
-left without ownership records. Uploads are staged before publication; database
-advisory locks protect publication and ownership checks against concurrent
-cleanup. No database migration is required for cleanup.
+cleanup. Books in the trash retain their files so they can be restored. Schema
+22 records released ownership and retired covers in a durable cleanup queue.
+The worker drains batches of 256 after notifications and retries every minute.
+Full filesystem audits run at startup and hourly to recover files left by crashes
+or rolled-back transactions. Uploads and catalog pin installation share the
+publication lock; only unlinking and private-copy consolidation take it exclusively.
+Catalog adoption schedules duplicate-copy removal after commit, so it no longer
+blocks publication of unrelated uploads for the whole manifest.
 
 Deploy the sync server before publishing the static page in `bokheim-site`.
 
@@ -270,7 +273,7 @@ remain readable and writable without converting between mirrored value types.
 
 Protocol 33 requires matching clients and servers. Historical inner payload
 versions are rejected. Storage codec 18 and SQLite library schema 55 use the
-current domain layout; PostgreSQL sync schema 20 starts new installations.
+current domain layout; PostgreSQL sync schema 22 starts new installations.
 Queue generations use the publisher's monotonic sequence; forwarded state
 retains its original authored version. Push responses list
 only rejected sequences, and clients acknowledge exactly the submitted sequences
@@ -445,19 +448,39 @@ Other register keys use UTF-8 bytea values. JSON hashes remain hexadecimal
 and register addresses retain their existing strings.
 
 Initialize an empty database with `sync-server migrate`. Existing schemas 14,
-17, 18 and 19 upgrade automatically on startup before any workers or HTTP
+17, 18, 19, 20 and 21 upgrade automatically on startup before any workers or HTTP
 listeners start. Current databases only read the schema marker; they do not
 scan synchronized records again. The bundled `library-cloud-upgrade` executable
 must be installed beside `sync-server` for a historical upgrade.
 Schema 19 adds provider-neutral billing and scheduled subscription changes without changing existing quotas or
 synchronized data. The optional maintenance command
 `sync-server upgrade` also runs the legacy cloud-data upgrade before this schema
-upgrade, then migrates local book IDs and opaque payloads to schema 20.
+upgrade when needed, then migrates local book IDs and opaque payloads to schema 20.
+Schema 21 adds lookup indexes and reconciles reserved quota with surviving upload
+reservations. The index build and reconciliation run before serving requests and
+can extend startup on large databases; schema 20 upgrades do not scan opaque payloads.
 The client migrates existing SQLite IDs on opening, preserving annotations,
 progress, placements and old reader links. The cloud upgrade retains authored
 versions and canonical blob bytes, then rotates sync history to force a full pull.
 Protocol 33 prevents older clients from writing scoped IDs back after migration.
-After upgrading, startup verifies schema 20 before accepting requests.
+After upgrading, startup verifies schema 22 before accepting requests.
 HTTP and synchronized payload decoding accept only protocol 33. Historical
 envelope decoding is confined to migration of stored records; old clients
 receive a version error and must update.
+
+Authentication maintenance runs every minute, deleting up to 256 expired rows per
+table per pass. Expired sessions cascade to their access tokens and consumed
+refresh tokens. Consumed refresh tokens retain their original token expiry;
+reuse detection ends at that expiry. Security events are retained for 90 days
+after detection. Asset collection streams files and database rows in batches
+of 256. Schema 22 adds the transactional cleanup queue and changes full audits
+to hourly; ordinary deletion notifications process only queued candidates.
+History rotation drains writers with a maintenance-time library-table lock,
+so normal pushes no longer lock the shared history row.
+
+For repeated cells within one push, immutable `book_add` records use the first
+admissible entry in request order; other registers use authored version order.
+When a batch mixes an exact retry with another publication for the same cell,
+the retry cannot suppress redelivery of the stored winner to the losing writer.
+Lifecycle publications require a book key matching the declared book and an
+empty subkey, so quota references and lifecycle admission identify the same cell.

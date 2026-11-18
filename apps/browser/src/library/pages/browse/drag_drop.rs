@@ -6,6 +6,8 @@ use std::any::Any;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+#[cfg(target_arch = "wasm32")]
+use gpui::ExternalFiles;
 use gpui::prelude::*;
 use gpui::{App, ApplicationDrag, Entity, ExternalDragPayload, ExternalPaths, Pixels, Point, SharedString, WindowId, div, px};
 use gpui_component::Theme;
@@ -23,6 +25,8 @@ use crate::library::widgets::{BookCardView, PaginatorDragPreview, PaginatorState
 #[derive(Clone)]
 pub(super) enum FolderDrop {
     Files(Vec<PathBuf>),
+    #[cfg(target_arch = "wasm32")]
+    BrowserFiles(ExternalFiles),
     Items(LibraryDrag),
     Catalog(Vec<BookCardRow>),
 }
@@ -75,6 +79,16 @@ impl FolderDrag for BrowseDrag {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl FolderDrag for ExternalFiles {
+    fn accepts(&self, _: Uuid, _: DirId) -> bool {
+        true
+    }
+    fn contents(&self) -> FolderDrop {
+        FolderDrop::BrowserFiles(self.clone())
+    }
+}
+
 impl FolderDrag for ExternalPaths {
     fn accepts(&self, _: Uuid, _: DirId) -> bool {
         true
@@ -86,6 +100,10 @@ impl FolderDrag for ExternalPaths {
 }
 
 fn accepts_drop(dragged: &dyn Any, library_id: Uuid, destination: DirId) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    if dragged.is::<ExternalFiles>() {
+        return true;
+    }
     if let Some(targets) = dragged.downcast_ref::<BrowseDrag>() { targets.accepts(library_id, destination) } else { dragged.downcast_ref::<ExternalPaths>().is_some_and(|paths| paths.accepts(library_id, destination)) }
 }
 
@@ -103,8 +121,14 @@ fn bind_folder_drop<T: FolderDrag, E: InteractiveElement>(element: E, library_id
 
 /// Query pages import cross-library items into root, and also accept external files.
 pub(super) fn import_drop_target<E: InteractiveElement>(element: E, library_id: Uuid, destination: DirId, name: SharedString, events: CardEvents) -> E {
+    #[cfg(target_arch = "wasm32")]
+    let element = bind_folder_drop::<ExternalFiles, _>(element, library_id, destination, name.clone(), events.clone());
     let element = bind_folder_drop::<BrowseDrag, _>(element, library_id, destination, name.clone(), events.clone());
     bind_folder_drop::<ExternalPaths, _>(element, library_id, destination, name, events).can_drop(move |dragged, _, _| {
+        #[cfg(target_arch = "wasm32")]
+        if dragged.is::<ExternalFiles>() {
+            return true;
+        }
         dragged.is::<ExternalPaths>()
             || dragged.downcast_ref::<BrowseDrag>().is_some_and(|drag| match drag {
                 BrowseDrag::Library(items) => items.library_id != library_id && items.accepts(library_id, destination),
@@ -116,6 +140,8 @@ pub(super) fn import_drop_target<E: InteractiveElement>(element: E, library_id: 
 /// Chips, breadcrumbs and open space all accept files to import or library
 /// items to move/copy, with the same destination and highlight behavior.
 pub(super) fn folder_drop_target<E: ParentElement + InteractiveElement + Styled>(element: E, library_id: Uuid, destination: DirId, name: SharedString, highlight: bool, events: CardEvents, theme: components::BrowserTheme) -> E {
+    #[cfg(target_arch = "wasm32")]
+    let element = bind_folder_drop::<ExternalFiles, _>(element, library_id, destination, name.clone(), events.clone());
     let element = bind_folder_drop::<BrowseDrag, _>(element, library_id, destination, name.clone(), events.clone());
     let element = bind_folder_drop::<ExternalPaths, _>(element, library_id, destination, name, events).can_drop(move |dragged, _, _| accepts_drop(dragged, library_id, destination));
     // Draw the outline last, after nested targets have reported their hint.
@@ -178,7 +204,7 @@ impl gpui::Render for DragPreview {
                 .children(self.items.iter().map(|item| match item {
                     DragPreviewItem::Snapshot(preview) => preview.render(window, cx).into_any_element(),
                     DragPreviewItem::Book(book) => div().w(px(components::BOOK_CARD_WIDTH)).flex_none().child(book.clone()).into_any_element(),
-                    DragPreviewItem::Folder { icon, label, path } => components::compact_hierarchy_item(format!("drag-preview-folder-{label}"), *icon, label.clone(), path.clone(), None, None, false, false, false, theme).into_any_element(),
+                    DragPreviewItem::Folder { icon, label, path } => components::hierarchy_item_content(*icon, label.clone(), path.clone(), theme).bg(theme.page_bg).into_any_element(),
                 }))
                 .into_any_element()
         };
@@ -202,25 +228,39 @@ impl gpui::Render for DragPreview {
     }
 }
 
-/// Lets `element` be picked up, carrying `targets`, with a preview of `items`
-/// following the pointer.
-pub(super) fn folder_drag_source<E: StatefulInteractiveElement>(element: E, targets: BrowseDrag, items: Vec<DragPreviewItem>) -> E {
-    let label = SharedString::from(match &targets {
-        BrowseDrag::Library(drag) => describe(&drag.targets),
-        BrowseDrag::Catalog(books) => {
-            if books.len() == 1 {
-                text!(browse::one_book).to_owned()
-            } else {
-                format!(text!(browse::book_count), books.len())
-            }
-        }
-    });
+/// Lets an element resolve its current payload and preview when picked up.
+pub(super) fn folder_drag_source<E: StatefulInteractiveElement>(element: E, source: DragSource) -> E {
     element
-        .on_drag(targets, move |_, grab, _, cx| {
+        .on_drag_with(move |grab, _, cx| {
+            let (targets, items) = source(cx)?;
+            let label = SharedString::from(match &targets {
+                BrowseDrag::Library(drag) => describe(&drag.targets),
+                BrowseDrag::Catalog(books) => {
+                    if books.len() == 1 {
+                        text!(browse::one_book).to_owned()
+                    } else {
+                        format!(text!(browse::book_count), books.len())
+                    }
+                }
+            });
             cx.set_global(DropHint(None));
-            cx.new(|_| DragPreview { items: items.clone(), label: label.clone(), grab })
+            Some((targets, cx.new(|_| DragPreview { items, label, grab })))
         })
         .external_drag_payload::<BrowseDrag>(|_, _, _| Some(ExternalDragPayload::Application(ApplicationDrag::new())))
+}
+
+pub(super) type DragSource = Rc<dyn Fn(&App) -> Option<DragPayload>>;
+
+/// Cached frames retain the source paginator, not an old selection snapshot.
+pub(super) fn paginator_drag_source(state: &PaginatorState, id: SharedString, drag: BookDrag) -> Option<DragSource> {
+    let owner = state.owner.clone()?;
+    Some(Rc::new(move |cx| {
+        let owner = owner.upgrade()?;
+        let state = owner.read(cx).drag_state();
+        let (targets, preview) = drag(&state, &id, cx)?;
+        let preview = state.drag_preview(&id).map_or(preview, |snapshot| vec![DragPreviewItem::Snapshot(snapshot)]);
+        Some((targets, preview))
+    }))
 }
 
 /// What a drag carries, with an optional source folder, and the preview it shows.
@@ -318,7 +358,7 @@ mod tests {
             let source = Uuid::from_u128(2);
             let dragged = LibraryDrag { library_id: library, targets: FolderTargets { folders: vec![Uuid::from_u128(3)], source: Some(source), ..Default::default() } };
             let target = folder_drop_target(div().id("same-folder").size_full(), library, source, "Current folder".into(), false, Rc::new(|_, _, _| panic!("a no-op drop must not move anything")), components::browser_theme(cx));
-            folder_drag_source(target, BrowseDrag::Library(dragged), Vec::new())
+            folder_drag_source(target, Rc::new(move |_| Some((BrowseDrag::Library(dragged.clone()), Vec::new()))))
         }
     }
 
@@ -365,6 +405,7 @@ mod tests {
     fn cross_library_drag_accepts_identical_folder_ids_without_local_no_op_checks() {
         let library_id = Uuid::from_u128(1);
         let other_library_id = Uuid::from_u128(2);
+        let source = Uuid::from_u128(3);
         let destination = Uuid::from_u128(4);
         let drag = LibraryDrag { library_id, targets: FolderTargets { source: Some(source), books: vec![sync_common::BookId::from_bytes([1; 32])], ..Default::default() } };
         assert!(drag.accepts(library_id, destination));

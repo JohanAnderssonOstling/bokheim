@@ -23,7 +23,7 @@ use library_services::account::LibraryAccount;
 use library_services::scheduler::SyncScheduler;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
-#[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
@@ -326,12 +326,20 @@ type FolderWatcher = super::import::watcher::WatchSubscription;
 #[cfg(all(feature = "scanner", not(feature = "watcher"), not(target_arch = "wasm32")))]
 type FolderWatcher = ();
 
+#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
+struct ScanRetry {
+    watcher: Option<FolderWatcher>,
+    blocked_delay: Duration,
+    incomplete_delay: Duration,
+    file_progress: u64,
+}
+
 /// Scans on open, on folder changes, and after failures.
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
 async fn run_scan_worker(session: &LibraryResources) {
     #[cfg(feature = "watcher")]
     let assets = session.state.read().await.assets().clone();
-    let wake = SyncScheduler::default();
+    let wake = session.events.scan.clone();
     #[cfg(feature = "watcher")]
     let watcher = {
         let root = assets.native_library_root();
@@ -341,12 +349,12 @@ async fn run_scan_worker(session: &LibraryResources) {
     let watcher: Option<FolderWatcher> = None;
     wake.wake();
     let wake = &wake;
-    let watcher = std::sync::Arc::new(tokio::sync::Mutex::new(watcher));
+    let state = Arc::new(tokio::sync::Mutex::new(ScanRetry { watcher, blocked_delay: Duration::from_secs(30), incomplete_delay: Duration::from_secs(30), file_progress: session.events.file_progress_revision() }));
     // The debounce is the quiet period while a file manager is still copying.
     library_services::scheduler::run_timed(
         move |_| {
-            let watcher = watcher.clone();
-            recover_pass("filesystem scan", async move { scan_and_watch(session, wake, &mut *watcher.lock().await).await })
+            let state = state.clone();
+            recover_pass("filesystem scan", async move { scan_and_watch(session, wake, &mut *state.lock().await).await })
         },
         wake,
         Duration::from_secs(30),
@@ -356,18 +364,40 @@ async fn run_scan_worker(session: &LibraryResources) {
 }
 
 #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
-async fn scan_and_watch(session: &LibraryResources, wake: &SyncScheduler, watcher: &mut Option<FolderWatcher>) -> Result<(), ()> {
+async fn scan_and_watch(session: &LibraryResources, wake: &SyncScheduler, state: &mut ScanRetry) -> Result<(), ()> {
+    let watcher = &mut state.watcher;
+    let progress = session.events.file_progress_revision();
+    if progress != state.file_progress {
+        state.blocked_delay = Duration::from_secs(30);
+        state.file_progress = progress;
+    }
+    // Arm before taking the snapshot so progress during discovery cannot be lost.
+    session.events.set_scan_waiting(true);
     #[cfg(feature = "watcher")]
     let assets = session.state.read().await.assets().clone();
     #[cfg(feature = "watcher")]
     if watcher.as_ref().is_some_and(|watcher| !watcher.is_active()) {
         *watcher = None;
     }
-    match session.scan_folder().await {
-        Ok(super::import::filesystem_scan::FolderScan::Complete) => {}
-        // Coalesce concurrent changes and excluded paths into one later pass.
-        // Release the busy state first so pending file replay can finish.
-        Ok(super::import::filesystem_scan::FolderScan::Deferred) => wake.wake_after(Duration::from_secs(1)),
+    let result = session.scan_folder().await;
+    if result.as_ref().is_ok_and(|result| !matches!(result, super::import::filesystem_scan::FolderScan::Incomplete)) {
+        state.incomplete_delay = Duration::from_secs(30);
+    }
+    match result {
+        Ok(super::import::filesystem_scan::FolderScan::Complete) => {
+            session.events.set_scan_waiting(false);
+            state.blocked_delay = Duration::from_secs(30);
+        }
+        Ok(super::import::filesystem_scan::FolderScan::ChangedDuringScan) => wake.wake_after(Duration::from_secs(1)),
+        Ok(super::import::filesystem_scan::FolderScan::Deferred) => {
+            wake.wake_after(state.blocked_delay);
+            state.blocked_delay = (state.blocked_delay * 2).min(Duration::from_secs(300));
+        }
+        Ok(super::import::filesystem_scan::FolderScan::Incomplete) => {
+            log::warn!("filesystem scan was incomplete; retrying in {} seconds", state.incomplete_delay.as_secs());
+            wake.wake_after(state.incomplete_delay);
+            state.incomplete_delay = (state.incomplete_delay * 2).min(Duration::from_secs(300));
+        }
         Err(error) => {
             log::warn!("filesystem scan failed; retrying in 30 seconds: {error}");
             #[cfg(feature = "watcher")]
@@ -394,6 +424,133 @@ async fn scan_and_watch(session: &LibraryResources, wake: &SyncScheduler, watche
 mod tests {
     use super::*;
     use library_services::scheduler::SyncScheduler;
+
+    #[cfg(feature = "scanner")]
+    #[tokio::test]
+    async fn scan_retry_deadlines_back_off_and_reset_after_recovery_and_progress() {
+        use crate::library::lifecycle::concurrency_tests::fixture;
+        use web_time::Instant;
+
+        // Opt in to the real 17.5-minute cycle when collecting runtime measurements.
+        // The default regression below still checks every scheduled deadline quickly.
+        if std::env::var_os("BOKHEIM_MEASURE_SCAN_RETRIES").is_some() {
+            async fn measure(incomplete: bool) {
+                let root = tempfile::tempdir().unwrap();
+                let (service, _handle) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap()).await;
+                if incomplete {
+                    std::fs::create_dir(root.path().join("offline")).unwrap();
+                    std::fs::write(root.path().join("offline/.biblos_uuid"), "invalid directory marker").unwrap();
+                } else {
+                    service.database.create_directory(&sync_common::ROOT_DIR_ID, &"Held".into()).await.unwrap();
+                }
+                #[cfg(feature = "watcher")]
+                let watcher = Some(watch(root.path(), SyncScheduler::default()).unwrap());
+                #[cfg(not(feature = "watcher"))]
+                let watcher = None;
+                let state = Arc::new(tokio::sync::Mutex::new(ScanRetry { watcher, blocked_delay: Duration::from_secs(30), incomplete_delay: Duration::from_secs(30), file_progress: service.events.file_progress_revision() }));
+                let wake = SyncScheduler::default();
+                wake.wake();
+                let (sender, receiver) = async_channel::unbounded();
+                let worker = library_services::scheduler::run_timed(
+                    |_| {
+                        let state = state.clone();
+                        let service = &service;
+                        let wake = &wake;
+                        let sender = &sender;
+                        async move {
+                            let started = Instant::now();
+                            scan_and_watch(service, wake, &mut *state.lock().await).await?;
+                            sender.send((started, Instant::now())).await.unwrap();
+                            Ok(())
+                        }
+                    },
+                    &wake,
+                    Duration::from_secs(30),
+                    Duration::from_millis(500),
+                );
+                let observe = async {
+                    let (_, mut previous_finish) = receiver.recv().await.unwrap();
+                    for expected in [30, 60, 120, 240, 300, 300] {
+                        let (started, finished) = receiver.recv().await.unwrap();
+                        let elapsed = started.duration_since(previous_finish).as_secs_f64();
+                        println!("{}", serde_json::json!({"scenario": if incomplete { "incomplete" } else { "deferred" }, "expected_seconds": expected, "observed_seconds": elapsed, "scan_ms": finished.duration_since(started).as_secs_f64() * 1000.0}));
+                        assert!(elapsed >= expected as f64 - 0.05, "retry fired early: {elapsed}");
+                        assert!(elapsed <= expected as f64 + 5.0, "retry fired late: {elapsed}");
+                        previous_finish = finished;
+                    }
+                };
+                tokio::time::timeout(Duration::from_secs(1100), async {
+                    tokio::select! {
+                        _ = worker => panic!("scanner worker stopped unexpectedly"),
+                        () = observe => {}
+                    }
+                }).await.expect("full scanner retry cycle timed out");
+            }
+            // Independent libraries share the same clock, measuring both outcomes in one cycle.
+            tokio::join!(measure(true), measure(false));
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let (service, _handle) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap()).await;
+        let directory = root.path().join("offline");
+        std::fs::create_dir(&directory).unwrap();
+        let marker = directory.join(".biblos_uuid");
+        std::fs::write(&marker, "invalid directory marker").unwrap();
+        #[cfg(feature = "watcher")]
+        let watcher = Some(watch(root.path(), SyncScheduler::default()).unwrap());
+        #[cfg(not(feature = "watcher"))]
+        let watcher = None;
+        let mut state = ScanRetry { watcher, blocked_delay: Duration::from_secs(30), incomplete_delay: Duration::from_secs(30), file_progress: service.events.file_progress_revision() };
+
+        // Each fresh scheduler represents the previous deadline having been consumed.
+        // Inspect actual requested deadlines; Tokio's paused clock does not advance web_time.
+        for expected in [30, 60, 120, 240, 300, 300] {
+            let wake = SyncScheduler::default();
+            let before = Instant::now();
+            scan_and_watch(&service, &wake, &mut state).await.unwrap();
+            let after = Instant::now();
+            let schedule = *wake.subscribe().borrow();
+            let deadline = schedule.deadline.expect("incomplete scan must retry");
+            assert!(deadline >= before + Duration::from_secs(expected));
+            assert!(deadline <= after + Duration::from_secs(expected));
+            assert!(schedule.wake_requested_at.is_none());
+            assert!(!service.scanner_running());
+        }
+        std::fs::remove_file(&marker).unwrap();
+        // The newly discovered directory may require a second pass to converge.
+        for _ in 0..2 {
+            scan_and_watch(&service, &SyncScheduler::default(), &mut state).await.unwrap();
+        }
+        let wake = SyncScheduler::default();
+        scan_and_watch(&service, &wake, &mut state).await.unwrap();
+        assert!(wake.subscribe().borrow().deadline.is_none());
+        assert_eq!(state.incomplete_delay, Duration::from_secs(30));
+
+        service.database.create_directory(&sync_common::ROOT_DIR_ID, &"Held".into()).await.unwrap();
+        assert!(!service.database.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).await.unwrap().excluded_paths.is_empty());
+        for expected in [30, 60, 120, 240, 300, 300] {
+            let wake = SyncScheduler::default();
+            let before = Instant::now();
+            scan_and_watch(&service, &wake, &mut state).await.unwrap();
+            let after = Instant::now();
+            let deadline = wake.subscribe().borrow().deadline.expect("deferred scan must retry");
+            assert!(deadline >= before + Duration::from_secs(expected));
+            assert!(deadline <= after + Duration::from_secs(expected));
+        }
+        assert!(service.events.scan.subscribe().borrow().wake_requested_at.is_none(), "blocked passes must not immediately wake the scanner");
+        let progress = service.events.file_progress_revision();
+        service.events.file_work_progressed();
+        assert!(service.events.file_progress_revision() > progress);
+        assert!(service.events.scan.subscribe().borrow().wake_requested_at.is_some());
+        let wake = SyncScheduler::default();
+        let before = Instant::now();
+        scan_and_watch(&service, &wake, &mut state).await.unwrap();
+        let after = Instant::now();
+        let deadline = wake.subscribe().borrow().deadline.unwrap();
+        assert!(deadline >= before + Duration::from_secs(30));
+        assert!(deadline <= after + Duration::from_secs(30));
+        assert_eq!(state.blocked_delay, Duration::from_secs(60));
+    }
 
     #[tokio::test]
     async fn worker_retries_factory_and_poll_panics_and_releases_activity() {

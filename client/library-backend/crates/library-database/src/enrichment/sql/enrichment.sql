@@ -82,11 +82,17 @@ ORDER BY w.content_hash;
 
 -- name: finish_upload_preparation!
 -- param: members: &str
+-- param: affected_dirs: &str
 -- A book prepared with no upload records 0; upload ids start at 1.
 INSERT INTO book_transfer(content_hash, upload_prepared)
 SELECT b.content_hash, COALESCE(json_extract(member.value, '$[1]'), 0)
 FROM json_each(:members) member
 JOIN book b ON b.content_hash = unhex(json_extract(member.value, '$[0]'))
 WHERE b.deleted_at IS NULL
+  AND (SELECT upload_id FROM book_transfer WHERE content_hash=b.content_hash) IS json_extract(member.value, '$[1]')
+  AND NOT EXISTS(SELECT 1 FROM local_book_work w WHERE w.content_hash=b.content_hash)
+  AND NOT EXISTS(SELECT 1 FROM local_file_work w WHERE w.content_hash=b.content_hash)
+  AND NOT EXISTS(SELECT 1 FROM book_dir bd WHERE bd.book_row_id=b.row_id AND bd.dir_id IN (SELECT value FROM json_each(:affected_dirs)))
+  AND NOT EXISTS(SELECT 1 FROM local_file_projection fp WHERE fp.content_hash=b.content_hash AND fp.dir_id IN (SELECT value FROM json_each(:affected_dirs)))
 ON CONFLICT(content_hash) DO UPDATE SET upload_prepared = excluded.upload_prepared
 WHERE upload_prepared IS NOT excluded.upload_prepared;

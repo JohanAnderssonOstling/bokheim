@@ -11,7 +11,9 @@ pub(super) fn observe(page: &WebView, sender: Sender<Action>) {
     let Some(context) = native.context() else { return };
     let page = native.downgrade();
     context.connect_download_started(move |_, download| {
-        if page.upgrade().is_none_or(|page| download.web_view().as_ref() != Some(&page)) { return; }
+        if page.upgrade().is_none_or(|page| download.web_view().as_ref() != Some(&page)) {
+            return;
+        }
         let previous = Rc::new(Cell::new(None));
         download.connect_created_destination({
             let previous = previous.clone();
@@ -26,12 +28,15 @@ pub(super) fn observe(page: &WebView, sender: Sender<Action>) {
 }
 
 fn send_progress(download: &Download, previous: &Cell<Option<u8>>, sender: &Sender<Action>) {
-    if download.response().is_none_or(|response| response.content_length() == 0) { return; }
+    if download.response().is_none_or(|response| response.content_length() == 0) {
+        return;
+    }
     let percent = (download.estimated_progress().clamp(0.0, 1.0) * 100.0).floor() as u8;
-    if previous.get() == Some(percent) { return; }
+    if previous.get() == Some(percent) {
+        return;
+    }
     let Some(destination) = download.destination() else { return };
-    let path = Url::parse(&destination).ok().and_then(|url| url.to_file_path().ok())
-        .unwrap_or_else(|| PathBuf::from(destination.as_str()));
+    let path = Url::parse(&destination).ok().and_then(|url| url.to_file_path().ok()).unwrap_or_else(|| PathBuf::from(destination.as_str()));
     previous.set(Some(percent));
     let _ = sender.send(Action::DownloadProgress { path, percent });
 }

@@ -1,9 +1,7 @@
 -- Immutable scanner inventory snapshots and revision guards.
 
 -- name: scanner_file_work_revision ->
-SELECT COALESCE(SUM(seq), 0)
-FROM sqlite_sequence
-WHERE name IN ('local_directory_work', 'local_book_work', 'local_file_work');
+SELECT revision FROM local_scan_clock WHERE singleton=1;
 
 -- name: scanner_pending_book_work?
 SELECT content_hash FROM local_book_work;
@@ -108,6 +106,21 @@ AND NOT EXISTS(SELECT 1 FROM book_dir live JOIN book owner ON owner.row_id=live.
 SELECT b.content_hash, bd.dir_id, bd.file_name,
        bd.local_hash, bd.is_downloaded, projection.relative_path
 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
+LEFT JOIN local_file_projection projection ON projection.content_hash=b.content_hash AND projection.dir_id=bd.dir_id
+WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL
+ORDER BY bd.dir_id,b.content_hash;
+
+-- name: scanner_changed_placements?
+-- param: revision: i64
+-- param: directories: &str
+WITH changed(content_hash) AS (
+    SELECT content_hash FROM local_scan_changed_book INDEXED BY idx_local_scan_changed_revision WHERE revision>:revision
+    UNION SELECT b.content_hash FROM json_each(:directories) affected
+        JOIN book_dir bd ON bd.dir_id=affected.value JOIN book b ON b.row_id=bd.book_row_id
+)
+SELECT b.content_hash,bd.dir_id,bd.file_name,bd.local_hash,bd.is_downloaded,projection.relative_path
+FROM changed CROSS JOIN book b ON b.content_hash=changed.content_hash
+CROSS JOIN book_dir bd ON bd.book_row_id=b.row_id
 LEFT JOIN local_file_projection projection ON projection.content_hash=b.content_hash AND projection.dir_id=bd.dir_id
 WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL
 ORDER BY bd.dir_id,b.content_hash;

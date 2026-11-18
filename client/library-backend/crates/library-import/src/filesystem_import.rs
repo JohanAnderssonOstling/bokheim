@@ -395,7 +395,7 @@ mod tests {
         let failures = importer.import_paths(ROOT_DIR_ID, vec![source.clone()], true).await.unwrap();
         assert!(failures.is_empty(), "{failures:?}");
         assert!(!source.exists());
-        assert!(importer.storage.database().has_book_named(&ROOT_DIR_ID, "book.epub").unwrap());
+        assert!(importer.storage.database().has_book_named(&ROOT_DIR_ID, "book.epub").await.unwrap());
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(fs::read(source).unwrap(), b"invalid EPUB");
         assert!(!root.path().join("invalid.epub").exists());
-        assert!(!importer.storage.database().has_book_named(&ROOT_DIR_ID, "invalid.epub").unwrap());
+        assert!(!importer.storage.database().has_book_named(&ROOT_DIR_ID, "invalid.epub").await.unwrap());
     }
 
     #[test]

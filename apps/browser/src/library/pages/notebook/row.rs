@@ -4,7 +4,7 @@ use super::super::pagination::{merge_page, page_request_for_slots};
 use super::overlay;
 use crate::library::services::LibraryContext;
 use crate::library::widgets::{
-    BookCardElement, BookCardEvent, BookCardInteraction, BookCardPresentation, BookCardView, Paginator, PaginatorAxis, PaginatorChild, PaginatorChildren, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy,
+    BookCardElement, BookCardInteraction, BookCardPresentation, BookCardView, Paginator, PaginatorAxis, PaginatorChild, PaginatorChildren, PaginatorEvent, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy,
 };
 use book_model::Annotation;
 use gpui::prelude::*;
@@ -109,26 +109,14 @@ impl NotebookRow {
     }
 
     pub(super) fn new(data: NotebookBook, query: NotebookQuery, library: LibraryContext, cx: &mut Context<Self>) -> Self {
-        let open = library.clone();
-        let book = BookCardView::create_in_grid(
-            data.book.clone(),
-            library.clone(),
-            Rc::new(move |event, window, cx| {
-                if let BookCardEvent::OpenDetail(book, _) = event {
-                    if let Some(id) = book.library_file() {
-                        open.open_book_at(id, book.title, None, window, cx);
-                    }
-                }
-            }),
-            false,
-            false,
-            cx,
-        );
+        let book = BookCardView::create_in_grid(data.book.clone(), library.clone(), Rc::new(|_, _, _| {}), false, false, cx);
         let book_element = BookCardView::presentation(book.clone(), BookCardPresentation::Grid, cx);
         let flow = cx.new(|_| Paginator::new("notebook-annotations", []).flow_axis(PaginatorAxis::Horizontal).horizontal_only().next_page_preview(false));
-        let flow_updates = cx.observe(&flow, |row: &mut Self, _, cx| {
-            row.load_visible_matches(cx);
-            cx.notify();
+        let flow_updates = cx.subscribe(&flow, |row: &mut Self, _, event: &PaginatorEvent, cx| {
+            if *event == PaginatorEvent::PageChanged {
+                row.load_visible_matches(cx);
+                cx.notify();
+            }
         });
         let book_updates = cx.observe(&book, |_, _, cx| cx.notify());
         let cover_text_updates = cx.observe_global::<crate::stores::CoverTextSetting>(|_: &mut Self, cx| cx.notify());

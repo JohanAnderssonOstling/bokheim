@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::{Anchored, App, Div, ElementId, FocusHandle, FontWeight, Global, InteractiveElement, KeyBinding, KeyDownEvent, MouseButton, SharedString, Stateful, Window, div, px, rems};
 
 use gpui_component::menu::{ChoiceRowColors, choice_row, choice_row_checkmark};
-use gpui_component::{Icon, IconName, tooltip::Tooltip};
+use gpui_component::{Icon, IconName};
 
 use crate::{BrowserTheme, RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XXS, TEXT_MD, TEXT_XS};
 
@@ -97,6 +97,11 @@ pub fn modal_form_surface(theme: BrowserTheme) -> Div {
     modal_surface(theme).max_w_full().p(px(SPACE_MD)).flex().flex_col().gap(px(SPACE_MD)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
+/// A form or operation dialog's title, independent of its header layout.
+pub fn dialog_title(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div().min_w_0().text_size(rems(TEXT_MD)).text_color(theme.text).child(title.into())
+}
+
 /// Font selection uses the same centered surface on the reader and browse
 /// settings. Its list fills the available height instead of sizing to results.
 pub fn font_picker_surface(window: &Window, theme: BrowserTheme) -> Div {
@@ -141,17 +146,17 @@ pub fn font_picker_overlay(content: impl IntoElement, window: &Window, theme: Br
 }
 
 /// The widest a confirmation dialog grows.
-const CONFIRMATION_DIALOG_MAX_WIDTH: f32 = 448.0;
+const CONFIRMATION_DIALOG_MAX_WIDTH_REM: f32 = 28.0;
 
 /// A confirmation, sized the same wherever one is asked: up to
-/// [`CONFIRMATION_DIALOG_MAX_WIDTH`], and never closer to the window's edges
+/// 28rem, and never closer to the window's edges
 /// than a modal's gutter.
 ///
 /// It is gpui-component's in-window dialog rather than the platform's: that
 /// one is drawn by the system in the system's colours, while this one is
 /// dressed from the palette like every other widget, scrim included.
 pub fn confirmation_dialog(dialog: gpui_component::dialog::AlertDialog, window: &gpui::Window) -> gpui_component::dialog::AlertDialog {
-    dialog.width(px((f32::from(window.viewport_size().width) - 2.0 * SPACE_MD).clamp(1.0, CONFIRMATION_DIALOG_MAX_WIDTH)))
+    dialog.width(px((f32::from(window.viewport_size().width) - 2.0 * SPACE_MD).clamp(1.0, f32::from(window.rem_size()) * CONFIRMATION_DIALOG_MAX_WIDTH_REM)))
 }
 
 /// A wrapping confirmation question above its two answers.
@@ -166,7 +171,7 @@ pub fn confirmation_dialog_row(dialog: gpui_component::dialog::AlertDialog, ques
             .flex()
             .flex_col()
             .gap(px(SPACE_SM))
-            .child(div().w_full().min_w_0().whitespace_normal().text_size(rems(TEXT_MD)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(question.into()))
+            .child(div().w_full().min_w_0().whitespace_normal().text_size(rems(TEXT_MD)).font_weight(FontWeight::BOLD).text_color(theme.text).child(question.into()))
             .child(div().w_full().flex().justify_end().gap(px(SPACE_SM)).child(cancel).child(confirm)),
     )
 }
@@ -211,26 +216,29 @@ pub fn bottom_sheet_header(title: impl Into<SharedString>, theme: BrowserTheme) 
         .when(crate::touch_ui(), |header| header.min_h(rems(crate::TOUCH_TARGET_REM)))
         .border_b_1()
         .border_color(theme.rule)
-        .child(div().text_size(rems(TEXT_MD)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title.into()))
+        .child(div().text_size(rems(TEXT_MD)).font_weight(FontWeight::BOLD).text_color(theme.text).child(title.into()))
 }
 
 /// A bottom sheet's close button, for the end of `bottom_sheet_header`: the
 /// muted glyph, centred in a touch target on a phone.
-pub fn bottom_sheet_close_button(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
+pub fn bottom_sheet_close_button(id: impl Into<ElementId>, theme: BrowserTheme) -> crate::Button {
     let tooltip = crate::shortcut_tooltip(text!(common::close), "escape");
-    div()
-        .id(id)
+    crate::base_button(id)
+        .ghost()
+        .p_0()
+        .min_h_0()
+        .size(px(16.0))
         .flex_none()
-        .cursor_pointer()
         .text_color(theme.text_muted)
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-        .when(crate::touch_ui(), |button| button.size(rems(crate::TOUCH_TARGET_REM)).flex().items_center().justify_center())
+        .aria_label(text!(common::close))
+        .tooltip(tooltip)
+        .when(crate::touch_ui(), |button| button.size(rems(crate::TOUCH_TARGET_REM)))
         .child(Icon::new(IconName::Close).size(px(16.0)))
 }
 
 /// A small muted heading over a group of sheet rows.
 pub fn bottom_sheet_section(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().flex_none().min_w_0().px(px(SPACE_SM)).pt(px(SPACE_SM)).pb(px(SPACE_XXS)).text_size(rems(TEXT_XS)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child(label.into())
+    div().flex_none().min_w_0().px(px(SPACE_SM)).pt(px(SPACE_SM)).pb(px(SPACE_XXS)).text_size(rems(TEXT_XS)).font_weight(FontWeight::BOLD).text_color(theme.text_muted).child(label.into())
 }
 
 pub fn bottom_sheet_divider(theme: BrowserTheme) -> Div {
@@ -246,7 +254,7 @@ pub fn bottom_sheet_row(id: impl Into<ElementId>, label: impl IntoElement, check
         .flex_none()
         .min_w_0()
         .cursor_pointer()
-        .min_h(px(48.0))
+        .min_h(rems(crate::TOUCH_TARGET_REM))
         .flex()
         .items_center()
         .justify_between()

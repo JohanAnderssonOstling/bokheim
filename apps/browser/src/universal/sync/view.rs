@@ -14,7 +14,7 @@ use ui_text::text;
 
 use super::*;
 use crate::services::format_storage_bytes;
-use gpui::{ScrollHandle, rems};
+use gpui::{FontWeight, Pixels, ScrollHandle, rems};
 use gpui_component::Disableable;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::DropdownMenu as _;
@@ -22,6 +22,23 @@ use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use sync_common::{MutationIssue, MutationRejectionReason};
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use ui_components::Button;
+
+/// The library table's fixed columns. The name takes what is left.
+const LIBRARY_NAME_COLUMN_MIN_WIDTH_REM: f32 = 8.0;
+const LIBRARY_SIZE_COLUMN_WIDTH_REM: f32 = 6.5;
+const LIBRARY_STATUS_COLUMN_WIDTH_REM: f32 = 9.0;
+const LIBRARY_CLOUD_COLUMN_WIDTH_REM: f32 = 5.0;
+/// The column gap in the library table.
+const LIBRARY_COLUMN_GAP: f32 = 12.0;
+
+fn library_table_min_width(window: &Window) -> Pixels {
+    let columns = LIBRARY_NAME_COLUMN_MIN_WIDTH_REM + LIBRARY_SIZE_COLUMN_WIDTH_REM + LIBRARY_STATUS_COLUMN_WIDTH_REM + LIBRARY_CLOUD_COLUMN_WIDTH_REM + components::topbar_action_height_rem();
+    window.rem_size() * columns + px(LIBRARY_COLUMN_GAP * 4.0)
+}
+
+fn library_table_line(theme: components::BrowserTheme) -> Div {
+    div().w_full().flex().flex_row().items_center().gap(px(LIBRARY_COLUMN_GAP)).border_t_1().border_color(theme.rule)
+}
 
 const LEGEND_LIBRARY_LIMIT: usize = 4;
 
@@ -31,8 +48,8 @@ fn account_initial(email: &str) -> String {
     email.chars().next().map(|first| first.to_uppercase().to_string()).unwrap_or_else(|| "?".to_owned())
 }
 
-/// The identity row has its own render boundary. Sync, storage, and transfer
-/// updates can refresh the page around it without making the row flash.
+/// Identity state changes independently from storage and transfer state.
+/// The containing Settings page still participates in normal rendering.
 pub(super) struct AccountIdentityView {
     page: Entity<SyncPage>,
     account_status: AccountStatus,
@@ -81,9 +98,7 @@ impl Render for AccountIdentityView {
 ///
 /// Settings draws Account, then this, as two sections — so the two halves of
 /// what [`SyncPage`] knows are rendered in two places. A view of its own is
-/// also the right boundary for the content: transfer progress reaches these
-/// rows several times a second, and nothing above them should be rebuilt at
-/// that rate.
+/// independently retains the table state; it is not a cached render boundary.
 pub(crate) struct LibrariesView {
     page: Entity<SyncPage>,
     compact: bool,
@@ -106,7 +121,7 @@ impl Render for LibrariesView {
         let view = cx.weak_entity();
         div().w_full().min_w_0().child(SyncPage::libraries_section(page.read(cx), &page, &rows, compact, theme, cx)).on_children_prepainted(move |children, window, cx| {
             let Some(bounds) = children.first() else { return };
-            let next_compact = bounds.size.width < components::library_table_min_width(window);
+            let next_compact = bounds.size.width < library_table_min_width(window);
             if next_compact != compact {
                 let view = view.clone();
                 window.defer(cx, move |_, cx| {
@@ -227,10 +242,9 @@ impl SyncPage {
                 #[cfg(not(feature = "kobo"))]
                 {
                     let reset = entity.clone();
-                    actions = actions.w_full()
-                        .child(components::secondary_action_button("account-request-reset", text!(account::password_reset), IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
-                            reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, cx));
-                        }));
+                    actions = actions.w_full().child(components::secondary_action_button("account-request-reset", text!(account::password_reset), IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
+                        reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, cx));
+                    }));
                 }
                 form.child(components::section_header(text!(common::sign_in), "", theme))
                     .children(feedback)
@@ -557,7 +571,13 @@ impl SyncPage {
             return libraries.child(components::library_usage_empty(text!(account::no_local_libraries), theme).when(!has_rows, |row| row.border_t_0()));
         }
         if !compact {
-            let header = components::library_table_header(theme);
+            let heading = |label: &'static str| div().whitespace_nowrap().text_size(rems(components::TEXT_XS)).text_color(theme.text_muted).font_features(components::small_caps()).child(label);
+            let header = library_table_line(theme)
+                .py(px(components::SPACE_XS))
+                .child(heading(text!(common::library)).flex_1().min_w(rems(LIBRARY_NAME_COLUMN_MIN_WIDTH_REM)))
+                .child(heading(text!(account::on_this_device)).w(rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none().text_center())
+                .child(heading(text!(account::status)).w(rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none().text_center())
+                .child(heading(text!(account::cloud_books)).w(rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)).flex_none().text_center());
             let header = header.child(div().w(rems(components::topbar_action_height_rem())).flex_none());
             libraries = libraries.child(header.when(!has_rows, |row| row.border_t_0()));
             has_rows = true;
@@ -617,7 +637,37 @@ impl SyncPage {
                 .child(cloud)
                 .children((self.state.read(cx).account_status.signed_in() && !row.status.asset_storage_enabled).then_some(cloud_blocker).flatten().map(|message| components::form_hint(message, theme)))
                 .into_any_element();
-            let library_row = components::library_table_row(row.name.clone(), path, local_bytes, (status, status_color), cloud, compact, theme).when(!has_rows, |row| row.border_t_0());
+            let local_size = div().text_size(rems(components::TEXT_XS)).text_color(theme.text_muted).child(local_bytes);
+            let title = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(components::SPACE_XS))
+                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::BOLD).text_size(rems(components::TEXT_SM)).text_color(theme.text).child(row.name.clone()))
+                .children(path.map(|path| div().w_full().min_w_0().flex().child(path)));
+            let status = div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(rems(components::TEXT_XS))
+                .text_color(theme.text)
+                .child(div().size(px(8.0)).flex_none().rounded_full().bg(status_color))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(status));
+            let cloud = div().flex_none().flex().items_center().child(cloud);
+            let library_row = if compact {
+                library_table_line(theme).flex_col().items_start().gap(px(components::SPACE_SM)).py(px(12.0)).child(title.w_full().flex_none().child(local_size)).child(status.w_full().flex_none()).child(cloud.w_full())
+            } else {
+                library_table_line(theme)
+                    .py(px(12.0))
+                    .child(title.min_w(rems(LIBRARY_NAME_COLUMN_MIN_WIDTH_REM)))
+                    .child(local_size.w(rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none().text_center())
+                    .child(status.w(rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none().justify_center())
+                    .child(cloud.w(rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)).justify_center())
+            }
+            .when(!has_rows, |row| row.border_t_0());
             let library_row = {
                 let libraries = self.active_library.clone();
                 let backend = libraries.read(cx).backend_client();

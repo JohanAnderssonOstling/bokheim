@@ -2,8 +2,8 @@
 
 use crate::query_methods::try_for_each_row;
 use crate::{Database, DatabaseError};
-use book_model::BookFormat;
 use book_inspection_contract::PdfSourceIdentity;
+use book_model::BookFormat;
 use content_address::{BookId, ContentHash};
 use include_sqlite_sql::include_sql;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -171,7 +171,7 @@ impl Database {
     /// Resolve a byte-hash reference once at the reader boundary. All reader
     /// state remains keyed by the returned stable identity.
     pub fn resolve_book_identity(&self, reference: BookId) -> Result<BookId, DatabaseError> {
-        let reference = crate::migration::book_ids::mapping(&self.connection)?.get(&reference).copied().unwrap_or(reference);
+        let reference = self.connection.query_row("SELECT book_id FROM local_legacy_book_id WHERE legacy_id=?1", [reference], |row| row.get(0)).optional()?.unwrap_or(reference);
         let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)", [reference], |row| row.get(0))?;
         if exists {
             return Ok(reference);
@@ -260,8 +260,8 @@ impl Database {
             .connection
             .prepare_cached(
                 "SELECT b.content_hash,b.format FROM book b WHERE b.deleted_at IS NULL
-            AND (b.content_hash=?1 OR EXISTS(SELECT 1 FROM local_content_alias a WHERE a.book_id=b.content_hash AND a.byte_hash=?2)
-                OR EXISTS(SELECT 1 FROM book_content c WHERE c.book_id=b.content_hash AND c.canonical_hash=?2))
+            AND b.content_hash IN (SELECT ?1 UNION SELECT book_id FROM local_content_alias WHERE byte_hash=?2
+                UNION SELECT book_id FROM book_content WHERE canonical_hash=?2)
             AND EXISTS(SELECT 1 FROM book_dir d WHERE d.book_row_id=b.row_id AND d.deleted_at IS NULL)
             ORDER BY b.content_hash",
             )?

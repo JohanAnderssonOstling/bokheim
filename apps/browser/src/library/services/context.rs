@@ -4,14 +4,15 @@ use ui_text::text;
 use ui_components::user_facing_error;
 
 use crate::BOOK_IMPORT_EXTENSIONS;
-use crate::services::{import_failure_message, notify_error, notify_warning};
+use crate::services::{book_transfer_error_message, import_failure_message, notify_error, notify_warning};
 use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, WeakEntity, Window};
-use library_backend::{BackendError, DownloadState, LibraryClient, ThumbnailResolution};
+use library_backend::{BackendError, DownloadState, ImportFailure, LibraryClient, ThumbnailResolution};
 use library_model::{BookCardRow, BookDetail, BookLocator, BookSource};
+use std::future::Future;
 use std::rc::Rc;
 use sync_common::{BookId, DirId};
 
-use super::{DownloadSubscription, LibraryUpdateBridge, UndoEntry};
+use super::{CoverSubscription, DownloadSubscription, LibraryUpdateBridge, UndoEntry};
 use crate::navigation::LibrarySession;
 pub(crate) type OpenBook = Rc<dyn Fn(BookLocator, String, Option<String>, &mut Window, &mut App)>;
 
@@ -103,9 +104,36 @@ impl LibraryContext {
         self.updates.read(cx).importing()
     }
 
+    pub(crate) fn subscribe_cover<T: 'static>(&self, book_id: BookId, cx: &mut Context<T>, callback: impl FnMut(&mut T, &mut Context<T>) + 'static) -> CoverSubscription {
+        let source = self.updates.update(cx, |updates, cx| updates.cover_source(book_id, cx));
+        LibraryUpdateBridge::subscribe_cover(source, cx, callback)
+    }
+
     pub(crate) fn subscribe_download<T: 'static>(&self, book_id: BookId, cx: &mut Context<T>, callback: impl FnMut(&mut T, &DownloadState, &mut Context<T>) + 'static) -> DownloadSubscription {
         let source = self.updates.update(cx, |updates, cx| updates.download_source(book_id, cx));
         LibraryUpdateBridge::subscribe_download(source, cx, callback)
+    }
+
+    /// Request ownership and immediate queued state belong to the library,
+    /// so replacing a card or detail page cannot cancel a download request.
+    pub(crate) fn download_book(&self, book: BookId, cx: &mut App) {
+        let updates = self.updates.read(cx);
+        if updates.downloads_blocked() || !matches!(updates.download_state(book), Some(DownloadState::NotDownloaded)) {
+            return;
+        }
+        self.updates.update(cx, |updates, cx| updates.set_download_state(book, DownloadState::Queued, cx));
+        let library = self.backend.clone();
+        let updates = self.updates.downgrade();
+        cx.spawn(async move |cx| {
+            if let Err(error) = library.download_book(book).await {
+                let _ = updates.update(cx, |updates, cx| {
+                    updates.set_download_state(book, DownloadState::NotDownloaded, cx);
+                    let owner = cx.entity_id();
+                    cx.with_window(owner, |window, cx| notify_error("book-download-error", book_transfer_error_message(error.failure()), window, cx));
+                });
+            }
+        })
+        .detach();
     }
 
     /// Prompts for one book and imports it into the requested folder.
@@ -120,30 +148,35 @@ impl LibraryContext {
         let selection = cx
             .prompt_for_files_with_filters(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(text!(browse::add_book).into()) }, vec![FileDialogFilter { name: text!(browse::books).to_owned(), extensions }]);
         let library = self.backend.clone();
-        let updates = self.updates.downgrade();
-        let task = cx.spawn(async move |_, cx| {
-            let selected = selection.await.unwrap_or_else(|error| Err(error.into())).map(|files| files.and_then(|files| files.into_iter().next()));
-            let result = match selected {
-                Ok(Some(file)) => {
-                    let mut source = file.source;
-                    source.path = vec![file.name.clone()];
-                    let directory = crate::directory_import(gpui::SelectedDirectory { local_path: None, name: file.name, directories: Vec::new(), files: vec![source] });
-                    library.import_directory(parent_id, directory, false).await.map(|failures| failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"))
-                }
-                Ok(None) => Ok(String::new()),
-                Err(error) => Err(BackendError::message(error.to_string())),
-            };
-            let _ = updates.update_in(cx, |updates, window, cx| {
-                updates.set_import_task(None, cx);
-                match result {
-                    // Import failures already carry their own wording.
-                    Ok(failures) if !failures.is_empty() => notify_error("add-book-error", failures, window, cx),
-                    Ok(_) => {}
-                    Err(error) => notify_error("add-book-error", format!(text!(browse::could_not_add_book_generic), user_facing_error(&error, "")), window, cx),
-                }
-            });
-        });
-        self.updates.update(cx, |updates, cx| updates.set_import_task(Some(task), cx));
+        self.run_import(
+            async move {
+                let selected = selection.await.unwrap_or_else(|error| Err(error.into())).map_err(|error| BackendError::message(error.to_string()))?;
+                let Some(file) = selected.and_then(|files| files.into_iter().next()) else { return Ok(Vec::new()) };
+                let mut source = file.source;
+                source.path = vec![file.name.clone()];
+                let directory = crate::directory_import(gpui::SelectedDirectory { local_path: None, name: file.name, directories: Vec::new(), files: vec![source] });
+                library.import_directory(parent_id, directory, false).await
+            },
+            cx,
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn import_browser_files<C: 'static>(&self, parent_id: DirId, files: Vec<gpui::SelectedFile>, cx: &mut Context<C>) {
+        if files.is_empty() {
+            return;
+        }
+        let files = files
+            .into_iter()
+            .map(|file| {
+                let mut source = file.source;
+                source.path = vec![file.name];
+                source
+            })
+            .collect();
+        let directory = crate::directory_import(gpui::SelectedDirectory { local_path: None, name: String::new(), directories: vec![], files });
+        let library = self.backend.clone();
+        self.run_import(async move { library.import_directory(parent_id, directory, false).await }, cx);
     }
 
     /// Imports a folder from the picker through the same copy flow as a drop.
@@ -152,64 +185,50 @@ impl LibraryContext {
             return;
         }
         let extensions = BOOK_IMPORT_EXTENSIONS.into_iter();
-        // Native document providers filter the files they enumerate. Include
-        // audiobook members so the backend can classify the complete folder.
         #[cfg(not(target_arch = "wasm32"))]
         let extensions = extensions.chain(["mp3folder", "mp3", "nfo", "cue", "jpg", "jpeg", "png", "webp"]);
-        let extensions = extensions.map(str::to_owned).collect();
         let selection = cx.prompt_for_directories_with_filters(
             PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(text!(browse::add_folder).into()) },
-            vec![FileDialogFilter { name: text!(browse::books).to_owned(), extensions }],
+            vec![FileDialogFilter { name: text!(browse::books).to_owned(), extensions: extensions.map(str::to_owned).collect() }],
         );
         let library = self.backend.clone();
-        let updates = self.updates.downgrade();
-        let task = cx.spawn(async move |_, cx| {
-            let selected = selection.await.unwrap_or_else(|error| Err(error.into())).map(|directories| directories.and_then(|directories| directories.into_iter().next()));
-            let result = match selected {
-                Ok(Some(directory)) => {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let result = match directory.local_path.as_ref() {
-                        Some(path) => library.import_paths(parent_id, vec![path.clone()], false).await,
-                        None => library.import_directory(parent_id, crate::directory_import(directory), true).await,
-                    };
-                    #[cfg(target_arch = "wasm32")]
-                    let result = library.import_directory(parent_id, crate::directory_import(directory), true).await;
-                    result
+        self.run_import(
+            async move {
+                let selected = selection.await.unwrap_or_else(|error| Err(error.into())).map_err(|error| BackendError::message(error.to_string()))?;
+                let Some(directory) = selected.and_then(|directories| directories.into_iter().next()) else { return Ok(Vec::new()) };
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(path) = directory.local_path.as_ref() {
+                    return library.import_paths(parent_id, vec![path.clone()], false).await;
                 }
-                Ok(None) => Ok(Vec::new()),
-                Err(error) => Err(BackendError::message(error.to_string())),
-            };
-            let _ = updates.update_in(cx, |updates, window, cx| {
-                updates.set_import_task(None, cx);
-                match result {
-                    Ok(failures) if !failures.is_empty() => notify_warning("add-folder-warning", failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),
-                    Err(error) => notify_error("add-folder-error", format!(text!(browse::could_not_add_folder), user_facing_error(&error, "")), window, cx),
-                    _ => {}
-                }
-            });
-        });
-        self.updates.update(cx, |updates, cx| updates.set_import_task(Some(task), cx));
+                library.import_directory(parent_id, crate::directory_import(directory), true).await
+            },
+            cx,
+        );
     }
 
     /// Copies or moves a desktop drop into the library, then imports it in place.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn import_dropped_paths<C: 'static>(&self, parent_id: DirId, paths: Vec<std::path::PathBuf>, moving: bool, cx: &mut Context<C>) {
+        let library = self.backend.clone();
+        self.run_import(async move { library.import_paths(parent_id, paths, moving).await }, cx);
+    }
+
+    /// One lifetime and feedback policy for imports from pickers and drops.
+    fn run_import<C: 'static>(&self, operation: impl Future<Output = Result<Vec<ImportFailure>, BackendError>> + 'static, cx: &mut Context<C>) {
         if self.files_busy(cx) || self.importing(cx) {
             return;
         }
-        let library = self.backend.clone();
         let updates = self.updates.downgrade();
         let task = cx.spawn(async move |_, cx| {
-            let message = match library.import_paths(parent_id, paths, moving).await {
-                Ok(failures) if failures.is_empty() => None,
-                Ok(failures) => Some(failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n")),
-                Err(error) => Some(user_facing_error(&error, text!(browse::could_not_import_the_dropped_files_check_that_they_are_available_and)).to_owned()),
-            };
-            let _ = updates.update_in(cx, |updates, window, cx| {
+            let result = operation.await;
+            let _ = updates.update(cx, |updates, cx| {
                 updates.set_import_task(None, cx);
-                if let Some(message) = message {
-                    notify_warning("drop-import-warning", message, window, cx);
-                }
+                let owner = cx.entity_id();
+                cx.with_window(owner, |window, cx| match result {
+                    Ok(failures) if !failures.is_empty() => notify_warning("library-import", failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),
+                    Ok(_) => {}
+                    Err(error) => notify_error("library-import", user_facing_error(&error, text!(browse::could_not_import_items)), window, cx),
+                });
             });
         });
         self.updates.update(cx, |updates, cx| updates.set_import_task(Some(task), cx));

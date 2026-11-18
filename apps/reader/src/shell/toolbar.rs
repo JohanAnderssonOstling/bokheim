@@ -334,10 +334,10 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
                 if first {
                     cx.notify();
                 }
-                // Header controls own Tab and activation keys, including the
+                // Header and rail controls own Tab and activation keys, including the
                 // first key that reveals keyboard focus. Panel shortcuts and
                 // Escape have already been handled above.
-                if event.context_stack.iter().any(|context| context.contains("ReaderSidebarHeader")) {
+                if event.context_stack.iter().any(|context| context.contains("ReaderSidebarHeader") || context.contains("ReaderRailAction")) {
                     return;
                 }
                 let focus = this.sidebar_focus();

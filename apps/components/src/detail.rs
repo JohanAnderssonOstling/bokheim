@@ -9,14 +9,15 @@
 
 use ui_text::text;
 
+use crate::book_metadata;
 use gpui::prelude::*;
 use gpui::{Div, ElementId, SharedString, Stateful, div, px, rems};
-use gpui_component::text::TextView;
 use gpui_component::IconName;
+use gpui_component::text::TextView;
 
 use crate::{
-    BOOK_DETAIL_COLUMN_GAP, BOOK_DETAIL_COLUMN_MAX_WIDTH_REM, BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_COVER_WIDTH, BOOK_DETAIL_HERO_GAP, BOOK_DETAIL_PAGE_MARGIN,
-    BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP, BrowserTheme, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, topbar_action_height_rem,
+    BOOK_DETAIL_COLUMN_GAP, BOOK_DETAIL_COLUMN_MAX_WIDTH_REM, BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_COVER_WIDTH, BOOK_DETAIL_HERO_GAP, BOOK_DETAIL_PAGE_MARGIN, BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP, BrowserTheme, SPACE_LG,
+    SPACE_SM, TEXT_LG, TEXT_SM, TEXT_XS, topbar_action_height_rem,
 };
 
 gpui::actions!(book_detail, [ShowBookDescription, ShowBookContents, CloseBookPlayer]);
@@ -152,19 +153,15 @@ pub fn book_detail_text(id: impl Into<ElementId>, text: impl Into<SharedString>)
 }
 
 pub fn book_detail_title(title: impl Into<SharedString>, subtitle: Option<&str>, large: bool, theme: BrowserTheme) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(SPACE_XS))
-        .child(div().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(rems(if large { TITLE_MD } else { TEXT_LG })).text_color(theme.text).child(book_detail_text("book-detail-title", title)))
-        .children(subtitle.filter(|subtitle| !subtitle.trim().is_empty()).map(|subtitle| div().text_size(rems(TEXT_MD)).text_color(theme.text_muted).child(book_detail_text("book-detail-subtitle", subtitle.to_owned()))))
+    let subtitle = subtitle.filter(|subtitle| !subtitle.trim().is_empty()).map(|subtitle| book_detail_text("book-detail-subtitle", subtitle.to_owned()));
+    book_metadata::title(book_detail_text("book-detail-title", title), subtitle, large, theme)
 }
 
 /// One credited line: "Narrated by", "Translated by", the authors themselves.
 /// The role is stated rather than implied by position, because a page that lists
 /// four names in a column says nothing about which of them wrote it.
 pub fn book_detail_credit_line(role: Option<impl Into<SharedString>>, theme: BrowserTheme) -> Div {
-    div().flex().flex_row().flex_wrap().items_baseline().gap(px(SPACE_XS)).text_size(rems(TEXT_SM)).text_color(theme.text_muted).children(role.map(|role| div().flex_none().child(book_detail_text("book-detail-credit-role", role))))
+    book_metadata::credit_line(theme).children(role.map(|role| div().flex_none().child(book_detail_text("book-detail-credit-role", role))))
 }
 
 /// Author names wrap within the headline, with room for at most three lines.
@@ -176,7 +173,7 @@ pub fn book_detail_authors(theme: BrowserTheme) -> Div {
 
 /// A name that goes somewhere — an author's own page.
 pub fn book_detail_name_link(id: impl Into<ElementId>, name: impl Into<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
-    div().id(id).cursor_pointer().text_color(theme.text_accent).hover(|style| style.underline()).child(book_detail_text("book-detail-name", name))
+    book_metadata::name_link(id, book_detail_text("book-detail-name", name), theme)
 }
 
 /// The facts a reader checks rather than reads — how long an audiobook runs,
@@ -184,14 +181,8 @@ pub fn book_detail_name_link(id: impl Into<ElementId>, name: impl Into<SharedStr
 /// two words long and a list of them down the page would take more room than the
 /// cover beside it.
 pub fn book_detail_facts(facts: impl IntoIterator<Item = SharedString>, theme: BrowserTheme) -> Div {
-    let mut row = div().flex().flex_row().flex_wrap().items_baseline().gap(px(SPACE_SM)).text_size(rems(TEXT_XS)).text_color(theme.text_muted);
-    for (index, fact) in facts.into_iter().enumerate() {
-        if index > 0 {
-            row = row.child(div().flex_none().text_color(theme.rule).child(book_detail_text(format!("book-detail-fact-separator-{index}"), "·")));
-        }
-        row = row.child(div().flex_none().child(book_detail_text(format!("book-detail-fact-{index}"), fact)));
-    }
-    row
+    let facts = facts.into_iter().enumerate().map(|(index, fact)| book_detail_text(format!("book-detail-fact-{index}"), fact));
+    book_metadata::facts(facts, |index| book_detail_text(format!("book-detail-fact-separator-{index}"), "·"), theme)
 }
 
 /// Where the reader is, in the book's own words rather than as a percentage:

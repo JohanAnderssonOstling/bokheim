@@ -132,9 +132,16 @@ pub fn muted_line(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     single_line(text).text_color(theme.text_muted)
 }
 
+/// Small muted supporting content. Wrapping follows the surrounding layout;
+/// callers that need one truncated line use [`caption_line`].
+pub fn supporting_text(text: impl IntoElement, theme: BrowserTheme) -> Div {
+    div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(text)
+}
+
 /// A small muted line: a chapter title, a time readout.
 pub fn caption_line(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    muted_line(text, theme).text_size(gpui::rems(TEXT_XS))
+    let text: SharedString = text.into();
+    supporting_text(text, theme).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis()
 }
 
 pub fn section_title(text: impl Into<SharedString>) -> Div {

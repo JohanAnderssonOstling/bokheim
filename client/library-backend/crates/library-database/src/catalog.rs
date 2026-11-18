@@ -90,11 +90,13 @@ fn read_sources_for(db: &Connection, key: &[u8; 32]) -> Result<Vec<String>, Data
 }
 
 fn visit_sources(db: &Connection, key: Option<&[u8; 32]>, mut receive: impl FnMut([u8; 32], String)) -> Result<(), DatabaseError> {
-    let mut statement = db.prepare("SELECT book.key,name FROM book_source credit JOIN book ON book.row_id=credit.book_row_id JOIN source ON source.id=credit.source_id WHERE (?1 IS NULL OR book.key=?1)
-        UNION SELECT entry_key,name FROM external_book JOIN source ON source.id=external_book.source_id WHERE (?1 IS NULL OR entry_key=?1)
-        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.hosted_row_id JOIN source ON source.id=credit.original_source_id WHERE (?1 IS NULL OR book.key=?1)
-        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.external_row_id JOIN source ON source.id=credit.original_source_id WHERE (?1 IS NULL OR book.key=?1)
-        ORDER BY 1,2")?;
+    let book_filter = if key.is_some() { "book.key=?1" } else { "?1 IS NULL" };
+    let external_filter = if key.is_some() { "entry_key=?1" } else { "?1 IS NULL" };
+    let mut statement = db.prepare_cached(&format!("SELECT book.key,name FROM book_source credit JOIN book ON book.row_id=credit.book_row_id JOIN source ON source.id=credit.source_id WHERE {book_filter}
+        UNION SELECT entry_key,name FROM external_book JOIN source ON source.id=external_book.source_id WHERE {external_filter}
+        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.hosted_row_id JOIN source ON source.id=credit.original_source_id WHERE {book_filter}
+        UNION SELECT book.key,source.name FROM source_entry_source credit JOIN source_entry entry USING(source_id,entry_id) JOIN book ON book.row_id=entry.external_row_id JOIN source ON source.id=credit.original_source_id WHERE {book_filter}
+        ORDER BY 1,2"))?;
     for row in statement.query_map([key.map(|key| key.as_slice())], |row| Ok((row.get::<_, [u8; 32]>(0)?, row.get::<_, String>(1)?)))? {
         let (identity, source) = row?;
         receive(identity, source);

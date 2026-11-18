@@ -1,12 +1,12 @@
 use super::*;
-use crate::state_sync::{next_outbox_page, prepare_outbox, prepare_sync, PublicationOutbox};
+use crate::state_sync::{PublicationOutbox, next_outbox_page, prepare_outbox, prepare_sync};
 use axum::{
+    Router,
     body::Bytes,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
-    Router,
 };
 use client_platform_runtime::executor::BackendExecutor;
 use library_database::DatabaseClient;
@@ -53,7 +53,7 @@ impl SyncStore for &DatabaseStore {
         Box::pin(async move { self.0.sync_acknowledge_mutations(&ids).await.map_err(Into::into) })
     }
     fn apply_exchange_response(&self, ids: Vec<ReplicaSeq>, page: PullStateResponse) -> StoreFuture<'_, ()> {
-        Box::pin(async move { self.0.sync_commit_pull_response(&ids, &page).await.map(|_| ()).map_err(Into::into) })
+        Box::pin(async move { self.0.sync_commit_pull_response(&ids, page).await.map(|_| ()).map_err(Into::into) })
     }
 }
 
@@ -176,7 +176,7 @@ struct Server {
 }
 
 async fn exchange(State(server): State<Arc<Server>>, bytes: Bytes) -> Response {
-    let request: SyncExchangeRequest = sync_common::transport::decode(&bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+    let request: SyncExchangeRequest = sync_common::http::decode(&bytes, sync_common::http::MAX_DECODED_REQUEST_BYTES).unwrap();
     let valid = request.cursor.belongs_to(server.generation);
     let needs_cell = request.cursor.field_revision.map_or(true, |revision| revision < server.recovered.revision);
     server.requests.lock().unwrap().push(request);
@@ -192,7 +192,7 @@ async fn exchange(State(server): State<Arc<Server>>, bytes: Bytes) -> Response {
             has_more: false,
         },
     };
-    sync_common::transport::encode(&response).unwrap().into_response()
+    sync_common::http::encode(&response).unwrap().into_response()
 }
 
 #[tokio::test]
@@ -255,7 +255,7 @@ async fn both_sync_modes_preserve_rejections_and_acknowledgements_when_pull_is_i
     let app = Router::new().route(
         "/api/sync/exchange",
         post(|body: Bytes| async move {
-            let request: SyncExchangeRequest = sync_common::transport::decode_byte_fields(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+            let request: SyncExchangeRequest = sync_common::http::decode(&body, sync_common::http::MAX_DECODED_REQUEST_BYTES).unwrap();
             assert_eq!(request.mutations.len(), 3);
             let response = SyncExchangeResponse {
                 push: PushMutationsResponse {
@@ -268,7 +268,7 @@ async fn both_sync_modes_preserve_rejections_and_acknowledgements_when_pull_is_i
                 // upload-only library intentionally does not apply its pull.
                 pull: PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false },
             };
-            sync_common::transport::encode(&response).unwrap()
+            sync_common::http::encode(&response).unwrap()
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -297,7 +297,7 @@ async fn both_sync_modes_preserve_rejections_and_acknowledgements_when_pull_is_i
 #[tokio::test]
 async fn lifecycle_rejections_defer_fields_on_later_storage_pages_in_both_modes() {
     use library_replica::BookLifecycleState;
-    use sync_common::{BookId, DirId, MutationRejection, MutationRejectionReason, MAX_PUSH_MUTATIONS};
+    use sync_common::{BookId, DirId, MAX_PUSH_MUTATIONS, MutationRejection, MutationRejectionReason};
     let book = BookId::from_bytes([7; 32]);
     let rejected_id = ReplicaSeq::new(MAX_PUSH_MUTATIONS as u64 + 5).unwrap();
     let field_id = ReplicaSeq::new(MAX_PUSH_MUTATIONS as u64 + 6).unwrap();
@@ -309,10 +309,10 @@ async fn lifecycle_rejections_defer_fields_on_later_storage_pages_in_both_modes(
             move |bytes: Bytes| {
                 let requests = requests.clone();
                 async move {
-                    let request: SyncExchangeRequest = sync_common::transport::decode(&bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+                    let request: SyncExchangeRequest = sync_common::http::decode(&bytes, sync_common::http::MAX_DECODED_REQUEST_BYTES).unwrap();
                     let rejected = if request.mutations.iter().any(|p| p.publisher_seq == rejected_id) { vec![MutationRejection { publisher_seq: rejected_id, reason: MutationRejectionReason::TimestampTooFarFuture }] } else { Vec::new() };
                     requests.lock().unwrap().push(request);
-                    sync_common::transport::encode(&SyncExchangeResponse {
+                    sync_common::http::encode(&SyncExchangeResponse {
                         push: PushMutationsResponse { rejected },
                         pull: PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor { generation: Some(SyncGeneration::from_u128(1)), ..Default::default() }, has_more: false },
                     })

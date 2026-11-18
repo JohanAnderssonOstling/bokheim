@@ -26,9 +26,9 @@ use std::io::{Error, ErrorKind};
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
-use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use std::time::Duration;
 pub(crate) use sync_common::BookId;
@@ -193,6 +193,42 @@ impl AssetStore {
         })
         .await
         .map_err(AssetStoreError::operation)?
+    }
+
+    /// Cheap download-review estimate. Actual downloads still verify checksums.
+    /// Expanded audiobook directories cannot be compared with archive sizes.
+    pub async fn book_present_for_review(&self, hash: BookId, paths: Vec<RelativeBookPath>, expected_size: u64) -> Result<bool, AssetStoreError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = hash;
+            let store = self.clone();
+            let root = self.lock_root_shared().await;
+            run_blocking(move || {
+                let _root = root;
+                if store.is_retired() || !store.root_available() {
+                    return Ok(false);
+                }
+                for relative in paths {
+                    let metadata = match std::fs::metadata(imp::placement_path(&store.0, &relative)) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    let present = if metadata.is_file() { metadata.len() > 0 && (expected_size == 0 || metadata.len() == expected_size) } else { metadata.is_dir() && store.placement_file_exists(&relative) };
+                    if present {
+                        return Ok(store.root_available());
+                    }
+                }
+                Ok(false)
+            })
+            .await
+            .map_err(AssetStoreError::operation)?
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let size = self.stored_book_bytes(hash, paths).await?;
+            Ok(size > 0 && (expected_size == 0 || size == expected_size))
+        }
     }
 
     /// Native directory placements require audiobook discovery, including track

@@ -121,7 +121,9 @@ and invokes the fixed root-owned sync activation helper. It validates every
 stored client payload before stopping the service, then takes a full PostgreSQL
 backup and starts the installed candidate behind a private socket. Startup
 upgrades cloud schema 14 to 17 when needed, applies billing schema 19, and
-migrates book IDs to schema 20 before opening the listener. Existing payloads and
+migrates book IDs to schema 20, and installs maintenance indexes and reconciles
+reservation accounting in schema 21, then installs the cleanup queue in schema
+22 before opening the listener. Existing payloads and
 retired storage configuration are retained in `bokheim_upgrade_archive`;
 legacy feed records remain in `opds_feeds`. External-storage configuration is
 retained in the archive while its library uses the current local storage policy.
@@ -470,3 +472,11 @@ A current database skips the migration after reading its version marker.
 while the service is stopped. Deployment retains its backup and private
 readiness checks around startup migration. See
 [`../BILLING.md`](../BILLING.md) for the provider-neutral billing boundary.
+
+Typed sync payload readiness is tracked by `sync_payload_migration`, separately
+from the relational schema and HTTP versions. Activation runs `sync-server
+upgrade` and `verify-schema` while service is stopped, after backup. The upgrade
+converts payloads even on an already-current SQL schema when the payload marker
+is absent or older. Public readiness requires the current marker. The deployment
+rollback removes a marker table introduced by a failed candidate if the backup
+predates that table.

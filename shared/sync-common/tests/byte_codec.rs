@@ -160,15 +160,14 @@ fn counted_push_sizes_keep_exact_batch_limits_and_oversized_handling() {
         OpaquePublication { publisher_seq: ReplicaSeq::new(sequence).unwrap(), state }
     };
     let mut exact = make_publication(1, MAX_PUSH_BATCH_BYTES);
-    let extra = transport::encoded_len(&exact).unwrap() - MAX_PUSH_BATCH_BYTES;
-    exact.state.value.bytes.truncate(MAX_PUSH_BATCH_BYTES - extra);
-    assert_eq!(transport::encoded_len(&exact).unwrap(), MAX_PUSH_BATCH_BYTES);
-    assert_eq!(transport::encode(&exact).unwrap().len(), MAX_PUSH_BATCH_BYTES);
+    exact.state.value.bytes.truncate(exact.state.value.address.payload_byte_limit());
+    assert_eq!(exact.state.value.delivery_byte_budget(), sync_common::MAX_PULL_BATCH_BYTES);
+    assert_eq!(sync_common::http::encoded_len(&exact).unwrap(), sync_common::http::encode(&exact).unwrap().len());
     let mut oversized = exact.clone();
     oversized.publisher_seq = ReplicaSeq::new(2).unwrap();
     oversized.state.value.bytes.push(1);
-    assert_eq!(transport::encoded_len(&oversized).unwrap(), MAX_PUSH_BATCH_BYTES + 1);
-    let small = make_publication(3, 128);
+    assert_eq!(oversized.state.value.delivery_byte_budget(), sync_common::MAX_PULL_BATCH_BYTES + 1);
+    let small = make_publication(3, 2048);
     let mut batches = PushBatcher::new(vec![exact.clone(), oversized, small.clone()]).unwrap();
     assert_eq!(batches.untransmittable(), &[ReplicaSeq::new(2).unwrap()]);
     assert_eq!(batches.next_batch(), vec![exact]);
@@ -182,12 +181,11 @@ fn incremental_batch_budget_recovers_after_deferrals_and_oversized_values() {
     use sync_common::{MAX_PUSH_BATCH_BYTES, PushBatcher};
     let state = response(1, MAX_PUSH_BATCH_BYTES).pull.mutations.remove(0).state;
     let mut exact = OpaquePublication { publisher_seq: ReplicaSeq::new(1).unwrap(), state };
-    let overhead = transport::encoded_len(&exact).unwrap() - MAX_PUSH_BATCH_BYTES;
-    exact.state.value.bytes.truncate(MAX_PUSH_BATCH_BYTES - overhead);
+    exact.state.value.bytes.truncate(exact.state.value.address.payload_byte_limit());
     let book = exact.state.value.book.unwrap();
     let mut batcher = PushBatcher::default();
     batcher.push(exact.clone()).unwrap();
-    assert!(batcher.has_batch());
+    assert!(!batcher.has_batch());
     batcher.defer_book_fields(&[book]);
     assert!(!batcher.has_batch());
     assert!(batcher.is_empty());
@@ -207,14 +205,20 @@ fn incremental_batching_preserves_eager_batch_boundaries() {
     let publications: Vec<_> = response(40, 128 * 1024).pull.mutations.into_iter().map(|delivery| OpaquePublication { publisher_seq: delivery.state.version.replica_seq, state: delivery.state }).collect();
     let mut eager = PushBatcher::new(publications.clone()).unwrap();
     let mut expected = Vec::new();
-    while !eager.is_empty() { expected.push(eager.next_batch()); }
+    while !eager.is_empty() {
+        expected.push(eager.next_batch());
+    }
     let mut incremental = PushBatcher::default();
     let mut actual = Vec::new();
     for publication in publications {
         incremental.push(publication).unwrap();
-        if incremental.has_batch() { actual.push(incremental.next_batch()); }
+        if incremental.has_batch() {
+            actual.push(incremental.next_batch());
+        }
     }
-    while !incremental.is_empty() { actual.push(incremental.next_batch()); }
+    while !incremental.is_empty() {
+        actual.push(incremental.next_batch());
+    }
     assert_eq!(actual, expected);
 }
 
@@ -250,11 +254,7 @@ fn sync_byte_codec_performance() {
         let legacy = LegacyResponse::from(&response);
         let encode = || if mode == "legacy" { transport::encode(&legacy) } else { transport::encode(&response) };
         let decode = |bytes: &[u8]| -> Result<SyncExchangeResponse, WireError> {
-            if mode == "legacy" {
-                transport::decode(bytes, transport::MAX_DECODED_RESPONSE_BYTES)
-            } else {
-                transport::decode_byte_fields(bytes, transport::MAX_DECODED_RESPONSE_BYTES)
-            }
+            if mode == "legacy" { transport::decode(bytes, transport::MAX_DECODED_RESPONSE_BYTES) } else { transport::decode_byte_fields(bytes, transport::MAX_DECODED_RESPONSE_BYTES) }
         };
         assert_response(decode(&encode().unwrap()).unwrap(), &response);
         let mut encodes = Vec::new();

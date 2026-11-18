@@ -280,7 +280,7 @@ impl Browser {
             #[cfg(target_os = "linux")]
             native_downloads::observe(&page, sender.clone());
             if request.url == "about:blank" {
-                let html = ui_components::browser_start_page(history.start_page_shortcuts().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), browser_theme(cx));
+                let html = ui_components::browser_start_page(history.start_page_shortcuts().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), browser_theme(cx), cx.theme());
                 page.load_html(&html)?;
             } else {
                 page.load_url(&request.url)?;

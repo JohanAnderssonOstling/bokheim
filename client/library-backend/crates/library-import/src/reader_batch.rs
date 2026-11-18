@@ -148,13 +148,13 @@ mod tests {
         let mut batch = ReaderImportBatch::new(&importer, ImportMode::Copy).unwrap();
         let parent = batch.prepare_tree(&importer, ROOT_DIR_ID, &paths).await.unwrap()[&paths[0]];
         prepare_into(&importer, source.path(), parent, "book.epub", FIRST, &mut batch).await;
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
-        assert!(importer.storage.database().child_directory(&ROOT_DIR_ID, "Readest 2").unwrap().is_none());
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
+        assert!(importer.storage.database().child_directory(&ROOT_DIR_ID, "Readest 2").await.unwrap().is_none());
         assert!(destination.path().join("Readest 2/Shelf/book.epub").is_file());
         batch.imports[0].0.parent_id = DirId::new_v4();
         assert!(batch.finish(&importer, &mut ReaderImportReport::default()).await.is_err());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
-        assert!(importer.storage.database().child_directory(&ROOT_DIR_ID, "Readest 2").unwrap().is_none());
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
+        assert!(importer.storage.database().child_directory(&ROOT_DIR_ID, "Readest 2").await.unwrap().is_none());
         let mut retry = ReaderImportBatch::new(&importer, ImportMode::Copy).unwrap();
         let recovered = retry.prepare_tree(&importer, ROOT_DIR_ID, &paths).await.unwrap()[&paths[0]];
         assert_eq!(parent, recovered);
@@ -162,7 +162,7 @@ mod tests {
         let mut report = ReaderImportReport::default();
         retry.finish(&importer, &mut report).await.unwrap();
         assert_eq!(report.imported, 1);
-        assert!(importer.storage.database().is_live_destination(&recovered).unwrap());
+        assert!(importer.storage.database().is_live_destination(&recovered).await.unwrap());
         assert_eq!(fs::read(source.path().join("book.epub")).unwrap(), FIRST);
         assert_eq!(fs::read(destination.path().join("Readest/foreign")).unwrap(), b"keep");
         assert!(!destination.path().join("Readest 3").exists());
@@ -182,8 +182,8 @@ mod tests {
         prepare_into(&importer, source.path(), parent, "book.epub", FIRST, &mut batch).await;
         fs::write(destination.path().join("Readest/.biblos_uuid"), DirId::new_v4().to_string()).unwrap();
         assert!(batch.finish(&importer, &mut ReaderImportReport::default()).await.is_err());
-        assert!(importer.storage.database().child_directory(&ROOT_DIR_ID, "Readest").unwrap().is_none());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+        assert!(importer.storage.database().child_directory(&ROOT_DIR_ID, "Readest").await.unwrap().is_none());
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
         assert_eq!(fs::read(source.path().join("book.epub")).unwrap(), FIRST);
     }
 
@@ -198,13 +198,13 @@ mod tests {
         prepare(&importer, source.path(), "Book.epub", FIRST, &mut batch).await;
         prepare(&importer, source.path(), "duplicate.epub", FIRST, &mut batch).await;
         prepare(&importer, source.path(), "book.epub", SECOND, &mut batch).await;
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
         assert!(!destination.path().join("duplicate.epub").exists());
         assert_ne!(batch.imports[0].0.published.name.to_lowercase(), batch.imports[2].0.published.name.to_lowercase());
         let mut report = ReaderImportReport::default();
         batch.finish(&importer, &mut report).await.unwrap();
         assert_eq!((report.imported, report.already_present), (2, 1));
-        assert_eq!(importer.storage.database().book_count().unwrap(), 2);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 2);
         assert_eq!(fs::read(source.path().join("Book.epub")).unwrap(), FIRST);
         assert_eq!(fs::read(source.path().join("book.epub")).unwrap(), SECOND);
     }
@@ -221,14 +221,14 @@ mod tests {
         prepare(&importer, source.path(), "second.epub", SECOND, &mut batch).await;
         batch.imports[1].0.parent_id = DirId::new_v4();
         assert!(batch.finish(&importer, &mut ReaderImportReport::default()).await.is_err());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
         let source_path = source.path().join("first.epub");
-        assert!(importer.storage.database().cached_import_source(source_path.to_str().unwrap(), library_files::filesystem::fingerprint(&source_path).unwrap()).unwrap().is_none());
+        assert!(importer.storage.database().cached_import_source(source_path.to_str().unwrap(), library_files::filesystem::fingerprint(&source_path).unwrap()).await.unwrap().is_none());
         let mut retry = ReaderImportBatch::new(&importer, ImportMode::Copy).unwrap();
         prepare(&importer, source.path(), "first.epub", FIRST, &mut retry).await;
         prepare(&importer, source.path(), "second.epub", SECOND, &mut retry).await;
         retry.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
-        assert_eq!(importer.storage.database().book_count().unwrap(), 2);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 2);
     }
 
     #[tokio::test]
@@ -244,18 +244,18 @@ mod tests {
         prepare(&importer, source.path(), "book.epub", FIRST, &mut batch).await;
         batch.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
         let revision = library_files::filesystem::fingerprint(&path).unwrap();
-        assert_eq!(importer.storage.database().cached_import_source(path.to_str().unwrap(), revision).unwrap(), Some(blake3::hash(FIRST).into()));
+        assert_eq!(importer.storage.database().cached_import_source(path.to_str().unwrap(), revision).await.unwrap(), Some(blake3::hash(FIRST).into()));
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         fs::write(&path, SECOND).unwrap();
         fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
         let next = library_files::filesystem::fingerprint(&path).unwrap();
         assert_ne!(revision, next);
-        assert!(importer.storage.database().cached_import_source(path.to_str().unwrap(), next).unwrap().is_none());
+        assert!(importer.storage.database().cached_import_source(path.to_str().unwrap(), next).await.unwrap().is_none());
         let mut retry = ReaderImportBatch::new(&importer, ImportMode::Copy).unwrap();
         import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &ReadestConfig::default(), ImportMode::Copy, Some(&mut retry)).await.unwrap();
         retry.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
-        assert_eq!(importer.storage.database().book_count().unwrap(), 2);
-        assert_eq!(importer.storage.database().cached_import_source(path.to_str().unwrap(), next).unwrap(), Some(blake3::hash(SECOND).into()));
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 2);
+        assert_eq!(importer.storage.database().cached_import_source(path.to_str().unwrap(), next).await.unwrap(), Some(blake3::hash(SECOND).into()));
     }
 
     #[tokio::test]
@@ -274,7 +274,7 @@ mod tests {
         let mut repeat = ReaderImportBatch::new(&importer, ImportMode::Copy).unwrap();
         let result = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, ImportMode::Copy, Some(&mut repeat)).await.unwrap();
         repeat.finish(&importer, &mut ReaderImportReport::default()).await.unwrap();
-        assert_eq!(importer.storage.database().annotations(result.book_id).unwrap().len(), 1);
+        assert_eq!(importer.storage.database().annotations(result.book_id).await.unwrap().len(), 1);
         let published = destination.path().join("book.epub");
         let modified = fs::metadata(&published).unwrap().modified().unwrap();
         fs::write(&published, vec![b'x'; FIRST.len()]).unwrap();
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(report.already_present, 1);
         let repaired = importer.storage.database().book_paths(&result.book_id).await.unwrap();
         assert_eq!(fs::read(destination.path().join(repaired[0].as_str().trim_start_matches('/'))).unwrap(), FIRST);
-        assert_eq!(importer.storage.database().book_count().unwrap(), 1);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -306,7 +306,7 @@ mod tests {
                 fs::write(path, b"changed").unwrap();
             }
             assert!(batch.finish(&importer, &mut ReaderImportReport::default()).await.is_err());
-            assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+            assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
             assert_eq!(fs::read(source.path().join("book.epub")).unwrap(), FIRST);
         }
     }

@@ -3,6 +3,7 @@
 use std::sync::PoisonError;
 mod crypto;
 mod deletion;
+mod maintenance;
 mod outbox;
 mod public_registration;
 mod rate_limit;
@@ -321,21 +322,8 @@ impl PostgresAccountService {
         let access_expires_at = Utc::now() + Duration::hours(ACCESS_TOKEN_TTL_HOURS);
         let refresh_expires_at = Utc::now() + Duration::days(REFRESH_TOKEN_TTL_DAYS);
         let mut transaction = self.pool.begin().await.map_err(internal)?;
-        sqlx::query(
-            "DELETE FROM auth_consumed_refresh_token
-             WHERE token_hash IN (
-                 SELECT token_hash
-                 FROM auth_consumed_refresh_token
-                 WHERE expires_at <= now()
-                 ORDER BY expires_at
-                 LIMIT 256
-             )",
-        )
-        .execute(&mut *transaction)
-        .await
-        .map_err(internal)?;
-        let session: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT auth_session.id, users.id, users.email
+        let session: Option<(String, String, String, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT auth_session.id, users.id, users.email, auth_session.refresh_expires_at
              FROM auth_session
              JOIN users ON users.id = auth_session.user_id
              WHERE auth_session.refresh_token_hash = $1
@@ -346,7 +334,7 @@ impl PostgresAccountService {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(internal)?;
-        let Some((session_id, user_id, email)) = session else {
+        let Some((session_id, user_id, email, old_refresh_expires_at)) = session else {
             let reused_session: Option<(String, String)> = sqlx::query_as(
                 "SELECT auth_session.id, auth_session.user_id
                  FROM auth_consumed_refresh_token
@@ -373,11 +361,11 @@ impl PostgresAccountService {
         sqlx::query("INSERT INTO auth_consumed_refresh_token (token_hash, session_id, expires_at) VALUES ($1, $2, $3)")
             .bind(&old_refresh_hash)
             .bind(&session_id)
-            .bind(refresh_expires_at)
+            .bind(old_refresh_expires_at)
             .execute(&mut *transaction)
             .await
             .map_err(internal)?;
-        sqlx::query("UPDATE auth_consumed_refresh_token SET expires_at = $2 WHERE session_id = $1").bind(&session_id).bind(refresh_expires_at).execute(&mut *transaction).await.map_err(internal)?;
+        // Detect reuse only through the consumed token's original validity window.
         sqlx::query("UPDATE auth_session SET refresh_token_hash = $2, refresh_expires_at = $3 WHERE id = $1").bind(&session_id).bind(new_refresh_hash).bind(refresh_expires_at).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM auth_token WHERE session_id = $1").bind(&session_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("INSERT INTO auth_token (token_hash, user_id, expires_at, session_id) VALUES ($1, $2, $3, $4)")

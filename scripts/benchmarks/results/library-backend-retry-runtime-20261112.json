@@ -1,0 +1,88 @@
+{
+  "date": "2026-11-12",
+  "passed": 1,
+  "failed": 0,
+  "elapsed_seconds": 1050.92,
+  "command": "BOKHEIM_MEASURE_SCAN_RETRIES=1 CARGO_INCREMENTAL=0 cargo test --locked -p library-backend --lib scan_retry_deadlines -- --nocapture",
+  "samples": [
+    {
+      "expected_seconds": 30,
+      "observed_seconds": 30.001103541,
+      "scan_ms": 2.182985,
+      "scenario": "incomplete"
+    },
+    {
+      "expected_seconds": 30,
+      "observed_seconds": 30.000727038,
+      "scan_ms": 1.8278619999999999,
+      "scenario": "deferred"
+    },
+    {
+      "expected_seconds": 60,
+      "observed_seconds": 60.001594564,
+      "scan_ms": 2.8618099999999997,
+      "scenario": "incomplete"
+    },
+    {
+      "expected_seconds": 60,
+      "observed_seconds": 60.001086973,
+      "scan_ms": 1.5579910000000001,
+      "scenario": "deferred"
+    },
+    {
+      "expected_seconds": 120,
+      "observed_seconds": 120.000359069,
+      "scan_ms": 2.1501319999999997,
+      "scenario": "deferred"
+    },
+    {
+      "expected_seconds": 120,
+      "observed_seconds": 120.001174935,
+      "scan_ms": 2.42858,
+      "scenario": "incomplete"
+    },
+    {
+      "expected_seconds": 240,
+      "observed_seconds": 240.023048704,
+      "scan_ms": 27.571813,
+      "scenario": "deferred"
+    },
+    {
+      "expected_seconds": 240,
+      "observed_seconds": 240.008659725,
+      "scan_ms": 43.25856,
+      "scenario": "incomplete"
+    },
+    {
+      "expected_seconds": 300,
+      "observed_seconds": 300.014987345,
+      "scan_ms": 35.264959999999995,
+      "scenario": "deferred"
+    },
+    {
+      "expected_seconds": 300,
+      "observed_seconds": 300.022657669,
+      "scan_ms": 28.468662,
+      "scenario": "incomplete"
+    },
+    {
+      "expected_seconds": 300,
+      "observed_seconds": 300.011763197,
+      "scan_ms": 38.329781,
+      "scenario": "deferred"
+    },
+    {
+      "expected_seconds": 300,
+      "observed_seconds": 300.019805755,
+      "scan_ms": 33.024108000000005,
+      "scenario": "incomplete"
+    }
+  ],
+  "max_interval_deviation_ms": 23.04870399999004,
+  "scope": "Real monotonic clock, production run_timed scheduler and scan_and_watch, two independent temporary libraries, debug build. Intervals measured from prior scan completion to next scan start.",
+  "limits": [
+    "Watcher callbacks are isolated from the measured scheduler to avoid fixture filesystem writes creating external wakes.",
+    "Incomplete discovery uses an invalid directory marker; deferred scans use pending directory work.",
+    "One full cycle per scenario; no large-library throughput or CPU benchmark."
+  ]
+}

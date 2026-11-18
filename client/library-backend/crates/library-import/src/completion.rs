@@ -98,7 +98,7 @@ impl LibraryImport<'_> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use crate::reader_transfer::test_importer;
+    use crate::{reader_transfer::test_importer, LibraryImport};
     use book_model::BookFormat;
     use std::fs::{self, File};
     use sync_common::ROOT_DIR_ID;
@@ -128,12 +128,12 @@ mod tests {
         assert!(!moved.created);
         assert!(!path.exists());
 
-        assert_eq!(importer.storage.database().book_count().unwrap(), 1);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 1);
         let paths = importer.storage.database().book_paths(&identity).await.unwrap();
-        assert!(importer.storage.assets().book_exists(&identity, &paths).unwrap());
+        assert!(importer.storage.assets().book_exists(&identity, &paths).await.unwrap());
         let current = importer.storage.database().book_transfer_state(identity).await.unwrap();
         assert_eq!(current.addition.record.title, original.addition.record.title);
         assert_eq!(current.expected_checksum(), original.expected_checksum());
-        assert!(importer.storage.database().has_import_inspection(&identity, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap());
+        assert!(importer.storage.database().has_import_inspection(&identity, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).await.unwrap());
     }
 }

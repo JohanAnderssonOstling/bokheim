@@ -5,7 +5,8 @@ use std::time::Duration;
 use web_time::Instant;
 
 use gpui::{
-    App, Bounds, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Window, canvas, div, point,
+    AnyWindowHandle, App, Bounds, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity,
+    Window, canvas, div, point,
 };
 use gpui_component::StyledExt;
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
@@ -21,6 +22,8 @@ pub fn page_wheel_ready(last_turn: Option<Instant>, animating: bool, now: Instan
 struct RegisteredScroll {
     id: ElementId,
     handle: ScrollHandle,
+    window: AnyWindowHandle,
+    mount: WeakEntity<()>,
 }
 
 struct PageScrollRegistry {
@@ -44,7 +47,8 @@ pub fn init_page_scrolling(cx: &mut App) {
         let Some(direction) = page_direction(&event.keystroke.key) else {
             return;
         };
-        let handle = cx.global::<PageScrollRegistry>().scrolls.iter().rev().find_map(|registered| {
+        cx.global_mut::<PageScrollRegistry>().scrolls.retain(|registered| registered.mount.is_upgradable());
+        let handle = cx.global::<PageScrollRegistry>().scrolls.iter().rev().filter(|registered| registered.window == window.window_handle()).find_map(|registered| {
             let bounds = registered.handle.bounds();
             (bounds.size.height > gpui::Pixels::ZERO && registered.handle.max_offset().y > gpui::Pixels::ZERO).then(|| registered.handle.clone())
         });
@@ -55,16 +59,19 @@ pub fn init_page_scrolling(cx: &mut App) {
     cx.set_global(PageScrollRegistry { scrolls: Vec::new(), _keystroke_subscription: subscription });
 }
 
-/// Registers an externally managed vertical scroll handle for application-wide
-/// viewport paging.
-pub fn register_page_scroll_handle(id: impl Into<ElementId>, handle: ScrollHandle, cx: &mut App) {
+/// Registers a vertical scroll handle for its current window and mounted
+/// element lifetime. Call while rendering the surface.
+pub fn register_page_scroll_handle(id: impl Into<ElementId>, handle: ScrollHandle, window: &mut Window, cx: &mut App) {
     if !cx.has_global::<PageScrollRegistry>() {
         return;
     }
     let id = id.into();
+    // Keyed element state is retained across cached frames and released when
+    // the surface unmounts. The registry itself must not keep that state alive.
+    let mount = window.use_keyed_state((id.clone(), "page-scroll-mount"), cx, |_, _| ()).downgrade();
     let registry = cx.global_mut::<PageScrollRegistry>();
-    registry.scrolls.retain(|registered| registered.id != id);
-    registry.scrolls.push(RegisteredScroll { id, handle });
+    registry.scrolls.retain(|registered| registered.mount.is_upgradable() && (registered.id != id || registered.window != window.window_handle()));
+    registry.scrolls.push(RegisteredScroll { id, handle, window: window.window_handle(), mount });
 }
 
 /// Adds Bokheim's keyboard paging behavior to a scrollable element.
@@ -160,7 +167,7 @@ where
             Some(handle) => handle,
             None => window.use_keyed_state(self.id.clone(), cx, |_, _| ScrollHandle::default()).read(cx).clone(),
         };
-        register_page_scroll_handle(self.id.clone(), scroll_handle.clone(), cx);
+        register_page_scroll_handle(self.id.clone(), scroll_handle.clone(), window, cx);
         let root_style = outer_layout_style(&mut self.element);
 
         let content = self.element.id((self.id.clone(), "content")).flex_none().h_auto().min_h_full();

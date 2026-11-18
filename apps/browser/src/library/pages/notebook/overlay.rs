@@ -38,7 +38,7 @@ fn show_editor(library: LibraryContext, title: String, annotation: Annotation, w
         NotebookEditor { library, title, saved: annotation.clone(), draft: annotation, focus: cx.focus_handle(), input, scroll: ScrollHandle::default(), window: window.window_handle(), state: EditorState::Idle }
     });
     let _ = session.update(cx, |session, cx| {
-        session.show_operation_dialog(editor.clone(), f32::from(window.rem_size()) * components::ANNOTATION_EDITOR_WIDTH_REM, true, window, cx);
+        session.show_operation_dialog(editor.clone(), components::ANNOTATION_EDITOR_WIDTH_REM, true, window, cx);
     });
     editor
 }

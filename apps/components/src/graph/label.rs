@@ -10,11 +10,11 @@
 //! the drawing cannot disagree.
 
 use gpui::prelude::FluentBuilder;
-use gpui::{AvailableSpace, Div, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels, SharedString, Size, Stateful, Styled, div, px, rems, size};
+use gpui::{App, AvailableSpace, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Size, Styled, Window, div, px, rems, size};
 use gpui_component::Theme;
 
 use super::layout::NodeRole;
-use crate::{BrowserTheme, browser_theme};
+use crate::browser_theme;
 
 const HAIR_SPACE: &str = "\u{200A}";
 const E_INK: bool = cfg!(feature = "kobo");
@@ -28,46 +28,73 @@ const MAX_LINES: usize = 2;
 const PAD_X: f32 = 10.0;
 const PAD_Y: f32 = 8.0;
 
-/// A label for `name` in `role`, filling the box the graph gives it.
-pub fn graph_label(id: impl Into<ElementId>, role: NodeRole, name: &str, count: Option<usize>, compact: bool, theme: BrowserTheme, font_family: SharedString) -> Stateful<Div> {
-    let color = match role {
-        NodeRole::Selection => theme.text_accent,
-        NodeRole::Context => theme.text_muted,
-        NodeRole::Root | NodeRole::Path | NodeRole::Fan => theme.text,
-    };
-    let accent = theme.text_accent;
-    div().id(id).size_full().flex().items_center().justify_center().cursor_pointer().text_color(color).hover(move |style| style.text_color(accent)).child(label_body(role, name, count, compact, theme, font_family))
+/// The text and count shared by a graph node's measurement and drawing.
+#[derive(Clone)]
+pub struct GraphLabel {
+    name: SharedString,
+    count: Option<usize>,
 }
 
-/// The box [`graph_label`] needs for the same label.
-pub fn graph_label_size(role: NodeRole, name: &str, count: Option<usize>, compact: bool, window: &mut gpui::Window, cx: &mut gpui::App) -> Size<Pixels> {
-    crate::ensure_text_fonts(name, cx);
-    let theme = browser_theme(cx);
-    let mut body = label_body(role, name, count, compact, theme, Theme::global(cx).font_family.clone()).into_any_element();
-    body.layout_as_root(size(AvailableSpace::MaxContent, AvailableSpace::MaxContent), window, cx)
+impl GraphLabel {
+    pub fn new(name: impl Into<SharedString>, count: Option<usize>) -> Self {
+        Self { name: name.into(), count }
+    }
+
+    pub fn measure(&self, role: NodeRole, compact: bool, window: &mut Window, cx: &mut App) -> Size<Pixels> {
+        let mut body = self.body(role, compact, cx).into_any_element();
+        body.layout_as_root(size(AvailableSpace::MaxContent, AvailableSpace::MaxContent), window, cx)
+    }
+
+    pub fn view(&self, role: NodeRole, compact: bool) -> impl IntoElement {
+        GraphLabelView { label: self.clone(), role, compact }
+    }
+
+    fn body(&self, role: NodeRole, compact: bool, cx: &mut App) -> Div {
+        crate::ensure_text_fonts(&self.name, cx);
+        let theme = browser_theme(cx);
+        let font_family = Theme::global(cx).font_family.clone();
+        let text_size = label_rems(role, compact);
+        let display = matches!(role, NodeRole::Root | NodeRole::Path | NodeRole::Selection);
+        let shown = if display { self.name.to_uppercase().chars().map(String::from).collect::<Vec<_>>().join(HAIR_SPACE) } else { self.name.to_string() };
+        let text = div()
+            .max_w(rems(MAX_TEXT_WIDTH_REM))
+            .text_center()
+            .line_clamp(MAX_LINES)
+            .text_ellipsis()
+            .when(display, |text| text.when_some(theme.display_font_family(), |text, family| text.font_family(family)).when(role == NodeRole::Selection, |text| text.font_weight(FontWeight::SEMIBOLD)))
+            .when(!display, |text| text.font_family(font_family.clone()).font_features(crate::small_caps()))
+            .child(shown);
+        div()
+            .px(px(PAD_X))
+            .py(px(PAD_Y))
+            .flex()
+            .map(|row| if E_INK { row.items_end() } else { row.items_start() })
+            .text_size(rems(text_size))
+            .line_height_auto()
+            .child(text)
+            .children(self.count.map(|count| div().flex_none().pl(px(COUNT_GAP)).font_family(font_family).text_size(rems(text_size * COUNT_SCALE)).line_height_auto().text_color(theme.text_muted).child(count.to_string())))
+    }
 }
 
-fn label_body(role: NodeRole, name: &str, count: Option<usize>, compact: bool, theme: BrowserTheme, font_family: SharedString) -> Div {
-    let text_size = label_rems(role, compact);
-    let display = matches!(role, NodeRole::Root | NodeRole::Path | NodeRole::Selection);
-    let shown = if display { name.to_uppercase().chars().map(String::from).collect::<Vec<_>>().join(HAIR_SPACE) } else { name.to_owned() };
-    let text = div()
-        .max_w(rems(MAX_TEXT_WIDTH_REM))
-        .text_center()
-        .line_clamp(MAX_LINES)
-        .text_ellipsis()
-        .when(display, |text| text.when_some(theme.display_font_family(), |text, family| text.font_family(family)).when(role == NodeRole::Selection, |text| text.font_weight(FontWeight::SEMIBOLD)))
-        .when(!display, |text| text.font_family(font_family.clone()).font_features(crate::small_caps()))
-        .child(shown);
-    div()
-        .px(px(PAD_X))
-        .py(px(PAD_Y))
-        .flex()
-        .map(|row| if E_INK { row.items_end() } else { row.items_start() })
-        .text_size(rems(text_size))
-        .line_height_auto()
-        .child(text)
-        .children(count.map(|count| div().flex_none().pl(px(COUNT_GAP)).font_family(font_family).text_size(rems(text_size * COUNT_SCALE)).line_height_auto().text_color(theme.text_muted).child(count.to_string())))
+#[derive(IntoElement)]
+struct GraphLabelView {
+    label: GraphLabel,
+    role: NodeRole,
+    compact: bool,
+}
+
+impl RenderOnce for GraphLabelView {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let body = self.label.body(self.role, self.compact, cx);
+        let theme = browser_theme(cx);
+        let color = match self.role {
+            NodeRole::Selection => theme.text_accent,
+            NodeRole::Context => theme.text_muted,
+            NodeRole::Root | NodeRole::Path | NodeRole::Fan => theme.text,
+        };
+        let accent = theme.text_accent;
+        div().size_full().flex().items_center().justify_center().cursor_pointer().text_color(color).hover(move |style| style.text_color(accent)).child(body)
+    }
 }
 
 /// Label sizes in rems, for phones and e-readers or for larger windows.

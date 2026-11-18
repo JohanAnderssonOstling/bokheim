@@ -239,7 +239,10 @@ pub fn recover_import_moves(root: &Path, mut is_committed: impl FnMut(&Path) -> 
             unresolved.push(format!("{}: {error}", entry.path().display()));
         }
     }
-    if missing.is_empty() {
+    // Older releases did not register claims. Discover them once, then use
+    // the registry on ordinary opens. Failed walks remain eligible for retry.
+    let legacy_complete = registry.join("legacy-recovery-complete");
+    if missing.is_empty() && legacy_complete.try_exists()? {
         return Ok(unresolved);
     }
     let mut scanned = true;
@@ -278,6 +281,10 @@ pub fn recover_import_moves(root: &Path, mut is_committed: impl FnMut(&Path) -> 
         }
     }
     if scanned {
+        if !legacy_complete.try_exists()? {
+            File::create(&legacy_complete)?.sync_all()?;
+            sync_directory(&registry)?;
+        }
         for entry in missing {
             remove_registration(&entry)?;
         }

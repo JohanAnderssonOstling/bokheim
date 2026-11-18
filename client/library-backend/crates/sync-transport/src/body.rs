@@ -1,17 +1,17 @@
 //! Shared bounded buffering for typed HTTP bodies. Status policy belongs to
 //! each endpoint; raw book transfers retain their streaming paths.
-pub(crate) use http_response::{read, BodyReadError};
-use sync_common::transport::WireError;
+pub(crate) use http_response::{BodyReadError, read};
+use sync_common::http::WireError;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use axum::{
+        Router,
         body::{Body, Bytes},
         extract::Path,
         response::{IntoResponse, Response},
         routing::get,
-        Router,
     };
     use std::convert::Infallible;
 

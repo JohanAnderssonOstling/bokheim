@@ -11,26 +11,30 @@
 use ui_text::text;
 
 use ui_components::user_facing_error;
+use ui_html_components::BookDescription;
 
-use crate::services::{book_transfer_error_message, import_catalog_book_with_progress, notify_error};
+use crate::services::import_catalog_book_with_progress;
 use library_backend::{DownloadState, ThumbnailResolution};
-use std::collections::{BTreeSet, HashSet};
-use std::ops::Bound::{Excluded, Unbounded};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, AppContext, AvailableSpace, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Render, SharedString, Task, Window, canvas, div, px};
-use gpui_component::{IconName, Placement, WindowExt as _};
+use gpui::{AnyElement, App, AppContext, AvailableSpace, Context, Entity, FocusHandle, Focusable, IntoElement, ListSizingBehavior, MouseButton, Render, SharedString, Task, Window, canvas, div, list, px, rems};
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
+use gpui_component::{IconName, Placement, WindowExt as _};
 use gpui_image_eviction::track_image;
-use library_model::{BookCardRow, BookDetail, BookLocator, BookSource, BookTocEntry, CardKey, LibraryFileTypeFilter};
+use library_model::{BookCardRow, BookDetail, BookLocator, BookSource, CardKey, LibraryFileTypeFilter};
 use sync_common::{BookId, ROOT_DIR_ID};
 use ui_components as components;
 use ui_components::ScrollableElement as _;
 
 use crate::library::pages::with_retry_banner;
 use crate::library::services::{DownloadSubscription, LibraryContext};
-use crate::library::widgets::{CoverVisibility, CoversEvicted, LoadedCover, cover_aspect_ratio, generated_cover_variant, loaded_cover_from_jpeg};
+use crate::library::widgets::{CoverVisibility, CoversEvicted, LoadedCover, cover_aspect_ratio, generated_cover_variant, load_cover_image};
+
+mod contents;
+use contents::ContentsList;
 
 /// Leaves the book's page for the location it was opened from on Back.
 /// Owned by the browse page, which is what knows how to leave the detail location.
@@ -85,6 +89,7 @@ pub(crate) struct BookDetailPage {
     /// Once revealed, background refreshes keep the book visible.
     ready: bool,
     detail: Option<BookDetail>,
+    description: Option<BookDescription>,
     error: Option<SharedString>,
     cover: DetailCover,
     cover_visibility: CoverVisibility,
@@ -99,12 +104,13 @@ pub(crate) struct BookDetailPage {
     contents_open: bool,
     contents_filter: Option<Entity<InputState>>,
     contents_query: String,
+    contents_list: ContentsList,
     description_open: bool,
     focus: FocusHandle,
     /// The load in flight. Replacing it drops the one before, which cancels it.
     request: Option<Task<()>>,
+    refresh_pending: bool,
     _cover_task: Option<Task<()>>,
-    download_requested_by_page: bool,
     /// Prevent repeated submissions while the library waits for the import.
     adding: bool,
     _download_updates: Option<DownloadSubscription>,
@@ -159,9 +165,10 @@ impl BookDetailPage {
             }
             let download_updates = Self::download_subscription(&book, &ui, cx);
             let contents_updates = cx.subscribe(&ui.updates(), |page: &mut Self, _, _: &crate::library::services::LibraryContentsChanged, cx| {
-                let Some(hash) = page.book.library_file() else { return };
-                let library = page.ui.backend().clone();
-                page.finish_load(async move { library.book_detail(hash).await }, cx);
+                if page.book.library_file().is_some() {
+                    page.refresh_pending = true;
+                    cx.notify();
+                }
             });
             let cover_evictions = cx.observe_global::<CoversEvicted>(|page: &mut Self, cx| {
                 if page.cover_visibility.is_visible() {
@@ -177,12 +184,14 @@ impl BookDetailPage {
                 book,
                 ready: false,
                 detail: None,
+                description: None,
                 error: None,
                 cover: DetailCover::Loading(cover),
                 cover_visibility: CoverVisibility::default(),
                 cover_generation: 0,
                 _cover_evictions: cover_evictions,
                 _contents_updates: contents_updates,
+                contents_list: ContentsList::default(),
                 expanded: HashSet::new(),
                 contents_open: true,
                 contents_filter: None,
@@ -190,8 +199,8 @@ impl BookDetailPage {
                 description_open: true,
                 focus: cx.focus_handle(),
                 request: None,
+                refresh_pending: false,
                 _cover_task: None,
-                download_requested_by_page: false,
                 adding: false,
                 _download_updates: download_updates,
             };
@@ -231,17 +240,22 @@ impl BookDetailPage {
     }
 
     fn finish_load(&mut self, load: impl std::future::Future<Output = Result<BookDetail, library_backend::BackendError>> + 'static, cx: &mut Context<Self>) {
+        self.refresh_pending = false;
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             cx.wait_for_update_slot().await;
             let _ = page.update(cx, |page, cx| {
+                page.request = None;
                 match result {
-                    Ok(detail) => {
+                    Ok(mut detail) => {
                         // A catalog book may already be, or have just
                         // become, a library book.
                         if detail.book.library_file() != page.book.library_file() {
                             page._download_updates = Self::download_subscription(&detail.book, &page.ui, cx);
                         }
+                        page.contents_list.set_toc(&detail.toc, detail.book.audiobook_duration_ms.or(page.book.audiobook_duration_ms));
+                        page.contents_list.filter(&page.expanded, &page.contents_query);
+                        page.description = BookDescription::new(std::mem::take(&mut detail.description));
                         page.book = detail.book.clone();
                         page.detail = Some(detail);
                         page.error = None;
@@ -293,11 +307,7 @@ impl BookDetailPage {
         let load = self.ui.clone().book_cover(self.book.source, ThumbnailResolution::HighDensity);
         let decoder = cx.background_executor().clone();
         self._cover_task = Some(cx.spawn(async move |page, cx| {
-            let cover = match load.await {
-                Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await.map(Some).ok_or_else(|| library_backend::BackendError::message("cover is not a readable JPEG")),
-                Ok(None) => Ok(None),
-                Err(error) => Err(error),
-            };
+            let cover = load_cover_image(load, decoder).await;
             let _ = page.update(cx, |page, cx| {
                 if generation != page.cover_generation {
                     return;
@@ -324,31 +334,16 @@ impl BookDetailPage {
     }
 
     fn download(&mut self, cx: &mut Context<Self>) {
-        let Some(book_id) = self.book.library_file() else { return };
-        if !matches!(self.ui.updates().read(cx).download_state(book_id), Some(DownloadState::NotDownloaded)) || self.download_requested_by_page {
-            return;
+        if let Some(book) = self.book.library_file() {
+            self.ui.download_book(book, cx);
         }
-        self.download_requested_by_page = true;
-        let library = self.ui.backend().clone();
-        cx.spawn(async move |page, cx| {
-            let result = library.download_book(book_id).await;
-            let _ = page.update_in(cx, |page, window, cx| {
-                page.download_requested_by_page = false;
-                if let Err(error) = result {
-                    log::warn!("Could not download library book {book_id}: {error}");
-                    notify_error("book-download-error", book_transfer_error_message(error.failure()), window, cx);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
     fn toggle_entry(&mut self, target: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(target) {
             self.expanded.insert(target.to_owned());
         }
+        self.contents_list.filter(&self.expanded, &self.contents_query);
         cx.notify();
     }
 }
@@ -360,35 +355,6 @@ fn download_action_label(state: &DownloadState) -> SharedString {
         DownloadState::Downloading(_) => text!(browse::starting_download).into(),
         DownloadState::Downloaded | DownloadState::NotDownloaded => text!(common::download).into(),
     }
-}
-
-/// One entry, flattened for drawing, with the depth it was found at.
-struct DrawnEntry<'a> {
-    entry: &'a BookTocEntry,
-    depth: usize,
-}
-
-/// Walks the navigation tree into the list actually drawn: an unopened entry
-/// keeps its children to itself.
-fn drawn_entries<'a>(entries: &'a [BookTocEntry], expanded: &HashSet<String>, depth: usize, drawn: &mut Vec<DrawnEntry<'a>>) {
-    for entry in entries {
-        drawn.push(DrawnEntry { entry, depth });
-        if expanded.contains(&entry.target) {
-            drawn_entries(&entry.children, expanded, depth + 1, drawn);
-        }
-    }
-}
-
-fn matching_entries<'a>(entries: &'a [BookTocEntry], query: &str, depth: usize) -> Vec<DrawnEntry<'a>> {
-    let mut matches = Vec::new();
-    for entry in entries {
-        let children = matching_entries(&entry.children, query, depth + 1);
-        if !children.is_empty() || book_model::normalize_search_text(&entry.title).contains(query) {
-            matches.push(DrawnEntry { entry, depth });
-            matches.extend(children);
-        }
-    }
-    matches
 }
 
 /// "12 h 41 min", for a fact read at a glance rather than a clock read against a
@@ -409,15 +375,21 @@ pub(crate) fn spoken_duration(duration_ms: u64) -> String {
 
 impl Render for BookDetailPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.contents_list.sync_typography(window);
+        if self.refresh_pending && self.request.is_none() {
+            self.load(cx);
+        }
         if self.contents_filter.is_none() {
             let input = components::contents_filter_input(window, cx);
             cx.subscribe_in(&input, window, |page, input, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
                     page.contents_query = book_model::normalize_search_text(&input.read(cx).value());
+                    page.contents_list.filter(&page.expanded, &page.contents_query);
                     cx.notify();
                     window.refresh();
                 }
-            }).detach();
+            })
+            .detach();
             self.contents_filter = Some(input);
         }
         self.cover_visibility.track(window);
@@ -461,13 +433,13 @@ impl BookDetailPage {
                 let label = if contents { if audiobook { text!(browse::chapters) } else { text!(common::contents) } } else { text!(common::description) };
                 let title = div().flex_1().min_w_0().child(label);
                 let content = if contents {
-                    page.detail.clone().filter(|detail| !detail.toc.is_empty()).map(|detail| {
+                    page.detail.as_ref().filter(|detail| !detail.toc.is_empty()).map(|detail| {
                         let locator = page.locator();
                         let position = page.ui.now_playing().read(cx).book.as_ref().filter(|playing| Some(&playing.locator) == locator.as_ref()).and_then(|playing| (playing.position)(cx)).map(|(position, _)| position);
-                        page.render_contents(&detail, audiobook, position, None, theme, cx)
+                        page.render_contents(detail, audiobook, position, None, theme, cx)
                     })
                 } else {
-                    page.detail.as_ref().and_then(|detail| ui_html_components::book_detail_description(&detail.description, theme, cx)).map(IntoElement::into_any_element)
+                    page.description.as_ref().map(|description| description.render(theme, cx).into_any_element())
                 };
                 let empty = if contents { text!(browse::no_contents_available) } else { text!(browse::no_description_available) };
                 (title, content.unwrap_or_else(|| components::muted_line(empty, theme).into_any_element()))
@@ -507,11 +479,11 @@ impl BookDetailPage {
         }
 
         // The initial requests are complete before the book is displayed.
-        let book = self.book.clone();
-        let detail = self.detail.clone();
+        let book = &self.book;
+        let detail = self.detail.as_ref();
 
         // Columns only when there is something to put beside the player.
-        let has_sections = detail.as_ref().is_some_and(|detail| !detail.toc.is_empty() || !detail.description.trim().is_empty());
+        let has_sections = detail.is_some_and(|detail| !detail.toc.is_empty() || self.description.is_some());
         let layout = if width >= BOOK_DETAIL_SIDEBAR_BREAKPOINT && has_sections {
             DetailLayout::Columns
         } else if width >= BOOK_DETAIL_STACKED_BREAKPOINT {
@@ -559,7 +531,7 @@ impl BookDetailPage {
         // and where their page lives. Until it lands the line is stated rather
         // than linked, so the byline neither appears late nor moves when it
         // becomes clickable.
-        match detail.as_ref().filter(|detail| !detail.authors.is_empty()) {
+        match detail.filter(|detail| !detail.authors.is_empty()) {
             Some(detail) => {
                 let mut byline = components::book_detail_authors(theme);
                 for author in &detail.authors {
@@ -594,9 +566,9 @@ impl BookDetailPage {
         // without a chapter list. Contents focus on chapter titles.
         // The year is bare rather than "Published 1998": for an ebook edition
         // it can be the edition's year, not the work's.
-        let chapter_list = audiobook && detail.as_ref().is_some_and(|detail| !detail.toc.is_empty());
+        let chapter_list = audiobook && detail.is_some_and(|detail| !detail.toc.is_empty());
         let mut facts = Vec::new();
-        if let Some(year) = detail.as_ref().and_then(|detail| detail.year) {
+        if let Some(year) = detail.and_then(|detail| detail.year) {
             facts.push(SharedString::from(year.to_string()));
         }
         if !chapter_list {
@@ -616,7 +588,7 @@ impl BookDetailPage {
         // it. Multiplying it by a hundred again put "2201%" beside the title of
         // a book a fifth of the way through.
         let position = book.library_file().and_then(|_| {
-            let entry = detail.as_ref().and_then(|detail| detail.current_entry.clone()).filter(|entry| !entry.trim().is_empty()).map(SharedString::from);
+            let entry = detail.and_then(|detail| detail.current_entry.clone()).filter(|entry| !entry.trim().is_empty()).map(SharedString::from);
             let percentage = (book.progress > 0.0).then(|| SharedString::from(format!("{}%", book.progress.round() as i32)));
             (entry.is_some() || percentage.is_some()).then(|| components::book_detail_position(entry, percentage, left_aligned_actions, theme))
         });
@@ -644,7 +616,7 @@ impl BookDetailPage {
         // be added. Other external entries keep reading on the source website.
         match book.source {
             BookSource::ExternalCatalog { downloadable: false, .. } => {
-                let url = detail.as_ref().and_then(|detail| detail.external_url.clone());
+                let url = detail.and_then(|detail| detail.external_url.clone());
                 let label = if url.as_deref().is_some_and(|url| url.starts_with("https://litteraturbanken.se/")) { text!(browse::open_on_litteraturbanken) } else { text!(browse::open_at_source) };
                 actions = components::book_detail_actions().child(components::primary_action_button("book-detail-external", label, IconName::ExternalLink, url.is_none()).px(gpui::px(action_padding)).on_click(move |_, _, cx| {
                     if let Some(url) = &url {
@@ -685,12 +657,12 @@ impl BookDetailPage {
 
         // Three columns show the contents and the description side by side;
         // stacked, in two columns or fewer, either can be folded away.
-        let three_columns = layout == DetailLayout::Columns && width >= BOOK_DETAIL_THREE_COLUMN_BREAKPOINT && detail.as_ref().is_some_and(|detail| !detail.toc.is_empty() && !detail.description.trim().is_empty());
+        let three_columns = layout == DetailLayout::Columns && width >= BOOK_DETAIL_THREE_COLUMN_BREAKPOINT && detail.is_some_and(|detail| !detail.toc.is_empty()) && self.description.is_some();
         let collapsible = !three_columns;
         // Empty contents and descriptions do not occupy a section.
-        let contents = detail.as_ref().filter(|detail| !mobile && !detail.toc.is_empty()).map(|detail| self.render_contents(detail, audiobook, listening.map(|(position, _)| position), Some(collapsible), theme, cx));
-        // A description containing only markup is empty.
-        let description = detail.as_ref().filter(|_| !mobile).and_then(|detail| ui_html_components::book_detail_description(&detail.description, theme, cx)).map(|description| {
+        let contents = detail.filter(|detail| !mobile && !detail.toc.is_empty()).map(|detail| self.render_contents(detail, audiobook, listening.map(|(position, _)| position), Some(collapsible), theme, cx));
+        // Markup-only descriptions were excluded when details loaded.
+        let description = self.description.as_ref().filter(|_| !mobile).map(|description| {
             let open = !collapsible || self.description_open;
             let heading = components::book_detail_section_heading(text!(common::description), None::<SharedString>, collapsible.then_some(open), theme).id("book-detail-description-heading").when(collapsible, |heading| {
                 heading.on_click(cx.listener(|page, _, window, cx| {
@@ -700,10 +672,8 @@ impl BookDetailPage {
                     }
                 }))
             });
-            components::book_detail_section().child(heading).when(open, |section| section.child(description))
+            components::book_detail_section().child(heading).when(open, |section| section.child(description.render(theme, cx)))
         });
-        // A description of markup alone has no section after all.
-        let three_columns = three_columns && description.is_some();
 
         // Mobile reserves space for the headline and controls, shrinking only
         // the cover. Other narrow layouts scroll as one page.
@@ -803,113 +773,112 @@ impl BookDetailPage {
     /// `collapsible` includes a section heading and says whether it folds the
     /// list away. Sheets supply their own header and pass `None`.
     fn render_contents(&self, detail: &BookDetail, audiobook: bool, listening: Option<Duration>, collapsible: Option<bool>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
-        let mut drawn = Vec::new();
-        if self.contents_query.is_empty() {
-            drawn_entries(&detail.toc, &self.expanded, 0, &mut drawn);
-        } else {
-            drawn = matching_entries(&detail.toc, &self.contents_query, 0);
-        }
-        let no_matches = drawn.is_empty();
-        // Include entries hidden under collapsed parents when locating playback.
-        let mut ordered = Vec::new();
-        fn visit<'a>(entries: &'a [BookTocEntry], ordered: &mut Vec<&'a BookTocEntry>) {
-            for entry in entries {
-                ordered.push(entry);
-                visit(&entry.children, ordered);
-            }
-        }
-        visit(&detail.toc, &mut ordered);
-        let chapter_starts: BTreeSet<_> = if audiobook { ordered.iter().filter_map(|entry| book_model::audiobook_toc_position(&entry.target)).collect() } else { BTreeSet::new() };
-        let duration_ms = detail.book.audiobook_duration_ms.or(self.book.audiobook_duration_ms);
-        // The entry the reader is inside, and only that one: a parent is not
-        // partly read, because a navigation document says where a section
-        // starts and never how far into it anyone has got. Matched on the
-        // target rather than the wording — two entries can be called the same
-        // thing, and `current_entry` is the wording. While the book plays,
-        // it is the last chapter starting at or before the player's position.
-        let playing_target = listening.and_then(|position| {
-            let position = position.as_millis() as u64;
-            ordered.iter().filter(|entry| book_model::audiobook_toc_position(&entry.target).is_some_and(|start| start <= position)).last().map(|entry| entry.target.as_str())
+        let heading = collapsible.map(|collapsible| {
+            let open = !collapsible || self.contents_open;
+            components::book_detail_section_heading(if audiobook { text!(browse::chapters) } else { text!(common::contents) }, None::<SharedString>, collapsible.then_some(open), theme).id("book-detail-contents-heading").when(
+                collapsible,
+                |heading| {
+                    heading.on_click(cx.listener(|page, _, window, cx| {
+                        if !window.has_text_selection(cx) {
+                            page.contents_open = !page.contents_open;
+                            cx.notify();
+                        }
+                    }))
+                },
+            )
         });
-        let marked = playing_target.or(detail.current_target.as_deref());
+        if collapsible == Some(true) && !self.contents_open {
+            return components::book_detail_section().children(heading).into_any_element();
+        }
+        let no_matches = self.contents_list.visible.is_empty();
+        let playing_target = listening.and_then(|position| self.contents_list.starts.range(..=position.as_millis() as u64).next_back().map(|(_, &index)| self.contents_list.chapters[index].target.clone()));
+        let marked = playing_target.or_else(|| detail.current_target.clone().map(SharedString::from));
         let locator = self.locator();
         let read_status = self.ui.now_playing().read(cx).book.as_ref().filter(|playing| Some(&playing.locator) == locator.as_ref()).map(|playing| (playing.chapter_read_status)(cx)).unwrap_or_else(|| detail.chapter_read_status.clone());
-        // A closed part holding the current entry carries the mark itself, so
-        // where the reader is never disappears into it.
-        fn holds(entry: &BookTocEntry, target: &str) -> bool {
-            entry.children.iter().any(|child| child.target == target || holds(child, target))
-        }
-
         let page = cx.entity();
+        let owner = page.downgrade();
         let can_open = self.book.library_file().is_some();
-        // Keep the caret column only in a contents that has parts.
-        let nested = detail.toc.iter().any(|entry| !entry.children.is_empty());
-        let mut panel = components::contents_panel(theme).when(audiobook, |panel| panel.child(components::contents_timing_header(theme)));
-        for (index, DrawnEntry { entry, depth }) in drawn.into_iter().enumerate() {
-            let expanded = !self.contents_query.is_empty() || self.expanded.contains(&entry.target);
+        let state = self.contents_list.state(collapsible.is_none());
+        let rows = list(state.clone(), move |index, _, cx| {
+            let Some(page) = owner.upgrade() else { return div().into_any_element() };
+            let view = page.read(cx);
+            let chapter_index = view.contents_list.visible[index];
+            let entry = &view.contents_list.chapters[chapter_index];
+            let expanded = !view.contents_query.is_empty() || view.expanded.contains(entry.target.as_ref());
             let row = components::ContentsRow {
-                depth,
-                has_children: !entry.children.is_empty(),
+                depth: entry.depth,
+                has_children: entry.end > chapter_index + 1,
                 expanded,
-                marked: marked.is_some_and(|marked| marked == entry.target || (!expanded && holds(entry, marked))),
-                read: read_status.completed.contains(&entry.target),
+                // A collapsed ancestor carries the current chapter's mark.
+                marked: marked
+                    .as_ref()
+                    .is_some_and(|marked| marked == &entry.target || (!expanded && view.contents_list.targets.get(marked.as_ref()).is_some_and(|indices| indices.iter().any(|&index| index > chapter_index && index < entry.end)))),
+                read: read_status.completed.contains(entry.target.as_ref()),
                 focused: false,
-                timing: book_model::audiobook_toc_position(&entry.target).filter(|_| audiobook).map(|start| {
-                    let end = chapter_starts.range((Excluded(start), Unbounded)).next().copied().or(duration_ms);
-                    components::ContentsTiming { start: Duration::from_millis(start), duration: end.and_then(|end| end.checked_sub(start)).map(Duration::from_millis) }
-                }),
+                timing: entry.timing.filter(|_| audiobook),
             };
-            // The chevron opens the entry and the row goes to it, so the two
-            // clicks have to be separable. Attach the toggle directly to the
-            // disclosure, and leave leaf entries transparent to the row click.
-            let disclosure = nested.then(|| {
-                components::contents_disclosure(format!("book-detail-disclosure-{index}"), row, theme).when(row.has_children && self.contents_query.is_empty(), |disclosure| {
+            let disclosure = view.contents_list.nested.then(|| {
+                components::contents_disclosure(format!("book-detail-disclosure-{index}"), row, theme).when(row.has_children && view.contents_query.is_empty(), |disclosure| {
                     let page = page.clone();
                     let target = entry.target.clone();
                     disclosure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| page.update(cx, |page, cx| page.toggle_entry(&target, cx)))
                 })
             });
             let reset_page = page.clone();
-            let reset_target = entry.target.clone();
+            let reset_target = entry.target.to_string();
             let reset: components::ContentsReadReset = std::rc::Rc::new(move |_, _, cx| reset_page.update(cx, |page, cx| page.reset_contents_read_status(Some(reset_target.clone()), cx)));
             let title = div().id(format!("book-detail-entry-title-{index}")).whitespace_normal().line_height_auto().line_clamp(2).text_ellipsis().child(entry.title.clone());
-            panel = panel.child(
-                components::contents_row(format!("book-detail-entry-{index}"), row, disclosure, title, None, Some(reset), theme)
-                    .when(can_open, |row| {
-                        row.on_click({
-                            let page = page.clone();
-                            let target = entry.target.clone();
-                            move |_, window, cx| {
-                                if !window.has_text_selection(cx) {
-                                    if window.has_active_sheet(cx) {
-                                        window.close_sheet(cx);
-                                    }
-                                    page.update(cx, |page, cx| page.open(Some(target.clone()), window, cx));
+            components::contents_row(format!("book-detail-entry-{index}"), row, disclosure, title, Some(reset), theme)
+                .when(can_open, |row| {
+                    row.on_click({
+                        let page = page.clone();
+                        let target = entry.target.to_string();
+                        move |_, window, cx| {
+                            if !window.has_text_selection(cx) {
+                                if window.has_active_sheet(cx) {
+                                    window.close_sheet(cx);
                                 }
+                                page.update(cx, |page, cx| page.open(Some(target.clone()), window, cx));
                             }
-                        })
+                        }
                     })
-                    .when(!can_open, |row| row.cursor_default()),
-            );
-        }
+                })
+                .when(!can_open, |row| row.cursor_default())
+                .into_any_element()
+        })
+        .with_sizing_behavior(ListSizingBehavior::Infer)
+        .w_full()
+        .max_h(rems(28.0));
+        let scrollbar = Scrollbar::new(state).axis(ScrollbarAxis::Vertical);
+        let state = state.clone();
+        let previous_width = state.viewport_bounds().size.width;
+        let viewport = div()
+            .relative()
+            .w_full()
+            .min_h_0()
+            .child(rows)
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        if state.viewport_bounds().size.width != previous_width {
+                            state.clone().with_uniform_item_height(px(80.0));
+                            window.refresh();
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(scrollbar);
+        let panel = components::contents_panel(theme).when(audiobook, |panel| panel.child(components::contents_timing_header(theme))).child(viewport);
         let reset = can_open.then(|| components::contents_read_reset_button("reset-chapter-read-status").on_click(cx.listener(|page, _, _, cx| page.reset_contents_read_status(None, cx))));
         let controls = self.contents_filter.as_ref().map(|input| components::contents_filter_bar(input, reset, theme));
-        let panel = div().w_full().min_w_0().flex().flex_col().children(controls).child(panel)
-            .when(no_matches, |panel| panel.child(components::reader_state_note(text!(reader::no_chapters_match_your_filter), theme).p(px(12.0))));
-        let Some(collapsible) = collapsible else { return panel.into_any_element() };
-        let open = !collapsible || self.contents_open;
-        let heading = components::book_detail_section_heading(if audiobook { text!(browse::chapters) } else { text!(common::contents) }, None::<SharedString>, collapsible.then_some(open), theme).id("book-detail-contents-heading").when(
-            collapsible,
-            |heading| {
-                heading.on_click(cx.listener(|page, _, window, cx| {
-                    if !window.has_text_selection(cx) {
-                        page.contents_open = !page.contents_open;
-                        cx.notify();
-                    }
-                }))
-            },
-        );
-        components::book_detail_section().child(heading).when(open, |section| section.child(panel)).into_any_element()
+        let panel = div().w_full().min_w_0().flex().flex_col().children(controls).child(panel).when(no_matches, |panel| panel.child(components::reader_state_note(text!(reader::no_chapters_match_your_filter), theme).p(px(12.0))));
+        match heading {
+            Some(heading) => components::book_detail_section().child(heading).child(panel).into_any_element(),
+            None => panel.into_any_element(),
+        }
     }
 }
 
@@ -926,6 +895,7 @@ mod tests {
     use crate::navigation::LibrarySession;
     use gpui::{Pixels, RenderImage, StyleRefinement, TestAppContext, VisualTestContext, px, size};
     use gpui_component::Root;
+    use library_model::BookTocEntry;
     use std::{cell::Cell, rc::Rc, sync::Arc};
 
     struct Neighbor(Rc<Cell<usize>>);
@@ -1070,6 +1040,9 @@ mod tests {
             let mut detail = empty_detail(book, "<p>A long description.</p>".repeat(60));
             detail.current_entry = Some("Chapter one".into());
             detail.toc.push(BookTocEntry { title: "Chapter one".into(), target: "chapter-one.xhtml".into(), children: Vec::new() });
+            page.contents_list.set_toc(&detail.toc, detail.book.audiobook_duration_ms);
+            page.contents_list.filter(&page.expanded, &page.contents_query);
+            page.description = BookDescription::new(std::mem::take(&mut detail.description));
             page.detail = Some(detail);
             page.cover = DetailCover::Missing;
         });
@@ -1138,7 +1111,9 @@ mod tests {
         page.update(cx, |page, _| {
             page.request.take();
             page._cover_task.take();
-            page.detail = Some(empty_detail(book, "A description".into()));
+            let mut detail = empty_detail(book, "A description".into());
+            page.description = BookDescription::new(std::mem::take(&mut detail.description));
+            page.detail = Some(detail);
             page.cover = DetailCover::Missing;
         });
         let notifications = Rc::new(Cell::new(0));

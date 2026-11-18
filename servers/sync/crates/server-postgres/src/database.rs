@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::Duration;
-use sync_common::SyncGeneration;
+use sync_common::{STATE_STORAGE_VERSION, SyncGeneration};
 use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +82,7 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
         .map(PostgresDatabase::from_pool)
 }
 
-const SCHEMA_VERSION: i32 = 20;
+const SCHEMA_VERSION: i32 = 22;
 
 /// Applies the initial schema to an empty database. Files are
 /// applied in filename order -- `01_core.sql` before the domain files that
@@ -95,11 +95,16 @@ pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
         include_str!("../schema/04_assets.sql"),
         include_str!("../schema/05_billing.sql"),
         include_str!("../schema/06_scheduled_billing.sql"),
+        include_str!("../schema/07_maintenance.sql"),
+        include_str!("../schema/08_asset_cleanup.sql"),
     ];
     let mut transaction = database.pool().begin().await?;
     for file in SCHEMA_FILES {
         sqlx::raw_sql(file).execute(&mut *transaction).await?;
     }
+    // This is an empty database, so no historical payloads need converting.
+    sqlx::raw_sql("CREATE TABLE sync_payload_migration (singleton boolean PRIMARY KEY CHECK(singleton), version bigint NOT NULL)").execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO sync_payload_migration(singleton,version) VALUES(true,$1)").bind(i64::from(STATE_STORAGE_VERSION)).execute(&mut *transaction).await?;
     transaction.commit().await
 }
 
@@ -108,10 +113,29 @@ pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
 pub async fn needs_upgrade(database: &PostgresDatabase) -> Result<bool, sqlx::Error> {
     let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(database.pool()).await?;
     match version {
-        SCHEMA_VERSION => Ok(false),
-        14 | 17 | 18 | 19 => Ok(true),
-        _ => Err(sqlx::Error::Protocol(format!("unsupported sync schema version {version}; expected 14, 17, 18, 19 or {SCHEMA_VERSION}"))),
+        SCHEMA_VERSION => needs_payload_upgrade(database).await,
+        14 | 17 | 18 | 19 | 20 | 21 => Ok(true),
+        _ => Err(sqlx::Error::Protocol(format!("unsupported sync schema version {version}; expected 14, 17, 18, 19, 20, 21 or {SCHEMA_VERSION}"))),
     }
+}
+
+/// Check the independently committed payload migration, without scanning opaque state.
+pub async fn needs_payload_upgrade(database: &PostgresDatabase) -> Result<bool, sqlx::Error> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('sync_payload_migration') IS NOT NULL").fetch_one(database.pool()).await?;
+    if !exists {
+        return Ok(true);
+    }
+    let version: Option<i64> = sqlx::query_scalar("SELECT version FROM sync_payload_migration WHERE singleton=true").fetch_optional(database.pool()).await?;
+    if version.is_some_and(|version| version > i64::from(STATE_STORAGE_VERSION)) {
+        return Err(sqlx::Error::Protocol("stored payload migration is newer than this server release".into()));
+    }
+    Ok(version != Some(i64::from(STATE_STORAGE_VERSION)))
+}
+
+/// Only historical schemas need the client-domain data migration executable.
+pub async fn needs_cloud_upgrade(database: &PostgresDatabase) -> Result<bool, sqlx::Error> {
+    let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(database.pool()).await?;
+    Ok(matches!(version, 14 | 17 | 18 | 19))
 }
 
 /// Atomic relational step used by startup and explicit maintenance commands.
@@ -123,6 +147,19 @@ pub async fn upgrade_schema(database: &PostgresDatabase) -> Result<(), sqlx::Err
     let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(&mut *transaction).await?;
     match version {
         SCHEMA_VERSION => {}
+        20 | 21 => {
+            if version == 20 {
+                sqlx::raw_sql(include_str!("../schema/07_maintenance.sql")).execute(&mut *transaction).await?;
+            }
+            sqlx::raw_sql(include_str!("../schema/08_asset_cleanup.sql")).execute(&mut *transaction).await?;
+            sqlx::raw_sql(
+                "ALTER TABLE bokheim_schema_version DROP CONSTRAINT bokheim_schema_version_version_check;
+                UPDATE bokheim_schema_version SET version=22;
+                ALTER TABLE bokheim_schema_version ADD CONSTRAINT bokheim_schema_version_version_check CHECK(version=22);",
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
         // The separate client-domain tool completes 19 → 20 after this step.
         19 => {}
         17 | 18 => {
@@ -138,7 +175,7 @@ pub async fn upgrade_schema(database: &PostgresDatabase) -> Result<(), sqlx::Err
             .execute(&mut *transaction)
             .await?;
         }
-        _ => return Err(sqlx::Error::Protocol(format!("unsupported sync schema upgrade from {version}; expected 17, 18, 19 or {SCHEMA_VERSION}"))),
+        _ => return Err(sqlx::Error::Protocol(format!("unsupported sync schema upgrade from {version}; expected 17, 18, 19, 20, 21 or {SCHEMA_VERSION}"))),
     }
     transaction.commit().await
 }
@@ -149,6 +186,9 @@ pub async fn verify_schema(database: &PostgresDatabase) -> Result<(), sqlx::Erro
     if version != SCHEMA_VERSION {
         return Err(sqlx::Error::Protocol(format!("unsupported sync schema version {version}; expected {SCHEMA_VERSION}")));
     }
+    if needs_payload_upgrade(database).await? {
+        return Err(sqlx::Error::Protocol("stored payload migration is incomplete; run sync-server upgrade before serving".into()));
+    }
     Ok(())
 }
 
@@ -157,9 +197,16 @@ pub async fn verify_schema(database: &PostgresDatabase) -> Result<(), sqlx::Erro
 pub async fn rotate_sync_generation(database: &PostgresDatabase) -> Result<SyncGeneration, sqlx::Error> {
     verify_schema(database).await?;
     let generation = SyncGeneration::new_v4();
-    sqlx::query_scalar("UPDATE sync_history SET generation=$1 WHERE singleton=true RETURNING generation").bind(generation).fetch_one(database.pool()).await
+    let mut transaction = database.pool().begin().await?;
+    // Exchanges hold ROW SHARE on libraries through their row-locking query.
+    // Drain those writers here instead of locking the shared history row on
+    // every push. Snapshot-based pulls can finish against the old generation.
+    sqlx::query("LOCK TABLE libraries IN EXCLUSIVE MODE").execute(&mut *transaction).await?;
+    let generation = sqlx::query_scalar("UPDATE sync_history SET generation=$1 WHERE singleton=true RETURNING generation").bind(generation).fetch_one(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(generation)
 }
 
 pub async fn check_ready(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(database.pool()).await.map(|_| ())
+    verify_schema(database).await
 }

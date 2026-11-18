@@ -375,11 +375,11 @@ UPDATE book SET entry_count=7 WHERE content_hash=:arg_1;
 UPDATE book SET duration_ms=NULL WHERE content_hash=:arg_1;
 
 -- name: fixtures_read_numbers_numbers_n_n &
-WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<2999) INSERT INTO book(content_hash,title,format) SELECT printf('%064x',n),'Other book',1 FROM numbers;
+WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<2999) INSERT INTO book(content_hash,title,format) SELECT unhex(printf('%064x',n)),'Other book',1 FROM numbers;
 
 -- name: fixtures_insert_book_dir_5 !
 -- param: arg_1: &SqlParam<'_>
-INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT :arg_1,row_id,content_hash || '.epub','',1 FROM book WHERE title='Other book';
+INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT :arg_1,row_id,lower(hex(content_hash)) || '.epub',X'',1 FROM book WHERE title='Other book';
 
 -- name: fixtures_read_numbers_numbers_n_n_2 !
 -- param: arg_1: &SqlParam<'_>

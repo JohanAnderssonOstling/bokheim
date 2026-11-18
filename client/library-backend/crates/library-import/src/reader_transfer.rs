@@ -401,16 +401,16 @@ mod tests {
         let importer_storage = importer_placement.write().await;
         let mut importer = LibraryImport::new(&importer_storage, Arc::new(cpu_host::NativeHost));
         let first = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &ReadestConfig::default(), ImportMode::Copy, None).await.unwrap();
-        assert!(importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Epub, READER_EPUB_METADATA_VERSION).unwrap());
-        assert!(!importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap());
-        assert!(importer.storage.database().book_transfer_state(first.book_id).unwrap().addition.record.book.identifiers.is_empty(), "reader admission must skip the fixture's page-only ISBN");
+        assert!(importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Epub, READER_EPUB_METADATA_VERSION).await.unwrap());
+        assert!(!importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).await.unwrap());
+        assert!(importer.storage.database().book_transfer_state(first.book_id).await.unwrap().addition.record.book.identifiers.is_empty(), "reader admission must skip the fixture's page-only ISBN");
         let published = destination.path().join("book.epub");
         let revision = library_files::filesystem::fingerprint(&published).unwrap();
         importer.cpu = Arc::new(NoInspection);
         let config = ReadestConfig { booknotes: vec![json!({"id":"new-note","type":"annotation","cfi":"epubcfi(/6/2!/4/2/1:0)","text":"New quote","createdAt":1})], ..Default::default() };
         let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, ImportMode::Copy, None).await.unwrap();
         assert!(!repeat.created);
-        assert_eq!(importer.storage.database().annotations(first.book_id).unwrap().len(), 1, "cached inspection must still merge new reader notes");
+        assert_eq!(importer.storage.database().annotations(first.book_id).await.unwrap().len(), 1, "cached inspection must still merge new reader notes");
         let state = importer.storage.database().book_transfer_state(first.book_id).await.unwrap();
         let duplicate = importer.import_verified_reader_state(ROOT_DIR_ID, "book.epub".into(), Box::new(Unreadable), state.clone(), None).await.unwrap();
         assert!(!duplicate.created);
@@ -420,7 +420,7 @@ mod tests {
         let other_storage = other_placement.write().await;
         let other = LibraryImport::new(&other_storage, Arc::new(cpu_host::NativeHost));
         let transferred = other.import_transferred_book(ROOT_DIR_ID, "book.epub".into(), Box::new(File::open(&path).unwrap()), fs::metadata(&path).unwrap().len(), state.clone()).await.unwrap();
-        assert!(!other.storage.database().has_import_inspection(&transferred.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).unwrap(), "general transfers must not claim a current parser inspection");
+        assert!(!other.storage.database().has_import_inspection(&transferred.book_id, BookFormat::Epub, book_inspection::inspection_version(BookFormat::Epub)).await.unwrap(), "general transfers must not claim a current parser inspection");
         assert!(importer.import_transferred_book(ROOT_DIR_ID, "book.epub".into(), Box::new(std::io::Cursor::new(b"wrong bytes")), b"wrong bytes".len() as u64, state).await.is_err());
         assert_eq!(fs::read_dir(destination.path()).unwrap().filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().contains(".part-")).count(), 0);
     }
@@ -464,9 +464,9 @@ mod tests {
             assert!(state.addition.pdf.is_none());
             assert!(state.addition.navigation.is_none());
             assert!(state.annotations.is_empty());
-            assert_eq!(importer.storage.database().reading_position(&first.book_id).unwrap().as_deref(), Some("pdfpage(2)"));
-            assert!(importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Pdf, READER_PDF_METADATA_VERSION).unwrap());
-            assert!(!importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Pdf, book_inspection::inspection_version(BookFormat::Pdf)).unwrap());
+            assert_eq!(importer.storage.database().reading_position(&first.book_id).await.unwrap().as_deref(), Some("pdfpage(2)"));
+            assert!(importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Pdf, READER_PDF_METADATA_VERSION).await.unwrap());
+            assert!(!importer.storage.database().has_import_inspection(&first.book_id, BookFormat::Pdf, book_inspection::inspection_version(BookFormat::Pdf)).await.unwrap());
             fs::write(&path, PDF).unwrap();
             let repeat = import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &config, mode, None).await.unwrap();
             assert_eq!(repeat.book_id, first.book_id);
@@ -495,7 +495,7 @@ mod tests {
             importer.cpu = Arc::new(NoInspection);
             assert!(import_book_in_batch(&importer, source.path(), ROOT_DIR_ID, &book, &ReadestConfig::default(), mode, None).await.is_err());
             assert_eq!(fs::read(&path).unwrap(), b"not a PDF");
-            assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+            assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
         }
     }
 
@@ -521,7 +521,7 @@ mod tests {
         let error = importer.move_book_from_path(sync_common::ROOT_DIR_ID, &path).await.unwrap_err();
         assert!(error.to_string().contains("inspection requested"), "{error}");
         assert!(path.is_file());
-        assert_eq!(importer.storage.database().book_count().unwrap(), 0);
+        assert_eq!(importer.storage.database().book_count().await.unwrap(), 0);
     }
 
     #[test]

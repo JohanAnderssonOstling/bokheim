@@ -5,8 +5,8 @@ use crate as components;
 use book_model::{Annotation, AnnotationStyle, BookId, RecurringScope};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Div, Entity, FocusHandle, SharedString, Window, div, px, rems};
-use gpui_component::input::InputState;
 use gpui_component::Selectable;
+use gpui_component::input::InputState;
 use std::rc::Rc;
 
 /// Width shared by reader popups and notebook annotation overlays.
@@ -91,15 +91,12 @@ pub fn recurring_annotation_editor_controls<C: AnnotationEditorTarget>(current: 
             let row = components::base_button(SharedString::from(format!("annotation-note-{id}")))
                 .ghost()
                 .selected(selected)
-                .text_color(theme.text)
                 .w_full()
                 .h_auto()
                 .min_h(rems(components::settings_control_size_rem()))
                 .p(px(components::SPACE_SM))
                 .border_1()
                 .border_color(if selected { theme.rule } else { gpui::transparent_black() })
-                .bg(if selected { theme.accent_wash } else { theme.page_bg })
-                .hover(move |style| style.bg(if selected { theme.accent_wash_hover } else { theme.hover }))
                 .aria_label(format!("{} {preview}", note.exact_text))
                 .child(
                     div().flex().items_start().gap(px(components::SPACE_SM)).w_full().min_w_0().child(div().flex_none().mt(px(4.0)).size(px(8.0)).rounded_full().bg(components::reader_annotation_color(note.color))).child(

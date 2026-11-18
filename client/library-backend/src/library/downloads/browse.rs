@@ -36,7 +36,7 @@ impl LibraryResources {
         // Inspect files after the database method has released its snapshot.
         let books = self.database.book_storage_metadata(for_download).await?;
         let mut storage = LibraryBookStorage { activity, download_bytes: Some(0), ..Default::default() };
-        for BookStorageMetadata { book, paths, checksum } in books {
+        for BookStorageMetadata { book, paths, .. } in books {
             let bytes = assets.stored_book_bytes(book.book_id, paths.clone()).await.map_err(BackendError::operation)?;
             storage.local_bytes = storage.local_bytes.saturating_add(bytes);
             if !book.server_has_book {
@@ -46,7 +46,9 @@ impl LibraryResources {
                 let removable = assets.evictable_book_bytes(book.book_id, paths).await.map_err(BackendError::operation)?;
                 storage.removable_books += usize::from(removable > 0);
                 storage.removable_bytes = storage.removable_bytes.saturating_add(removable);
-            } else if assets.verified_book_reader_with_checksum(book.book_id, paths, checksum).await.map_err(BackendError::operation)?.is_none() {
+            } else if !assets.book_present_for_review(book.book_id, paths, book.size_bytes).await.map_err(BackendError::operation)? {
+                // This is a presence estimate for the review. The download
+                // operation verifies checksums before deciding which bytes to fetch.
                 storage.download_book_ids.push(book.book_id);
                 storage.download_bytes = storage.download_bytes.and_then(|bytes| (book.size_bytes > 0).then_some(book.size_bytes).and_then(|size| bytes.checked_add(size)));
             }

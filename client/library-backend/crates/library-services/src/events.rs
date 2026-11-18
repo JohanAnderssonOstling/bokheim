@@ -1,6 +1,10 @@
 //! Event delivery owned by one open library.
 
 use async_channel::{Receiver, Sender};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 
 use crate::reading_positions::ReadingPositionPolicy;
 use crate::scheduler::SyncScheduler;
@@ -38,6 +42,9 @@ pub struct LibraryEventRouter {
     pub assets: SyncScheduler,
     pub files: SyncScheduler,
     pub enrichment: SyncScheduler,
+    pub scan: SyncScheduler,
+    scan_waiting: Arc<AtomicBool>,
+    file_progress: Arc<AtomicU64>,
 }
 
 impl LibraryEventRouter {
@@ -57,9 +64,28 @@ impl LibraryEventRouter {
                 assets: SyncScheduler::default(),
                 files: SyncScheduler::default(),
                 enrichment: SyncScheduler::default(),
+                scan: SyncScheduler::default(),
+                scan_waiting: Arc::new(AtomicBool::new(false)),
+                file_progress: Arc::new(AtomicU64::new(0)),
             },
             LibraryEventState { receiver, position_updates, updates, closed: false },
         )
+    }
+
+    pub fn set_scan_waiting(&self, waiting: bool) {
+        self.scan_waiting.store(waiting, Ordering::Release);
+    }
+
+    pub fn file_progress_revision(&self) -> u64 {
+        self.file_progress.load(Ordering::Acquire)
+    }
+
+    /// A blocked replay attempt must not keep the scanner awake.
+    pub fn file_work_progressed(&self) {
+        self.file_progress.fetch_add(1, Ordering::AcqRel);
+        if self.scan_waiting.load(Ordering::Acquire) {
+            self.scan.wake();
+        }
     }
 
     /// Wake synchronization after a commit. The owner coalesces content updates
@@ -249,6 +275,7 @@ mod tests {
         assert_eq!(state.updates.download_state(&hash), Some(downloading.clone()));
 
         let updates = state.updates.subscribe();
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Download(BookDownloadStatus::new(hash, downloading.clone())));
         router.download_status_changed(hash, DownloadState::Downloaded);
         router.download_status_changed(hash, downloading);
         state.drain(&router);

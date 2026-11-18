@@ -8,7 +8,7 @@ use std::{
 
 use futures_lite::future::zip;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, BackgroundExecutor, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, Subscription, Task, Window, div, px};
+use gpui::{AnyElement, App, AsyncApp, BackgroundExecutor, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, Subscription, Task, Window, div, px};
 use gpui_component::{FocusTrapElement, Theme};
 use book_model::BookTocEntry;
 use content_address::{BookId, hash_reader};
@@ -23,7 +23,7 @@ use library_model::BookLocator;
 use skrift_column_paginator::RendererPreparation;
 use html_resources::{ImageLoadCompletion, ImageLoader, ImageResourceContext, ResourceMetadata, ResourceProvider, load_image_bytes_async};
 use language_tags::LanguageTag;
-use reader_lookups::{WikipediaArticle, WikipediaChoice, LookupError, parse_language_tag};
+use reader_lookups::{Client as LookupClient, WikipediaArticle, WikipediaChoice, WikipediaLookup, LookupError, parse_language_tag};
 use percent_encoding::percent_decode_str;
 use ui_components as components;
 use ui_text::text;
@@ -45,6 +45,7 @@ pub(super) struct Equivalents {
     pub(super) targets: Vec<LanguageTag>,
     source: Option<String>,
     result: Option<Result<Vec<WikipediaChoice>, LookupError>>,
+    cache: BTreeMap<String, Result<Vec<WikipediaChoice>, LookupError>>,
     _request: Task<()>,
 }
 
@@ -56,7 +57,46 @@ impl Default for Equivalents {
 
 impl Equivalents {
     pub(super) fn new(targets: Vec<LanguageTag>) -> Self {
-        Self { targets, source: None, result: None, _request: Task::ready(()) }
+        Self { targets, source: None, result: None, cache: BTreeMap::new(), _request: Task::ready(()) }
+    }
+
+    pub(super) async fn filter_lookup(&mut self, lookup: Option<WikipediaLookup>, lookups: LookupClient, cx: &AsyncApp) -> Option<WikipediaLookup> {
+        let (article, hits) = match lookup {
+            Some(WikipediaLookup::Article(article)) => {
+                let hit = WikipediaChoice { title: article.title.clone(), description: article.extract.clone(), url: article.url.clone(), language: article.language.clone() };
+                (Some(article), vec![hit])
+            }
+            Some(WikipediaLookup::Choices(hits)) => (None, hits),
+            other => return other,
+        };
+        let mut translated = Vec::new();
+        let mut failure = None;
+        // Validate a few candidates concurrently, preserving search order.
+        for batch in hits.chunks(4) {
+            let requests = batch.iter().cloned().map(|hit| {
+                let lookups = lookups.clone();
+                let targets = self.targets.clone();
+                cx.spawn(async move |_| {
+                    let article = WikipediaArticle { title: hit.title.clone(), extract: String::new(), url: hit.url.clone(), language: hit.language.clone() };
+                    let links = lookups.wikipedia_equivalents(article, targets).await;
+                    (hit, links)
+                })
+            }).collect::<Vec<_>>();
+            for request in requests {
+                let (hit, links) = request.await;
+                match &links {
+                    Ok(links) if !links.is_empty() => translated.push(hit.clone()),
+                    Err(error) => failure = Some(error.clone()),
+                    _ => {}
+                }
+                self.cache.insert(hit.url, links);
+            }
+        }
+        if translated.is_empty() {
+            failure.map(WikipediaLookup::Unavailable)
+        } else {
+            Some(article.map_or_else(|| WikipediaLookup::Choices(translated), WikipediaLookup::Article))
+        }
     }
 
 
@@ -72,7 +112,9 @@ impl Equivalents {
             Some(Err(error)) => {
                 body = body.child(div().flex().items_center().gap(px(8.0)).child(components::user_facing_error(error, text!(reader::wikipedia_unavailable))).child(components::outlined_text_button("wikipedia-equivalents-retry", text!(common::retry)).on_click(cx.listener(
                     |popup, _, _, cx| {
-                        popup.wikipedia_equivalents.source = None;
+                        if let Some(source) = popup.wikipedia_equivalents.source.take() {
+                            popup.wikipedia_equivalents.cache.remove(&source);
+                        }
                         popup.refresh_wikipedia_equivalents(cx);
                     },
                 ))));
@@ -110,6 +152,11 @@ impl DictionaryPopup {
             return;
         }
         equivalents.source = Some(article.url.clone());
+        equivalents._request = Task::ready(());
+        if let Some(result) = equivalents.cache.get(&article.url) {
+            equivalents.result = Some(result.clone());
+            return;
+        }
         equivalents.result = None;
         let targets = equivalents.targets.clone();
         let lookups = super::super::lookups::client(cx);
@@ -117,22 +164,8 @@ impl DictionaryPopup {
             let result = lookups.wikipedia_equivalents(article.clone(), targets).await;
             let _ = this.update(cx, |popup, cx| {
                 if popup.wikipedia_equivalents.source.as_deref() == Some(&article.url) {
-                    let empty = result.as_ref().is_ok_and(Vec::is_empty);
+                    popup.wikipedia_equivalents.cache.insert(article.url.clone(), result.clone());
                     popup.wikipedia_equivalents.result = Some(result);
-                    if empty && popup.translation.is_some() {
-                        // A translation result needs an equivalent in at least one
-                        // target language. Keep checking the remaining search hits.
-                        popup._wikipedia_task = Task::ready(());
-                        popup.wikipedia_loading = false;
-                        popup.wikipedia_failed = None;
-                        popup.wikipedia = None;
-                        if popup.wikipedia_index < popup.wikipedia_hits.len() {
-                            popup.wikipedia_hits.remove(popup.wikipedia_index);
-                        }
-                        popup.wikipedia_index = popup.wikipedia_index.min(popup.wikipedia_hits.len().saturating_sub(1));
-                        popup.popup_height = None;
-                        popup.wikipedia_hit(popup.wikipedia_index, cx);
-                    }
                     if !popup.showing_translation() {
                         popup.popup_height = None;
                     }

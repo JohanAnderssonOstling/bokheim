@@ -1,8 +1,9 @@
 use crate::extract::AuthUser;
 use crate::state::AppState;
+use ::wire::typed as wire;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
-use axum::http::{StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -132,7 +133,11 @@ pub(crate) async fn connect(State(state): State<AppState>, user: AuthUser, upgra
     let subscription = state.notifications.subscribe(&user.user_id).ok_or(StatusCode::TOO_MANY_REQUESTS)?;
     let config = state.notifications.config;
     let account = state.account.clone();
-    Ok(upgrade.protocols(["bokheim.notifications.v1"]).max_message_size(MAX_CONTROL_MESSAGE_BYTES).max_frame_size(MAX_CONTROL_MESSAGE_BYTES).on_upgrade(move |socket| serve(socket, subscription, account, user.user_id, user.credential, config)))
+    Ok(upgrade
+        .protocols(["bokheim.notifications.v1"])
+        .max_message_size(MAX_CONTROL_MESSAGE_BYTES)
+        .max_frame_size(MAX_CONTROL_MESSAGE_BYTES)
+        .on_upgrade(move |socket| serve(socket, subscription, account, user.user_id, user.credential, config)))
 }
 
 #[path = "notification_auth.rs"]

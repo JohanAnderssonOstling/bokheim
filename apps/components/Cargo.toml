@@ -15,6 +15,7 @@ ui-text = { path = "../ui-text" }
 book-model = { path = "../../shared/book-model", default-features = false }
 kobo-profile = { path = "../../client/platforms/kobo/crates/profile", optional = true }
 log = "0.4"
+base64 = "0.22"
 web-time = "1"
 library-model = { path = "../../client/library-model", default-features = false }
 operation-failure = { path = "../../client/client-protocol/crates/operation-failure", features = ["web"] }

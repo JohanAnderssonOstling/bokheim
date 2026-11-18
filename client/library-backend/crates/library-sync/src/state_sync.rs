@@ -74,7 +74,7 @@ pub(crate) async fn acknowledge(database: &DatabaseClient, events: Option<&Libra
 
 /// One bounded exchange commits before notifying the owner. No transaction
 /// spans an await; independently valid acknowledgements survive a failed pull.
-pub(crate) async fn apply_response(database: &DatabaseClient, events: Option<&LibraryEventRouter>, ids: &[ReplicaSeq], page: &PullStateResponse) -> Result<(), DatabaseError> {
+pub(crate) async fn apply_response(database: &DatabaseClient, events: Option<&LibraryEventRouter>, ids: &[ReplicaSeq], page: PullStateResponse) -> Result<(), DatabaseError> {
     // Normal replies fit the existing protocol limit. Retain bounded handling
     // for callers supplying more IDs than a single exchange could acknowledge.
     let ids = if ids.len() > MAX_PUSH_MUTATIONS {
@@ -91,10 +91,6 @@ pub(crate) async fn apply_response(database: &DatabaseClient, events: Option<&Li
                 }
                 if changes.contents_changed {
                     events.emit(LibraryEvent::ContentsChanged);
-                } else {
-                    for book in changes.reading_progress {
-                        events.updates.publish(LibraryUpdate::ReadingProgress(book));
-                    }
                 }
             }
             Ok(())
@@ -140,7 +136,7 @@ impl crate::engine::SyncStore for AccountStore<'_> {
         Box::pin(async move { acknowledge(&self.sync.database, Some(&self.sync.events), &ids).await.map_err(Into::into) })
     }
     fn apply_exchange_response(&self, ids: Vec<ReplicaSeq>, page: PullStateResponse) -> StoreFuture<'_, ()> {
-        Box::pin(async move { apply_response(&self.sync.database, Some(&self.sync.events), &ids, &page).await.map_err(Into::into) })
+        Box::pin(async move { apply_response(&self.sync.database, Some(&self.sync.events), &ids, page).await.map_err(Into::into) })
     }
 }
 
@@ -171,33 +167,31 @@ mod tests {
             has_more: false,
         };
         let lifecycles = [first, second].map(|book_id| publication(LibraryStateEntry::BookLifecycle { book_id, value: BookLifecycleState::Present }, 1));
-        apply_response(&database, None, &[], &page(&lifecycles)).await.unwrap();
+        apply_response(&database, None, &[], page(&lifecycles)).await.unwrap();
 
         let (events, mut state) = LibraryEventRouter::new();
         let updates = state.updates.subscribe();
         let position = |book_id, time| publication(LibraryStateEntry::ReadingPosition { book_id, value: ReadingPositionState { location: ReadingPosition::pdf_page(3), progress: 25.0 } }, time);
         let progress = page(&[position(first, 10), publication(LibraryStateEntry::ChapterReadStatus { book_id: first, value: ChapterReadStatus::default() }, 10), position(second, 10)]);
-        apply_response(&database, Some(&events), &[], &progress).await.unwrap();
+        apply_response(&database, Some(&events), &[], progress.clone()).await.unwrap();
         state.drain(&events);
-        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::ReadingProgress(first));
-        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::ReadingProgress(second));
-        assert!(updates.try_recv().is_err(), "position and chapter status share one notification per book");
+        assert!(updates.try_recv().is_err(), "position and chapter status must not refresh the library UI");
 
-        apply_response(&database, Some(&events), &[], &progress).await.unwrap();
-        apply_response(&database, Some(&events), &[], &page(&[position(first, 9)])).await.unwrap();
-        apply_response(&database, Some(&events), &[], &page(&[])).await.unwrap();
+        apply_response(&database, Some(&events), &[], progress).await.unwrap();
+        apply_response(&database, Some(&events), &[], page(&[position(first, 9)])).await.unwrap();
+        apply_response(&database, Some(&events), &[], page(&[])).await.unwrap();
         state.drain(&events);
         assert!(updates.try_recv().is_err(), "repeated, stale, and empty pages must not refresh readers");
 
         let mixed = page(&[position(first, 11), publication(LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(9), name: "Remote shelf".into() }, 11)]);
-        apply_response(&database, Some(&events), &[], &mixed).await.unwrap();
+        apply_response(&database, Some(&events), &[], mixed.clone()).await.unwrap();
         state.drain(&events);
         assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Contents);
         assert!(updates.try_recv().is_err(), "a contents notification already includes progress changes");
 
-        apply_response(&database, Some(&events), &[], &mixed).await.unwrap();
+        apply_response(&database, Some(&events), &[], mixed).await.unwrap();
         let stale_contents = page(&[publication(LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(9), name: "Old shelf name".into() }, 9)]);
-        apply_response(&database, Some(&events), &[], &stale_contents).await.unwrap();
+        apply_response(&database, Some(&events), &[], stale_contents).await.unwrap();
         state.drain(&events);
         assert!(updates.try_recv().is_err(), "stale structural mutations must not reload annotations either");
     }

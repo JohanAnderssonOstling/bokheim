@@ -13,12 +13,12 @@ mod selection_action;
 pub(crate) use selection_action::{SelectionAction, SelectionActionKind};
 
 pub(crate) use book_card::{BookCardElement, BookCardInteraction, BookCardPresentation, BookCardView};
-pub(crate) use book_card::{BookCardEvent, BookCardEvents, LoadedCover, cover_aspect_ratio, generated_cover_variant, loaded_cover_from_jpeg, mark_catalog_book_added};
+pub(crate) use book_card::{BookCardEvent, BookCardEvents, LoadedCover, cover_aspect_ratio, generated_cover_variant, load_cover_image, mark_catalog_book_added};
 pub(crate) use book_card::{CoversEvicted, evict_covers};
 pub(crate) use cover_visibility::CoverVisibility;
 pub(crate) use paginator::{
-    CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorChildren, PaginatorDragPreview, PaginatorGroup, PaginatorGroupPolicy, PaginatorPosition, PaginatorSizing, PaginatorSlots, PaginatorState, PaginatorWidthPolicy,
-    book_card_policy, browse_folder_card_policy, browse_folder_item_policy, browse_section_card_policy, browse_section_item_policy, browse_shelf_card_policy, graph_cover_policy,
+    CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorChildren, PaginatorDragPreview, PaginatorEvent, PaginatorGroup, PaginatorGroupPolicy, PaginatorPosition, PaginatorSizing, PaginatorSlots, PaginatorState,
+    PaginatorWidthPolicy, book_card_policy, browse_folder_card_policy, browse_folder_item_policy, browse_section_card_policy, browse_section_item_policy, browse_shelf_card_policy, graph_cover_policy,
 };
 
 pub(crate) use page_controls::activate_paginator;

@@ -352,7 +352,7 @@ async fn library_selection_download_only_enables_for_missing_books(cx: &mut Test
 }
 
 #[gpui::test]
-async fn play_opens_books_directly_and_shows_audiobook_detail_before_playback(cx: &mut TestAppContext) {
+async fn play_opens_books_and_audiobooks_directly(cx: &mut TestAppContext) {
     let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_directory, _session, library, _app_client) = LibrarySession::test_context(cx).await;
     let window = cx.add_window(|_, _| gpui::Empty);
@@ -376,25 +376,10 @@ async fn play_opens_books_directly_and_shows_audiobook_detail_before_playback(cx
     );
     for format_category in [LibraryFileTypeFilter::Book, LibraryFileTypeFilter::Audiobook] {
         actions.borrow_mut().clear();
-        let detail = actions.clone();
         let book = BookCardRow { format_category, ..row() };
-        let card = cx.new(|cx| {
-            BookCardView::new(
-                book,
-                library.clone(),
-                Rc::new(move |event, _, _| {
-                    let BookCardEvent::OpenDetail(book, _) = event else { panic!("expected book details") };
-                    assert_eq!(book.format_category, LibraryFileTypeFilter::Audiobook);
-                    detail.borrow_mut().push("detail");
-                }),
-                false,
-                false,
-                cx,
-            )
-        });
+        let card = cx.new(|cx| BookCardView::new(book, library.clone(), Rc::new(|_, _, _| {}), false, false, cx));
         window.update(cx, |_, window, cx| BookCardView::play(&card, window, cx)).unwrap();
-        let expected = if format_category == LibraryFileTypeFilter::Audiobook { vec!["detail", "open"] } else { vec!["open"] };
-        assert_eq!(*actions.borrow(), expected);
+        assert_eq!(*actions.borrow(), vec!["open"]);
     }
 }
 

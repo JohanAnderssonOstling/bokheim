@@ -17,21 +17,28 @@ impl Render for NumericTiles {
         let selections = self.selections.clone();
         let decrement = self.adjustments.clone();
         let increment = self.adjustments.clone();
-        let custom = reader_numeric_tile(
-            "test-custom",
-            "1.5 em",
-            false,
+        let custom = crate::settings_stepper(
             crate::settings_stepper_button("test-decrease", "−", false).debug_selector(|| "test-decrease".into()).on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 decrement.set(decrement.get() - 1);
             }),
+            reader_picture_tile(("test-custom", 0usize), reader_tile_picture("icons/reader-settings/line-spacing-normal.svg"), "1.5 em", false, theme)
+                .border_0()
+                .debug_selector(|| "test-custom-value".into())
+                .on_click(move |_, _, _| selections.set(selections.get() + 1)),
             crate::settings_stepper_button("test-increase", "+", false).debug_selector(|| "test-increase".into()).on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 increment.set(increment.get() + 1);
             }),
             theme,
-            move |_, _, _| selections.set(selections.get() + 1),
-        );
+        )
+        .id("test-custom")
+        .debug_selector(|| "test-custom".into())
+        .w_full()
+        .min_w_0()
+        .h_auto()
+        .px_0()
+        .border_color(theme.rule);
         let presets = reader_tile_group("test-presets").child(reader_picture_tile("test-book", reader_tile_picture("icons/reader-settings/align-book.svg"), "Book", true, theme)).child(reader_picture_tile(
             "test-off",
             reader_tile_picture("icons/reader-settings/align-left.svg"),
@@ -82,19 +89,6 @@ fn numeric_tiles_fit_and_stepper_clicks_do_not_select_twice(cx: &mut TestAppCont
             visual.simulate_click(decrease.center(), Modifiers::default());
             assert_eq!(adjustments.get(), 0);
             assert_eq!(selections.get(), 1);
-        }
-    }
-}
-
-#[cfg(feature = "kobo")]
-#[test]
-fn selected_kobo_numeric_tile_steppers_keep_dark_ink_on_paper() {
-    use gpui::Styled;
-    let theme = BrowserTheme::default();
-    for selected in [false, true] {
-        for label in ["−", "+"] {
-            let mut button = numeric_tile_stepper(crate::settings_stepper_button("contrast-test", label, false), selected, theme);
-            assert_eq!(button.style().text.color, Some(theme.text), "Kobo steppers must remain visible when Custom is selected");
         }
     }
 }

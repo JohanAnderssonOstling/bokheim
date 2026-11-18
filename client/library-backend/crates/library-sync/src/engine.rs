@@ -7,6 +7,7 @@ use std::fmt;
 use client_protocol::{BackendError, Classified, Failure};
 use sync_common::{BookId, LibraryId, MutationIssue, OpaquePublication, PullStateResponse, PushBatcher, PushMutationsResponse, ReplicaId, ReplicaSeq, SyncCursor};
 use sync_transport::SyncCredentials;
+use sync_common::transport::WireError;
 
 pub type StoreError = Box<dyn Error + Send + Sync>;
 
@@ -227,12 +228,21 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
     }
 
     async fn next_push_batch(&self, remaining: &mut Outgoing<S::Outbox>, result: &mut SyncOutcome) -> Result<Vec<OpaquePublication>, SyncError> {
+        let mut issues = Vec::new();
         while !remaining.batches.has_batch() {
             if let Some(publication) = remaining.page.next() {
                 if publication.state.value.book().is_some_and(|book| remaining.deferred.contains(&book)) {
                     continue;
                 }
-                let opaque = sync_common::transport::representation(&publication).map_err(SyncError::failed)?;
+                let sequence = publication.publisher_seq;
+                let opaque = match publication.into_opaque() {
+                    Ok(value) => value,
+                    Err(WireError::TooLarge { .. } | WireError::LimitExceeded(_)) => {
+                        issues.push(MutationIssue::Untransmittable(sequence));
+                        continue;
+                    }
+                    Err(error) => return Err(SyncError::failed(error)),
+                };
                 remaining.batches.push(opaque).map_err(SyncError::failed)?;
             } else {
                 let Some(scan) = remaining.scan.as_mut() else { break };
@@ -243,7 +253,7 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
                 }
             }
         }
-        let issues: Vec<_> = remaining.batches.take_untransmittable().into_iter().map(MutationIssue::Untransmittable).collect();
+        issues.extend(remaining.batches.take_untransmittable().into_iter().map(MutationIssue::Untransmittable));
         self.record_issues(&issues).await?;
         result.mutation_issues.extend(issues);
         Ok(remaining.batches.next_batch())

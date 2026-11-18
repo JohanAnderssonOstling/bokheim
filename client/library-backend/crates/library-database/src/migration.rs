@@ -48,3 +48,33 @@ pub(crate) fn upgrade_before_50(tx: &Transaction<'_>, version: i64) -> Result<()
     tx.execute_batch("DELETE FROM local_file_work; DELETE FROM local_directory_work; DELETE FROM local_book_work;")?;
     Ok(())
 }
+
+/// Install derived indexes and caches after historical identity migration.
+pub(crate) fn upgrade_review(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+    tx.execute_batch(include_str!("migration/review.sql"))?;
+    for (legacy, book) in book_ids::mapping(tx)? {
+        tx.execute("INSERT INTO local_legacy_book_id(legacy_id,book_id) VALUES(?1,?2)", (legacy, book))?;
+    }
+    Ok(())
+}
+
+/// Existing optional indexes need the same invalidation triggers as new ones.
+pub(crate) fn upgrade_text_index(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+    let installed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='book_text_state')", [], |row| row.get(0))?;
+    if installed {
+        tx.execute_batch(include_str!("text_search/schema.sql"))?;
+    }
+    Ok(())
+}
+
+/// Install indexed directory projection and scanner journals.
+pub(crate) fn upgrade_directories(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+    tx.execute_batch(include_str!("migration/directories.sql"))?;
+    Ok(())
+}
+
+/// Observe completed file work without treating scan bookkeeping as progress.
+pub(crate) fn upgrade_scan_progress(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+    tx.execute_batch(include_str!("migration/scan_progress.sql"))?;
+    Ok(())
+}

@@ -94,47 +94,50 @@ pub(super) fn group_geometries(data: &PaginatorData, available_width: Pixels, re
         .collect()
 }
 
-pub(super) fn next_forward_row(data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], next_child: &mut usize) -> Option<AssignedRow> {
-    if *next_child >= data.children.len() {
-        return None;
-    }
-    let group_index = data.group_index_for_child(*next_child)?;
-    let group = data.groups[group_index];
-    let geometry = geometries[group_index];
-    debug_assert_eq!(geometry.group_index, group_index);
-    let row_start = *next_child;
-    let mut row_end = row_start;
-    let mut items = Vec::new();
-    let mut x = geometry.leading;
-    while row_end < group.end {
-        let width = if group.policy.intrinsic { widths.get(row_end).copied().unwrap_or_default().max(px(1.0)).min(geometry.child_width) } else { geometry.child_width };
-        if !items.is_empty() && (if group.policy.intrinsic { x + width > geometry.leading + geometry.child_width } else { items.len() >= geometry.columns }) {
-            break;
+/// Locate the starting group once, then retain it until a row crosses its end.
+pub(super) fn forward_rows<'a>(data: &'a PaginatorData, widths: &'a Slots<Pixels>, geometries: &'a [GroupGeometry], start: usize) -> impl Iterator<Item = AssignedRow> + 'a {
+    let mut next_child = start;
+    let mut group_index = data.group_index_for_child(start).unwrap_or(data.groups.len());
+    std::iter::from_fn(move || {
+        let group = *data.groups.get(group_index)?;
+        let geometry = geometries[group_index];
+        debug_assert_eq!(geometry.group_index, group_index);
+        let row_start = next_child;
+        let mut row_end = row_start;
+        let mut items = Vec::new();
+        let mut x = geometry.leading;
+        while row_end < group.end {
+            let width = if group.policy.intrinsic { widths.get(row_end).copied().unwrap_or_default().max(px(1.0)).min(geometry.child_width) } else { geometry.child_width };
+            if !items.is_empty() && (if group.policy.intrinsic { x + width > geometry.leading + geometry.child_width } else { items.len() >= geometry.columns }) {
+                break;
+            }
+            items.push(PageItem { child_index: row_end, x, width });
+            x += width + geometry.column_gap;
+            row_end += 1;
         }
-        items.push(PageItem { child_index: row_end, x, width });
-        x += width + geometry.column_gap;
-        row_end += 1;
-    }
-    *next_child = row_end;
-    Some(AssignedRow { group_index, items, child_width: geometry.child_width, column_gap: geometry.column_gap, top: None })
+        next_child = row_end;
+        let row = AssignedRow { group_index, items, child_width: geometry.child_width, column_gap: geometry.column_gap, top: None };
+        if row_end == group.end {
+            group_index += 1;
+        }
+        Some(row)
+    })
 }
 
 /// Normalizes an exact child range forward. The start remains stable and only
 /// the final row of each group can be incomplete.
 pub(super) fn forward_rows_in_range(data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], start: usize, end: usize) -> Vec<AssignedRow> {
     let end = end.min(data.children.len());
-    let mut next_child = start.min(end);
     let mut rows = Vec::new();
-    while next_child < end {
-        let Some(mut row) = next_forward_row(data, widths, geometries, &mut next_child) else {
+    if start >= end {
+        return rows;
+    }
+    for mut row in forward_rows(data, widths, geometries, start) {
+        let reaches_end = row.items.last().is_some_and(|item| item.child_index + 1 >= end);
+        row.items.retain(|item| item.child_index < end);
+        rows.push(row);
+        if reaches_end {
             break;
-        };
-        if let Some(first_after_range) = row.items.iter().position(|item| item.child_index >= end) {
-            row.items.truncate(first_after_range);
-            next_child = end;
-        }
-        if !row.items.is_empty() {
-            rows.push(row);
         }
     }
     rows
@@ -183,10 +186,10 @@ pub(super) fn strip_rows(data: &PaginatorData, geometries: &[GroupGeometry], sta
     let available = strip_width(data, geometries);
     let mut rows = Vec::new();
     let mut next = start;
+    let mut group_index = data.group_index_for_child(start).unwrap_or(data.groups.len());
     let mut x = Pixels::ZERO;
     while next < end.min(data.children.len()) {
-        let Some(group_index) = data.group_index_for_child(next) else { break };
-        let group = data.groups[group_index];
+        let Some(&group) = data.groups.get(group_index) else { break };
         let geometry = geometries[group_index];
         if !rows.is_empty() && x + geometry.child_width > available + px(0.01) {
             break;
@@ -204,6 +207,9 @@ pub(super) fn strip_rows(data: &PaginatorData, geometries: &[GroupGeometry], sta
             next += 1;
         }
         x += geometry.child_width + geometry.column_gap;
+        if next == group.end {
+            group_index += 1;
+        }
     }
     rows
 }
@@ -212,8 +218,8 @@ fn strip_page_start(data: &PaginatorData, geometries: &[GroupGeometry], end: usi
     let available = strip_width(data, geometries);
     let mut start = end.min(data.children.len());
     let mut used = Pixels::ZERO;
+    let mut group_index = data.group_index_for_child(start.saturating_sub(1)).unwrap_or(data.groups.len());
     while start > 0 {
-        let Some(group_index) = data.group_index_for_child(start - 1) else { break };
         let group = data.groups[group_index];
         let geometry = geometries[group_index];
         if start < end && used + geometry.child_width > available + px(0.01) {
@@ -222,14 +228,16 @@ fn strip_page_start(data: &PaginatorData, geometries: &[GroupGeometry], end: usi
         let count = strip_column_rows(group.policy, geometry.child_width, height, rem_size).min(start - group.start);
         start -= count;
         used += geometry.child_width + geometry.column_gap;
+        if start == group.start {
+            group_index = group_index.saturating_sub(1);
+        }
     }
     start
 }
 
 fn forward_page_rows(data: &PaginatorData, widths: &Slots<Pixels>, geometries: &[GroupGeometry], child_offset: usize, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
-    let mut next_child = child_offset.min(data.children.len());
     let mut rows = Vec::new();
-    while let Some(row) = next_forward_row(data, widths, geometries, &mut next_child) {
+    for row in forward_rows(data, widths, geometries, child_offset) {
         rows.push(row);
         if rows_height(data, &rows, rem_size) > available_height.max(px(1.0)) && rows.len() > 1 {
             rows.pop();
@@ -249,8 +257,8 @@ fn backward_page_start(data: &PaginatorData, widths: &Slots<Pixels>, geometries:
     let mut used = 0.0;
     let mut adjacent_group: Option<usize> = None;
 
-    while start > 0 {
-        let Some(group_index) = data.group_index_for_child(start - 1) else { break };
+    let Some(last_group) = start.checked_sub(1).and_then(|child| data.group_index_for_child(child)) else { return start };
+    for group_index in (0..=last_group).rev() {
         let group = data.groups[group_index];
         let geometry = geometries[group_index];
         let columns = geometry.columns.max(1);

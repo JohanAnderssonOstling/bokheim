@@ -339,6 +339,13 @@ impl SettingsPage {
         }));
     }
 
+    fn on_off_choices(ids: [&'static str; 2], enabled: bool, patch: fn(bool) -> BrowsingPreferencePatch, cx: &Context<Self>) -> Div {
+        let theme = components::browser_theme(cx);
+        components::browser_settings_button_group(theme).children(
+            [false, true].into_iter().zip(ids).map(|(value, id)| Self::preference_button(components::settings_choice_button(id, if value { text!(common::on) } else { text!(common::off) }, enabled == value, theme), patch(value), cx)),
+        )
+    }
+
     fn preference_button(button: Button, patch: BrowsingPreferencePatch, cx: &Context<Self>) -> Button {
         button.on_click(cx.listener(move |page, _, _, cx| page.update_browsing(patch.clone(), cx)))
     }
@@ -472,13 +479,7 @@ impl Render for SettingsPage {
                         theme,
                     )
                     .track_focus(&self.font_choice_focus[index])
-                    .on_click(cx.listener(move |page, _, _, cx| page.update_browsing(BrowsingPreferencePatch::UiFontFamily(value), cx)))
-                    .on_key_down(cx.listener(move |page, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            page.update_browsing(BrowsingPreferencePatch::UiFontFamily(value), cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    .on_click(cx.listener(move |page, _, _, cx| page.update_browsing(BrowsingPreferencePatch::UiFontFamily(value), cx))),
                 );
             }
             if !cfg!(target_arch = "wasm32") {
@@ -490,8 +491,8 @@ impl Render for SettingsPage {
                     .detach();
                     picker
                 });
-                picker.update(cx, |picker, _| {
-                    picker.set_selected(preferences.custom_ui_font_family().map(str::to_owned));
+                picker.update(cx, |picker, cx| {
+                    picker.set_selected(preferences.custom_ui_font_family().map(str::to_owned), cx);
                     picker.set_active(preferences.custom_ui_font_active());
                 });
                 choices = choices.child(div().flex_1().min_w_0().overflow_hidden().child(picker.clone()));
@@ -530,9 +531,7 @@ impl Render for SettingsPage {
         #[cfg(not(feature = "kobo"))]
         let appearance_settings = {
             let enabled = preferences.animations();
-            let choices = components::browser_settings_button_group(theme)
-                .child(Self::preference_button(components::settings_choice_button("animations-off", text!(common::off), !enabled, theme), BrowsingPreferencePatch::Animations(false), cx))
-                .child(Self::preference_button(components::settings_choice_button("animations-on", text!(common::on), enabled, theme), BrowsingPreferencePatch::Animations(true), cx));
+            let choices = Self::on_off_choices(["animations-off", "animations-on"], enabled, BrowsingPreferencePatch::Animations, cx);
             appearance_settings.child(self.section(Section::Animations, components::browser_settings_compact_row(text!(settings::animations), choices, theme), cx))
         };
         // Every preference on this page lives in this group, so this is where a
@@ -540,9 +539,7 @@ impl Render for SettingsPage {
         let appearance_settings = appearance_settings.children(self.error.clone().map(|error| components::browser_settings_group_error(error, theme)));
 
         let enabled = preferences.text_search();
-        let choices = components::browser_settings_button_group(theme)
-            .child(Self::preference_button(components::settings_choice_button("text-search-off", text!(common::off), !enabled, theme), BrowsingPreferencePatch::TextSearch(false), cx))
-            .child(Self::preference_button(components::settings_choice_button("text-search-on", text!(common::on), enabled, theme), BrowsingPreferencePatch::TextSearch(true), cx));
+        let choices = Self::on_off_choices(["text-search-off", "text-search-on"], enabled, BrowsingPreferencePatch::TextSearch, cx);
         let usage = self.index_usage.clone().unwrap_or_else(|| text!(account::calculating).into());
         let text_search = components::browser_settings_fieldset(text!(settings::text_search), theme)
             .child(self.section(Section::TextSearch, components::browser_settings_compact_row(text!(settings::search_downloaded_book_text), choices, theme).border_t_0(), cx))
@@ -552,9 +549,7 @@ impl Render for SettingsPage {
         #[cfg(not(feature = "kobo"))]
         {
             let metered = preferences.allow_metered_transfers();
-            let transfer_choices = components::browser_settings_button_group(theme)
-                .child(Self::preference_button(components::settings_choice_button("transfers-unmetered", text!(common::off), !metered, theme), BrowsingPreferencePatch::AllowMeteredTransfers(false), cx))
-                .child(Self::preference_button(components::settings_choice_button("transfers-metered", text!(common::on), metered, theme), BrowsingPreferencePatch::AllowMeteredTransfers(true), cx));
+            let transfer_choices = Self::on_off_choices(["transfers-unmetered", "transfers-metered"], metered, BrowsingPreferencePatch::AllowMeteredTransfers, cx);
             let transfers = components::browser_settings_fieldset(text!(settings::transfers), theme)
                 .child(self.section(Section::Transfers, components::browser_settings_compact_row(text!(settings::allow_automatic_transfers_on_metered_connections), transfer_choices, theme).border_t_0(), cx))
                 .children(self.transfer_save_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
@@ -605,9 +600,8 @@ impl Render for SettingsPage {
 
         sections = sections.child(self.section(Section::Libraries, self.libraries.clone(), cx));
 
-        // Keep account and library invalidations inside their own entities.
-        // Transfer progress reaches the library rows several times a second and
-        // must not rebuild the settings controls above them.
+        // Account and library entities retain their own state; Settings still
+        // renders normally when their parent observes a change.
         self.settings_container(components::browser_settings_content().children(self.update_row(cx)).child(sections), desktop, cx).into_any_element()
     }
 }

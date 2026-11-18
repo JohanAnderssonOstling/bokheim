@@ -4,10 +4,11 @@ use crate::{CONTENT_INSET, topbar_action_height_rem, topbar_height_rem};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::{Button, Interactive};
+use crate::Button;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, ClickEvent, Div, ElementId, Entity, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, Point, RenderOnce, Role, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, anchored, deferred, div, img, point, px, rems};
-use gpui_component::IconName;
+use gpui::{
+    AnyElement, App, Div, ElementId, Entity, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, Point, RenderOnce, Role, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, anchored, deferred, div, img, point, px, rems,
+};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::{ContextMenuExt, PopupMenu};
 
@@ -43,15 +44,15 @@ pub fn reader_document_message(text: impl Into<SharedString>, theme: BrowserThem
     reader_document_surface(theme).flex().items_center().justify_center().text_color(theme.text_muted).text_size(gpui::rems(TEXT_SM)).child(text.into())
 }
 
-pub fn reader_pdf_scroll_surface(scroll_handle: &ScrollHandle, theme: BrowserTheme, cx: &mut App) -> Stateful<Div> {
-    crate::register_page_scroll_handle("pdf-reader-scroll", scroll_handle.clone(), cx);
+pub fn reader_pdf_scroll_surface(scroll_handle: &ScrollHandle, theme: BrowserTheme, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+    crate::register_page_scroll_handle("pdf-reader-scroll", scroll_handle.clone(), window, cx);
     reader_document_surface(theme).id("pdf-reader-scroll").track_scroll(scroll_handle).flex().items_start().justify_start()
 }
 
 /// The split divider and tab strip own the surrounding borders; the TOC body
 /// adds none of its own.
 pub fn reader_toc(theme: BrowserTheme) -> Div {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(SPACE_XXS)).bg(theme.page_bg).on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+    div().size_full().min_h_0().min_w_0().flex().flex_col().bg(theme.page_bg).on_scroll_wheel(|_, _, cx| cx.stop_propagation())
 }
 
 /// Space for the scrollbar's 16px track, including its thumb insets.
@@ -110,7 +111,7 @@ pub fn reader_state_full_quote(text: impl IntoElement, theme: BrowserTheme) -> D
 }
 
 pub fn reader_state_note(text: impl IntoElement, theme: BrowserTheme) -> Div {
-    div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(text)
+    crate::supporting_text(text, theme)
 }
 
 /// Smallest note field, in the absence of a note. Below two rows the box reads
@@ -302,9 +303,16 @@ pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
         return div().w_auto().max_w_full().min_w_0().flex_none().flex().flex_col().items_start().gap(px(SPACE_XXS)).child(div().text_size(rems(TEXT_SM)).child(label.into()));
     }
     // Wrap the control as a unit instead of pushing it beyond a narrow sidebar.
-    div().w_full().min_w_0().min_h(gpui::rems(2.375)).flex().flex_wrap().items_center().justify_end().gap(px(SPACE_SM)).child(
-        div().w(gpui::rems(7.0)).max_w_full().min_w_0().flex_grow(1.0).flex_shrink(0.0).text_size(gpui::rems(TEXT_SM)).child(label.into()),
-    )
+    div()
+        .w_full()
+        .min_w_0()
+        .min_h(gpui::rems(2.375))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_end()
+        .gap(px(SPACE_SM))
+        .child(div().w(gpui::rems(7.0)).max_w_full().min_w_0().flex_grow(1.0).flex_shrink(0.0).text_size(gpui::rems(TEXT_SM)).child(label.into()))
 }
 
 /// Adjacent steppers share a row when their controls fit in the panel.
@@ -458,13 +466,13 @@ pub fn reader_bottom_bar_item(id: impl Into<ElementId>, destination: ReaderDesti
 /// is measured beside it.
 pub const READER_RAIL_WIDTH: f32 = 52.0;
 const READER_RAIL_ITEM_SIZE: f32 = 40.0;
-const READER_PROGRESS_RING_SIZE: f32 = 28.0;
+const READER_PROGRESS_RING_SIZE_REM: f32 = 2.5;
 const READER_PROGRESS_RING_STROKE: f32 = 3.0;
 
 /// The sidebar's column of destinations: navigation at the top, tools at the
 /// foot, ruled off from the panel beside it.
 pub fn reader_rail(theme: BrowserTheme) -> Div {
-    div().w(px(READER_RAIL_WIDTH)).flex_none().h_full().min_h_0().flex().flex_col().items_center().gap(px(SPACE_XS)).py(px(SPACE_SM)).border_r_1().border_color(theme.rule).bg(theme.page_bg)
+    div().w(px(READER_RAIL_WIDTH)).min_w(rems(READER_PROGRESS_RING_SIZE_REM)).flex_none().h_full().min_h_0().flex().flex_col().items_center().gap(px(SPACE_XS)).py(px(SPACE_SM)).border_r_1().border_color(theme.rule).bg(theme.page_bg)
 }
 
 /// Pushes the rail's tools to its foot.
@@ -484,16 +492,19 @@ pub enum ReaderRailMark {
     Paused,
 }
 
-/// One rail destination: an icon, named by its tooltip.
-pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination, label: impl Into<SharedString>, mark: ReaderRailMark, theme: BrowserTheme, cx: &gpui::App) -> Stateful<Div> {
-    let label = destination.tooltip(label, cx);
+/// One rail destination with an accessible name and a shortcut tooltip.
+pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination, label: impl Into<SharedString>, mark: ReaderRailMark, theme: BrowserTheme, cx: &gpui::App) -> Button {
+    let label = label.into();
+    let tooltip = destination.tooltip(label.clone(), cx);
     let ink = match mark {
         ReaderRailMark::Selected => theme.text,
         ReaderRailMark::Active => theme.accent,
         ReaderRailMark::None | ReaderRailMark::Paused => theme.text_muted,
     };
-    div()
-        .id(id)
+    let button = crate::base_button(id)
+        .ghost()
+        .p_0()
+        .key_context("ReaderRailAction")
         .relative()
         .flex_none()
         .size(px(READER_RAIL_ITEM_SIZE))
@@ -501,12 +512,12 @@ pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination
         .items_center()
         .justify_center()
         .rounded(px(RADIUS_SM))
-        .cursor_pointer()
         .text_color(ink)
-        .selectable(mark == ReaderRailMark::Selected, theme)
-        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx))
+        .aria_label(label)
+        .tooltip(tooltip)
         .child(destination.glyph(1.25, theme))
-        .children(reader_activity_dot(mark, theme).map(|dot| dot.top(px(7.0)).right(px(7.0))))
+        .children(reader_activity_dot(mark, theme).map(|dot| dot.top(px(7.0)).right(px(7.0))));
+    crate::selectable_button(button, mark == ReaderRailMark::Selected, theme)
 }
 
 /// The dot that says something is running (filled) or paused (hollow), for
@@ -529,7 +540,7 @@ pub fn reader_progress_ring(fraction: f32, label: impl Into<SharedString>, detai
         |_, _, _| {},
         move |bounds, _, window, _| {
             let center = bounds.center();
-            let radius = (READER_PROGRESS_RING_SIZE - READER_PROGRESS_RING_STROKE) / 2.0;
+            let radius = (f32::from(bounds.size.width.min(bounds.size.height)) - READER_PROGRESS_RING_STROKE) / 2.0;
             // A circle drawn as a polyline: fine enough at this size, and the
             // same stroke builder the graph view uses.
             let arc = |from: f32, to: f32, color: gpui::Hsla, window: &mut Window| {
@@ -559,11 +570,11 @@ pub fn reader_progress_ring(fraction: f32, label: impl Into<SharedString>, detai
         .id("reader-progress-ring")
         .relative()
         .flex_none()
-        .size(px(READER_PROGRESS_RING_SIZE))
+        .size(rems(READER_PROGRESS_RING_SIZE_REM))
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(9.0))
+        .text_size(rems(TEXT_XS))
         .text_color(theme.text_muted)
         .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx))
         .child(ring)
@@ -577,9 +588,14 @@ pub fn reader_tile_group(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// A choice drawn as a picture of its effect above its name, using the shared
 /// selected appearance for interactive controls.
-pub fn reader_picture_tile(id: impl Into<ElementId>, picture: impl IntoElement, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
-    div()
-        .id(id)
+pub fn reader_picture_tile(id: impl Into<ElementId>, picture: impl IntoElement, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
+    let label = label.into();
+    let button = crate::base_button(id)
+        .ghost()
+        .p_0()
+        .h_auto()
+        .min_h_0()
+        .aria_label(label.clone())
         .flex_1()
         .min_w_0()
         .flex()
@@ -593,70 +609,36 @@ pub fn reader_picture_tile(id: impl Into<ElementId>, picture: impl IntoElement, 
         .border_color(theme.rule)
         .bg(theme.page_bg)
         .text_color(if selected { theme.text } else { theme.text_muted })
-        .cursor_pointer()
-        .selectable(selected, theme)
         .child(picture)
-        .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_XS)).child(label.into()))
+        .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_XS)).child(label));
+    crate::selectable_button(button, selected, theme)
 }
 
-/// Minimum width for two independent stepper targets and a readable value.
+/// Preferred width for a numeric tile; narrow rows can shrink it.
 pub fn reader_numeric_tile_width_rem() -> f32 {
-    2.0 * settings_control_size_rem() + 3.25
+    2.0 * settings_control_size_rem() + crate::SETTINGS_STEPPER_VALUE_WIDTH_REM
 }
 
-fn numeric_tile_stepper(button: Button, selected: bool, theme: BrowserTheme) -> Button {
-    // Kobo marks selection with a border and retains the paper background.
-    let filled = selected && !cfg!(feature = "kobo");
-    let foreground = if filled { theme.accent_text } else { theme.text };
-    let hovered = if filled { theme.accent_hover } else { theme.hover };
-    button.text_color(foreground).hover(move |style| style.bg(hovered))
-}
-
-/// A custom choice with its saved value beneath the lines icon. The outer
-/// surface groups three controls; stepper callbacks stop click propagation so
-/// changing a value never also activates the central selection control.
-pub fn reader_numeric_tile(id: &'static str, value: impl Into<SharedString>, selected: bool, decrement: Button, increment: Button, theme: BrowserTheme, select: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Stateful<Div> {
-    let value = value.into();
-    div()
+/// A composite choice: the group paints selection once, and its three buttons
+/// paint only their own interaction feedback over that shared surface.
+pub fn reader_numeric_tile(id: impl Into<ElementId>, decrement: Button, value: Button, increment: Button, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
+    let on_surface = |button: Button| button.on_selection_surface(selected).border_0().rounded(px(0.0));
+    crate::settings_stepper(on_surface(decrement), on_surface(value), on_surface(increment), theme)
         .id(id)
         .role(Role::Group)
-        .debug_selector(move || id.into())
+        .aria_selected(selected)
         .w_full()
         .min_w_0()
-        .flex()
-        .items_center()
-        .rounded(px(RADIUS_SM))
-        .border_1()
+        .h_auto()
+        .px_0()
         .border_color(theme.rule)
-        .bg(theme.page_bg)
-        .text_color(if selected { theme.text } else { theme.text_muted })
-        .selectable(selected, theme)
-        .child(numeric_tile_stepper(decrement, selected, theme))
-        .child(
-            div()
-                .id((id, 0usize))
-                .role(Role::Button)
-                .debug_selector(move || format!("{id}-value"))
-                .on_click(select)
-                .aria_label(format!(text!(common::use_custom_value), value = value))
-                .aria_selected(selected)
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(SPACE_XXS))
-                .py(px(SPACE_XS))
-                .cursor_pointer()
-                .child(reader_tile_picture("icons/reader-settings/line-spacing-normal.svg"))
-                .child(div().text_size(gpui::rems(TEXT_XS)).whitespace_nowrap().child(value)),
-        )
-        .child(numeric_tile_stepper(increment, selected, theme))
+        .when(selected && !cfg!(feature = "kobo"), |group| group.bg(theme.accent).text_color(theme.accent_text))
+        .when(selected && cfg!(feature = "kobo"), |group| group.border_2().border_color(theme.accent))
 }
 
 /// The drawing on a settings tile, from the `icons/reader-settings/` set.
 pub fn reader_tile_picture(path: &'static str) -> gpui_component::Icon {
-    gpui_component::Icon::empty().path(path).size(gpui::rems(2.25))
+    gpui_component::Icon::empty().path(path).size(gpui::rems(2.25)).max_w_full()
 }
 
 /// A typeface tile's sample: "Aa" set in the face it selects. `None` is the
@@ -820,16 +802,18 @@ impl RenderOnce for ReaderImagePopup {
         });
         let dismiss_modal = self.on_dismiss;
         let copy_image = self.image.clone();
-        let content = crate::infinite_canvas(&self.canvas).control_wheel_zoom().child(
-            div().absolute().left_0().top_0().w(px(width)).h(px(height)).child(reader_image_preview(self.image)),
-        );
+        let content = crate::infinite_canvas(&self.canvas).control_wheel_zoom().child(div().absolute().left_0().top_0().w(px(width)).h(px(height)).child(reader_image_preview(self.image)));
 
-        ReaderModal::new(gpui::size(px(panel_width), px(panel_height)), div().id("reader-image-context").size_full().child(content).context_menu(move |menu, _, _| {
-            let image = copy_image.clone();
-            let save_image = copy_image.clone();
-            menu.item(menu_item(text!(common::copy_image), move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image))))
-                .when(crate::image_saving_available(), |menu| menu.item(menu_item(text!(common::save_image), move |_, window, cx| crate::save_image(save_image.clone(), window, cx))))
-        })).on_dismiss(move |window, cx| dismiss_modal(window, cx))
+        ReaderModal::new(
+            gpui::size(px(panel_width), px(panel_height)),
+            div().id("reader-image-context").size_full().child(content).context_menu(move |menu, _, _| {
+                let image = copy_image.clone();
+                let save_image = copy_image.clone();
+                menu.item(menu_item(text!(common::copy_image), move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image))))
+                    .when(crate::image_saving_available(), |menu| menu.item(menu_item(text!(common::save_image), move |_, window, cx| crate::save_image(save_image.clone(), window, cx))))
+            }),
+        )
+        .on_dismiss(move |window, cx| dismiss_modal(window, cx))
     }
 }
 
@@ -853,7 +837,14 @@ pub fn reader_selection_handle_center(endpoint: Point<Pixels>, window: &Window) 
 
 pub fn reader_selection_handle(id: impl Into<ElementId>, endpoint: Point<Pixels>, window: &Window, theme: BrowserTheme) -> AnyElement {
     let center = reader_selection_handle_center(endpoint, window);
-    let knob = div().id(id).size(px(44.0)).relative().flex().items_center().justify_center().occlude()
+    let knob = div()
+        .id(id)
+        .size(px(44.0))
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .occlude()
         .child(div().absolute().left(px(21.0)).top(px(6.0)).w(px(2.0)).h(px(16.0)).bg(theme.accent))
         .child(div().size(px(18.0)).rounded_full().bg(theme.accent));
     deferred(anchored().position(center - point(px(22.0), px(22.0))).child(knob)).with_priority(2).into_any_element()

@@ -1,6 +1,6 @@
+use crate::Button;
 use gpui::prelude::*;
 use gpui::{ElementId, SharedString, px, rems};
-use crate::Button;
 use gpui_component::{Disableable, Icon, IconName, Sizable, Size};
 
 use crate::{BrowserTheme, SPACE_MD, TEXT_SM, topbar_action_height_rem};
@@ -58,6 +58,14 @@ pub fn dialog_cancel_button(id: impl Into<ElementId>, label: impl Into<SharedStr
     let label: SharedString = label.into();
     let tooltip = crate::shortcut_tooltip(label.clone(), "escape");
     base_button(id).label(label).tooltip(tooltip)
+}
+
+/// A dialog's primary action, paired with [`dialog_cancel_button`].
+/// Pass a shortcut only when the dialog handles it outside the focused button.
+pub fn dialog_confirm_button(id: impl Into<ElementId>, label: impl Into<SharedString>, shortcut: Option<&str>) -> Button {
+    let label = label.into();
+    let tooltip = shortcut.map(|shortcut| crate::shortcut_tooltip(label.clone(), shortcut));
+    base_button(id).primary().label(label).when_some(tooltip, |button, tooltip| button.tooltip(tooltip))
 }
 
 pub fn primary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, disabled: bool) -> Button {

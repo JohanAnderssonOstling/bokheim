@@ -76,7 +76,7 @@ INSERT INTO sync_outbox(replica_seq,state_kind,state_key,state_subkey) VALUES(:r
 
 -- name: registers_book_fields ?
 -- param: book_key: &SqlParam<'_>
-SELECT state_kind,state_key,state_subkey FROM sync_state_version WHERE book_key=:book_key AND state_kind!='book_lifecycle' AND body IS NOT NULL UNION ALL SELECT state_kind,content_hash,'' FROM sync_book_record WHERE content_hash=:book_key;
+SELECT state_kind,state_key,state_subkey FROM sync_state_version WHERE book_key=:book_key AND state_kind!='book_lifecycle' AND body IS NOT NULL UNION ALL SELECT state_kind,content_hash,'' FROM sync_book_record WHERE state_kind='book_add' AND content_hash=:book_key;
 
 -- name: registers_canonical_body ->
 -- param: state_kind: &SqlParam<'_>

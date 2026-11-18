@@ -343,7 +343,7 @@ impl<T: Copy + 'static> PlaybackMenu<T> {
             .flex_none()
             .p(px(ui_components::SPACE_MD))
             .overflow_x_scroll()
-            .child(ui_components::row(0.0).w_full().min_w(rems(self.choices.len() as f32 * (ui_components::PLAYBACK_SECONDARY_SIZE_REM + 0.25) + 0.25)).justify_evenly().children(buttons))
+            .child(ui_components::row(0.0).w_full().min_w(rems(self.choices.len() as f32 * (ui_components::playback_secondary_size_rem() + 0.25) + 0.25)).justify_evenly().children(buttons))
             .into_any_element()
     }
 
@@ -359,7 +359,7 @@ impl<T: Copy + 'static> PlaybackMenu<T> {
             let row_height = (ui_components::TEXT_MD * rem * 1.5 + ui_components::SPACE_SM * 2.0).max(48.0);
             let header_height = (ui_components::TEXT_MD * rem * 1.5).max(24.0) + 16.0;
             let status_height = if !self.presets && self.status.is_some() { ui_components::TEXT_XS * rem * 1.5 + 10.0 } else { 0.0 };
-            let choices_height = if self.presets { ui_components::PLAYBACK_SECONDARY_SIZE_REM * rem + ui_components::SPACE_MD * 2.0 } else { row_height * self.choices.len() as f32 };
+            let choices_height = if self.presets { ui_components::playback_secondary_size_rem() * rem + ui_components::SPACE_MD * 2.0 } else { row_height * self.choices.len() as f32 };
             let height = (header_height + choices_height + status_height + f32::from(safe_area.bottom) + 1.0).min(f32::from(usable_height) * 0.8);
             let content = if self.presets {
                 self.preset_row(

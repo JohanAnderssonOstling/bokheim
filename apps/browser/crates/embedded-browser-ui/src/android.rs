@@ -331,7 +331,8 @@ impl Browser {
         let history = AddressHistory::load(request.history_file.clone());
         let mut request = json!(request);
         let page = history.page(&url).cloned().unwrap_or_else(|| PageMetadata::for_url(&url));
-        request["start_page_html"] = components::browser_start_page(history.start_page_shortcuts().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), components::browser_theme(cx)).into();
+        request["start_page_html"] =
+            components::browser_start_page(history.start_page_shortcuts().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), components::browser_theme(cx), cx.theme()).into();
         request["page_metadata_script"] = PAGE_METADATA_SCRIPT.into();
         let address = cx.new(|cx| InputState::new(window, cx).placeholder(text!(startup::web_address_or_search)).default_value(if url == "about:blank" { "" } else { &url }));
         let focus = cx.focus_handle();

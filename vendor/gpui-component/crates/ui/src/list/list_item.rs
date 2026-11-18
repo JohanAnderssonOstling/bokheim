@@ -30,6 +30,7 @@ pub struct ListItem {
     disabled: bool,
     selected: bool,
     secondary_selected: bool,
+    selection_highlight: bool,
     confirmed: bool,
     check_icon: Option<Icon>,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
@@ -50,6 +51,7 @@ impl ListItem {
             disabled: false,
             selected: false,
             secondary_selected: false,
+            selection_highlight: true,
             confirmed: false,
             on_click: None,
             on_mouse_down: HashMap::new(),
@@ -75,6 +77,12 @@ impl ListItem {
     /// Set ListItem as the selected item style.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Show the active-row background and border. Defaults to true.
+    pub fn selection_highlight(mut self, enabled: bool) -> Self {
+        self.selection_highlight = enabled;
         self
     }
 
@@ -220,7 +228,7 @@ impl RenderOnce for ListItem {
             )
             .when_some(self.suffix, |this, suffix| this.child(suffix(window, cx)))
             .map(|this| {
-                if is_selectable && (self.selected || self.secondary_selected) {
+                if self.selection_highlight && is_selectable && (self.selected || self.secondary_selected) {
                     let bg = if self.selected && cx.theme().list.active_highlight {
                         cx.theme().list_active
                     } else {

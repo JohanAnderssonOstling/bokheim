@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 #[tokio::test(start_paused = true)]
 async fn subscribed_notifications_have_no_retry_timer_while_offline() {
-    use futures_util::task::{waker_ref, ArcWake};
+    use futures_util::task::{ArcWake, waker_ref};
     use library_services::interest::NotificationInterest;
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,7 +51,7 @@ fn account_discovery_wakes_for_account_events_without_open_libraries() {
         (NotificationMessage::LibrariesChanged, false, true),
         (NotificationMessage::Reconcile, false, true),
     ] {
-        let bytes = sync_common::transport::encode(&message).unwrap();
+        let bytes = sync_common::http::encode(&message).unwrap();
         notify(&bytes, &wake, browsing, &libraries, &Weak::new()).unwrap();
         assert_eq!(changes.has_changed().unwrap(), should_wake, "{message:?}");
         changes.borrow_and_update();

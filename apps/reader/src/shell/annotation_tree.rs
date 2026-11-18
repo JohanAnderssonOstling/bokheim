@@ -158,7 +158,7 @@ impl AnnotationTreeState {
                 let row = components::ContentsRow { depth: *depth, has_children: true, expanded, ..Default::default() };
                 let click_target = target.downgrade();
                 let key_target = target.downgrade();
-                components::contents_row(("reader-annotation-branch", id), row, Some(components::contents_disclosure(("reader-annotation-disclosure", id), row, theme)), title.clone(), None, None, theme)
+                components::contents_row(("reader-annotation-branch", id), row, Some(components::contents_disclosure(("reader-annotation-disclosure", id), row, theme)), title.clone(), None, theme)
                     .flex_none()
                     .debug_selector(move || format!("reader-annotation-branch-{id}"))
                     .focusable()

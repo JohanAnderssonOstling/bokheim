@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 pub mod filenames;
 mod folder_management;
 mod folder_names;
+pub mod storage;
 pub use folder_names::project_folder_name;
 mod enrichment;
 mod library_state;
@@ -231,9 +232,7 @@ impl LibraryStateEntry {
                     return Err(invalid("book addition is awaiting enrichment"));
                 };
                 if let EnrichmentResult::Found { toc: Some(entries), .. } = enrichment {
-                    if sync_common::transport::encode(entries)?.len() > 512 * 1024 {
-                        return Err(invalid("enriched navigation exceeds the mutation envelope"));
-                    }
+                    storage::toc_encoded_len(entries)?;
                 }
                 if value.facts.added_at > i64::MAX as u64 {
                     return Err(invalid("book addition timestamp exceeds storage range"));
@@ -278,27 +277,29 @@ impl StatePayload for LibraryStateEntry {
             .contains(&kind)
     }
 
+    fn encode_entry(&self) -> Result<OpaqueStateEntry, sync_common::transport::WireError> {
+        Ok(OpaqueStateEntry { address: self.address(), book: self.book(), bytes: storage::encode(self)? })
+    }
+
     fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.validate().map_err(serde::ser::Error::custom)?;
-        let entry = OpaqueStateEntry { address: self.address(), book: self.book(), bytes: sync_common::transport::encode(self).map_err(serde::ser::Error::custom)? };
-        entry.serialize_entry(serializer)
+        self.encode_entry().map_err(serde::ser::Error::custom)?.serialize_entry(serializer)
+    }
+
+    fn decode_entry(entry: &OpaqueStateEntry) -> Result<Self, sync_common::transport::WireError> {
+        use sync_common::transport::WireError;
+        if !Self::recognizes_kind(&entry.address.kind) {
+            return Err(WireError::Decode("unknown state kind".into()));
+        }
+        let value = storage::decode(&entry.bytes)?;
+        if value.address() != entry.address || value.book() != entry.book {
+            return Err(WireError::Decode("state envelope does not match its value".to_owned()));
+        }
+        Ok(value)
     }
 
     fn deserialize_entry<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let entry = OpaqueStateEntry::deserialize_entry(deserializer)?;
-        let decode = || -> Result<Self, sync_common::transport::WireError> {
-            use sync_common::transport::WireError;
-            if !Self::recognizes_kind(&entry.address.kind) {
-                return Err(WireError::Decode("unknown state kind".into()));
-            }
-            let value: Self = sync_common::transport::decode(&entry.bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES)?;
-            value.validate()?;
-            if value.address() != entry.address || value.book() != entry.book {
-                return Err(WireError::Decode("state envelope does not match its value".to_owned()));
-            }
-            Ok(value)
-        };
-        decode().map_err(serde::de::Error::custom)
+        Self::decode_entry(&entry).map_err(serde::de::Error::custom)
     }
 
     fn validate_version(&self, version: &VersionKey) -> Result<(), sync_common::transport::WireError> {
@@ -329,9 +330,7 @@ fn validate_navigation(value: &BookTocDocument) -> Result<(), sync_common::trans
             return Err(WireError::Decode("invalid audiobook track index".into()));
         }
     }
-    if sync_common::transport::encode(value)?.len() > 512 * 1024 {
-        return Err(WireError::Decode("navigation document exceeds the mutation envelope".into()));
-    }
+    storage::navigation_encoded_len(value)?;
     Ok(())
 }
 
@@ -340,23 +339,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_content_keeps_its_persisted_discriminant() {
+    fn canonical_content_uses_its_current_persisted_discriminant() {
         let value = LibraryStateEntry::BookContent { book_id: BookId::from_bytes([7; 32]), checksum: ContentHash::from_bytes([8; 32]), size_bytes: Some(42), pdf: None };
         let encoded = sync_common::wire::encode(&value).unwrap();
-        assert_eq!(encoded[sync_common::wire::encode(&()).unwrap().len()], 10);
+        assert_eq!(encoded[sync_common::wire::encode(&()).unwrap().len()], 9);
         assert_eq!(sync_common::wire::decode::<LibraryStateEntry>(&encoded, 1024).unwrap(), value);
         let mut removed = sync_common::wire::encode(&()).unwrap();
-        removed.push(9);
+        removed.push(10);
         assert!(sync_common::wire::decode::<LibraryStateEntry>(&removed, 1024).is_err());
     }
 
     #[test]
-    fn history_upgrade_preserves_relay_values_written_with_protocol_28() {
+    fn replicas_require_current_storage_format() {
         let publication = LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(1), name: "Retained".into() }.publication(ReplicaId::from_u128(2), 3, ReplicaSeq::new(4).unwrap());
         let mut stored: Versioned<OpaqueStateEntry> = sync_common::transport::representation(&publication.state).unwrap();
-        stored.value.bytes[1] = 28;
-        let decoded = sync_common::state_encoding::decode_known::<LibraryStateEntry>(&stored).unwrap().unwrap();
-        assert_eq!(decoded, publication.state);
+        stored.value.bytes[1] = 33;
+        assert!(matches!(sync_common::state_encoding::decode_known::<LibraryStateEntry>(&stored), Err(sync_common::transport::WireError::UnsupportedVersion(33))));
     }
 
     #[test]

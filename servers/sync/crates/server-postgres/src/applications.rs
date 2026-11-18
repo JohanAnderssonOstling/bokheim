@@ -1,7 +1,8 @@
 use crate::assets::BookUploadReservation;
 use crate::assets::{self, BookUploadAdmission};
-use crate::cleanup::lock_publication;
-use crate::{sync_store, PostgresDatabase};
+use crate::cleanup::{lock_publication, repair_unbound_aliases};
+use crate::PostgresDatabase;
+use content_address::ContentHash;
 use server_asset_store::{AssetError, AssetKind, AssetReader, FsAssetStore, StoredAsset};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -88,27 +89,13 @@ impl AssetApplication {
     }
 
     async fn require_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<(), AssetError> {
-        let owned = sync_store::owns_library(&self.pool, user_id, library_id).await.map_err(|error| AssetError::Storage(error.to_string()))?;
-        if !owned {
-            return Err(AssetError::Forbidden);
-        }
-        let enabled: bool = sqlx::query_scalar("SELECT cloud_storage_enabled FROM libraries WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL")
-            .bind(library_id.to_string())
-            .bind(user_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|error| AssetError::Storage(error.to_string()))?;
+        let enabled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM libraries WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL AND cloud_storage_enabled)")
+            .bind(library_id.to_string()).bind(user_id).fetch_one(&self.pool).await.map_err(|error| AssetError::Storage(error.to_string()))?;
         if !enabled {
             Err(AssetError::Forbidden)
         } else {
             Ok(())
         }
-    }
-
-    /// A book is readable once this account uploaded it or adopted a verified
-    /// public catalog file. Client-declared lifecycle references grant nothing.
-    async fn has_book_charge(&self, user_id: &str, hash: &BookId) -> Result<bool, AssetError> {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_blob_charge WHERE user_id=$1 AND content_hash=$2)").bind(user_id).bind(hash.as_bytes()).fetch_one(&self.pool).await.map_err(|error| AssetError::Storage(error.to_string()))
     }
 
     pub async fn negotiate_books(&self, user_id: &str, library_id: &sync_common::LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, AssetError> {
@@ -125,16 +112,21 @@ impl AssetApplication {
         // Verify and pin a temporary catalog inode before taking database
         // locks. A cancellation or rejected claim releases these temporary links.
         let mut catalog = HashMap::new();
+        let mut prepared_checksums = HashSet::new();
         for blob in &blobs {
             if blob.size_bytes > 0 {
                 if let Some(source) = blob.byte_checksum.or_else(|| blob.book_id.content_hash()) {
-                    if let Some(book) = self.store.prepare_catalog_book(&BookId::from(source)).await? {
-                    catalog.insert(blob.book_id, book);
+                    if prepared_checksums.insert(source) {
+                        if let Some(book) = self.store.prepare_catalog_book(&BookId::from(source)).await? {
+                            catalog.insert(source, book);
+                        }
                     }
                 }
             }
         }
+        let adopted_catalog = !catalog.is_empty();
         let response = assets::negotiate_books(&self.pool, user_id, library_id, &blobs, &self.store, catalog).await?;
+        if adopted_catalog { self.cleanup.notify_one(); }
         tracing::debug!(target: "sync_performance", phase = "manifest_database", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
         Ok(response)
     }
@@ -152,27 +144,26 @@ impl AssetApplication {
     }
 
     pub async fn open_from(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &BookId, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
-        self.require_library(user_id, library_id).await?;
-        if kind == AssetKind::Book {
-            if !self.has_book_charge(user_id, hash).await? {
+        let checksum = if kind == AssetKind::Book {
+            let Some(checksum) = self.book_content_hash(user_id, library_id, hash).await? else {
                 return Ok(None);
-            }
+            };
+            Some(checksum)
         } else {
+            self.require_library(user_id, library_id).await?;
             let Some(size) = self.store.size(user_id, kind, hash).await? else {
                 return Ok(None);
             };
             assets::validate_thumbnail(&self.pool, user_id, library_id, hash, size).await?;
-        }
+            None
+        };
         if let Some(asset) = self.store.open_from(user_id,kind,hash,offset).await? { return Ok(Some(asset)); }
-        if kind == AssetKind::Book {
-            let checksum: Option<Vec<u8>> = sqlx::query_scalar("SELECT byte_checksum FROM blob_object WHERE content_hash=$1").bind(hash.as_bytes()).fetch_optional(&self.pool).await.map_err(storage)?;
-            if let Some(checksum) = checksum {
-                let canonical = BookId::from(content_address::ContentHash::try_from(checksum.as_slice()).map_err(storage)?);
-                if canonical != *hash {
-                    if let Some(mut asset) = self.store.open_from(user_id,kind,&canonical,offset).await? {
-                        asset.book_id = *hash;
-                        return Ok(Some(asset));
-                    }
+        if let Some(checksum) = checksum {
+            let canonical = BookId::from(checksum);
+            if canonical != *hash {
+                if let Some(mut asset) = self.store.open_from(user_id,kind,&canonical,offset).await? {
+                    asset.book_id = *hash;
+                    return Ok(Some(asset));
                 }
             }
         }
@@ -190,14 +181,15 @@ impl AssetApplication {
         self.put_book_with_checksum(user_id, library_id, hash, checksum, length, reader).await
     }
 
-    pub async fn book_content_hash(&self, user: &str, library: &sync_common::LibraryId, book: &BookId) -> Result<Option<content_address::ContentHash>, AssetError> {
-        self.require_library(user, library).await?;
-        if !self.has_book_charge(user, book).await? { return Ok(None); }
-        let bytes: Option<Vec<u8>> = sqlx::query_scalar("SELECT byte_checksum FROM blob_object WHERE content_hash=$1").bind(book.as_bytes()).fetch_optional(&self.pool).await.map_err(storage)?;
-        bytes.map(|bytes| content_address::ContentHash::try_from(bytes.as_slice()).map_err(storage)).transpose()
+    pub async fn book_content_hash(&self, user: &str, library: &sync_common::LibraryId, book: &BookId) -> Result<Option<ContentHash>, AssetError> {
+        // No row means forbidden library access; a NULL checksum means the
+        // account does not own this book. Lifecycle references grant no access.
+        let bytes: Option<Option<Vec<u8>>> = sqlx::query_scalar(include_str!("sql/assets/book_read_access.sql"))
+            .bind(library.to_string()).bind(user).bind(book.as_bytes()).fetch_optional(&self.pool).await.map_err(storage)?;
+        bytes.ok_or(AssetError::Forbidden)?.map(|bytes| ContentHash::try_from(bytes.as_slice()).map_err(storage)).transpose()
     }
 
-    pub async fn put_book_with_checksum(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &BookId, checksum: content_address::ContentHash, length: u64, reader: AssetReader) -> Result<(), AssetError> {
+    pub async fn put_book_with_checksum(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &BookId, checksum: ContentHash, length: u64, reader: AssetReader) -> Result<(), AssetError> {
         self.require_library(user_id, library_id).await?;
 
         // Reserve and verify actual bytes even when an object is already owned.
@@ -210,18 +202,19 @@ impl AssetApplication {
         };
         let result = async {
             let staged = self.store.stage_with_checksum(user_id, AssetKind::Book, hash, Some(length), Some(checksum), reader).await?;
+            repair_unbound_aliases(&self.pool, &self.store, &[*hash]).await?;
             let mut transaction = self.pool.begin().await.map_err(storage)?;
             lock_publication(&mut transaction).await?;
-            let bound: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM blob_object WHERE content_hash=$1)").bind(hash.as_bytes()).fetch_one(&mut *transaction).await.map_err(storage)?;
-            if !bound { self.store.discard_unbound_book_alias(hash)?; }
             let phase_started = Instant::now();
             assets::finish_book_upload(&mut transaction, user_id, library_id, hash, &admission, staged.size_bytes(), checksum).await?;
             let canonical = BookId::from(checksum);
             let retained = canonical != *hash && self.store.link_book_revision(&canonical,hash,checksum,length).await?;
-            let sources: Vec<Vec<u8>> = sqlx::query_scalar("SELECT content_hash FROM blob_object WHERE byte_checksum=$1 AND content_hash<>$2 ORDER BY content_hash").bind(checksum.as_bytes().as_slice()).bind(hash.as_bytes()).fetch_all(&mut *transaction).await.map_err(storage)?;
-            for source in sources.into_iter().filter(|_| !retained) {
-                let source = BookId::try_from(source.as_slice()).map_err(storage)?;
-                if self.store.link_book_revision(&source, hash, checksum, length).await? { break; }
+            if !retained {
+                let sources: Vec<Vec<u8>> = sqlx::query_scalar("SELECT content_hash FROM blob_object WHERE byte_checksum=$1 AND content_hash<>$2 ORDER BY content_hash").bind(checksum.as_bytes().as_slice()).bind(hash.as_bytes()).fetch_all(&mut *transaction).await.map_err(storage)?;
+                for source in sources {
+                    let source = BookId::try_from(source.as_slice()).map_err(storage)?;
+                    if self.store.link_book_revision(&source, hash, checksum, length).await? { break; }
+                }
             }
             if retained && self.store.size(user_id,AssetKind::Book,hash).await?.is_none() { staged.discard()?; }
             else { staged.publish().await?; }
@@ -245,9 +238,8 @@ impl AssetApplication {
         self.require_library(user_id, library_id).await?;
         let mut transaction = self.pool.begin().await.map_err(storage)?;
         lock_publication(&mut transaction).await?;
-        for variant in [bytes, browse_bytes] {
-            assets::validate_thumbnail_upload_in_transaction(&mut transaction, user_id, library_id, hash, variant.len() as u64).await?;
-        }
+        let largest_size = bytes.len().max(browse_bytes.len()) as u64;
+        assets::validate_thumbnail_upload_in_transaction(&mut transaction, user_id, library_id, hash, largest_size).await?;
         self.store.put_thumbnail_pair(user_id, hash, bytes, browse_bytes).await?;
         transaction.commit().await.map_err(storage)
     }

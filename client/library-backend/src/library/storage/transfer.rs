@@ -7,7 +7,7 @@ use book_access::BoxedBookReader;
 #[cfg(target_arch = "wasm32")]
 use client_platform_runtime::executor::{local_service_on_current_thread, storage_call, ServiceHandle};
 use client_protocol::BackendError;
-use library_database::transfer::{BookTransferState, ImportedBook, LocalBookMetadata, TransferBook, TransferPlan};
+use library_database::transfer::{BookTransferState, ImportedBook, LocalBookMetadata, TransferPlan};
 use library_database::DatabaseClient;
 #[cfg(target_arch = "wasm32")]
 use library_files::asset_store::VerifiedBook;
@@ -15,7 +15,7 @@ use library_model::{DownloadProgress, DownloadState, TransferOrigin};
 use library_placement::LibraryState;
 use remote_book_access::{describe_remote_file, RemoteBookAccess};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 use sync_common::BookId;
@@ -38,12 +38,11 @@ pub struct StorageCopiedBook {
 impl LibraryHandle {
     /// Host-local orchestration keeps readers inside the backend. The source
     /// receives read requests only, including when the destination fails.
-    pub async fn copy_storage_from<F: std::future::Future<Output = Result<(), BackendError>>>(
-        &self, source: &LibraryHandle, mut progress: StorageCopyProgress, mut checkpoint: impl FnMut(StorageCopyProgress) -> F,
-    ) -> Result<(), BackendError> {
+    pub async fn copy_storage_from<F: std::future::Future<Output = Result<(), BackendError>>>(&self, source: &LibraryHandle, progress: StorageCopyProgress, mut checkpoint: impl FnMut(StorageCopiedBook) -> F) -> Result<(), BackendError> {
         if self.id() == source.id() {
             return Err(BackendError::message("choose another library for the storage copy"));
         }
+        let mut completed = progress.books.into_iter().map(|book| ((book.source, book.directory), book.destination)).collect::<HashMap<_, _>>();
         let plan: TransferPlan = source.storage_copy_plan().await?;
         let mapped = |id: DirId| if id == ROOT_DIR_ID { ROOT_DIR_ID } else { DirId::new_v5(self.id(), id.as_bytes()) };
         // Import each book directly. Failed copies retain their completed checkpoints.
@@ -52,25 +51,22 @@ impl LibraryHandle {
         }
         for book in &plan.books {
             let parent = mapped(book.directory);
-            if self.storage_copy_checkpoint_present(book, &progress, parent).await? {
-                continue;
+            if let Some(&destination) = completed.get(&(book.book_id, book.directory)) {
+                if self.storage_copy_book_present(destination, parent).await? {
+                    continue;
+                }
             }
             let resource = source.export_transfer_book(book.book_id).await?;
             let copied = self.import_transfer_book(parent, book.file_name.clone(), resource).await?;
-            progress.books.retain(|copied| copied.source != book.book_id || copied.directory != book.directory);
-            progress.books.push(StorageCopiedBook { source: book.book_id, directory: book.directory, destination: copied.book_id });
-            checkpoint(progress.clone()).await?;
+            let copied = StorageCopiedBook { source: book.book_id, directory: book.directory, destination: copied.book_id };
+            completed.insert((copied.source, copied.directory), copied.destination);
+            checkpoint(copied).await?;
         }
         let current: TransferPlan = source.storage_copy_plan().await?;
         if current != plan {
             return Err(BackendError::message("library changed during the copy; retry to include the latest books"));
         }
         Ok(())
-    }
-
-    async fn storage_copy_checkpoint_present(&self, book: &TransferBook, progress: &StorageCopyProgress, parent_id: DirId) -> Result<bool, BackendError> {
-        let Some(copied) = progress.books.iter().find(|copied| copied.source == book.book_id && copied.directory == book.directory) else { return Ok(false) };
-        self.storage_copy_book_present(copied.destination, parent_id).await
     }
 }
 

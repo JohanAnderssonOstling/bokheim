@@ -534,6 +534,9 @@ impl DictionaryPopup {
     }
 
     fn wikipedia_result_count(&self) -> usize {
+        if self.translation.is_some() && self.wikipedia_hits.is_empty() && self.wikipedia.is_none() && self.wikipedia_failed.is_none() {
+            return 0;
+        }
         if self.wikipedia_eligible() {
             self.wikipedia_hits.len().max(usize::from(self.wikipedia.is_some() || self.wikipedia_loading || self.wikipedia_failed.is_some()))
         } else {
@@ -717,11 +720,21 @@ impl DictionaryPopup {
 
     fn start_wikipedia(&mut self, query: String, languages: Vec<LanguageTag>, cx: &mut Context<Self>) {
         let Some(request) = self.wikipedia_request.clone() else { return };
+        let mut equivalents = (self.translation.is_some() && self.wikipedia_hits.is_empty()).then(|| wikipedia::Equivalents::new(self.wikipedia_equivalents.targets.clone()));
+        let lookups = super::lookups::client(cx);
         self.wikipedia_loading = true;
         self.wikipedia_failed = None;
         self._wikipedia_task = cx.spawn(async move |this, cx| {
             let result = request(query.clone(), languages).await;
+            let result = if let Some(equivalents) = &mut equivalents {
+                equivalents.filter_lookup(result, lookups, cx).await
+            } else {
+                result
+            };
             let _ = this.update(cx, |this, cx| {
+                if let Some(equivalents) = equivalents {
+                    this.wikipedia_equivalents = equivalents;
+                }
                 this.wikipedia_loading = false;
                 if !this.showing_translation() {
                     this.popup_height = None;

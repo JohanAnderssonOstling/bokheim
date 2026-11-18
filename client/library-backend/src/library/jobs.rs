@@ -8,9 +8,14 @@ use asset_transfer::thumbnail_jobs::{ThumbnailExtractor, ThumbnailJobs};
 impl LibraryResources {
     pub(crate) async fn run_file_jobs(&self) -> Result<(), BackendError> {
         let database = &self.database;
+        let before = database.file_work_revision().await?;
         let had_file_work = database.has_pending_file_work().await?;
         let result = library_placement::run_file_jobs(&self.state).await;
-        if had_file_work {
+        let progressed = database.file_work_revision().await? != before;
+        if progressed {
+            self.events.file_work_progressed();
+        }
+        if had_file_work && progressed {
             // Replay completion refreshes views and sync, but is not another
             // request for replay. Durable work can remain queued (for example
             // while a book is leased); ContentsChanged would self-wake forever.

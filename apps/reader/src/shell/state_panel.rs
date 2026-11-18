@@ -357,7 +357,7 @@ where
                 // Rows are content-sized, so a two-line title keeps the row's own
                 // padding above and below it.
                 ListItem::new(("reader-toc-item", index)).w_full().min_w_0().p_0().child(
-                    components::contents_row(("reader-toc-row", index), row, nested.then(|| components::contents_disclosure(("reader-toc-disclosure", index), row, theme)), title, None, reset, theme)
+                    components::contents_row(("reader-toc-row", index), row, nested.then(|| components::contents_disclosure(("reader-toc-disclosure", index), row, theme)), title, reset, theme)
                         .debug_selector(move || format!("reader-toc-row-{index}"))
                         .min_h_0()
                         .line_height_auto(),

@@ -382,8 +382,8 @@ mod tests {
                 }
                 let database_path = root.path().join(".library.db");
                 let db = Database::open(&database_path).unwrap();
-                db.initialize_library().await.unwrap();
-                let mut snapshot = db.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).await.unwrap();
+                db.initialize_library().unwrap();
+                let mut snapshot = db.scan_snapshot(book_inspection::inspection_version(book_model::BookFormat::Pdf)).unwrap();
                 let discovery = discover(root.path(), &snapshot);
                 let fingerprint = discovery.files[0].fingerprint;
                 let hash = BookId::from(blake3::hash(b"book"));
@@ -408,11 +408,11 @@ mod tests {
                 };
                 let inspected = InspectedFilesystemScan { readable: true, books: vec![book] };
                 assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, inspected, true, None).unwrap(), ScanApplyResult::Applied);
-                let hash = db.resolve_scanned_content(hash.content_hash().unwrap(), None).await.unwrap();
+                let hash = db.resolve_scanned_content(hash.content_hash().unwrap(), None).unwrap();
                 if remove_last_placement {
                     assert!(db.remove_book_placement(&hash, &ROOT_DIR_ID).unwrap());
                 } else {
-                    db.trash_book(&hash).await.unwrap();
+                    db.trash_book(&hash).unwrap();
                 }
                 drop(db);
 

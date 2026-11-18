@@ -9,7 +9,6 @@ use ui_components::user_facing_error;
 use crate::services::{import_catalog_book_with_progress, notify_error};
 use crate::{BrowsePageSession, NavigationSession, NewWindowTarget, PaneRequest};
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, DismissEvent, Div, Entity, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, Pixels, Point, Render, SharedString, Stateful, Subscription, Task, Window, div, px, rems};
@@ -32,10 +31,10 @@ use super::listing::{BrowseDestination, BrowseItem, BrowseKind, BrowseListing, c
 use super::navigator::{BrowseNavigator, Loaded};
 use super::profile::Stage;
 use crate::library::pages::with_retry_banner;
-use crate::library::services::{FolderPlacement, LibraryContext, LibraryScanChanged};
+use crate::library::services::{FolderPlacement, LibraryContext};
 use crate::library::widgets::mobile_context_menu::ContextMenu;
 use crate::library::widgets::{BookCardEvent, BookCardEvents, BookCardView, LoadedCover, SelectionAction, SelectionActionKind};
-use crate::{CopyBooks, CutBooks, DismissSettings, OpenContextMenu, PasteBooks, ToggleGridSelection, UndoLibraryAction};
+use crate::{CopyBooks, CutBooks, DismissSettings, OpenContextMenu, PasteBooks, SelectLoadedItems, ToggleGridSelection, UndoLibraryAction};
 
 pub(crate) use ui_components::SplitSide as BrowseSplitSide;
 
@@ -67,7 +66,6 @@ pub(crate) struct BrowsePage {
     restore_focus: bool,
     search_input: Option<Entity<InputState>>,
     search_open: bool,
-    search_debounce: Option<Task<()>>,
     /// The compact bottom-sheet counterpart to the desktop sort/filter dropdown.
     browse_options_sheet_open: bool,
     _subscriptions: Vec<Subscription>,
@@ -95,7 +93,7 @@ impl BrowsePage {
         let card_events: CardEvents = Rc::new(move |event, window, cx| {
             let _ = page.update(cx, |page, cx| page.handle_card_event(event, window, cx));
         });
-        let cards = cx.new(|cx| CardView::new(navigator.clone(), folder_actions.is_some() || kind == BrowseKind::Catalog, card_events.clone(), cx));
+        let cards = cx.new(|cx| CardView::new(navigator.clone(), card_events.clone(), cx));
         let graph = kind.graph_layout().map(|layout| cx.new(|cx| BrowseGraph::new(navigator.clone(), layout, cx)));
         let updates = ui.updates();
         let mut subscriptions = vec![
@@ -111,7 +109,7 @@ impl BrowsePage {
                 }
             }),
             // Only repaints: the empty listing reads whether a scan is running.
-            cx.subscribe(&updates, |_, _, _: &LibraryScanChanged, cx| cx.notify()),
+            cx.observe(&updates, |_, _, cx| cx.notify()),
         ];
         if let Some(graph) = &graph {
             subscriptions.push(cx.observe(graph, |_, _, cx| cx.notify()));
@@ -138,7 +136,6 @@ impl BrowsePage {
             restore_focus: false,
             search_input: None,
             search_open: false,
-            search_debounce: None,
             browse_options_sheet_open: false,
             _subscriptions: subscriptions,
             session_path: Vec::new(),
@@ -172,7 +169,6 @@ impl BrowsePage {
 
     fn handle_book_event(&mut self, event: BookCardEvent, cx: &mut Context<Self>) {
         match (event, self.folder_actions.clone()) {
-            (BookCardEvent::OpenDetail(book, cover), _) => self.show_book_detail(book, cover, cx),
             (BookCardEvent::Place(books, source, placement), Some(actions)) => actions.update(cx, |actions, cx| actions.open_placement_picker(placement, FolderTargets { books, source, ..FolderTargets::default() }, cx)),
             (BookCardEvent::Remove(book, source), Some(actions)) => actions.update(cx, |actions, cx| actions.remove_books_from_folder(FolderTargets { books: vec![book], source: Some(source), ..FolderTargets::default() }, cx)),
             // Cards offer the folder commands only on a page that has them.
@@ -302,6 +298,12 @@ impl BrowsePage {
             return;
         }
         let contents = match contents {
+            #[cfg(target_arch = "wasm32")]
+            FolderDrop::BrowserFiles(files) => {
+                self.dismiss_menu(cx);
+                self.ui.import_browser_files(destination, files.take(), cx);
+                return;
+            }
             FolderDrop::Catalog(books) => {
                 self.dismiss_menu(cx);
                 self.import_catalog_books(destination, books, window, cx);
@@ -344,6 +346,8 @@ impl BrowsePage {
                     }
                 }
                 FolderDrop::Catalog(_) => unreachable!("catalog drops import before opening a placement menu"),
+                #[cfg(target_arch = "wasm32")]
+                FolderDrop::BrowserFiles(_) => unreachable!("browser drops import before opening a placement menu"),
             })
         });
         self.cards.update(cx, |cards, cx| cards.clear_selection(cx));
@@ -411,18 +415,10 @@ impl BrowsePage {
     }
 
     fn search_changed(&mut self, query: String, cx: &mut Context<Self>) {
-        self.search_debounce = None;
         if query == self.navigator.read(cx).selection.search {
             return;
         }
-        let timer = cx.background_executor().timer(Duration::from_millis(250));
-        self.search_debounce = Some(cx.spawn(async move |page, cx| {
-            timer.await;
-            let _ = page.update(cx, |page, cx| {
-                page.search_debounce = None;
-                page.navigator.update(cx, |navigator, cx| navigator.search(query, cx));
-            });
-        }));
+        self.navigator.update(cx, |navigator, cx| navigator.search(query, cx));
     }
 
     fn search_focused(&self, window: &Window, cx: &App) -> bool {
@@ -463,7 +459,7 @@ impl BrowsePage {
     }
 
     fn selection_keys_enabled(&self, cx: &App) -> bool {
-        matches!(self.navigator.read(cx).kind, BrowseKind::Folder | BrowseKind::Books | BrowseKind::Catalog) && self.menu_keys_enabled(cx)
+        self.menu_keys_enabled(cx)
     }
 
     fn menu_keys_enabled(&self, cx: &App) -> bool {
@@ -684,7 +680,6 @@ impl BrowsePage {
         // Opening a match leaves the search: what it found is now the page.
         if !navigator.selection.search.is_empty() {
             self.navigator.update(cx, |navigator, _| navigator.selection.search.clear());
-            self.search_debounce = None;
             if let Some(input) = &self.search_input {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
             }
@@ -813,12 +808,10 @@ impl BrowsePage {
         let controls = components::browser_topbar_right()
             .when(inline_search_field.is_some(), |controls| controls.flex_1())
             .children(inline_search_field.map(|field| div().flex_1().min_w(rems(8.0)).child(field)))
-            .when(!compact_graph, |controls| {
-                controls.child(
-                    components::selectable_button(components::outlined_icon_button("toggle-browse-search", search_button_label, IconName::Search), search_open || searching, theme)
-                        .on_click(cx.listener(|page, _, window, cx| page.toggle_search(window, cx))),
-                )
-            })
+            .child(
+                components::selectable_button(components::outlined_icon_button("toggle-browse-search", search_button_label, IconName::Search), search_open || searching, theme)
+                    .on_click(cx.listener(|page, _, window, cx| page.toggle_search(window, cx))),
+            )
             .children(view_toggle)
             .children(graph_layout_switch)
             .when(!compact_graph, |controls| controls.children(self.folder_actions.as_ref().zip(folder).map(|(actions, parent)| FolderActions::render_trigger(actions.clone(), parent, menu_anchor, self.ui.files_busy(cx)))))
@@ -835,7 +828,6 @@ impl BrowsePage {
                 .items_center()
                 .p(px(4.0))
                 .when(cfg!(feature = "kobo"), |bar| bar.px(px(components::CONTENT_INSET)))
-                .rounded(px(8.0))
                 .bg(theme.page_bg)
                 .border_1()
                 .border_color(theme.rule)
@@ -889,8 +881,11 @@ impl BrowsePage {
                         return;
                     }
                     page.restoring_detail = None;
-                    if let Ok(detail) = result {
-                        page.show_book_detail(detail.book, None, cx);
+                    match result {
+                        Ok(detail) => page.show_book_detail(detail.book, None, cx),
+                        Err(error) => {
+                            cx.with_window(cx.entity_id(), |window, cx| notify_error("book-detail-restore-error", user_facing_error(&error, text!(browse::could_not_load_book_details_please_try_again)), window, cx));
+                        }
                     }
                     cx.notify();
                 });
@@ -973,6 +968,10 @@ impl BrowsePage {
         }
         let body = body
             .child(view)
+            .when(empty && self.shown_graph().is_none() && !show_loading && !navigator.is_loading() && error.is_none(), |body| {
+                let message = if navigator.selection.search.is_empty() { text!(browse::no_items_here) } else { text!(browse::no_matches) };
+                body.child(components::absolute_full_size().flex().items_center().justify_center().child(components::reader_state_note(message, theme)))
+            })
             .when(show_loading, |body| {
                 body.child(components::absolute_full_size().debug_selector(|| "browse-loading-overlay".into()).bg(theme.page_bg).flex().items_center().justify_center().child(components::browser_loading_message(loading_label, theme)))
             })
@@ -1040,7 +1039,7 @@ impl BrowsePage {
             return None;
         }
         let (source, items) = self.cards.read(cx).selected_items(cx);
-        if items.len() < 2 {
+        if items.is_empty() {
             return None;
         }
         let theme = components::browser_theme(cx);
@@ -1087,6 +1086,11 @@ impl BrowsePage {
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(Self::on_open_context_menu))
             .on_action(cx.listener(Self::on_toggle_grid_selection))
+            .on_action(cx.listener(|page, _: &SelectLoadedItems, _, cx| {
+                if page.selection_keys_enabled(cx) {
+                    page.cards.update(cx, |cards, cx| cards.select_loaded(cx));
+                }
+            }))
             .on_action(cx.listener(Self::on_copy_books))
             .on_action(cx.listener(Self::on_cut_books))
             .on_action(cx.listener(Self::on_focused_book_clipboard))
@@ -1145,7 +1149,7 @@ mod tests {
     use std::{cell::RefCell, fs};
 
     #[gpui::test]
-    async fn search_debounces_across_hiding_and_cancels_when_opening_a_result(cx: &mut TestAppContext) {
+    async fn search_updates_immediately_and_clears_when_opening_a_result(cx: &mut TestAppContext) {
         let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_directory, _session, library, _app_client) = LibrarySession::test_context(cx).await;
         let updates = library.updates();
@@ -1161,15 +1165,9 @@ mod tests {
         visual.run_until_parked();
         visual.simulate_input("Search");
         visual.run_until_parked();
-        visual.executor().advance_clock(Duration::from_millis(200));
-        visual.run_until_parked();
         visual.simulate_input(" destination");
         visual.run_until_parked();
         page.update(&mut visual, |page, cx| page.close_search(cx));
-        visual.executor().advance_clock(Duration::from_millis(249));
-        visual.run_until_parked();
-        visual.read_entity(&navigator, |navigator, _| assert!(navigator.selection.search.is_empty()));
-        visual.executor().advance_clock(Duration::from_millis(1));
         visual.run_until_parked();
         visual.condition(&navigator, |navigator, _| navigator.selection.search == "Search destination" && navigator.listing.child(BrowseLocation::Folder(folder)).is_some()).await;
         let input = visual.read_entity(&page, |page, _| page.search_input.clone().unwrap());
@@ -1179,18 +1177,13 @@ mod tests {
             assert_eq!(input.read(cx).value().as_str(), "Search destination");
         });
         visual.simulate_input(" stale");
-        visual.run_until_parked();
-        visual.read_entity(&page, |page, _| assert!(page.search_debounce.is_some()));
         visual.update(|window, cx| page.update(cx, |page, cx| page.open_child(BrowseLocation::Folder(folder), window, cx)));
-        visual.read_entity(&page, |page, _| assert!(page.search_debounce.is_none()));
         visual.condition(&navigator, |navigator, _| navigator.destination.location == BrowseLocation::Folder(folder)).await;
-        visual.executor().advance_clock(Duration::from_millis(300));
         visual.run_until_parked();
         visual.read_entity(&page, |page, cx| {
             assert_eq!(page.navigator.read(cx).destination.location, BrowseLocation::Folder(folder));
             assert!(page.navigator.read(cx).selection.search.is_empty());
             assert!(input.read(cx).value().is_empty());
-            assert!(page.search_debounce.is_none());
         });
     }
 

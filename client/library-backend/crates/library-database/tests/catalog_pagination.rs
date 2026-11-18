@@ -211,7 +211,7 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         // Snapshots may omit the optional duration table entirely.
         source.execute_batch("DROP TABLE book_audiobook_duration").unwrap();
         source.execute("UPDATE book SET title='Retitled' WHERE row_id=1", []).unwrap();
-        catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, catalog::FORMAT_VERSION)).unwrap();
+        catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, 11)).unwrap();
         assert_eq!(catalog::entry(audio_key).unwrap().unwrap().audiobook_duration_ms, None);
         let published: (i64, String) = attached
             .query_row("SELECT browse.row_id,source.title FROM catalog.catalog_hosted source JOIN catalog.catalog_browse_book browse ON source.identity=browse.key WHERE browse.key=?1", [[1_u8; 32].as_slice()], |row| {
@@ -228,7 +228,7 @@ fn catalog_first_pages_and_arrow_pages_match_complete_sections() {
         let fresh_revision = fresh.page.as_ref().unwrap().result_revision.as_ref().unwrap();
         source.pragma_update(None, "foreign_keys", false).unwrap();
         source.execute("DELETE FROM description WHERE row_id=1", []).unwrap();
-        assert!(catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, catalog::FORMAT_VERSION)).is_err(), "invalid foreign keys must roll the whole snapshot back");
+        assert!(catalog::store(&source.serialize("main").unwrap(), &catalog_path, (1, 11)).is_err(), "invalid foreign keys must roll the whole snapshot back");
         let retained = db.browse_result_page(&heading_query, false, fresh_revision, BrowsePageRequest::default()).unwrap().unwrap();
         assert_eq!(retained.contents, fresh.contents);
         assert_eq!(retained.sections, fresh.sections);

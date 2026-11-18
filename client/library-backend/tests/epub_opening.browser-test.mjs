@@ -42,7 +42,16 @@ with zipfile.ZipFile(output, 'w') as archive:
 sys.stdout.buffer.write(output.getvalue())
 `, name], {maxBuffer:4 * 1024 * 1024}));
 }
+const opfsFixture = execFileSync('python3', ['-c', `
+import io, sys, zipfile
+output = io.BytesIO()
+with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+    archive.writestr('track10.mp3', bytes([10]) * (2 * 1024 * 1024))
+    archive.writestr('track2.mp3', bytes([2]) * (2 * 1024 * 1024))
+sys.stdout.buffer.write(output.getvalue())
+`]);
 const calls = [];
+let cancelledDownload = false;
 const server = createServer(async (request, response) => {
   try {
     response.setHeader('Access-Control-Allow-Origin', '*');
@@ -80,6 +89,47 @@ const server = createServer(async (request, response) => {
       response.setHeader('Content-Length', body.length);
       response.writeHead(206);
       return response.end(body);
+    }
+    if (path === '/slow-audiobook') {
+      response.writeHead(200, {'Content-Type':'application/zip'});
+      response.write(Buffer.alloc(64 * 1024, 7));
+      const timer = setTimeout(() => response.end(), 15000);
+      response.on('close', () => { cancelledDownload = !response.writableEnded; clearTimeout(timer); });
+      return;
+    }
+    if (path === '/cancellation-worker.js') {
+      response.setHeader('Content-Type', 'text/javascript');
+      return response.end(`import init, {checkOpfsCancellation} from '/pkg/epub_opening_checks.js';
+        onmessage = async () => {
+          try {
+            await init();
+            const result = JSON.parse(await checkOpfsCancellation(location.origin + '/slow-audiobook'));
+            postMessage({result});
+          } catch (error) { postMessage({error:String(error)}); }
+        };`);
+    }
+    if (path === '/termination-worker.js') {
+      response.setHeader('Content-Type', 'text/javascript');
+      return response.end(`import init, {prepareOpfsWorkerTermination, checkOpfsWorkerRecovery} from '/pkg/epub_opening_checks.js';
+        onmessage = async ({data}) => {
+          try {
+            await init();
+            if (data.recover) postMessage({result:JSON.parse(await checkOpfsWorkerRecovery(data.library))});
+            else await prepareOpfsWorkerTermination(location.origin + '/slow-audiobook', data.library, bytes => postMessage({ready:true, bytes}));
+          } catch (error) { postMessage({error:String(error)}); }
+        };`);
+    }
+    if (path === '/opfs.zip') return response.end(opfsFixture);
+    if (path === '/opfs-worker.js') {
+      response.setHeader('Content-Type', 'text/javascript');
+      return response.end(`import init, {checkOpfsRepacking} from '/pkg/epub_opening_checks.js';
+        onmessage = async () => {
+          try {
+            await init();
+            const bytes = new Uint8Array(await (await fetch('/opfs.zip')).arrayBuffer());
+            postMessage({result:JSON.parse(await checkOpfsRepacking(bytes))});
+          } catch (error) { postMessage({error:String(error)}); }
+        };`);
     }
     if (path === '/worker.js') {
       response.setHeader('Content-Type', 'text/javascript');
@@ -123,6 +173,57 @@ try {
     assert.equal(requests[0].range, 'bytes=-65557');
     console.log(JSON.stringify({name, requests:requests.length, ...result}));
   }
+  const opfs = await page.evaluate(() => new Promise((resolve, reject) => {
+    const worker = new Worker('/opfs-worker.js', {type:'module'});
+    const timer = setTimeout(() => { worker.terminate(); reject(Error('OPFS repacking timed out')); }, 30000);
+    worker.onmessage = ({data}) => { clearTimeout(timer); worker.terminate(); data.error ? reject(Error(data.error)) : resolve(data.result); };
+    worker.onerror = event => { clearTimeout(timer); worker.terminate(); reject(Error(event.message)); };
+    worker.postMessage(null);
+  }));
+  assert.equal(opfs.final_reader_cleanup, true);
+  console.log(JSON.stringify(opfs));
+  // Keep the worker alive until the server observes cancellation: termination must
+  // not be what aborts the request under test.
+  const cancellation = await page.evaluate(() => new Promise((resolve, reject) => {
+    const worker = new Worker('/cancellation-worker.js', {type:'module'});
+    globalThis.cancellationWorker = worker;
+    const timer = setTimeout(() => { worker.terminate(); reject(Error('Cancellation timed out')); }, 10000);
+    worker.onmessage = ({data}) => { clearTimeout(timer); data.error ? reject(Error(data.error)) : resolve(data.result); };
+    worker.onerror = event => { clearTimeout(timer); reject(Error(event.message)); };
+    worker.postMessage(null);
+  }));
+  const deadline = Date.now() + 5000;
+  while (!cancelledDownload && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(cancelledDownload, true, 'dropping acquisition must abort the stalled HTTP response');
+  await page.evaluate(() => globalThis.cancellationWorker.terminate());
+  console.log(JSON.stringify({...cancellation, http_aborted:true}));
+  const recovery = await page.evaluate(async () => {
+    const library = crypto.randomUUID();
+    const invoke = recover => new Promise((resolve, reject) => {
+      const worker = new Worker('/termination-worker.js', {type:'module'});
+      const timer = setTimeout(() => { worker.terminate(); reject(Error('Worker recovery timed out')); }, 15000);
+      worker.onmessage = ({data}) => {
+        clearTimeout(timer);
+        worker.terminate(); // In prepare mode this prevents Rust destructors from running.
+        data.error ? reject(Error(data.error)) : resolve(data);
+      };
+      worker.onerror = event => { clearTimeout(timer); worker.terminate(); reject(Error(event.message)); };
+      worker.postMessage({library, recover});
+    });
+    const prepared = await invoke(false);
+    if (!prepared.ready || prepared.bytes <= 0) throw Error('Worker did not persist a partial download');
+    // Confirm that termination left an actual orphan before starting recovery.
+    let directory = await navigator.storage.getDirectory();
+    for (const part of ['__libraries', library, 'book']) directory = await directory.getDirectoryHandle(part);
+    let count = 0;
+    for await (const entry of directory.values()) if (entry.kind === 'file') count++;
+    if (count !== 2) throw Error('Expected a committed file and an orphan before recovery, found ' + count);
+    const recovered = await invoke(true);
+    return {...recovered.result, persisted_bytes:prepared.bytes, files_before_recovery:count};
+  });
+  assert.equal(recovery.orphan_reclaimed, true);
+  assert.equal(recovery.published_bytes_preserved, true);
+  console.log(JSON.stringify(recovery));
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

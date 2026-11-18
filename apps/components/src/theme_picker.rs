@@ -6,7 +6,7 @@ use crate::Button;
 use app_preferences::{ApplicationTheme, ResolvedAppearance};
 use gpui::prelude::*;
 use gpui::{Div, ElementId, px, rems, rgb};
-use gpui_component::{Icon, IconName};
+use gpui_component::{Icon, IconName, Selectable};
 
 use crate::theme::palette;
 
@@ -67,5 +67,5 @@ pub fn theme_picker_swatch(id: impl Into<ElementId>, theme: ApplicationTheme, ap
             sample.child(gpui::div().absolute().top(px(2.0)).right(px(2.0)).size(rems(0.875)).flex().items_center().justify_center().bg(accent).text_color(rgb(colors.accent_text)).child(Icon::new(IconName::Check).size(rems(0.625))))
         });
 
-    crate::base_button(id).ghost().size(rems(SWATCH_SIZE_REM)).flex_none().p_0().rounded(px(0.0)).bg(page).tooltip(label).child(sample)
+    crate::base_button(id).ghost().no_fill().selected(selected).size(rems(SWATCH_SIZE_REM)).flex_none().p_0().rounded(px(0.0)).bg(page).tooltip(label).child(sample)
 }

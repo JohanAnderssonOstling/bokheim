@@ -47,12 +47,11 @@ pub(super) struct AddLibraryChoices {
     focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
     selected: usize,
-    choices: Vec<AddLibraryChoice>,
 }
 
 impl Sidebar {
     pub(super) fn open_add_library_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let choices: Vec<_> = AddLibraryChoice::ALL.iter().copied().collect();
+        let choices = AddLibraryChoice::ALL;
         let previous_focus = window.focused(cx);
         let focus = cx.focus_handle();
         let menu = if cx.supports_touch_input() || components::uses_mobile_navigation(window) {
@@ -60,9 +59,9 @@ impl Sidebar {
             None
         } else {
             let sidebar = cx.entity();
-            let menu_choices = choices.clone();
+            let menu_choices = choices;
             let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
-                for &choice in &menu_choices {
+                for &choice in menu_choices {
                     let sidebar = sidebar.clone();
                     menu = menu.item(components::menu_item_with_icon(choice.label(), choice.icon(), move |_, window, cx| {
                         sidebar.update(cx, |sidebar, cx| sidebar.add_library(choice, window, cx));
@@ -77,7 +76,7 @@ impl Sidebar {
             menu.focus_handle(cx).focus(window, cx);
             Some((menu, subscription))
         };
-        self.add_library_choices = Some(AddLibraryChoices { menu, focus, previous_focus, selected: 0, choices });
+        self.add_library_choices = Some(AddLibraryChoices { menu, focus, previous_focus, selected: 0 });
         cx.notify();
     }
 
@@ -134,9 +133,9 @@ impl Sidebar {
         let Some(choices) = self.add_library_choices.as_mut() else { return };
         match event.keystroke.key.as_str() {
             "up" => choices.selected = choices.selected.saturating_sub(1),
-            "down" => choices.selected = (choices.selected + 1).min(choices.choices.len() - 1),
+            "down" => choices.selected = (choices.selected + 1).min(AddLibraryChoice::ALL.len() - 1),
             "enter" | "space" => {
-                let choice = choices.choices[choices.selected];
+                let choice = AddLibraryChoice::ALL[choices.selected];
                 self.add_library(choice, window, cx);
             }
             "escape" => self.close_add_library_choices(window, cx),
@@ -157,17 +156,19 @@ impl Sidebar {
         let mut panel = components::modal_form_surface(theme)
             .id("add-library-overlay")
             .debug_selector(|| "add-library-overlay".into())
-            .w(px(360.0))
+            .w(gpui::rems(22.5))
             .gap(px(components::SPACE_XS))
             .track_focus(&choices.focus)
             .on_key_down(move |event, window, cx| keys.update(cx, |sidebar, cx| sidebar.add_library_overlay_key(event, window, cx)))
             .child(header);
-        for (index, &choice) in choices.choices.iter().enumerate() {
+        for (index, &choice) in AddLibraryChoice::ALL.iter().enumerate() {
             let select = emitter.clone();
-            panel = panel.child(components::library_switcher_item(("add-library-choice", index), choice.label(), false, index == choices.selected, theme).flex_none().w_full().min_h(px(48.0)).on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                select.update(cx, |sidebar, cx| sidebar.add_library(choice, window, cx));
-            }));
+            panel = panel.child(components::library_switcher_item(("add-library-choice", index), choice.label(), false, index == choices.selected, theme).flex_none().w_full().min_h(gpui::rems(components::TOUCH_TARGET_REM)).on_click(
+                move |_, window, cx| {
+                    cx.stop_propagation();
+                    select.update(cx, |sidebar, cx| sidebar.add_library(choice, window, cx));
+                },
+            ));
         }
         Some(
             deferred(components::anchor_to_window(

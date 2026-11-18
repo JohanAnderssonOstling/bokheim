@@ -1,4 +1,4 @@
-use super::super::library_resources::LibraryResources;
+use super::super::{library_resources::LibraryResources, library_handle::LibraryOwner};
 use super::*;
 use crate::executor::BackendExecutor;
 use crate::library::book::reading::thumbnail;
@@ -6,7 +6,7 @@ use crate::library::events::LibraryEvent;
 use crate::library::LibraryNotifications;
 use crate::{BookId, LibraryId, LibrarySyncState};
 use library_services::interest::{InterestState, NotificationInterest};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use sync_common::api::notifications::NotificationMessage;
 use sync_common::ROOT_DIR_ID;
@@ -119,7 +119,7 @@ async fn failed_scan_releases_busy_state_and_can_scan_again() {
     let marker = directory.join(".biblos_uuid");
     std::fs::write(&marker, "invalid directory marker").unwrap();
 
-    assert!(service.scan_folder().await.is_err());
+    assert!(matches!(service.scan_folder().await.unwrap(), crate::library::import::filesystem_scan::FolderScan::Incomplete));
     assert!(!service.scanner_running(), "a failed scan must not block file replay");
     service.event_state.lock().expect("library events").drain(&service.events);
     let mut observed = Vec::new();
@@ -190,7 +190,7 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
     assert!(delay <= Duration::from_secs(5) && delay > Duration::from_secs(4));
     assert_eq!(service.state.read().await.database().reading_position(&hash).await.unwrap().as_deref(), Some("epubcfi(/6/2)"));
     service.event_state.lock().expect("library events").drain(&service.events);
-    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::ReadingProgress(hash));
+    assert!(updates.is_empty(), "saving a reading position must not refresh the library UI");
     let recent = service.state.read().await.database().browse_contents(&query, false).await.unwrap().books;
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].book_id(), Some(hash));
@@ -201,10 +201,10 @@ async fn saving_a_reading_position_refreshes_the_library_before_delayed_sync() {
     let mut outbox = service.state.read().await.database().sync_prepare_outbox_excluding_positions(service.events.reading_positions.borrow().waiting(web_time::Instant::now())).await.unwrap();
     assert!(service.state.read().await.database().sync_next_outbox_page(&mut outbox).await.unwrap().iter().all(|p| p.state.value.kind() != "reading_position"));
 
-    // Updates within a chapter must refresh too, without needing a completed chapter.
+    // Updates within a chapter remain durable without refreshing the library UI.
     handle.update_reading_position(hash, "epubcfi(/6/4)".into(), Some(20.0), None).await.unwrap();
     service.event_state.lock().expect("library events").drain(&service.events);
-    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::ReadingProgress(hash));
+    assert!(updates.is_empty(), "saving a reading position must not refresh the library UI");
     assert_eq!(service.state.read().await.database().browse_contents(&query, false).await.unwrap().books[0].progress, 20.0);
     handle.update_reading_position(hash, "epubcfi(/6/4)".into(), Some(20.0), None).await.unwrap();
     service.event_state.lock().expect("library events").drain(&service.events);
@@ -314,10 +314,10 @@ async fn foreground_resume_reconciles_libraries_without_a_socket_and_does_not_po
     assert!(second_service_changes.borrow_and_update().refresh_remote);
 
     let token = account.require().unwrap().token().to_owned();
-    assert!(account.refresh_after_unauthorized(token).await.unwrap().is_none());
+    assert!(account.refresh_after_unauthorized(token).await.is_err());
     drop(view);
     let _view = interest.view(false);
-    assert!(!notifications.observe_activity_at(*activity.borrow(), now + Duration::from_secs(100), &libraries).await, "signed-out resumes do not trigger discovery or library refresh");
+    assert!(notifications.observe_activity_at(*activity.borrow(), now + Duration::from_secs(100), &libraries).await, "a transient refresh failure keeps the account available for a later resume");
 }
 
 #[tokio::test]

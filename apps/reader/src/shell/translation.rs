@@ -1,11 +1,11 @@
 //! Translation content inside the shared selection popup.
 use ui_text::text;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use content_address::BookId;
 use gpui::prelude::*;
-use gpui::{ClipboardItem, Context, EventEmitter, IntoElement, Render, Task, Window, div, px, rems};
+use gpui::{Context, EventEmitter, IntoElement, Render, Task, Window, div, px, rems};
 use gpui_component::{IconName, Theme, popover::Popover, text::TextView};
 use language_tags::LanguageTag;
 use reader_lookups::{
@@ -53,11 +53,12 @@ impl TranslationPopup {
         let lookups = super::lookups::client(cx);
         let preferences = ReaderSettings::preferences(cx);
         let mut targets = preferences.translation_languages.clone().unwrap_or_default();
-        let mut seen = HashSet::new();
-        targets.retain(|tag| seen.insert(tag.clone()));
         let source = preferences.translation_sources.get(&book_id).cloned().or_else(|| languages.iter().find_map(|tag| parse_language_tag(tag)));
         if targets.is_empty() {
             targets = languages::system_languages(cx);
+        }
+        targets.truncate(1);
+        if preferences.translation_languages.as_ref() != Some(&targets) {
             ReaderSettings::update(cx, |preferences| preferences.translation_languages = Some(targets.clone()));
         }
         let mut popup = Self { picker_bounds: None, lookups, book_id, text, source, targets, translations: Vec::new(), error: None, language_picker_open: false, cache: HashMap::new() };
@@ -120,7 +121,6 @@ impl TranslationPopup {
             };
             self.translations.push(Translation { language: target.clone(), result, _request: request });
         }
-        self.translations.sort_by_key(|translation| self.targets.iter().position(|target| target == &translation.language));
         if ready_result {
             cx.emit(ResultsChanged);
         }
@@ -138,14 +138,10 @@ impl TranslationPopup {
                 preferences.translation_sources.insert(self.book_id, code);
             });
         } else {
-            if let Some(index) = self.targets.iter().position(|target| target == &code) {
-                if self.targets.len() == 1 {
-                    return;
-                }
-                self.targets.remove(index);
-            } else {
-                self.targets.push(code);
+            if self.targets.first() == Some(&code) {
+                return;
             }
+            self.targets = vec![code];
             ReaderSettings::update(cx, |preferences| preferences.translation_languages = Some(self.targets.clone()));
         }
         self.translate(cx);
@@ -187,30 +183,17 @@ impl TranslationPopup {
                     .gap(px(8.0))
                     .child(components::section_title(text!(reader::mymemory)))
                     .child(text!(reader::selected_text_and_the_language_pair_are_sent_directly_to_mymemory_it))
-                    .when(self.source.is_some(), |panel| panel.child(div().flex().items_center().gap(px(8.0)).child(text!(reader::translate_from)).child(languages::picker(true, self.source.as_slice(), self.picker_bounds, window, cx))))
+                    .when(self.source.is_some(), |panel| panel.child(div().flex().items_center().gap(px(8.0)).child(text!(reader::translate_from)).child(languages::picker(true, self.source.as_ref(), self.picker_bounds, window, cx))))
                     .child(components::outlined_text_button("translation-privacy", text!(reader::mymemory_privacy_policy)).ghost().no_fill().on_click(|_, _, cx| cx.open_url("https://mymemory.translated.net/terms-and-conditions"))),
             ));
-        div().flex_none().flex().items_center().gap(px(8.0)).child(info)
-            .children(self.translations.iter().filter_map(|translation| {
-                let translated = translation.result.as_ref()?.as_ref().ok()?.clone();
-                let language = &translation.language;
-                let label = if self.targets.len() > 1 {
-                    format!("{} ({})", text!(reader::copy_translation), languages::language_label(language))
-                } else {
-                    text!(reader::copy_translation).to_owned()
-                };
-                Some(components::outlined_icon_button(format!("translation-copy-{language}"), label, IconName::Copy).no_fill().on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(translated.clone()));
-                }))
-            })).into_any_element()
+        div().flex_none().flex().items_center().child(info).into_any_element()
     }
 }
 
 impl Render for TranslationPopup {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = components::browser_theme(cx);
         let header =
-            div().flex().items_center().gap(px(8.0)).flex_none().child(div().flex().items_center().gap(px(8.0)).flex_1().min_w_0().child(text!(reader::translate_to)).child(languages::picker(false, &self.targets, self.picker_bounds, window, cx)));
+            div().flex().items_center().gap(px(8.0)).flex_none().child(div().flex().items_center().gap(px(8.0)).flex_1().min_w_0().child(text!(reader::translate_to)).child(languages::picker(false, self.targets.first(), self.picker_bounds, window, cx)));
         div()
             .w_full()
             .flex_none()
@@ -219,7 +202,7 @@ impl Render for TranslationPopup {
             .gap(px(8.0))
             .child(header)
             .when(self.source.is_none() && self.text.len() <= MAX_SELECTION_BYTES, |panel| {
-                panel.child(div().flex().items_center().gap(px(8.0)).flex_none().child(text!(reader::translate_from)).child(languages::picker(true, self.source.as_slice(), self.picker_bounds, window, cx)))
+                panel.child(div().flex().items_center().gap(px(8.0)).flex_none().child(text!(reader::translate_from)).child(languages::picker(true, self.source.as_ref(), self.picker_bounds, window, cx)))
             })
             .child(div().id("translation-results").flex().flex_col().gap(px(8.0)).children(self.error.clone()).children(self.translations.iter().map(|translation| {
                 let language = translation.language.clone();
@@ -234,7 +217,6 @@ impl Render for TranslationPopup {
                     .flex()
                     .items_start()
                     .gap(px(8.0))
-                    .when(self.targets.len() > 1, |row| row.child(div().flex_none().max_w(px(100.0)).text_sm().text_color(theme.text_muted).child(languages::language_label(&language))))
                     .child(div().flex_1().min_w_0().child(TextView::plain(format!("translation-text-{language}"), result).selectable(matches!(&translation.result, Some(Ok(_))))))
                     .when(matches!(&translation.result, Some(Err(_))), |panel| {
                         panel.child(components::outlined_text_button(format!("translation-retry-{language}"), text!(common::retry)).on_click(cx.listener(move |this, _, _, cx| this.retry(&language, cx))))

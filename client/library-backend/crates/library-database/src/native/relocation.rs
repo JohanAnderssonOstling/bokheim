@@ -82,11 +82,11 @@ impl Database {
             tx.execute("UPDATE local_file_work SET source_root=?1,source_identity=?2,source_library=?3 WHERE operation='remove' AND source_root IS NULL", (&source, &source_identity, &source_library))?;
             for (book, directory, old) in retained {
                 if let Some(new) = paths.get(&stored_book_path(&old)?) {
-                    tx.execute("INSERT OR IGNORE INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(?1,?2,?3)", (book, directory, new.as_str()))?;
+                    tx.execute("INSERT OR IGNORE INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(?1,?2,'/'||ltrim(?3,'/'))", (book, directory, new.as_str()))?;
                 }
             }
             for (directory, path) in directories {
-                tx.execute("INSERT INTO local_directory_projection(dir_id,relative_path) VALUES(?1,?2)", (directory.to_string(), &path))?;
+                tx.execute("INSERT INTO local_directory_projection(dir_id,relative_path) VALUES(?1,'/'||ltrim(?2,'/'))", (directory.to_string(), &path))?;
             }
             let mut observed_books = HashSet::new();
             for (book, directory, path) in relocated {

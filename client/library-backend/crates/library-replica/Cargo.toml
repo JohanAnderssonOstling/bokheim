@@ -9,6 +9,7 @@ default = ["random-ids"]
 random-ids = ["library-model/random-ids"]
 
 [dependencies]
+prost = "0.14.4"
 content-address = { path = "../../../../shared/content-address" }
 # Keep compatibility normalization consistent across replicas.
 unicode-normalization = "=0.1.25"

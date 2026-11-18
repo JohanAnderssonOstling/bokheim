@@ -30,6 +30,12 @@ const SCHEMA: &str = r#"
         library_id TEXT PRIMARY KEY NOT NULL,
         storage_path TEXT NOT NULL
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS app_value_member (
+        group_key TEXT NOT NULL,
+        member_key TEXT NOT NULL,
+        value BLOB NOT NULL,
+        PRIMARY KEY(group_key,member_key)
+    ) STRICT, WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS app_value (
         key TEXT PRIMARY KEY NOT NULL,
         value BLOB NOT NULL
@@ -276,6 +282,19 @@ impl LocalRegistry {
         self.complete_local_purge(library_id)
     }
 
+    pub fn read_value_members(&mut self, group: &str) -> RegistryResult<Vec<Vec<u8>>> {
+        Ok(self.connection.prepare_cached("SELECT value FROM app_value_member WHERE group_key=?1 ORDER BY member_key")?.query_map([group], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn write_value_member(&mut self, group: &str, member: &str, value: &[u8]) -> RegistryResult<()> {
+        self.connection.execute(
+            "INSERT INTO app_value_member(group_key,member_key,value) VALUES(?1,?2,?3)
+            ON CONFLICT(group_key,member_key) DO UPDATE SET value=excluded.value",
+            params![group, member, value],
+        )?;
+        Ok(())
+    }
+
     pub fn read_value(&mut self, key: &str) -> RegistryResult<Option<Vec<u8>>> {
         Ok(self.connection.query_row("SELECT value FROM app_value WHERE key=?1", [key], |row| row.get(0)).optional()?)
     }
@@ -286,7 +305,10 @@ impl LocalRegistry {
     }
 
     pub fn remove_value(&mut self, key: &str) -> RegistryResult<()> {
-        self.connection.execute("DELETE FROM app_value WHERE key=?1", [key])?;
+        let tx = self.connection.transaction()?;
+        tx.execute("DELETE FROM app_value_member WHERE group_key=?1", [key])?;
+        tx.execute("DELETE FROM app_value WHERE key=?1", [key])?;
+        tx.commit()?;
         Ok(())
     }
 }

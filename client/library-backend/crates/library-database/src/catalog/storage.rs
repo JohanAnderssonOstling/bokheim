@@ -25,7 +25,7 @@ struct ActiveCatalog {
     generation: u64,
 }
 static ACTIVE: OnceLock<Mutex<ActiveCatalog>> = OnceLock::new();
-const PROJECTION_VERSION: i64 = 20;
+const PROJECTION_VERSION: i64 = 22;
 const SCHEMA: &str = include_str!("schema.sql");
 const COMPACT_SCHEMA: &str = include_str!("compact.sql");
 // An inactive catalog exposes empty browse tables without allocating source records.
@@ -221,7 +221,15 @@ fn previous_ids(db: &Connection) -> Result<StableIds, DatabaseError> {
         return Ok(StableIds::default());
     }
     let mut ids = StableIds::default();
-    let mut rows = db.prepare("SELECT key,row_id FROM catalog_browse_book")?;
+    // Read IDs without the derived view: an older cached view may refer to
+    // optional source tables that this projection rebuild is about to repair.
+    let has_search: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='catalog_browse_search')", [], |row| row.get(0))?;
+    let query = if has_search {
+        "SELECT book.key,browse.row_id FROM catalog_browse_search browse JOIN book ON book.row_id=browse.book_row_id"
+    } else {
+        "SELECT key,row_id FROM catalog_browse_book"
+    };
+    let mut rows = db.prepare(query)?;
     for row in rows.query_map([], |row| Ok((CardKey::from(row.get::<_, BookId>(0)?), row.get::<_, i64>(1)?)))? {
         let (key, id) = row?;
         ids.books.insert(key, id);

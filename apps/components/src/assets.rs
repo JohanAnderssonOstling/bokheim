@@ -220,7 +220,7 @@ impl AssetSource for Assets {
         if CLOUD_ICON_PATH.starts_with(path) {
             assets.push(CLOUD_ICON_PATH.into());
         }
-        assets.extend(PHOSPHOR_LIGHT_ICONS.iter().chain(&TRANSPORT_ICONS).filter(|(icon_path, _)| icon_path.starts_with(path)).map(|(icon_path, _)| SharedString::from(*icon_path)));
+        assets.extend(PHOSPHOR_LIGHT_ICONS.iter().chain(&TRANSPORT_ICONS).chain(&READER_SETTINGS_ICONS).filter(|(icon_path, _)| icon_path.starts_with(path)).map(|(icon_path, _)| SharedString::from(*icon_path)));
         if WIFI_OFF_ICON_PATH.starts_with(path) {
             assets.push(WIFI_OFF_ICON_PATH.into());
         }

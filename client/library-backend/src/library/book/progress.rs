@@ -1,16 +1,8 @@
 //! Reading positions, chapter status, and finished-book state.
 
-use crate::library::{LibraryHandle, LibraryResources};
+use crate::library::LibraryHandle;
 use crate::{BackendError, BookId};
 use library_model::LibraryUpdate;
-
-impl LibraryResources {
-    fn reading_position_changed(&self, book_id: BookId) {
-        self.event_state.lock().expect("library events").reading_position_changed(book_id, &self.events);
-        // Shelf membership, recency and progress change locally, before sync.
-        self.events.updates.publish(LibraryUpdate::ReadingProgress(book_id));
-    }
-}
 
 impl LibraryHandle {
     pub async fn reading_position(&self, book_id: BookId) -> Result<Option<String>, BackendError> {
@@ -35,7 +27,7 @@ impl LibraryHandle {
         let session = &self.owner.resources;
         let database = self.database();
         if database.reset_chapter_read_status_at(&book_id, target.as_deref()).await? {
-            session.reading_position_changed(book_id);
+            session.event_state.lock().expect("library events").reading_position_changed(book_id, &session.events);
         }
         Ok(database.chapter_read_status(&book_id).await?)
     }
@@ -44,7 +36,7 @@ impl LibraryHandle {
         let session = &self.owner.resources;
         let database = self.database();
         if database.update_reading_position(&book_id, &position, progress, entry.as_deref()).await? {
-            session.reading_position_changed(book_id);
+            session.event_state.lock().expect("library events").reading_position_changed(book_id, &session.events);
         }
         Ok(())
     }
@@ -53,7 +45,8 @@ impl LibraryHandle {
         let session = &self.owner.resources;
         let database = self.database();
         if database.set_book_read(&book_id, read).await? {
-            session.reading_position_changed(book_id);
+            session.event_state.lock().expect("library events").reading_position_changed(book_id, &session.events);
+            session.events.updates.publish(LibraryUpdate::Contents);
         }
         Ok(())
     }

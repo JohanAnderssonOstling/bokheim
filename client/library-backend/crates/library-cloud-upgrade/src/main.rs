@@ -1,5 +1,5 @@
 //! Explicit, transactional upgrade of deployed client-owned synchronization data.
-use library_replica::LibraryStateEntry;
+use library_replica::{LibraryStateEntry, storage};
 use prost::Message;
 use sqlx::{PgConnection, Row, postgres::PgPoolOptions};
 use std::{collections::BTreeMap, error::Error, io};
@@ -9,7 +9,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 mod book_id_files;
 mod book_ids;
 
-// Retain the raw protobuf Value until the current domain decoder validates it.
+// Retain raw legacy bytes only in this offline migration executable.
 #[derive(Clone, PartialEq, Message)]
 struct Envelope {
     #[prost(uint32, tag = "1")]
@@ -27,18 +27,35 @@ fn convert(bytes: &[u8]) -> Result<(LibraryStateEntry, Vec<u8>)> {
         return Err(invalid("stored payload exceeds the synchronization limit"));
     }
     let mut envelope = Envelope::decode(bytes)?;
-    if !(28..=transport::version()).contains(&envelope.version) || envelope.value.is_none() || envelope.encode_to_vec() != bytes {
+    // Historical HTTP-versioned payloads are a fixed migration input range;
+    // future HTTP versions must never implicitly become storage versions.
+    let supported_version = (28..=33).contains(&envelope.version) || envelope.version == storage::VERSION;
+    if !supported_version || envelope.value.is_none() || envelope.encode_to_vec() != bytes {
         return Err(invalid("unsupported or non-canonical stored state envelope"));
     }
-    envelope.version = transport::version();
-    let value: LibraryStateEntry = transport::decode(&envelope.encode_to_vec(), transport::MAX_DECODED_REQUEST_BYTES)?;
+    let value: LibraryStateEntry = if envelope.version == storage::VERSION {
+        storage::decode(bytes)?
+    } else {
+        // Version 33 is the final generic Serde payload schema. Relabel older
+        // supported envelopes only here, then validate and write typed storage.
+        envelope.version = 33;
+        transport::decode_versioned(&envelope.encode_to_vec(), transport::MAX_DECODED_REQUEST_BYTES, 33)?
+    };
     value.validate()?;
-    let encoded = transport::encode(&value)?;
-    let decoded: LibraryStateEntry = transport::decode(&encoded, transport::MAX_DECODED_REQUEST_BYTES)?;
+    let encoded = storage::encode(&value)?;
+    let decoded: LibraryStateEntry = storage::decode(&encoded)?;
     if value != decoded {
         return Err(invalid("state changed during current-format encoding"));
     }
     Ok((value, encoded))
+}
+
+// Written only after every row has been validated/converted under the same lock
+// and transaction. A relational schema version alone says nothing about payloads.
+async fn mark_payloads_current(connection: &mut PgConnection) -> Result<()> {
+    sqlx::raw_sql("CREATE TABLE IF NOT EXISTS sync_payload_migration (singleton boolean PRIMARY KEY CHECK(singleton), version bigint NOT NULL)").execute(&mut *connection).await?;
+    sqlx::query("INSERT INTO sync_payload_migration(singleton,version) VALUES(true,$1) ON CONFLICT(singleton) DO UPDATE SET version=EXCLUDED.version").bind(i64::from(storage::VERSION)).execute(&mut *connection).await?;
+    Ok(())
 }
 
 async fn counts(connection: &mut PgConnection) -> Result<(i64, i64, i64, i64)> {
@@ -68,8 +85,15 @@ async fn main() -> Result<()> {
         sqlx::query("LOCK TABLE libraries,sync_state,bokheim_schema_version IN ACCESS EXCLUSIVE MODE").execute(&mut *tx).await?;
     }
     let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(&mut *tx).await?;
-    if !matches!(version, 14 | 17 | 18 | 19 | 20) {
-        return Err(invalid(format!("unsupported database schema {version}; expected 14, 17, 18, 19 or 20")));
+    if !matches!(version, 14 | 17 | 18 | 19 | 20 | 21 | 22) {
+        return Err(invalid(format!("unsupported database schema {version}; expected 14, 17, 18, 19, 20, 21 or 22")));
+    }
+    let marker_exists: bool = sqlx::query_scalar("SELECT to_regclass('sync_payload_migration') IS NOT NULL").fetch_one(&mut *tx).await?;
+    if marker_exists {
+        let migrated: Option<i64> = sqlx::query_scalar("SELECT version FROM sync_payload_migration WHERE singleton=true").fetch_optional(&mut *tx).await?;
+        if migrated.is_some_and(|version| version > i64::from(storage::VERSION)) {
+            return Err(invalid("payload migration is newer than this upgrade tool"));
+        }
     }
     let before = counts(&mut tx).await?;
     let records = sqlx::query("SELECT library_id,kind,entity_key,entity_subkey,content_hash,version_rank,value FROM sync_state ORDER BY library_id,kind,entity_key,entity_subkey").fetch_all(&mut *tx).await?;
@@ -142,10 +166,43 @@ async fn main() -> Result<()> {
         }
         tx.commit().await?;
         println!("Committed schema 14 → 17; accounts, libraries, state versions and assets preserved. Original payloads and storage policies remain in bokheim_upgrade_archive; legacy feeds remain in opds_feeds.");
+    } else if apply && matches!(version, 20 | 21 | 22) {
+        if !external.is_empty() {
+            return Err(invalid("retired external-storage configurations remain; no changes applied"));
+        }
+        if !updates.is_empty() {
+            sqlx::raw_sql(
+                "CREATE SCHEMA IF NOT EXISTS bokheim_upgrade_archive; CREATE TABLE IF NOT EXISTS bokheim_upgrade_archive.sync_state_before_typed_payloads (LIKE sync_state INCLUDING DEFAULTS); ALTER TABLE sync_state DISABLE TRIGGER USER;",
+            )
+            .execute(&mut *tx)
+            .await?;
+            for (library, kind, key, subkey, bytes) in &updates {
+                sqlx::query("INSERT INTO bokheim_upgrade_archive.sync_state_before_typed_payloads SELECT * FROM sync_state WHERE library_id=$1 AND kind=$2 AND entity_key=$3 AND entity_subkey=$4")
+                    .bind(library)
+                    .bind(kind)
+                    .bind(key)
+                    .bind(subkey)
+                    .execute(&mut *tx)
+                    .await?;
+                let affected =
+                    sqlx::query("UPDATE sync_state SET value=$5 WHERE library_id=$1 AND kind=$2 AND entity_key=$3 AND entity_subkey=$4").bind(library).bind(kind).bind(key).bind(subkey).bind(bytes).execute(&mut *tx).await?.rows_affected();
+                if affected != 1 {
+                    return Err(invalid("a synchronized row changed during migration"));
+                }
+            }
+            sqlx::raw_sql("ALTER TABLE sync_state ENABLE TRIGGER USER").execute(&mut *tx).await?;
+            sqlx::query("UPDATE sync_history SET generation=$1 WHERE singleton=true").bind(uuid::Uuid::new_v4()).execute(&mut *tx).await?;
+        }
+        if counts(&mut tx).await? != before {
+            return Err(invalid("account, library, state, or asset counts changed during migration"));
+        }
+        mark_payloads_current(&mut tx).await?;
+        tx.commit().await?;
+        println!("Verified storage version {} and committed {} payload conversions; original changed rows are archived and authored versions preserved.", storage::VERSION, updates.len());
     } else {
         // The book-ID upgrade rewrites supported earlier envelopes together
         // with their addresses after the billing schema reaches version 19.
-        if apply && ((!updates.is_empty() && version == 20) || !external.is_empty()) {
+        if apply && !external.is_empty() {
             return Err(invalid(format!("schema {version} still contains unmigrated data")));
         }
         tx.rollback().await?;

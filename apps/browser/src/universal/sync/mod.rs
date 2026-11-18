@@ -8,8 +8,6 @@
 use ui_text::text;
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use ui_components::user_facing_error;
 mod account;
 #[cfg(target_os = "android")]
 mod android_authentication;
@@ -226,7 +224,8 @@ pub(crate) struct SyncPage {
     error: Option<SharedString>,
     #[cfg(not(target_arch = "wasm32"))]
     task: Option<Task<()>>,
-    refresh_scheduled: bool,
+    open: bool,
+    scheduled_refresh: Option<Task<()>>,
     refresh_pending: bool,
     /// File sizes change independently of account notifications. Read them
     /// on entry, explicit refresh, and when the library set changes.
@@ -257,16 +256,14 @@ impl SyncPage {
         let identity = cx.new(|_| view::AccountIdentityView::new(page_entity, account_status.clone()));
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         let authentication = AuthenticationInputs::new(window, cx);
-        let backend = services.backend.clone();
-        let subscription_backend = backend.clone();
-        let active_library_subscription = cx.observe(&active_library, move |page, _, cx| {
+        let active_library_subscription = cx.observe(&active_library, |page, _, cx| {
             let library_ids = page.active_library.read(cx).entries().iter().map(|entry| *entry.library_id()).collect();
             if page.local_usage_libraries != library_ids {
                 page.local_usage_libraries = library_ids;
                 page.local_usage_due = true;
-                page.observe_library_sync(&subscription_backend, cx);
+                page.observe_library_sync(cx);
+                page.schedule_refresh(cx);
             }
-            page.schedule_refresh(cx);
             cx.notify();
         });
         let state_subscription = cx.observe(&state, |page, state, cx| {
@@ -279,7 +276,7 @@ impl SyncPage {
             }
             cx.notify();
         });
-        let mut page = Self {
+        let page = Self {
             #[cfg(not(target_arch = "wasm32"))]
             services,
             #[cfg(target_arch = "wasm32")]
@@ -310,7 +307,8 @@ impl SyncPage {
             error: None,
             #[cfg(not(target_arch = "wasm32"))]
             task: None,
-            refresh_scheduled: false,
+            open: false,
+            scheduled_refresh: None,
             refresh_pending: false,
             local_usage_due: true,
             local_usage_libraries,
@@ -326,10 +324,6 @@ impl SyncPage {
             _active_library_subscription: active_library_subscription,
             _state_subscription: state_subscription,
         };
-        page.observe_library_sync(&backend, cx);
-        // Start snapshots from a normal window turn, never from an async
-        // worker callback or a render borrow.
-        cx.on_next_frame(window, |page, _, cx| page.refresh(cx));
         #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
         {
             let preferences = page.services.preferences.clone();
@@ -349,8 +343,28 @@ impl SyncPage {
         page
     }
 
-    /// Settings includes every library, even those without an open book view.
-    fn observe_library_sync(&mut self, backend: &Rc<app::AppClient>, cx: &mut Context<Self>) {
+    pub(crate) fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.open == open {
+            return;
+        }
+        self.open = open;
+        if open {
+            self.observe_library_sync(cx);
+            self.local_usage_due = true;
+            self.refresh_with_feedback(false, cx);
+        } else {
+            self.sync_update_tasks.clear();
+            self.scheduled_refresh = None;
+            self.refresh_pending = false;
+        }
+    }
+
+    /// Settings includes every library, but observes them only while open.
+    fn observe_library_sync(&mut self, cx: &mut Context<Self>) {
+        if !self.open {
+            return;
+        }
+        let backend = self.active_library.read(cx).backend_client();
         self.sync_update_tasks.retain(|id, _| self.local_usage_libraries.contains(id));
         for id in &self.local_usage_libraries {
             if self.sync_update_tasks.contains_key(id) {
@@ -405,10 +419,7 @@ impl SyncPage {
                 self.local_usage_due |= storage_changed;
                 self.schedule_refresh(cx);
             }
-            SyncEvent::AccountRefreshDue => {
-                self.refresh_scheduled = false;
-                self.refresh_with_feedback(false, cx);
-            }
+            SyncEvent::AccountRefreshDue => self.refresh_with_feedback(false, cx),
             SyncEvent::AccountSnapshot { result, .. } => match result {
                 Ok(snapshot) => self.apply_snapshot(snapshot, None, cx),
                 Err(error) => self.apply_error(error, cx),

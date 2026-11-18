@@ -1,5 +1,7 @@
 //! Persistent pages owned by one library session.
 
+use crate::services::notify_error;
+use ui_components::user_facing_error;
 use ui_text::text;
 
 use std::collections::HashMap;
@@ -12,13 +14,13 @@ use gpui::{AnyView, App, AppContext, Context, DismissEvent, Entity, EventEmitter
 use gpui_component::IconName;
 use library_backend::LibraryClient;
 use library_management::management::ManagementClient;
-use library_model::{BrowseLocation, BrowsePathSegment, LibraryBusyReason};
+use library_model::{BookCardRow, BrowseLocation, BrowsePathSegment, LibraryBusyReason};
 #[cfg(test)]
 use sync_common::LibraryId;
 use sync_common::{DirId, ROOT_DIR_ID};
 
 use super::LibraryRoute;
-use crate::library::{BrowseKind, BrowsePage, LibraryContext, LibraryUpdateBridge, NotebookPage, OpenBook, TrashPage, UndoEntry, UndoStack};
+use crate::library::{BrowseKind, BrowsePage, LibraryContext, LibraryFileActionsChanged, LibraryUpdateBridge, LoadedCover, NotebookPage, OpenBook, TrashPage, UndoEntry, UndoStack};
 use crate::{BrowsePageSession, PaneRequest};
 
 #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -26,8 +28,6 @@ mod reader_import;
 
 pub(crate) struct LibrarySession {
     operation_dialog: Option<LibraryDialog>,
-    #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    reader_import: Option<(Entity<reader_import::ReaderImportDialog>, Subscription)>,
     busy_focus: FocusHandle,
     undo: UndoStack,
     library: LibraryContext,
@@ -41,7 +41,7 @@ pub(crate) struct LibrarySession {
 
 struct LibraryDialog {
     view: AnyView,
-    width: f32,
+    width_rem: f32,
     focus: FocusHandle,
     dismiss: Box<dyn Fn(&mut Window, &mut App)>,
     _dismiss: Subscription,
@@ -79,11 +79,16 @@ impl LibrarySession {
         let updates = LibraryUpdateBridge::create(library_backend.as_ref().clone(), cx);
         let library = LibraryContext::new(management, library_backend, open_book, updates, cx.entity().downgrade(), now_playing);
         let library_updates = library.updates();
-        let library_updates_subscription = cx.observe(&library_updates, |_, _, cx| cx.notify());
+        let mut busy_reason = library_updates.read(cx).busy_reason();
+        let library_updates_subscription = cx.subscribe(&library_updates, move |_, updates, _: &LibraryFileActionsChanged, cx| {
+            let next = updates.read(cx).busy_reason();
+            if next != busy_reason {
+                busy_reason = next;
+                cx.notify();
+            }
+        });
         let mut session = Self {
             operation_dialog: None,
-            #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-            reader_import: None,
             busy_focus: cx.focus_handle(),
             undo: Default::default(),
             library,
@@ -103,14 +108,10 @@ impl LibrarySession {
         if self.operation_dialog.is_some() || self.library.updates().read(cx).busy_reason().is_some() {
             return true;
         }
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        if self.reader_import.as_ref().is_some_and(|(dialog, _)| dialog.read(cx).importing) {
-            return true;
-        }
         false
     }
 
-    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, view: Entity<V>, width: f32, activate: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, view: Entity<V>, width_rem: f32, activate: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Preserve an existing draft when another command opens a dialog.
         if self.operation_dialog.is_some() {
             if activate {
@@ -134,7 +135,7 @@ impl LibrarySession {
         let request_dismiss = Box::new(move |window: &mut Window, cx: &mut App| {
             let _ = target.update(cx, |view, cx| view.dismiss(window, cx));
         });
-        self.operation_dialog = Some(LibraryDialog { view: view.into(), width, focus: focus.clone(), dismiss: request_dismiss, _dismiss: dismiss });
+        self.operation_dialog = Some(LibraryDialog { view: view.into(), width_rem, focus: focus.clone(), dismiss: request_dismiss, _dismiss: dismiss });
         if activate {
             focus.focus(window, cx);
         }
@@ -218,10 +219,6 @@ impl LibrarySession {
         if self.library.updates().read(cx).busy_reason().is_some() {
             return true;
         }
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        if self.dismiss_reader_import(cx) {
-            return true;
-        }
         if self.route == LibraryRoute::Search {
             return self.text_search.as_ref().is_some_and(|page| page.update(cx, |page, cx| page.dismiss(cx)));
         }
@@ -261,17 +258,31 @@ impl LibrarySession {
         self.current_browse_page()?.read(cx).shown_book_detail(cx)
     }
 
+    /// Cards always open details through the session, retaining a visible
+    /// browse location and artwork rather than delegating navigation to pages.
+    pub(crate) fn show_book_detail(&mut self, book: BookCardRow, cover: Option<LoadedCover>, window: &mut Window, cx: &mut Context<Self>) {
+        let page = match self.current_browse_page().cloned() {
+            Some(page) => page,
+            None => {
+                self.navigate(LibraryRoute::Folders, window, cx);
+                self.browse_page(BrowseKind::Folder, cx)
+            }
+        };
+        page.update(cx, |page, cx| page.show_book_detail(book, cover, cx));
+    }
+
     pub(super) fn open_book_detail(&mut self, book_id: sync_common::BookId, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(LibraryRoute::Folders, window, cx);
         let backend = self.library.backend().clone();
         let page = self.browse_page(BrowseKind::Folder, cx);
         cx.spawn(async move |session, cx| {
             let result = backend.book_detail(book_id).await;
-            cx.defer_update(session, move |_session, cx| {
-                if let Ok(detail) = result {
-                    page.update(cx, |page, cx| page.open_book_detail(detail.book, detail.path, cx));
+            match result {
+                Ok(detail) => cx.defer_update(session, move |_, cx| page.update(cx, |page, cx| page.open_book_detail(detail.book, detail.path, cx))),
+                Err(error) => {
+                    let _ = session.update_in(cx, |_, window, cx| notify_error("book-detail-open-error", user_facing_error(&error, text!(browse::could_not_load_book_details_please_try_again)), window, cx));
                 }
-            });
+            }
         })
         .detach();
     }
@@ -282,10 +293,6 @@ impl LibrarySession {
         }
         if let Some(dialog) = &self.operation_dialog {
             return Some(dialog.focus.clone());
-        }
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        if let Some((dialog, _)) = &self.reader_import {
-            return Some(dialog.read(cx).focus_handle(cx));
         }
         match self.route.browse_kind() {
             Some(kind) => self.browse_pages.get(&kind).map(|(page, _)| page.read(cx).focus_handle(cx)),
@@ -320,7 +327,8 @@ impl LibrarySession {
             Some(kind) => {
                 self.browse_pages.remove(&kind);
             }
-            None if matches!(self.route, LibraryRoute::Notebook | LibraryRoute::Search) => {}
+            None if self.route == LibraryRoute::Notebook => self.notebook = None,
+            None if self.route == LibraryRoute::Search => self.text_search = None,
             None => self.trash = None,
         }
         self.navigate(self.route, window, cx);
@@ -412,20 +420,7 @@ impl Render for LibrarySession {
                 .items_center()
                 .justify_center()
                 .occlude()
-                .child(ui_components::modal_surface(theme).id("library-operation-dialog").role(gpui::Role::Dialog).w(px(dialog.width)).max_w_full().max_h_full().flex().flex_col().child(dialog.view.clone()))
-                .into_any_element();
-        }
-        #[cfg(all(not(feature = "kobo"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        if let Some((dialog, _)) = &self.reader_import {
-            let theme = ui_components::browser_theme(cx);
-            return ui_components::library_section_content()
-                .debug_selector(|| "library-reader-import".into())
-                .bg(theme.overlay_scrim)
-                .p(px(ui_components::SPACE_MD))
-                .items_center()
-                .justify_center()
-                .occlude()
-                .child(ui_components::modal_surface(theme).w(px(420.0)).max_w_full().max_h_full().flex().flex_col().child(dialog.clone()))
+                .child(ui_components::modal_surface(theme).id("library-operation-dialog").role(gpui::Role::Dialog).w(gpui::rems(dialog.width_rem)).max_w_full().max_h_full().flex().flex_col().child(dialog.view.clone()))
                 .into_any_element();
         }
         let kind = self.route.browse_kind();

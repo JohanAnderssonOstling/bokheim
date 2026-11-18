@@ -35,7 +35,7 @@ mod taxonomy_update;
 mod transactions;
 pub mod transfer;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 56;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 60;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -215,6 +215,18 @@ impl Database {
             if version < 55 {
                 migration::book_ids::upgrade(&transaction)?;
             }
+            if version < 57 {
+                migration::upgrade_review(&transaction)?;
+            }
+            if version < 58 {
+                migration::upgrade_text_index(&transaction)?;
+            }
+            if version < 59 {
+                migration::upgrade_directories(&transaction)?;
+            }
+            if version < 60 {
+                migration::upgrade_scan_progress(&transaction)?;
+            }
             if version != VERSION {
                 transaction.pragma_update(None, "user_version", VERSION)?;
             }
@@ -254,6 +266,9 @@ impl Database {
         transaction.schema_placements_index()?;
         transaction.execute_batch(include_str!("placements/sql/schema/path_indexes.sql"))?;
         transaction.schema_annotations_index()?;
+        migration::upgrade_review(&transaction)?;
+        migration::upgrade_directories(&transaction)?;
+        migration::upgrade_scan_progress(&transaction)?;
         browse::revision::install(&transaction)?;
         let replica_id = sync_common::ReplicaId::new_v4();
         transaction.owner_set_replica_id(&replica_id.to_string())?;

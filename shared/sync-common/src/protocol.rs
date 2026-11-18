@@ -1,12 +1,29 @@
 //! Transport-independent validation for synchronization pages.
 
-use crate::transport::encoded_len;
 use crate::BookId;
-use crate::{LibraryRevision, MutationRejection, MutationRejectionReason, OpaquePublication, PullStateResponse, PushMutationsResponse, SyncCursor};
-use crate::{ReplicaSeq, MAX_PUSH_BATCH_BYTES, MAX_PUSH_MUTATIONS};
+use crate::http::{
+    Contract,
+    encoding::{delimited_len, message_len, varint_len},
+    version,
+};
+use crate::{LibraryId, LibraryRevision, MutationRejection, MutationRejectionReason, OpaquePublication, PullStateResponse, PushMutationsResponse, ReplicaId, SyncCursor, SyncExchangeRequest, SyncGeneration};
+use crate::{MAX_PUSH_BATCH_BYTES, MAX_PUSH_MUTATIONS, ReplicaSeq};
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::sync::OnceLock;
+
+/// Request IDs have fixed widths. Reserve the largest legal cursor so batches
+/// remain valid as the exchange loop advances its checkpoint.
+fn push_request_len(mutation_bytes: usize) -> usize {
+    static BASE_BODY: OnceLock<usize> = OnceLock::new();
+    let base = *BASE_BODY.get_or_init(|| {
+        let revision = Some(LibraryRevision::new(i64::MAX as u64).expect("maximum valid revision"));
+        SyncExchangeRequest { library_id: LibraryId::nil(), replica_id: ReplicaId::nil(), mutations: Vec::new(), cursor: SyncCursor { generation: Some(SyncGeneration::nil()), lifecycle_revision: revision, field_revision: revision } }
+            .body_len()
+    });
+    varint_len(1, version().into()) + delimited_len(2, base.saturating_add(mutation_bytes))
+}
 
 #[derive(Debug)]
 struct EncodedMutation {
@@ -44,8 +61,8 @@ impl PushBatcher {
 
     /// Append one publication; streaming callers stop once a batch is ready.
     pub fn push(&mut self, publication: OpaquePublication) -> Result<(), crate::transport::WireError> {
-        let bytes = encoded_len(&publication)?;
-        if bytes > MAX_PUSH_BATCH_BYTES {
+        let bytes = message_len(3, &publication);
+        if push_request_len(bytes) > MAX_PUSH_BATCH_BYTES || publication.state.value.bytes.len() > publication.state.value.address.payload_byte_limit() || publication.state.value.delivery_byte_budget() > crate::MAX_PULL_BATCH_BYTES {
             self.untransmittable.push(publication.publisher_seq);
         } else {
             self.ready_bytes += bytes;
@@ -55,7 +72,7 @@ impl PushBatcher {
     }
 
     pub fn has_batch(&self) -> bool {
-        self.ready.len() >= MAX_PUSH_MUTATIONS || self.ready_bytes >= MAX_PUSH_BATCH_BYTES
+        self.ready.len() >= MAX_PUSH_MUTATIONS || push_request_len(self.ready_bytes) >= MAX_PUSH_BATCH_BYTES
     }
 
     pub fn take_untransmittable(&mut self) -> Vec<ReplicaSeq> {
@@ -91,7 +108,7 @@ impl PushBatcher {
         let mut bytes = 0_usize;
         while batch.len() < MAX_PUSH_MUTATIONS {
             let Some(next) = self.ready.front() else { break };
-            if !batch.is_empty() && bytes.saturating_add(next.bytes) > MAX_PUSH_BATCH_BYTES {
+            if !batch.is_empty() && push_request_len(bytes.saturating_add(next.bytes)) > MAX_PUSH_BATCH_BYTES {
                 break;
             }
             let Some(mutation) = self.ready.pop_front() else { break };

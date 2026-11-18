@@ -16,11 +16,11 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, ElementId, Font, PAGE_SCROLL_DURATION, Pixels, Point, Rems, Render, ScrollDelta, ScrollWheelEvent, SharedString, TouchPhase, Window, div, ease_in_out, point, touch_page_settle_duration,
-    touch_page_settle_easing,
+    AnyElement, App, Bounds, Context, ElementId, EventEmitter, Font, PAGE_SCROLL_DURATION, Pixels, Point, Rems, Render, ScrollDelta, ScrollWheelEvent, SharedString, TouchPhase, WeakEntity, Window, div, ease_in_out, point,
+    touch_page_settle_duration, touch_page_settle_easing,
 };
-use ui_components::{HierarchyItemWidth, SwipePreview, TouchpadNavigation};
 use ui_components::scroll::{PAGE_WHEEL_REPEAT_INTERVAL as SCROLL_REPEAT_INTERVAL, page_wheel_ready};
+use ui_components::{HierarchyItemWidth, SwipePreview, TouchpadNavigation};
 use web_time::Instant;
 
 pub(crate) use drag_preview::PaginatorDragPreview;
@@ -113,6 +113,7 @@ pub(crate) struct PaginatorState {
     /// Whether a rubber band is sweeping; children suppress hover during it.
     pub(crate) marquee: bool,
     pub(crate) preview: bool,
+    pub(crate) owner: Option<WeakEntity<Paginator>>,
     bounds: Rc<Vec<(usize, Bounds<Pixels>)>>,
     data: Rc<PaginatorData>,
 }
@@ -283,7 +284,8 @@ impl PaginatorData {
     }
 
     pub(super) fn group_index_for_child(&self, child_index: usize) -> Option<usize> {
-        self.groups.iter().position(|group| child_index >= group.start && child_index < group.end)
+        let index = self.groups.partition_point(|group| group.end <= child_index);
+        self.groups.get(index).is_some_and(|group| group.start <= child_index).then_some(index)
     }
 }
 
@@ -390,7 +392,21 @@ struct WarmedPage {
     content_height: Pixels,
 }
 
+/// Changes that matter to owners, independent of paginator-only redraws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaginatorEvent {
+    SelectionChanged,
+    /// The displayed page or its readiness for loading more data changed.
+    PageChanged,
+}
+
+impl EventEmitter<PaginatorEvent> for Paginator {}
+
 impl Paginator {
+    pub(crate) fn drag_state(&self) -> PaginatorState {
+        PaginatorState { cursor: self.cursor, selection: self.selection.clone(), marquee: self.marquee_active(), bounds: self.child_bounds.clone(), data: self.data.clone(), ..Default::default() }
+    }
+
     pub(crate) fn new(id: impl Into<SharedString>, groups: impl IntoIterator<Item = PaginatorGroup>) -> Self {
         let data = Rc::new(PaginatorData::new(groups));
         Self {
@@ -513,7 +529,8 @@ impl Paginator {
     pub(crate) fn restore_position(&mut self, position: &PaginatorPosition, cx: &mut Context<Self>) {
         self.cursor = position.cursor.as_ref().and_then(|cursor| self.data.resolve(cursor));
         self.child_offset = position.anchor.as_ref().and_then(|anchor| self.data.resolve(anchor)).unwrap_or_else(|| position.anchor.as_ref().map_or(0, |anchor| anchor.index.min(self.data.children.len().saturating_sub(1))));
-        self.selection = position.selection.iter().filter_map(|id| self.data.indices.get(id).copied()).collect();
+        let selection = position.selection.iter().filter_map(|id| self.data.indices.get(id).copied()).collect();
+        self.set_selection(selection, cx);
         self.keyboard_selection_active = position.keyboard_selection_active && self.cursor.is_some();
         cx.notify();
     }
@@ -552,7 +569,11 @@ impl Paginator {
         // so a backward turn still pans by a measured page rather than a guess.
         let transition = self.transition.take();
         let content_height = self.content_height;
+        // Compare the restored selection with the original, not the temporary
+        // empty selection used while replacing the groups.
+        let selection = std::mem::take(&mut self.selection);
         self.set_groups(groups, cx);
+        self.selection = selection;
         self.restore_position(&position, cx);
         self.direction = direction;
         self.transition = transition;
@@ -566,7 +587,7 @@ impl Paginator {
         // The children are different books now, so a retained index would point
         // the cursor at something the reader never put it on.
         self.cursor = None;
-        self.selection.clear();
+        self.set_selection(BTreeSet::new(), cx);
         self.keyboard_selection_active = false;
         self.marquee = None;
         self.child_bounds = Rc::new(Vec::new());
@@ -616,6 +637,7 @@ impl Paginator {
         if let Some(warmed) = warmed {
             self.content_height = Some(warmed.content_height);
             self.update_visible_page(self.children_revision, Some(warmed.page));
+            cx.emit(PaginatorEvent::PageChanged);
         }
         self.prefetched = None;
         self.maybe_start_page_transition(cx);
@@ -645,6 +667,23 @@ impl Paginator {
         self.child_bounds.iter().find(|(index, _)| *index == child_index).map(|(_, bounds)| *bounds)
     }
 
+    fn set_selection(&mut self, selection: BTreeSet<usize>, cx: &mut Context<Self>) {
+        if self.selection != selection {
+            self.selection = selection;
+            cx.emit(PaginatorEvent::SelectionChanged);
+        }
+    }
+
+    pub(crate) fn select_loaded(&mut self, cx: &mut Context<Self>) {
+        if !self.selectable || self.transition.is_some() {
+            return;
+        }
+        self.keyboard_selection_active = false;
+        self.marquee = None;
+        self.set_selection(self.data.indices.values().copied().collect(), cx);
+        cx.notify();
+    }
+
     /// Drops the selection, reporting whether there was one. Every path that
     /// invalidates the indices — new children, a page turn, the keyboard cursor
     /// moving — goes through here.
@@ -653,17 +692,17 @@ impl Paginator {
         if self.selection.is_empty() && self.marquee.is_none() {
             return false;
         }
-        self.selection.clear();
+        self.set_selection(BTreeSet::new(), cx);
         self.marquee = None;
         cx.notify();
         true
     }
 
-    pub(super) fn set_child_bounds(&mut self, bounds: Vec<(usize, Bounds<Pixels>)>) {
+    pub(super) fn set_child_bounds(&mut self, bounds: Rc<Vec<(usize, Bounds<Pixels>)>>) {
         // Reported every frame from prepaint, so this deliberately does not
         // notify: it is a record of the frame that was just drawn, not a change
         // to anything drawn from.
-        self.child_bounds = Rc::new(bounds);
+        self.child_bounds = bounds;
     }
 
     pub(super) fn begin_marquee(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -682,7 +721,8 @@ impl Paginator {
             marquee.active = true;
         }
         let band = marquee.bounds();
-        self.selection = self.child_bounds.iter().filter(|(_, bounds)| bounds.intersects(&band)).map(|(index, _)| *index).collect();
+        let selection = self.child_bounds.iter().filter(|(_, bounds)| bounds.intersects(&band)).map(|(index, _)| *index).collect();
+        self.set_selection(selection, cx);
         cx.notify();
     }
 
@@ -749,6 +789,7 @@ impl Paginator {
         self.reveal_cursor(target, cx);
         self.selection = selection;
         self.keyboard_selection_active = true;
+        cx.emit(PaginatorEvent::SelectionChanged);
         cx.notify();
         true
     }
@@ -801,7 +842,16 @@ impl Paginator {
             // Match the visible page's packing, including a restored partial row.
             let start = self.visible_page.map_or(0, |page| page.first_child);
             let mut rows = if start == 0 { Vec::new() } else { geometry::page_rows(&self.data, widths, &geometries, AssignmentDirection::Backward, start - 1, key.height, key.rem_size) };
-            rows.extend(geometry::forward_rows_in_range(&self.data, widths, &geometries, start, self.data.children.len()));
+            let mut following = geometry::forward_rows(&self.data, widths, &geometries, start);
+            let mut next = start;
+            while next <= current {
+                let row = following.next()?;
+                next = row.items.last()?.child_index + 1;
+                rows.push(row);
+            }
+            if movement == CursorMove::Down {
+                rows.extend(following.next());
+            }
             let row_index = rows.iter().position(|row| row.items.iter().any(|item| item.child_index == current))?;
             let current_item = rows[row_index].items.iter().find(|item| item.child_index == current)?;
             let center = current_item.x + current_item.width / 2.0;
@@ -854,8 +904,6 @@ impl Paginator {
         }
     }
 
-    /// Runs the cursor child's activation — the same callback a click runs, so
-    /// Enter and a click cannot diverge.
     /// What Enter on the cursor would do, handed out rather than run.
     ///
     /// Activating a child navigates, and navigation can complete synchronously —
@@ -943,6 +991,7 @@ impl Paginator {
             return;
         }
         self.maybe_start_page_transition(cx);
+        cx.emit(PaginatorEvent::PageChanged);
         cx.notify();
     }
 
@@ -979,10 +1028,11 @@ impl Paginator {
         transition.started_at = Some(Instant::now());
     }
 
-    fn cancel_page_transition(&mut self) {
-        self.transition = None;
+    fn cancel_page_transition(&mut self) -> bool {
+        let readiness_changed = self.transition.take().is_some() && self.visible_page.is_some();
         self.warm_request = None;
         self.swipe_preview.clear();
+        readiness_changed
     }
 
     #[cfg(not(feature = "mobile"))]
@@ -1116,7 +1166,9 @@ impl Paginator {
             TouchPhase::Started | TouchPhase::Moved => {
                 if event.touch_phase == TouchPhase::Started {
                     // A fresh drag supersedes any previous settle animation.
-                    self.cancel_page_transition();
+                    if self.cancel_page_transition() {
+                        cx.emit(PaginatorEvent::PageChanged);
+                    }
                     self.swipe = Some(PaginatorSwipe::default());
                 }
                 let Some(swipe) = self.swipe.as_mut() else {
@@ -1192,8 +1244,8 @@ impl Paginator {
 
 impl Render for Paginator {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if cx.reduce_motion() {
-            self.cancel_page_transition();
+        if cx.reduce_motion() && self.cancel_page_transition() {
+            cx.emit(PaginatorEvent::PageChanged);
         }
         if let Some(stage) = self.profile_turn.take() {
             window.on_next_frame(move |_, _| stage.finish("rendered"));
@@ -1205,6 +1257,7 @@ impl Render for Paginator {
             let progress = transition.started_at.map(|started_at| started_at.elapsed().as_secs_f32() / transition.touch_duration.unwrap_or(PAGE_SCROLL_DURATION).as_secs_f32());
             if progress.is_some_and(|progress| progress >= 1.0) {
                 self.transition = None;
+                cx.emit(PaginatorEvent::PageChanged);
                 cx.notify();
                 None
             } else {
@@ -1236,7 +1289,7 @@ impl Render for Paginator {
             None => rendered_transition.as_ref().and_then(|(transition, progress)| progress.map(|progress| page_transition_vector(transition.axis, page_transition_offsets(transition.direction, progress).1))).unwrap_or((0.0, 0.0)),
         };
         let drag_offset = rendered_transition.as_ref().map_or_else(|| self.swipe_preview.offset(window, cx), |(transition, progress)| transition.drag_offset * (1.0 - progress.unwrap_or(0.0)));
-        let state = Rc::new(PaginatorState { cursor: self.cursor, selection: self.selection.clone(), marquee: self.marquee_active(), preview: false, bounds: self.child_bounds.clone(), data: self.data.clone() });
+        let state = Rc::new(PaginatorState { owner: Some(cx.weak_entity()), ..self.drag_state() });
         let warm_direction = self.swipe.as_ref().and_then(|swipe| {
             let axis = swipe.axis.filter(|axis| self.allows_axis(*axis))?;
             let travel = if axis == PaginatorAxis::Horizontal { swipe.x } else { swipe.y };

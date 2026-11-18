@@ -91,8 +91,12 @@ impl Database {
     /// Current live books with no physical work outstanding. Membership and
     /// upload revisions stay fixed while the caller prepares this batch.
     pub fn prepared_upload_batch(&self) -> Result<UploadPreparationBatch, DatabaseError> {
+        let snapshot = self.connection.is_autocommit().then(|| self.connection.unchecked_transaction()).transpose()?;
         let affected_dirs = serde_json::to_string(&crate::placements::pending_work_directories(&self.connection)?).map_err(DatabaseError::operation)?;
         let members = query_rows(|read| self.connection.prepared_upload_batch(&affected_dirs, read), |row| Ok((row.get::<_, BookId>(0)?, row.get::<_, Option<i64>>(1)?)))?;
+        if let Some(snapshot) = snapshot {
+            snapshot.commit()?;
+        }
         Ok(UploadPreparationBatch { members })
     }
 
@@ -104,8 +108,11 @@ impl Database {
 
     pub fn finish_upload_preparation(&self, batch: &UploadPreparationBatch) -> Result<(), DatabaseError> {
         let json = serde_json::to_string(&batch.members).map_err(DatabaseError::operation)?;
-        self.connection.finish_upload_preparation(json.as_str())?;
-        Ok(())
+        self.write(|tx| {
+            let affected_dirs = serde_json::to_string(&crate::placements::pending_work_directories(tx)?).map_err(DatabaseError::operation)?;
+            tx.finish_upload_preparation(json.as_str(), &affected_dirs)?;
+            Ok(())
+        })
     }
 
     /// Thumbnail candidates and their prepared-upload scope share one snapshot.

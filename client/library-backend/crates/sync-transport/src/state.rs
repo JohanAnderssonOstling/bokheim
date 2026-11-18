@@ -2,7 +2,7 @@ use crate::api::SyncCredentials;
 use reqwest::StatusCode;
 use std::time::Duration;
 use sync_common::api::assets::BlobManifestValidationError;
-use sync_common::transport::WireError;
+use sync_common::http::WireError;
 use sync_common::{LibraryId, ReplicaId, SyncCursor, SyncExchangeRequest, SyncExchangeResponse};
 use url::ParseError;
 
@@ -41,7 +41,7 @@ pub async fn exchange_changes(
     let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor };
     let mut trace = crate::PerformanceTrace::new("exchange_http", "encode_request_response_decode");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} push_count={} cursor={:?}", trace.id(), request.library_id, request.mutations.len(), request.cursor);
-    crate::api::send_with_trace_byte_fields(client.post(credentials.server_url().join("api/sync/exchange")?).bearer_auth(credentials.access_token()), &request, &mut trace).await
+    crate::api::send_with_trace(client.post(credentials.server_url().join("api/sync/exchange")?).bearer_auth(credentials.access_token()), &request, &mut trace).await
 }
 
 pub(crate) fn retry_after(value: &str) -> Option<Duration> {

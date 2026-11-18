@@ -134,7 +134,7 @@ impl Libraries {
         self.selected_session().is_some_and(|session| session.read(cx).blocks_navigation(cx))
     }
 
-    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, library_id: LibraryId, view: Entity<V>, width: f32, selection_epoch: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_operation_dialog<V: LibraryOperationDialog>(&mut self, library_id: LibraryId, view: Entity<V>, width_rem: f32, selection_epoch: u64, window: &mut Window, cx: &mut Context<Self>) {
         if !self.contains(&library_id) {
             return;
         }
@@ -150,7 +150,7 @@ impl Libraries {
         if activate {
             self.select_library(library_id, cx);
         }
-        session.update(cx, |session, cx| session.show_operation_dialog(view, width, activate, window, cx));
+        session.update(cx, |session, cx| session.show_operation_dialog(view, width_rem, activate, window, cx));
         if activate {
             cx.emit(LibraryDialogOpened { library_id, selection_epoch: self.selection_epoch.get() });
         }
@@ -303,7 +303,6 @@ impl Libraries {
                 let library_id = *entry.library_id();
                 let name = entry.library_name();
                 let result = async { backend.management.library(library_id)?.import_directory(ROOT_DIR_ID, directory, false).await }.await;
-                #[cfg(not(target_arch = "wasm32"))]
                 match result {
                     Ok(failures) if !failures.is_empty() => {
                         let _ = sessions.update_in(cx, |_, window, cx| notify_warning("library-import-warning", import_failure_summary(&failures), window, cx));
@@ -314,8 +313,6 @@ impl Libraries {
                     }
                     _ => {}
                 }
-                #[cfg(target_arch = "wasm32")]
-                let _ = (result, name); // Coordinator notifications own the outcome.
             }
         })
         .detach();

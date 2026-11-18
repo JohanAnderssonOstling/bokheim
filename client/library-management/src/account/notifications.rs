@@ -71,7 +71,7 @@ async fn run_with_network(account: LibraryAccount, account_wake: watch::Sender<(
 }
 
 fn notify(bytes: &[u8], account_wake: &watch::Sender<()>, browsing: bool, notifications: &LibraryNotifications, libraries: &Weak<LibraryService>) -> Result<(), String> {
-    let message = sync_common::transport::decode::<NotificationMessage>(bytes, 4096).map_err(|e| e.to_string())?;
+    let message = sync_common::http::decode::<NotificationMessage>(bytes, 4096).map_err(|e| e.to_string())?;
     let handles = libraries.upgrade().map(|state| state.open_handles()).unwrap_or_default();
     notifications.receive(&message, browsing, &handles);
     if matches!(message, NotificationMessage::LibrariesChanged | NotificationMessage::Reconcile) || (browsing && matches!(message, NotificationMessage::Hello { .. })) {
@@ -81,7 +81,7 @@ fn notify(bytes: &[u8], account_wake: &watch::Sender<()>, browsing: bool, notifi
 }
 
 fn receive(bytes: &[u8], timeout: &mut Duration, received: &mut impl FnMut(&[u8]) -> Result<(), String>) -> Result<(), String> {
-    if let Ok(NotificationMessage::Hello { timeout_seconds, .. }) = sync_common::transport::decode(bytes, 4096) {
+    if let Ok(NotificationMessage::Hello { timeout_seconds, .. }) = sync_common::http::decode(bytes, 4096) {
         *timeout = Duration::from_secs(timeout_seconds.max(1));
     }
     received(bytes)

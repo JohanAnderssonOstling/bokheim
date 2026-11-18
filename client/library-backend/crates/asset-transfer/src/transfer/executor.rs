@@ -1,10 +1,10 @@
 //! Book and cover transfers with independent metadata commands.
+use crate::TransferError;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::deadline::download_deadline;
-use crate::TransferError;
 use crate::{deadline::transfer_deadline, policy::SMALL_REQUEST_TIMEOUT};
 use content_address::ContentHash;
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use library_database::DatabaseClient;
 use library_model::BookUploadIntent;
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,8 +19,8 @@ use std::{
     collections::HashSet,
     future::Future,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 use sync_common::{BookId, LibraryId};
@@ -317,7 +317,7 @@ mod failure_tests {
     use client_platform_runtime::executor::BoxedBackendFuture;
     use client_protocol::BackendError;
     use cpu_host::{BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, ThumbnailBytes};
-    use library_database::{executor::BackendExecutor, DatabaseClient, ImportCommit};
+    use library_database::{DatabaseClient, ImportCommit, executor::BackendExecutor};
     use library_files::AssetStore;
     use library_model::{BlobKind, DownloadState, PublishedStagedBook};
     use library_services::{account::LibraryAccountSession, events::LibraryEventState};
@@ -327,8 +327,8 @@ mod failure_tests {
         sync::RwLock,
     };
     use sync_common::{
-        api::assets::{ThumbnailBatchDownloadResponse, ThumbnailBatchEntry},
         ROOT_DIR_ID,
+        api::assets::{ThumbnailBatchDownloadResponse, ThumbnailBatchEntry},
     };
     use thumbnail::ThumbnailVersions;
 
@@ -444,11 +444,7 @@ mod failure_tests {
                         return Err(TransferError::AuthenticationRequired);
                     }
                     assert_eq!(account.require().unwrap().token(), "b".repeat(43));
-                    if succeeds {
-                        Ok(42)
-                    } else {
-                        Err(TransferError::AuthenticationRequired)
-                    }
+                    if succeeds { Ok(42) } else { Err(TransferError::AuthenticationRequired) }
                 })
                 .await;
             assert_eq!(calls.get(), 2);
@@ -544,7 +540,7 @@ mod failure_tests {
     fn asset_server_with_head(response: impl serde::Serialize, head: Option<(BookId, ContentHash, u64)>) -> (sync_transport::SyncCredentials, std::thread::JoinHandle<()>) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
-        use sync_common::transport;
+        use sync_common::http as transport;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();

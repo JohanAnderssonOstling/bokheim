@@ -10,10 +10,10 @@ mod widgets;
 pub(crate) use self::pages::browse::{BrowseKind, BrowsePage};
 pub(crate) use self::pages::notebook::NotebookPage;
 pub(crate) use self::pages::trash::TrashPage;
-pub(crate) use self::services::{LibraryContext, LibraryUpdateBridge, OpenBook, UndoEntry, UndoStack};
-pub(crate) use self::widgets::CursorMove;
+pub(crate) use self::services::{LibraryContext, LibraryFileActionsChanged, LibraryUpdateBridge, OpenBook, UndoEntry, UndoStack};
 pub(crate) use self::widgets::evict_covers;
 pub(crate) use self::widgets::mark_catalog_book_added;
+pub(crate) use self::widgets::{CursorMove, LoadedCover};
 
 #[cfg(test)]
 pub(crate) use self::services::UndoStep;

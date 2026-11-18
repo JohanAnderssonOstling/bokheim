@@ -1,7 +1,9 @@
 //! Interface and book fonts shared by every application platform.
 mod bundled;
 mod catalog;
-pub use catalog::{FontCatalog, FontCatalogTarget, load_font_catalog, observe_font_catalog};
+mod picker;
+pub use catalog::FontCatalog;
+pub use picker::{FontPicker, FontPickerEvent};
 
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]
 use std::borrow::Cow;

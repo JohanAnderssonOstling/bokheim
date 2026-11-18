@@ -12,11 +12,12 @@
 use ui_text::text;
 
 use crate::Button;
+use crate::book_metadata;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, AvailableSpace, Bounds, Div, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId, Pixels, Refineable, SharedString, Stateful, Style, StyleRefinement, Window, div, point, px, rems, size};
 use gpui_component::Icon;
 
-use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, base_button, topbar_action_height_rem};
+use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_XS, base_button, topbar_action_height_rem};
 
 /// Never narrower than this, so a book with a single command — a catalog
 /// book's Add — still has a column its blurb can be read in.
@@ -121,17 +122,14 @@ pub fn book_overlay_actions() -> Div {
 
 /// The display face at the detail page's smaller title size.
 pub fn book_overlay_title(title: impl Into<SharedString>, subtitle: Option<&str>, theme: BrowserTheme) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(SPACE_XS))
-        .child(div().when_some(theme.display_font_family(), |text, family| text.font_family(family)).text_size(rems(TEXT_LG)).line_height_auto().text_color(theme.text).child(title.into()))
-        .children(subtitle.filter(|subtitle| !subtitle.trim().is_empty()).map(|subtitle| div().text_size(rems(TEXT_MD)).text_color(theme.text_muted).child(subtitle.to_owned())))
+    let title: SharedString = title.into();
+    let subtitle = subtitle.filter(|subtitle| !subtitle.trim().is_empty()).map(SharedString::from);
+    book_metadata::title(title, subtitle, false, theme)
 }
 
 /// "by" and the names after it, in the muted caption the detail page uses.
 pub fn book_overlay_byline(theme: BrowserTheme) -> Div {
-    div().flex().flex_row().flex_wrap().items_baseline().gap_x(px(SPACE_XS)).text_size(rems(TEXT_SM)).text_color(theme.text_muted)
+    book_metadata::credit_line(theme).gap_y_0()
 }
 
 /// Plain words in a byline: "by", "read by", the comma between names.
@@ -141,20 +139,14 @@ pub fn book_overlay_byline_text(text: impl Into<SharedString>) -> Div {
 
 /// A name that goes to that author's page.
 pub fn book_overlay_name_link(id: impl Into<ElementId>, name: impl Into<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
-    div().id(id).min_w_0().cursor_pointer().text_color(theme.text_accent).hover(|style| style.underline()).child(name.into())
+    let name: SharedString = name.into();
+    book_metadata::name_link(id, name, theme).min_w_0()
 }
 
 /// How long an audiobook runs, or that a catalog book is already held: facts
 /// checked rather than read, separated by a middot.
 pub fn book_overlay_facts(facts: impl IntoIterator<Item = SharedString>, theme: BrowserTheme) -> Div {
-    let mut row = div().flex().flex_row().flex_wrap().items_baseline().gap(px(SPACE_SM)).text_size(rems(TEXT_XS)).text_color(theme.text_muted);
-    for (index, fact) in facts.into_iter().enumerate() {
-        if index > 0 {
-            row = row.child(div().flex_none().text_color(theme.rule).child("·"));
-        }
-        row = row.child(div().flex_none().child(fact));
-    }
-    row
+    book_metadata::facts(facts, |_| "·", theme)
 }
 
 /// The blurb, the subjects and the way to the book's page.

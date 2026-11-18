@@ -1,6 +1,6 @@
+use crate::Button;
 use gpui::{FontFeatures, FontWeight, Styled};
 use std::sync::OnceLock;
-use crate::Button;
 
 use crate::theme::BrowserTheme;
 
@@ -186,9 +186,7 @@ pub const DISPLAY_FONT_FAMILY: &str = "Bodoni Moda";
 /// set this way runs slightly larger than its nominal size suggests.
 pub fn small_caps() -> FontFeatures {
     static FEATURES: OnceLock<FontFeatures> = OnceLock::new();
-    FEATURES
-        .get_or_init(|| FontFeatures::new(vec![("smcp".to_owned(), 1), ("c2sc".to_owned(), 1)]))
-        .clone()
+    FEATURES.get_or_init(|| FontFeatures::new(vec![("smcp".to_owned(), 1), ("c2sc".to_owned(), 1)])).clone()
 }
 
 /// Placeholder proportions and the tallest cover frame reserved by book cards.
@@ -237,7 +235,7 @@ pub const CONTENT_INSET: f32 = SPACE_SM;
 /// nowhere else and sat between two steps.
 pub const BOOK_CARD_TITLE_SIZE: f32 = TEXT_SM;
 /// Main titles carry more weight than subtitles.
-pub const BOOK_CARD_TITLE_WEIGHT: FontWeight = FontWeight::SEMIBOLD;
+pub const BOOK_CARD_TITLE_WEIGHT: FontWeight = FontWeight::BOLD;
 pub const BOOK_CARD_TITLE_LINE_HEIGHT_EM: f32 = 1.25;
 pub const BOOK_CARD_TEXT_LINES: usize = 3;
 pub const BOOK_CARD_SUBTITLE_SIZE: f32 = TEXT_XS;

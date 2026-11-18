@@ -85,6 +85,8 @@ async fn server_card_variants_preserve_finished_jpegs() {
         }
     }
 
+    let cache = tempfile::tempdir().unwrap();
+    configure_cover_cache(cache.path(), COVER_CACHE_MAX_BYTES).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let _restore = RestoreOrigin(std::env::var_os("BOKHEIM_CATALOG_ORIGIN"));
     std::env::set_var("BOKHEIM_CATALOG_ORIGIN", format!("http://{}", listener.local_addr().unwrap()));

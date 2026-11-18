@@ -142,9 +142,6 @@ pub enum LibraryUpdate {
     SyncStatusChanged,
     /// Annotation text, anchors or deletion state changed locally.
     Annotations,
-    /// Reading position, progress, or chapter read status changed. Shelf cards
-    /// may need refreshing, while annotations and bookmarks remain unchanged.
-    ReadingProgress(BookId),
     TextSearchRemoved(crate::TextSearchRemoval),
 }
 

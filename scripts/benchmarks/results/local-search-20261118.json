@@ -1,0 +1,5696 @@
+{
+  "created_utc": "2026-11-18T00:53:08.364497+00:00",
+  "platform": "Linux-7.3.4-arch1-2-x86_64-with-glibc2.44",
+  "cpu_count": 16,
+  "build": "cargo build -p library-database --example query_benchmark --release",
+  "run": "target/release/examples/query_benchmark SNAPSHOT_DIRECTORY",
+  "methodology": {
+    "source": "Six existing library.db files under ~/.local/share/bokheim/libraries, opened mode=ro by Python SQLite backup into consistent SSD snapshots under ~/.cache/bokheim/local-query-benchmark-20261118. Live databases were not migrated or edited.",
+    "profile": "Workspace release: opt-level 3, fat LTO, one codegen unit.",
+    "workload": "Production synchronous Database::browse_page (Books and root Folder), notebook, text_search and bounded text_search_matches. Generic prefixes, ordinary words and no-match query. Five fresh connections per case, immediately repeated on the same connection for cached timings.",
+    "timing": "Database::open excluded. Fresh includes selection preparation, filtering, ordering and first-page hydration with new SQLite/result caches. Cached repeats hit prepared result cache. OS filesystem cache is warm; these are not cold-disk measurements.",
+    "page_sizes": "Browse default 48 direct books / 24 sections. Notebook and full text 8 books, 8 match slots per full-text book, as initial UI loads.",
+    "exclusions": "UI timers/rendering, async scheduling/IPC, catalog queries, and opening book files to resolve actual excerpt text. Notebook has just seven annotations, so it does not represent annotation-heavy libraries.",
+    "read_only_scope": "Only snapshot files are opened by the production API; initialization/migration is not called."
+  },
+  "libraries": [
+    {
+      "id": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "source": "/home/johan/.local/share/bokheim/libraries/05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e/library.db",
+      "snapshot": "/home/johan/.cache/bokheim/local-query-benchmark-20261118/05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e.db",
+      "counts": {
+        "book": 90,
+        "notebook_annotation": 0,
+        "book_text_state": 81
+      },
+      "version": 60
+    },
+    {
+      "id": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "source": "/home/johan/.local/share/bokheim/libraries/2150d671-a4dc-4d06-bfec-3c30e67e6b17/library.db",
+      "snapshot": "/home/johan/.cache/bokheim/local-query-benchmark-20261118/2150d671-a4dc-4d06-bfec-3c30e67e6b17.db",
+      "counts": {
+        "book": 28,
+        "notebook_annotation": 0,
+        "book_text_state": 28
+      },
+      "version": 60
+    },
+    {
+      "id": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "source": "/home/johan/.local/share/bokheim/libraries/2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026/library.db",
+      "snapshot": "/home/johan/.cache/bokheim/local-query-benchmark-20261118/2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026.db",
+      "counts": {
+        "book": 76,
+        "notebook_annotation": 0,
+        "book_text_state": 70
+      },
+      "version": 60
+    },
+    {
+      "id": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "source": "/home/johan/.local/share/bokheim/libraries/2fc8146c-0fc2-479d-a249-436abc2c3e32/library.db",
+      "snapshot": "/home/johan/.cache/bokheim/local-query-benchmark-20261118/2fc8146c-0fc2-479d-a249-436abc2c3e32.db",
+      "counts": {
+        "book": 94,
+        "notebook_annotation": 0,
+        "book_text_state": 91
+      },
+      "version": 60
+    },
+    {
+      "id": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "source": "/home/johan/.local/share/bokheim/libraries/c15ad76b-459e-44a8-9935-e0853c557595/library.db",
+      "snapshot": "/home/johan/.cache/bokheim/local-query-benchmark-20261118/c15ad76b-459e-44a8-9935-e0853c557595.db",
+      "counts": {
+        "book": 11,
+        "notebook_annotation": 1,
+        "book_text_state": 11
+      },
+      "version": 60
+    },
+    {
+      "id": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "source": "/home/johan/.local/share/bokheim/libraries/d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16/library.db",
+      "snapshot": "/home/johan/.cache/bokheim/local-query-benchmark-20261118/d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16.db",
+      "counts": {
+        "book": 79,
+        "notebook_annotation": 6,
+        "book_text_state": 67
+      },
+      "version": 60
+    }
+  ],
+  "summary": [
+    {
+      "kind": "books",
+      "cases": 72,
+      "fresh_ms": {
+        "samples": 360,
+        "median": 0.437423,
+        "p95": 0.765108,
+        "max": 1.1136679999999999
+      },
+      "cached_ms": {
+        "samples": 360,
+        "median": 0.032957,
+        "p95": 0.13356300000000002,
+        "max": 0.20058
+      }
+    },
+    {
+      "kind": "folder",
+      "cases": 72,
+      "fresh_ms": {
+        "samples": 360,
+        "median": 0.7334885,
+        "p95": 1.287717,
+        "max": 1.5846289999999998
+      },
+      "cached_ms": {
+        "samples": 360,
+        "median": 0.032306,
+        "p95": 0.131218,
+        "max": 0.23424399999999998
+      }
+    },
+    {
+      "kind": "notebook",
+      "cases": 72,
+      "fresh_ms": {
+        "samples": 360,
+        "median": 0.10902600000000001,
+        "p95": 0.352848,
+        "max": 0.446054
+      },
+      "cached_ms": {
+        "samples": 360,
+        "median": 0.020108,
+        "p95": 0.091644,
+        "max": 0.173548
+      }
+    },
+    {
+      "kind": "full_text",
+      "cases": 48,
+      "fresh_ms": {
+        "samples": 240,
+        "median": 0.767593,
+        "p95": 18.641742,
+        "max": 41.234592
+      },
+      "cached_ms": {
+        "samples": 240,
+        "median": 0.233151,
+        "p95": 0.34358,
+        "max": 0.404977
+      }
+    }
+  ],
+  "samples": [
+    {
+      "cached_ms": [
+        0.18673299999999998,
+        0.187826,
+        0.196091,
+        0.185972,
+        0.18450899999999998
+      ],
+      "fresh_ms": [
+        1.1136679999999999,
+        0.872241,
+        0.9538650000000001,
+        0.850069,
+        0.837395
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 90,
+      "page_books": 48,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.188777,
+        0.18767499999999998,
+        0.185962,
+        0.189218,
+        0.191111
+      ],
+      "fresh_ms": [
+        0.861711,
+        0.847344,
+        0.86143,
+        0.8987109999999999,
+        0.8688549999999999
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 73,
+      "page_books": 48,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.101171,
+        0.10121100000000001,
+        0.10211300000000001,
+        0.101552,
+        0.114937
+      ],
+      "fresh_ms": [
+        0.738177,
+        0.746834,
+        0.765108,
+        0.7363339999999999,
+        0.711476
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 20,
+      "page_books": 20,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.060694,
+        0.060483999999999996,
+        0.061777,
+        0.061036,
+        0.068951
+      ],
+      "fresh_ms": [
+        0.679937,
+        0.663415,
+        0.672142,
+        0.6723220000000001,
+        0.6803669999999999
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 7,
+      "page_books": 7,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.045286,
+        0.046148,
+        0.0471,
+        0.056527,
+        0.044905
+      ],
+      "fresh_ms": [
+        0.653407,
+        0.6379670000000001,
+        0.654869,
+        0.651533,
+        0.6403719999999999
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 3,
+      "page_books": 3,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.046137000000000004,
+        0.046428,
+        0.060365,
+        0.046408,
+        0.046888
+      ],
+      "fresh_ms": [
+        0.678284,
+        0.655761,
+        0.664197,
+        0.661963,
+        0.63932
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 3,
+      "page_books": 3,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.19017,
+        0.20058,
+        0.19675199999999998,
+        0.190651,
+        0.19101200000000002
+      ],
+      "fresh_ms": [
+        0.880196,
+        0.856331,
+        0.91442,
+        0.8594769999999999,
+        0.895415
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 74,
+      "page_books": 48,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.131028,
+        0.12726099999999999,
+        0.127441,
+        0.12672,
+        0.12856299999999998
+      ],
+      "fresh_ms": [
+        0.76081,
+        0.766822,
+        0.806366,
+        0.743888,
+        0.807819
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 28,
+      "page_books": 28,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.030839000000000002,
+        0.030087,
+        0.030007,
+        0.030187000000000002,
+        0.030327
+      ],
+      "fresh_ms": [
+        0.540252,
+        0.5523760000000001,
+        0.565871,
+        0.5444599999999999,
+        0.539391
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.030608000000000003,
+        0.030137,
+        0.029947,
+        0.048041,
+        0.029856
+      ],
+      "fresh_ms": [
+        0.554249,
+        0.561373,
+        0.538609,
+        0.542387,
+        0.557916
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.029927,
+        0.030227,
+        0.030338,
+        0.029596,
+        0.030568
+      ],
+      "fresh_ms": [
+        0.540483,
+        0.538229,
+        0.5485680000000001,
+        0.557926,
+        0.56012
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.029526,
+        0.030708,
+        0.030458,
+        0.030196999999999998,
+        0.030657999999999998
+      ],
+      "fresh_ms": [
+        0.53905,
+        0.549289,
+        0.5551710000000001,
+        0.531676,
+        0.5555910000000001
+      ],
+      "kind": "books",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.209226,
+        0.219546,
+        0.205269,
+        0.20415599999999998,
+        0.23424399999999998
+      ],
+      "fresh_ms": [
+        1.5846289999999998,
+        1.414026,
+        1.469421,
+        1.4033660000000001,
+        1.409969
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.192244,
+        0.19059,
+        0.20407699999999998,
+        0.19087199999999999,
+        0.192093
+      ],
+      "fresh_ms": [
+        1.446097,
+        1.390943,
+        1.4034259999999998,
+        1.427381,
+        1.40556
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 73,
+      "page_books": 48,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.103516,
+        0.102755,
+        0.103285,
+        0.11931599999999999,
+        0.113124
+      ],
+      "fresh_ms": [
+        1.2773269999999999,
+        1.2674990000000002,
+        1.260145,
+        1.258582,
+        1.2711560000000002
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 20,
+      "page_books": 20,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.062678,
+        0.061727,
+        0.061006,
+        0.074461,
+        0.071936
+      ],
+      "fresh_ms": [
+        1.2132759999999998,
+        1.213217,
+        1.213577,
+        1.19955,
+        1.22039
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 7,
+      "page_books": 7,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.045817,
+        0.046889,
+        0.047299,
+        0.046548,
+        0.048081000000000006
+      ],
+      "fresh_ms": [
+        1.172308,
+        1.182758,
+        1.171186,
+        1.240358,
+        1.1816369999999998
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 3,
+      "page_books": 3,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.046468,
+        0.046779,
+        0.046528,
+        0.046458,
+        0.047931
+      ],
+      "fresh_ms": [
+        1.173562,
+        1.166718,
+        1.174733,
+        1.1793820000000002,
+        1.179292
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 3,
+      "page_books": 3,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.18959900000000002,
+        0.200239,
+        0.19012900000000002,
+        0.19132200000000002,
+        0.189268
+      ],
+      "fresh_ms": [
+        1.407915,
+        1.421921,
+        1.4250669999999999,
+        1.418164,
+        1.40523
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 74,
+      "page_books": 48,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.14643699999999998,
+        0.127572,
+        0.126549,
+        0.12931499999999999,
+        0.129415
+      ],
+      "fresh_ms": [
+        1.287717,
+        1.281706,
+        1.302946,
+        1.30549,
+        1.3006719999999998
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 28,
+      "page_books": 28,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.029206000000000003,
+        0.029736000000000002,
+        0.029876999999999997,
+        0.029977,
+        0.030067
+      ],
+      "fresh_ms": [
+        1.0401589999999998,
+        1.0375429999999999,
+        1.047833,
+        1.044947,
+        1.036311
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.029596,
+        0.03163,
+        0.030608000000000003,
+        0.029745999999999998,
+        0.029936
+      ],
+      "fresh_ms": [
+        1.042042,
+        1.071678,
+        1.042153,
+        1.0498969999999999,
+        1.042924
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.030638000000000002,
+        0.030057,
+        0.030397999999999998,
+        0.029436,
+        0.029697
+      ],
+      "fresh_ms": [
+        1.038966,
+        1.044116,
+        1.050999,
+        1.042483,
+        1.042353
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.044444,
+        0.030188,
+        0.030007,
+        0.030017000000000002,
+        0.03146
+      ],
+      "fresh_ms": [
+        1.0382449999999999,
+        1.027334,
+        1.025501,
+        1.022836,
+        1.041021
+      ],
+      "kind": "folder",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.029466,
+        0.029255,
+        0.028985,
+        0.028523,
+        0.028725
+      ],
+      "fresh_ms": [
+        0.15915100000000001,
+        0.15313,
+        0.151337,
+        0.150264,
+        0.150986
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.030809000000000003,
+        0.029416,
+        0.029937000000000002,
+        0.029255,
+        0.029936
+      ],
+      "fresh_ms": [
+        0.16379,
+        0.15101599999999998,
+        0.150925,
+        0.15051499999999998,
+        0.15144600000000003
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.029246,
+        0.030888,
+        0.029906000000000002,
+        0.029276,
+        0.029475
+      ],
+      "fresh_ms": [
+        0.15173699999999998,
+        0.163189,
+        0.150675,
+        0.151897,
+        0.152018
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.043111000000000003,
+        0.029646,
+        0.029476,
+        0.030957999999999996,
+        0.029896
+      ],
+      "fresh_ms": [
+        0.152639,
+        0.151808,
+        0.15217799999999998,
+        0.161024,
+        0.150845
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.029806,
+        0.029455,
+        0.029807,
+        0.029745999999999998,
+        0.03135
+      ],
+      "fresh_ms": [
+        0.150474,
+        0.151227,
+        0.151707,
+        0.152709,
+        0.193536
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.029776,
+        0.029666,
+        0.029957,
+        0.029756,
+        0.030257
+      ],
+      "fresh_ms": [
+        0.150726,
+        0.15228799999999998,
+        0.15101599999999998,
+        0.151387,
+        0.15168700000000002
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.029856,
+        0.028945000000000002,
+        0.030447,
+        0.029335,
+        0.029035
+      ],
+      "fresh_ms": [
+        0.152639,
+        0.149393,
+        0.151807,
+        0.151576,
+        0.150445
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.029115000000000002,
+        0.029376000000000003,
+        0.040928,
+        0.029136,
+        0.028804
+      ],
+      "fresh_ms": [
+        0.150305,
+        0.167687,
+        0.150204,
+        0.150615,
+        0.151306
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.029865999999999997,
+        0.029105,
+        0.028905,
+        0.035095999999999995,
+        0.031087999999999998
+      ],
+      "fresh_ms": [
+        0.15321,
+        0.151998,
+        0.15140699999999999,
+        0.161125,
+        0.151597
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.030237,
+        0.030758,
+        0.030247,
+        0.029697,
+        0.030919
+      ],
+      "fresh_ms": [
+        0.151888,
+        0.151647,
+        0.151537,
+        0.152498,
+        0.177476
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.030147,
+        0.029756,
+        0.030127,
+        0.030237,
+        0.029306
+      ],
+      "fresh_ms": [
+        0.151256,
+        0.151707,
+        0.151487,
+        0.150866,
+        0.151346
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.03159,
+        0.043872999999999995,
+        0.029856,
+        0.030567,
+        0.029946
+      ],
+      "fresh_ms": [
+        0.16406099999999998,
+        0.151096,
+        0.15217799999999998,
+        0.151506,
+        0.152027
+      ],
+      "kind": "notebook",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.28599199999999997,
+        0.289417,
+        0.28009999999999996,
+        0.279249,
+        0.27778600000000003
+      ],
+      "fresh_ms": [
+        41.234592,
+        38.254971999999995,
+        34.808890000000005,
+        34.535463,
+        34.501519
+      ],
+      "kind": "full_text",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 81,
+      "page_books": 8,
+      "query": "the"
+    },
+    {
+      "cached_ms": [
+        0.24152700000000002,
+        0.21832300000000002,
+        0.21673,
+        0.21634,
+        0.21502700000000002
+      ],
+      "fresh_ms": [
+        1.1316519999999999,
+        1.065126,
+        1.069775,
+        1.0625509999999998,
+        1.060728
+      ],
+      "kind": "full_text",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 31,
+      "page_books": 8,
+      "query": "och"
+    },
+    {
+      "cached_ms": [
+        0.264861,
+        0.280561,
+        0.26365900000000003,
+        0.267476,
+        0.26650399999999996
+      ],
+      "fresh_ms": [
+        1.677114,
+        1.717451,
+        1.653019,
+        1.6445130000000001,
+        1.638812
+      ],
+      "kind": "full_text",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 81,
+      "page_books": 8,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.275402,
+        0.303925,
+        0.265192,
+        0.265122,
+        0.26420000000000005
+      ],
+      "fresh_ms": [
+        1.2022249999999999,
+        1.2520499999999999,
+        1.207626,
+        1.205281,
+        1.207165
+      ],
+      "kind": "full_text",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 76,
+      "page_books": 8,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.262857,
+        0.266505,
+        0.275862,
+        0.28174299999999997,
+        0.278828
+      ],
+      "fresh_ms": [
+        2.08729,
+        2.076891,
+        2.0821110000000003,
+        2.074687,
+        2.070379
+      ],
+      "kind": "full_text",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 81,
+      "page_books": 8,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.276293,
+        0.27511,
+        0.28345600000000004,
+        0.270672,
+        0.27257600000000004
+      ],
+      "fresh_ms": [
+        1.0739530000000002,
+        1.075906,
+        1.065217,
+        1.068552,
+        1.0750250000000001
+      ],
+      "kind": "full_text",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 61,
+      "page_books": 8,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.266154,
+        0.283146,
+        0.26381,
+        0.29298399999999997,
+        0.266404
+      ],
+      "fresh_ms": [
+        1.555955,
+        1.5349949999999999,
+        1.548009,
+        1.525578,
+        1.537881
+      ],
+      "kind": "full_text",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 80,
+      "page_books": 8,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.051017,
+        0.053271,
+        0.051157,
+        0.050624999999999996,
+        0.050464999999999996
+      ],
+      "fresh_ms": [
+        0.39967600000000003,
+        0.44393,
+        0.40188,
+        0.407651,
+        0.40152
+      ],
+      "kind": "full_text",
+      "library": "05f3e7a8-ea4e-4893-bfe8-cb0a6231c37e",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.11751199999999999,
+        0.118224,
+        0.117843,
+        0.13356300000000002,
+        0.117542
+      ],
+      "fresh_ms": [
+        0.596058,
+        0.5929719999999999,
+        0.58684,
+        0.577683,
+        0.596448
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 28,
+      "page_books": 28,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.10076,
+        0.101302,
+        0.102013,
+        0.117843,
+        0.101783
+      ],
+      "fresh_ms": [
+        0.577192,
+        0.589806,
+        0.5800379999999999,
+        0.584196,
+        0.5928720000000001
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 22,
+      "page_books": 22,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.049173,
+        0.04765,
+        0.048692,
+        0.047329,
+        0.048482000000000004
+      ],
+      "fresh_ms": [
+        0.514864,
+        0.509915,
+        0.5808490000000001,
+        0.507822,
+        0.512931
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 4,
+      "page_books": 4,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.041588,
+        0.029075,
+        0.028234000000000002,
+        0.028603999999999997,
+        0.028864
+      ],
+      "fresh_ms": [
+        0.38350500000000004,
+        0.400177,
+        0.403814,
+        0.39613000000000004,
+        0.407491
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.028524,
+        0.028243,
+        0.027873,
+        0.028053,
+        0.028023
+      ],
+      "fresh_ms": [
+        0.387634,
+        0.382745,
+        0.38304499999999997,
+        0.383535,
+        0.382133
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.029005,
+        0.029105,
+        0.028685000000000002,
+        0.029054999999999997,
+        0.028564
+      ],
+      "fresh_ms": [
+        0.39606,
+        0.39548900000000003,
+        0.402692,
+        0.394707,
+        0.38843500000000003
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.112773,
+        0.112694,
+        0.11149099999999999,
+        0.12401400000000001,
+        0.11300400000000001
+      ],
+      "fresh_ms": [
+        0.596579,
+        0.605356,
+        0.612389,
+        0.595947,
+        0.6085520000000001
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 26,
+      "page_books": 26,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.092154,
+        0.093958,
+        0.091864,
+        0.09296600000000001,
+        0.09108200000000001
+      ],
+      "fresh_ms": [
+        0.5709200000000001,
+        0.583133,
+        0.599464,
+        0.5703,
+        0.581621
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 19,
+      "page_books": 19,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.028323,
+        0.028644,
+        0.028494,
+        0.028133,
+        0.028384000000000003
+      ],
+      "fresh_ms": [
+        0.390358,
+        0.385399,
+        0.38461799999999996,
+        0.38583999999999996,
+        0.385129
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.027973,
+        0.030046999999999997,
+        0.029476,
+        0.029696,
+        0.028594
+      ],
+      "fresh_ms": [
+        0.386641,
+        0.40118,
+        0.398414,
+        0.409154,
+        0.395488
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.028564,
+        0.028413,
+        0.028864,
+        0.028423,
+        0.028404000000000002
+      ],
+      "fresh_ms": [
+        0.395629,
+        0.38447699999999996,
+        0.386852,
+        0.38521900000000003,
+        0.389667
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.027903,
+        0.029566000000000002,
+        0.028985,
+        0.029335999999999997,
+        0.029045
+      ],
+      "fresh_ms": [
+        0.382604,
+        0.39665,
+        0.395699,
+        0.42014500000000005,
+        0.381482
+      ],
+      "kind": "books",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.110369,
+        0.107753,
+        0.107614,
+        0.108115,
+        0.105099
+      ],
+      "fresh_ms": [
+        0.897709,
+        0.894192,
+        0.8976989999999999,
+        0.875136,
+        0.863585
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 9,
+      "page_books": 9,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.094569,
+        0.088738,
+        0.086905,
+        0.084911,
+        0.080062
+      ],
+      "fresh_ms": [
+        0.823669,
+        0.790226,
+        0.759417,
+        0.727547,
+        0.704814
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 23,
+      "page_books": 23,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.03715,
+        0.036008,
+        0.034375,
+        0.040355999999999996,
+        0.032692
+      ],
+      "fresh_ms": [
+        0.6160059999999999,
+        0.600727,
+        0.5713320000000001,
+        0.562635,
+        0.5303439999999999
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 4,
+      "page_books": 4,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.019457,
+        0.019126,
+        0.018746,
+        0.018996,
+        0.032341
+      ],
+      "fresh_ms": [
+        0.436256,
+        0.421107,
+        0.419734,
+        0.416959,
+        0.451164
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.019137,
+        0.019026,
+        0.019306,
+        0.018876,
+        0.019176000000000002
+      ],
+      "fresh_ms": [
+        0.440213,
+        0.42277,
+        0.431406,
+        0.419995,
+        0.437247
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.019237,
+        0.018856,
+        0.018996,
+        0.019227,
+        0.019627
+      ],
+      "fresh_ms": [
+        0.422329,
+        0.439542,
+        0.422049,
+        0.428571,
+        0.429924
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.073389,
+        0.072838,
+        0.07353900000000001,
+        0.08254600000000001,
+        0.073379
+      ],
+      "fresh_ms": [
+        0.576812,
+        0.584446,
+        0.581631,
+        0.569168,
+        0.573625
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 27,
+      "page_books": 27,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.060625000000000005,
+        0.061065,
+        0.061155999999999995,
+        0.060594999999999996,
+        0.060695
+      ],
+      "fresh_ms": [
+        0.563907,
+        0.566813,
+        0.558978,
+        0.556483,
+        0.573525
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 19,
+      "page_books": 19,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.020027999999999997,
+        0.019015999999999998,
+        0.019527000000000003,
+        0.019097,
+        0.019477
+      ],
+      "fresh_ms": [
+        0.43273900000000004,
+        0.426367,
+        0.431947,
+        0.424613,
+        0.432549
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.019658000000000002,
+        0.019447,
+        0.019046,
+        0.019577,
+        0.019517
+      ],
+      "fresh_ms": [
+        0.425034,
+        0.438099,
+        0.420997,
+        0.44075400000000003,
+        0.430585
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.019726999999999998,
+        0.019787,
+        0.019797000000000002,
+        0.019347,
+        0.023866000000000002
+      ],
+      "fresh_ms": [
+        0.44914,
+        0.446074,
+        0.43485300000000005,
+        0.43482299999999996,
+        0.446946
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.019888,
+        0.019407,
+        0.019687,
+        0.019035999999999997,
+        0.019797000000000002
+      ],
+      "fresh_ms": [
+        0.465281,
+        0.445543,
+        0.429263,
+        0.435755,
+        0.42862100000000003
+      ],
+      "kind": "folder",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.019587,
+        0.019026,
+        0.018635,
+        0.019707,
+        0.020319
+      ],
+      "fresh_ms": [
+        0.107303,
+        0.10172199999999999,
+        0.10013899999999999,
+        0.101482,
+        0.109397
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.019627,
+        0.019636999999999998,
+        0.019457,
+        0.019306,
+        0.019506
+      ],
+      "fresh_ms": [
+        0.099689,
+        0.099028,
+        0.099298,
+        0.099929,
+        0.111421
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.019076000000000003,
+        0.019556999999999998,
+        0.019627,
+        0.019517,
+        0.019597
+      ],
+      "fresh_ms": [
+        0.099789,
+        0.099799,
+        0.098807,
+        0.098707,
+        0.125638
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.019927,
+        0.033794000000000005,
+        0.028062999999999998,
+        0.019457,
+        0.020038
+      ],
+      "fresh_ms": [
+        0.10727300000000001,
+        0.117823,
+        0.11671999999999999,
+        0.101452,
+        0.10213399999999999
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.020248,
+        0.020869,
+        0.019857999999999997,
+        0.020188,
+        0.019948
+      ],
+      "fresh_ms": [
+        0.101803,
+        0.10262399999999999,
+        0.102564,
+        0.10250400000000001,
+        0.10182300000000001
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.020058,
+        0.02077,
+        0.019968,
+        0.019767,
+        0.019817
+      ],
+      "fresh_ms": [
+        0.102373,
+        0.118835,
+        0.101973,
+        0.101523,
+        0.102333
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.020458,
+        0.019908,
+        0.019647,
+        0.020338000000000002,
+        0.019667
+      ],
+      "fresh_ms": [
+        0.109627,
+        0.101963,
+        0.101582,
+        0.10115199999999999,
+        0.10066
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.019808,
+        0.019577,
+        0.019728000000000002,
+        0.019758,
+        0.020118
+      ],
+      "fresh_ms": [
+        0.101061,
+        0.101072,
+        0.10586000000000001,
+        0.101813,
+        0.110709
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.019896999999999998,
+        0.019698,
+        0.019937,
+        0.021411,
+        0.019366
+      ],
+      "fresh_ms": [
+        0.10110100000000001,
+        0.10074999999999999,
+        0.11135099999999999,
+        0.10110100000000001,
+        0.099588
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.019556999999999998,
+        0.019737,
+        0.020228,
+        0.020798999999999998,
+        0.019507
+      ],
+      "fresh_ms": [
+        0.099759,
+        0.10008,
+        0.102064,
+        0.110509,
+        0.099669
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.019768,
+        0.019728000000000002,
+        0.020159,
+        0.020179000000000002,
+        0.019337
+      ],
+      "fresh_ms": [
+        0.09969800000000001,
+        0.099608,
+        0.100169,
+        0.108485,
+        0.10024
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.019938,
+        0.019768,
+        0.019867000000000003,
+        0.028884,
+        0.020288
+      ],
+      "fresh_ms": [
+        0.10064,
+        0.10055,
+        0.099718,
+        0.12751099999999999,
+        0.102203
+      ],
+      "kind": "notebook",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.318714,
+        0.326137,
+        0.323973,
+        0.318623,
+        0.327279
+      ],
+      "fresh_ms": [
+        3.743595,
+        3.2510730000000003,
+        3.2246829999999997,
+        3.1320279999999996,
+        3.162526
+      ],
+      "kind": "full_text",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 27,
+      "page_books": 8,
+      "query": "the"
+    },
+    {
+      "cached_ms": [
+        0.12213099999999999,
+        0.12168999999999999,
+        0.12161,
+        0.12445499999999998,
+        0.120308
+      ],
+      "fresh_ms": [
+        0.455402,
+        0.47414799999999996,
+        0.456915,
+        0.45683399999999996,
+        0.490558
+      ],
+      "kind": "full_text",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "och"
+    },
+    {
+      "cached_ms": [
+        0.362346,
+        0.36507100000000003,
+        0.372765,
+        0.35578299999999996,
+        0.367817
+      ],
+      "fresh_ms": [
+        0.7761089999999999,
+        0.782421,
+        0.768224,
+        0.777161,
+        0.778223
+      ],
+      "kind": "full_text",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 23,
+      "page_books": 8,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.36466,
+        0.373076,
+        0.357827,
+        0.362446,
+        0.361234
+      ],
+      "fresh_ms": [
+        0.76617,
+        0.75553,
+        0.76047,
+        0.762854,
+        0.763525
+      ],
+      "kind": "full_text",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 22,
+      "page_books": 8,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.324144,
+        0.326197,
+        0.31540700000000005,
+        0.312712,
+        0.31707
+      ],
+      "fresh_ms": [
+        0.757383,
+        0.7589969999999999,
+        0.764787,
+        0.791067,
+        0.764246
+      ],
+      "kind": "full_text",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 25,
+      "page_books": 8,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.20802400000000001,
+        0.208875,
+        0.211941,
+        0.207683,
+        0.21476599999999998
+      ],
+      "fresh_ms": [
+        0.558257,
+        0.5515840000000001,
+        0.568396,
+        0.555451,
+        0.5505319999999999
+      ],
+      "kind": "full_text",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 3,
+      "page_books": 3,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.341807,
+        0.34312,
+        0.34263899999999997,
+        0.353198,
+        0.404977
+      ],
+      "fresh_ms": [
+        0.761552,
+        0.765819,
+        0.757193,
+        0.7661709999999999,
+        0.763936
+      ],
+      "kind": "full_text",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 22,
+      "page_books": 8,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.034576,
+        0.033853999999999995,
+        0.034193999999999995,
+        0.034726,
+        0.036399
+      ],
+      "fresh_ms": [
+        0.29056,
+        0.26097400000000004,
+        0.260012,
+        0.26885899999999996,
+        0.26796699999999996
+      ],
+      "kind": "full_text",
+      "library": "2150d671-a4dc-4d06-bfec-3c30e67e6b17",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.124857,
+        0.123815,
+        0.12328299999999999,
+        0.12218099999999998,
+        0.12125000000000001
+      ],
+      "fresh_ms": [
+        0.580318,
+        0.548648,
+        0.529613,
+        0.5112180000000001,
+        0.5247729999999999
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 76,
+      "page_books": 48,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.121199,
+        0.121359,
+        0.130928,
+        0.12225100000000001,
+        0.12056800000000001
+      ],
+      "fresh_ms": [
+        0.5335500000000001,
+        0.542758,
+        0.523591,
+        0.5249039999999999,
+        0.513232
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 62,
+      "page_books": 48,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.028564,
+        0.028143,
+        0.029005,
+        0.028193,
+        0.028464
+      ],
+      "fresh_ms": [
+        0.405918,
+        0.394387,
+        0.427749,
+        0.393715,
+        0.40146000000000004
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.025579,
+        0.025468,
+        0.025658999999999998,
+        0.02658,
+        0.034085000000000004
+      ],
+      "fresh_ms": [
+        0.38708299999999995,
+        0.399056,
+        0.39651,
+        0.397433,
+        0.39284399999999997
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.025388,
+        0.02648,
+        0.025899000000000002,
+        0.025598000000000003,
+        0.025879
+      ],
+      "fresh_ms": [
+        0.38497899999999996,
+        0.398985,
+        0.39538799999999996,
+        0.449691,
+        0.393194
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.025698,
+        0.025559000000000002,
+        0.025378,
+        0.025308,
+        0.025969000000000002
+      ],
+      "fresh_ms": [
+        0.39601000000000003,
+        0.383936,
+        0.400808,
+        0.38532900000000003,
+        0.411189
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.120728,
+        0.11997699999999999,
+        0.120328,
+        0.120508,
+        0.128523
+      ],
+      "fresh_ms": [
+        0.5200549999999999,
+        0.507861,
+        0.5183409999999999,
+        0.524223,
+        0.510527
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 49,
+      "page_books": 48,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.08386900000000001,
+        0.08344800000000001,
+        0.090281,
+        0.083228,
+        0.083858
+      ],
+      "fresh_ms": [
+        0.465201,
+        0.47944699999999996,
+        0.464238,
+        0.466302,
+        0.476221
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 29,
+      "page_books": 29,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.025529,
+        0.025448000000000002,
+        0.025889,
+        0.025668,
+        0.025919
+      ],
+      "fresh_ms": [
+        0.387032,
+        0.398444,
+        0.38699300000000003,
+        0.392393,
+        0.385169
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.018935999999999998,
+        0.018435,
+        0.018816,
+        0.018734999999999998,
+        0.019207000000000002
+      ],
+      "fresh_ms": [
+        0.313423,
+        0.313013,
+        0.323051,
+        0.315277,
+        0.325296
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.019035999999999997,
+        0.018354000000000002,
+        0.018935999999999998,
+        0.018215000000000002,
+        0.018595
+      ],
+      "fresh_ms": [
+        0.314545,
+        0.313574,
+        0.314876,
+        0.313654,
+        0.329234
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.019497,
+        0.019276,
+        0.019056,
+        0.018734999999999998,
+        0.018425
+      ],
+      "fresh_ms": [
+        0.31305299999999997,
+        0.319595,
+        0.310558,
+        0.313093,
+        0.31004600000000004
+      ],
+      "kind": "books",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.080302,
+        0.083147,
+        0.081364,
+        0.079891,
+        0.080633
+      ],
+      "fresh_ms": [
+        0.728179,
+        0.7192109999999999,
+        0.711887,
+        0.6924509999999999,
+        0.695877
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 6,
+      "page_books": 6,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.119526,
+        0.133613,
+        0.128774,
+        0.122883,
+        0.120058
+      ],
+      "fresh_ms": [
+        0.814642,
+        0.809793,
+        0.810845,
+        0.835612,
+        0.820242
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 62,
+      "page_books": 48,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.029797,
+        0.028234000000000002,
+        0.029045,
+        0.029235,
+        0.028564
+      ],
+      "fresh_ms": [
+        0.691228,
+        0.6798970000000001,
+        0.712648,
+        0.7057559999999999,
+        0.7013870000000001
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.025939,
+        0.03173,
+        0.025789,
+        0.025939,
+        0.025889
+      ],
+      "fresh_ms": [
+        0.683464,
+        0.685277,
+        0.67636,
+        0.670939,
+        0.7203039999999999
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.025919,
+        0.025509,
+        0.026268999999999997,
+        0.025919,
+        0.025609000000000003
+      ],
+      "fresh_ms": [
+        0.69741,
+        0.685918,
+        0.698162,
+        0.678234,
+        0.668836
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.025769,
+        0.025649,
+        0.025367999999999998,
+        0.02615,
+        0.025479
+      ],
+      "fresh_ms": [
+        0.6926709999999999,
+        0.679095,
+        0.6869200000000001,
+        0.6761090000000001,
+        0.669597
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.119517,
+        0.12287299999999998,
+        0.127492,
+        0.129465,
+        0.12162
+      ],
+      "fresh_ms": [
+        0.821194,
+        0.822647,
+        0.81907,
+        0.8685029999999999,
+        0.849798
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 49,
+      "page_books": 48,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.083348,
+        0.08275600000000001,
+        0.086564,
+        0.083007,
+        0.097374
+      ],
+      "fresh_ms": [
+        0.7736540000000001,
+        0.76576,
+        0.7773110000000001,
+        0.767031,
+        0.759106
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 29,
+      "page_books": 29,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.025758,
+        0.025498,
+        0.025328,
+        0.025729000000000002,
+        0.025378
+      ],
+      "fresh_ms": [
+        0.6733140000000001,
+        0.671922,
+        0.6868799999999999,
+        0.676921,
+        0.688102
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.019667,
+        0.019556999999999998,
+        0.019698,
+        0.025879,
+        0.019687
+      ],
+      "fresh_ms": [
+        0.590237,
+        0.597471,
+        0.6004060000000001,
+        0.599425,
+        0.5963379999999999
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.019397,
+        0.019447,
+        0.020970000000000003,
+        0.019407,
+        0.018876
+      ],
+      "fresh_ms": [
+        0.601589,
+        0.609223,
+        0.5936640000000001,
+        0.592401,
+        0.602821
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.019417,
+        0.019938,
+        0.019567,
+        0.019837,
+        0.019726999999999998
+      ],
+      "fresh_ms": [
+        0.60763,
+        0.593583,
+        0.5878329999999999,
+        0.602741,
+        0.600446
+      ],
+      "kind": "folder",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.019517,
+        0.019547000000000002,
+        0.019216,
+        0.018906000000000003,
+        0.018664999999999998
+      ],
+      "fresh_ms": [
+        0.10498800000000001,
+        0.101853,
+        0.098717,
+        0.10006899999999999,
+        0.09894800000000001
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.019357000000000003,
+        0.019867000000000003,
+        0.019066,
+        0.019598,
+        0.019587
+      ],
+      "fresh_ms": [
+        0.10016,
+        0.10051,
+        0.099608,
+        0.099608,
+        0.09922800000000001
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.019347,
+        0.019466999999999998,
+        0.019267,
+        0.019698,
+        0.019076000000000003
+      ],
+      "fresh_ms": [
+        0.09854700000000001,
+        0.099588,
+        0.09837599999999999,
+        0.099358,
+        0.09951800000000001
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.019627,
+        0.019487,
+        0.019436000000000002,
+        0.019447,
+        0.019806999999999998
+      ],
+      "fresh_ms": [
+        0.100771,
+        0.09905699999999999,
+        0.099288,
+        0.099799,
+        0.099368
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.019837999999999998,
+        0.019577,
+        0.020218,
+        0.020489,
+        0.019998000000000002
+      ],
+      "fresh_ms": [
+        0.099589,
+        0.10061,
+        0.099709,
+        0.101803,
+        0.10251400000000001
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.020308,
+        0.020599,
+        0.019837,
+        0.019808,
+        0.019377000000000002
+      ],
+      "fresh_ms": [
+        0.101583,
+        0.10009,
+        0.101623,
+        0.108726,
+        0.099769
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.019337,
+        0.019547000000000002,
+        0.019366,
+        0.019216,
+        0.019868
+      ],
+      "fresh_ms": [
+        0.099428,
+        0.099498,
+        0.100461,
+        0.10269400000000001,
+        0.09999
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.019517,
+        0.019787,
+        0.019737,
+        0.019778,
+        0.019677
+      ],
+      "fresh_ms": [
+        0.09972800000000001,
+        0.1004,
+        0.100521,
+        0.09995899999999999,
+        0.099899
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.019266000000000002,
+        0.019157,
+        0.019236,
+        0.019647,
+        0.019647
+      ],
+      "fresh_ms": [
+        0.099218,
+        0.098907,
+        0.099208,
+        0.103847,
+        0.099488
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.019567,
+        0.020128,
+        0.019918,
+        0.019988,
+        0.020338000000000002
+      ],
+      "fresh_ms": [
+        0.10071000000000001,
+        0.100029,
+        0.102033,
+        0.10200300000000001,
+        0.120218
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.020248,
+        0.020048,
+        0.019817,
+        0.019627,
+        0.019707
+      ],
+      "fresh_ms": [
+        0.102664,
+        0.10252399999999999,
+        0.107834,
+        0.10029,
+        0.099769
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.020048,
+        0.028043,
+        0.020218,
+        0.019806999999999998,
+        0.020148
+      ],
+      "fresh_ms": [
+        0.10021000000000001,
+        0.100591,
+        0.100119,
+        0.099709,
+        0.10035
+      ],
+      "kind": "notebook",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.19737300000000002,
+        0.194438,
+        0.22335200000000002,
+        0.193657,
+        0.193607
+      ],
+      "fresh_ms": [
+        7.6066959999999995,
+        6.7397860000000005,
+        6.743132,
+        6.741759,
+        6.690302
+      ],
+      "kind": "full_text",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 69,
+      "page_books": 8,
+      "query": "the"
+    },
+    {
+      "cached_ms": [
+        0.13735,
+        0.13356300000000002,
+        0.136118,
+        0.13566699999999998,
+        0.132451
+      ],
+      "fresh_ms": [
+        0.664407,
+        0.6381479999999999,
+        0.623159,
+        0.654138,
+        0.616407
+      ],
+      "kind": "full_text",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 21,
+      "page_books": 8,
+      "query": "och"
+    },
+    {
+      "cached_ms": [
+        0.184369,
+        0.185061,
+        0.186843,
+        0.190611,
+        0.190841
+      ],
+      "fresh_ms": [
+        0.780778,
+        0.770298,
+        0.7698969999999999,
+        0.793842,
+        0.796808
+      ],
+      "kind": "full_text",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 64,
+      "page_books": 8,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.163971,
+        0.16382,
+        0.16211599999999998,
+        0.163399,
+        0.16443100000000002
+      ],
+      "fresh_ms": [
+        0.660049,
+        0.647555,
+        0.6510720000000001,
+        0.674166,
+        0.653316
+      ],
+      "kind": "full_text",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 43,
+      "page_books": 8,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.19817500000000002,
+        0.207413,
+        0.19911700000000002,
+        0.20893499999999998,
+        0.19736299999999998
+      ],
+      "fresh_ms": [
+        1.292887,
+        1.3621779999999999,
+        1.277558,
+        1.253042,
+        1.247781
+      ],
+      "kind": "full_text",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 69,
+      "page_books": 8,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.192084,
+        0.191242,
+        0.191142,
+        0.191523,
+        0.198646
+      ],
+      "fresh_ms": [
+        0.61292,
+        0.59186,
+        0.5962689999999999,
+        0.590998,
+        0.610616
+      ],
+      "kind": "full_text",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 8,
+      "page_books": 8,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.16517300000000001,
+        0.157298,
+        0.15872999999999998,
+        0.155364,
+        0.157899
+      ],
+      "fresh_ms": [
+        0.712499,
+        0.684175,
+        0.685758,
+        0.665019,
+        0.668385
+      ],
+      "kind": "full_text",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 45,
+      "page_books": 8,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.033774,
+        0.033914,
+        0.033092,
+        0.033463,
+        0.033153
+      ],
+      "fresh_ms": [
+        0.281914,
+        0.29387599999999997,
+        0.27411800000000003,
+        0.275952,
+        0.279619
+      ],
+      "kind": "full_text",
+      "library": "2a0f7e1f-fbeb-4faf-a2d5-656b88f2c026",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.136227,
+        0.12318299999999999,
+        0.12912500000000002,
+        0.12768100000000002,
+        0.126309
+      ],
+      "fresh_ms": [
+        0.569948,
+        0.5458729999999999,
+        0.563957,
+        0.589957,
+        0.56025
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 94,
+      "page_books": 48,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.125537,
+        0.133081,
+        0.12694,
+        0.12576800000000002,
+        0.125728
+      ],
+      "fresh_ms": [
+        0.569438,
+        0.551664,
+        0.571081,
+        0.5613630000000001,
+        0.604394
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 85,
+      "page_books": 48,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.06901,
+        0.067948,
+        0.068419,
+        0.069261,
+        0.067758
+      ],
+      "fresh_ms": [
+        0.494566,
+        0.476412,
+        0.48622,
+        0.499896,
+        0.472835
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 20,
+      "page_books": 20,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.03791099999999999,
+        0.039104,
+        0.037401000000000004,
+        0.037691,
+        0.037801
+      ],
+      "fresh_ms": [
+        0.457786,
+        0.431036,
+        0.43321,
+        0.441225,
+        0.434392
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 6,
+      "page_books": 6,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.032912,
+        0.032962,
+        0.033393,
+        0.033263,
+        0.033012999999999994
+      ],
+      "fresh_ms": [
+        0.445934,
+        0.43025399999999997,
+        0.439451,
+        0.436506,
+        0.426998
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 4,
+      "page_books": 4,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.032702,
+        0.032952,
+        0.033344,
+        0.033664,
+        0.033684
+      ],
+      "fresh_ms": [
+        0.436977,
+        0.425846,
+        0.43892,
+        0.42851100000000003,
+        0.452566
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 4,
+      "page_books": 4,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.126359,
+        0.13668799999999998,
+        0.12455499999999999,
+        0.123604,
+        0.124676
+      ],
+      "fresh_ms": [
+        0.572183,
+        0.5514330000000001,
+        0.550172,
+        0.5570240000000001,
+        0.5629050000000001
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 74,
+      "page_books": 48,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.08883899999999999,
+        0.089719,
+        0.088768,
+        0.088958,
+        0.08851700000000001
+      ],
+      "fresh_ms": [
+        0.530073,
+        0.498885,
+        0.507971,
+        0.515747,
+        0.499375
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 30,
+      "page_books": 30,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.027702,
+        0.027903,
+        0.027902000000000003,
+        0.027422,
+        0.027182
+      ],
+      "fresh_ms": [
+        0.41876199999999997,
+        0.432008,
+        0.41424399999999995,
+        0.429433,
+        0.41707
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.027763000000000003,
+        0.027422,
+        0.028073,
+        0.028023,
+        0.027412000000000002
+      ],
+      "fresh_ms": [
+        0.424904,
+        0.41364199999999995,
+        0.426127,
+        0.416518,
+        0.41739000000000004
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.035427,
+        0.035147,
+        0.035767,
+        0.035117,
+        0.035887999999999996
+      ],
+      "fresh_ms": [
+        0.43838,
+        0.430855,
+        0.437869,
+        0.431286,
+        0.443349
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 5,
+      "page_books": 5,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.018845,
+        0.018706,
+        0.019477,
+        0.018845999999999998,
+        0.019127
+      ],
+      "fresh_ms": [
+        0.33838999999999997,
+        0.353539,
+        0.344753,
+        0.346696,
+        0.33803
+      ],
+      "kind": "books",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.103837,
+        0.1056,
+        0.104007,
+        0.117643,
+        0.10620099999999999
+      ],
+      "fresh_ms": [
+        0.866099,
+        0.852644,
+        0.8402499999999999,
+        0.832726,
+        0.841572
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 5,
+      "page_books": 5,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.119135,
+        0.118785,
+        0.119126,
+        0.119336,
+        0.127411
+      ],
+      "fresh_ms": [
+        0.946832,
+        0.941492,
+        0.944778,
+        0.9413320000000001,
+        0.943596
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 89,
+      "page_books": 48,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.07912999999999999,
+        0.06919099999999999,
+        0.074561,
+        0.06929099999999999,
+        0.075032
+      ],
+      "fresh_ms": [
+        0.8400299999999999,
+        0.839469,
+        0.849288,
+        0.851702,
+        0.8518030000000001
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 24,
+      "page_books": 24,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.038623,
+        0.039405,
+        0.038222,
+        0.039414,
+        0.039324
+      ],
+      "fresh_ms": [
+        0.8065060000000001,
+        0.8586550000000001,
+        0.8241999999999999,
+        0.83487,
+        0.8191700000000001
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 9,
+      "page_books": 9,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.033944,
+        0.033293,
+        0.034155,
+        0.035156,
+        0.033473
+      ],
+      "fresh_ms": [
+        0.798321,
+        0.7938230000000001,
+        0.795426,
+        0.783412,
+        0.78703
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 7,
+      "page_books": 7,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.033163,
+        0.034455,
+        0.034064,
+        0.033994,
+        0.033444
+      ],
+      "fresh_ms": [
+        0.794103,
+        0.809412,
+        0.794183,
+        0.783543,
+        0.788142
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 7,
+      "page_books": 7,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.118614,
+        0.118554,
+        0.119065,
+        0.11791299999999999,
+        0.121279
+      ],
+      "fresh_ms": [
+        0.926003,
+        0.923869,
+        0.938056,
+        0.9307719999999999,
+        0.9562
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 77,
+      "page_books": 48,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.08974,
+        0.08969,
+        0.08983,
+        0.107113,
+        0.09003
+      ],
+      "fresh_ms": [
+        0.875396,
+        0.873373,
+        0.876268,
+        0.88267,
+        0.863194
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 32,
+      "page_books": 32,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.028232999999999998,
+        0.036058,
+        0.027742,
+        0.027752000000000002,
+        0.027752000000000002
+      ],
+      "fresh_ms": [
+        0.7847149999999999,
+        0.769397,
+        0.770008,
+        0.768685,
+        0.777431
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.028333,
+        0.028343999999999998,
+        0.027842,
+        0.028954,
+        0.028674
+      ],
+      "fresh_ms": [
+        0.779686,
+        0.779576,
+        0.7750269999999999,
+        0.807688,
+        0.791608
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.035157,
+        0.036159,
+        0.035837999999999995,
+        0.035296999999999995,
+        0.036008
+      ],
+      "fresh_ms": [
+        0.798882,
+        0.800014,
+        0.7919889999999999,
+        0.818659,
+        0.798311
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 6,
+      "page_books": 6,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.020197999999999997,
+        0.019797000000000002,
+        0.020007,
+        0.019927,
+        0.019346000000000002
+      ],
+      "fresh_ms": [
+        0.691539,
+        0.6830430000000001,
+        0.68167,
+        0.688734,
+        0.6978899999999999
+      ],
+      "kind": "folder",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.019296,
+        0.019477,
+        0.019868,
+        0.019627,
+        0.019147
+      ],
+      "fresh_ms": [
+        0.10511899999999999,
+        0.10068,
+        0.11087999999999999,
+        0.100189,
+        0.099879
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.019567,
+        0.019517,
+        0.020539,
+        0.019185999999999998,
+        0.019417
+      ],
+      "fresh_ms": [
+        0.100441,
+        0.10086099999999999,
+        0.108195,
+        0.099058,
+        0.099619
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.019757,
+        0.019417,
+        0.020659,
+        0.020088,
+        0.019717000000000002
+      ],
+      "fresh_ms": [
+        0.09999,
+        0.099027,
+        0.11323399999999999,
+        0.099869,
+        0.10006899999999999
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.019507,
+        0.019748,
+        0.019847,
+        0.019768,
+        0.019286
+      ],
+      "fresh_ms": [
+        0.09898799999999999,
+        0.099147,
+        0.106842,
+        0.099799,
+        0.099579
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.019636999999999998,
+        0.019787,
+        0.019636999999999998,
+        0.019577,
+        0.019537
+      ],
+      "fresh_ms": [
+        0.099038,
+        0.100029,
+        0.101121,
+        0.099899,
+        0.099979
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.019726999999999998,
+        0.020158,
+        0.020078,
+        0.020438,
+        0.019988
+      ],
+      "fresh_ms": [
+        0.099659,
+        0.099889,
+        0.102835,
+        0.10189200000000001,
+        0.100661
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.019707,
+        0.020499,
+        0.019567,
+        0.019096000000000002,
+        0.018966
+      ],
+      "fresh_ms": [
+        0.10213399999999999,
+        0.117212,
+        0.099027,
+        0.098797,
+        0.09893700000000001
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.019998000000000002,
+        0.019617,
+        0.019216,
+        0.019287,
+        0.019337
+      ],
+      "fresh_ms": [
+        0.09991900000000001,
+        0.100751,
+        0.09894800000000001,
+        0.099589,
+        0.098396
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.020048,
+        0.020108,
+        0.020068000000000003,
+        0.019367,
+        0.019667
+      ],
+      "fresh_ms": [
+        0.101672,
+        0.108445,
+        0.099539,
+        0.099618,
+        0.099949
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.020789000000000002,
+        0.019747,
+        0.019737,
+        0.019656999999999997,
+        0.019758
+      ],
+      "fresh_ms": [
+        0.11292300000000001,
+        0.10024999999999999,
+        0.10014999999999999,
+        0.100731,
+        0.099689
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.020679,
+        0.019397,
+        0.019978,
+        0.019527000000000003,
+        0.019296999999999998
+      ],
+      "fresh_ms": [
+        0.10932700000000001,
+        0.10017,
+        0.099589,
+        0.09980900000000001,
+        0.099879
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.020579,
+        0.020177999999999998,
+        0.020439,
+        0.019847,
+        0.020038
+      ],
+      "fresh_ms": [
+        0.111771,
+        0.10024999999999999,
+        0.1003,
+        0.100611,
+        0.101061
+      ],
+      "kind": "notebook",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.321348,
+        0.307903,
+        0.30867500000000003,
+        0.304296,
+        0.305649
+      ],
+      "fresh_ms": [
+        19.980416,
+        18.571679,
+        18.641742,
+        18.768532,
+        18.332908
+      ],
+      "kind": "full_text",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 91,
+      "page_books": 8,
+      "query": "the"
+    },
+    {
+      "cached_ms": [
+        0.270121,
+        0.270392,
+        0.268318,
+        0.27086299999999996,
+        0.27046200000000004
+      ],
+      "fresh_ms": [
+        0.697851,
+        0.687381,
+        0.673565,
+        0.68173,
+        0.6764899999999999
+      ],
+      "kind": "full_text",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 12,
+      "page_books": 8,
+      "query": "och"
+    },
+    {
+      "cached_ms": [
+        0.308614,
+        0.295039,
+        0.29793400000000003,
+        0.313042,
+        0.295319
+      ],
+      "fresh_ms": [
+        1.2099,
+        1.208146,
+        1.212144,
+        1.202336,
+        1.183881
+      ],
+      "kind": "full_text",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 90,
+      "page_books": 8,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.293836,
+        0.30666,
+        0.293174,
+        0.294658,
+        0.312431
+      ],
+      "fresh_ms": [
+        0.9232469999999999,
+        0.9147409999999999,
+        0.913999,
+        0.928147,
+        0.914982
+      ],
+      "kind": "full_text",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 87,
+      "page_books": 8,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.298174,
+        0.299207,
+        0.34358,
+        0.301981,
+        0.297252
+      ],
+      "fresh_ms": [
+        1.630226,
+        1.6031039999999999,
+        1.6328099999999999,
+        1.65902,
+        1.586743
+      ],
+      "kind": "full_text",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 89,
+      "page_books": 8,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.289397,
+        0.30128099999999997,
+        0.28960800000000003,
+        0.292684,
+        0.29480799999999996
+      ],
+      "fresh_ms": [
+        0.8725809999999999,
+        0.863554,
+        0.876909,
+        0.882189,
+        0.8682730000000001
+      ],
+      "kind": "full_text",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 68,
+      "page_books": 8,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.303815,
+        0.30446599999999996,
+        0.30817300000000003,
+        0.305709,
+        0.301992
+      ],
+      "fresh_ms": [
+        1.452559,
+        1.485592,
+        1.5402250000000002,
+        1.442129,
+        1.4283329999999999
+      ],
+      "kind": "full_text",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 89,
+      "page_books": 8,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.034195,
+        0.034536000000000004,
+        0.034325,
+        0.034244,
+        0.033744
+      ],
+      "fresh_ms": [
+        0.289578,
+        0.26979000000000003,
+        0.26759700000000003,
+        0.261144,
+        0.270653
+      ],
+      "kind": "full_text",
+      "library": "2fc8146c-0fc2-479d-a249-436abc2c3e32",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.044995,
+        0.05265,
+        0.044785,
+        0.057418,
+        0.044795
+      ],
+      "fresh_ms": [
+        0.32483399999999996,
+        0.31709000000000004,
+        0.317261,
+        0.313674,
+        0.32391400000000004
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 11,
+      "page_books": 11,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.025537999999999998,
+        0.025748,
+        0.025167000000000002,
+        0.024757,
+        0.023936
+      ],
+      "fresh_ms": [
+        0.298485,
+        0.29926600000000003,
+        0.29973700000000003,
+        0.301761,
+        0.301461
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.018716,
+        0.018244,
+        0.017864,
+        0.018175,
+        0.018475
+      ],
+      "fresh_ms": [
+        0.235446,
+        0.221699,
+        0.220457,
+        0.230246,
+        0.22158
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.018283999999999998,
+        0.018254,
+        0.018895000000000002,
+        0.018465,
+        0.017703999999999998
+      ],
+      "fresh_ms": [
+        0.222912,
+        0.22986499999999999,
+        0.225327,
+        0.233131,
+        0.22185
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.018283999999999998,
+        0.018054,
+        0.018215000000000002,
+        0.018495,
+        0.017643
+      ],
+      "fresh_ms": [
+        0.22186,
+        0.220607,
+        0.221669,
+        0.22191999999999998,
+        0.221048
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.018104000000000002,
+        0.017934000000000002,
+        0.018625,
+        0.018164,
+        0.018765
+      ],
+      "fresh_ms": [
+        0.222411,
+        0.22061699999999998,
+        0.224215,
+        0.222051,
+        0.233823
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.035206999999999995,
+        0.035727,
+        0.036118000000000004,
+        0.035517,
+        0.035546999999999995
+      ],
+      "fresh_ms": [
+        0.321038,
+        0.307442,
+        0.32144900000000004,
+        0.308053,
+        0.31026699999999996
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 6,
+      "page_books": 6,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.031068999999999996,
+        0.030868999999999997,
+        0.030709,
+        0.031259,
+        0.031058
+      ],
+      "fresh_ms": [
+        0.299848,
+        0.302011,
+        0.31712,
+        0.30298400000000003,
+        0.311449
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 4,
+      "page_books": 4,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.024757,
+        0.029536,
+        0.025689,
+        0.024877,
+        0.024797
+      ],
+      "fresh_ms": [
+        0.292774,
+        0.316039,
+        0.29716299999999995,
+        0.292624,
+        0.290179
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.018836000000000002,
+        0.019105999999999998,
+        0.018765999999999998,
+        0.018195000000000003,
+        0.018606
+      ],
+      "fresh_ms": [
+        0.223092,
+        0.235736,
+        0.222811,
+        0.22359300000000001,
+        0.233883
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.017943999999999998,
+        0.018535000000000003,
+        0.019035999999999997,
+        0.018335,
+        0.018946
+      ],
+      "fresh_ms": [
+        0.223212,
+        0.221339,
+        0.23640799999999998,
+        0.22117799999999999,
+        0.226579
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.018865999999999997,
+        0.018765,
+        0.018495,
+        0.018605,
+        0.018505
+      ],
+      "fresh_ms": [
+        0.240876,
+        0.224014,
+        0.221148,
+        0.23567600000000002,
+        0.220357
+      ],
+      "kind": "books",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.029115000000000002,
+        0.027973,
+        0.027672,
+        0.027141,
+        0.027131000000000002
+      ],
+      "fresh_ms": [
+        0.478596,
+        0.442778,
+        0.43795900000000004,
+        0.429713,
+        0.44759699999999997
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.025318,
+        0.024797,
+        0.025248,
+        0.025097,
+        0.025106999999999997
+      ],
+      "fresh_ms": [
+        0.435524,
+        0.434632,
+        0.446405,
+        0.435965,
+        0.44544300000000003
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.019336,
+        0.019105999999999998,
+        0.018956,
+        0.019056,
+        0.018865999999999997
+      ],
+      "fresh_ms": [
+        0.358328,
+        0.37534100000000004,
+        0.35669500000000004,
+        0.37719400000000003,
+        0.356415
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.019306,
+        0.018856,
+        0.018996,
+        0.019407,
+        0.019177
+      ],
+      "fresh_ms": [
+        0.36744499999999997,
+        0.359751,
+        0.37062100000000003,
+        0.360733,
+        0.373637
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.018915,
+        0.019656999999999997,
+        0.019507,
+        0.018736000000000003,
+        0.019185999999999998
+      ],
+      "fresh_ms": [
+        0.361484,
+        0.372325,
+        0.366704,
+        0.366593,
+        0.359541
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.019497,
+        0.019076000000000003,
+        0.024766999999999997,
+        0.018836000000000002,
+        0.019457
+      ],
+      "fresh_ms": [
+        0.375641,
+        0.3594,
+        0.37012,
+        0.358077,
+        0.367636
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.035778000000000004,
+        0.035758,
+        0.035357,
+        0.036008,
+        0.036279000000000006
+      ],
+      "fresh_ms": [
+        0.45199500000000004,
+        0.464409,
+        0.450743,
+        0.46507,
+        0.45967
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 7,
+      "page_books": 7,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.033183,
+        0.032031,
+        0.032070999999999995,
+        0.031819999999999994,
+        0.032271
+      ],
+      "fresh_ms": [
+        0.45586299999999996,
+        0.47544,
+        0.447116,
+        0.458668,
+        0.455772
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 5,
+      "page_books": 5,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.025388,
+        0.024887,
+        0.025428000000000003,
+        0.025077000000000002,
+        0.025086999999999998
+      ],
+      "fresh_ms": [
+        0.435294,
+        0.44401,
+        0.434813,
+        0.447617,
+        0.437879
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.019196,
+        0.019136,
+        0.019307,
+        0.018886,
+        0.019046
+      ],
+      "fresh_ms": [
+        0.365902,
+        0.359651,
+        0.362236,
+        0.357747,
+        0.367165
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.019667,
+        0.019087,
+        0.018806,
+        0.019247,
+        0.018706
+      ],
+      "fresh_ms": [
+        0.35824799999999996,
+        0.370832,
+        0.357436,
+        0.37461900000000004,
+        0.356715
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.019015999999999998,
+        0.019046,
+        0.019457,
+        0.019004999999999998,
+        0.018986
+      ],
+      "fresh_ms": [
+        0.36650400000000005,
+        0.355883,
+        0.37076200000000004,
+        0.358628,
+        0.371202
+      ],
+      "kind": "folder",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.087836,
+        0.08998,
+        0.087876,
+        0.087876,
+        0.08993999999999999
+      ],
+      "fresh_ms": [
+        0.3116,
+        0.319875,
+        0.295118,
+        0.306791,
+        0.294397
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.020288999999999998,
+        0.019908,
+        0.019677,
+        0.019778,
+        0.019406
+      ],
+      "fresh_ms": [
+        0.11315399999999999,
+        0.109487,
+        0.108936,
+        0.11037899999999999,
+        0.108505
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.02099,
+        0.019978,
+        0.020298,
+        0.019918,
+        0.02081
+      ],
+      "fresh_ms": [
+        0.13547700000000001,
+        0.111622,
+        0.109016,
+        0.109156,
+        0.120558
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.019677,
+        0.019767,
+        0.019537,
+        0.019798,
+        0.020048
+      ],
+      "fresh_ms": [
+        0.109097,
+        0.10908699999999999,
+        0.10857599999999999,
+        0.109888,
+        0.11541799999999999
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.019848,
+        0.019726999999999998,
+        0.020168000000000002,
+        0.020428,
+        0.019758
+      ],
+      "fresh_ms": [
+        0.109166,
+        0.109127,
+        0.108565,
+        0.109106,
+        0.109197
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.020038,
+        0.019537,
+        0.020108,
+        0.020659,
+        0.019988
+      ],
+      "fresh_ms": [
+        0.10935700000000001,
+        0.109197,
+        0.108195,
+        0.118014,
+        0.108375
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.091644,
+        0.08975,
+        0.088547,
+        0.0896,
+        0.089078
+      ],
+      "fresh_ms": [
+        0.303224,
+        0.308684,
+        0.295889,
+        0.314245,
+        0.29542
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.019617,
+        0.019737,
+        0.019967000000000002,
+        0.019166,
+        0.019437
+      ],
+      "fresh_ms": [
+        0.11098,
+        0.109868,
+        0.108927,
+        0.108516,
+        0.108085
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.026941,
+        0.020128,
+        0.020018,
+        0.020349000000000003,
+        0.020279
+      ],
+      "fresh_ms": [
+        0.11107,
+        0.10932700000000001,
+        0.10897599999999999,
+        0.118244,
+        0.10784400000000001
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.020148,
+        0.020148,
+        0.020088,
+        0.019828000000000002,
+        0.020649
+      ],
+      "fresh_ms": [
+        0.129886,
+        0.111551,
+        0.10926599999999999,
+        0.10897599999999999,
+        0.120508
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.020219,
+        0.019938,
+        0.020179000000000002,
+        0.019726999999999998,
+        0.019556999999999998
+      ],
+      "fresh_ms": [
+        0.108044,
+        0.10903600000000001,
+        0.109176,
+        0.108947,
+        0.11598
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.019887000000000002,
+        0.020048,
+        0.020238,
+        0.020339,
+        0.020469
+      ],
+      "fresh_ms": [
+        0.108095,
+        0.10897699999999999,
+        0.109287,
+        0.10889599999999999,
+        0.11082
+      ],
+      "kind": "notebook",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.116882,
+        0.11765300000000001,
+        0.11548800000000001,
+        0.12287299999999998,
+        0.122803
+      ],
+      "fresh_ms": [
+        0.5131209999999999,
+        0.509434,
+        0.510637,
+        0.5183209999999999,
+        0.508923
+      ],
+      "kind": "full_text",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 11,
+      "page_books": 8,
+      "query": "the"
+    },
+    {
+      "cached_ms": [
+        0.034005,
+        0.033484,
+        0.032902,
+        0.033503,
+        0.033203
+      ],
+      "fresh_ms": [
+        0.266695,
+        0.259651,
+        0.26398,
+        0.25684599999999996,
+        0.256345
+      ],
+      "kind": "full_text",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "och"
+    },
+    {
+      "cached_ms": [
+        0.040035,
+        0.032612,
+        0.033904,
+        0.033133,
+        0.033093000000000004
+      ],
+      "fresh_ms": [
+        0.258529,
+        0.255694,
+        0.268899,
+        0.25673599999999996,
+        0.256966
+      ],
+      "kind": "full_text",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.033312999999999995,
+        0.032861999999999995,
+        0.034605,
+        0.033163,
+        0.033102
+      ],
+      "fresh_ms": [
+        0.26834800000000003,
+        0.263689,
+        0.29059,
+        0.260323,
+        0.26044300000000004
+      ],
+      "kind": "full_text",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.065584,
+        0.074912,
+        0.06443199999999999,
+        0.066636,
+        0.065064
+      ],
+      "fresh_ms": [
+        0.396411,
+        0.395028,
+        0.392303,
+        0.415026,
+        0.39348500000000003
+      ],
+      "kind": "full_text",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.034375,
+        0.033583,
+        0.034616,
+        0.033724,
+        0.034235
+      ],
+      "fresh_ms": [
+        0.277025,
+        0.257418,
+        0.254071,
+        0.254682,
+        0.260914
+      ],
+      "kind": "full_text",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.033584,
+        0.033694,
+        0.041849,
+        0.032912,
+        0.032642
+      ],
+      "fresh_ms": [
+        0.265542,
+        0.25615499999999997,
+        0.254842,
+        0.256235,
+        0.25422100000000003
+      ],
+      "kind": "full_text",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.033312999999999995,
+        0.033343000000000005,
+        0.033201999999999995,
+        0.032822,
+        0.033213
+      ],
+      "fresh_ms": [
+        0.263649,
+        0.254451,
+        0.25373,
+        0.254131,
+        0.254913
+      ],
+      "kind": "full_text",
+      "library": "c15ad76b-459e-44a8-9935-e0853c557595",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.123955,
+        0.12348400000000001,
+        0.12664,
+        0.12398500000000001,
+        0.12439499999999999
+      ],
+      "fresh_ms": [
+        0.564979,
+        0.532948,
+        0.522208,
+        0.525625,
+        0.5518339999999999
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 78,
+      "page_books": 48,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.12313299999999999,
+        0.137811,
+        0.12485600000000001,
+        0.12410399999999999,
+        0.125277
+      ],
+      "fresh_ms": [
+        0.550081,
+        0.534933,
+        0.535153,
+        0.542346,
+        0.559299
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 72,
+      "page_books": 48,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.08411,
+        0.083298,
+        0.083398,
+        0.09013099999999999,
+        0.083287
+      ],
+      "fresh_ms": [
+        0.489967,
+        0.483755,
+        0.489457,
+        0.495628,
+        0.482543
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 27,
+      "page_books": 27,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.068079,
+        0.06890099999999999,
+        0.067929,
+        0.067538,
+        0.07612400000000001
+      ],
+      "fresh_ms": [
+        0.470971,
+        0.470119,
+        0.460692,
+        0.47381700000000004,
+        0.462916
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 20,
+      "page_books": 20,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.067829,
+        0.06866,
+        0.067858,
+        0.067858,
+        0.067147
+      ],
+      "fresh_ms": [
+        0.45975,
+        0.4756,
+        0.461504,
+        0.46495,
+        0.47181300000000004
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 20,
+      "page_books": 20,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.065054,
+        0.065664,
+        0.066425,
+        0.066586,
+        0.06539400000000001
+      ],
+      "fresh_ms": [
+        0.456824,
+        0.470651,
+        0.46476900000000004,
+        0.45892900000000003,
+        0.465311
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 19,
+      "page_books": 19,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.131068,
+        0.125748,
+        0.12480600000000001,
+        0.12578799999999998,
+        0.126219
+      ],
+      "fresh_ms": [
+        0.546655,
+        0.5376380000000001,
+        0.5381290000000001,
+        0.5506019999999999,
+        0.5475760000000001
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 60,
+      "page_books": 48,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.058391,
+        0.057689000000000004,
+        0.058990999999999995,
+        0.05794,
+        0.057809
+      ],
+      "fresh_ms": [
+        0.450452,
+        0.447638,
+        0.462756,
+        0.44937,
+        0.455191
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 15,
+      "page_books": 15,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.019226,
+        0.018664999999999998,
+        0.018505,
+        0.018625,
+        0.018394999999999998
+      ],
+      "fresh_ms": [
+        0.331768,
+        0.332259,
+        0.32335200000000003,
+        0.338822,
+        0.324243
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.019205999999999997,
+        0.018956,
+        0.019136,
+        0.019056,
+        0.027412000000000002
+      ],
+      "fresh_ms": [
+        0.337599,
+        0.32260099999999997,
+        0.329564,
+        0.324654,
+        0.340935
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.018786,
+        0.018675,
+        0.018185,
+        0.018695,
+        0.018926000000000002
+      ],
+      "fresh_ms": [
+        0.32930299999999996,
+        0.32442400000000005,
+        0.323342,
+        0.32211,
+        0.33588599999999996
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.019116,
+        0.019597,
+        0.018726,
+        0.025308,
+        0.018996
+      ],
+      "fresh_ms": [
+        0.321187,
+        0.35516200000000003,
+        0.320857,
+        0.319605,
+        0.320687
+      ],
+      "kind": "books",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.085231,
+        0.08564200000000001,
+        0.085231,
+        0.086904,
+        0.085532
+      ],
+      "fresh_ms": [
+        0.770798,
+        0.774015,
+        0.7665909999999999,
+        0.781629,
+        0.782291
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 6,
+      "page_books": 6,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.121029,
+        0.122211,
+        0.13337200000000002,
+        0.12174,
+        0.122862
+      ],
+      "fresh_ms": [
+        1.0225250000000001,
+        1.016825,
+        1.030461,
+        1.012667,
+        1.022775
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 73,
+      "page_books": 48,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.08365800000000001,
+        0.083748,
+        0.083719,
+        0.08421,
+        0.086634
+      ],
+      "fresh_ms": [
+        0.8499580000000001,
+        0.877571,
+        0.857563,
+        0.852964,
+        0.881168
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 27,
+      "page_books": 27,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.070784,
+        0.07363,
+        0.067748,
+        0.075573,
+        0.068069
+      ],
+      "fresh_ms": [
+        0.849909,
+        0.8350799999999999,
+        0.8319850000000001,
+        0.836824,
+        0.8321850000000001
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 20,
+      "page_books": 20,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.071436,
+        0.06872,
+        0.06858,
+        0.075503,
+        0.068409
+      ],
+      "fresh_ms": [
+        0.834519,
+        0.836142,
+        0.837906,
+        0.832967,
+        0.853576
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 20,
+      "page_books": 20,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.06690700000000001,
+        0.067067,
+        0.065644,
+        0.06600500000000001,
+        0.06600500000000001
+      ],
+      "fresh_ms": [
+        0.833187,
+        0.8608290000000001,
+        0.8393590000000001,
+        0.830762,
+        0.830372
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 19,
+      "page_books": 19,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.12490600000000002,
+        0.131218,
+        0.123494,
+        0.123654,
+        0.126309
+      ],
+      "fresh_ms": [
+        1.017345,
+        1.0048920000000001,
+        1.0146899999999999,
+        1.013178,
+        1.0318230000000002
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 61,
+      "page_books": 48,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.059172,
+        0.057819999999999996,
+        0.07083400000000001,
+        0.060554000000000004,
+        0.060645
+      ],
+      "fresh_ms": [
+        0.822086,
+        0.825722,
+        0.838387,
+        0.903339,
+        0.8718410000000001
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 15,
+      "page_books": 15,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.019647,
+        0.020298,
+        0.019948,
+        0.019996999999999997,
+        0.020158
+      ],
+      "fresh_ms": [
+        0.713049,
+        0.709754,
+        0.694945,
+        0.690988,
+        0.703982
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.019988,
+        0.033803999999999994,
+        0.020158,
+        0.020088,
+        0.020489
+      ],
+      "fresh_ms": [
+        0.707139,
+        0.730643,
+        0.706688,
+        0.7106150000000001,
+        0.6969390000000001
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.019958,
+        0.019837,
+        0.019918,
+        0.020088,
+        0.020018
+      ],
+      "fresh_ms": [
+        0.690116,
+        0.696759,
+        0.6963079999999999,
+        0.7363339999999999,
+        0.692881
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.020299,
+        0.019868,
+        0.02098,
+        0.020398,
+        0.019857
+      ],
+      "fresh_ms": [
+        0.744128,
+        0.6888839999999999,
+        0.712188,
+        0.683554,
+        0.670038
+      ],
+      "kind": "folder",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.142058,
+        0.157348,
+        0.142931,
+        0.143762,
+        0.15759800000000002
+      ],
+      "fresh_ms": [
+        0.430795,
+        0.409315,
+        0.40697,
+        0.425064,
+        0.40676999999999996
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": ""
+    },
+    {
+      "cached_ms": [
+        0.146146,
+        0.145295,
+        0.166565,
+        0.14671700000000001,
+        0.143792
+      ],
+      "fresh_ms": [
+        0.41098799999999996,
+        0.42726899999999995,
+        0.41012600000000005,
+        0.419554,
+        0.421097
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "h"
+    },
+    {
+      "cached_ms": [
+        0.100961,
+        0.091874,
+        0.091673,
+        0.09130300000000001,
+        0.091513
+      ],
+      "fresh_ms": [
+        0.352848,
+        0.353319,
+        0.3644,
+        0.35207700000000003,
+        0.36543200000000003
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 1,
+      "page_books": 1,
+      "query": "hi"
+    },
+    {
+      "cached_ms": [
+        0.020429,
+        0.020419,
+        0.021361,
+        0.019958,
+        0.020329
+      ],
+      "fresh_ms": [
+        0.15898099999999998,
+        0.15865,
+        0.170322,
+        0.158911,
+        0.162017
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "his"
+    },
+    {
+      "cached_ms": [
+        0.02129,
+        0.020048,
+        0.020188,
+        0.020098,
+        0.02122
+      ],
+      "fresh_ms": [
+        0.168419,
+        0.15770800000000001,
+        0.157979,
+        0.15847,
+        0.167177
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.020208999999999998,
+        0.020509,
+        0.021480000000000003,
+        0.020729,
+        0.020718999999999998
+      ],
+      "fresh_ms": [
+        0.15781799999999999,
+        0.158831,
+        0.176715,
+        0.17244600000000002,
+        0.162308
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.148801,
+        0.173548,
+        0.146146,
+        0.15081599999999998,
+        0.148071
+      ],
+      "fresh_ms": [
+        0.446054,
+        0.419304,
+        0.418722,
+        0.426256,
+        0.43284900000000004
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 2,
+      "page_books": 2,
+      "query": "d"
+    },
+    {
+      "cached_ms": [
+        0.020789000000000002,
+        0.020519000000000003,
+        0.020469,
+        0.020438,
+        0.020619000000000002
+      ],
+      "fresh_ms": [
+        0.16365,
+        0.162117,
+        0.170453,
+        0.160844,
+        0.157969
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "de"
+    },
+    {
+      "cached_ms": [
+        0.02108,
+        0.020448,
+        0.019777,
+        0.020128,
+        0.020619000000000002
+      ],
+      "fresh_ms": [
+        0.194218,
+        0.157238,
+        0.159452,
+        0.158279,
+        0.171896
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.020188,
+        0.020239,
+        0.021169999999999998,
+        0.020519000000000003,
+        0.020288
+      ],
+      "fresh_ms": [
+        0.158259,
+        0.158179,
+        0.16241699999999998,
+        0.162328,
+        0.157448
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.020349000000000003,
+        0.020369,
+        0.020068000000000003,
+        0.020088,
+        0.020078
+      ],
+      "fresh_ms": [
+        0.159111,
+        0.165754,
+        0.157548,
+        0.157538,
+        0.15871
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.020829,
+        0.020358,
+        0.020729,
+        0.020639,
+        0.020479
+      ],
+      "fresh_ms": [
+        0.192986,
+        0.158009,
+        0.156687,
+        0.15767799999999998,
+        0.165824
+      ],
+      "kind": "notebook",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    },
+    {
+      "cached_ms": [
+        0.267696,
+        0.25405099999999997,
+        0.25326,
+        0.255824,
+        0.2592
+      ],
+      "fresh_ms": [
+        37.970584,
+        32.685852000000004,
+        37.948783,
+        36.508396999999995,
+        34.912376
+      ],
+      "kind": "full_text",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 65,
+      "page_books": 8,
+      "query": "the"
+    },
+    {
+      "cached_ms": [
+        0.334814,
+        0.33357200000000004,
+        0.326157,
+        0.335976,
+        0.33623600000000003
+      ],
+      "fresh_ms": [
+        0.847534,
+        0.785577,
+        0.768224,
+        0.75552,
+        0.7483960000000001
+      ],
+      "kind": "full_text",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 16,
+      "page_books": 8,
+      "query": "och"
+    },
+    {
+      "cached_ms": [
+        0.234093,
+        0.234484,
+        0.23211,
+        0.234344,
+        0.23317100000000002
+      ],
+      "fresh_ms": [
+        1.379601,
+        1.328084,
+        1.3487230000000001,
+        1.3372410000000001,
+        1.329617
+      ],
+      "kind": "full_text",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 65,
+      "page_books": 8,
+      "query": "hist"
+    },
+    {
+      "cached_ms": [
+        0.23458400000000001,
+        0.24813899999999997,
+        0.232511,
+        0.233702,
+        0.235276
+      ],
+      "fresh_ms": [
+        0.920523,
+        0.877872,
+        0.874374,
+        0.886358,
+        0.879014
+      ],
+      "kind": "full_text",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 64,
+      "page_books": 8,
+      "query": "history"
+    },
+    {
+      "cached_ms": [
+        0.234985,
+        0.240155,
+        0.246326,
+        0.233131,
+        0.241067
+      ],
+      "fresh_ms": [
+        1.392255,
+        1.374161,
+        1.457789,
+        1.363291,
+        1.38445
+      ],
+      "kind": "full_text",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 65,
+      "page_books": 8,
+      "query": "dem"
+    },
+    {
+      "cached_ms": [
+        0.233822,
+        0.234574,
+        0.232691,
+        0.23344199999999998,
+        0.246026
+      ],
+      "fresh_ms": [
+        0.764136,
+        0.772352,
+        0.761721,
+        0.766962,
+        0.764177
+      ],
+      "kind": "full_text",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 50,
+      "page_books": 8,
+      "query": "democracy"
+    },
+    {
+      "cached_ms": [
+        0.236387,
+        0.231067,
+        0.24191800000000002,
+        0.230536,
+        0.234284
+      ],
+      "fresh_ms": [
+        0.9822279999999999,
+        0.960859,
+        0.9656480000000001,
+        0.956971,
+        0.9629719999999999
+      ],
+      "kind": "full_text",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 61,
+      "page_books": 8,
+      "query": "social"
+    },
+    {
+      "cached_ms": [
+        0.033874,
+        0.032942,
+        0.033443,
+        0.034145,
+        0.033634
+      ],
+      "fresh_ms": [
+        0.29556899999999997,
+        0.273969,
+        0.270442,
+        0.283246,
+        0.274891
+      ],
+      "kind": "full_text",
+      "library": "d2ee7a00-df14-4a14-a1b0-fe0b4d0c5b16",
+      "matching_books": 0,
+      "page_books": 0,
+      "query": "zzzxqnevermatch"
+    }
+  ]
+}

@@ -60,13 +60,10 @@ pub(crate) fn library_book_menu(menu: PopupMenu, libraries: Entity<Libraries>, b
 
 fn open_dialog(libraries: Entity<Libraries>, library: LibraryClient, name: String, action: Action, window: &mut Window, cx: &mut App) {
     let selection_epoch = libraries.read(cx).selection_epoch();
-    // Let the triggering popup finish restoring focus before the dialog opens.
-    window.defer(cx, move |window, cx| {
-        window.defer(cx, move |window, cx| {
-            let id = *library.id();
-            let view = cx.new(|cx| DownloadDialog::new(library, name, action, cx));
-            libraries.update(cx, |libraries, cx| libraries.show_operation_dialog(id, view, 420.0, selection_epoch, window, cx));
-        });
+    crate::services::after_menu_dismiss(window, cx, move |window, cx| {
+        let id = *library.id();
+        let view = cx.new(|cx| DownloadDialog::new(library, name, action, cx));
+        libraries.update(cx, |libraries, cx| libraries.show_operation_dialog(id, view, 26.25, selection_epoch, window, cx));
     });
 }
 
@@ -256,7 +253,7 @@ impl Render for DownloadDialog {
             .flex_col()
             .gap(px(components::SPACE_MD))
             .text_color(theme.text)
-            .child(div().text_size(gpui::rems(components::TEXT_MD)).child(self.action.title()))
+            .child(components::dialog_title(self.action.title(), theme))
             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.name.clone()));
         if let Some(storage) = storage {
             let (count, bytes) = match self.action {
@@ -280,7 +277,7 @@ impl Render for DownloadDialog {
                     }))
                 }))
                 .child(components::dialog_cancel_button("library-downloads-cancel", text!(common::cancel)).on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))))
-                .child(components::base_button("library-downloads-confirm").primary().label(self.action.label()).disabled(!self.can_start()).on_click(cx.listener(|view, _, window, cx| view.start(window, cx)))),
+                .child(components::dialog_confirm_button("library-downloads-confirm", self.action.label(), Some("enter")).disabled(!self.can_start()).on_click(cx.listener(|view, _, window, cx| view.start(window, cx)))),
         )
     }
 }

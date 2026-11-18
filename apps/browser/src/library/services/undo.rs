@@ -25,6 +25,8 @@ pub(crate) enum UndoStep {
     RestoreDirectory { directory: DirId, parent: Option<DirId> },
     /// Drop a placement an action created.
     RemoveBookFromDirectory { book: BookId, directory: DirId },
+    /// Restore a book and the placements discarded by a whole-book trash action.
+    RestoreBook { book: BookId },
     /// Put back a placement an action removed.
     RestoreBookPlacement { book: BookId, directory: DirId },
     /// Rename a folder back.
@@ -38,6 +40,7 @@ impl UndoStep {
             Self::TrashDirectory { directory } => library.move_directory_to_trash(directory).await,
             Self::RestoreDirectory { directory, parent } => library.restore_directory(directory, parent).await.map(|_| ()),
             Self::RemoveBookFromDirectory { book, directory } => library.remove_book_from_directory(book, directory).await.map(|_| ()),
+            Self::RestoreBook { book } => library.restore_book(book).await,
             Self::RestoreBookPlacement { book, directory } => library.restore_book_placement(book, directory).await,
             Self::RenameDirectory { directory, name } => library.rename_directory(directory, name).await.map(|_| ()),
         }

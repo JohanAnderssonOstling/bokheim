@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 mod billing;
+mod http_contracts;
 pub use billing::{AccountEntitlementsResponse, AccountSubscription, ScheduledStoragePlanChange, StoragePlan, SubscriptionStatus};
 
 pub const PASSWORD_MIN_CHARACTERS: usize = 12;

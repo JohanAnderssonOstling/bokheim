@@ -9,7 +9,7 @@ use ui_text::text;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::library::widgets::{BookCardPresentation, Paginator, PaginatorAxis, PaginatorGroup, PaginatorPosition, graph_cover_policy};
+use crate::library::widgets::{BookCardPresentation, Paginator, PaginatorAxis, PaginatorEvent, PaginatorGroup, PaginatorPosition, graph_cover_policy};
 use gpui::prelude::*;
 use gpui::{Context, div};
 use gpui_component::{IconName, Theme};
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, App, Bounds, Entity, FocusHandle, IntoElement, Pixels, Point, SharedString, Size, Subscription, Window, point, px, size};
 use library_model::{BrowseLocation, BrowsePathSegment, BrowseRow};
-use ui_components::{self as components, CanvasCamera, GraphLayout, GraphLayoutKind, GraphTree, InfiniteCanvas, LayoutParams, NodeRole};
+use ui_components::{self as components, CanvasCamera, GraphLabel, GraphLayout, GraphLayoutKind, GraphTree, InfiniteCanvas, LayoutParams, NodeRole};
 
 use super::listing::BrowseKind;
 use super::navigator::{BrowseNavigator, Loaded};
@@ -39,17 +39,9 @@ pub(super) enum GraphTap {
 /// One node of the graph: what its chip shows, the trail that browses it, and
 /// the key that follows it from one layout to the next.
 struct GraphEntry {
-    name: String,
-    books: usize,
+    label: GraphLabel,
     trail: Vec<BrowsePathSegment>,
     key: String,
-}
-
-impl GraphEntry {
-    /// The count a label shows: books in this location and beneath it, if any.
-    fn count(&self) -> Option<usize> {
-        (self.books > 0).then_some(self.books)
-    }
 }
 
 /// A layout and the entry for each of its nodes.
@@ -58,13 +50,12 @@ struct Drawn {
     entries: Arc<Vec<GraphEntry>>,
 }
 
-/// Everything a layout is computed from: the graph is laid out again only
-/// when one of these changes.
+/// Structural and typographic inputs to layout. Count-only changes reuse
+/// the root slot while the updated label still fits.
 #[derive(PartialEq)]
 struct GraphKey {
     root: BrowseLocation,
     root_label: String,
-    root_book_count: usize,
     path: Vec<BrowsePathSegment>,
     compact: bool,
     rem_size: Pixels,
@@ -75,6 +66,7 @@ struct GraphKey {
 /// The settled layout for a key, which the drawn one animates towards.
 struct CachedGraph {
     key: GraphKey,
+    root_book_count: usize,
     target: Drawn,
 }
 
@@ -129,7 +121,10 @@ impl BrowseGraph {
         let covers_id = format!("{}-graph-covers", navigator.read(cx).kind.list_prefix());
         let loaded = cx.subscribe(&navigator, |graph, _, loaded: &Loaded, cx| graph.install(loaded, cx));
         let covers = cx.new(|_| Paginator::new(covers_id, []).flow_axis(PaginatorAxis::Vertical));
-        let covers_subscription = cx.observe(&covers, |graph, covers, cx| {
+        let covers_subscription = cx.subscribe(&covers, |graph, covers, event: &PaginatorEvent, cx| {
+            if *event != PaginatorEvent::PageChanged {
+                return;
+            }
             let flow = covers.read(cx);
             let Some(range) = flow.visible_child_range() else { return };
             let range = range.start..flow.adjacent_child_range(true).map_or(range.end, |next| next.end.max(range.end));
@@ -208,7 +203,7 @@ impl BrowseGraph {
             return false;
         }
         let minimum = f32::from(rem_size) * 17.5;
-        let width = (start_width + start_x - x).clamp(minimum, 720.0_f32.max(minimum));
+        let width = (start_width + start_x - x).clamp(minimum, (f32::from(rem_size) * 45.0).max(minimum));
         if (self.sidebar_width - width).abs() < 0.5 {
             return false;
         }
@@ -240,17 +235,18 @@ impl BrowseGraph {
             return graph_area.size_full().into_any_element();
         }
         if compact {
-            let expanded = self.sheet_expanded;
+            let expanded = self.sheet_expanded || search_field.is_some();
             let cover_sheet = div()
                 .relative()
                 .w_full()
                 .when(expanded, |sheet| sheet.flex_1().min_h_0())
-                .when(!expanded, |sheet| sheet.h(px(117.0)).flex_none())
+                .when(!expanded, |sheet| sheet.h(gpui::rems(7.3125)).flex_none())
                 .bg(theme.page_bg)
                 .border_t_1()
                 .border_color(theme.rule)
                 .flex()
                 .flex_col()
+                .children(search_field)
                 .child(div().flex_1().min_h_0().child(covers))
                 .when(!expanded, |sheet| {
                     sheet.child(
@@ -348,16 +344,11 @@ impl BrowseGraph {
     }
 
     pub(super) fn handle_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
-        if key == "l" {
-            self.toggle_layout();
-            cx.notify();
-            return true;
-        }
         if let Some(action) = self.key(key) {
             cx.emit(action);
             return true;
         }
-        matches!(key, "left" | "right" | "up" | "down" | "enter" | "backspace" | "pageup" | "pagedown")
+        false
     }
 
     pub(super) fn layout_kind(&self) -> GraphLayoutKind {
@@ -449,12 +440,25 @@ impl BrowseGraph {
         let compact = components::WindowWidthClass::for_window(window).is_compact();
         let params = if compact { LayoutParams::compact() } else { LayoutParams::desktop() };
         let font_family = Theme::global(cx).font_family.clone();
-        let key = GraphKey { root, root_label: root_label.to_string(), root_book_count, path: path.to_vec(), compact, rem_size: window.rem_size(), font_family: font_family.clone(), kind: self.layout_kind };
-        let target_changed = !self.target.as_ref().is_some_and(|target| target.key == key);
+        let key = GraphKey { root, root_label: root_label.to_string(), path: path.to_vec(), compact, rem_size: window.rem_size(), font_family: font_family.clone(), kind: self.layout_kind };
+        let layout_key_changed = !self.target.as_ref().is_some_and(|target| target.key == key);
+        let mut target_changed = layout_key_changed;
+        if !layout_key_changed && let Some(target) = &mut self.target {
+            if target.root_book_count != root_book_count {
+                if let Some(node) = target.target.layout.node(0) {
+                    let label = GraphLabel::new(root_label.clone(), (root_book_count > 0).then_some(root_book_count));
+                    let measured = label.measure(node.role, compact, window, cx);
+                    target_changed = f32::from(measured.width) > node.bounds.size.width || f32::from(measured.height) > node.bounds.size.height;
+                }
+                target.root_book_count = root_book_count;
+            }
+        }
         if target_changed {
-            // Camera destinations and node roles belong to this target. A
-            // replacement target starts a fresh transition, if needed.
-            self.motion = None;
+            // Structural changes invalidate animation node identities. A root
+            // count growing beyond its slot keeps the same nodes and motion.
+            if layout_key_changed {
+                self.motion = None;
+            }
             self.target = None;
             if let Some((tree, entries, selection)) = graph_tree(root, &root_label, root_book_count, path, &self.children) {
                 // Each label is measured in every role, since the layout picks
@@ -464,12 +468,12 @@ impl BrowseGraph {
                     .enumerate()
                     .flat_map(|(node, entry)| NodeRole::ALL.map(|role| (node, role, entry)))
                     .map(|(node, role, entry)| {
-                        let measured = components::graph_label_size(role, &entry.name, entry.count(), compact, window, cx);
+                        let measured = entry.label.measure(role, compact, window, cx);
                         ((node, role), size(f32::from(measured.width), f32::from(measured.height)))
                     })
                     .collect();
                 match components::graph_layout(self.layout_kind, &tree, selection, &|node, role| sizes[&(node, role)], &params) {
-                    Ok(layout) => self.target = Some(CachedGraph { key, target: Drawn { layout: Arc::new(layout), entries: Arc::new(entries) } }),
+                    Ok(layout) => self.target = Some(CachedGraph { key, root_book_count, target: Drawn { layout: Arc::new(layout), entries: Arc::new(entries) } }),
                     Err(error) => log::error!("Could not lay out browse graph: {error}"),
                 }
             }
@@ -491,7 +495,6 @@ impl BrowseGraph {
             return components::infinite_canvas(&self.canvas).into_any_element();
         };
         let ghost = self.motion.as_ref().filter(|motion| !motion.departing.nodes().is_empty() && motion.ghost_opacity > 0.0);
-        let theme = components::browser_theme(cx);
         let graph = cx.weak_entity();
         // A tap browses the node, unless the press that ended on it was a pan;
         // a fading node only shows.
@@ -501,7 +504,8 @@ impl BrowseGraph {
         let node = move |placed: &components::PlacedNode, departing: bool| {
             let entries = if departing { departing_entries.as_ref() } else { Some(&entries) };
             let Some(entry) = entries.and_then(|entries| entries.get(placed.node)) else { return div().into_any_element() };
-            let label = components::graph_label(SharedString::from(format!("graph-node-{}", entry.key)), placed.role, &entry.name, entry.count(), compact, theme, font_family.clone());
+            let label = if placed.node == 0 { GraphLabel::new(root_label.clone(), (root_book_count > 0).then_some(root_book_count)) } else { entry.label.clone() };
+            let label = div().id(SharedString::from(format!("graph-node-{}", entry.key))).size_full().child(label.view(placed.role, compact));
             if departing {
                 return label.into_any_element();
             }
@@ -656,7 +660,7 @@ fn trail_key(root: BrowseLocation, trail: &[BrowsePathSegment]) -> String {
 /// location on `path`, and the index of the path's last location. `None` while
 /// any of those locations' children are unknown.
 fn graph_tree(root: BrowseLocation, root_label: &str, root_book_count: usize, path: &[BrowsePathSegment], children: &HashMap<BrowseLocation, Vec<BrowseRow>>) -> Option<(GraphTree, Vec<GraphEntry>, usize)> {
-    let entry = |name: &str, books: usize, trail: Vec<BrowsePathSegment>| GraphEntry { name: name.to_owned(), books, key: trail_key(root, &trail), trail };
+    let entry = |name: &str, books: usize, trail: Vec<BrowsePathSegment>| GraphEntry { label: GraphLabel::new(name.to_owned(), (books > 0).then_some(books)), key: trail_key(root, &trail), trail };
     let mut parents = vec![None];
     let mut entries = vec![entry(root_label, root_book_count, Vec::new())];
     let mut parent = 0;

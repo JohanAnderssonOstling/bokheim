@@ -30,7 +30,7 @@ impl LibraryHandle {
         let library = &self.owner.resources;
         let storage = self.storage().await?;
         let database = storage.database();
-        if let Some(existing) = database.folder_destinations().await?.into_iter().find(|folder| folder.id == id) {
+        if let Some(existing) = database.folder_destination(&id).await? {
             if existing.parent_id != Some(parent_id) || existing.label != name {
                 return Err(BackendError::message("copied folder was changed; keep the existing copy and choose another destination"));
             }

@@ -777,7 +777,7 @@ impl Render for ApplicationPane {
             self.audiobook_footer.update(cx, |footer, cx| footer.set(dock, pending, cx));
             visible.then(|| AnyView::from(self.audiobook_footer.clone()))
         };
-        let embedded_reader = self.split_enabled && browser_ui::native_windows_available() && !ui_components::uses_mobile_navigation(window);
+        let embedded_reader = self.split_enabled && browser_ui::independent_panes_available() && !ui_components::uses_mobile_navigation(window);
         self.browser.update(cx, |browser, cx| browser.set_content_footer(footer.clone().filter(|_| self.reader.is_none() || embedded_reader), cx));
         let reader_surface = self.reader.as_ref().filter(|_| embedded_reader).map(|reader| AnyView::from(reader.view.clone()));
         self.browser.update(cx, |browser, cx| browser.set_reader_surface(reader_surface, cx));

@@ -90,12 +90,6 @@ SELECT content_hash FROM uploadable_covers
 WHERE NOT EXISTS(SELECT 1 FROM local_book_draft draft WHERE draft.content_hash=uploadable_covers.content_hash) AND content_hash > COALESCE(:after,X'')
 ORDER BY content_hash LIMIT :limit;
 
--- name: transfer_complete_upload!
--- param: id: i64
--- param: content_hash: &BookId
-UPDATE book_transfer SET upload_id=NULL=NULL, upload_size=NULL
-WHERE content_hash=:content_hash AND upload_id=:id;
-
 -- name: pending_thumbnail_downloads?
 -- param: after: Option<&BookId>
 -- param: limit: i64

@@ -1,0 +1,99 @@
+[
+  {
+    "crate": "audiobook-archive",
+    "passed": 5,
+    "failed": 0,
+    "seconds": 0.0,
+    "failures": []
+  },
+  {
+    "crate": "filesystem-scanner",
+    "passed": 17,
+    "failed": 0,
+    "seconds": 0.17,
+    "failures": []
+  },
+  {
+    "crate": "library-backend",
+    "passed": 30,
+    "failed": 3,
+    "seconds": 1.15,
+    "failures": [
+      "library::library_resources::tests::opening_library_recovers_an_abandoned_legacy_claim_before_scanning",
+      "library::lifecycle::concurrency_tests::failed_scan_releases_busy_state_and_can_scan_again",
+      "library::lifecycle::concurrency_tests::foreground_resume_reconciles_libraries_without_a_socket_and_does_not_poll"
+    ]
+  },
+  {
+    "crate": "library-catalog",
+    "passed": 2,
+    "failed": 1,
+    "seconds": 0.85,
+    "failures": [
+      "download_tests::server_card_variants_preserve_finished_jpegs"
+    ]
+  },
+  {
+    "crate": "library-database",
+    "passed": 156,
+    "failed": 6,
+    "seconds": 4.04,
+    "failures": [
+      "projection::tests::addition_and_enrichment_project_only_the_final_metadata",
+      "regression_tests::folder_count_queries_do_not_scan_unrelated_library_books",
+      "taxonomy_update::tests::failure_rolls_back_every_assignment_and_revision",
+      "taxonomy_update::tests::refresh_keeps_imported_catalog_concept_identity_without_external_codes",
+      "taxonomy_update::tests::refresh_removes_stale_assignments_without_changing_canonical_data_and_is_idempotent",
+      "taxonomy_update::tests::serving_session_defers_stale_subjects_until_maintenance"
+    ]
+  },
+  {
+    "crate": "library-files",
+    "passed": 37,
+    "failed": 7,
+    "seconds": 0.11,
+    "failures": [
+      "asset_store::native::lease_location_tests::cancelled_thumbnail_write_preserves_artwork_and_releases_its_lease",
+      "asset_store::tests::fingerprint_failure_preserves_completed_imports_and_retry_does_not_duplicate_them",
+      "import_move::tests::restart_does_not_touch_a_replacement_at_the_publication_path",
+      "import_move::tests::restart_restores_an_unpublished_claim_and_is_idempotent",
+      "import_move::tests::restart_never_overwrites_a_replacement_at_the_original_path",
+      "import_move::tests::restart_keeps_a_database_committed_publication",
+      "import_move::tests::restart_restores_publication_before_database_commit"
+    ]
+  },
+  {
+    "crate": "library-import",
+    "passed": 43,
+    "failed": 3,
+    "seconds": 1.04,
+    "failures": [
+      "foliate::tests::imported_cfis_match_nested_toc_sections_and_export_under_their_headings",
+      "completion::tests::stored_dropped_transferred_and_moved_books_share_identity_and_metadata",
+      "catalog::tests::catalog_answers_follow_file_hashes_and_selected_audio_covers_preserve_files"
+    ]
+  },
+  {
+    "crate": "library-management",
+    "passed": 10,
+    "failed": 0,
+    "seconds": 0.01,
+    "failures": []
+  },
+  {
+    "crate": "library-registry",
+    "passed": 19,
+    "failed": 0,
+    "seconds": 0.07,
+    "failures": []
+  },
+  {
+    "crate": "library-services",
+    "passed": 14,
+    "failed": 1,
+    "seconds": 0.0,
+    "failures": [
+      "events::tests::queued_progress_is_owned_without_subscribers_and_cannot_regress_completion"
+    ]
+  }
+]

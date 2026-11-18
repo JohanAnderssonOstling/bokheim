@@ -9,8 +9,8 @@ pub use ruler::ReadingRulerStyle;
 use fixed_page::{DISPLAY_CACHE_BUDGET, PageCache, PageImage, PageSwipe, PageZoom};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseButton, MouseMoveEvent,
-    PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, Style, Task, TouchEvent, TouchId, TouchPhase, Window, canvas, div, fill, point, px, rgba, size,
+    AnyElement, App, Axis, Bounds, ClipboardItem, ContentMask, Context, Corners, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent, MouseButton,
+    MouseMoveEvent, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, Style, Task, TouchEvent, TouchId, TouchPhase, Window, canvas, div, fill, point, px, rgba, size,
 };
 use gpui_component::ElementExt;
 use gpui_image_eviction::track_image;
@@ -2702,7 +2702,9 @@ impl Render for PdfView {
             self.scroll_touch_content(delta.y, cx);
             self.touch_momentum.constrain(self.touch_scroll_offset);
         }
-        if self.touch_momentum.is_animating() { window.request_animation_frame(); }
+        if self.touch_momentum.is_animating() {
+            window.request_animation_frame();
+        }
         if self.advance_scroll_animation(cx) {
             window.request_animation_frame();
         }
@@ -2780,7 +2782,7 @@ impl Render for PdfView {
         let key_target = view.clone();
         let pinch_target = view.clone();
         let wheel_target = view;
-        components::reader_pdf_scroll_surface(&self.scroll_handle, theme, cx)
+        components::reader_pdf_scroll_surface(&self.scroll_handle, theme, window, cx)
             .debug_selector(|| "pdf-reader-document".into())
             .track_focus(&self.focus)
             .key_context("PdfReaderDocument")
@@ -2817,9 +2819,7 @@ impl Render for PdfView {
                 right_click_target.update(cx, |view, cx| {
                     let Some(target) = view.interaction_target(event.position, right_click_bounds.get()) else { return };
                     let had_selection = view.selection.as_ref().is_some_and(|selection| !selection.text().is_empty() && !selection.rects().is_empty());
-                    if view.selection_page == Some(target.page_index)
-                        && view.selection.as_ref().is_some_and(|selection| selection.rects().iter().any(|rect| normalized_rect_contains(*rect, target.page_point)))
-                    {
+                    if view.selection_page == Some(target.page_index) && view.selection.as_ref().is_some_and(|selection| selection.rects().iter().any(|rect| normalized_rect_contains(*rect, target.page_point))) {
                         return;
                     }
                     let Some(source_index) = view.selection_anchor_source_index(target) else { return };
@@ -2839,7 +2839,9 @@ impl Render for PdfView {
                 });
             })
             .on_long_press(cx.listener(|view, event: &LongPressEvent, window, cx| {
-                if !components::uses_mobile_reader_controls(window) { return; }
+                if !components::uses_mobile_reader_controls(window) {
+                    return;
+                }
                 let Some(target) = view.interaction_target(event.position, view.surface_bounds) else { return };
                 let Some(source_index) = view.selection_anchor_source_index(target) else { return };
                 view.begin_selection(target.page_index, target.column.page_column_index(), target.page_point, source_index, SelectionGranularity::Word, cx);
@@ -2854,7 +2856,9 @@ impl Render for PdfView {
                 if view.touch_selection_handles_visible && event.phase == TouchPhase::Started && components::uses_mobile_reader_controls(window) {
                     view.begin_selection_handle(event, window, cx);
                 }
-                if view.touch_selection_id != Some(event.id) { return; }
+                if view.touch_selection_id != Some(event.id) {
+                    return;
+                }
                 let target = view.interaction_target(event.position - view.touch_selection_offset, view.surface_bounds);
                 match event.phase {
                     TouchPhase::Moved => {

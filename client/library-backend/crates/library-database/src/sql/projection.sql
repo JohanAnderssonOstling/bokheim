@@ -3,16 +3,10 @@
 -- name: projection_dirty_addresses ?
 SELECT state_kind,state_key,state_subkey FROM sync_projection_dirty;
 
--- name: projection_directory_lifecycles_and_parents ?
-SELECT body FROM sync_state_version WHERE state_kind IN ('directory_parent','directory_lifecycle') AND body IS NOT NULL;
-
 -- name: projection_dirty_books ?
 SELECT DISTINCT COALESCE(v.book_key,CASE WHEN d.state_kind IN ('book_projection','book_add') THEN d.state_key END),d.state_kind
         FROM sync_projection_dirty d LEFT JOIN sync_state_version v USING(state_kind,state_key,state_subkey)
         WHERE v.book_key IS NOT NULL OR d.state_kind IN ('book_projection','book_add') ORDER BY 1;
-
--- name: projection_missing_directory_books ?
-SELECT DISTINCT v.state_key FROM sync_state_version v LEFT JOIN dir d ON d.id=v.state_subkey WHERE v.state_kind='placement' AND v.body IS NOT NULL AND d.id IS NULL;
 
 -- name: projection_book_state ?
 -- param: book_key: &SqlParam<'_>
@@ -20,29 +14,19 @@ SELECT DISTINCT v.state_key FROM sync_state_version v LEFT JOIN dir d ON d.id=v.
 -- param: changed_kinds: &str
 SELECT body,changed_at FROM sync_state_version
 WHERE book_key=:book_key AND body IS NOT NULL
-  AND (:full OR state_kind='book_lifecycle' OR state_kind IN (SELECT value FROM json_each(:changed_kinds)))
+  AND (:full OR state_kind='book_lifecycle' OR (state_kind IN (SELECT value FROM json_each(:changed_kinds))
+    AND (state_kind!='annotation' OR EXISTS(SELECT 1 FROM sync_projection_dirty d
+        WHERE d.state_kind=sync_state_version.state_kind AND d.state_key=sync_state_version.state_key AND d.state_subkey=sync_state_version.state_subkey))))
 UNION ALL SELECT body,0 FROM sync_book_record WHERE state_kind='book_add' AND content_hash=:book_key
   AND (:full OR 'book_add' IN (SELECT value FROM json_each(:changed_kinds)))
 UNION ALL SELECT body,0 FROM local_book_draft WHERE content_hash=:book_key
   AND (:full OR 'book_add' IN (SELECT value FROM json_each(:changed_kinds)));
 
 -- name: projection_directory_state ?
-SELECT body FROM sync_state_version WHERE state_kind IN ('directory_name','directory_parent','directory_lifecycle') AND body IS NOT NULL ORDER BY state_kind,state_key;
+SELECT v.body FROM sync_projection_dirty d JOIN sync_state_version v USING(state_kind,state_key,state_subkey) WHERE d.state_kind IN ('directory_name','directory_parent','directory_lifecycle') AND v.body IS NOT NULL ORDER BY d.state_kind,d.state_key;
 
 -- name: projection_clear_dirty !
 DELETE FROM sync_projection_dirty;
-
--- name: projection_directory_rows ?
-SELECT id,parent_id,name,deleted_at IS NOT NULL FROM dir;
-
--- name: projection_directory_intents ?
-SELECT n.body,p.body,l.body FROM sync_state_version n
-    JOIN sync_state_version p ON p.state_kind='directory_parent' AND p.state_key=n.state_key AND p.state_subkey=''
-    JOIN sync_state_version l ON l.state_kind='directory_lifecycle' AND l.state_key=n.state_key AND l.state_subkey=''
-    WHERE n.state_kind='directory_name' AND n.state_subkey='' AND n.body IS NOT NULL AND p.body IS NOT NULL AND l.body IS NOT NULL;
-
--- name: projection_detach_directories !
-UPDATE dir SET parent_id='00000000-0000-0000-0000-000000000000' WHERE id!='00000000-0000-0000-0000-000000000000' AND parent_id!='00000000-0000-0000-0000-000000000000';
 
 -- name: projection_queue_purged_directory_files !
 -- param: dir_id: &SqlParam<'_>
@@ -151,3 +135,11 @@ DELETE FROM book_language WHERE book_row_id=:book_row_id;
 INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash)
          VALUES(:arg_1,(SELECT row_id FROM book WHERE content_hash=:content_hash),:arg_3,'')
          ON CONFLICT(dir_id,book_row_id) DO UPDATE SET file_name=excluded.file_name;
+
+-- name: projection_trim_dirty_annotations !
+-- param: content_hash: &SqlParam<'_>
+DELETE FROM annotation WHERE id IN (
+    SELECT d.state_key FROM sync_projection_dirty d
+    LEFT JOIN sync_state_version v USING(state_kind,state_key,state_subkey)
+    WHERE d.state_kind='annotation' AND v.body IS NULL
+) AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);

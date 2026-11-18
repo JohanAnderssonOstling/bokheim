@@ -16,10 +16,11 @@ impl Database {
     /// Gather storage-summary metadata in one read snapshot, before file I/O.
     pub fn book_storage_metadata(&self, for_download: bool) -> Result<Vec<BookStorageMetadata>, DatabaseError> {
         self.with_browse_snapshot(|| {
+            let mut folders = crate::placements::FolderPaths::all(&self.connection)?;
             self.cloud_quota_books()?
                 .into_iter()
                 .map(|book| {
-                    let paths = self.book_paths(&book.book_id)?;
+                    let paths = crate::placements::book_paths_with_folders(&self.connection, &book.book_id, Some(&mut folders))?;
                     let checksum = if for_download && book.server_has_book { self.book_transfer_state_in_snapshot(book.book_id)?.expected_checksum() } else { None };
                     Ok(BookStorageMetadata { book, paths, checksum })
                 })

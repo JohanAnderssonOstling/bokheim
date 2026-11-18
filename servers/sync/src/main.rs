@@ -81,9 +81,19 @@ async fn run_verify_schema() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_upgrade() -> Result<(), Box<dyn Error>> {
-    run_cloud_upgrade("apply")?;
-    run_upgrade_schema().await?;
-    run_cloud_upgrade("apply-book-ids")
+    let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
+    let database = server_postgres::connect(&database_url).await?;
+    if server_postgres::needs_cloud_upgrade(&database).await? {
+        run_cloud_upgrade("apply")?;
+        server_postgres::upgrade_schema(&database).await?;
+        run_cloud_upgrade("apply-book-ids")?;
+    }
+    server_postgres::upgrade_schema(&database).await?;
+    if server_postgres::needs_payload_upgrade(&database).await? {
+        run_cloud_upgrade("apply")?;
+    }
+    server_postgres::verify_schema(&database).await?;
+    Ok(())
 }
 
 async fn run_upgrade_schema() -> Result<(), Box<dyn Error>> {
@@ -107,7 +117,7 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
     let database_pool = server_postgres::DatabasePoolConfig::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let pool = server_postgres::connect_configured(&database_url, database_pool).await?;
     if server_postgres::needs_upgrade(&pool).await? {
-        tracing::info!("upgrading stored library identities before accepting requests");
+        tracing::info!("upgrading database schema before accepting requests");
         run_upgrade().await?;
     }
     server_postgres::verify_schema(&pool).await?;

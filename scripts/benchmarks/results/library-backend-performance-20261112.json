@@ -1,0 +1,472 @@
+{
+  "platform": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+  "profile": "release, opt-level=3, default Cargo codegen/lto",
+  "notes": "Release component benchmarks of backend review fixes, using synthetic local data.\n\nRuns production APIs in fresh processes. Baselines reconstruct the former buffered\narchive and whole-checkpoint algorithms; this is not a benchmark of an old commit.\nExcludes UI, network, browser OPFS, and end-to-end copy/scanner scheduling.\n",
+  "binary_sha256": "82c273f5803fffae937f8282afd370c2aec5deaa10b316fd12361b8239341754",
+  "samples": [
+    {
+      "component": "archive",
+      "elapsed_ms": 94.792767,
+      "mode": "buffered",
+      "output_bytes": 33554542,
+      "peak_kib": 69252,
+      "size": 32,
+      "repeat": 1
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 146.473859,
+      "mode": "buffered",
+      "output_bytes": 33554542,
+      "peak_kib": 69528,
+      "size": 32,
+      "repeat": 2
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 116.587857,
+      "mode": "buffered",
+      "output_bytes": 33554542,
+      "peak_kib": 69516,
+      "size": 32,
+      "repeat": 3
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 39.964496000000004,
+      "mode": "streamed",
+      "output_bytes": 33554542,
+      "peak_kib": 4168,
+      "size": 32,
+      "repeat": 1
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 72.969493,
+      "mode": "streamed",
+      "output_bytes": 33554542,
+      "peak_kib": 4064,
+      "size": 32,
+      "repeat": 2
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 71.45174899999999,
+      "mode": "streamed",
+      "output_bytes": 33554542,
+      "peak_kib": 4208,
+      "size": 32,
+      "repeat": 3
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 503.011468,
+      "mode": "buffered",
+      "output_bytes": 268435566,
+      "peak_kib": 527712,
+      "size": 256,
+      "repeat": 1
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 987.760975,
+      "mode": "buffered",
+      "output_bytes": 268435566,
+      "peak_kib": 527940,
+      "size": 256,
+      "repeat": 2
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 813.878286,
+      "mode": "buffered",
+      "output_bytes": 268435566,
+      "peak_kib": 527304,
+      "size": 256,
+      "repeat": 3
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 287.598388,
+      "mode": "streamed",
+      "output_bytes": 268435566,
+      "peak_kib": 4104,
+      "size": 256,
+      "repeat": 1
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 585.497842,
+      "mode": "streamed",
+      "output_bytes": 268435566,
+      "peak_kib": 4180,
+      "size": 256,
+      "repeat": 2
+    },
+    {
+      "component": "archive",
+      "elapsed_ms": 549.1179440000001,
+      "mode": "streamed",
+      "output_bytes": 268435566,
+      "peak_kib": 4160,
+      "size": 256,
+      "repeat": 3
+    },
+    {
+      "bytes_per_book": 1048576,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 6.921085000000001,
+      "mode": "checksum",
+      "peak_kib": 4436,
+      "present": 16,
+      "size": 1,
+      "repeat": 1
+    },
+    {
+      "bytes_per_book": 1048576,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 6.2265109999999995,
+      "mode": "checksum",
+      "peak_kib": 4460,
+      "present": 16,
+      "size": 1,
+      "repeat": 2
+    },
+    {
+      "bytes_per_book": 1048576,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 5.680146,
+      "mode": "checksum",
+      "peak_kib": 4440,
+      "present": 16,
+      "size": 1,
+      "repeat": 3
+    },
+    {
+      "bytes_per_book": 1048576,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 0.49792300000000006,
+      "mode": "metadata",
+      "peak_kib": 4420,
+      "present": 16,
+      "size": 1,
+      "repeat": 1
+    },
+    {
+      "bytes_per_book": 1048576,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 0.60696,
+      "mode": "metadata",
+      "peak_kib": 4356,
+      "present": 16,
+      "size": 1,
+      "repeat": 2
+    },
+    {
+      "bytes_per_book": 1048576,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 0.436787,
+      "mode": "metadata",
+      "peak_kib": 4400,
+      "present": 16,
+      "size": 1,
+      "repeat": 3
+    },
+    {
+      "bytes_per_book": 16777216,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 76.67152300000001,
+      "mode": "checksum",
+      "peak_kib": 4508,
+      "present": 16,
+      "size": 16,
+      "repeat": 1
+    },
+    {
+      "bytes_per_book": 16777216,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 75.094687,
+      "mode": "checksum",
+      "peak_kib": 4460,
+      "present": 16,
+      "size": 16,
+      "repeat": 2
+    },
+    {
+      "bytes_per_book": 16777216,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 77.338486,
+      "mode": "checksum",
+      "peak_kib": 4476,
+      "present": 16,
+      "size": 16,
+      "repeat": 3
+    },
+    {
+      "bytes_per_book": 16777216,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 0.688093,
+      "mode": "metadata",
+      "peak_kib": 4396,
+      "present": 16,
+      "size": 16,
+      "repeat": 1
+    },
+    {
+      "bytes_per_book": 16777216,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 0.810875,
+      "mode": "metadata",
+      "peak_kib": 4372,
+      "present": 16,
+      "size": 16,
+      "repeat": 2
+    },
+    {
+      "bytes_per_book": 16777216,
+      "component": "review",
+      "count": 16,
+      "elapsed_ms": 0.753998,
+      "mode": "metadata",
+      "peak_kib": 4444,
+      "present": 16,
+      "size": 16,
+      "repeat": 3
+    },
+    {
+      "component": "checkpoint",
+      "count": 100,
+      "elapsed_ms": 2367.247693,
+      "mode": "whole",
+      "peak_kib": 6216,
+      "saved": 100,
+      "submitted_bytes": 1062900,
+      "size": 100,
+      "repeat": 1
+    },
+    {
+      "component": "checkpoint",
+      "count": 100,
+      "elapsed_ms": 2398.033721,
+      "mode": "whole",
+      "peak_kib": 6364,
+      "saved": 100,
+      "submitted_bytes": 1062900,
+      "size": 100,
+      "repeat": 2
+    },
+    {
+      "component": "checkpoint",
+      "count": 100,
+      "elapsed_ms": 2406.9860040000003,
+      "mode": "whole",
+      "peak_kib": 6260,
+      "saved": 100,
+      "submitted_bytes": 1062900,
+      "size": 100,
+      "repeat": 3
+    },
+    {
+      "component": "checkpoint",
+      "count": 100,
+      "elapsed_ms": 2443.661703,
+      "mode": "member",
+      "peak_kib": 6156,
+      "saved": 100,
+      "submitted_bytes": 20900,
+      "size": 100,
+      "repeat": 1
+    },
+    {
+      "component": "checkpoint",
+      "count": 100,
+      "elapsed_ms": 2463.660063,
+      "mode": "member",
+      "peak_kib": 6048,
+      "saved": 100,
+      "submitted_bytes": 20900,
+      "size": 100,
+      "repeat": 2
+    },
+    {
+      "component": "checkpoint",
+      "count": 100,
+      "elapsed_ms": 2529.837717,
+      "mode": "member",
+      "peak_kib": 6168,
+      "saved": 100,
+      "submitted_bytes": 20900,
+      "size": 100,
+      "repeat": 3
+    },
+    {
+      "component": "checkpoint",
+      "count": 1000,
+      "elapsed_ms": 25702.602523999998,
+      "mode": "whole",
+      "peak_kib": 8116,
+      "saved": 1000,
+      "submitted_bytes": 105129000,
+      "size": 1000,
+      "repeat": 1
+    },
+    {
+      "component": "checkpoint",
+      "count": 1000,
+      "elapsed_ms": 25667.643988000003,
+      "mode": "whole",
+      "peak_kib": 8004,
+      "saved": 1000,
+      "submitted_bytes": 105129000,
+      "size": 1000,
+      "repeat": 2
+    },
+    {
+      "component": "checkpoint",
+      "count": 1000,
+      "elapsed_ms": 26391.834964,
+      "mode": "whole",
+      "peak_kib": 8060,
+      "saved": 1000,
+      "submitted_bytes": 105129000,
+      "size": 1000,
+      "repeat": 3
+    },
+    {
+      "component": "checkpoint",
+      "count": 1000,
+      "elapsed_ms": 25465.169397,
+      "mode": "member",
+      "peak_kib": 6552,
+      "saved": 1000,
+      "submitted_bytes": 209000,
+      "size": 1000,
+      "repeat": 1
+    },
+    {
+      "component": "checkpoint",
+      "count": 1000,
+      "elapsed_ms": 24437.595081000003,
+      "mode": "member",
+      "peak_kib": 6504,
+      "saved": 1000,
+      "submitted_bytes": 209000,
+      "size": 1000,
+      "repeat": 2
+    },
+    {
+      "component": "checkpoint",
+      "count": 1000,
+      "elapsed_ms": 24212.765217,
+      "mode": "member",
+      "peak_kib": 6432,
+      "saved": 1000,
+      "submitted_bytes": 209000,
+      "size": 1000,
+      "repeat": 3
+    }
+  ],
+  "summaries": [
+    {
+      "component": "archive",
+      "mode": "buffered",
+      "size": 32,
+      "elapsed_ms": 116.587857,
+      "peak_kib": 69516
+    },
+    {
+      "component": "archive",
+      "mode": "streamed",
+      "size": 32,
+      "elapsed_ms": 71.45174899999999,
+      "peak_kib": 4168
+    },
+    {
+      "component": "archive",
+      "mode": "buffered",
+      "size": 256,
+      "elapsed_ms": 813.878286,
+      "peak_kib": 527712
+    },
+    {
+      "component": "archive",
+      "mode": "streamed",
+      "size": 256,
+      "elapsed_ms": 549.1179440000001,
+      "peak_kib": 4160
+    },
+    {
+      "component": "review",
+      "mode": "checksum",
+      "size": 1,
+      "elapsed_ms": 6.2265109999999995,
+      "peak_kib": 4440
+    },
+    {
+      "component": "review",
+      "mode": "metadata",
+      "size": 1,
+      "elapsed_ms": 0.49792300000000006,
+      "peak_kib": 4400
+    },
+    {
+      "component": "review",
+      "mode": "checksum",
+      "size": 16,
+      "elapsed_ms": 76.67152300000001,
+      "peak_kib": 4476
+    },
+    {
+      "component": "review",
+      "mode": "metadata",
+      "size": 16,
+      "elapsed_ms": 0.753998,
+      "peak_kib": 4396
+    },
+    {
+      "component": "checkpoint",
+      "mode": "whole",
+      "size": 100,
+      "elapsed_ms": 2398.033721,
+      "peak_kib": 6260
+    },
+    {
+      "component": "checkpoint",
+      "mode": "member",
+      "size": 100,
+      "elapsed_ms": 2463.660063,
+      "peak_kib": 6156
+    },
+    {
+      "component": "checkpoint",
+      "mode": "whole",
+      "size": 1000,
+      "elapsed_ms": 25702.602523999998,
+      "peak_kib": 8060
+    },
+    {
+      "component": "checkpoint",
+      "mode": "member",
+      "size": 1000,
+      "elapsed_ms": 24437.595081000003,
+      "peak_kib": 6504
+    }
+  ],
+  "date": "2026-11-12",
+  "cpu_count": 16,
+  "cpu_model": "AMD Ryzen 7 6800HS Creator Edition",
+  "work_directory": "/home/johan/.cache/bokheim/backend-measurements/run-fa3v3mf0",
+  "scope": "All three samples completed for every listed mode and size. Checkpoints limited to 100 and 1000; an initial 5000-row extension was stopped and is not included.",
+  "validation": "Buffered and streamed archive output SHA-256 matched at each size; every review found all 16 files; every member run read back the expected checkpoint count."
+}

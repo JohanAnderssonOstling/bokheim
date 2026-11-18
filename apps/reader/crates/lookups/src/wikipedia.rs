@@ -184,7 +184,7 @@ impl Services {
                     .filter_map(|target| {
                         let wiki_language = wikipedia_language(target)?;
                         if wiki_language == language {
-                            return Some(WikipediaChoice { title: article.title.clone(), description: String::new(), language: target.clone(), url: article.url.clone() });
+                            return None;
                         }
                         let link = links.iter().find(|link| link.code == wiki_language)?;
                         let mut url = Url::parse(&format!("https://{wiki_language}.wikipedia.org/wiki/")).ok()?;

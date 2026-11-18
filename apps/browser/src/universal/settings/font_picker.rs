@@ -1,93 +1,42 @@
-//! A single interface-font override, with a lazy, virtualized system catalog.
-
-use ui_text::text;
-
-use components::{FontCatalog, FontCatalogTarget};
+//! Interface-font preference controls around the shared font picker.
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, SharedString, Task, TextSystem, UniformListScrollHandle, Window, div, px, uniform_list};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::scroll::{Scrollbar, ScrollbarAxis, ScrollbarShow};
-use gpui_component::tooltip::Tooltip;
+use gpui::{Context, Entity, EventEmitter, FocusHandle, Render, Window, div};
 use ui_components as components;
+use ui_text::text;
 
 pub(super) struct FontSelected(pub String);
 
 pub(super) struct FontPicker {
-    input: Entity<InputState>,
-    panel_focus: FocusHandle,
+    picker: Entity<components::FontPicker>,
     selected: Option<String>,
     active: bool,
-    catalog: FontCatalog,
-    open: bool,
     trigger_focus: FocusHandle,
-    scroll: UniformListScrollHandle,
-    _catalog_task: Option<Task<()>>,
 }
 
 impl EventEmitter<FontSelected> for FontPicker {}
 
-impl FontCatalogTarget for FontPicker {
-    fn font_catalog(&mut self) -> &mut FontCatalog {
-        &mut self.catalog
-    }
-    fn font_query(&self, cx: &App) -> SharedString {
-        self.input.read(cx).value()
-    }
-    fn font_scroll(&self) -> &UniformListScrollHandle {
-        &self.scroll
-    }
-    fn font_filter(&self) -> impl Fn(&TextSystem, &str) -> bool + Send + 'static {
-        |_, _| true
-    }
-}
-
 impl FontPicker {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(text!(common::search_fonts)));
-        cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-            match event {
-                InputEvent::Change => this.filter(cx),
-                InputEvent::PressEnter { .. } => {
-                    if let Some(family) = this.catalog.filtered.get(this.catalog.cursor).map(|index| this.catalog.families[*index].clone()) {
-                        this.choose(family, window, cx);
-                    }
-                }
-                _ => {}
+        let picker = cx.new(|cx| components::FontPicker::new(window, cx));
+        cx.subscribe_in(&picker, window, |this, _, event, window, cx| match event {
+            components::FontPickerEvent::Selected(family) => this.choose(family.clone(), window, cx),
+            components::FontPickerEvent::Dismissed => {
+                this.trigger_focus.focus(window, cx);
+                cx.notify();
             }
-            cx.notify();
         })
         .detach();
-        components::observe_font_catalog(cx, |this: &mut Self, cx| this.load_catalog(cx)).detach();
-        Self {
-            input,
-            panel_focus: cx.focus_handle(),
-            selected: None,
-            active: false,
-            catalog: FontCatalog::default(),
-            open: false,
-            trigger_focus: cx.focus_handle().tab_stop(true),
-            scroll: UniformListScrollHandle::new(),
-            _catalog_task: None,
-        }
+        Self { picker, selected: None, active: false, trigger_focus: cx.focus_handle().tab_stop(true) }
     }
 
-    pub(super) fn set_selected(&mut self, family: Option<String>) {
+    pub(super) fn set_selected(&mut self, family: Option<String>, cx: &mut Context<Self>) {
         self.active = family.is_some();
-        self.selected = family;
+        self.selected = family.clone();
+        self.picker.update(cx, |picker, cx| picker.set_selected(family, cx));
     }
 
     pub(super) fn set_active(&mut self, active: bool) {
         self.active = active;
-    }
-
-    fn filter(&mut self, cx: &App) {
-        self.filter_font_catalog(cx);
-    }
-
-    fn load_catalog(&mut self, cx: &mut Context<Self>) {
-        if let Some(task) = components::load_font_catalog(self, cx) {
-            self._catalog_task = Some(task);
-        }
     }
 
     pub(super) fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -96,19 +45,7 @@ impl FontPicker {
         {
             self.choose(family, window, cx);
         }
-        self.open = true;
-        self.input.update(cx, |input, cx| input.set_value("", window, cx));
-        self.filter(cx);
-        self.load_catalog(cx);
-        self.input.read(cx).focus_handle(cx).focus(window, cx);
-        cx.notify();
-    }
-
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open = false;
-        self._catalog_task = None;
-        self.catalog = FontCatalog::default();
-        self.trigger_focus.focus(window, cx);
+        self.picker.update(cx, |picker, cx| picker.show(self.selected.clone(), |_, _| true, window, cx));
         cx.notify();
     }
 
@@ -121,90 +58,26 @@ impl FontPicker {
 }
 
 impl Render for FontPicker {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let preview_family = self.selected.clone().filter(|family| !cfg!(target_os = "android") || cx.try_global::<components::SystemFontFamilies>().is_some_and(|fonts| fonts.0.contains(family)));
         let sample = components::reader_typeface_sample(None).when_some(preview_family, |sample, family| sample.font_family(family));
         let tooltip = self.selected.clone().unwrap_or_else(|| text!(settings::choose_an_installed_font).into());
         let label = self.selected.clone().unwrap_or_else(|| text!(common::custom).into());
-        let trigger = components::reader_picture_tile("ui-font-custom", sample, label, self.open || self.active, theme)
+        let trigger = components::reader_picture_tile("ui-font-custom", sample, label, self.picker.read(cx).is_open() || self.active, theme)
             .w_full()
             .track_focus(&self.trigger_focus)
             .debug_selector(|| "ui-font-custom-trigger".into())
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            .on_click(cx.listener(|this, _, window, cx| this.show(window, cx)))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.show(window, cx);
-                    cx.stop_propagation();
-                }
-            }));
-        let trigger = div().w_full().child(trigger);
-        if !self.open {
-            return trigger;
-        }
-        let rows = uniform_list(
-            "ui-font-list",
-            self.catalog.filtered.len(),
-            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                let theme = components::browser_theme(cx);
-                range
-                    .map(|row| {
-                        let index = this.catalog.filtered[row];
-                        let family = this.catalog.families[index].clone();
-                        components::font_picker_row(("ui-font", index), family.clone(), this.selected.as_deref() == Some(family.as_str()), theme)
-                            .when(this.catalog.cursor == row && this.selected.as_deref() != Some(family.as_str()), |row| row.bg(theme.hover))
-                            .debug_selector(move || format!("ui-font-row-{row}"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.catalog.cursor = row;
-                                this.choose(family.clone(), window, cx);
-                            }))
-                    })
-                    .collect()
-            }),
-        )
-        .size_full()
-        .track_scroll(&self.scroll);
-        let list = div()
-            .id("ui-font-scroll")
-            .debug_selector(|| "ui-font-catalog".into())
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .overflow_hidden()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(rows)
-            .child(Scrollbar::new(&self.scroll).axis(ScrollbarAxis::Vertical).scrollbar_show(ScrollbarShow::Always));
-        let panel = components::font_picker_surface(window, theme)
-            .id("ui-font-overlay")
-            .debug_selector(|| "ui-font-overlay".into())
-            .tab_group()
-            .capture_key_down(cx.listener(|this, event, _, cx| this.navigate_font_catalog(event, cx)))
-            .when(self.catalog.loaded && self.selected.as_ref().is_some_and(|family| !self.catalog.families.contains(family)), |panel| {
-                panel.child(div().text_color(theme.text_muted).child(text!(common::saved_font_unavailable_on_this_device)))
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(components::SPACE_SM))
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.input)))
-                    .child(components::bottom_sheet_close_button("ui-font-overlay-close", theme).on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))),
-            )
-            .when(self.catalog.loading || self.catalog.filtered.is_empty(), |panel| panel.child(div().text_color(theme.text_muted).child(if self.catalog.loading { text!(common::loading_fonts) } else { text!(common::no_matching_fonts) })))
-            .when(!self.catalog.loading && !self.catalog.filtered.is_empty(), |panel| panel.child(list));
-        let panel = components::contain_modal_focus(panel, &self.panel_focus, "BrowserFontPicker ModalFocus", cx);
-        let picker = cx.entity();
-        trigger.child(components::font_picker_overlay(panel, window, theme, move |window, cx| picker.update(cx, |picker, cx| picker.close(window, cx))))
+            .tooltip(tooltip)
+            .on_click(cx.listener(|this, _, window, cx| this.show(window, cx)));
+        div().w_full().child(trigger).child(self.picker.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, point};
+    use gpui::{AppContext, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, point, px};
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -221,9 +94,9 @@ mod tests {
             gpui_component::Root::new(picker, window, cx)
         });
         let picker = cx.update(|_, cx| root.read(cx).view().clone().downcast::<FontPicker>().ok().unwrap());
-        picker.read_with(cx, |picker, _| {
-            assert!(!picker.catalog.loaded);
-            assert!(picker.catalog.families.is_empty());
+        picker.read_with(cx, |picker, cx| {
+            assert!(!picker.picker.read(cx).catalog().loaded);
+            assert!(picker.picker.read(cx).catalog().families.is_empty());
         });
         let selected = Rc::new(RefCell::new(None));
         let target = selected.clone();
@@ -232,37 +105,37 @@ mod tests {
         let bounds = cx.debug_bounds("ui-font-custom-trigger").unwrap();
         cx.simulate_click(bounds.center(), Modifiers::default());
         cx.run_until_parked();
-        let desktop = cx.debug_bounds("ui-font-overlay").unwrap();
+        let desktop = cx.debug_bounds("font-picker-panel").unwrap();
         cx.simulate_resize(gpui::size(px(390.0), px(640.0)));
         cx.run_until_parked();
-        let phone = cx.debug_bounds("ui-font-overlay").unwrap();
+        let phone = cx.debug_bounds("font-picker-panel").unwrap();
         assert!(phone.size.width < desktop.size.width);
         assert!(phone.size.height < desktop.size.height);
         assert!(phone.left() >= px(0.0) && phone.right() <= px(390.0));
         assert!(phone.top() >= px(0.0) && phone.bottom() <= px(640.0));
-        assert!(cx.debug_bounds("ui-font-row-0").is_some());
-        assert!(cx.debug_bounds("ui-font-row-999").is_none());
-        let bounds = cx.debug_bounds("ui-font-catalog").unwrap();
+        assert!(cx.debug_bounds("font-picker-row-0").is_some());
+        assert!(cx.debug_bounds("font-picker-row-999").is_none());
+        let bounds = cx.debug_bounds("font-picker-list").unwrap();
         cx.simulate_event(ScrollWheelEvent { position: bounds.center(), delta: ScrollDelta::Pixels(point(px(0.0), px(-132.0))), ..Default::default() });
         cx.run_until_parked();
-        picker.read_with(cx, |picker, _| assert!(picker.scroll.0.borrow().base_handle.offset().y < px(0.0)));
+        picker.read_with(cx, |picker, cx| assert!(picker.picker.read(cx).scroll().0.borrow().base_handle.offset().y < px(0.0)));
         cx.simulate_keystrokes("g a r enter");
         cx.run_until_parked();
         assert_eq!(*selected.borrow(), Some("NV Garamond".into()));
-        picker.read_with(cx, |picker, _| {
-            assert!(picker.open);
+        picker.read_with(cx, |picker, cx| {
+            assert!(picker.picker.read(cx).is_open());
             assert_eq!(picker.selected.as_deref(), Some("NV Garamond"));
         });
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
-        picker.read_with(cx, |picker, _| assert!(!picker.open));
+        picker.read_with(cx, |picker, cx| assert!(!picker.picker.read(cx).is_open()));
         let bounds = cx.debug_bounds("ui-font-custom-trigger").unwrap();
         cx.simulate_click(bounds.center(), Modifiers::default());
         cx.run_until_parked();
         picker.read_with(cx, |picker, cx| {
-            assert!(picker.open);
-            assert!(picker.input.read(cx).value().is_empty());
-            assert_eq!(picker.catalog.filtered.len(), 1001);
+            assert!(picker.picker.read(cx).is_open());
+            assert!(picker.picker.read(cx).query(cx).is_empty());
+            assert_eq!(picker.picker.read(cx).catalog().filtered.len(), 1001);
         });
         cx.simulate_keystrokes("escape");
         picker.update(cx, |picker, cx| {
@@ -275,9 +148,9 @@ mod tests {
         cx.simulate_click(bounds.center(), Modifiers::default());
         cx.run_until_parked();
         assert_eq!(*selected.borrow(), Some("NV Garamond".into()), "clicking the saved font restores it immediately");
-        picker.read_with(cx, |picker, _| {
+        picker.read_with(cx, |picker, cx| {
             assert!(picker.active);
-            assert!(picker.open);
+            assert!(picker.picker.read(cx).is_open());
             assert_eq!(picker.selected.as_deref(), Some("NV Garamond"));
         });
     }

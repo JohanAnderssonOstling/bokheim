@@ -179,6 +179,11 @@ pub struct PurgeBookSnapshot {
 }
 
 impl Database {
+    /// Completed file work, including purged directory projections.
+    pub fn file_work_revision(&self) -> Result<i64, DatabaseError> {
+        Ok(self.connection.query_row("SELECT replay_revision FROM local_scan_clock WHERE singleton=1", [], |row| row.get(0))?)
+    }
+
     /// Native placement work waiting for physical replay.
     pub fn has_pending_file_work(&self) -> Result<bool, DatabaseError> {
         #[cfg(target_arch = "wasm32")]
@@ -270,7 +275,7 @@ impl Database {
     pub fn acknowledge_native_file_work(&self, completion: NativeFileWorkCompletion) -> Result<(), DatabaseError> {
         self.with_write_transaction(|transaction| {
             let snapshot = completion.snapshot;
-            let Some(current) = self.native_file_work_snapshot(snapshot.work)? else { return Ok(Rollback(())) };
+            let Some(current) = self.native_file_work_snapshot(snapshot.work)? else { return Ok(Commit(())) };
             let work = &current.work;
             let hash = &work.book_id;
             if current.resolved_path != snapshot.resolved_path || current.placement != snapshot.placement {
@@ -544,6 +549,10 @@ database_methods! {
     fn complete_downloaded_book_with_content(completion: NativeBookCompletion, checksum: content_address::ContentHash, thumbnail_set_exists: bool) -> NativeBookAcknowledgement;
     arguments (NativeBookCompletion, content_address::ContentHash, bool,) = (completion, checksum, thumbnail_set_exists,);
     execute database, arguments => database.complete_downloaded_book_with_content(arguments.0, arguments.1, arguments.2);
+
+    fn file_work_revision() -> i64;
+    arguments () = ();
+    execute database, arguments => database.file_work_revision();
 
     fn has_pending_file_work() -> bool;
     arguments () = ();

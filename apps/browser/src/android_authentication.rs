@@ -1,7 +1,7 @@
 //! Android UI transport. Session IDs prevent a dismissed screen receiving a
 //! later account response. Credentials exist only in the bounded request queue.
-use ui_text::text;
 use operation_failure::OperationError;
+use ui_text::text;
 
 use async_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
