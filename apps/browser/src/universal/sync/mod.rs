@@ -5,6 +5,8 @@
 //! library list is reported upward so the root can update the shared
 //! [`Libraries`] rather than this page reaching into the navigation UI tree.
 
+#[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
+use ui_components::user_facing_error;
 use ui_text::text;
 
 use std::collections::{HashMap, HashSet};
