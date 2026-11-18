@@ -22,7 +22,7 @@ flamegraph.svg
 # Scratch analysis runs and test scratch directories. These hold multi-gigabyte
 # extracts and built wasm bundles, so they must never be staged.
 /tmp/
-/.tmp/
+/.tmp
 /.test-tmp/
 /client/.test-tmp/
 /.orphan-sql-report
@@ -136,8 +136,8 @@ venv/
 
 # Verified PDFium dependency cache and prepared platform inputs
 /.pdfium-cache/
-/.pdfium/
-/.linux-toolchain/
+/.pdfium
+/.linux-toolchain
 
 # Generated output from in-memory annotation databases.
 :memory:.annotation-export-baselines/
@@ -146,4 +146,4 @@ venv/
 *.hprof
 
 # Nested native speech compiler cache.
-/vendor/sherpa-onnx-sys/.tmp/
+/vendor/sherpa-onnx-sys/.tmp
