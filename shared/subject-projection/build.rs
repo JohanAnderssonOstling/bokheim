@@ -76,19 +76,6 @@ fn main() {
     let image = std::fs::read(&client_database_path).expect("read prepared taxonomy");
     let digest = blake3::hash(&image).to_hex().to_string();
     std::fs::write(output_dir.join("taxonomy.digest"), &digest).expect("write taxonomy digest");
-    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("wasm32") {
-        // OUT_DIR is <profile>/build/<crate>/out. Cargo-run and all native
-        // packagers use the same prepared database beside the executable.
-        let profile = output_dir.ancestors().nth(3).expect("Cargo profile directory");
-        for (name, bytes) in [("taxonomy.sqlite3", image.as_slice()), ("taxonomy.digest", digest.as_bytes())] {
-            let destination = profile.join(name);
-            if std::fs::read(&destination).ok().as_deref() != Some(bytes) {
-                let staging = profile.join(format!(".{name}.{}", std::process::id()));
-                std::fs::write(&staging, bytes).expect("stage bundled taxonomy resource");
-                std::fs::rename(staging, destination).expect("publish bundled taxonomy resource");
-            }
-        }
-    }
 }
 
 fn build_client_database(authority_path: &PathBuf, client_path: &PathBuf) {

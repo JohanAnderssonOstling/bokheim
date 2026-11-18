@@ -19,6 +19,16 @@ and checksum to the version release. The hosted Kobo workflow remains available
 for Windows and optional Linux builds; dispatching it currently builds both
 installers, so it is not needed to produce the local Linux package.
 
+## Native resources
+
+Native application builds use `python3 scripts/ci/build-native.py cargo ...`.
+The command reads Cargo's build messages and stages the exact generated taxonomy
+and digest beside the binaries after a successful build. Cargo reports the build
+output even when the build script is cached; packaging never searches old hash
+directories or depends on build-script writes outside `OUT_DIR`. Linux, Windows,
+macOS, Android and Kobo use this same staging command. Plain Cargo builds only
+generate the resource inside `OUT_DIR`; debug executables can use that location.
+
 ## Persistent dependency caches
 
 Downloaded crates use the shared Cargo home (`~/.cargo`, or `CARGO_HOME`). Local
@@ -37,7 +47,7 @@ them can require rebuilding dependencies.
 For direct Cargo commands, use the same cache as the packaging scripts:
 
 ```bash
-python3 scripts/ci/build_cache.py run android -- cargo build --release --target aarch64-linux-android -p desktop-gpui --lib --no-default-features --features android
+python3 scripts/ci/build_cache.py run android -- python3 scripts/ci/build-native.py cargo build --release --target aarch64-linux-android -p desktop-gpui --lib --no-default-features --features android
 python3 scripts/ci/build_cache.py path linux-glibc217
 ```
 

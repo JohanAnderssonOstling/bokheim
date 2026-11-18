@@ -35,6 +35,10 @@ launcher reuses that updated application rather than restoring its embedded vers
 Arguments, working directory, standard handles and exit codes pass through to
 Bokheim. Libraries and settings still use the normal per-user storage.
 
+Build the desktop runtime with `python scripts/ci/build-native.py cargo desktop
+--release`. This explicitly stages the generated taxonomy beside the executables,
+including when Cargo restores compiled artifacts from its cache.
+
 Build the single-file app from a prepared portable ZIP on Windows:
 
 ```powershell

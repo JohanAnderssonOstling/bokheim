@@ -312,6 +312,7 @@ val buildRustDebug by tasks.registering(Exec::class) {
     dependsOn(preparePdfium, prepareSpeech)
     workingDir(workspaceRoot)
     commandLine(
+        "python3", "scripts/ci/build-native.py",
         "cargo",
         "build",
         "-p",
@@ -351,6 +352,7 @@ val buildRustRelease by tasks.registering(Exec::class) {
     dependsOn(preparePdfium, prepareSpeech)
     workingDir(workspaceRoot)
     commandLine(
+        "python3", "scripts/ci/build-native.py",
         "cargo",
         "build",
         "-p",

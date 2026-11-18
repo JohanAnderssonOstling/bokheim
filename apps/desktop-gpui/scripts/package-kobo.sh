@@ -56,7 +56,7 @@ CARGO_PROFILE_RELEASE_LTO=thin \
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
 CARGO_PROFILE_RELEASE_DEBUG=0 \
-cargo build --release --target-dir "$BUILD_TARGET" --target armv7-unknown-linux-gnueabihf \
+python3 scripts/ci/build-native.py cargo build --release --target-dir "$BUILD_TARGET" --target armv7-unknown-linux-gnueabihf \
     --config 'profile.release.package.gpui-component.codegen-units=16' \
     --config 'profile.release.package.browser-ui.codegen-units=16' \
     --config 'profile.release.package.reader-ui.codegen-units=16' \
