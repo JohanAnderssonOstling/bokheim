@@ -95,9 +95,12 @@ macOS is not yet part of the signed automatic update feed.
 Use a clean release checkout, with clean sibling GPUI-Fork, HtmlEngine and
 HtmlViewCore checkouts at the pins in `.github/workflows/desktop-release.yml`.
 Keep this separate from the Actions runner's `_work` directory and build caches.
-All platforms must use the same source commit. Do not create or move a version
-tag as part of building; publication requires an existing version tag. The tag may point to older source;
-the build receipts record the actual build commit.
+Each package retains its actual source commit in its build receipt. Verified
+packages can be reused across release-tooling changes without rebuilding other
+platforms. Publication still checks package version, compatibility, trust, hashes
+and each platform's build provenance. Do not create or move a version tag as part
+of building; publication requires an existing version tag. The tag is independent
+of individual package build commits.
 
 Install the latest stable Rust (`rustup update stable`), Python 3.11+, gh, and
 the platform build tools. CI and local releases use the `stable` channel. The
@@ -166,7 +169,7 @@ python3 scripts/ci/release_artifacts.py upload android --directory "$HOME/bokhei
 
 Uploads verify package hashes, the live server protocol, package version and existing version
 tag. They create/update only a **draft release**, never tags or public assets.
-A draft containing a different source receipt is rejected. The default release
+Each package retains its own source receipt. The default release
 repository is `JohanAnderssonOstling/bokheim-release`.
 
 Web `--deploy` uses `servers/sync/deploy/deploy-web-remote.sh --dist DIRECTORY`.
@@ -205,8 +208,8 @@ and committed before installer builds; see `apps/kobo-installer/README.md`.
 ## Feed publication
 
 Collect all three verified native platforms on the same version draft. Prepare
-using `servers/updates/prepare-github-release.py --source-commit FULL_SHA` in place
-of the legacy `--run-id`: it verifies individual platform receipts, package
+using `servers/updates/prepare-github-release.py` without the legacy `--run-id`:
+it verifies individual platform receipts, package
 hashes, Android signing identity, compatibility and the successful Windows run.
 The old combined-run preparation mode remains supported for existing builds.
 

@@ -90,7 +90,7 @@ def hosted_artifact(config, tag, filename):
     return f'{origin}/releases/{tag}/{filename}', relative
 
 
-def verified_receipts(repository, source, sha, tag, directory):
+def verified_receipts(repository, source, tag, directory):
     """Release upload permission is the local builder trust boundary."""
     # Keep the existing tag unchanged; verify the actual source via build receipts.
     gh_json('api', f'repos/{repository}/git/ref/tags/{tag}')
@@ -99,6 +99,7 @@ def verified_receipts(repository, source, sha, tag, directory):
         name = release_artifacts.receipt_name(platform)
         command('gh', 'release', 'download', tag, '--repo', repository, '--pattern', name, '--dir', str(directory))
         receipt = json.loads((directory / name).read_text())
+        sha = receipt.get('source_commit')
         release_artifacts.validate(receipt, platform, sha, source)
         if platform == 'windows':
             run = gh_json('api', f'repos/{source}/actions/runs/{receipt["workflow_run"]}')
@@ -126,12 +127,13 @@ def prepare(args):
         sha = validate_run(run, args.source_repository)
     else:
         sha = args.source_commit
-        require(re.fullmatch('[0-9a-f]{40}', sha), 'Expected full source commit')
+        require(sha is None or re.fullmatch('[0-9a-f]{40}', sha), 'Expected full source commit')
     release = gh_json('release', 'view', args.tag, '--repo', args.release_repository,
                       '--json', 'tagName,isDraft,isPrerelease,assets')
     require(release.get('tagName') == args.tag and not release.get('isPrerelease'), 'Wrong release or prerelease')
     assets = {a['name'] for a in release['assets']}
-    require('desktop-source-commit.txt' in assets, 'Release has no source commit receipt')
+    if args.run_id is not None:
+        require('desktop-source-commit.txt' in assets, 'Release has no source commit receipt')
     previous = json.loads(args.previous_manifest.read_text()) if args.previous_manifest else None
     if previous:
         require(previous.get('protocol_version') == 1 and previous.get('channel') == trust['channel'], 'Previous payload protocol/channel mismatch')
@@ -143,10 +145,11 @@ def prepare(args):
         scratch = Path(scratch)
         downloaded = scratch / 'release'
         downloaded.mkdir()
-        command('gh', 'release', 'download', args.tag, '--repo', args.release_repository,
-                '--pattern', 'desktop-source-commit.txt', '--dir', str(downloaded))
-        require((downloaded / 'desktop-source-commit.txt').read_text().strip() == sha, 'Release source differs from build commit')
-        build_receipts = verified_receipts(args.release_repository, args.source_repository, sha, args.tag, scratch) if args.run_id is None else None
+        if args.run_id is not None:
+            command('gh', 'release', 'download', args.tag, '--repo', args.release_repository,
+                    '--pattern', 'desktop-source-commit.txt', '--dir', str(downloaded))
+            require((downloaded / 'desktop-source-commit.txt').read_text().strip() == sha, 'Release source differs from build commit')
+        build_receipts = verified_receipts(args.release_repository, args.source_repository, args.tag, scratch) if args.run_id is None else None
         artifacts = {}
         first_info = None
         for target, (archive, filename) in PACKAGES.items():
@@ -197,10 +200,12 @@ def prepare(args):
             'taxonomy': previous.get('taxonomy') if previous else None,
             'catalog': previous.get('catalog') if previous else None,
         }
-        receipt = {'source_repository': args.source_repository, 'source_commit': sha,
+        receipt = {'source_repository': args.source_repository,
                    'workflow_run': args.run_id, 'release_repository': args.release_repository,
                    'tag': args.tag, 'signing_key_id': args.key_id,
                    'release_was_draft': release['isDraft'], 'android_cert_sha256': android_cert, 'artifacts': artifacts}
+        if sha is not None:
+            receipt['source_commit'] = sha
         if build_receipts is not None:
             receipt['build_receipts'] = build_receipts
         # Only expose a complete preparation result; a failed download leaves no
@@ -222,9 +227,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-repository', required=True)
     parser.add_argument('--release-repository', required=True)
-    origin = parser.add_mutually_exclusive_group(required=True)
+    origin = parser.add_mutually_exclusive_group()
     origin.add_argument('--run-id', type=int, help='Legacy combined Actions build')
-    origin.add_argument('--source-commit', help='Exact source SHA of local builds and the Windows run')
+    origin.add_argument('--source-commit', help='Optional release reference; each package retains its own build source')
     parser.add_argument('--tag', required=True)
     parser.add_argument('--sequence', required=True, type=int)
     parser.add_argument('--valid-days', type=int, default=14)

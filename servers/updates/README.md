@@ -166,7 +166,7 @@ pass the preparation gate.
 python3 servers/updates/prepare-github-release.py \
   --source-repository JohanAnderssonOstling/bokheim-release \
   --release-repository JohanAnderssonOstling/bokheim-release \
-  --source-commit FULL_SOURCE_SHA --tag v1.2.0 --sequence 1 \
+  --tag v1.2.0 --sequence 1 \
   --android-cert-sha256 "$BOKHEIM_ANDROID_CERT_SHA256" \
   --config /secure/bokheim-updates.json --initial --output /tmp/update-bundle
 ```
@@ -325,8 +325,10 @@ Packaged rollout trials and the first updater-enabled distribution remain pendin
 Linux and Android packages are built and verified locally using
 `scripts/ci/local-release.py`; Windows alone uses the desktop release workflow.
 All packages and their `build-receipt-*.json` files are uploaded to the same draft
-in `bokheim-release`. Prepare with `--source-commit FULL_SOURCE_SHA`; preparation
-and publication check these per-platform receipts and the successful Windows
-run. `--run-id` is retained for older combined Actions builds. See
+in `bokheim-release`. Preparation and publication check each package's actual
+source commit, hashes and compatibility, plus the successful Windows run.
+Packages can come from different commits; verified executables do not need to
+be rebuilt when release tooling changes. `--source-commit` is an optional release
+reference and does not constrain the package build sources. `--run-id` is retained for older combined Actions builds. See
 `scripts/ci/README.md` for commands. Web builds deploy directly to the server and
 do not need GitHub release assets.
